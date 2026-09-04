@@ -1509,6 +1509,74 @@ internal typealias UniffiVTableCallbackInterfaceFfiSdkStateBlobStoreUniffiByValu
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 @Synchronized
 private fun findLibraryName(componentName: String): String {
     val libOverride = System.getProperty("uniffi.component.$componentName.libraryOverride")
@@ -1593,6 +1661,57 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_func_resolve_pubky_url() != 12085.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_method_ffiallowanceamountrange_maximum() != 52035.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffiallowanceamountrange_minimum() != 15472.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffiallowanceperiod_anchor() != 30631.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffiallowanceperiod_every() != 60037.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffiallowanceperiod_kind() != 12042.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffiallowanceperiod_unit() != 49664.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffiallowanceperiodlimit_amount_limit() != 22492.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffiallowanceperiodlimit_payment_count_limit() != 8509.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffiallowanceperiodlimit_period() != 36301.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffiallowanceterms_active_from() != 56693.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffiallowanceterms_allowed_payment_endpoint_identifiers() != 63441.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffiallowanceterms_asset() != 61516.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffiallowanceterms_expires_at() != 42679.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffiallowanceterms_lifetime_amount_limit() != 50133.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffiallowanceterms_per_payment_amount() != 32791.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffiallowanceterms_period_limits() != 38146.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_allowance() != 19038.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_link_with_peer() != 24950.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -1644,6 +1763,9 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_encrypted_link_recovery_marker_status() != 64910.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_end_allowance() != 27377.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_enqueue_private_payment_list() != 16764.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -1677,6 +1799,9 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffipaykitsdk_forget_session_access() != 58467.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_get_allowance() != 44953.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_identity_status() != 8559.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -1696,6 +1821,9 @@ internal object IntegrityCheckingUniffiLib : Library {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_linked_peers() != 57246.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_list_allowances() != 36022.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_list_payment_requests() != 43354.toShort()) {
@@ -1732,6 +1860,9 @@ internal object IntegrityCheckingUniffiLib : Library {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_process_receipt_issuance() != 18672.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_allowance() != 8566.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_payment_request() != 35762.toShort()) {
@@ -1783,6 +1914,9 @@ internal object IntegrityCheckingUniffiLib : Library {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_refresh_contact_paykit_profile() != 26474.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_method_ffipaykitsdk_reject_allowance() != 56162.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
         if (uniffi_paykit_checksum_method_ffipaykitsdk_reject_payment_request() != 14619.toShort()) {
@@ -1983,6 +2117,18 @@ internal object IntegrityCheckingUniffiLib : Library {
         if (uniffi_paykit_checksum_method_ffisdkstateblobstore_save_state_blob_atomically() != 4172.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
+        if (uniffi_paykit_checksum_constructor_ffiallowanceamountrange_new() != 19415.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_constructor_ffiallowanceperiod_new() != 5577.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_constructor_ffiallowanceperiodlimit_new() != 24867.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
+        if (uniffi_paykit_checksum_constructor_ffiallowanceterms_new() != 52414.toShort()) {
+            throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+        }
         if (uniffi_paykit_checksum_constructor_ffipaykitsdk_new() != 15447.toShort()) {
             throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
         }
@@ -2083,6 +2229,57 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_func_resolve_pubky_url(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiallowanceamountrange_maximum(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiallowanceamountrange_minimum(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiallowanceperiod_anchor(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiallowanceperiod_every(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiallowanceperiod_kind(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiallowanceperiod_unit(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiallowanceperiodlimit_amount_limit(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiallowanceperiodlimit_payment_count_limit(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiallowanceperiodlimit_period(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiallowanceterms_active_from(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiallowanceterms_allowed_payment_endpoint_identifiers(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiallowanceterms_asset(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiallowanceterms_expires_at(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiallowanceterms_lifetime_amount_limit(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiallowanceterms_per_payment_amount(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffiallowanceterms_period_limits(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_accept_allowance(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_accept_link_with_peer(
     ): Short
     @JvmStatic
@@ -2134,6 +2331,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_encrypted_link_recovery_marker_status(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_end_allowance(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_enqueue_private_payment_list(
     ): Short
     @JvmStatic
@@ -2167,6 +2367,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_forget_session_access(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_get_allowance(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_identity_status(
     ): Short
     @JvmStatic
@@ -2186,6 +2389,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_linked_peers(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_list_allowances(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_list_payment_requests(
@@ -2222,6 +2428,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_process_receipt_issuance(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_propose_allowance(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_propose_payment_request(
@@ -2273,6 +2482,9 @@ internal object IntegrityCheckingUniffiLib : Library {
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_refresh_contact_paykit_profile(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_method_ffipaykitsdk_reject_allowance(
     ): Short
     @JvmStatic
     external fun uniffi_paykit_checksum_method_ffipaykitsdk_reject_payment_request(
@@ -2473,6 +2685,18 @@ internal object IntegrityCheckingUniffiLib : Library {
     external fun uniffi_paykit_checksum_method_ffisdkstateblobstore_save_state_blob_atomically(
     ): Short
     @JvmStatic
+    external fun uniffi_paykit_checksum_constructor_ffiallowanceamountrange_new(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_constructor_ffiallowanceperiod_new(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_constructor_ffiallowanceperiodlimit_new(
+    ): Short
+    @JvmStatic
+    external fun uniffi_paykit_checksum_constructor_ffiallowanceterms_new(
+    ): Short
+    @JvmStatic
     external fun uniffi_paykit_checksum_constructor_ffipaykitsdk_new(
     ): Short
     @JvmStatic
@@ -2546,6 +2770,198 @@ internal object UniffiLib : Library {
         UniffiCleaner.create()
     }
     @JvmStatic
+    external fun uniffi_paykit_fn_clone_ffiallowanceamountrange(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_free_ffiallowanceamountrange(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Unit
+    @JvmStatic
+    external fun uniffi_paykit_fn_constructor_ffiallowanceamountrange_new(
+        `minimum`: RustBufferByValue,
+        `maximum`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceamountrange_maximum(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceamountrange_minimum(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceamountrange_uniffi_trait_debug(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceamountrange_uniffi_trait_display(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_clone_ffiallowanceperiod(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_free_ffiallowanceperiod(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Unit
+    @JvmStatic
+    external fun uniffi_paykit_fn_constructor_ffiallowanceperiod_new(
+        `kind`: RustBufferByValue,
+        `every`: Long,
+        `unit`: RustBufferByValue,
+        `anchor`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceperiod_anchor(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceperiod_every(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceperiod_kind(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceperiod_unit(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceperiod_uniffi_trait_debug(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceperiod_uniffi_trait_display(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_clone_ffiallowanceperiodlimit(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_free_ffiallowanceperiodlimit(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Unit
+    @JvmStatic
+    external fun uniffi_paykit_fn_constructor_ffiallowanceperiodlimit_new(
+        `amountLimit`: RustBufferByValue,
+        `paymentCountLimit`: RustBufferByValue,
+        `period`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceperiodlimit_amount_limit(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceperiodlimit_payment_count_limit(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceperiodlimit_period(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceperiodlimit_uniffi_trait_debug(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceperiodlimit_uniffi_trait_display(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_clone_ffiallowanceterms(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_free_ffiallowanceterms(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Unit
+    @JvmStatic
+    external fun uniffi_paykit_fn_constructor_ffiallowanceterms_new(
+        `asset`: RustBufferByValue,
+        `perPaymentAmount`: RustBufferByValue,
+        `periodLimits`: RustBufferByValue,
+        `lifetimeAmountLimit`: RustBufferByValue,
+        `activeFrom`: RustBufferByValue,
+        `expiresAt`: RustBufferByValue,
+        `allowedPaymentEndpointIdentifiers`: RustBufferByValue,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceterms_active_from(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceterms_allowed_payment_endpoint_identifiers(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceterms_asset(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceterms_expires_at(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceterms_lifetime_amount_limit(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceterms_per_payment_amount(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceterms_period_limits(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceterms_uniffi_trait_debug(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffiallowanceterms_uniffi_trait_display(
+        `ptr`: Pointer?,
+        uniffiCallStatus: UniffiRustCallStatus,
+    ): RustBufferByValue
+    @JvmStatic
     external fun uniffi_paykit_fn_clone_ffipaykitsdk(
         `ptr`: Pointer?,
         uniffiCallStatus: UniffiRustCallStatus,
@@ -2587,6 +3003,13 @@ internal object UniffiLib : Library {
         `pubkyClient`: RustBufferByValue,
         uniffiCallStatus: UniffiRustCallStatus,
     ): Pointer?
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_accept_allowance(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+        `counterpartyReceiverPath`: RustBufferByValue,
+        `allowanceId`: RustBufferByValue,
+    ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_accept_link_with_peer(
         `ptr`: Pointer?,
@@ -2681,6 +3104,13 @@ internal object UniffiLib : Library {
         `counterpartyReceiverPath`: RustBufferByValue,
     ): Long
     @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_end_allowance(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+        `counterpartyReceiverPath`: RustBufferByValue,
+        `allowanceId`: RustBufferByValue,
+    ): Long
+    @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_enqueue_private_payment_list(
         `ptr`: Pointer?,
         `counterparty`: RustBufferByValue,
@@ -2739,6 +3169,13 @@ internal object UniffiLib : Library {
         `ptr`: Pointer?,
     ): Long
     @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_get_allowance(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+        `counterpartyReceiverPath`: RustBufferByValue,
+        `allowanceId`: RustBufferByValue,
+    ): Long
+    @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_identity_status(
         `ptr`: Pointer?,
     ): Long
@@ -2772,6 +3209,11 @@ internal object UniffiLib : Library {
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_linked_peers(
         `ptr`: Pointer?,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_list_allowances(
+        `ptr`: Pointer?,
+        `filter`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_list_payment_requests(
@@ -2841,6 +3283,14 @@ internal object UniffiLib : Library {
         `counterparty`: RustBufferByValue,
         `counterpartyReceiverPath`: RustBufferByValue,
         `receiptId`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_propose_allowance(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+        `counterpartyReceiverPath`: RustBufferByValue,
+        `localRole`: RustBufferByValue,
+        `terms`: Pointer?,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_propose_payment_request(
@@ -2936,6 +3386,13 @@ internal object UniffiLib : Library {
         `ptr`: Pointer?,
         `publicKey`: RustBufferByValue,
         `receiverPath`: RustBufferByValue,
+    ): Long
+    @JvmStatic
+    external fun uniffi_paykit_fn_method_ffipaykitsdk_reject_allowance(
+        `ptr`: Pointer?,
+        `counterparty`: RustBufferByValue,
+        `counterpartyReceiverPath`: RustBufferByValue,
+        `allowanceId`: RustBufferByValue,
     ): Long
     @JvmStatic
     external fun uniffi_paykit_fn_method_ffipaykitsdk_reject_payment_request(
@@ -4125,6 +4582,834 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 
 
 /**
+ * Inclusive per-payment amount range for Allowance Terms.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+public open class AllowanceAmountRange: Disposable, AllowanceAmountRangeInterface {
+
+    public constructor(pointer: Pointer) {
+        this.pointer = pointer
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiPointerDestroyer(pointer))
+    }
+
+    /**
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    public constructor(noPointer: NoPointer) {
+        this.pointer = null
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiPointerDestroyer(null))
+    }
+    /**
+     * Validate and create an inclusive per-payment amount range.
+     */
+    public constructor(`minimum`: kotlin.String, `maximum`: kotlin.String) : this(
+        uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
+            UniffiLib.uniffi_paykit_fn_constructor_ffiallowanceamountrange_new(
+                FfiConverterString.lower(`minimum`),
+                FfiConverterString.lower(`maximum`),
+                uniffiRustCallStatus,
+            )
+        }!!
+    )
+
+    protected val pointer: Pointer?
+    protected val cleanable: UniffiCleaner.Cleanable
+
+    private val wasDestroyed: kotlinx.atomicfu.AtomicBoolean = kotlinx.atomicfu.atomic(false)
+    private val callCounter: kotlinx.atomicfu.AtomicLong = kotlinx.atomicfu.atomic(1L)
+
+    private val lock = kotlinx.atomicfu.locks.ReentrantLock()
+
+    private fun <T> synchronized(block: () -> T): T {
+        lock.lock()
+        try {
+            return block()
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    override fun close() {
+        synchronized { this.destroy() }
+    }
+
+    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.value
+            if (c == 0L) {
+                throw IllegalStateException("${this::class::simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this::class::simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the pointer being freed concurrently.
+        try {
+            return block(this.uniffiClonePointer())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiPointerDestroyer(private val pointer: Pointer?) : Disposable {
+        override fun destroy() {
+            pointer?.let { ptr ->
+                uniffiRustCall { status ->
+                    UniffiLib.uniffi_paykit_fn_free_ffiallowanceamountrange(ptr, status)
+                }
+            }
+        }
+    }
+
+    public fun uniffiClonePointer(): Pointer {
+        return uniffiRustCall { status ->
+            UniffiLib.uniffi_paykit_fn_clone_ffiallowanceamountrange(pointer!!, status)
+        }!!
+    }
+
+
+    /**
+     * Return the maximum decimal wire spelling.
+     */
+    public override fun `maximum`(): kotlin.String {
+        return FfiConverterString.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiallowanceamountrange_maximum(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    /**
+     * Return the minimum decimal wire spelling.
+     */
+    public override fun `minimum`(): kotlin.String {
+        return FfiConverterString.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiallowanceamountrange_minimum(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+
+
+
+
+
+
+    public companion object
+
+}
+
+
+
+
+
+public object FfiConverterTypeAllowanceAmountRange: FfiConverter<AllowanceAmountRange, Pointer> {
+
+    override fun lower(value: AllowanceAmountRange): Pointer {
+        return value.uniffiClonePointer()
+    }
+
+    override fun lift(value: Pointer): AllowanceAmountRange {
+        return AllowanceAmountRange(value)
+    }
+
+    override fun read(buf: ByteBuffer): AllowanceAmountRange {
+        // The Rust code always writes pointers as 8 bytes, and will
+        // fail to compile if they don't fit.
+        return lift(buf.getLong().toPointer())
+    }
+
+    override fun allocationSize(value: AllowanceAmountRange): ULong = 8UL
+
+    override fun write(value: AllowanceAmountRange, buf: ByteBuffer) {
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(lower(value).toLong())
+    }
+}
+
+
+
+/**
+ * Anchored or rolling period for an Allowance usage limit.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+public open class AllowancePeriod: Disposable, AllowancePeriodInterface {
+
+    public constructor(pointer: Pointer) {
+        this.pointer = pointer
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiPointerDestroyer(pointer))
+    }
+
+    /**
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    public constructor(noPointer: NoPointer) {
+        this.pointer = null
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiPointerDestroyer(null))
+    }
+    /**
+     * Validate and create an anchored or rolling Allowance period.
+     */
+    public constructor(`kind`: kotlin.String, `every`: kotlin.ULong, `unit`: kotlin.String, `anchor`: kotlin.String?) : this(
+        uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
+            UniffiLib.uniffi_paykit_fn_constructor_ffiallowanceperiod_new(
+                FfiConverterString.lower(`kind`),
+                FfiConverterULong.lower(`every`),
+                FfiConverterString.lower(`unit`),
+                FfiConverterOptionalString.lower(`anchor`),
+                uniffiRustCallStatus,
+            )
+        }!!
+    )
+
+    protected val pointer: Pointer?
+    protected val cleanable: UniffiCleaner.Cleanable
+
+    private val wasDestroyed: kotlinx.atomicfu.AtomicBoolean = kotlinx.atomicfu.atomic(false)
+    private val callCounter: kotlinx.atomicfu.AtomicLong = kotlinx.atomicfu.atomic(1L)
+
+    private val lock = kotlinx.atomicfu.locks.ReentrantLock()
+
+    private fun <T> synchronized(block: () -> T): T {
+        lock.lock()
+        try {
+            return block()
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    override fun close() {
+        synchronized { this.destroy() }
+    }
+
+    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.value
+            if (c == 0L) {
+                throw IllegalStateException("${this::class::simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this::class::simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the pointer being freed concurrently.
+        try {
+            return block(this.uniffiClonePointer())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiPointerDestroyer(private val pointer: Pointer?) : Disposable {
+        override fun destroy() {
+            pointer?.let { ptr ->
+                uniffiRustCall { status ->
+                    UniffiLib.uniffi_paykit_fn_free_ffiallowanceperiod(ptr, status)
+                }
+            }
+        }
+    }
+
+    public fun uniffiClonePointer(): Pointer {
+        return uniffiRustCall { status ->
+            UniffiLib.uniffi_paykit_fn_clone_ffiallowanceperiod(pointer!!, status)
+        }!!
+    }
+
+
+    /**
+     * Return the UTC anchor for an anchored period.
+     */
+    public override fun `anchor`(): kotlin.String? {
+        return FfiConverterOptionalString.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiallowanceperiod_anchor(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    /**
+     * Return the positive interval multiplier.
+     */
+    public override fun `every`(): kotlin.ULong {
+        return FfiConverterULong.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiallowanceperiod_every(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    /**
+     * Return the canonical period kind: `anchored` or `rolling`.
+     */
+    public override fun `kind`(): kotlin.String {
+        return FfiConverterString.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiallowanceperiod_kind(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    /**
+     * Return the canonical singular interval unit.
+     */
+    public override fun `unit`(): kotlin.String {
+        return FfiConverterString.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiallowanceperiod_unit(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+
+
+
+
+
+
+    public companion object
+
+}
+
+
+
+
+
+public object FfiConverterTypeAllowancePeriod: FfiConverter<AllowancePeriod, Pointer> {
+
+    override fun lower(value: AllowancePeriod): Pointer {
+        return value.uniffiClonePointer()
+    }
+
+    override fun lift(value: Pointer): AllowancePeriod {
+        return AllowancePeriod(value)
+    }
+
+    override fun read(buf: ByteBuffer): AllowancePeriod {
+        // The Rust code always writes pointers as 8 bytes, and will
+        // fail to compile if they don't fit.
+        return lift(buf.getLong().toPointer())
+    }
+
+    override fun allocationSize(value: AllowancePeriod): ULong = 8UL
+
+    override fun write(value: AllowancePeriod, buf: ByteBuffer) {
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(lower(value).toLong())
+    }
+}
+
+
+
+/**
+ * Amount and/or payment-count ceiling applied over one Allowance period.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+public open class AllowancePeriodLimit: Disposable, AllowancePeriodLimitInterface {
+
+    public constructor(pointer: Pointer) {
+        this.pointer = pointer
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiPointerDestroyer(pointer))
+    }
+
+    /**
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    public constructor(noPointer: NoPointer) {
+        this.pointer = null
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiPointerDestroyer(null))
+    }
+    /**
+     * Validate and create an Allowance period limit.
+     */
+    public constructor(`amountLimit`: kotlin.String?, `paymentCountLimit`: kotlin.ULong?, `period`: AllowancePeriod) : this(
+        uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
+            UniffiLib.uniffi_paykit_fn_constructor_ffiallowanceperiodlimit_new(
+                FfiConverterOptionalString.lower(`amountLimit`),
+                FfiConverterOptionalULong.lower(`paymentCountLimit`),
+                FfiConverterTypeAllowancePeriod.lower(`period`),
+                uniffiRustCallStatus,
+            )
+        }!!
+    )
+
+    protected val pointer: Pointer?
+    protected val cleanable: UniffiCleaner.Cleanable
+
+    private val wasDestroyed: kotlinx.atomicfu.AtomicBoolean = kotlinx.atomicfu.atomic(false)
+    private val callCounter: kotlinx.atomicfu.AtomicLong = kotlinx.atomicfu.atomic(1L)
+
+    private val lock = kotlinx.atomicfu.locks.ReentrantLock()
+
+    private fun <T> synchronized(block: () -> T): T {
+        lock.lock()
+        try {
+            return block()
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    override fun close() {
+        synchronized { this.destroy() }
+    }
+
+    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.value
+            if (c == 0L) {
+                throw IllegalStateException("${this::class::simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this::class::simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the pointer being freed concurrently.
+        try {
+            return block(this.uniffiClonePointer())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiPointerDestroyer(private val pointer: Pointer?) : Disposable {
+        override fun destroy() {
+            pointer?.let { ptr ->
+                uniffiRustCall { status ->
+                    UniffiLib.uniffi_paykit_fn_free_ffiallowanceperiodlimit(ptr, status)
+                }
+            }
+        }
+    }
+
+    public fun uniffiClonePointer(): Pointer {
+        return uniffiRustCall { status ->
+            UniffiLib.uniffi_paykit_fn_clone_ffiallowanceperiodlimit(pointer!!, status)
+        }!!
+    }
+
+
+    /**
+     * Return the optional amount ceiling decimal spelling.
+     */
+    public override fun `amountLimit`(): kotlin.String? {
+        return FfiConverterOptionalString.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiallowanceperiodlimit_amount_limit(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    /**
+     * Return the optional payment-count ceiling.
+     */
+    public override fun `paymentCountLimit`(): kotlin.ULong? {
+        return FfiConverterOptionalULong.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiallowanceperiodlimit_payment_count_limit(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    /**
+     * Return the period over which the ceilings apply.
+     */
+    public override fun `period`(): AllowancePeriod {
+        return FfiConverterTypeAllowancePeriod.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiallowanceperiodlimit_period(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }!!
+        })
+    }
+
+
+
+
+
+
+
+    public companion object
+
+}
+
+
+
+
+
+public object FfiConverterTypeAllowancePeriodLimit: FfiConverter<AllowancePeriodLimit, Pointer> {
+
+    override fun lower(value: AllowancePeriodLimit): Pointer {
+        return value.uniffiClonePointer()
+    }
+
+    override fun lift(value: Pointer): AllowancePeriodLimit {
+        return AllowancePeriodLimit(value)
+    }
+
+    override fun read(buf: ByteBuffer): AllowancePeriodLimit {
+        // The Rust code always writes pointers as 8 bytes, and will
+        // fail to compile if they don't fit.
+        return lift(buf.getLong().toPointer())
+    }
+
+    override fun allocationSize(value: AllowancePeriodLimit): ULong = 8UL
+
+    override fun write(value: AllowancePeriodLimit, buf: ByteBuffer) {
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(lower(value).toLong())
+    }
+}
+
+
+
+/**
+ * Immutable private Allowance Terms with redacted default formatting.
+ *
+ * Applications must treat the object and every value returned by its getters
+ * as sensitive. Do not include them in ordinary platform logs or diagnostics.
+ */
+public open class AllowanceTerms: Disposable, AllowanceTermsInterface {
+
+    public constructor(pointer: Pointer) {
+        this.pointer = pointer
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiPointerDestroyer(pointer))
+    }
+
+    /**
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    public constructor(noPointer: NoPointer) {
+        this.pointer = null
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiPointerDestroyer(null))
+    }
+    /**
+     * Validate and create immutable Allowance Terms.
+     */
+    public constructor(`asset`: kotlin.String, `perPaymentAmount`: AllowanceAmountRange?, `periodLimits`: List<AllowancePeriodLimit>, `lifetimeAmountLimit`: kotlin.String?, `activeFrom`: kotlin.String?, `expiresAt`: kotlin.String?, `allowedPaymentEndpointIdentifiers`: List<kotlin.String>?) : this(
+        uniffiRustCallWithError(PaykitExceptionErrorHandler) { uniffiRustCallStatus ->
+            UniffiLib.uniffi_paykit_fn_constructor_ffiallowanceterms_new(
+                FfiConverterString.lower(`asset`),
+                FfiConverterOptionalTypeFfiAllowanceAmountRange.lower(`perPaymentAmount`),
+                FfiConverterSequenceTypeAllowancePeriodLimit.lower(`periodLimits`),
+                FfiConverterOptionalString.lower(`lifetimeAmountLimit`),
+                FfiConverterOptionalString.lower(`activeFrom`),
+                FfiConverterOptionalString.lower(`expiresAt`),
+                FfiConverterOptionalSequenceString.lower(`allowedPaymentEndpointIdentifiers`),
+                uniffiRustCallStatus,
+            )
+        }!!
+    )
+
+    protected val pointer: Pointer?
+    protected val cleanable: UniffiCleaner.Cleanable
+
+    private val wasDestroyed: kotlinx.atomicfu.AtomicBoolean = kotlinx.atomicfu.atomic(false)
+    private val callCounter: kotlinx.atomicfu.AtomicLong = kotlinx.atomicfu.atomic(1L)
+
+    private val lock = kotlinx.atomicfu.locks.ReentrantLock()
+
+    private fun <T> synchronized(block: () -> T): T {
+        lock.lock()
+        try {
+            return block()
+        } finally {
+            lock.unlock()
+        }
+    }
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    override fun close() {
+        synchronized { this.destroy() }
+    }
+
+    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.value
+            if (c == 0L) {
+                throw IllegalStateException("${this::class::simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this::class::simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the pointer being freed concurrently.
+        try {
+            return block(this.uniffiClonePointer())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiPointerDestroyer(private val pointer: Pointer?) : Disposable {
+        override fun destroy() {
+            pointer?.let { ptr ->
+                uniffiRustCall { status ->
+                    UniffiLib.uniffi_paykit_fn_free_ffiallowanceterms(ptr, status)
+                }
+            }
+        }
+    }
+
+    public fun uniffiClonePointer(): Pointer {
+        return uniffiRustCall { status ->
+            UniffiLib.uniffi_paykit_fn_clone_ffiallowanceterms(pointer!!, status)
+        }!!
+    }
+
+
+    /**
+     * Return the optional inclusive first eligible instant.
+     */
+    public override fun `activeFrom`(): kotlin.String? {
+        return FfiConverterOptionalString.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiallowanceterms_active_from(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    /**
+     * Return the optional exact Payment Endpoint Identifier allowlist.
+     */
+    public override fun `allowedPaymentEndpointIdentifiers`(): List<kotlin.String>? {
+        return FfiConverterOptionalSequenceString.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiallowanceterms_allowed_payment_endpoint_identifiers(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    /**
+     * Return the exact, case-sensitive asset.
+     */
+    public override fun `asset`(): kotlin.String {
+        return FfiConverterString.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiallowanceterms_asset(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    /**
+     * Return the optional exclusive first ineligible instant.
+     */
+    public override fun `expiresAt`(): kotlin.String? {
+        return FfiConverterOptionalString.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiallowanceterms_expires_at(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    /**
+     * Return the optional lifetime amount ceiling decimal spelling.
+     */
+    public override fun `lifetimeAmountLimit`(): kotlin.String? {
+        return FfiConverterOptionalString.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiallowanceterms_lifetime_amount_limit(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    /**
+     * Return the optional inclusive per-payment amount range.
+     */
+    public override fun `perPaymentAmount`(): AllowanceAmountRange? {
+        return FfiConverterOptionalTypeFfiAllowanceAmountRange.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiallowanceterms_per_payment_amount(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+    /**
+     * Return every independently applicable period limit.
+     */
+    public override fun `periodLimits`(): List<AllowancePeriodLimit> {
+        return FfiConverterSequenceTypeAllowancePeriodLimit.lift(callWithPointer {
+            uniffiRustCall { uniffiRustCallStatus ->
+                UniffiLib.uniffi_paykit_fn_method_ffiallowanceterms_period_limits(
+                    it,
+                    uniffiRustCallStatus,
+                )
+            }
+        })
+    }
+
+
+
+
+
+
+
+    public companion object
+
+}
+
+
+
+
+
+public object FfiConverterTypeAllowanceTerms: FfiConverter<AllowanceTerms, Pointer> {
+
+    override fun lower(value: AllowanceTerms): Pointer {
+        return value.uniffiClonePointer()
+    }
+
+    override fun lift(value: Pointer): AllowanceTerms {
+        return AllowanceTerms(value)
+    }
+
+    override fun read(buf: ByteBuffer): AllowanceTerms {
+        // The Rust code always writes pointers as 8 bytes, and will
+        // fail to compile if they don't fit.
+        return lift(buf.getLong().toPointer())
+    }
+
+    override fun allocationSize(value: AllowanceTerms): ULong = 8UL
+
+    override fun write(value: AllowanceTerms, buf: ByteBuffer) {
+        // The Rust code always expects pointers written as 8 bytes,
+        // and will fail to compile if they don't fit.
+        buf.putLong(lower(value).toLong())
+    }
+}
+
+
+
+/**
  * Stateful Paykit SDK runtime handle.
  */
 public open class PaykitSdk: Disposable, PaykitSdkInterface {
@@ -4229,6 +5514,31 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
         }!!
     }
 
+
+    /**
+     * Queue acceptance for a received Allowance proposal.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `acceptAllowance`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `allowanceId`: kotlin.String): AllowanceRecord {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_accept_allowance(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                    FfiConverterString.lower(`counterpartyReceiverPath`),
+                    FfiConverterString.lower(`allowanceId`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeAllowanceRecord.lift(it) },
+            // Error FFI converter
+            PaykitExceptionErrorHandler,
+        )
+    }
 
     /**
      * Start an Encrypted Link Handshake as the responder.
@@ -4623,6 +5933,31 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
     }
 
     /**
+     * Queue a proposal withdrawal or unilateral End for accepted authority.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `endAllowance`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `allowanceId`: kotlin.String): AllowanceRecord {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_end_allowance(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                    FfiConverterString.lower(`counterpartyReceiverPath`),
+                    FfiConverterString.lower(`allowanceId`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeAllowanceRecord.lift(it) },
+            // Error FFI converter
+            PaykitExceptionErrorHandler,
+        )
+    }
+
+    /**
      * Queue the current complete Private Payment List for one counterparty receiver.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -4882,6 +6217,31 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
     }
 
     /**
+     * Return one Allowance from one exact authenticated Encrypted Link.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `getAllowance`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `allowanceId`: kotlin.String): AllowanceRecord? {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_get_allowance(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                    FfiConverterString.lower(`counterpartyReceiverPath`),
+                    FfiConverterString.lower(`allowanceId`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterOptionalTypeFfiAllowanceRecord.lift(it) },
+            // Error FFI converter
+            PaykitExceptionErrorHandler,
+        )
+    }
+
+    /**
      * Return current identity status, when initialized.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -5037,6 +6397,29 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
             { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
             // lift function
             { FfiConverterSequenceTypeLinkedPeerRecord.lift(it) },
+            // Error FFI converter
+            PaykitExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Return Allowances matching a local SDK filter, newest first by local record time (presentation order only).
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `listAllowances`(`filter`: AllowanceFilter): List<AllowanceRecord> {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_list_allowances(
+                    thisPtr,
+                    FfiConverterTypeAllowanceFilter.lower(`filter`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterSequenceTypeAllowanceRecord.lift(it) },
             // Error FFI converter
             PaykitExceptionErrorHandler,
         )
@@ -5325,6 +6708,32 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
             { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
             // lift function
             { FfiConverterTypeReceiptIssuanceView.lift(it) },
+            // Error FFI converter
+            PaykitExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Queue a new Allowance proposal and return local derived state.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `proposeAllowance`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `localRole`: AllowanceLocalRole, `terms`: AllowanceTerms): AllowanceRecord {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_propose_allowance(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                    FfiConverterString.lower(`counterpartyReceiverPath`),
+                    FfiConverterTypeAllowanceLocalRole.lower(`localRole`),
+                    FfiConverterTypeAllowanceTerms.lower(`terms`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeAllowanceRecord.lift(it) },
             // Error FFI converter
             PaykitExceptionErrorHandler,
         )
@@ -5726,6 +7135,31 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
             { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
             // lift function
             { FfiConverterOptionalTypeFfiContactRecord.lift(it) },
+            // Error FFI converter
+            PaykitExceptionErrorHandler,
+        )
+    }
+
+    /**
+     * Queue rejection for a received Allowance proposal.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public override suspend fun `rejectAllowance`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `allowanceId`: kotlin.String): AllowanceRecord {
+        return uniffiRustCallAsync(
+            callWithPointer { thisPtr ->
+                UniffiLib.uniffi_paykit_fn_method_ffipaykitsdk_reject_allowance(
+                    thisPtr,
+                    FfiConverterString.lower(`counterparty`),
+                    FfiConverterString.lower(`counterpartyReceiverPath`),
+                    FfiConverterString.lower(`allowanceId`),
+                )
+            },
+            { future, callback, continuation -> UniffiLib.ffi_paykit_rust_future_poll_rust_buffer(future, callback, continuation) },
+            { future, continuation -> UniffiLib.ffi_paykit_rust_future_complete_rust_buffer(future, continuation) },
+            { future -> UniffiLib.ffi_paykit_rust_future_free_rust_buffer(future) },
+            { future -> UniffiLib.ffi_paykit_rust_future_cancel_rust_buffer(future) },
+            // lift function
+            { FfiConverterTypeAllowanceRecord.lift(it) },
             // Error FFI converter
             PaykitExceptionErrorHandler,
         )
@@ -9824,6 +11258,122 @@ internal object uniffiCallbackInterfaceFfiSdkStateBlobStore {
 
 
 
+public object FfiConverterTypeAllowanceFilter: FfiConverterRustBuffer<AllowanceFilter> {
+    override fun read(buf: ByteBuffer): AllowanceFilter {
+        return AllowanceFilter(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeFfiAllowanceLocalRole.read(buf),
+            FfiConverterSequenceTypeAllowanceLifecycleState.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: AllowanceFilter): ULong = (
+            FfiConverterOptionalString.allocationSize(value.`counterparty`) +
+            FfiConverterOptionalString.allocationSize(value.`counterpartyReceiverPath`) +
+            FfiConverterOptionalTypeFfiAllowanceLocalRole.allocationSize(value.`localRole`) +
+            FfiConverterSequenceTypeAllowanceLifecycleState.allocationSize(value.`states`)
+    )
+
+    override fun write(value: AllowanceFilter, buf: ByteBuffer) {
+        FfiConverterOptionalString.write(value.`counterparty`, buf)
+        FfiConverterOptionalString.write(value.`counterpartyReceiverPath`, buf)
+        FfiConverterOptionalTypeFfiAllowanceLocalRole.write(value.`localRole`, buf)
+        FfiConverterSequenceTypeAllowanceLifecycleState.write(value.`states`, buf)
+    }
+}
+
+
+
+
+public object FfiConverterTypeAllowanceRecord: FfiConverterRustBuffer<AllowanceRecord> {
+    override fun read(buf: ByteBuffer): AllowanceRecord {
+        return AllowanceRecord(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalTypeFfiAllowanceLocalRole.read(buf),
+            FfiConverterTypeAllowanceLifecycleState.read(buf),
+            FfiConverterTypeAllowanceHistoryStatus.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeFfiAllowanceTerms.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: AllowanceRecord): ULong = (
+            FfiConverterString.allocationSize(value.`counterparty`) +
+            FfiConverterString.allocationSize(value.`counterpartyReceiverPath`) +
+            FfiConverterString.allocationSize(value.`allowanceId`) +
+            FfiConverterOptionalTypeFfiAllowanceLocalRole.allocationSize(value.`localRole`) +
+            FfiConverterTypeAllowanceLifecycleState.allocationSize(value.`state`) +
+            FfiConverterTypeAllowanceHistoryStatus.allocationSize(value.`historyStatus`) +
+            FfiConverterOptionalString.allocationSize(value.`proposalEventId`) +
+            FfiConverterOptionalTypeFfiAllowanceTerms.allocationSize(value.`terms`) +
+            FfiConverterOptionalULong.allocationSize(value.`proposalStreamItemId`) +
+            FfiConverterOptionalULong.allocationSize(value.`proposalOutboundMessageId`) +
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.allocationSize(value.`proposalOutboundStatus`) +
+            FfiConverterOptionalString.allocationSize(value.`acceptanceEventId`) +
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.allocationSize(value.`acceptanceOutboundStatus`) +
+            FfiConverterOptionalString.allocationSize(value.`rejectionEventId`) +
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.allocationSize(value.`rejectionOutboundStatus`) +
+            FfiConverterOptionalString.allocationSize(value.`endEventId`) +
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.allocationSize(value.`endOutboundStatus`) +
+            FfiConverterSequenceString.allocationSize(value.`pendingCausalEventIds`) +
+            FfiConverterSequenceString.allocationSize(value.`conflictEventIds`) +
+            FfiConverterOptionalULong.allocationSize(value.`lastStreamItemId`) +
+            FfiConverterOptionalULong.allocationSize(value.`lastOutboundMessageId`) +
+            FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.allocationSize(value.`lastOutboundStatus`) +
+            FfiConverterOptionalString.allocationSize(value.`lastEventAt`) +
+            FfiConverterOptionalString.allocationSize(value.`invalidReason`)
+    )
+
+    override fun write(value: AllowanceRecord, buf: ByteBuffer) {
+        FfiConverterString.write(value.`counterparty`, buf)
+        FfiConverterString.write(value.`counterpartyReceiverPath`, buf)
+        FfiConverterString.write(value.`allowanceId`, buf)
+        FfiConverterOptionalTypeFfiAllowanceLocalRole.write(value.`localRole`, buf)
+        FfiConverterTypeAllowanceLifecycleState.write(value.`state`, buf)
+        FfiConverterTypeAllowanceHistoryStatus.write(value.`historyStatus`, buf)
+        FfiConverterOptionalString.write(value.`proposalEventId`, buf)
+        FfiConverterOptionalTypeFfiAllowanceTerms.write(value.`terms`, buf)
+        FfiConverterOptionalULong.write(value.`proposalStreamItemId`, buf)
+        FfiConverterOptionalULong.write(value.`proposalOutboundMessageId`, buf)
+        FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.write(value.`proposalOutboundStatus`, buf)
+        FfiConverterOptionalString.write(value.`acceptanceEventId`, buf)
+        FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.write(value.`acceptanceOutboundStatus`, buf)
+        FfiConverterOptionalString.write(value.`rejectionEventId`, buf)
+        FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.write(value.`rejectionOutboundStatus`, buf)
+        FfiConverterOptionalString.write(value.`endEventId`, buf)
+        FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.write(value.`endOutboundStatus`, buf)
+        FfiConverterSequenceString.write(value.`pendingCausalEventIds`, buf)
+        FfiConverterSequenceString.write(value.`conflictEventIds`, buf)
+        FfiConverterOptionalULong.write(value.`lastStreamItemId`, buf)
+        FfiConverterOptionalULong.write(value.`lastOutboundMessageId`, buf)
+        FfiConverterOptionalTypeFfiOutboundPrivateMessageStatus.write(value.`lastOutboundStatus`, buf)
+        FfiConverterOptionalString.write(value.`lastEventAt`, buf)
+        FfiConverterOptionalString.write(value.`invalidReason`, buf)
+    }
+}
+
+
+
+
 public object FfiConverterTypeBillingPeriod: FfiConverterRustBuffer<BillingPeriod> {
     override fun read(buf: ByteBuffer): BillingPeriod {
         return BillingPeriod(
@@ -12071,6 +13621,60 @@ public object FfiConverterTypeSdkStateBlobSnapshot: FfiConverterRustBuffer<SdkSt
 
 
 
+public object FfiConverterTypeAllowanceHistoryStatus: FfiConverterRustBuffer<AllowanceHistoryStatus> {
+    override fun read(buf: ByteBuffer): AllowanceHistoryStatus = try {
+        AllowanceHistoryStatus.entries[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: AllowanceHistoryStatus): ULong = 4UL
+
+    override fun write(value: AllowanceHistoryStatus, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+public object FfiConverterTypeAllowanceLifecycleState: FfiConverterRustBuffer<AllowanceLifecycleState> {
+    override fun read(buf: ByteBuffer): AllowanceLifecycleState = try {
+        AllowanceLifecycleState.entries[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: AllowanceLifecycleState): ULong = 4UL
+
+    override fun write(value: AllowanceLifecycleState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+public object FfiConverterTypeAllowanceLocalRole: FfiConverterRustBuffer<AllowanceLocalRole> {
+    override fun read(buf: ByteBuffer): AllowanceLocalRole = try {
+        AllowanceLocalRole.entries[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: AllowanceLocalRole): ULong = 4UL
+
+    override fun write(value: AllowanceLocalRole, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 public object FfiConverterTypeContactProfileSource: FfiConverterRustBuffer<ContactProfileSource> {
     override fun read(buf: ByteBuffer): ContactProfileSource = try {
         ContactProfileSource.entries[buf.getInt() - 1]
@@ -12761,6 +14365,64 @@ public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteA
 
 
 
+public object FfiConverterOptionalTypeFfiAllowanceAmountRange: FfiConverterRustBuffer<AllowanceAmountRange?> {
+    override fun read(buf: ByteBuffer): AllowanceAmountRange? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeAllowanceAmountRange.read(buf)
+    }
+
+    override fun allocationSize(value: AllowanceAmountRange?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeAllowanceAmountRange.allocationSize(value)
+        }
+    }
+
+    override fun write(value: AllowanceAmountRange?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeAllowanceAmountRange.write(value, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterOptionalTypeFfiAllowanceTerms: FfiConverterRustBuffer<AllowanceTerms?> {
+    override fun read(buf: ByteBuffer): AllowanceTerms? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeAllowanceTerms.read(buf)
+    }
+
+    override fun allocationSize(value: AllowanceTerms?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeAllowanceTerms.allocationSize(value)
+        }
+    }
+
+    override fun write(value: AllowanceTerms?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeAllowanceTerms.write(value, buf)
+        }
+    }
+}
+
+
+
+
 public object FfiConverterOptionalTypeFfiPrivateOperationError: FfiConverterRustBuffer<PrivateOperationError?> {
     override fun read(buf: ByteBuffer): PrivateOperationError? {
         if (buf.get().toInt() == 0) {
@@ -12841,6 +14503,35 @@ public object FfiConverterOptionalTypeFfiPubkySessionAccess: FfiConverterRustBuf
         } else {
             buf.put(1)
             FfiConverterTypePubkySessionAccess.write(value, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterOptionalTypeFfiAllowanceRecord: FfiConverterRustBuffer<AllowanceRecord?> {
+    override fun read(buf: ByteBuffer): AllowanceRecord? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeAllowanceRecord.read(buf)
+    }
+
+    override fun allocationSize(value: AllowanceRecord?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeAllowanceRecord.allocationSize(value)
+        }
+    }
+
+    override fun write(value: AllowanceRecord?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeAllowanceRecord.write(value, buf)
         }
     }
 }
@@ -13399,6 +15090,35 @@ public object FfiConverterOptionalTypeFfiSdkStateBlobSnapshot: FfiConverterRustB
 
 
 
+public object FfiConverterOptionalTypeFfiAllowanceLocalRole: FfiConverterRustBuffer<AllowanceLocalRole?> {
+    override fun read(buf: ByteBuffer): AllowanceLocalRole? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeAllowanceLocalRole.read(buf)
+    }
+
+    override fun allocationSize(value: AllowanceLocalRole?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeAllowanceLocalRole.allocationSize(value)
+        }
+    }
+
+    override fun write(value: AllowanceLocalRole?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeAllowanceLocalRole.write(value, buf)
+        }
+    }
+}
+
+
+
+
 public object FfiConverterOptionalTypeFfiEncryptedLinkHandshakeRole: FfiConverterRustBuffer<EncryptedLinkHandshakeRole?> {
     override fun read(buf: ByteBuffer): EncryptedLinkHandshakeRole? {
         if (buf.get().toInt() == 0) {
@@ -13486,6 +15206,35 @@ public object FfiConverterOptionalTypeFfiPaymentRequestLocalRole: FfiConverterRu
 
 
 
+public object FfiConverterOptionalSequenceString: FfiConverterRustBuffer<List<kotlin.String>?> {
+    override fun read(buf: ByteBuffer): List<kotlin.String>? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterSequenceString.read(buf)
+    }
+
+    override fun allocationSize(value: List<kotlin.String>?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterSequenceString.allocationSize(value)
+        }
+    }
+
+    override fun write(value: List<kotlin.String>?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterSequenceString.write(value, buf)
+        }
+    }
+}
+
+
+
+
 public object FfiConverterSequenceULong: FfiConverterRustBuffer<List<kotlin.ULong>> {
     override fun read(buf: ByteBuffer): List<kotlin.ULong> {
         val len = buf.getInt()
@@ -13529,6 +15278,56 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterString.write(it, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterSequenceTypeAllowancePeriodLimit: FfiConverterRustBuffer<List<AllowancePeriodLimit>> {
+    override fun read(buf: ByteBuffer): List<AllowancePeriodLimit> {
+        val len = buf.getInt()
+        return List<AllowancePeriodLimit>(len) {
+            FfiConverterTypeAllowancePeriodLimit.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<AllowancePeriodLimit>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.sumOf { FfiConverterTypeAllowancePeriodLimit.allocationSize(it) }
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<AllowancePeriodLimit>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeAllowancePeriodLimit.write(it, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterSequenceTypeAllowanceRecord: FfiConverterRustBuffer<List<AllowanceRecord>> {
+    override fun read(buf: ByteBuffer): List<AllowanceRecord> {
+        val len = buf.getInt()
+        return List<AllowanceRecord>(len) {
+            FfiConverterTypeAllowanceRecord.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<AllowanceRecord>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.sumOf { FfiConverterTypeAllowanceRecord.allocationSize(it) }
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<AllowanceRecord>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeAllowanceRecord.write(it, buf)
         }
     }
 }
@@ -14254,6 +16053,31 @@ public object FfiConverterSequenceTypeRestoreRecoveryRequiredPeer: FfiConverterR
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeRestoreRecoveryRequiredPeer.write(it, buf)
+        }
+    }
+}
+
+
+
+
+public object FfiConverterSequenceTypeAllowanceLifecycleState: FfiConverterRustBuffer<List<AllowanceLifecycleState>> {
+    override fun read(buf: ByteBuffer): List<AllowanceLifecycleState> {
+        val len = buf.getInt()
+        return List<AllowanceLifecycleState>(len) {
+            FfiConverterTypeAllowanceLifecycleState.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<AllowanceLifecycleState>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.sumOf { FfiConverterTypeAllowanceLifecycleState.allocationSize(it) }
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<AllowanceLifecycleState>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeAllowanceLifecycleState.write(it, buf)
         }
     }
 }

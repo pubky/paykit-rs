@@ -350,6 +350,8 @@ Sensitive fields include:
 - Payment Targets
 - Payment Endpoint Reservation IDs and attribution
 - payable endpoint ordering or provider metadata
+- Allowance Terms, including limits, time bounds, assets, and endpoint
+  allowlists
 
 If a platform wrapper must expose sensitive data for backup/export or storage
 callbacks, that type should be documented as sensitive and must redact default
@@ -401,6 +403,7 @@ Bindings should expose high-level workflows before low-level records:
   a public-only result
 - queue and list Payment Requests
 - submit Payment Proofs with caller-supplied proof data
+- propose, inspect, accept, reject, and end Allowances
 - retrieve Receipts
 - export and restore SDK-managed backup state, including text-form wrappers
 

@@ -106,9 +106,151 @@ public object NoPointer
 
 
 /**
+ * Inclusive per-payment amount range for Allowance Terms.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+public interface AllowanceAmountRangeInterface {
+
+    /**
+     * Return the maximum decimal wire spelling.
+     */
+    public fun `maximum`(): kotlin.String
+
+    /**
+     * Return the minimum decimal wire spelling.
+     */
+    public fun `minimum`(): kotlin.String
+
+    public companion object
+}
+
+
+
+
+/**
+ * Anchored or rolling period for an Allowance usage limit.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+public interface AllowancePeriodInterface {
+
+    /**
+     * Return the UTC anchor for an anchored period.
+     */
+    public fun `anchor`(): kotlin.String?
+
+    /**
+     * Return the positive interval multiplier.
+     */
+    public fun `every`(): kotlin.ULong
+
+    /**
+     * Return the canonical period kind: `anchored` or `rolling`.
+     */
+    public fun `kind`(): kotlin.String
+
+    /**
+     * Return the canonical singular interval unit.
+     */
+    public fun `unit`(): kotlin.String
+
+    public companion object
+}
+
+
+
+
+/**
+ * Amount and/or payment-count ceiling applied over one Allowance period.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+public interface AllowancePeriodLimitInterface {
+
+    /**
+     * Return the optional amount ceiling decimal spelling.
+     */
+    public fun `amountLimit`(): kotlin.String?
+
+    /**
+     * Return the optional payment-count ceiling.
+     */
+    public fun `paymentCountLimit`(): kotlin.ULong?
+
+    /**
+     * Return the period over which the ceilings apply.
+     */
+    public fun `period`(): AllowancePeriod
+
+    public companion object
+}
+
+
+
+
+/**
+ * Immutable private Allowance Terms with redacted default formatting.
+ *
+ * Applications must treat the object and every value returned by its getters
+ * as sensitive. Do not include them in ordinary platform logs or diagnostics.
+ */
+public interface AllowanceTermsInterface {
+
+    /**
+     * Return the optional inclusive first eligible instant.
+     */
+    public fun `activeFrom`(): kotlin.String?
+
+    /**
+     * Return the optional exact Payment Endpoint Identifier allowlist.
+     */
+    public fun `allowedPaymentEndpointIdentifiers`(): List<kotlin.String>?
+
+    /**
+     * Return the exact, case-sensitive asset.
+     */
+    public fun `asset`(): kotlin.String
+
+    /**
+     * Return the optional exclusive first ineligible instant.
+     */
+    public fun `expiresAt`(): kotlin.String?
+
+    /**
+     * Return the optional lifetime amount ceiling decimal spelling.
+     */
+    public fun `lifetimeAmountLimit`(): kotlin.String?
+
+    /**
+     * Return the optional inclusive per-payment amount range.
+     */
+    public fun `perPaymentAmount`(): AllowanceAmountRange?
+
+    /**
+     * Return every independently applicable period limit.
+     */
+    public fun `periodLimits`(): List<AllowancePeriodLimit>
+
+    public companion object
+}
+
+
+
+
+/**
  * Stateful Paykit SDK runtime handle.
  */
 public interface PaykitSdkInterface {
+
+    /**
+     * Queue acceptance for a received Allowance proposal.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `acceptAllowance`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `allowanceId`: kotlin.String): AllowanceRecord
 
     /**
      * Start an Encrypted Link Handshake as the responder.
@@ -212,6 +354,12 @@ public interface PaykitSdkInterface {
     public suspend fun `encryptedLinkRecoveryMarkerStatus`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String): EncryptedLinkRecoveryMarkerReport?
 
     /**
+     * Queue a proposal withdrawal or unilateral End for accepted authority.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `endAllowance`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `allowanceId`: kotlin.String): AllowanceRecord
+
+    /**
      * Queue the current complete Private Payment List for one counterparty receiver.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -281,6 +429,12 @@ public interface PaykitSdkInterface {
     public suspend fun `forgetSessionAccess`(): IdentityStatus
 
     /**
+     * Return one Allowance from one exact authenticated Encrypted Link.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `getAllowance`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `allowanceId`: kotlin.String): AllowanceRecord?
+
+    /**
      * Return current identity status, when initialized.
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
@@ -321,6 +475,12 @@ public interface PaykitSdkInterface {
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `linkedPeers`(): List<LinkedPeerRecord>
+
+    /**
+     * Return Allowances matching a local SDK filter, newest first by local record time (presentation order only).
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `listAllowances`(`filter`: AllowanceFilter): List<AllowanceRecord>
 
     /**
      * Return Payment Requests matching a local SDK filter.
@@ -396,6 +556,12 @@ public interface PaykitSdkInterface {
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `processReceiptIssuance`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `receiptId`: kotlin.String): ReceiptIssuanceView
+
+    /**
+     * Queue a new Allowance proposal and return local derived state.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `proposeAllowance`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `localRole`: AllowanceLocalRole, `terms`: AllowanceTerms): AllowanceRecord
 
     /**
      * Queue a new Payment Request proposal and return local derived state.
@@ -498,6 +664,12 @@ public interface PaykitSdkInterface {
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public suspend fun `refreshContactPaykitProfile`(`publicKey`: kotlin.String, `receiverPath`: kotlin.String): ContactRecord?
+
+    /**
+     * Queue rejection for a received Allowance proposal.
+     */
+    @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
+    public suspend fun `rejectAllowance`(`counterparty`: kotlin.String, `counterpartyReceiverPath`: kotlin.String, `allowanceId`: kotlin.String): AllowanceRecord
 
     /**
      * Queue rejection for a received Payment Request and return local derived state.
@@ -1088,6 +1260,168 @@ public interface SdkStateBlobStore {
     public companion object
 }
 
+
+
+
+/**
+ * Filter for listing SDK-derived Allowances.
+ */
+@kotlinx.serialization.Serializable
+public data class AllowanceFilter (
+    /**
+     * Restrict results to one counterparty.
+     */
+    val `counterparty`: kotlin.String?,
+    /**
+     * Restrict results to one counterparty receiver/runtime folder.
+     */
+    val `counterpartyReceiverPath`: kotlin.String?,
+    /**
+     * Restrict results to one local Allowance role.
+     */
+    val `localRole`: AllowanceLocalRole?,
+    /**
+     * Restrict results to lifecycle states. Empty means all states.
+     */
+    val `states`: List<AllowanceLifecycleState>
+) {
+    public companion object
+}
+
+
+
+/**
+ * SDK-derived record for one Allowance on one exact Encrypted Link.
+ */
+
+public data class AllowanceRecord (
+    /**
+     * Counterparty associated with the authenticated private history.
+     */
+    val `counterparty`: kotlin.String,
+    /**
+     * Counterparty receiver/runtime folder associated with the history.
+     */
+    val `counterpartyReceiverPath`: kotlin.String,
+    /**
+     * Stable Allowance ID.
+     */
+    val `allowanceId`: kotlin.String,
+    /**
+     * Local role derived from the authenticated proposal source.
+     */
+    val `localRole`: AllowanceLocalRole?,
+    /**
+     * Derived consent lifecycle state.
+     */
+    val `state`: AllowanceLifecycleState,
+    /**
+     * Health of the evidence used for derivation.
+     */
+    val `historyStatus`: AllowanceHistoryStatus,
+    /**
+     * Proposal Event ID.
+     */
+    val `proposalEventId`: kotlin.String?,
+    /**
+     * Immutable private proposed terms.
+     */
+    val `terms`: AllowanceTerms?,
+    /**
+     * Inbound stream item carrying the proposal, when received.
+     */
+    val `proposalStreamItemId`: kotlin.ULong?,
+    /**
+     * Outbound message carrying the proposal, when locally queued.
+     */
+    val `proposalOutboundMessageId`: kotlin.ULong?,
+    /**
+     * Local delivery status of an outbound proposal.
+     */
+    val `proposalOutboundStatus`: OutboundPrivateMessageStatus?,
+    /**
+     * Controlling Acceptance Event ID.
+     */
+    val `acceptanceEventId`: kotlin.String?,
+    /**
+     * Local delivery status of an outbound acceptance.
+     */
+    val `acceptanceOutboundStatus`: OutboundPrivateMessageStatus?,
+    /**
+     * Controlling Rejection Event ID.
+     */
+    val `rejectionEventId`: kotlin.String?,
+    /**
+     * Local delivery status of an outbound rejection.
+     */
+    val `rejectionOutboundStatus`: OutboundPrivateMessageStatus?,
+    /**
+     * Valid End Event ID retained by the SDK.
+     */
+    val `endEventId`: kotlin.String?,
+    /**
+     * Local delivery status of an outbound End.
+     */
+    val `endOutboundStatus`: OutboundPrivateMessageStatus?,
+    /**
+     * Causal Event IDs not yet present in durable history.
+     */
+    val `pendingCausalEventIds`: List<kotlin.String>,
+    /**
+     * Event IDs whose reuse or proposal collision taints this Allowance.
+     */
+    val `conflictEventIds`: List<kotlin.String>,
+    /**
+     * Last inbound stream item associated with this Allowance.
+     */
+    val `lastStreamItemId`: kotlin.ULong?,
+    /**
+     * Last outbound message associated with this Allowance.
+     */
+    val `lastOutboundMessageId`: kotlin.ULong?,
+    /**
+     * Delivery status of the last associated outbound message.
+     */
+    val `lastOutboundStatus`: OutboundPrivateMessageStatus?,
+    /**
+     * Latest local record time as RFC3339 text, used only for presentation ordering.
+     */
+    val `lastEventAt`: kotlin.String?,
+    /**
+     * Redaction-safe SDK reason for invalid history, when available.
+     */
+    val `invalidReason`: kotlin.String?
+) : Disposable {
+    override fun destroy() {
+        Disposable.destroy(
+            this.`counterparty`,
+            this.`counterpartyReceiverPath`,
+            this.`allowanceId`,
+            this.`localRole`,
+            this.`state`,
+            this.`historyStatus`,
+            this.`proposalEventId`,
+            this.`terms`,
+            this.`proposalStreamItemId`,
+            this.`proposalOutboundMessageId`,
+            this.`proposalOutboundStatus`,
+            this.`acceptanceEventId`,
+            this.`acceptanceOutboundStatus`,
+            this.`rejectionEventId`,
+            this.`rejectionOutboundStatus`,
+            this.`endEventId`,
+            this.`endOutboundStatus`,
+            this.`pendingCausalEventIds`,
+            this.`conflictEventIds`,
+            this.`lastStreamItemId`,
+            this.`lastOutboundMessageId`,
+            this.`lastOutboundStatus`,
+            this.`lastEventAt`,
+            this.`invalidReason`,
+        )
+    }
+    public companion object
+}
 
 
 
@@ -3708,6 +4042,107 @@ public data class SdkStateBlobSnapshot (
     }
     public companion object
 }
+
+
+
+
+/**
+ * Health of the durable history used to derive one Allowance.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class AllowanceHistoryStatus {
+
+    /**
+     * All retained evidence is valid and causally resolved.
+     */
+    CONSISTENT,
+    /**
+     * A valid event references evidence that has not been loaded yet.
+     */
+    UNRESOLVED_REFERENCES,
+    /**
+     * Malformed, conflicting, or protocol-invalid evidence is present.
+     */
+    INVALID,
+    /**
+     * The exact Encrypted Link needs recovery before safe use.
+     */
+    RECOVERY_REQUIRED,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * SDK-derived Allowance consent lifecycle state.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class AllowanceLifecycleState {
+
+    /**
+     * One proposal is known and has no controlling response.
+     */
+    PROPOSED,
+    /**
+     * The proposal recipient accepted the immutable terms.
+     */
+    ACCEPTED,
+    /**
+     * The proposal recipient rejected the proposal.
+     */
+    REJECTED,
+    /**
+     * A valid unilateral End is present.
+     */
+    ENDED,
+    /**
+     * Multiple distinct proposals reused the same Allowance ID.
+     */
+    CONFLICTED,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
+
+
+
+
+/**
+ * Local party role for one Allowance.
+ */
+
+@kotlinx.serialization.Serializable
+public enum class AllowanceLocalRole {
+
+    /**
+     * Local identity grants authority and remains the Payer.
+     */
+    ALLOWER,
+    /**
+     * Local identity may send qualifying Payment Requests.
+     */
+    ALLOWEE,
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    UNKNOWN;
+    public companion object
+}
+
+
 
 
 
