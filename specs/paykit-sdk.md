@@ -265,6 +265,7 @@ runtime.
 ```rust
 pub trait PubkySessionProvider {
     async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>>;
+    async fn revoke_session_access(&self, access: &PubkySessionAccess) -> Result<()>;
     async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>>;
     async fn clear_session_access(&self) -> Result<()>;
 }
@@ -283,10 +284,16 @@ identity/runtime coordinator.
 If `load_session_access` returns `None`, no live session access is currently
 available. Ordinary refreshes must preserve the last identity-scoped state and
 block Pubky-backed workflows until session access is available again. Explicit
-`sign_out` is the path that clears SDK-managed identity-scoped state.
-Sign-out should clear live session access before deleting SDK-managed local
-state. If local storage clearing fails after session access is cleared, the app
-must retry sign-out or clear SDK storage through its adapter.
+`sign_out` revokes the live Pubky grant, then clears session access and
+SDK-managed identity-scoped state. If remote revocation fails, local state is
+preserved so the operation can be retried. When an initialized identity has no
+live session access, `sign_out` also preserves state and returns an error because
+it cannot prove revocation. A session for a different identity is rejected
+before revocation. If revocation succeeds but provider or SDK storage cleanup
+fails, `forget_session_access` completes the remaining local cleanup.
+It is also the explicit local-only escape hatch when remote revocation is
+unavailable; in that case it does not invalidate other persisted copies of the
+grant.
 Apps that want explicit sign-out to be reversible for the same user must export
 and persist an SDK backup before calling `sign_out`; sign-out must not be used
 when live session access is merely unavailable.
@@ -312,23 +319,33 @@ storage and auth-session handoff, not a separate Pubky SDK or identity product
 that integrators must use.
 
 Rust integrations can use `PubkySessionBootstrap` to create or import the live
-session access consumed by the provider. It covers common Pubky account/session
-workflows: signup, signin, session-secret import, auth handoff
-start/resume/approve helpers, and `pubky://` resource normalization. Full SDK
-runtime auth should use `config.required_session_capabilities()` as the expected
-scope for auth start/resume/approve, completion, and session import. The
+grant-session access consumed by the provider. Each bootstrap is constructed
+with a stable, app-owned Pubky client ID. It covers common Pubky account/session
+workflows: signup, signin, grant-secret import, auth handoff start/resume/approve
+helpers, and `pubky://` resource normalization. All session and auth operations
+require Pubky grants. Full SDK runtime auth should use
+`config.required_session_capabilities()` as the expected scope for auth
+start/resume/approve, completion, and session import. The
 required scope covers this runtime's receiver-scoped public and private Paykit
 paths; it adds the configured profile/contact namespace only when that namespace
 is outside the receiver-scoped Paykit default. The app generates one
 `ReceiverNoiseSecretKey` per receiver and supplies that same persisted key to
 signup, signin, auth completion, and session import. The key is required;
 reauthentication must not silently rotate it.
+Pending external grant auth also owns a client proof-of-possession key that is
+not recoverable from its authorization URL. Apps that need an unapproved
+request to survive process loss must securely persist the complete state
+returned by `PubkyAuthRequest::save_state` and resume with that state. Pubky
+relay approvals are consumed when read, so cancellation or credential-exchange
+failure after approval retrieval requires a new auth request. Apps must delete
+saved state after completion, expiry, or abandonment.
 `PubkyLocalSecretKey` also provides Pubky Core-compatible BIP39 seed and
 mnemonic helpers plus public-key-from-secret helpers. Apps that intentionally
 share the same Pubky identity material should derive the same Pubky key; app
 and runtime separation belongs in receiver folders, Noise keys, and SDK state.
-Exported session secrets and auth URLs are secret-bearing values and must be
-stored or displayed only for their intended short-lived flow.
+Exported session secrets contain both the signed grant and proof-of-possession
+key. Those secrets, pending auth state, and auth URLs are secret-bearing values
+and must be stored or displayed only for their intended flow.
 Bindings should wrap these helpers so mobile apps do not need a second Pubky
 SDK dependency for ordinary Paykit onboarding.
 
@@ -336,8 +353,8 @@ Applications can attach an app-defined companion claim to a Pubky Auth
 approval. The integrator supplies the claim query parameter, claim type,
 expected capability, and serialized unsigned payload. The SDK owns request
 validation, request-bound identity signing, companion channel derivation,
-XSalsa20-Poly1305 transport, relay delivery, and normal authorization. The
-companion message must be accepted by the relay before normal Pubky Auth is
+XSalsa20-Poly1305 transport, relay delivery, and grant authorization. The
+companion message must be accepted by the relay before the Pubky grant is
 approved. Bitkit's watch-only account claim is one application of this generic
 operation. The shared protocol is specified in
 [`pubky-auth-companion-claims.md`](pubky-auth-companion-claims.md).
@@ -848,10 +865,11 @@ writes still check the stored lease id so an earlier holder cannot commit after
 a newer lease has replaced it.
 
 The Rust SDK implementation provides storage-backed per-peer leases for
-Encrypted Link work and serializes `initialize`, `sign_out`, and public endpoint
-sync calls on one runtime instance. Integrators that run more than one runtime
-instance against the same storage must serialize identity-scoped operations and
-public endpoint sync with their own process or storage lock.
+Encrypted Link work and serializes `initialize`, `sign_out`,
+`forget_session_access`, and public endpoint sync calls on one runtime instance.
+Integrators that run more than one runtime instance against the same storage
+must serialize identity-scoped operations and public endpoint sync with their
+own process or storage lock.
 
 ## Workflows
 

@@ -134,17 +134,24 @@ Common workflows:
   profile and follows data
 - use `resolve_contact_profile` when contact display should prefer Paykit
   Profile and fall back to Pubky Profile
-- use `PubkySessionBootstrap` for common Pubky signup, signin, session import,
-  capability-checked auth handoff, and `pubky://` normalization flows before
-  exposing live access through a `PubkySessionProvider`; exported session
-  secrets and auth URLs must be treated as secret material, and session export
-  is an explicit call on the bootstrap result
+- construct `PubkySessionBootstrap` with a stable, app-owned client ID and use
+  it for grant-only Pubky signup, signin, session import, capability-checked
+  auth handoff, and `pubky://` normalization flows before exposing live access
+  through a `PubkySessionProvider`; exported session secrets contain the grant
+  and proof-of-possession key, while pending auth state contains the
+  secret-bearing URL and client key, so both belong in secure storage
+- call `PubkyAuthRequest::save_state` when an unapproved external auth request
+  must survive process loss, then pass that complete state to
+  `PubkySessionBootstrap::resume_auth`; the authorization URL alone cannot
+  restore the proof-of-possession key. Once completion fetches an approval,
+  cancellation or a later credential-exchange failure requires a new auth
+  request because Pubky relay approvals are consumed when read
 - use `PubkySessionBootstrap::approve_auth_with_companion_claim` for a
   `pubkyauth://` request carrying an application-defined companion claim; the
   integrator supplies the query parameter, claim type, exact expected
   capabilities, and serialized unsigned payload, while the helper signs and
   encrypts that payload, delivers it to the derived relay channel, and only
-  then approves normal Pubky Auth
+  then approves the Pubky grant
 - when deriving a Pubky key from identity seed material, use the Pubky
   Core/Ring-compatible BIP39 seed or mnemonic helpers; app/runtime separation
   should come from receiver folders, Noise keys, and SDK state, not a different
@@ -176,7 +183,7 @@ Common workflows:
   `process_pending_private_messages` from a broader retry worker
 - call `sync_public_contact_markers` on startup if the app uses public contact
   markers
-- call `sign_out` when the app wants to clear live Pubky access and
+- call `sign_out` when the app wants to revoke its Pubky grant and clear
   SDK-managed identity-scoped state
 - export and persist an SDK backup before `sign_out` if the app wants that
   sign-out to be reversible for the same user
@@ -309,24 +316,31 @@ that transaction boundary, it should fail the receive operation instead of
 persisting a partial checkpoint.
 
 Apps should also serialize identity-scoped operations such as `initialize`,
-`sign_out`, backup restore, and public endpoint sync when multiple runtime
-instances share the same storage. The SDK serializes `initialize`, `sign_out`,
-and public endpoint sync calls on one runtime instance and uses storage-backed
-per-peer leases for Encrypted Link work, but it does not add a process-wide
-identity or public endpoint lock by itself.
+`sign_out`, `forget_session_access`, backup restore, and public endpoint sync
+when multiple runtime instances share the same storage. The SDK serializes
+these calls on one runtime instance and uses storage-backed per-peer leases for
+Encrypted Link work, but it does not add a process-wide identity or public
+endpoint lock by itself.
 
-`sign_out` clears live Pubky session access before clearing SDK-managed
-identity-scoped storage. If provider clearing fails, the SDK leaves local state
-intact so callers can retry without losing contacts, links, queues, or receipts.
-If provider clearing succeeds but local storage clearing fails, Pubky-backed
-workflows remain blocked because no live session is available; retry `sign_out`
-or clear SDK storage through the adapter.
+`sign_out` revokes the current Pubky grant before clearing live session access
+and SDK-managed identity-scoped storage. If revocation fails, the SDK leaves
+local state intact so callers can retry without losing contacts, links, queues,
+or receipts. If provider or SDK storage clearing fails after revocation, finish
+local cleanup with `forget_session_access`; retrying remote revocation may no
+longer be possible.
+
+`forget_session_access` performs the same destructive local cleanup without
+attempting remote revocation. It is also the recovery path after confirmed
+revocation if local cleanup fails. Otherwise, persisted copies of the grant may
+remain usable until the grant expires or is revoked elsewhere.
 
 If the provider returns no live session access during ordinary startup or
 workflow calls, the SDK blocks Pubky-backed work but preserves the last
-identity-scoped state. Call `sign_out` when the app intentionally wants to clear
-that state. If the app wants to restore private Paykit state after sign-out, it
-must keep a separate SDK backup and not delete it as part of sign-out.
+identity-scoped state. Secure `sign_out` also fails without clearing that state
+until live access is restored and the grant can be revoked. Use
+`forget_session_access` only when the app intentionally accepts local-only
+cleanup. If the app wants to restore private Paykit state after sign-out, it must
+keep a separate SDK backup and not delete it as part of sign-out.
 
 Read-only private views such as cached Private Payment Lists can still be
 returned for the initialized identity when live session access is missing.

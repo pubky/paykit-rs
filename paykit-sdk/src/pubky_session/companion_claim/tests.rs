@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use crypto_secretbox::{aead::Aead, KeyInit, XSalsa20Poly1305};
 use pubky::{
-    AuthToken, EncryptedHttpRelayInboxChannel, HttpRelayInboxChannel, Pubky, PubkyHttpClient,
+    Capabilities, EncryptedHttpRelayInboxChannel, GrantClaims, HttpRelayInboxChannel, Keypair,
+    Pubky, PubkyHttpClient,
 };
 
 use super::*;
@@ -10,6 +11,8 @@ use super::*;
 const QUERY_PARAMETER: &str = "x-example-claim";
 const CLAIM_TYPE: &str = "account-export-v1";
 const CAPABILITY: &str = "/pub/example/account/:rw";
+const CLIENT_ID: &str = "paykit.test";
+const CLIENT_KEY_SECRET: [u8; 32] = [11; 32];
 
 fn test_claim() -> PubkyAuthCompanionClaim {
     PubkyAuthCompanionClaim::new(QUERY_PARAMETER, CLAIM_TYPE, (0_u8..84).collect()).unwrap()
@@ -29,9 +32,20 @@ fn test_companion_claim_debug_redacts_unsigned_payload() {
 }
 
 fn auth_url(relay: &Url, secret: &[u8; 32], claim_type: &str) -> String {
+    auth_url_for_client_id(relay, secret, claim_type, CLIENT_ID)
+}
+
+fn auth_url_for_client_id(
+    relay: &Url,
+    secret: &[u8; 32],
+    claim_type: &str,
+    client_id: &str,
+) -> String {
+    let client_public_key = Keypair::from_secret(&CLIENT_KEY_SECRET).public_key();
     format!(
-        "pubkyauth://signin?caps={CAPABILITY}&relay={relay}&secret={}&{QUERY_PARAMETER}={claim_type}",
-        URL_SAFE_NO_PAD.encode(secret)
+        "pubkyauth://signin_grant?caps={CAPABILITY}&relay={relay}&secret={}&cid={client_id}&cpk={}&{QUERY_PARAMETER}={claim_type}",
+        URL_SAFE_NO_PAD.encode(secret),
+        client_public_key.z32(),
     )
 }
 
@@ -159,7 +173,8 @@ async fn test_approve_auth_with_companion_claim_delivers_both_envelopes() {
         .unwrap();
     let inbox = relay.local_url().join("inbox").unwrap();
     let client = PubkyHttpClient::new().unwrap();
-    let bootstrap = PubkySessionBootstrap::with_pubky(Pubky::with_client(client.clone()));
+    let bootstrap =
+        PubkySessionBootstrap::with_pubky(Pubky::with_client(client.clone()), CLIENT_ID).unwrap();
     let auth_secret = [9; 32];
     let identity = PubkyLocalSecretKey::new([7; 32]);
     let auth_url = auth_url(&inbox, &auth_secret, CLAIM_TYPE);
@@ -184,14 +199,67 @@ async fn test_approve_auth_with_companion_claim_delivers_both_envelopes() {
     assert_eq!(claim_payload.len(), 148);
 
     let auth_channel = EncryptedHttpRelayInboxChannel::new(inbox, auth_secret).unwrap();
-    let token_bytes = auth_channel
+    let grant_bytes = auth_channel
         .poll(&client, Some(Duration::from_secs(1)))
         .await
         .unwrap()
         .unwrap();
-    let token = AuthToken::verify(&token_bytes).unwrap();
-    assert_eq!(token.public_key(), &identity.keypair().public_key());
-    assert_eq!(token.capabilities().to_string(), CAPABILITY);
+    let grant = GrantClaims::decode(std::str::from_utf8(&grant_bytes).unwrap()).unwrap();
+    assert_eq!(grant.iss, identity.keypair().public_key());
+    assert_eq!(grant.client_id.as_str(), CLIENT_ID);
+    assert_eq!(Capabilities::from(grant.caps).to_string(), CAPABILITY);
+    assert_eq!(
+        grant.cnf,
+        Keypair::from_secret(&CLIENT_KEY_SECRET).public_key()
+    );
+}
+
+#[tokio::test]
+async fn test_approve_auth_with_companion_claim_rejects_mismatched_client_before_delivery() {
+    let relay = http_relay::HttpRelay::builder()
+        .http_port(0)
+        .run()
+        .await
+        .unwrap();
+    let inbox = relay.local_url().join("inbox").unwrap();
+    let client = PubkyHttpClient::new().unwrap();
+    let bootstrap =
+        PubkySessionBootstrap::with_pubky(Pubky::with_client(client.clone()), CLIENT_ID).unwrap();
+    let auth_secret = [9; 32];
+    let auth_url = auth_url_for_client_id(&inbox, &auth_secret, CLAIM_TYPE, "attacker.test");
+
+    let error = bootstrap
+        .approve_auth_with_companion_claim(
+            &auth_url,
+            CAPABILITY,
+            &PubkyLocalSecretKey::new([7; 32]),
+            &test_claim(),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        PubkyAuthCompanionClaimApprovalError::InvalidAuthUrl { .. }
+    ));
+
+    let claim_channel = HttpRelayInboxChannel::new(
+        inbox.clone(),
+        derive_companion_channel_id(CLAIM_TYPE, &auth_secret),
+    )
+    .unwrap();
+    assert!(claim_channel
+        .poll(&client, Some(Duration::from_millis(50)))
+        .await
+        .unwrap()
+        .is_none());
+
+    let auth_channel = EncryptedHttpRelayInboxChannel::new(inbox, auth_secret).unwrap();
+    assert!(auth_channel
+        .poll(&client, Some(Duration::from_millis(50)))
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
@@ -199,7 +267,7 @@ async fn test_approve_auth_with_companion_claim_reports_relay_failure() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let relay = Url::parse(&format!("http://{}/inbox", listener.local_addr().unwrap())).unwrap();
     drop(listener);
-    let bootstrap = PubkySessionBootstrap::new().unwrap();
+    let bootstrap = PubkySessionBootstrap::new(CLIENT_ID).unwrap();
     let auth_secret = [9; 32];
     let auth_url = auth_url(&relay, &auth_secret, CLAIM_TYPE);
     let channel_id = derive_companion_channel_id(CLAIM_TYPE, &auth_secret);

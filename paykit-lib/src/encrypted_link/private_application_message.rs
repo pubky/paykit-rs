@@ -228,10 +228,10 @@ pub async fn clear_encrypted_link_outbox(
     local_receiver_path: &PaykitReceiverPath,
     remote_receiver_path: &PaykitReceiverPath,
 ) -> Result<usize> {
-    let local_identity_public_key = session.info().public_key();
+    let local_identity_public_key = session.info().public_key().clone();
     let (write_path, _) = compute_private_payment_paths(
         local_noise_secret_key,
-        local_identity_public_key,
+        &local_identity_public_key,
         remote_identity_public_key,
         remote_noise_public_key,
         local_receiver_path,

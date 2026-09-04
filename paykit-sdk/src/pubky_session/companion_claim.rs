@@ -14,7 +14,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
 
-use super::{validate_auth_url_capabilities, PubkySessionBootstrap};
+use super::{
+    validate_auth_url_capabilities, validate_auth_url_client_id, validate_grant_auth_url,
+    PubkySessionBootstrap,
+};
 use crate::PubkyLocalSecretKey;
 
 const ED25519_SIGNATURE_LEN: usize = 64;
@@ -119,7 +122,7 @@ pub enum PubkyAuthCompanionClaimApprovalError {
         /// Relay failure detail.
         reason: String,
     },
-    /// Normal Pubky Auth approval failed after companion delivery succeeded.
+    /// Pubky grant approval failed after companion delivery succeeded.
     #[error("Pubky Auth approval failed after companion delivery: {reason}")]
     AuthorizationFailure {
         /// Pubky authorization failure detail.
@@ -137,12 +140,15 @@ impl PubkySessionBootstrap {
     ///
     /// The URL must contain exactly one query parameter matching the claim's
     /// `query_parameter` and `claim_type`. Its requested capabilities must
-    /// exactly match `expected_capabilities`.
+    /// exactly match `expected_capabilities`, and its client ID must match this
+    /// bootstrap's client ID.
     ///
-    /// The claim is delivered before the normal `AuthToken`. A claim
+    /// The claim is delivered before the Pubky grant. A claim
     /// validation, encryption, or relay delivery failure therefore leaves the
     /// requesting server unauthorized. Pubky client timeout configuration
-    /// remains the caller's responsibility.
+    /// remains the caller's responsibility. For a signup request, approval
+    /// creates the identity on its requested homeserver after claim delivery
+    /// and before issuing the application grant.
     pub async fn approve_auth_with_companion_claim(
         &self,
         auth_url: &str,
@@ -150,6 +156,7 @@ impl PubkySessionBootstrap {
         secret_key: &PubkyLocalSecretKey,
         claim: &PubkyAuthCompanionClaim,
     ) -> Result<(), PubkyAuthCompanionClaimApprovalError> {
+        validate_auth_url_client_id(auth_url, &self.client_id).map_err(invalid_auth_url)?;
         let request = parse_companion_auth_request(auth_url, expected_capabilities, claim)?;
         let signed_claim = encode_signed_claim(claim, &request.secret, secret_key);
         let encrypted_claim = encrypt_claim(&signed_claim, &request.secret)?;
@@ -191,6 +198,7 @@ fn parse_companion_auth_request(
     if url.scheme() != "pubkyauth" {
         return Err(invalid_auth_url("URL scheme must be pubkyauth"));
     }
+    validate_grant_auth_url(auth_url).map_err(invalid_auth_url)?;
     let request = parse_pubky_auth_request(auth_url)?;
     validate_auth_url_capabilities(auth_url, expected_capabilities).map_err(invalid_auth_url)?;
 
@@ -202,8 +210,6 @@ fn parse_companion_auth_request(
         )));
     }
 
-    unique_query_value(&url, "secret")?;
-    unique_query_value(&url, "relay")?;
     validate_relay_url(&request.relay)?;
     Ok(request)
 }
@@ -213,12 +219,15 @@ fn parse_pubky_auth_request(
 ) -> Result<CompanionAuthRequest, PubkyAuthCompanionClaimApprovalError> {
     let deep_link: DeepLink = auth_url.parse().map_err(invalid_auth_url)?;
     let (relay, secret) = match deep_link {
-        DeepLink::Signin(link) => (link.relay().clone(), *link.secret()),
-        DeepLink::Signup(link) => (link.relay().clone(), *link.secret()),
-        DeepLink::SeedExport(_) => {
+        DeepLink::SigninGrant(link) => (link.params().relay.clone(), link.params().secret),
+        DeepLink::SignupGrant(link) => (link.params().relay.clone(), link.params().secret),
+        DeepLink::Signin(_)
+        | DeepLink::Signup(_)
+        | DeepLink::DirectSignup(_)
+        | DeepLink::SeedExport(_) => {
             return Err(invalid_auth_url(
-                "Pubky secret-export URLs cannot carry companion claims",
-            ));
+                "only Pubky grant auth URLs can carry companion claims",
+            ))
         }
     };
     Ok(CompanionAuthRequest { relay, secret })

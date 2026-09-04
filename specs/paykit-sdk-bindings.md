@@ -166,8 +166,12 @@ The platform session provider should return one of:
 - live session access with its required receiver Noise key
 
 `None` or `null` means no live session is currently available. It does not mean
-explicit sign-out. Explicit sign-out should be a separate SDK call that clears
-session access first and then clears SDK-managed identity-scoped state.
+explicit sign-out. The regular sign-out call revokes the live Pubky grant before
+clearing local session access and SDK-managed identity-scoped state. If live
+access is unavailable, regular sign-out fails and preserves local state so the
+app can retry. Bindings also expose a distinctly named local-only forget
+operation for offline recovery and for finishing local cleanup after confirmed
+revocation; it must not be presented as remote revocation.
 Bindings should document that apps must export and persist an SDK backup before
 explicit sign-out if they want to restore the same user's private Paykit state
 later.
@@ -178,6 +182,8 @@ ordinary app use, SDK bindings should turn app-provided session material,
 imported session secrets, or an auth handoff result into the Rust Pubky access
 needed by the SDK. SDK bindings use `PubkySessionBootstrap` for signup, signin,
 session import, capability-checked auth handoff, and `pubky://` normalization.
+Every bootstrap requires a stable, app-owned Pubky client ID, and all resulting
+sessions and accepted auth URLs use Pubky grants.
 Binding helpers should request the capability scope returned by the active
 `PaykitSdkConfig` and validate completed/imported sessions against that same
 scope.
@@ -186,8 +192,14 @@ query parameter, claim type, and unsigned binary payload, plus one high-level
 approval operation. Application-specific serialization stays in the
 integrating app. Channel derivation, identity signatures, nonces, encryption,
 and relay posting remain inside Rust. Binding errors should preserve distinct
-invalid-request, invalid-claim, encryption, relay-delivery, and normal-auth
-failure cases.
+invalid-request, invalid-claim, encryption, relay-delivery, and grant-auth
+failure cases. Pending grant auth requests must expose securely persistable
+state containing both the secret-bearing authorization URL and the client
+proof-of-possession key; URL-only resume is insufficient. Completion is
+one-shot. Saved state can restore an unapproved request after process loss, but
+once completion retrieves the approval, cancellation or credential-exchange
+failure requires a new auth request. Apps must delete saved state after
+completion, expiry, or abandonment.
 When bindings create the Pubky client internally, they should expose FFI-safe
 client configuration for platform-owned network policy such as request
 timeouts. The default configuration uses the public network; setting a local
@@ -196,8 +208,9 @@ runtimes can reach local services.
 `PubkyLocalSecretKey` exposes app/runtime-domain-separated key derivation and
 public-key-from-secret helpers. Platform bindings should wrap those helpers
 where the platform has no better native primitive. Auth URLs and exported
-session secrets are secret-bearing values, so bindings should avoid exposing
-them through ordinary logs or debug output. If a platform binding cannot own
+session secrets (which contain a grant and proof-of-possession key) are
+secret-bearing values, so bindings should avoid exposing them through ordinary
+logs or debug output. If a platform binding cannot own
 that construction, it must make the required Pubky binding dependency explicit
 instead of implying that no Pubky integration is needed.
 

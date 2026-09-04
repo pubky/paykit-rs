@@ -1,7 +1,7 @@
 //! Shared harness for testnet-backed end-to-end tests.
 //!
-//! Mirrors the embedded-testnet pattern from paykit-lib's test suite: one
-//! embedded Postgres instance shared across the test binary, one ephemeral
+//! Mirrors the testnet pattern from paykit-lib's test suite: one Docker
+//! Postgres instance shared across the test binary, one ephemeral
 //! Pubky testnet (homeserver) per test, and real signed-up sessions wrapped in
 //! the SDK's own `PubkySessionAccess` via `PubkySessionBootstrap`.
 
@@ -18,18 +18,20 @@ use paykit_sdk::{
     PublicPaymentEndpointCandidate, PublicPaymentEndpointSelectionRequest, PublicReceivingDetail,
     ReceiverNoiseSecretKey, Result, StorageAdapter,
 };
-use pubky_testnet::{embedded_postgres::EmbeddedPostgres, pubky::Keypair, EphemeralTestnet};
+use pubky_testnet::{docker_postgres::DockerPostgres, pubky::Keypair, EphemeralTestnet};
 use tokio::sync::{Mutex as TokioMutex, OnceCell};
 
-static SHARED_POSTGRES: OnceCell<EmbeddedPostgres> = OnceCell::const_new();
+const TEST_CLIENT_ID: &str = "paykit-sdk.test";
+
+static SHARED_POSTGRES: OnceCell<DockerPostgres> = OnceCell::const_new();
 static TESTNET_BUILD_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 
-async fn shared_postgres() -> &'static EmbeddedPostgres {
+async fn shared_postgres() -> &'static DockerPostgres {
     SHARED_POSTGRES
         .get_or_init(|| async {
-            EmbeddedPostgres::start()
+            DockerPostgres::start()
                 .await
-                .expect("failed to start embedded postgres")
+                .expect("failed to start Docker Postgres")
         })
         .await
 }
@@ -43,11 +45,23 @@ pub async fn build_testnet() -> EphemeralTestnet {
         let postgres = shared_postgres()
             .await
             .connection_string()
-            .expect("embedded postgres connection string should be valid");
+            .expect("Docker Postgres connection string should be valid");
         EphemeralTestnet::builder().postgres(postgres)
     };
 
-    builder.build().await.unwrap()
+    builder.with_http_relay().build().await.unwrap()
+}
+
+pub fn session_bootstrap(testnet: &EphemeralTestnet, client_id: &str) -> PubkySessionBootstrap {
+    let auth_relay_url = testnet
+        .http_relay()
+        .local_url()
+        .join("inbox")
+        .expect("test auth relay inbox URL should be valid");
+    PubkySessionBootstrap::with_pubky(testnet.sdk().expect("testnet Pubky client"), client_id)
+        .expect("test client ID should be valid")
+        .with_auth_relay(auth_relay_url.as_str())
+        .expect("test auth relay URL should be valid")
 }
 
 /// Session provider backed by a real testnet session.
@@ -57,12 +71,14 @@ pub async fn build_testnet() -> EphemeralTestnet {
 #[derive(Clone)]
 pub struct TestnetSessionProvider {
     session: Arc<Mutex<Option<PubkySessionAccess>>>,
+    session_secret: Arc<String>,
 }
 
 impl TestnetSessionProvider {
-    pub fn new(access: PubkySessionAccess) -> Self {
+    pub fn new(access: PubkySessionAccess, session_secret: String) -> Self {
         Self {
             session: Arc::new(Mutex::new(Some(access))),
+            session_secret: Arc::new(session_secret),
         }
     }
 }
@@ -71,6 +87,12 @@ impl TestnetSessionProvider {
 impl PubkySessionProvider for TestnetSessionProvider {
     async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>> {
         Ok(self.session.lock().expect("session lock poisoned").clone())
+    }
+
+    async fn revoke_session_access(&self, access: &PubkySessionAccess) -> Result<()> {
+        PubkySessionBootstrap::with_pubky(access.outbox_client.clone(), TEST_CLIENT_ID)?
+            .revoke_grant(&self.session_secret, access)
+            .await
     }
 
     async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
@@ -170,6 +192,8 @@ pub struct TestUser {
     pub storage: InMemoryStorage,
     pub adapter: TestnetPaymentAdapter,
     pub access: PubkySessionAccess,
+    /// Local grant restore material, reused when the runtime is rebuilt.
+    pub session_secret: String,
     pub public_key: PubkyPublicKey,
     pub receiver_path: PaykitReceiverPath,
 }
@@ -207,8 +231,7 @@ impl TestUser {
         let secret_key = PubkyLocalSecretKey::new(keypair.secret_key());
         let homeserver_public_key =
             PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
-        let bootstrap =
-            PubkySessionBootstrap::with_pubky(testnet.sdk().expect("testnet Pubky client"));
+        let bootstrap = session_bootstrap(testnet, TEST_CLIENT_ID);
         let config = PaykitSdkConfig::new(receiver_path.clone());
         let receiver_noise_secret_key = ReceiverNoiseSecretKey::random();
         let receiver_noise_public_key = receiver_noise_secret_key.public_key();
@@ -222,6 +245,11 @@ impl TestUser {
             )
             .await
             .expect("testnet sign-up should succeed");
+        let session_secret = result
+            .export_session_secret()
+            .await
+            .expect("test grant should export local restore material")
+            .into_inner();
         assert_eq!(
             result.access.receiver_noise_secret_key.public_key(),
             receiver_noise_public_key
@@ -233,7 +261,14 @@ impl TestUser {
 
         let storage = InMemoryStorage::default();
         let adapter = TestnetPaymentAdapter::default();
-        let sdk = build_initialized_sdk(storage.clone(), &access, adapter.clone(), config).await;
+        let sdk = build_initialized_sdk(
+            storage.clone(),
+            &access,
+            &session_secret,
+            adapter.clone(),
+            config,
+        )
+        .await;
         sdk.publish_paykit_receiver_marker(PaykitReceiverCapabilities {
             private_payments: true,
             payment_requests: true,
@@ -248,6 +283,7 @@ impl TestUser {
             storage,
             adapter,
             access,
+            session_secret,
             public_key: result.public_key,
             receiver_path,
         }
@@ -259,15 +295,21 @@ impl TestUser {
     /// storage) from a backup restore into a fresh local store.
     pub async fn restart_with_storage(&self, storage: InMemoryStorage) -> TestUser {
         let config = PaykitSdkConfig::new(self.receiver_path.clone());
-        let sdk =
-            build_initialized_sdk(storage.clone(), &self.access, self.adapter.clone(), config)
-                .await;
+        let sdk = build_initialized_sdk(
+            storage.clone(),
+            &self.access,
+            &self.session_secret,
+            self.adapter.clone(),
+            config,
+        )
+        .await;
 
         TestUser {
             sdk,
             storage,
             adapter: self.adapter.clone(),
             access: self.access.clone(),
+            session_secret: self.session_secret.clone(),
             public_key: self.public_key.clone(),
             receiver_path: self.receiver_path.clone(),
         }
@@ -280,10 +322,11 @@ pub type TestSdk = PaykitSdk<InMemoryStorage, TestnetSessionProvider, TestnetPay
 async fn build_initialized_sdk(
     storage: InMemoryStorage,
     access: &PubkySessionAccess,
+    session_secret: &str,
     adapter: TestnetPaymentAdapter,
     config: PaykitSdkConfig,
 ) -> TestSdk {
-    let provider = TestnetSessionProvider::new(access.clone());
+    let provider = TestnetSessionProvider::new(access.clone(), session_secret.to_string());
     let sdk = PaykitSdk::new(storage, provider, adapter, config)
         .expect("SDK construction should succeed");
     let report = sdk
