@@ -254,9 +254,9 @@ impl From<[u8; 32]> for ReceiverNoiseSecretKey {
 
 /// Live Pubky access used by one SDK runtime for Pubky storage or links.
 ///
-/// The SDK validates that a present local identity secret belongs to the
-/// session public key. Encrypted Links instead use the independent,
-/// receiver-scoped Noise secret key.
+/// The SDK requires a grant-backed session and validates that a present local
+/// identity secret belongs to its public key. Encrypted Links instead use the
+/// independent, receiver-scoped Noise secret key.
 #[derive(Clone)]
 pub struct PubkySessionAccess {
     /// Authenticated Pubky session for local homeserver writes.
@@ -282,8 +282,15 @@ impl PubkySessionAccess {
         PubkyPublicKey::from_public_key(&self.receiver_noise_secret_key.public_key())
     }
 
-    /// Validate that the local secret key, when present, belongs to the session.
+    /// Validate the grant-backed session and its optional local secret key.
     pub fn validate(&self) -> crate::Result<()> {
+        if self.session.as_grant().is_none() {
+            return Err(crate::PaykitSdkError::Identity {
+                context: "Pubky session must be grant-backed".into(),
+                source: None,
+            });
+        }
+
         let Some(local_secret_key) = &self.local_secret_key else {
             return Ok(());
         };
@@ -338,11 +345,11 @@ fn validate_session_capabilities(
 }
 
 fn capability_covers(actual: &Capability, required: &Capability) -> bool {
-    scope_covers(&actual.scope, &required.scope)
+    scope_covers(actual.scope().as_str(), required.scope().as_str())
         && required
-            .actions
+            .actions()
             .iter()
-            .all(|required_action| actual.actions.contains(required_action))
+            .all(|required_action| actual.actions().contains(required_action))
 }
 
 fn scope_covers(parent: &str, child: &str) -> bool {
