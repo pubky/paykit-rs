@@ -1181,6 +1181,157 @@ async fn test_allowance_derivation_blocks_on_malformed_recognized_request_with_a
 }
 
 #[tokio::test]
+async fn test_allowance_derivation_blocks_on_allowance_correlated_unknown_kind() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    queue_outbound(
+        &storage,
+        peer.clone(),
+        receiver_path(),
+        proposal(PROPOSAL_ID, AllowanceRole::Allower),
+        timestamp(),
+    )
+    .await;
+    persist_inbound(
+        &storage,
+        peer.clone(),
+        receiver_path(),
+        vec![acceptance(PROPOSAL_ID)],
+        timestamp(),
+    )
+    .await;
+    let accepted = derived(&storage, &peer, &receiver_path()).await;
+    assert_eq!(accepted.state, AllowanceLifecycleState::Accepted);
+    assert_eq!(accepted.history_status, AllowanceHistoryStatus::Consistent);
+
+    persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        receiver_path(),
+        vec![PrivateApplicationMessage {
+            version: Some(1),
+            kind: Some("paykit.allowance_future".into()),
+            raw_json: format!(
+                r#"{{"version":1,"kind":"paykit.allowance_future","allowance_id":"{ALLOWANCE_ID}","private_sentinel":true}}"#
+            ),
+        }],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    let record = derived(&storage, &peer, &receiver_path()).await;
+
+    assert_eq!(record.state, AllowanceLifecycleState::Accepted);
+    assert_eq!(record.history_status, AllowanceHistoryStatus::Invalid);
+    assert_eq!(
+        record.invalid_reason.as_deref(),
+        Some("unsupported Allowance-correlated private message")
+    );
+    assert!(!format!("{record:?}").contains("private_sentinel"));
+}
+
+#[tokio::test]
+async fn test_allowance_derivation_ignores_unknown_kind_without_top_level_allowance_id() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    persist_inbound(
+        &storage,
+        peer.clone(),
+        receiver_path(),
+        vec![proposal(PROPOSAL_ID, AllowanceRole::Allower)],
+        timestamp(),
+    )
+    .await;
+    let unknown = |raw_json: String| PrivateApplicationMessage {
+        version: Some(1),
+        kind: Some("paykit.allowance_future".into()),
+        raw_json,
+    };
+    persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        receiver_path(),
+        vec![
+            unknown(r#"{"version":1,"kind":"paykit.allowance_future"}"#.into()),
+            unknown(format!(
+                r#"{{"version":1,"kind":"paykit.allowance_future","payload":{{"allowance_id":"{ALLOWANCE_ID}"}}}}"#
+            )),
+        ],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    let record = derived(&storage, &peer, &receiver_path()).await;
+
+    assert_eq!(record.state, AllowanceLifecycleState::Proposed);
+    assert_eq!(record.history_status, AllowanceHistoryStatus::Consistent);
+    assert!(record.invalid_reason.is_none());
+}
+
+#[tokio::test]
+async fn test_allowance_derivation_ignores_response_from_proposal_sender() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    persist_inbound(
+        &storage,
+        peer.clone(),
+        receiver_path(),
+        vec![
+            proposal(PROPOSAL_ID, AllowanceRole::Allower),
+            acceptance(PROPOSAL_ID),
+        ],
+        timestamp(),
+    )
+    .await;
+
+    let record = derived(&storage, &peer, &receiver_path()).await;
+
+    assert_eq!(record.state, AllowanceLifecycleState::Proposed);
+    assert!(record.acceptance_event_id.is_none());
+    assert_eq!(record.history_status, AllowanceHistoryStatus::Invalid);
+    assert_eq!(
+        record.invalid_reason.as_deref(),
+        Some("Allowance response came from the proposal sender")
+    );
+}
+
+#[tokio::test]
+async fn test_allowance_derivation_rejects_withdrawal_from_proposal_recipient() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    queue_outbound(
+        &storage,
+        peer.clone(),
+        receiver_path(),
+        proposal(PROPOSAL_ID, AllowanceRole::Allower),
+        timestamp(),
+    )
+    .await;
+    persist_inbound(
+        &storage,
+        peer.clone(),
+        receiver_path(),
+        vec![withdrawal()],
+        timestamp(),
+    )
+    .await;
+
+    let record = derived(&storage, &peer, &receiver_path()).await;
+
+    assert_eq!(record.state, AllowanceLifecycleState::Proposed);
+    assert!(record.end_event_id.is_none());
+    assert_eq!(record.history_status, AllowanceHistoryStatus::Invalid);
+    assert_eq!(
+        record.invalid_reason.as_deref(),
+        Some("Allowance proposal withdrawal came from the proposal recipient")
+    );
+}
+
+#[tokio::test]
 async fn test_allowance_end_command_rejects_later_end_without_queue_mutation() {
     let storage = InMemoryStorage::new();
     let peer = counterparty();
