@@ -976,6 +976,49 @@ async fn test_allowance_derivation_preserves_state_when_recognized_event_is_malf
 }
 
 #[tokio::test]
+async fn test_allowance_derivation_blocks_on_malformed_recognized_request_with_allowance_id() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    persist_inbound(
+        &storage,
+        peer.clone(),
+        receiver_path(),
+        vec![proposal(PROPOSAL_ID, AllowanceRole::Allower)],
+        timestamp(),
+    )
+    .await;
+    // A Payment Request rejects unknown top-level fields, so this carrier is
+    // stored as a malformed recognized kind that still names the Allowance.
+    let malformed_request = PrivateApplicationMessage {
+        version: Some(1),
+        kind: Some("paykit.payment_request".into()),
+        raw_json: format!(
+            r#"{{"version":1,"kind":"paykit.payment_request","event_id":"650e8400-e29b-41d4-a716-446655440000","payment_request_id":"550e8400-e29b-41d4-a716-446655440000","allowance_id":"{ALLOWANCE_ID}","private_sentinel":true,"request":{{"amount":{{"value":"0.5","asset":"btc"}},"payment_reference":"invoice-2026-0001","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt12"],"metadata":{{}}}}}}"#
+        ),
+    };
+    persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        receiver_path(),
+        vec![malformed_request],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    let record = derived(&storage, &peer, &receiver_path()).await;
+
+    assert_eq!(record.state, AllowanceLifecycleState::Proposed);
+    assert_eq!(record.history_status, AllowanceHistoryStatus::Invalid);
+    assert_eq!(
+        record.invalid_reason.as_deref(),
+        Some("unsupported Allowance-correlated private message")
+    );
+    assert!(!format!("{record:?}").contains("private_sentinel"));
+}
+
+#[tokio::test]
 async fn test_allowance_end_command_rejects_later_end_without_queue_mutation() {
     let storage = InMemoryStorage::new();
     let peer = counterparty();
