@@ -178,21 +178,25 @@ impl TryFrom<TermsWire> for AllowanceTerms {
                     .collect::<Result<Vec<_>>>()
             })
             .transpose()?;
-        Self::from_parts(
-            wire.asset,
-            wire.per_payment_amount
+        let terms = Self {
+            asset: wire.asset,
+            per_payment_amount: wire
+                .per_payment_amount
                 .into_inner()
                 .map(AllowanceAmountRange::try_from)
                 .transpose()?,
-            wire.period_limits
+            period_limits: wire
+                .period_limits
                 .into_iter()
                 .map(AllowancePeriodLimit::try_from)
                 .collect::<Result<Vec<_>>>()?,
-            wire.lifetime_amount_limit.into_inner(),
-            wire.active_from.into_inner(),
-            wire.expires_at.into_inner(),
-            endpoints,
-        )
+            lifetime_amount_limit: wire.lifetime_amount_limit.into_inner(),
+            active_from: wire.active_from.into_inner(),
+            expires_at: wire.expires_at.into_inner(),
+            allowed_payment_endpoint_identifiers: endpoints,
+        };
+        terms.validate()?;
+        Ok(terms)
     }
 }
 
