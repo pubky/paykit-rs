@@ -1580,7 +1580,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func linkedPeers() async throws  -> [LinkedPeerRecord]
 
     /**
-     * Return Allowances matching a local SDK filter, newest first.
+     * Return Allowances matching a local SDK filter, newest first by local record time (presentation order only).
      */
     func listAllowances(filter: AllowanceFilter) async throws  -> [AllowanceRecord]
 
@@ -2709,7 +2709,7 @@ open func linkedPeers()async throws  -> [LinkedPeerRecord]  {
 }
 
     /**
-     * Return Allowances matching a local SDK filter, newest first.
+     * Return Allowances matching a local SDK filter, newest first by local record time (presentation order only).
      */
 open func listAllowances(filter: AllowanceFilter)async throws  -> [AllowanceRecord]  {
     return
@@ -7105,7 +7105,7 @@ public struct AllowanceRecord {
      */
     public var lastOutboundStatus: OutboundPrivateMessageStatus?
     /**
-     * Latest local record time as RFC3339 text.
+     * Latest local record time as RFC3339 text, used only for presentation ordering.
      */
     public var lastEventAt: String?
     /**
@@ -7183,7 +7183,7 @@ public struct AllowanceRecord {
          * Delivery status of the last associated outbound message.
          */lastOutboundStatus: OutboundPrivateMessageStatus?,
         /**
-         * Latest local record time as RFC3339 text.
+         * Latest local record time as RFC3339 text, used only for presentation ordering.
          */lastEventAt: String?,
         /**
          * Redaction-safe SDK reason for invalid history, when available.
