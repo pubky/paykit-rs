@@ -8,7 +8,7 @@ mod conversions;
 #[cfg(test)]
 mod tests;
 
-use conversions::{allowance_records_to_ffi, parse_allowance_id};
+use conversions::parse_allowance_id;
 
 /// Local party role for one Allowance.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,7 +74,7 @@ macro_rules! impl_redacted_formatting {
 /// The object and values returned by its getters are sensitive. Its exported
 /// default string and debug output are redacted.
 #[uniffi::export(Debug, Display)]
-#[derive(uniffi::Object, Clone, PartialEq, Eq)]
+#[derive(uniffi::Object)]
 pub struct FfiAllowanceAmountRange {
     range: paykit_lib::AllowanceAmountRange,
 }
@@ -115,7 +115,7 @@ impl FfiAllowanceAmountRange {
 /// The object and values returned by its getters are sensitive. Its exported
 /// default string and debug output are redacted.
 #[uniffi::export(Debug, Display)]
-#[derive(uniffi::Object, Clone, PartialEq, Eq)]
+#[derive(uniffi::Object)]
 pub struct FfiAllowancePeriod {
     period: paykit_lib::AllowancePeriod,
 }
@@ -171,7 +171,7 @@ impl FfiAllowancePeriod {
 /// The object and values returned by its getters are sensitive. Its exported
 /// default string and debug output are redacted.
 #[uniffi::export(Debug, Display)]
-#[derive(uniffi::Object, Clone, PartialEq, Eq)]
+#[derive(uniffi::Object)]
 pub struct FfiAllowancePeriodLimit {
     limit: paykit_lib::AllowancePeriodLimit,
 }
@@ -255,10 +255,13 @@ impl FfiAllowanceTerms {
         expires_at: Option<String>,
         allowed_payment_endpoint_identifiers: Option<Vec<String>>,
     ) -> Result<Self, PaykitFfiError> {
-        conversions::parse_allowance_terms(
+        conversions::build_allowance_terms(
             asset,
-            per_payment_amount,
-            period_limits,
+            per_payment_amount.map(|range| range.domain_range()),
+            period_limits
+                .into_iter()
+                .map(|limit| limit.domain_limit())
+                .collect(),
             lifetime_amount_limit,
             active_from,
             expires_at,
@@ -276,8 +279,7 @@ impl FfiAllowanceTerms {
     pub fn per_payment_amount(&self) -> Option<Arc<FfiAllowanceAmountRange>> {
         self.terms
             .per_payment_amount()
-            .map(FfiAllowanceAmountRange::from)
-            .map(Arc::new)
+            .map(|range| Arc::new(FfiAllowanceAmountRange::from_validated_range(range.clone())))
     }
 
     /// Return every independently applicable period limit.
@@ -285,8 +287,7 @@ impl FfiAllowanceTerms {
         self.terms
             .period_limits()
             .iter()
-            .map(FfiAllowancePeriodLimit::from)
-            .map(Arc::new)
+            .map(|limit| Arc::new(FfiAllowancePeriodLimit::from_validated_limit(limit.clone())))
             .collect()
     }
 
@@ -392,8 +393,12 @@ impl FfiPaykitSdk {
         filter: FfiAllowanceFilter,
     ) -> Result<Vec<FfiAllowanceRecord>, PaykitFfiError> {
         let filter = filter.try_into()?;
-        let records = self.runtime.list_allowances(filter).await?;
-        allowance_records_to_ffi(records)
+        self.runtime
+            .list_allowances(filter)
+            .await?
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect()
     }
 
     /// Return one Allowance from one exact authenticated Encrypted Link.
