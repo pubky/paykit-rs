@@ -797,6 +797,30 @@ mod tests {
     }
 
     #[test]
+    fn test_wire_rejects_invalid_response_shapes() {
+        let acceptance = AllowanceEvent::Acceptance(AllowanceAcceptance::new(
+            event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d202"),
+            AllowanceId::new(ALLOWANCE_ID).unwrap(),
+            event_id(EVENT_ID),
+        ));
+        let json = serialize_allowance_json(&acceptance).unwrap();
+
+        // JSON kind says acceptance but the message was routed as a rejection.
+        assert!(parse_json(PrivateMessageKind::AllowanceRejection, &json).is_err());
+
+        // Missing required proposal_event_id on both response kinds.
+        let mut value: JsonValue = serde_json::from_str(&json).unwrap();
+        value.as_object_mut().unwrap().remove("proposal_event_id");
+        let missing = serde_json::to_string(&value).unwrap();
+        assert!(parse_json(PrivateMessageKind::AllowanceAcceptance, &missing).is_err());
+        let rejection = missing.replace(
+            PrivateMessageKind::AllowanceAcceptance.as_str(),
+            PrivateMessageKind::AllowanceRejection.as_str(),
+        );
+        assert!(parse_json(PrivateMessageKind::AllowanceRejection, &rejection).is_err());
+    }
+
+    #[test]
     fn test_wire_rejects_invalid_term_boundaries() {
         let json = serialize_allowance_json(&full_proposal()).unwrap();
         let value: JsonValue = serde_json::from_str(&json).unwrap();
