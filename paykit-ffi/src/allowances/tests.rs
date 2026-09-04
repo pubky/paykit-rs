@@ -103,6 +103,27 @@ fn test_allowance_period_rejects_anchored_period_without_anchor() {
 }
 
 #[test]
+fn test_allowance_period_rejects_invalid_period_shapes() {
+    assert_validation_context(
+        FfiAllowancePeriod::new(
+            "rolling".into(),
+            1,
+            "day".into(),
+            Some("2026-01-01T00:00:00Z".into()),
+        ),
+        "rolling Allowance period must not configure an anchor",
+    );
+    assert_validation_context(
+        FfiAllowancePeriod::new("rolling".into(), 0, "day".into(), None),
+        "Allowance period is invalid",
+    );
+    assert_validation_context(
+        FfiAllowancePeriod::new("rolling".into(), 1, "month".into(), None),
+        "Allowance period is invalid",
+    );
+}
+
+#[test]
 fn test_allowance_nested_validation_errors_do_not_echo_private_input() {
     assert_validation_context(
         FfiAllowanceAmountRange::new("private-invalid-minimum".into(), "1".into()),
@@ -406,7 +427,23 @@ fn test_allowance_record_conversion_preserves_lifecycle_evidence() {
     let rendered = format!("{ffi:?}");
     assert!(rendered.contains("AllowanceTerms(<redacted>)"));
     assert!(!rendered.contains("private-record-asset"));
-    assert_eq!(ffi.terms.unwrap().asset(), "private-record-asset");
+    let terms = ffi.terms.unwrap();
+    assert_eq!(terms.asset(), "private-record-asset");
+    let range = terms.per_payment_amount().unwrap();
+    assert_eq!(range.minimum(), "0.1");
+    assert_eq!(range.maximum(), "1");
+    let limits = terms.period_limits();
+    assert_eq!(limits.len(), 1);
+    assert_eq!(limits[0].amount_limit().as_deref(), Some("10"));
+    assert_eq!(limits[0].payment_count_limit(), Some(5));
+    assert_eq!(limits[0].period().kind(), "rolling");
+    assert_eq!(limits[0].period().every(), 1);
+    assert_eq!(limits[0].period().unit(), "day");
+    assert_eq!(limits[0].period().anchor(), None);
+    assert_eq!(terms.lifetime_amount_limit().as_deref(), Some("100"));
+    assert_eq!(terms.active_from(), None);
+    assert_eq!(terms.expires_at(), None);
+    assert_eq!(terms.allowed_payment_endpoint_identifiers(), None);
 }
 
 #[test]
