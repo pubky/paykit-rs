@@ -6286,7 +6286,7 @@ public open class PaykitSdk: Disposable, PaykitSdkInterface {
     }
 
     /**
-     * Return Allowances matching a local SDK filter, newest first.
+     * Return Allowances matching a local SDK filter, newest first by local record time (presentation order only).
      */
     @Throws(PaykitException::class, kotlin.coroutines.cancellation.CancellationException::class)
     public override suspend fun `listAllowances`(`filter`: AllowanceFilter): List<AllowanceRecord> {
