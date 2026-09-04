@@ -167,6 +167,30 @@ mod tests {
     }
 
     #[test]
+    fn test_parser_flags_reused_causal_event_ids_as_malformed() {
+        let proposal = proposal();
+        let event_id = proposal.event_id().clone();
+        let kind = PrivateMessageKind::AllowanceAcceptance;
+        // Constructors refuse the reuse, so build the wire text by hand.
+        let raw_json = format!(
+            "{{\"version\":1,\"kind\":\"{}\",\"event_id\":\"{event_id}\",\"allowance_id\":\"{}\",\"proposal_event_id\":\"{event_id}\"}}",
+            kind.as_str(),
+            proposal.allowance_id()
+        );
+        let message = PrivateApplicationMessage {
+            version: Some(1),
+            kind: Some(kind.as_str().to_string()),
+            raw_json,
+        };
+
+        let parsed = parse_allowance_event_message(&message).unwrap();
+        assert!(!parsed.is_valid());
+        assert_eq!(parsed.kind(), kind);
+        assert_eq!(parsed.event_id(), Some(&event_id));
+        assert_eq!(parsed.allowance_id(), Some(proposal.allowance_id()));
+    }
+
+    #[test]
     fn test_parser_ignores_non_allowance_kinds() {
         let message = PrivateApplicationMessage {
             version: Some(1),

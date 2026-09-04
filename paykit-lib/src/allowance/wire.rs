@@ -178,21 +178,25 @@ impl TryFrom<TermsWire> for AllowanceTerms {
                     .collect::<Result<Vec<_>>>()
             })
             .transpose()?;
-        Self::from_parts(
-            wire.asset,
-            wire.per_payment_amount
+        let terms = Self {
+            asset: wire.asset,
+            per_payment_amount: wire
+                .per_payment_amount
                 .into_inner()
                 .map(AllowanceAmountRange::try_from)
                 .transpose()?,
-            wire.period_limits
+            period_limits: wire
+                .period_limits
                 .into_iter()
                 .map(AllowancePeriodLimit::try_from)
                 .collect::<Result<Vec<_>>>()?,
-            wire.lifetime_amount_limit.into_inner(),
-            wire.active_from.into_inner(),
-            wire.expires_at.into_inner(),
-            endpoints,
-        )
+            lifetime_amount_limit: wire.lifetime_amount_limit.into_inner(),
+            active_from: wire.active_from.into_inner(),
+            expires_at: wire.expires_at.into_inner(),
+            allowed_payment_endpoint_identifiers: endpoints,
+        };
+        terms.validate()?;
+        Ok(terms)
     }
 }
 
@@ -681,6 +685,33 @@ mod tests {
         assert!(parse_proposal_json(&simple).is_err());
         let uppercase_allowance_id = json.replace(ALLOWANCE_ID, &ALLOWANCE_ID.to_uppercase());
         assert!(parse_proposal_json(&uppercase_allowance_id).is_err());
+    }
+
+    #[test]
+    fn test_wire_rejects_invalid_response_shapes() {
+        let acceptance = AllowanceEvent::Acceptance(
+            AllowanceAcceptance::new(
+                event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d202"),
+                AllowanceId::new(ALLOWANCE_ID).unwrap(),
+                event_id(EVENT_ID),
+            )
+            .unwrap(),
+        );
+        let json = serialize_allowance_json(&acceptance).unwrap();
+
+        // JSON kind says acceptance but the message was routed as a rejection.
+        assert!(parse_json(PrivateMessageKind::AllowanceRejection, &json).is_err());
+
+        // Missing required proposal_event_id on both response kinds.
+        let mut value: JsonValue = serde_json::from_str(&json).unwrap();
+        value.as_object_mut().unwrap().remove("proposal_event_id");
+        let missing = serde_json::to_string(&value).unwrap();
+        assert!(parse_json(PrivateMessageKind::AllowanceAcceptance, &missing).is_err());
+        let rejection = missing.replace(
+            PrivateMessageKind::AllowanceAcceptance.as_str(),
+            PrivateMessageKind::AllowanceRejection.as_str(),
+        );
+        assert!(parse_json(PrivateMessageKind::AllowanceRejection, &rejection).is_err());
     }
 
     #[test]

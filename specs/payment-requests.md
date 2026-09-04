@@ -139,6 +139,10 @@ Rules:
 - It is used for idempotent storage and replay dedupe.
 - It is stable across retries of the same event.
 - Each distinct lifecycle message uses a distinct `event_id`.
+- Dedupe is scoped to one authenticated Encrypted Link and applies across all
+  Event Message kinds: a reused `event_id` sent by the other party, or reused
+  with different payload bytes, is a conflict and MUST be rejected (fail
+  closed).
 - In v0.2 it is a UUID, not a hash of the event payload. Hash-based IDs would require canonical serialization rules.
 
 ### Payment Reference
@@ -278,21 +282,9 @@ Payment Requests and Subscriptions do not require an
 not change when Allowances are implemented. A wallet may use one matching,
 accepted Allowance as prior permission to send the ordinary Acceptance and pay
 automatically. This is optional wallet behavior, not a Payment Request
-requirement or a guarantee of payment.
-
-Automatic Acceptance does not imply that payment succeeded or remains in
-flight. If an Allowance-aware wallet cannot complete payment after recording
-Acceptance, it uses durable wallet-local execution state to decide whether the
-accepted request or Billing Period is safe to present for explicit payment. It
-does not send another Acceptance. This recovery path does not change the
-Payment Request wire lifecycle or make every accepted request actionable.
-
-The same matching applies to one-time and Recurring Payment Requests. Recurring
-Acceptance consumes no Allowance capacity; the wallet rechecks and meters the
-pinned Allowance for each Billing Period. Ending or expiring that Allowance
-stops future automatic payments. Insufficient capacity blocks the current
-payment and is re-evaluated for later Billing Periods. None of these conditions
-rejects or cancels the Payment Request.
+requirement or a guarantee of payment. Allowance matching, accepted-but-unpaid
+recovery, and per-Billing-Period metering are specified in
+[allowances.md](allowances.md) and are not repeated here.
 
 ## paykit.payment_request
 
@@ -660,7 +652,7 @@ If Encrypted Link state is lost, a new handshake may be needed to restore privat
 
 If an implementation persists Encrypted Link snapshots, it MUST treat the snapshot as the local read checkpoint. It MUST persist received Event Messages and dedupe state before replacing the stored snapshot with a snapshot whose read counter has advanced past those messages. A crash after event persistence but before snapshot persistence may replay messages; receivers MUST dedupe replayed Event Messages by `event_id`.
 
-Paykit libraries may parse, order, and structurally validate messages, and should expose either raw or canonical payloads from ordered receive APIs. Durable idempotency is the caller's responsibility. Implementations MUST use persisted history to dedupe repeated `event_id`s, reject conflicting reused `event_id`s, and reject later `paykit.payment_request` events that reuse an existing `payment_request_id` with a different `event_id`.
+Paykit libraries may parse, order, and structurally validate messages, and should expose either raw or canonical payloads from ordered receive APIs. Durable idempotency is the caller's responsibility. Implementations MUST use persisted history to dedupe repeated `event_id`s, reject conflicting reused `event_id`s across kinds and directions within the link, and reject later `paykit.payment_request` events that reuse an existing `payment_request_id` with a different `event_id`.
 
 ## Open questions
 

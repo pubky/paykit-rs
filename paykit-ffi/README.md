@@ -155,8 +155,9 @@ statuses still indicate whether a queued event has been sent.
   records without reimplementing lifecycle derivation on the platform.
 - `AllowanceTerms` and its nested range, period, and limit objects validate
   immutable Allowance authority before proposal and expose private fields only
-  through explicit getters. Their default Swift/Kotlin string and debug output
-  is redacted.
+  through explicit getters. Their Swift `description`/`debugDescription` is
+  routed to the redacted Rust formatting; the Kotlin wrappers expose no fields
+  through `toString()`.
 
 Allowance Terms and every value returned by their getters are sensitive private
 state. Do not include them in ordinary Swift/Kotlin logs, reflection output, or

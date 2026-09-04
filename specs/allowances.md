@@ -82,7 +82,15 @@ Every message is one UTF-8 JSON object and has these rules:
 A transport retry from the same authenticated sender MUST reuse the same Event
 ID and exact payload bytes. Within one authenticated Encrypted Link scope,
 Event ID dedupe applies across all Event Message kinds: reuse by the other
-sender or with different payload bytes is a conflict and MUST fail closed.
+sender or with different payload bytes is a conflict and MUST fail closed, as
+defined in [Payment Requests](payment-requests.md#event-id).
+
+A message whose Event ID conflicts is invalid evidence. A conflicted
+acceptance, rejection, or End never controls the Allowance, and any Allowance
+whose history contains conflicted evidence has invalid history and MUST NOT
+authorize automatic handling until explicit review. Conflicted Event IDs do not
+by themselves change the derived lifecycle state; `conflicted` remains reserved
+for multiple distinct proposals sharing one Allowance ID.
 
 ## Allowance Terms
 
@@ -139,9 +147,13 @@ normalization, registry, FX, or cross-asset comparison.
 A `period_limits` entry has required `amount_limit` and
 `payment_count_limit` fields; either MAY be `null`, but not both.
 `payment_count_limit` is an unsigned 64-bit JSON integer. All configured period
-entries apply independently and MUST be unique. Period and allowlist array
-order has no eligibility meaning. V1 sets no separate array cardinality limit
-beyond the complete-message byte limit.
+entries apply independently and MUST be unique. Two period entries are
+duplicates when every field is equal as spelled on the wire: `amount_limit` and
+`anchor` compare as strings (numerically equal amounts or instant-equal anchors
+with different spellings are distinct entries), `payment_count_limit` and
+`every` compare as integers, and `kind` and `unit` compare exactly. Period and
+allowlist array order has no eligibility meaning. V1 sets no separate array
+cardinality limit beyond the complete-message byte limit.
 
 Every rule is conjunctive: a payment qualifies only if all configured rules
 pass. V1 has no OR groups, deny rules, precedence, conversion, or implied
@@ -293,10 +305,16 @@ Event ID for the current message is invalid rather than an exact replay.
 ```
 
 The proposal sender MAY withdraw a proposal by sending End with
-`acceptance_event_id: null`. Either party MAY end accepted authority by naming
-its exact Acceptance Event ID. An end is unilateral and terminal. An End with
-a wrong causal reference or sent by the proposal recipient before acceptance
-is invalid.
+`acceptance_event_id: null` (a proposal withdrawal). A withdrawal is valid only
+from the proposal sender and is valid whether or not that sender has already
+loaded an acceptance or rejection; it always derives `ended`. A proposer that
+has already loaded a valid Acceptance SHOULD end accepted authority by naming
+that Acceptance Event ID instead; a recipient still derives `ended` from any
+valid null-acceptance End sent by the proposal sender, whether or not it has
+loaded the Acceptance. A proposal recipient MUST NOT send a null-acceptance
+End; such an End is invalid at any point. Either party MAY end accepted
+authority by sending End naming the exact bound Acceptance Event ID. An End is
+unilateral and terminal. An End with a wrong causal reference is invalid.
 
 Because the directions have no total order, a valid proposal withdrawal and a
 crossing acceptance or rejection may both exist. End wins safely: no authority
@@ -311,14 +329,18 @@ Lifecycle derivation is closed by this table:
 | Proposal only | `proposed` | No |
 | Proposal + Acceptance | `accepted` | Yes, while terms and wallet checks pass |
 | Proposal + Rejection | `rejected` | No |
-| Proposal + pending End | `ended` | No |
-| Proposal + Rejection + pending End | `ended` | No |
+| Proposal + proposal withdrawal | `ended` | No |
+| Proposal + Rejection + proposal withdrawal | `ended` | No |
 | Proposal + Acceptance + End | `ended` | No |
-| Proposal + crossing Acceptance + pending End | `ended` | No |
+| Proposal + crossing Acceptance + proposal withdrawal | `ended` | No |
 | Multiple distinct Proposals for one Allowance ID | `conflicted` | No |
 
-Rejection and End are terminal. Expiry is a trusted-time eligibility result,
-not an Event Message or another lifecycle state.
+The table describes valid events only; invalid history, including Event ID
+conflicts, blocks automatic handling under the eligibility rules below.
+Rejection and End are terminal: no later event restores authority, and a valid
+End after Rejection only moves the derived state to `ended`. Expiry is a
+trusted-time eligibility result, not an Event Message or another lifecycle
+state.
 
 ## Payment Request integration
 
@@ -359,6 +381,15 @@ permit reusable public details by local policy. A stale, expired, consumed,
 missing, invalid, or uncertain endpoint MUST NOT be used for automatic payment.
 Allowances add no destination digest, public-endpoint requirement, or fallback
 selection rule.
+
+Before an automatic payment, the wallet MUST establish that the amount and
+asset the selected payment method will actually transfer equal the requested
+Payment Amount; amount-less endpoint details (for example an amount-less
+invoice or offer) MUST be paid at exactly the requested Payment Amount.
+Endpoint details that fix a different amount or asset, or whose transferred
+amount the wallet cannot determine before execution, MUST be treated as
+unusable for automatic payment, with the same manual-flow outcome as a stale or
+invalid endpoint.
 
 Before automatic Acceptance, zero or multiple candidates, disabled local
 automatic handling, failed endpoint resolution, unsupported payment methods,
@@ -474,13 +505,12 @@ the irreversible execution step. If an End or cancellation is observed before
 any irreversible payment side effect, the wallet MUST abort and release the
 reservation. Once the payment is irreversible, later lifecycle events affect
 only future payments and the in-flight outcome remains reserved until
-reconciled. If cancellation is observed before proof is queued, the wallet MAY
-later send the ordinary Payment Proof for that earlier execution under the
-Payment Request crossing-cancellation rules; this includes recording a crossing
-Acceptance without reopening the request when the payee records its own
-Cancellation before receiving the payer's already-sent Acceptance. The request
-remains cancelled. V1 does not communicate Allowance usage or selection to the
-Allowee; the existing Payment Request messages communicate acceptance and proof.
+reconciled. Proof for an execution that was already past its irreversible
+boundary when cancellation was observed, and Acceptances that cross a payee
+Cancellation, follow the Payment Request rules in
+[payment-requests.md](payment-requests.md); the request remains cancelled. V1
+does not communicate Allowance usage or selection to the Allowee; the existing
+Payment Request messages communicate acceptance and proof.
 
 ## Durability and recovery
 
@@ -508,11 +538,18 @@ missing history.
 V1 is closed-world. Unknown fields, enum values, or period shapes inside a
 recognized V1 kind are invalid. Unsupported versions and unknown kinds MUST
 NOT be interpreted as V1 or cause side effects. Durable private-stream
-implementations MUST retain their raw bytes for audit and future upgrade. Any
-recoverably Allowance-correlated unknown kind or unsupported version MUST block
+implementations MUST retain their raw bytes for audit and future upgrade.
+
+A message is Allowance-correlated when it is a JSON object whose top-level
+`allowance_id` member is a canonical UUID string as defined above; this probe
+applies to every unknown kind and to every recognized kind that fails V1
+validation, including an unsupported `version`. Implementations MUST NOT
+search nested members. Any Allowance-correlated such message MUST block
 automatic handling for that Allowance until a compatible implementation or
-explicit review resolves it. Unrelated unknown kinds do not change V1
-Allowance state. Extensions require a new version or message kind.
+explicit review resolves it. A message that cannot be probed (not a JSON
+object, or no canonical top-level `allowance_id`) is unrelated: it does not
+change V1 Allowance state and probing failure is not an error. Extensions
+require a new version or message kind.
 
 Every complete message must fit the 1000-byte limit. Large arrays or long
 decimal spellings may exceed it and MUST be rejected as a whole; V1 has no
