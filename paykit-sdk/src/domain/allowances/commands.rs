@@ -80,6 +80,7 @@ where
                 &counterparty_receiver_path,
                 &allowance_id,
                 action,
+                HistoryGate::Consistent,
             )?;
             if local_sent_proposal(&record) {
                 return Err(PaykitSdkError::Policy {
@@ -123,12 +124,15 @@ where
     let event_id = EventId::new_v4();
     storage
         .transaction(move |tx| {
+            // End is the fail-safe terminal action: it stays available on
+            // incomplete or invalid history and is blocked only by recovery.
             let record = require_actionable_record(
                 tx,
                 &counterparty,
                 &counterparty_receiver_path,
                 &allowance_id,
                 "end Allowance",
+                HistoryGate::RecoverableOnly,
             )?;
             let proposal_event_id = bound_proposal_event_id(&record)?;
             let event = match record.state {
@@ -207,14 +211,24 @@ fn append_and_derive(
     })
 }
 
+/// How strict a command is about the derived history it acts on.
+#[derive(Clone, Copy)]
+enum HistoryGate {
+    /// Require complete and valid history.
+    Consistent,
+    /// Tolerate invalid or unresolved history; block only on recovery.
+    RecoverableOnly,
+}
+
 /// Load a record that a local command may act on: known on this exact link,
-/// with a ready link and consistent history.
+/// with a ready link and history acceptable under `gate`.
 fn require_actionable_record(
     tx: &dyn StorageTransaction,
     counterparty: &PubkyPublicKey,
     counterparty_receiver_path: &PaykitReceiverPath,
     allowance_id: &AllowanceId,
     action: &str,
+    gate: HistoryGate,
 ) -> Result<AllowanceRecord> {
     let history = AllowanceLinkHistory::load(tx, counterparty, counterparty_receiver_path);
     let record = derive_allowance_record(&history, allowance_id).ok_or_else(|| {
@@ -226,7 +240,7 @@ fn require_actionable_record(
         }
     })?;
     require_link_ready(tx, counterparty, counterparty_receiver_path)?;
-    require_consistent_history(&record, action)?;
+    require_history(&record, action, gate)?;
     Ok(record)
 }
 
@@ -245,19 +259,24 @@ fn require_link_ready(
     require_private_automation_ready(peer_state, has_active_link, counterparty)
 }
 
-fn require_consistent_history(record: &AllowanceRecord, action: &str) -> Result<()> {
-    match record.history_status {
-        AllowanceHistoryStatus::Consistent => Ok(()),
-        AllowanceHistoryStatus::RecoveryRequired => Err(PaykitSdkError::RecoveryRequired {
+fn require_history(record: &AllowanceRecord, action: &str, gate: HistoryGate) -> Result<()> {
+    match (record.history_status, gate) {
+        (AllowanceHistoryStatus::Consistent, _) => Ok(()),
+        (AllowanceHistoryStatus::RecoveryRequired, _) => Err(PaykitSdkError::RecoveryRequired {
             context: format!("cannot {action}: exact Encrypted Link history needs recovery"),
             source: None,
         }),
-        AllowanceHistoryStatus::UnresolvedReferences | AllowanceHistoryStatus::Invalid => {
-            Err(PaykitSdkError::Protocol {
-                context: format!("cannot {action}: Allowance history is not complete and valid"),
-                source: None,
-            })
-        }
+        (
+            AllowanceHistoryStatus::UnresolvedReferences | AllowanceHistoryStatus::Invalid,
+            HistoryGate::Consistent,
+        ) => Err(PaykitSdkError::Protocol {
+            context: format!("cannot {action}: Allowance history is not complete and valid"),
+            source: None,
+        }),
+        (
+            AllowanceHistoryStatus::UnresolvedReferences | AllowanceHistoryStatus::Invalid,
+            HistoryGate::RecoverableOnly,
+        ) => Ok(()),
     }
 }
 
