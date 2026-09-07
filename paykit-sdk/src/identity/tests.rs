@@ -17,7 +17,7 @@ fn test_pubky_local_secret_key_from_hex_validates_length() {
 }
 
 #[test]
-fn test_pubky_local_secret_key_derivation_matches_pubky_core_seed() {
+fn test_pubky_local_secret_key_derivation_matches_pubky_seed() {
     let seed = [3; 64];
     let key = PubkyLocalSecretKey::from_bip39_seed(&seed).unwrap();
 
@@ -26,7 +26,7 @@ fn test_pubky_local_secret_key_derivation_matches_pubky_core_seed() {
 }
 
 #[test]
-fn test_pubky_local_secret_key_derivation_matches_pubky_core_mnemonic() {
+fn test_pubky_local_secret_key_derivation_matches_pubky_mnemonic() {
     let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     let key = PubkyLocalSecretKey::from_bip39_mnemonic(mnemonic).unwrap();
 

@@ -260,7 +260,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [0.1.0-rc25] - 2026-07-02
 
 ### Changed
-- Pubky secret key derivation now matches Pubky Core/Ring BIP39 behavior:
+- Pubky secret key derivation now matches Pubky/Ring BIP39 behavior:
   SDK and FFI helpers derive from a BIP39 seed or mnemonic by using the first
   32 bytes of the BIP39 seed with an empty passphrase, instead of Paykit
   runtime-label HMAC derivation.

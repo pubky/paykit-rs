@@ -337,7 +337,7 @@ returned by `PubkyAuthRequest::save_state` and resume with that state. Pubky
 relay approvals are consumed when read, so cancellation or credential-exchange
 failure after approval retrieval requires a new auth request. Apps must delete
 saved state after completion, expiry, or abandonment.
-`PubkyLocalSecretKey` also provides Pubky Core-compatible BIP39 seed and
+`PubkyLocalSecretKey` also provides Pubky-compatible BIP39 seed and
 mnemonic helpers plus public-key-from-secret helpers. Apps that intentionally
 share the same Pubky identity material should derive the same Pubky key; app
 and runtime separation belongs in receiver folders, Noise keys, and SDK state.

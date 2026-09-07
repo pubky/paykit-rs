@@ -178,7 +178,7 @@ object.
 - `PubkyAuthRequestState` — secret-bearing URL plus client key used by
   `resumeAuth`; delete it after completion, expiry, or abandonment.
 - `pubkySecretKeyFromBip39Seed(seed)` — derive a Pubky secret key from a
-  64-byte BIP39 seed using the Pubky Core/Ring convention.
+  64-byte BIP39 seed using the Pubky/Ring convention.
 - `pubkySecretKeyFromBip39Mnemonic(mnemonicPhrase)` — derive the same key from
   a BIP39 English mnemonic phrase.
 - `pubkyPublicKeyFromSecret(localSecretKey)` — derive a Pubky public key.
