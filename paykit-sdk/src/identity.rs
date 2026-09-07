@@ -131,7 +131,7 @@ impl PubkyLocalSecretKey {
 
     /// Derive a local Pubky secret key from a 64-byte BIP39 seed.
     ///
-    /// This matches Pubky Core and Pubky Ring: the Pubky secret key is the
+    /// This matches Pubky and Pubky Ring: the Pubky secret key is the
     /// first 32 bytes of the BIP39 seed produced with an empty passphrase.
     pub fn from_bip39_seed(seed: &[u8]) -> crate::Result<Self> {
         if seed.len() != BIP39_SEED_BYTES {

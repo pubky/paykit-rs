@@ -671,7 +671,7 @@ fn test_session_access_rejects_invalid_client_id() {
 }
 
 #[test]
-fn test_pubky_secret_key_derivation_matches_pubky_core_seed() {
+fn test_pubky_secret_key_derivation_matches_pubky_seed() {
     let seed = vec![3; 64];
     let secret = pubky_secret_key_from_bip39_seed(seed).unwrap();
 
@@ -679,7 +679,7 @@ fn test_pubky_secret_key_derivation_matches_pubky_core_seed() {
 }
 
 #[test]
-fn test_pubky_secret_key_derivation_matches_pubky_core_mnemonic() {
+fn test_pubky_secret_key_derivation_matches_pubky_mnemonic() {
     let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     let secret = pubky_secret_key_from_bip39_mnemonic(mnemonic.into()).unwrap();
 
