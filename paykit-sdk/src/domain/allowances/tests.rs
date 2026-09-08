@@ -833,11 +833,14 @@ async fn test_allowance_end_command_succeeds_on_invalid_history() {
         &storage,
         peer.clone(),
         receiver_path(),
-        AllowanceEvent::Rejection(AllowanceRejection::new(
-            event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d204"),
-            allowance_id(),
-            event_id(PROPOSAL_ID),
-        )),
+        AllowanceEvent::Rejection(
+            AllowanceRejection::new(
+                event_id("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d204"),
+                allowance_id(),
+                event_id(PROPOSAL_ID),
+            )
+            .unwrap(),
+        ),
         timestamp(),
     )
     .await;
