@@ -3281,7 +3281,7 @@ dependencies = [
 
 [[package]]
 name = "paykit-ffi"
-version = "0.1.0-rc50"
+version = "0.1.0-rc51"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -3311,7 +3311,7 @@ dependencies = [
 
 [[package]]
 name = "paykit-lib"
-version = "0.1.0-rc50"
+version = "0.1.0-rc51"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3332,7 +3332,7 @@ dependencies = [
 
 [[package]]
 name = "paykit-sdk"
-version = "0.1.0-rc50"
+version = "0.1.0-rc51"
 dependencies = [
  "anyhow",
  "async-trait",

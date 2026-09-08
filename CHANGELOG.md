@@ -7,6 +7,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc51] - 2026-09-04
+
+### Fixed
+- Preserved Payment Request history and payer/payee roles when inbound and
+  outbound request lifecycles interleave.
+
 ## [0.1.0-rc50] - 2026-08-31
 
 ### Added
@@ -443,7 +449,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc50...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc51...HEAD
+[0.1.0-rc51]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc50...v0.1.0-rc51
 [0.1.0-rc50]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc49...v0.1.0-rc50
 [0.1.0-rc49]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc48...v0.1.0-rc49
 [0.1.0-rc48]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc47...v0.1.0-rc48
