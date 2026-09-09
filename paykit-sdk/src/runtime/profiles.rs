@@ -119,6 +119,9 @@ where
     /// Upload profile avatar bytes under the configured Paykit blob prefix.
     ///
     /// The blob name is derived from the content hash and image content type.
+    /// Identical uploads share a URI. A failed proposal does not establish that
+    /// this blob is unused. The caller must establish exclusive ownership before
+    /// deleting it, including references from other proposals or profiles.
     pub async fn upload_profile_avatar(
         &self,
         bytes: Vec<u8>,
@@ -163,6 +166,9 @@ where
     }
 
     /// Fetch a public `pubky://` file referenced by profile metadata.
+    ///
+    /// This compatibility API has no byte limit. Use
+    /// [`Self::fetch_pubky_file_bounded`] for untrusted files or images.
     pub async fn fetch_pubky_file(&self, uri: &str) -> Result<Option<Vec<u8>>> {
         let public_storage =
             self.pubky
@@ -172,7 +178,32 @@ where
                     context: "no Pubky public storage available for Pubky file fetch".into(),
                     source: None,
                 })?;
-        fetch_public_file_uri(&public_storage, uri, "fetch Pubky file").await
+        fetch_public_file_uri(&public_storage, uri, "fetch Pubky file", None).await
+    }
+
+    /// Fetch a public file while limiting the accumulated response body.
+    ///
+    /// Missing files return `None`. Bodies larger than `max_bytes` return a
+    /// protocol error, including streams without Content-Length. The limit is
+    /// checked before each chunk is appended and the response is dropped on
+    /// overflow. Transport buffers and the current chunk are additional memory.
+    /// Zero permits only an empty body. This does not decode images or limit
+    /// pixels, cache storage, or request duration. Pubky client configuration,
+    /// sessions, capabilities, and key rotation remain the caller's responsibility.
+    pub async fn fetch_pubky_file_bounded(
+        &self,
+        uri: &str,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>> {
+        let public_storage =
+            self.pubky
+                .load_public_storage()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no Pubky public storage available for Pubky file fetch".into(),
+                    source: None,
+                })?;
+        fetch_public_file_uri(&public_storage, uri, "fetch Pubky file", Some(max_bytes)).await
     }
 
     /// Fetch a public `pubky://` text file referenced by profile metadata.
@@ -292,6 +323,67 @@ where
     }
 }
 
+pub(super) async fn read_bounded_public_response(
+    response: reqwest::Response,
+    max_bytes: u64,
+) -> Result<Option<Vec<u8>>> {
+    let status = response.status();
+    // Never consume error bodies. PublicStorage::get would buffer them before
+    // returning an error, so bounded reads use the vendored unchecked GET.
+    if matches!(
+        status,
+        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
+    ) {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(PaykitSdkError::Transport {
+            context: format!("fetch Pubky file: HTTP {}", status.as_u16()),
+            source: None,
+        });
+    }
+    read_bounded_public_file(response, max_bytes)
+        .await
+        .map(Some)
+}
+
+pub(super) async fn read_bounded_public_file(
+    mut response: reqwest::Response,
+    max_bytes: u64,
+) -> Result<Vec<u8>> {
+    let too_large = || PaykitSdkError::Protocol {
+        context: format!("public file exceeds the {max_bytes} byte limit"),
+        source: None,
+    };
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes)
+    {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|err| PaykitSdkError::Transport {
+            context: "read public file".into(),
+            source: Some(err.into()),
+        })?
+    {
+        if chunk.len() as u64 > max_bytes.saturating_sub(bytes.len() as u64) {
+            return Err(too_large());
+        }
+        bytes
+            .try_reserve_exact(chunk.len())
+            .map_err(|_| PaykitSdkError::Protocol {
+                context: "public file cannot fit in memory".into(),
+                source: None,
+            })?;
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 fn avatar_extension(content_type: &str) -> Result<&'static str> {
     match content_type.trim().to_ascii_lowercase().as_str() {
         "image/jpeg" | "image/jpg" => Ok("jpg"),
@@ -302,5 +394,123 @@ fn avatar_extension(content_type: &str) -> Result<&'static str> {
             context: format!("unsupported profile avatar content type: {content_type}"),
             source: None,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    async fn response(
+        raw: &'static str,
+        hold_open: bool,
+    ) -> (reqwest::Response, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            stream.write_all(raw.as_bytes()).unwrap();
+            if hold_open {
+                // No EOF or terminating chunk until the bounded reader drops
+                // the connection. Full-body buffering would wait indefinitely.
+                let mut byte = [0];
+                let _ = stream.read(&mut byte);
+            }
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/image"))
+            .send()
+            .await
+            .unwrap();
+        (response, server)
+    }
+
+    #[tokio::test]
+    async fn test_bounded_public_file_stops_oversized_stream_before_eof() {
+        let (response, server) = response(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n1234\r\n4\r\n5678\r\n",
+            true,
+        )
+        .await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            read_bounded_public_file(response, 6),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_bounded_public_file_rejects_declared_size_before_body() {
+        let (response, server) =
+            response("HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n", true).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            read_bounded_public_file(response, 6),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_bounded_public_file_accepts_boundary_and_empty_bodies() {
+        for (raw, limit, expected) in [
+            ("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n12\r\n2\r\n34\r\n0\r\n\r\n", 4, "1234"),
+            ("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n1234", 4, "1234"),
+            ("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", 0, ""),
+        ] {
+            let (response, server) = response(raw, false).await;
+            assert_eq!(read_bounded_public_file(response, limit).await.unwrap(), expected.as_bytes());
+            server.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bounded_public_file_reports_truncated_body() {
+        let (response, server) =
+            response("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n12", false).await;
+        assert!(matches!(
+            read_bounded_public_file(response, 4).await,
+            Err(PaykitSdkError::Transport { .. })
+        ));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_bounded_public_file_discards_streamed_error_bodies_before_eof() {
+        for (raw, missing) in [
+            ("HTTP/1.1 404 Not Found\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n1234\r\n", true),
+            ("HTTP/1.1 410 Gone\r\nContent-Length: 1000000\r\n\r\n", true),
+            ("HTTP/1.1 500 Internal Server Error\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n1234\r\n", false),
+        ] {
+            let (response, server) = response(raw, true).await;
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                read_bounded_public_response(response, 0),
+            ).await.unwrap();
+            if missing {
+                assert_eq!(result.unwrap(), None);
+            } else {
+                assert!(matches!(result, Err(PaykitSdkError::Transport { .. })));
+            }
+            server.join().unwrap();
+        }
     }
 }

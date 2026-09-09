@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["paykit-lib", "paykit-ffi", "paykit-sdk"]
+exclude = ["vendor/pubky"]
 
 [patch.crates-io]
+pubky = { path = "vendor/pubky" }
 rustls-platform-verifier-android = { path = "vendor/rustls-platform-verifier-android" }

@@ -17,6 +17,38 @@ use conversions::{
     ParsedPaymentProofSubmission,
 };
 
+/// Durable proposal enqueue outcome. No outcome establishes image ownership.
+#[derive(uniffi::Enum, Debug)]
+pub enum FfiPaymentRequestPublication {
+    /// The exact proposal is durably queued, possibly already sent.
+    Queued { outbound_message_id: u64 },
+    /// No matching proposal was queued at the completed transaction.
+    NotQueued { error: PaykitFfiError },
+    /// Preserve the IDs and terms and retry to reconcile. Do not delete images.
+    Uncertain { error: PaykitFfiError },
+}
+
+impl From<paykit_sdk::PaymentRequestPublication> for FfiPaymentRequestPublication {
+    fn from(value: paykit_sdk::PaymentRequestPublication) -> Self {
+        match value {
+            paykit_sdk::PaymentRequestPublication::Queued {
+                outbound_message_id,
+            } => Self::Queued {
+                outbound_message_id,
+            },
+            paykit_sdk::PaymentRequestPublication::NotQueued { error } => Self::NotQueued {
+                error: error.into(),
+            },
+            paykit_sdk::PaymentRequestPublication::Uncertain { error } => Self::Uncertain {
+                error: error.into(),
+            },
+            _ => Self::Uncertain {
+                error: validation_error("unsupported proposal publication outcome"),
+            },
+        }
+    }
+}
+
 /// Payment Reference text with redacted debug output.
 #[derive(uniffi::Object)]
 pub struct FfiPaymentReference {
@@ -325,6 +357,33 @@ impl FfiPaykitSdk {
             .await
             .map_err(Into::into)
             .and_then(FfiPaymentRequestRecord::try_from)
+    }
+
+    /// Queue or reconcile a proposal with caller-persisted UUID-v4 IDs and terms.
+    /// Reuse the exact target, IDs, and terms after uncertainty or restart.
+    /// Exceptions only indicate invalid arguments before this attempt. They do
+    /// not rule out a previous attempt. Keep the same local identity and queue
+    /// history. Use payment_requests_with for derived state after Queued.
+    pub async fn propose_payment_request_with_ids(
+        &self,
+        counterparty: String,
+        counterparty_receiver_path: String,
+        event_id: String,
+        payment_request_id: String,
+        terms: FfiPaymentRequestTerms,
+    ) -> Result<FfiPaymentRequestPublication, PaykitFfiError> {
+        Ok(self
+            .runtime
+            .propose_payment_request_with_ids(
+                parse_public_key(counterparty)?,
+                parse_receiver_path(counterparty_receiver_path)?,
+                paykit_lib::EventId::new(event_id)
+                    .map_err(|err| validation_error(err.to_string()))?,
+                parse_payment_request_id(payment_request_id)?,
+                terms.try_into()?,
+            )
+            .await
+            .into())
     }
 
     /// Queue acceptance for a received Payment Request and return local derived state.

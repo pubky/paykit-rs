@@ -228,6 +228,8 @@ impl FfiPaykitSdk {
     }
 
     /// Upload profile avatar bytes and return the published blob record.
+    /// Identical uploads share a URI. Proposal failure is not permission to
+    /// delete an image that may be referenced by other proposals or profiles.
     pub async fn upload_profile_avatar(
         &self,
         bytes: Vec<u8>,
@@ -252,6 +254,21 @@ impl FfiPaykitSdk {
     pub async fn fetch_pubky_file(&self, uri: String) -> Result<Option<Vec<u8>>, PaykitFfiError> {
         self.runtime
             .fetch_pubky_file(&uri)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Fetch public file bytes with a limit checked while reading each chunk.
+    /// Missing files return None. Oversized bodies fail before full buffering.
+    /// Transport buffers are additional memory. Image decoding, cache limits,
+    /// request duration, and Pubky client configuration remain caller-owned.
+    pub async fn fetch_pubky_file_bounded(
+        &self,
+        uri: String,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>, PaykitFfiError> {
+        self.runtime
+            .fetch_pubky_file_bounded(&uri, max_bytes)
             .await
             .map_err(Into::into)
     }

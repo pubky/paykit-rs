@@ -1,0 +1,15 @@
+--- a/src/actors/storage/verbs.rs
++++ b/src/actors/storage/verbs.rs
+@@ -150,0 +151,12 @@
++    /// Fetch an addressed resource without consuming HTTP error bodies.
++    ///
++    /// Uses the same configured client and routing as [`Self::get`], including
++    /// ICANN fallback. The caller must check status before consuming the body.
++    ///
++    /// # Errors
++    /// Returns resource validation, routing, or HTTP transport errors. HTTP
++    /// error statuses are returned in the response without reading their body.
++    pub async fn get_unchecked<A: IntoPubkyResource>(&self, addr: A) -> Result<Response> {
++        Ok(self.request(Method::GET, addr).await?.send().await?)
++    }
++

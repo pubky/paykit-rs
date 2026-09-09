@@ -636,6 +636,7 @@ async fn fetch_public_file_uri(
     storage: &pubky::PublicStorage,
     uri: &str,
     context: &'static str,
+    max_bytes: Option<u64>,
 ) -> Result<Option<Vec<u8>>> {
     let resource = uri
         .parse::<pubky::PubkyResource>()
@@ -643,6 +644,13 @@ async fn fetch_public_file_uri(
             context: format!("{context}: invalid Pubky URI: {err}"),
             source: None,
         })?;
+    if let Some(limit) = max_bytes {
+        let response = storage
+            .get_unchecked(resource)
+            .await
+            .map_err(|err| map_pubky_transport_error(context, err))?;
+        return profiles::read_bounded_public_response(response, limit).await;
+    }
     match storage.get(resource).await {
         Ok(resp) => {
             let bytes = crate::net::read_bounded_body(resp, MAX_PUBLIC_FILE_BYTES, context).await?;

@@ -116,6 +116,21 @@ if report.identity.live_session_available {
 
 Common workflows:
 
+For proposal retries, use `propose_payment_request_with_ids`. Persist fresh
+UUID-v4 Event and Payment Request IDs with the target and exact terms before the
+first call. `PaymentRequestPublication::Queued` confirms durable local queue
+membership, `NotQueued` confirms absence at the completed transaction, and
+`Uncertain` requires preserving and retrying the same inputs to reconcile.
+Repeated matching calls reuse the queue entry, including sent entries.
+Conflicting IDs never overwrite a proposal. Deduplication requires retaining
+queue history under the same local identity. A later `payment_requests_with`
+lookup can fail without undoing a queued proposal. The compatibility method
+`propose_payment_request` can return an error after enqueueing.
+
+Avatar uploads with identical content share the same URI. No publication outcome
+establishes exclusive ownership or authorizes deleting a shared public image.
+The SDK does not roll back image uploads on proposal failure.
+
 - call `initialize` on startup to refresh identity status from the Pubky
   provider
 - call `sync_public_endpoints` after local receiving details change
@@ -128,8 +143,13 @@ Common workflows:
   Paykit Profile metadata, including app-specific public fields in `extra`
 - use `publish_paykit_blob` / `delete_paykit_blob` for files under the
   configured Paykit blob prefix
-- use `fetch_pubky_file` / `fetch_pubky_text` to load public `pubky://`
-  files referenced by profile metadata
+- use `fetch_pubky_file_bounded(uri, max_bytes)` for untrusted public files
+  and images. The limit is checked while reading, before each chunk is appended.
+  Missing files return `None`, oversized bodies return a protocol error, and zero
+  permits only empty bodies. Content-Length can reject a response early but is
+  not required. Transport buffers and the current chunk use additional memory.
+  Callers still set image decode, pixel, cache, and Pubky request-timeout limits.
+  The compatibility methods `fetch_pubky_file` / `fetch_pubky_text` are unbounded.
 - use `fetch_pubky_profile` / `fetch_pubky_follows` for read-only Pubky app
   profile and follows data
 - use `resolve_contact_profile` when contact display should prefer Paykit
@@ -286,3 +306,13 @@ private Paykit runtime state. Public Paykit data can be rediscovered from Pubky,
 but Encrypted Link snapshots, private stream history, Receipt Access keys,
 outbound queues, local Contact Records, and Payment Request/Receipt history
 cannot be safely reconstructed from homeserver data alone.
+
+## Vendored Pubky dependency
+
+Bounded public-file reads require the [vendored Pubky patch](../vendor/pubky/PATCH.md).
+The workspace selects it for all Pubky consumers, including pubky-noise.
+Cargo does not propagate a dependency's patch table. Applications consuming
+Paykit as a Rust Git or path dependency must add the equivalent `pubky` override
+to their own workspace root. Standalone crates.io packaging omits this override
+and cannot build this SDK against the unpatched Pubky 0.11.0 release.
+Mobile binaries built from this complete workspace include the patched code.
