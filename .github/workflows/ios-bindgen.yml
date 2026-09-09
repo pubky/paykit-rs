@@ -1,0 +1,65 @@
+name: iOS Bindgen
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios-bindgen:
+    name: Generate iOS bindings
+    permissions:
+      contents: read
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+
+      - name: Generate iOS bindings and XCFramework
+        working-directory: paykit-ffi
+        run: ./build_ios.sh
+
+      - name: Verify generated iOS outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            paykit-ffi/bindings/ios/PaykitPublicKeys.swift
+            paykit-ffi/bindings/ios/module.modulemap
+            paykit-ffi/bindings/ios/paykit.swift
+            paykit-ffi/bindings/ios/paykitFFI.h
+            paykit-ffi/dist/ios/Paykit.xcframework
+            paykit-ffi/dist/ios/Paykit.xcframework.zip
+          )
+
+          for path in "${required[@]}"; do
+            if [ ! -e "$path" ]; then
+              echo "::error::Missing generated iOS output: $path"
+              exit 1
+            fi
+          done
+
+          test -s paykit-ffi/dist/ios/Paykit.xcframework.zip
+
+      - name: Upload generated iOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: paykit-ios-bindgen
+          path: |
+            paykit-ffi/bindings/ios/PaykitPublicKeys.swift
+            paykit-ffi/bindings/ios/module.modulemap
+            paykit-ffi/bindings/ios/paykit.swift
+            paykit-ffi/bindings/ios/paykitFFI.h
+            paykit-ffi/dist/ios/Paykit.xcframework.zip
+          if-no-files-found: error

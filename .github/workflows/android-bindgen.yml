@@ -1,0 +1,98 @@
+name: Android Bindgen
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android-bindgen:
+    name: Generate Android bindings
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev cmake protobuf-compiler
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28c
+          add-to-path: true
+
+      - name: Export Android NDK paths
+        run: |
+          echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=${{ steps.setup-ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_PATH=${{ steps.setup-ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+          echo "NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+
+      - name: Generate Android bindings and native libraries
+        working-directory: paykit-ffi
+        run: ./build_android.sh
+
+      - name: Verify generated Android outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            paykit-ffi/bindings/android/lib/src/main/kotlin/com/synonym/paykit/paykit.android.kt
+            paykit-ffi/bindings/android/lib/src/main/kotlin/com/synonym/paykit/paykit.common.kt
+            paykit-ffi/bindings/android/lib/src/main/jniLibs/armeabi-v7a/libpaykit.so
+            paykit-ffi/bindings/android/lib/src/main/jniLibs/arm64-v8a/libpaykit.so
+            paykit-ffi/bindings/android/lib/src/main/jniLibs/x86/libpaykit.so
+            paykit-ffi/bindings/android/lib/src/main/jniLibs/x86_64/libpaykit.so
+            paykit-ffi/bindings/android/native-debug-symbols.zip
+          )
+
+          for path in "${required[@]}"; do
+            if [ ! -s "$path" ]; then
+              echo "::error::Missing or empty generated Android output: $path"
+              exit 1
+            fi
+          done
+
+          aar_count=$(find paykit-ffi/bindings/android/lib/build/outputs/aar -name '*release.aar' -type f | wc -l | tr -d ' ')
+          if [ "$aar_count" -eq 0 ]; then
+            echo "::error::Missing generated Android release AAR"
+            exit 1
+          fi
+
+      - name: Upload generated Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: paykit-android-bindgen
+          path: |
+            paykit-ffi/bindings/android/lib/src/main/kotlin/com/synonym/paykit/*.kt
+            paykit-ffi/bindings/android/lib/src/main/jniLibs/**/libpaykit.so
+            paykit-ffi/bindings/android/native-debug-symbols.zip
+            paykit-ffi/bindings/android/lib/build/outputs/aar/*release.aar
+          if-no-files-found: error
