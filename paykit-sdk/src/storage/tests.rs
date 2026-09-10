@@ -651,6 +651,59 @@ async fn test_private_payment_list_queue_reclaims_stale_sending_before_newer_lis
 }
 
 #[tokio::test]
+async fn test_private_payment_list_queue_keeps_failed_send_before_newer_list() {
+    let storage = InMemoryStorage::new();
+    let counterparty = random_public_key();
+
+    let (first, second) = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                let mut first = tx.insert_outbound_private_message(outbound_private_message(
+                    counterparty.clone(),
+                ));
+                first.status = OutboundPrivateMessageStatus::Failed;
+                first.last_attempt_at = Some(timestamp() - chrono::Duration::seconds(120));
+                tx.save_outbound_private_message(first.clone())?;
+                let second =
+                    tx.insert_outbound_private_message(outbound_private_message(counterparty));
+                Ok((first, second))
+            }
+        })
+        .await
+        .unwrap();
+
+    let claimed = claim_next_outbound_private_message(
+        &storage,
+        &counterparty,
+        &receiver_path(),
+        timestamp(),
+        timestamp() - chrono::Duration::seconds(60),
+        timestamp() - chrono::Duration::seconds(60),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // A failed send may have reached the homeserver, so the queue retries the
+    // identical packet instead of superseding it with a different list.
+    assert_eq!(claimed.outbound_message_id, first.outbound_message_id);
+    let snapshot = storage.snapshot().unwrap();
+    let first = snapshot
+        .outbound_private_messages
+        .iter()
+        .find(|message| message.outbound_message_id == first.outbound_message_id)
+        .unwrap();
+    assert_ne!(first.status, OutboundPrivateMessageStatus::Superseded);
+    let second = snapshot
+        .outbound_private_messages
+        .iter()
+        .find(|message| message.outbound_message_id == second.outbound_message_id)
+        .unwrap();
+    assert_eq!(second.status, OutboundPrivateMessageStatus::Pending);
+}
+
+#[tokio::test]
 async fn test_event_message_queue_preserves_fifo() {
     let storage = InMemoryStorage::new();
     let counterparty = random_public_key();

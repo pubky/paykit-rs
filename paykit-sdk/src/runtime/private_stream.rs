@@ -187,7 +187,7 @@ where
         let next_link_state = EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
             counterparty_receiver_path: stored_link_state.counterparty_receiver_path.clone(),
-            link_snapshot: Some(link.serialize()),
+            link_snapshot: Some(link.serialize()?),
             handshake_snapshot: None,
             handshake_role: None,
             generation: stored_link_state.generation.saturating_add(1),

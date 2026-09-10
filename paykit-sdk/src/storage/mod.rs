@@ -248,11 +248,15 @@ pub trait StorageTransaction {
     /// Claim the next retryable outbound private message for sending.
     ///
     /// Event Messages are claimed FIFO. Private Payment Lists are Latest-State
-    /// Messages, so older claimable unsent lists should be marked
+    /// Messages, so older lists that were never sent should be marked
     /// [`crate::OutboundPrivateMessageStatus::Superseded`] before claiming.
-    /// Stale [`crate::OutboundPrivateMessageStatus::Sending`] records can be
-    /// reclaimed only at the queue head so the same message is retried before
-    /// later private messages advance the Encrypted Link.
+    /// Records whose send outcome is unconfirmed
+    /// ([`crate::OutboundPrivateMessageStatus::Sending`] or
+    /// [`crate::OutboundPrivateMessageStatus::Failed`]) must not be
+    /// superseded: the next send restores the last confirmed snapshot, so
+    /// skipping ahead would reuse the transport key and nonce. They are
+    /// reclaimed only at the queue head so the identical message is retried
+    /// before later private messages advance the Encrypted Link.
     fn claim_next_outbound_private_message(
         &mut self,
         counterparty: &PubkyPublicKey,

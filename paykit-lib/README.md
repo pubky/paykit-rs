@@ -289,10 +289,10 @@ Storage paths for private Paykit data are derived per-counterparty receiver pair
   Advances the handshake by one step. Returns `HandshakeProgress::Pending(handle)` when waiting for the counterparty, or `HandshakeProgress::Complete(EncryptedLink)` when finished. Polling-safe — the caller controls retry timing and timeouts. If a homeserver write fails during the handshake (`HomeserverWriteError`), the function automatically recovers from a pre-mutation snapshot and returns `Pending` so the caller's polling loop retries transparently. The maximum number of consecutive recovery attempts is configurable via `EncryptedLinkHandshake::set_max_recovery_attempts` (default: `DEFAULT_MAX_RECOVERY_ATTEMPTS`, 3). The recovery-attempt counter resets to zero after every successful step.
 
 #### Handshake checkpointing / resumption
-- `EncryptedLinkHandshake::snapshot() -> EncryptedLinkHandshakeSnapshot`
-  Captures the current in-progress handshake state.
-- `EncryptedLinkHandshake::serialize() -> Vec<u8>`
-  Convenience method equivalent to `self.snapshot().serialize()`.
+- `EncryptedLinkHandshake::snapshot() -> Result<EncryptedLinkHandshakeSnapshot>`
+  Captures the current in-progress handshake state. Fails while a prepared transport operation is unacknowledged.
+- `EncryptedLinkHandshake::serialize() -> Result<Vec<u8>>`
+  Convenience method equivalent to `self.snapshot()?.serialize()`.
 - `EncryptedLinkHandshake::config() -> &Arc<PubkyNoiseConfig>`
   Access the shared Noise configuration for in-process handshake restore.
 - `EncryptedLinkHandshakeSnapshot::serialize() -> Vec<u8>` / `EncryptedLinkHandshakeSnapshot::deserialize(bytes: &[u8]) -> Result<EncryptedLinkHandshakeSnapshot>` / `EncryptedLinkHandshakeSnapshot::recipient() -> &PublicKey` / `EncryptedLinkHandshakeSnapshot::remote_noise_public_key() -> &PublicKey`
@@ -441,10 +441,12 @@ An established `EncryptedLink` can be snapshotted, serialized to bytes, persiste
 
 **Snapshot and serialize:**
 
-- `EncryptedLink::snapshot() -> EncryptedLinkSnapshot`
-  Captures the current Encrypted Link state (transport keys, nonce counters, and counterparty identity) as a serializable snapshot.
-- `EncryptedLink::serialize() -> Vec<u8>`
-  Convenience method equivalent to `self.snapshot().serialize()`.
+- `EncryptedLink::snapshot() -> Result<EncryptedLinkSnapshot>`
+  Captures the current Encrypted Link state (transport keys, nonce counters, and counterparty identity) as a serializable snapshot. Fails while a prepared send is unacknowledged; see `retry_pending_send`.
+- `EncryptedLink::serialize() -> Result<Vec<u8>>`
+  Convenience method equivalent to `self.snapshot()?.serialize()`.
+- `EncryptedLink::retry_pending_send() -> Result<()>`
+  Republish the prepared packet retained after a send exhausted its retry budget. Until it is republished, sends, receives, and snapshots on this link fail. Restoring an older snapshot is not a safe recovery: the failed write may have reached the homeserver, so rolling back the sending nonce and slot can reuse the transport key and nonce. Only republish the retained packet or establish a fresh link.
 - `EncryptedLink::config() -> &Arc<PubkyNoiseConfig>`
   Access the shared Noise configuration for in-process restore via `restore_encrypted_link_from_config`.
 
@@ -479,14 +481,14 @@ publish/fetch/remove helpers. SDKs decide when to publish or act on markers.
 
 **When to snapshot:**
 
-Take a snapshot after the Encrypted Link is established and periodically after exchanging messages. The snapshot includes nonce counters that must stay in sync with the counterparty. Restoring from a stale snapshot may cause nonce desynchronization or replay newer messages. Persist any returned Event Messages and caller dedupe state before replacing the stored snapshot with one whose read counter has advanced past those messages.
+Take a snapshot after the Encrypted Link is established and periodically after exchanging messages. The snapshot includes nonce counters that must stay in sync with the counterparty. Restoring from a stale snapshot may cause nonce desynchronization or replay newer messages. Never send different plaintext from a snapshot taken before a failed send: if the earlier publish reached the homeserver, that reuses the transport key and nonce. Persist any returned Event Messages and caller dedupe state before replacing the stored snapshot with one whose read counter has advanced past those messages.
 
 Snapshot bytes include sensitive key material, so they must be treated as secrets (store encrypted at rest; never log or expose them).
 
 ```rust,ignore
 // After establishing the link:
 let link: EncryptedLink = /* ... handshake complete ... */;
-let bytes = link.serialize();
+let bytes = link.serialize()?;
 save_to_disk(&bytes);
 
 // After app restart:

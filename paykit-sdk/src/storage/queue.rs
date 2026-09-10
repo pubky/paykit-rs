@@ -118,7 +118,15 @@ pub(super) fn supersede_outdated_private_payment_lists(
             && &message.counterparty_receiver_path == counterparty_receiver_path
             && message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
             && message.outbound_message_id < latest_private_list_id
-            && message.status != OutboundPrivateMessageStatus::Sending
+            // Never supersede a list whose send may have reached the
+            // homeserver. The next send restores the last confirmed snapshot,
+            // so skipping to different plaintext would reuse the transport key
+            // and nonce; failed and in-flight lists must be retried with the
+            // identical packet instead.
+            && !matches!(
+                message.status,
+                OutboundPrivateMessageStatus::Sending | OutboundPrivateMessageStatus::Failed
+            )
             && is_claimable_outbound_private_message(message, stale_before, failed_retry_after)
         {
             message.status = OutboundPrivateMessageStatus::Superseded;

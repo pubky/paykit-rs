@@ -418,7 +418,7 @@ where
     ) -> Result<()> {
         let now = self.clock.now();
         let sent = mark_outbound_sent(sending, now);
-        link_state.link_snapshot = Some(link.serialize());
+        link_state.link_snapshot = Some(link.serialize()?);
         link_state.handshake_snapshot = None;
         link_state.handshake_role = None;
         link_state.generation = link_state.generation.saturating_add(1);
