@@ -104,8 +104,9 @@ use crate::{
     domain::recovery::{recovery_marker_report, EncryptedLinkRecoveryMarkerReport},
     identity::{IdentityState, IdentityStatus},
     storage::{
-        outbound_private_queue_head_is_claimable, EncryptedLinkStateRecord, LinkedPeerRecord,
-        OutboundPrivateMessageRecord, PeerLinkOperationLease, StorageAdapter, StorageTransaction,
+        ensure_sign_out_generation, outbound_private_queue_head_is_claimable,
+        EncryptedLinkStateRecord, LinkedPeerRecord, OutboundPrivateMessageRecord,
+        PeerLinkOperationLease, StorageAdapter, StorageTransaction,
     },
     PaykitReceiverPath, PaykitSdkError, PaymentAdapter, PrivatePaymentEndpointCandidate,
     PrivatePaymentEndpointReservation, PrivatePaymentEndpointReservationCancellation,
@@ -352,6 +353,11 @@ where
     async fn load_session_access_and_refresh_identity(
         &self,
     ) -> Result<(Option<PubkySessionAccess>, IdentityState)> {
+        // Capture the lifecycle generation before loading the session. A
+        // concurrent sign-out can run between this read and the refresh write
+        // below; `refresh_active_identity` checks the generation so a sign-out
+        // during the session load cannot resurrect the signed-out identity.
+        let expected_generation = self.current_sign_out_generation().await?;
         let session = self.pubky.load_session_access().await?;
         let now = self.clock.now();
 
@@ -367,7 +373,7 @@ where
                         local_pubky_public_key: None,
                         local_receiver_noise_public_key: None,
                         initialized_at: now,
-                        sign_out_generation: 0,
+                        sign_out_generation: expected_generation,
                     };
                     tx.save_identity_state(state.clone());
                     Ok(state)
@@ -385,10 +391,23 @@ where
         session_access.validate_for_capabilities(&required_capabilities)?;
         let state = self
             .storage
-            .transaction(move |tx| Ok(refresh_active_identity(tx, active_identity, now)))
+            .transaction(move |tx| {
+                refresh_active_identity(tx, active_identity, now, expected_generation)
+            })
             .await?;
 
         Ok((session, state))
+    }
+
+    async fn current_sign_out_generation(&self) -> Result<u64> {
+        self.storage
+            .transaction(|tx| {
+                Ok(tx
+                    .load_identity_state()
+                    .map(|state| state.sign_out_generation)
+                    .unwrap_or_default())
+            })
+            .await
     }
 
     async fn require_initialized_identity(&self, context: &str) -> Result<PubkyPublicKey> {
@@ -513,8 +532,23 @@ fn refresh_active_identity(
     tx: &mut dyn StorageTransaction,
     active: ActiveReceiverIdentity,
     initialized_at: DateTime<Utc>,
-) -> IdentityState {
+    expected_generation: u64,
+) -> Result<IdentityState> {
     let previous = tx.load_identity_state();
+    let current_generation = previous
+        .as_ref()
+        .map(|state| state.sign_out_generation)
+        .unwrap_or_default();
+    if current_generation != expected_generation {
+        // A concurrent sign-out or Pubky identity change bumped the generation
+        // while the session was loading. Fail closed instead of pairing stale
+        // session access with the newer identity state.
+        return Err(PaykitSdkError::Identity {
+            context: "Pubky identity changed while session access was loading".into(),
+            source: None,
+        });
+    }
+
     let transition = identity_transition(previous.as_ref(), &active);
     let previous_generation = previous
         .as_ref()
@@ -540,7 +574,7 @@ fn refresh_active_identity(
         sign_out_generation,
     };
     tx.save_identity_state(state.clone());
-    state
+    Ok(state)
 }
 
 fn identity_transition(
@@ -561,6 +595,20 @@ fn identity_transition(
     IdentityTransition::Unchanged
 }
 
+/// Maximum accepted size for a public Paykit document fetched from another
+/// user's homeserver.
+///
+/// Public objects are attacker-controlled and must not be trusted to fit in
+/// memory; 64 KiB is far above any legitimate profile or endpoint payload.
+const MAX_PUBLIC_RESOURCE_BYTES: usize = 64 * 1024;
+
+/// Maximum accepted size for a public file referenced by profile metadata.
+///
+/// Unlike JSON documents, these files are typically profile images, so the
+/// bound is larger while still keeping a hostile pointer from exhausting
+/// memory.
+const MAX_PUBLIC_FILE_BYTES: usize = 5 * 1024 * 1024;
+
 async fn fetch_public_text(
     storage: &pubky::PublicStorage,
     public_key: &PubkyPublicKey,
@@ -570,14 +618,9 @@ async fn fetch_public_text(
     let addr = public_resource_uri(public_key, path);
     match storage.get(addr).await {
         Ok(resp) => {
-            let bytes = resp
-                .bytes()
-                .await
-                .map_err(|err| PaykitSdkError::Transport {
-                    context: context.into(),
-                    source: Some(err.into()),
-                })?;
-            String::from_utf8(bytes.to_vec())
+            let bytes =
+                crate::net::read_bounded_body(resp, MAX_PUBLIC_RESOURCE_BYTES, context).await?;
+            String::from_utf8(bytes)
                 .map(Some)
                 .map_err(|err| PaykitSdkError::Protocol {
                     context: format!("{context}: invalid UTF-8: {err}"),
@@ -601,14 +644,10 @@ async fn fetch_public_file_uri(
             source: None,
         })?;
     match storage.get(resource).await {
-        Ok(resp) => resp
-            .bytes()
-            .await
-            .map(|bytes| Some(bytes.to_vec()))
-            .map_err(|err| PaykitSdkError::Transport {
-                context: context.into(),
-                source: Some(err.into()),
-            }),
+        Ok(resp) => {
+            let bytes = crate::net::read_bounded_body(resp, MAX_PUBLIC_FILE_BYTES, context).await?;
+            Ok(Some(bytes))
+        }
         Err(err) if is_pubky_not_found(&err) => Ok(None),
         Err(err) => Err(map_pubky_transport_error(context, err)),
     }
@@ -621,10 +660,12 @@ async fn list_public_resources(
     context: &'static str,
 ) -> Result<Vec<pubky::PubkyResource>> {
     const LIST_PAGE_LIMIT: u16 = 100;
+    const LIST_MAX_PAGES: usize = 100;
 
     let addr = public_resource_uri(public_key, path);
     let mut entries = Vec::new();
     let mut cursor = None::<String>;
+    let mut pages = 0usize;
     loop {
         let mut builder = storage
             .list(&addr)
@@ -642,10 +683,24 @@ async fn list_public_resources(
         if page.is_empty() {
             break;
         }
+        pages += 1;
+        if pages > LIST_MAX_PAGES {
+            return Err(PaykitSdkError::Protocol {
+                context: format!("{context}: listing exceeded {LIST_MAX_PAGES} pages"),
+                source: None,
+            });
+        }
         let page_len = page.len();
-        cursor = page
+        let next_cursor = page
             .last()
             .map(|entry| format!("{}{}", entry.owner.z32(), entry.path.as_str()));
+        if cursor.is_some() && next_cursor == cursor {
+            return Err(PaykitSdkError::Protocol {
+                context: format!("{context}: listing cursor did not advance"),
+                source: None,
+            });
+        }
+        cursor = next_cursor;
         entries.extend(page);
         if page_len < LIST_PAGE_LIMIT as usize {
             break;

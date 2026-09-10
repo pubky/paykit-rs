@@ -151,9 +151,7 @@ impl PrivateApplicationMessage {
     }
 }
 
-fn decode_private_application_message(
-    raw: &[u8; pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN],
-) -> Result<PrivateApplicationMessage> {
+fn decode_private_application_message(raw: &[u8]) -> Result<PrivateApplicationMessage> {
     // Trim trailing zero-padding added by pubky-noise's fixed-size buffers.
     // Paykit application messages are JSON, so trailing NUL bytes are not valid
     // payload content.
@@ -306,6 +304,11 @@ fn validate_private_application_message_size(
     Ok(())
 }
 
+// The convenience send API is deprecated in favor of the prepared
+// send/acknowledge flow. Paykit keeps the convenience path here (with its own
+// retry loop) until it adopts the prepared flow and persists pending messages
+// before publication.
+#[allow(deprecated)]
 pub(super) async fn send_private_application_message(
     encryptor: &mut pubky_noise::PubkyNoiseEncryptor,
     max_send_retries: u32,
@@ -316,14 +319,25 @@ pub(super) async fn send_private_application_message(
 
     let max_attempts = send_attempts_from_retries(max_send_retries);
     let mut last_error: Option<String> = None;
+    // A failed outbox write leaves the prepared packet unacknowledged.
+    // Preparing a new send would then fail with
+    // `UnacknowledgedPreparedTransport` (non-retryable), so retries republish
+    // the same prepared packet instead of preparing a new one.
+    let mut retry_pending = false;
 
     for attempt in 1..=max_attempts {
-        match encryptor.send_message(plaintext).await {
+        let outcome = if retry_pending {
+            encryptor.retry_pending_send().await
+        } else {
+            encryptor.send_message(plaintext).await
+        };
+        match outcome {
             Ok(()) => {
                 debug!(context, "Private Application Message sent successfully");
                 return Ok(());
             }
             Err(err) if is_retryable_private_send_error(&err) => {
+                retry_pending = true;
                 last_error = Some(format!("{err:?}"));
                 if attempt < max_attempts {
                     warn!(

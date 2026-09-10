@@ -599,6 +599,7 @@ impl FfiPubkySessionBootstrap {
         expected_capabilities: String,
         local_secret_key: Arc<FfiPubkyLocalSecretKey>,
     ) -> Result<(), PaykitFfiError> {
+        let auth_url = Zeroizing::new(auth_url);
         let secret = local_secret_from_bytes(local_secret_key.export_bytes())?;
         self.inner
             .approve_auth(&auth_url, &expected_capabilities, &secret)
@@ -618,6 +619,7 @@ impl FfiPubkySessionBootstrap {
         local_secret_key: Arc<FfiPubkyLocalSecretKey>,
         claim: FfiPubkyAuthCompanionClaim,
     ) -> Result<(), FfiPubkyAuthCompanionClaimApprovalError> {
+        let auth_url = Zeroizing::new(auth_url);
         let secret = local_secret_from_bytes(local_secret_key.export_bytes()).map_err(|err| {
             FfiPubkyAuthCompanionClaimApprovalError::InvalidLocalSecretKey {
                 reason: err.to_string(),
@@ -749,6 +751,7 @@ pub fn redacted_pubky_public_key(value: String) -> Result<String, PaykitFfiError
 /// Parse an auth deep link into public request details.
 #[uniffi::export]
 pub fn parse_pubky_auth_url(auth_url: String) -> Result<FfiPubkyAuthDetails, PaykitFfiError> {
+    let auth_url = Zeroizing::new(auth_url);
     paykit_sdk::parse_pubky_auth_url(&auth_url)
         .map(Into::into)
         .map_err(Into::into)

@@ -96,21 +96,26 @@ impl EncryptedLink {
     ///
     /// Snapshot bytes include sensitive key material and must be stored as
     /// secrets. Do not log them or include them in telemetry.
-    pub fn snapshot(&self) -> EncryptedLinkSnapshot {
-        EncryptedLinkSnapshot::from_state(
-            self.encryptor.snapshot(),
+    pub fn snapshot(&self) -> Result<EncryptedLinkSnapshot> {
+        Ok(EncryptedLinkSnapshot::from_state(
+            self.encryptor
+                .snapshot()
+                .map_err(|err| PaykitError::InvalidData {
+                    context: format!("capture Encrypted Link snapshot: {err:?}"),
+                    source: None,
+                })?,
             self.recipient.clone(),
             self.remote_noise_public_key.clone(),
             self.local_receiver_path.clone(),
             self.remote_receiver_path.clone(),
-        )
+        ))
     }
 
     /// Serialize the current link state to bytes for persistence.
     ///
-    /// Convenience method equivalent to `self.snapshot().serialize()`.
-    pub fn serialize(&self) -> Vec<u8> {
-        self.snapshot().serialize()
+    /// Convenience method equivalent to `self.snapshot()?.serialize()`.
+    pub fn serialize(&self) -> Result<Vec<u8>> {
+        Ok(self.snapshot()?.serialize())
     }
 
     /// Access the shared Noise configuration for this link.
@@ -211,6 +216,17 @@ impl EncryptedLink {
     ///
     /// Higher-level callers should persist the exact JSON before sending when
     /// retrying the same message matters.
+    ///
+    /// Transient outbox write failures are retried up to the configured budget.
+    /// If every attempt fails, the prepared packet is retained and blocks
+    /// further sends, receives, and snapshots on this link until it is
+    /// republished with [`retry_pending_send`](Self::retry_pending_send).
+    ///
+    /// Do not restore an older snapshot to recover from a failed send: the
+    /// failed write may still have reached the homeserver, and rolling back
+    /// the sending nonce and slot would reuse the transport key and nonce for
+    /// the next plaintext. Only the identical prepared packet may be
+    /// republished; otherwise establish a fresh link.
     pub async fn send_private_application_message_json(&mut self, raw_json: &str) -> Result<()> {
         validate_private_application_message_json(raw_json)?;
         self.send_private_application_message_with_context(
@@ -218,6 +234,27 @@ impl EncryptedLink {
             "Private Application Message",
         )
         .await
+    }
+
+    /// Republish the prepared packet retained after a failed send.
+    ///
+    /// A send that exhausts its retry budget leaves the prepared packet
+    /// unacknowledged, which blocks sends, receives, and snapshots on this
+    /// link. Once connectivity recovers, call this to publish the retained
+    /// packet and make the link usable again.
+    ///
+    /// This is the recovery path for the convenience send API; adopting the
+    /// prepared send/acknowledge flow replaces it with explicit persisted
+    /// pending sends.
+    #[allow(deprecated)]
+    pub async fn retry_pending_send(&mut self) -> Result<()> {
+        self.encryptor
+            .retry_pending_send()
+            .await
+            .map_err(|err| PaykitError::Transport {
+                context: format!("retry pending private send: {err:?}"),
+                source: anyhow::anyhow!("pubky-noise retry_pending_send failed: {err:?}"),
+            })
     }
 
     #[cfg(test)]
@@ -230,6 +267,33 @@ impl EncryptedLink {
             "raw test Private Application Message",
         )
         .await
+    }
+
+    /// Return the outbox path the next receive call will read from.
+    ///
+    /// The path is `{owner}/{storage-path}/{slot}`; tests that seed malformed
+    /// ciphertext into the counterparty outbox strip the leading owner segment
+    /// before writing through the counterparty session.
+    #[cfg(test)]
+    pub(crate) fn next_receive_path_for_test(&self) -> Result<String> {
+        self.encryptor
+            .next_receive_path()
+            .map_err(|err| PaykitError::Transport {
+                context: format!("next_receive_path: {err:?}"),
+                source: anyhow::anyhow!("pubky-noise next_receive_path failed: {err:?}"),
+            })
+    }
+
+    /// Simulate homeserver outbox write failures for send-retry tests.
+    #[cfg(test)]
+    pub(crate) fn enable_write_failure_for_test(&mut self) {
+        self.encryptor.test_enable_write_failure();
+    }
+
+    /// Stop simulating homeserver outbox write failures.
+    #[cfg(test)]
+    pub(crate) fn disable_write_failure_for_test(&mut self) {
+        self.encryptor.test_disable_write_failure();
     }
 
     /// Receive available Private Application Messages in stream order.
