@@ -1,4 +1,9 @@
 use super::*;
+use crate::{
+    domain::private_stream::{outbound_event_carriers, OutboundEventCarriers},
+    storage::StorageTransaction,
+};
+use std::collections::HashMap;
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
@@ -294,16 +299,12 @@ where
         let (stored_receipt, access_records, conflicted_access_count, stored_receipt_conflicted) =
             self.storage
                 .transaction(|tx| {
+                    let mut conflicts = ReceiptEventConflicts::new(tx);
                     let stored_receipt =
                         tx.receipt_record(&counterparty, &counterparty_receiver_path, receipt_id);
-                    let stored_receipt_conflicted = stored_receipt.as_ref().is_some_and(|record| {
-                        tx.event_dedup_record(
-                            &counterparty,
-                            &counterparty_receiver_path,
-                            &record.receipt_access_event_id,
-                        )
-                        .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty())
-                    });
+                    let stored_receipt_conflicted = stored_receipt
+                        .as_ref()
+                        .is_some_and(|record| conflicts.receipt_is_conflicted(record));
                     let mut access_records = Vec::new();
                     let mut conflicted_access_count = 0usize;
                     for record in tx
@@ -311,7 +312,7 @@ where
                         .into_iter()
                         .filter(|record| record.receipt_id == receipt_id)
                     {
-                        if Self::receipt_access_event_is_conflicted(tx, &record) {
+                        if conflicts.access_is_conflicted(&record) {
                             conflicted_access_count += 1;
                         } else {
                             access_records.push(record);
@@ -477,10 +478,11 @@ where
             .await?;
         self.storage
             .transaction(|tx| {
+                let mut conflicts = ReceiptEventConflicts::new(tx);
                 let mut records = tx
                     .receipt_access_records(counterparty, counterparty_receiver_path)
                     .into_iter()
-                    .filter(|record| !Self::receipt_access_event_is_conflicted(tx, record))
+                    .filter(|record| !conflicts.access_is_conflicted(record))
                     .map(|record| ReceiptAccessView::from(&record))
                     .collect::<Vec<_>>();
                 records.sort_by_key(|record| Reverse(record.received_at));
@@ -507,6 +509,7 @@ where
         }
         self.storage
             .transaction(|tx| {
+                let mut conflicts = ReceiptEventConflicts::new(tx);
                 let snapshot = tx.export_storage_state();
                 let mut records = snapshot
                     .receipt_access_records
@@ -520,7 +523,7 @@ where
                             ))
                             .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
                     })
-                    .filter(|record| !Self::receipt_access_event_is_conflicted(tx, record))
+                    .filter(|record| !conflicts.access_is_conflicted(record))
                     .map(|record| ReceiptAccessView::from(&record))
                     .collect::<Vec<_>>();
                 records.sort_by_key(|record| Reverse(record.received_at));
@@ -543,6 +546,7 @@ where
             .await?;
         self.storage
             .transaction(|tx| {
+                let mut conflicts = ReceiptEventConflicts::new(tx);
                 let mut records = tx
                     .export_storage_state()
                     .receipt_records
@@ -550,7 +554,7 @@ where
                     .filter(|record| &record.issuer == issuer)
                     .filter(|record| &record.issuer_receiver_path == issuer_receiver_path)
                     .filter(|record| record.recipient_public_key == local_public_key)
-                    .filter(|record| !Self::receipt_record_access_event_is_conflicted(tx, record))
+                    .filter(|record| !conflicts.receipt_is_conflicted(record))
                     .collect::<Vec<_>>();
                 records.sort_by_key(|record| Reverse(record.retrieved_at));
                 Ok(records)
@@ -575,6 +579,7 @@ where
         };
         self.storage
             .transaction(|tx| {
+                let mut conflicts = ReceiptEventConflicts::new(tx);
                 let snapshot = tx.export_storage_state();
                 let mut records = snapshot
                     .receipt_records
@@ -586,7 +591,7 @@ where
                             .get(&(record.issuer.clone(), record.issuer_receiver_path.clone()))
                             .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
                     })
-                    .filter(|record| !Self::receipt_record_access_event_is_conflicted(tx, record))
+                    .filter(|record| !conflicts.receipt_is_conflicted(record))
                     .collect::<Vec<_>>();
                 records.sort_by_key(|record| Reverse(record.retrieved_at));
                 Ok(records)
@@ -633,30 +638,6 @@ where
         Ok(())
     }
 
-    fn receipt_access_event_is_conflicted(
-        tx: &dyn crate::storage::StorageTransaction,
-        access: &ReceiptAccessRecord,
-    ) -> bool {
-        tx.event_dedup_record(
-            &access.counterparty,
-            &access.counterparty_receiver_path,
-            &access.event_id,
-        )
-        .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty())
-    }
-
-    fn receipt_record_access_event_is_conflicted(
-        tx: &dyn crate::storage::StorageTransaction,
-        record: &ReceiptRecord,
-    ) -> bool {
-        tx.event_dedup_record(
-            &record.issuer,
-            &record.issuer_receiver_path,
-            &record.receipt_access_event_id,
-        )
-        .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty())
-    }
-
     fn conflicted_receipt_access_error(receipt_id: &str) -> PaykitSdkError {
         PaykitSdkError::Protocol {
             context: format!(
@@ -691,5 +672,66 @@ where
                 }
             })
             .await
+    }
+}
+
+/// Read Receipt Access provenance against both authenticated sending directions.
+///
+/// Inbound dedupe is durable, but outbound carriers live in the retained queue.
+/// Cache each exact link only within this transaction so a later read sees new
+/// conflicts and no other counterparty or receiver path can taint this link.
+struct ReceiptEventConflicts<'a> {
+    tx: &'a dyn StorageTransaction,
+    outbound: HashMap<(PubkyPublicKey, PaykitReceiverPath), OutboundEventCarriers>,
+}
+
+impl<'a> ReceiptEventConflicts<'a> {
+    fn new(tx: &'a dyn StorageTransaction) -> Self {
+        Self {
+            tx,
+            outbound: HashMap::new(),
+        }
+    }
+
+    fn access_is_conflicted(&mut self, access: &ReceiptAccessRecord) -> bool {
+        self.event_is_conflicted(
+            &access.counterparty,
+            &access.counterparty_receiver_path,
+            &access.event_id,
+        )
+    }
+
+    fn receipt_is_conflicted(&mut self, record: &ReceiptRecord) -> bool {
+        self.event_is_conflicted(
+            &record.issuer,
+            &record.issuer_receiver_path,
+            &record.receipt_access_event_id,
+        )
+    }
+
+    fn event_is_conflicted(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        receiver_path: &PaykitReceiverPath,
+        event_id: &str,
+    ) -> bool {
+        if self
+            .tx
+            .event_dedup_record(counterparty, receiver_path, event_id)
+            .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty())
+        {
+            return true;
+        }
+        self.outbound
+            .entry((counterparty.clone(), receiver_path.clone()))
+            .or_insert_with(|| {
+                outbound_event_carriers(
+                    &self
+                        .tx
+                        .outbound_private_messages(counterparty, receiver_path),
+                )
+            })
+            .event_ids
+            .contains(event_id)
     }
 }
