@@ -7,6 +7,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Security
+- Bound public response reads while streaming (JSON documents, profile files, Encrypted Receipts, and Encrypted Link recovery markers) and cap directory listing pagination, rejecting non-advancing cursors.
+- Keep decrypted private-message plaintext out of parse errors and zeroize FFI auth URL inputs.
+- Fail identity refresh and identity-scoped receipt writes when the sign-out generation changed, so concurrent sign-outs cannot cross-write identity state.
+- Refuse to supersede a Private Payment List whose send outcome is unknown, preventing transport key/nonce reuse after a failed publish.
+- Update `rustls-webpki` to 0.103.15, patching certificate-validation advisories.
+
+### Fixed
+- Update `pubky-noise` to 0.1.0-rc8, which rejects malformed outbox packets instead of panicking, and republish the retained prepared packet on send retries.
+- Reject Encrypted Receipts above the shared 256 KiB limit at issuance so they cannot be created unretrievable.
+
+### Changed
+- `EncryptedLink`/`EncryptedLinkHandshake::snapshot` and `serialize` now return `Result`; `EncryptedLink::retry_pending_send` recovers a retained prepared send.
+- Export `MAX_ENCRYPTED_RECEIPT_BYTES`.
+
 ## [0.1.0-rc51] - 2026-09-04
 
 ### Fixed
