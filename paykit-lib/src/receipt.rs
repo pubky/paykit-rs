@@ -6,7 +6,7 @@ mod wire;
 pub use access::{
     prepare_receipt, prepare_receipt_for_recipient, send_receipt_access, store_prepared_receipt,
 };
-pub use crypto::decrypt_receipt;
+pub use crypto::{decrypt_receipt, MAX_ENCRYPTED_RECEIPT_BYTES};
 pub(crate) use types::RECEIPT_ENCRYPTION_ALGORITHM;
 pub use types::{
     PreparedReceipt, Receipt, ReceiptAccess, ReceiptAccessEventMessage, ReceiptDecryptionKey,
@@ -107,6 +107,57 @@ mod tests {
         assert!(
             matches!(err, PaykitError::Validation(ref msg) if msg.contains("decimal string")),
             "expected Receipt amount validation error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_encrypt_receipt_rejects_oversized_document() {
+        let receipt = Receipt {
+            receipt_id: ReceiptId::new("450e8400-e29b-41d4-a716-446655440002").unwrap(),
+            payment_reference: PaymentReference::new("invoice-2026-0002").unwrap(),
+            payment_request_id: None,
+            billing_period: None,
+            recipient_public_key: Keypair::random().public_key(),
+            payment_endpoint_identifier: None,
+            amount: None,
+            metadata: metadata(json!({
+                "blob": "a".repeat(MAX_ENCRYPTED_RECEIPT_BYTES),
+            })),
+        };
+
+        let err = receipt
+            .encrypt(&receiver_path(), &ReceiptDecryptionKey::generate())
+            .unwrap_err();
+        assert!(
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("maximum size")),
+            "expected oversized Encrypted Receipt error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_encrypt_receipt_accepts_large_metadata_within_limit() {
+        let receipt_id = ReceiptId::new("450e8400-e29b-41d4-a716-446655440003").unwrap();
+        let receipt = Receipt {
+            receipt_id: receipt_id.clone(),
+            payment_reference: PaymentReference::new("invoice-2026-0003").unwrap(),
+            payment_request_id: None,
+            billing_period: None,
+            recipient_public_key: Keypair::random().public_key(),
+            payment_endpoint_identifier: None,
+            amount: None,
+            metadata: metadata(json!({
+                "blob": "a".repeat(50 * 1024),
+            })),
+        };
+        let location = ReceiptAccess::location(&receiver_path(), &receipt_id);
+        let key = ReceiptDecryptionKey::generate();
+
+        let encrypted = receipt.encrypt(&receiver_path(), &key).unwrap();
+
+        assert!(encrypted.len() <= MAX_ENCRYPTED_RECEIPT_BYTES);
+        assert_eq!(
+            decrypt_receipt(&encrypted, &key, &location).unwrap(),
+            receipt
         );
     }
 

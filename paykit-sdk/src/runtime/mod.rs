@@ -561,6 +561,20 @@ fn identity_transition(
     IdentityTransition::Unchanged
 }
 
+/// Maximum accepted size for a public Paykit document fetched from another
+/// user's homeserver.
+///
+/// Public objects are attacker-controlled and must not be trusted to fit in
+/// memory; 64 KiB is far above any legitimate profile or endpoint payload.
+const MAX_PUBLIC_RESOURCE_BYTES: usize = 64 * 1024;
+
+/// Maximum accepted size for a public file referenced by profile metadata.
+///
+/// Unlike JSON documents, these files are typically profile images, so the
+/// bound is larger while still keeping a hostile pointer from exhausting
+/// memory.
+const MAX_PUBLIC_FILE_BYTES: usize = 5 * 1024 * 1024;
+
 async fn fetch_public_text(
     storage: &pubky::PublicStorage,
     public_key: &PubkyPublicKey,
@@ -570,14 +584,9 @@ async fn fetch_public_text(
     let addr = public_resource_uri(public_key, path);
     match storage.get(addr).await {
         Ok(resp) => {
-            let bytes = resp
-                .bytes()
-                .await
-                .map_err(|err| PaykitSdkError::Transport {
-                    context: context.into(),
-                    source: Some(err.into()),
-                })?;
-            String::from_utf8(bytes.to_vec())
+            let bytes =
+                crate::net::read_bounded_body(resp, MAX_PUBLIC_RESOURCE_BYTES, context).await?;
+            String::from_utf8(bytes)
                 .map(Some)
                 .map_err(|err| PaykitSdkError::Protocol {
                     context: format!("{context}: invalid UTF-8: {err}"),
@@ -601,14 +610,10 @@ async fn fetch_public_file_uri(
             source: None,
         })?;
     match storage.get(resource).await {
-        Ok(resp) => resp
-            .bytes()
-            .await
-            .map(|bytes| Some(bytes.to_vec()))
-            .map_err(|err| PaykitSdkError::Transport {
-                context: context.into(),
-                source: Some(err.into()),
-            }),
+        Ok(resp) => {
+            let bytes = crate::net::read_bounded_body(resp, MAX_PUBLIC_FILE_BYTES, context).await?;
+            Ok(Some(bytes))
+        }
         Err(err) if is_pubky_not_found(&err) => Ok(None),
         Err(err) => Err(map_pubky_transport_error(context, err)),
     }

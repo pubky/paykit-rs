@@ -760,6 +760,12 @@ where
         .await
 }
 
+/// Maximum accepted size for an Encrypted Receipt document.
+///
+/// Encrypted Receipts are served by an issuer's homeserver and must not be
+/// trusted to fit in memory.
+const MAX_ENCRYPTED_RECEIPT_BYTES: usize = paykit_lib::MAX_ENCRYPTED_RECEIPT_BYTES;
+
 pub(crate) async fn fetch_encrypted_receipt_json(
     public_storage: &pubky::PublicStorage,
     issuer: &PubkyPublicKey,
@@ -768,13 +774,12 @@ pub(crate) async fn fetch_encrypted_receipt_json(
     let addr = format!("{}{}", issuer.to_public_key()?, location);
     match public_storage.get(addr).await {
         Ok(response) => {
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|err| PaykitSdkError::Transport {
-                    context: "read encrypted receipt bytes".into(),
-                    source: Some(err.into()),
-                })?;
+            let bytes = crate::net::read_bounded_body(
+                response,
+                MAX_ENCRYPTED_RECEIPT_BYTES,
+                "encrypted receipt",
+            )
+            .await?;
             let json = encrypted_receipt_json_from_bytes(&bytes)?;
             Ok(Some(json))
         }
