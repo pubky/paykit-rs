@@ -660,10 +660,12 @@ async fn list_public_resources(
     context: &'static str,
 ) -> Result<Vec<pubky::PubkyResource>> {
     const LIST_PAGE_LIMIT: u16 = 100;
+    const LIST_MAX_PAGES: usize = 100;
 
     let addr = public_resource_uri(public_key, path);
     let mut entries = Vec::new();
     let mut cursor = None::<String>;
+    let mut pages = 0usize;
     loop {
         let mut builder = storage
             .list(&addr)
@@ -681,10 +683,24 @@ async fn list_public_resources(
         if page.is_empty() {
             break;
         }
+        pages += 1;
+        if pages > LIST_MAX_PAGES {
+            return Err(PaykitSdkError::Protocol {
+                context: format!("{context}: listing exceeded {LIST_MAX_PAGES} pages"),
+                source: None,
+            });
+        }
         let page_len = page.len();
-        cursor = page
+        let next_cursor = page
             .last()
             .map(|entry| format!("{}{}", entry.owner.z32(), entry.path.as_str()));
+        if cursor.is_some() && next_cursor == cursor {
+            return Err(PaykitSdkError::Protocol {
+                context: format!("{context}: listing cursor did not advance"),
+                source: None,
+            });
+        }
+        cursor = next_cursor;
         entries.extend(page);
         if page_len < LIST_PAGE_LIMIT as usize {
             break;

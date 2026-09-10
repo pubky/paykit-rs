@@ -25,6 +25,7 @@ pub const PAYKIT_PATH_PREFIX: &str = "/pub/paykit/v0";
 pub const PAYKIT_PRIVATE_PATH_PREFIX: &str = "/pub/paykit/v0/private";
 
 const LIST_PAGE_LIMIT: u16 = 100;
+const LIST_MAX_PAGES: usize = 100;
 
 /// Maximum accepted size for a public Paykit document (Payment Endpoint
 /// payloads, receiver markers).
@@ -538,6 +539,7 @@ async fn list_resources(
     trace!("listing directory resources");
     let mut resources = Vec::new();
     let mut cursor = None::<String>;
+    let mut pages = 0usize;
 
     loop {
         let mut builder = match storage.list(&addr) {
@@ -578,10 +580,25 @@ async fn list_resources(
             break;
         }
 
+        pages += 1;
+        if pages > LIST_MAX_PAGES {
+            return Err(invalid_data(
+                format!("{label}: listing exceeded {LIST_MAX_PAGES} pages"),
+                None,
+            ));
+        }
+
         let page_len = page.len();
-        cursor = page
+        let next_cursor = page
             .last()
             .map(|resource| format!("{}{}", resource.owner.z32(), resource.path.as_str()));
+        if cursor.is_some() && next_cursor == cursor {
+            return Err(invalid_data(
+                format!("{label}: listing cursor did not advance"),
+                None,
+            ));
+        }
+        cursor = next_cursor;
         resources.extend(page);
 
         if page_len < LIST_PAGE_LIMIT as usize {
