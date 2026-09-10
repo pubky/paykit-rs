@@ -210,6 +210,24 @@ unresolved automatic reservations with original wallet admission time `s`
 satisfying `t - L < s <= t`. A payment exactly on the lower boundary has left
 the window.
 
+Wallets MUST durably retain a nondecreasing evaluation-time watermark for each
+Allowance alongside its usage and reservations. Before evaluating automatic
+handling at trusted time `t`, the wallet MUST reject that evaluation if `t` is
+earlier than the watermark. Advancing the watermark MUST be atomic with any
+automatic admission or removal of usage that has left a period. A failed or
+restarted operation MUST NOT leave admitted usage or discarded history with an
+older watermark. This rule applies to both rolling and anchored periods and
+MUST survive restart and backup recovery. Missing or uncertain watermark state
+requires the same fail-closed recovery as missing usage history.
+
+Clock rollback MUST NOT restore capacity, move evaluation into an earlier
+anchored period, or discard future-dated durable usage. Automatic handling may
+resume when trusted time reaches the retained watermark and the ordinary
+eligibility checks pass. For example, usage admitted at 10:00 remains protected
+when the clock moves to 09:00, including after restart; crossing midnight
+backwards MUST NOT reopen the previous day's anchored capacity. Wallet tests
+SHOULD cover those cases and normal forward-time period expiry.
+
 For every applicable period, adding the candidate amount and count MUST leave
 the amount total numerically at or below `amount_limit` and the count at or
 below `payment_count_limit` where those limits are non-null. Implementations

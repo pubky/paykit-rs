@@ -377,7 +377,13 @@ Validation rules:
 
 - Sender MUST be the payer.
 - The request MUST be known.
-- The request MUST be in the proposed state.
+- At the payer's rejection decision, the request MUST be in the proposed state.
+- A payee that has already recorded its own Cancellation MUST retain an
+  otherwise-valid crossing Rejection from the payer when no earlier Rejection
+  or Acceptance has been recorded. Both Event IDs are retained and the
+  lifecycle remains `cancelled`. A second Rejection is invalid and MUST NOT
+  replace the first. Rejection after the payer's own Cancellation is invalid
+  because those events occupy the same FIFO direction.
 - `reason` is optional and SHOULD be omitted when absent. If present, it MUST be a string; `null` is invalid.
 - Rejection is terminal for that `payment_request_id`. Later acceptance or proof messages for the same request are invalid.
 
@@ -401,7 +407,13 @@ Validation rules:
 
 - Sender MUST be either the payer or payee.
 - The request MUST be known.
-- The request MUST be non-terminal.
+- At the sender's cancellation decision, the request MUST be non-terminal.
+- A payer that has already recorded its own Rejection MUST retain an
+  otherwise-valid crossing Cancellation from the payee when no earlier
+  Cancellation has been recorded. Both Event IDs are retained and Cancellation
+  takes precedence, deriving `cancelled`. Cancellation by the payer after its
+  own Rejection remains invalid. These crossing exceptions do not permit new
+  local actions on a terminal request or reopen payment authority.
 - Cancellation is unilateral. No counterparty confirmation is required.
 - After cancellation, payer implementations MUST NOT start new payment execution for the request.
 - Cancellation does not invalidate a payment execution that the payer durably
@@ -516,6 +528,7 @@ proposed + rejection -> rejected
 accepted one-time request + payment_proof -> proof_submitted
 proposed|accepted|proof_submitted + cancellation -> cancelled
 proposed + crossing acceptance and cancellation -> cancelled (acceptance recorded)
+proposed + crossing rejection and payee cancellation -> cancelled (rejection recorded)
 cancelled request with recorded acceptance + qualifying payment_proof -> cancelled (proof recorded)
 ```
 
@@ -525,11 +538,13 @@ Terminal authorization states:
 - `cancelled`
 
 Neither state can be reopened by a later Acceptance. A crossing Acceptance may
-be recorded on a cancelled request only as described above. Rejection admits no
-later Payment Proof. Cancellation prevents new execution, but a qualifying
-Payment Proof may still report an execution that crossed its irreversible
-boundary first; recording that proof does not transition the request out of
-`cancelled`.
+be recorded on a cancelled request only as described above. A crossing
+Rejection and payee Cancellation are both retained with Cancellation taking
+precedence, regardless of which is recorded first. A recorded Rejection admits
+no later Acceptance or Payment Proof, including after a crossing Cancellation.
+Cancellation prevents new execution, but a qualifying Payment Proof may still
+report an execution that crossed its irreversible boundary first; recording
+that proof does not transition the request out of `cancelled`.
 
 For one-time requests, `proof_submitted` means Paykit has received a Payment
 Proof event, not that payment settlement was independently verified. It is not a
