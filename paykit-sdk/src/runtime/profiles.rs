@@ -181,13 +181,18 @@ where
         fetch_public_file_uri(&public_storage, uri, "fetch Pubky file", None).await
     }
 
-    /// Fetch a public file while limiting the accumulated response body.
+    /// Fetch a public file while limiting the accumulated successful response body.
     ///
-    /// Missing files return `None`. Bodies larger than `max_bytes` return a
+    /// Missing files return `None`. Successful bodies larger than `max_bytes` return a
     /// protocol error, including streams without Content-Length. The limit is
     /// checked before each chunk is appended and the response is dropped on
     /// overflow. Transport buffers and the current chunk are additional memory.
-    /// Zero permits only an empty body. This does not decode images or limit
+    ///
+    /// HTTP error bodies are not bounded: the current Pubky client buffers them
+    /// before Paykit regains control. Closing that gap through this API requires
+    /// a Pubky client API change. This is not complete response-size protection.
+    ///
+    /// Zero permits only an empty successful body. This does not decode images or limit
     /// pixels, cache storage, or request duration. Pubky client configuration,
     /// sessions, capabilities, and key rotation remain the caller's responsibility.
     pub async fn fetch_pubky_file_bounded(
@@ -321,30 +326,6 @@ where
         )
         .await
     }
-}
-
-pub(super) async fn read_bounded_public_response(
-    response: reqwest::Response,
-    max_bytes: u64,
-) -> Result<Option<Vec<u8>>> {
-    let status = response.status();
-    // Never consume error bodies. PublicStorage::get would buffer them before
-    // returning an error, so bounded reads use the vendored unchecked GET.
-    if matches!(
-        status,
-        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
-    ) {
-        return Ok(None);
-    }
-    if !status.is_success() {
-        return Err(PaykitSdkError::Transport {
-            context: format!("fetch Pubky file: HTTP {}", status.as_u16()),
-            source: None,
-        });
-    }
-    read_bounded_public_file(response, max_bytes)
-        .await
-        .map(Some)
 }
 
 pub(super) async fn read_bounded_public_file(
@@ -491,26 +472,5 @@ mod tests {
             Err(PaykitSdkError::Transport { .. })
         ));
         server.join().unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_bounded_public_file_discards_streamed_error_bodies_before_eof() {
-        for (raw, missing) in [
-            ("HTTP/1.1 404 Not Found\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n1234\r\n", true),
-            ("HTTP/1.1 410 Gone\r\nContent-Length: 1000000\r\n\r\n", true),
-            ("HTTP/1.1 500 Internal Server Error\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n1234\r\n", false),
-        ] {
-            let (response, server) = response(raw, true).await;
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                read_bounded_public_response(response, 0),
-            ).await.unwrap();
-            if missing {
-                assert_eq!(result.unwrap(), None);
-            } else {
-                assert!(matches!(result, Err(PaykitSdkError::Transport { .. })));
-            }
-            server.join().unwrap();
-        }
     }
 }

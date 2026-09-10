@@ -166,11 +166,14 @@ These proposal APIs never delete images. Callers must establish that no other
 proposal or profile references a blob before deleting it.
 
 For downloads, `fetchPubkyFileBounded(uri, maxBytes)` enforces a caller-selected
-byte limit while reading the response, before returning bytes across FFI. It
+byte limit while reading successful response bodies, before returning bytes across FFI. It
 returns `nil` for missing files and throws for oversized or truncated bodies.
 Zero permits only an empty body. Transport buffers and the current chunk are
 additional memory. Image decode, pixel, cache and request-timeout limits remain
-the app's responsibility. The older `fetchPubkyFile` is unbounded.
+the app's responsibility. HTTP error bodies remain unbounded inside the current
+Pubky client before Paykit regains control. Closing that gap through this path
+requires a Pubky client API change. This is not complete response-size protection.
+The older `fetchPubkyFile` is unbounded.
 
 - `PaykitSdk.proposePaymentRequest`, `acceptPaymentRequest`,
   `rejectPaymentRequest`, `cancelPaymentRequest`, and `submitPaymentProof` —

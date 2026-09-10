@@ -647,8 +647,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func fetchPubkyFile(uri: String) async throws  -> Data?
 
     /**
-     * Fetch public file bytes with a limit checked while reading each chunk.
-     * Missing files return None. Oversized bodies fail before full buffering.
+     * Fetch public file bytes with a limit on successful response bodies.
+     * The limit is checked before appending each chunk. Missing files return None.
+     * Oversized successful bodies fail before full buffering. HTTP error bodies
+     * remain unbounded inside the current Pubky client before Paykit regains
+     * control. Closing that gap requires a Pubky client API change.
      * Transport buffers are additional memory. Image decoding, cache limits,
      * request duration, and Pubky client configuration remain caller-owned.
      */
@@ -1578,8 +1581,11 @@ open func fetchPubkyFile(uri: String)async throws  -> Data?  {
 }
 
     /**
-     * Fetch public file bytes with a limit checked while reading each chunk.
-     * Missing files return None. Oversized bodies fail before full buffering.
+     * Fetch public file bytes with a limit on successful response bodies.
+     * The limit is checked before appending each chunk. Missing files return None.
+     * Oversized successful bodies fail before full buffering. HTTP error bodies
+     * remain unbounded inside the current Pubky client before Paykit regains
+     * control. Closing that gap requires a Pubky client API change.
      * Transport buffers are additional memory. Image decoding, cache limits,
      * request duration, and Pubky client configuration remain caller-owned.
      */
@@ -18396,7 +18402,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_file() != 313) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_file_bounded() != 64476) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_file_bounded() != 24197) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_follows() != 44041) {

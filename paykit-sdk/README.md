@@ -144,10 +144,14 @@ The SDK does not roll back image uploads on proposal failure.
 - use `publish_paykit_blob` / `delete_paykit_blob` for files under the
   configured Paykit blob prefix
 - use `fetch_pubky_file_bounded(uri, max_bytes)` for untrusted public files
-  and images. The limit is checked while reading, before each chunk is appended.
+  and images. The limit applies to successful response bodies and is checked
+  while reading, before each chunk is appended.
   Missing files return `None`, oversized bodies return a protocol error, and zero
   permits only empty bodies. Content-Length can reject a response early but is
   not required. Transport buffers and the current chunk use additional memory.
+  HTTP error bodies remain unbounded inside the current Pubky client before
+  Paykit regains control. Closing that gap through this path requires a Pubky
+  client API change. This is not complete response-size protection.
   Callers still set image decode, pixel, cache, and Pubky request-timeout limits.
   The compatibility methods `fetch_pubky_file` / `fetch_pubky_text` are unbounded.
 - use `fetch_pubky_profile` / `fetch_pubky_follows` for read-only Pubky app
@@ -306,13 +310,3 @@ private Paykit runtime state. Public Paykit data can be rediscovered from Pubky,
 but Encrypted Link snapshots, private stream history, Receipt Access keys,
 outbound queues, local Contact Records, and Payment Request/Receipt history
 cannot be safely reconstructed from homeserver data alone.
-
-## Vendored Pubky dependency
-
-Bounded public-file reads require the [vendored Pubky patch](../vendor/pubky/PATCH.md).
-The workspace selects it for all Pubky consumers, including pubky-noise.
-Cargo does not propagate a dependency's patch table. Applications consuming
-Paykit as a Rust Git or path dependency must add the equivalent `pubky` override
-to their own workspace root. Standalone crates.io packaging omits this override
-and cannot build this SDK against the unpatched Pubky 0.11.0 release.
-Mobile binaries built from this complete workspace include the patched code.
