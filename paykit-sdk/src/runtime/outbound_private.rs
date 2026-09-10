@@ -19,7 +19,7 @@ where
             &counterparty_receiver_path,
         )
         .await?;
-        let (session_access, _) = self.private_link_session_access().await?;
+        let (session_access, ..) = self.private_link_session_access().await?;
         self.ensure_peer_allows_private_automation(&counterparty, &counterparty_receiver_path)
             .await?;
         let queued = queued_outbound_private_messages(

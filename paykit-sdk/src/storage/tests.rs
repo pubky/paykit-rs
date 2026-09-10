@@ -1188,3 +1188,33 @@ async fn test_transaction_rolls_back_on_error() {
     let snapshot = storage.snapshot().unwrap();
     assert!(snapshot.linked_peers.is_empty());
 }
+
+#[tokio::test]
+async fn test_ensure_sign_out_generation_rejects_stale_writers() {
+    let storage = InMemoryStorage::new();
+    storage
+        .transaction(|tx| {
+            tx.save_identity_state(IdentityState {
+                local_pubky_public_key: None,
+                local_receiver_noise_public_key: None,
+                initialized_at: timestamp(),
+                sign_out_generation: 5,
+            });
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let stale = storage
+        .transaction(|tx| ensure_sign_out_generation(tx, 4, "test write"))
+        .await;
+    assert!(
+        matches!(stale, Err(PaykitSdkError::Identity { .. })),
+        "writes captured before a sign-out must be rejected"
+    );
+
+    let current = storage
+        .transaction(|tx| ensure_sign_out_generation(tx, 5, "test write"))
+        .await;
+    assert!(current.is_ok());
+}

@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     domain::outbound_private::validate_outbound_private_message,
     domain::records::{AmountRecord, BillingPeriodRecord},
-    storage::{NewOutboundPrivateMessage, StorageAdapter},
+    storage::{ensure_sign_out_generation, NewOutboundPrivateMessage, StorageAdapter},
     PaykitReceiverPath, PaykitSdkError, PubkyPublicKey, Result,
 };
 
@@ -940,6 +940,7 @@ pub(crate) async fn enqueue_receipt_access_for_issuance<S>(
     storage: &S,
     record: ReceiptIssuanceRecord,
     now: DateTime<Utc>,
+    expected_generation: u64,
 ) -> Result<ReceiptIssuanceRecord>
 where
     S: StorageAdapter,
@@ -956,6 +957,7 @@ where
     }
     storage
         .transaction(move |tx| {
+            ensure_sign_out_generation(tx, expected_generation, "queue receipt access")?;
             let outbound = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                 record.counterparty.clone(),
                 record.counterparty_receiver_path.clone(),

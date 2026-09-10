@@ -104,8 +104,9 @@ use crate::{
     domain::recovery::{recovery_marker_report, EncryptedLinkRecoveryMarkerReport},
     identity::{IdentityState, IdentityStatus},
     storage::{
-        outbound_private_queue_head_is_claimable, EncryptedLinkStateRecord, LinkedPeerRecord,
-        OutboundPrivateMessageRecord, PeerLinkOperationLease, StorageAdapter, StorageTransaction,
+        ensure_sign_out_generation, outbound_private_queue_head_is_claimable,
+        EncryptedLinkStateRecord, LinkedPeerRecord, OutboundPrivateMessageRecord,
+        PeerLinkOperationLease, StorageAdapter, StorageTransaction,
     },
     PaykitReceiverPath, PaykitSdkError, PaymentAdapter, PrivatePaymentEndpointCandidate,
     PrivatePaymentEndpointReservation, PrivatePaymentEndpointReservationCancellation,
@@ -352,6 +353,11 @@ where
     async fn load_session_access_and_refresh_identity(
         &self,
     ) -> Result<(Option<PubkySessionAccess>, IdentityState)> {
+        // Capture the lifecycle generation before loading the session. A
+        // concurrent sign-out can run between this read and the refresh write
+        // below; `refresh_active_identity` checks the generation so a sign-out
+        // during the session load cannot resurrect the signed-out identity.
+        let expected_generation = self.current_sign_out_generation().await?;
         let session = self.pubky.load_session_access().await?;
         let now = self.clock.now();
 
@@ -367,7 +373,7 @@ where
                         local_pubky_public_key: None,
                         local_receiver_noise_public_key: None,
                         initialized_at: now,
-                        sign_out_generation: 0,
+                        sign_out_generation: expected_generation,
                     };
                     tx.save_identity_state(state.clone());
                     Ok(state)
@@ -385,10 +391,23 @@ where
         session_access.validate_for_capabilities(&required_capabilities)?;
         let state = self
             .storage
-            .transaction(move |tx| Ok(refresh_active_identity(tx, active_identity, now)))
+            .transaction(move |tx| {
+                refresh_active_identity(tx, active_identity, now, expected_generation)
+            })
             .await?;
 
         Ok((session, state))
+    }
+
+    async fn current_sign_out_generation(&self) -> Result<u64> {
+        self.storage
+            .transaction(|tx| {
+                Ok(tx
+                    .load_identity_state()
+                    .map(|state| state.sign_out_generation)
+                    .unwrap_or_default())
+            })
+            .await
     }
 
     async fn require_initialized_identity(&self, context: &str) -> Result<PubkyPublicKey> {
@@ -513,8 +532,23 @@ fn refresh_active_identity(
     tx: &mut dyn StorageTransaction,
     active: ActiveReceiverIdentity,
     initialized_at: DateTime<Utc>,
-) -> IdentityState {
+    expected_generation: u64,
+) -> Result<IdentityState> {
     let previous = tx.load_identity_state();
+    let current_generation = previous
+        .as_ref()
+        .map(|state| state.sign_out_generation)
+        .unwrap_or_default();
+    if current_generation != expected_generation {
+        // A concurrent sign-out or Pubky identity change bumped the generation
+        // while the session was loading. Fail closed instead of pairing stale
+        // session access with the newer identity state.
+        return Err(PaykitSdkError::Identity {
+            context: "Pubky identity changed while session access was loading".into(),
+            source: None,
+        });
+    }
+
     let transition = identity_transition(previous.as_ref(), &active);
     let previous_generation = previous
         .as_ref()
@@ -540,7 +574,7 @@ fn refresh_active_identity(
         sign_out_generation,
     };
     tx.save_identity_state(state.clone());
-    state
+    Ok(state)
 }
 
 fn identity_transition(
