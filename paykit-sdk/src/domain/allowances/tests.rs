@@ -716,6 +716,116 @@ async fn test_allowance_rejection_blocks_later_response_without_queue_mutation()
 }
 
 #[tokio::test]
+async fn test_allowance_end_after_rejection_allows_proposer_withdrawal() {
+    for role in [AllowanceRole::Allower, AllowanceRole::Allowee] {
+        let storage = InMemoryStorage::new();
+        let peer = counterparty();
+        seed_active_link(&storage, peer.clone(), receiver_path()).await;
+        queue_outbound(
+            &storage,
+            peer.clone(),
+            receiver_path(),
+            proposal(PROPOSAL_ID, role),
+            timestamp(),
+        )
+        .await;
+        persist_inbound(
+            &storage,
+            peer.clone(),
+            receiver_path(),
+            vec![AllowanceEvent::Rejection(AllowanceRejection::new(
+                event_id(ACCEPTANCE_ID),
+                allowance_id(),
+                event_id(PROPOSAL_ID),
+            ))],
+            timestamp(),
+        )
+        .await;
+        assert_eq!(
+            derived(&storage, &peer, &receiver_path()).await.state,
+            AllowanceLifecycleState::Rejected
+        );
+
+        let ended = enqueue_allowance_end(
+            &storage,
+            peer.clone(),
+            receiver_path(),
+            allowance_id(),
+            timestamp(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(ended.state, AllowanceLifecycleState::Ended);
+        assert_eq!(ended.history_status, AllowanceHistoryStatus::Consistent);
+        let state = storage.snapshot().unwrap();
+        assert_eq!(state.outbound_private_messages.len(), 2);
+        let end_message = state.outbound_private_messages.last().unwrap();
+        let parsed = parse_allowance_event_message(&PrivateApplicationMessage {
+            version: Some(1),
+            kind: Some(end_message.kind.clone()),
+            raw_json: end_message.raw_json.clone(),
+        })
+        .unwrap();
+        let AllowanceEvent::End(end_event) = parsed.parsed_event().unwrap() else {
+            panic!("last outbound message must be an Allowance End")
+        };
+        assert_eq!(end_event.proposal_event_id().as_str(), PROPOSAL_ID);
+        assert!(end_event.acceptance_event_id().is_none());
+        assert_eq!(
+            derived(&storage, &peer, &receiver_path()).await.state,
+            AllowanceLifecycleState::Ended
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_allowance_end_after_rejection_rejects_recipient_without_queue_mutation() {
+    for role in [AllowanceRole::Allower, AllowanceRole::Allowee] {
+        let storage = InMemoryStorage::new();
+        let peer = counterparty();
+        seed_active_link(&storage, peer.clone(), receiver_path()).await;
+        persist_inbound(
+            &storage,
+            peer.clone(),
+            receiver_path(),
+            vec![proposal(PROPOSAL_ID, role)],
+            timestamp(),
+        )
+        .await;
+        let rejected = enqueue_allowance_rejection(
+            &storage,
+            peer.clone(),
+            receiver_path(),
+            allowance_id(),
+            timestamp(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rejected.state, AllowanceLifecycleState::Rejected);
+
+        let result = enqueue_allowance_end(
+            &storage,
+            peer.clone(),
+            receiver_path(),
+            allowance_id(),
+            timestamp(),
+        )
+        .await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
+        assert_eq!(
+            storage.snapshot().unwrap().outbound_private_messages.len(),
+            1
+        );
+        let record = derived(&storage, &peer, &receiver_path()).await;
+        assert_eq!(record.state, AllowanceLifecycleState::Rejected);
+        assert_eq!(record.history_status, AllowanceHistoryStatus::Consistent);
+        assert!(record.end_event_id.is_none());
+    }
+}
+
+#[tokio::test]
 async fn test_allowance_end_for_accepted_authority_references_exact_acceptance() {
     let storage = InMemoryStorage::new();
     let peer = counterparty();
