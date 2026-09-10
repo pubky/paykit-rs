@@ -119,9 +119,6 @@ where
     /// Upload profile avatar bytes under the configured Paykit blob prefix.
     ///
     /// The blob name is derived from the content hash and image content type.
-    /// Identical uploads share a URI. A failed proposal does not establish that
-    /// this blob is unused. The caller must establish exclusive ownership before
-    /// deleting it, including references from other proposals or profiles.
     pub async fn upload_profile_avatar(
         &self,
         bytes: Vec<u8>,

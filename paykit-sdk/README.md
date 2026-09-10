@@ -116,21 +116,6 @@ if report.identity.live_session_available {
 
 Common workflows:
 
-For proposal retries, use `propose_payment_request_with_ids`. Persist fresh
-UUID-v4 Event and Payment Request IDs with the target and exact terms before the
-first call. `PaymentRequestPublication::Queued` confirms durable local queue
-membership, `NotQueued` confirms absence at the completed transaction, and
-`Uncertain` requires preserving and retrying the same inputs to reconcile.
-Repeated matching calls reuse the queue entry, including sent entries.
-Conflicting IDs never overwrite a proposal. Deduplication requires retaining
-queue history under the same local identity. A later `payment_requests_with`
-lookup can fail without undoing a queued proposal. The compatibility method
-`propose_payment_request` can return an error after enqueueing.
-
-Avatar uploads with identical content share the same URI. No publication outcome
-establishes exclusive ownership or authorizes deleting a shared public image.
-The SDK does not roll back image uploads on proposal failure.
-
 - call `initialize` on startup to refresh identity status from the Pubky
   provider
 - call `sync_public_endpoints` after local receiving details change

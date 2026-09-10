@@ -304,8 +304,6 @@ where
     ///
     /// The returned record reflects the local outbound queue, not delivery or
     /// counterparty processing.
-    /// An error can occur after enqueueing. For recoverable retries, use
-    /// [`Self::propose_payment_request_with_ids`] and persist the IDs and terms.
     pub async fn propose_payment_request(
         &self,
         counterparty: PubkyPublicKey,
@@ -324,44 +322,6 @@ where
             &counterparty,
             &counterparty_receiver_path,
             &payment_request_id,
-        )
-        .await
-    }
-
-    /// Queue or reconcile a proposal using caller-persisted UUID-v4 IDs.
-    ///
-    /// Persist both IDs, the target, and the exact terms before calling. Reuse
-    /// them after an uncertain result, cancellation, or restart. Matching queue
-    /// entries, including sent entries, return `Queued` without inserting again.
-    /// Conflicting reuse returns `Uncertain` and never overwrites the proposal.
-    /// `NotQueued` is conclusive only for the checked target and retained local
-    /// storage at that moment. Do not retry across identities, clear queue history,
-    /// or restore an older backup and assume deduplication still holds.
-    ///
-    /// This does not load a derived record after enqueueing. Use
-    /// [`Self::payment_requests_with`] for lifecycle and delivery state. A failed
-    /// view lookup does not undo `Queued`. No outcome permits deleting a shared
-    /// public image. Session creation, capabilities, and key rotation remain the
-    /// caller's responsibility.
-    pub async fn propose_payment_request_with_ids(
-        &self,
-        counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
-        event_id: EventId,
-        payment_request_id: PaymentRequestId,
-        terms: PaymentRequestTerms,
-    ) -> crate::PaymentRequestPublication {
-        let readiness = self
-            .ensure_private_outbound_ready(&counterparty, &counterparty_receiver_path)
-            .await;
-        let event = PaymentRequest::new(event_id, payment_request_id, terms);
-        crate::domain::payment_requests::publish_payment_request(
-            &self.storage,
-            counterparty,
-            counterparty_receiver_path,
-            &event,
-            readiness,
-            self.clock.now(),
         )
         .await
     }

@@ -784,15 +784,6 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func proposePaymentRequest(counterparty: String, counterpartyReceiverPath: String, terms: PaymentRequestTerms) async throws  -> PaymentRequestRecord
 
     /**
-     * Queue or reconcile a proposal with caller-persisted UUID-v4 IDs and terms.
-     * Reuse the exact target, IDs, and terms after uncertainty or restart.
-     * Exceptions only indicate invalid arguments before this attempt. They do
-     * not rule out a previous attempt. Keep the same local identity and queue
-     * history. Use payment_requests_with for derived state after Queued.
-     */
-    func proposePaymentRequestWithIds(counterparty: String, counterpartyReceiverPath: String, eventId: String, paymentRequestId: String, terms: PaymentRequestTerms) async throws  -> PaymentRequestPublication
-
-    /**
      * Publish a minimal local recovery marker for a counterparty.
      */
     func publishEncryptedLinkRecoveryMarker(counterparty: String, counterpartyReceiverPath: String) async throws  -> EncryptedLinkRecoveryMarkerReport
@@ -993,8 +984,6 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Upload profile avatar bytes and return the published blob record.
-     * Identical uploads share a URI. Proposal failure is not permission to
-     * delete an image that may be referenced by other proposals or profiles.
      */
     func uploadProfileAvatar(bytes: Data, contentType: String) async throws  -> PaykitBlobRecord
 
@@ -2093,30 +2082,6 @@ open func proposePaymentRequest(counterparty: String, counterpartyReceiverPath: 
 }
 
     /**
-     * Queue or reconcile a proposal with caller-persisted UUID-v4 IDs and terms.
-     * Reuse the exact target, IDs, and terms after uncertainty or restart.
-     * Exceptions only indicate invalid arguments before this attempt. They do
-     * not rule out a previous attempt. Keep the same local identity and queue
-     * history. Use payment_requests_with for derived state after Queued.
-     */
-open func proposePaymentRequestWithIds(counterparty: String, counterpartyReceiverPath: String, eventId: String, paymentRequestId: String, terms: PaymentRequestTerms)async throws  -> PaymentRequestPublication  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_paykit_fn_method_ffipaykitsdk_propose_payment_request_with_ids(
-                    self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterString.lower(eventId),FfiConverterString.lower(paymentRequestId),FfiConverterTypePaymentRequestTerms_lower(terms)
-                )
-            },
-            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
-            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
-            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypePaymentRequestPublication_lift,
-            errorHandler: FfiConverterTypePaykitError_lift
-        )
-}
-
-    /**
      * Publish a minimal local recovery marker for a counterparty.
      */
 open func publishEncryptedLinkRecoveryMarker(counterparty: String, counterpartyReceiverPath: String)async throws  -> EncryptedLinkRecoveryMarkerReport  {
@@ -2892,8 +2857,6 @@ open func unblockPeer(counterparty: String, counterpartyReceiverPath: String)asy
 
     /**
      * Upload profile avatar bytes and return the published blob record.
-     * Identical uploads share a URI. Proposal failure is not permission to
-     * delete an image that may be referenced by other proposals or profiles.
      */
 open func uploadProfileAvatar(bytes: Data, contentType: String)async throws  -> PaykitBlobRecord  {
     return
@@ -15165,106 +15128,6 @@ extension PaymentRequestLocalRole: Codable {}
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
- * Durable proposal enqueue outcome. No outcome establishes image ownership.
- */
-
-public enum PaymentRequestPublication {
-
-    /**
-     * The exact proposal is durably queued, possibly already sent.
-     */
-    case queued(outboundMessageId: UInt64
-    )
-    /**
-     * No matching proposal was queued at the completed transaction.
-     */
-    case notQueued(error: PaykitError
-    )
-    /**
-     * Preserve the IDs and terms and retry to reconcile. Do not delete images.
-     */
-    case uncertain(error: PaykitError
-    )
-}
-
-
-#if compiler(>=6)
-extension PaymentRequestPublication: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypePaymentRequestPublication: FfiConverterRustBuffer {
-    typealias SwiftType = PaymentRequestPublication
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentRequestPublication {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-
-        case 1: return .queued(outboundMessageId: try FfiConverterUInt64.read(from: &buf)
-        )
-
-        case 2: return .notQueued(error: try FfiConverterTypePaykitError.read(from: &buf)
-        )
-
-        case 3: return .uncertain(error: try FfiConverterTypePaykitError.read(from: &buf)
-        )
-
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: PaymentRequestPublication, into buf: inout [UInt8]) {
-        switch value {
-
-
-        case let .queued(outboundMessageId):
-            writeInt(&buf, Int32(1))
-            FfiConverterUInt64.write(outboundMessageId, into: &buf)
-
-
-        case let .notQueued(error):
-            writeInt(&buf, Int32(2))
-            FfiConverterTypePaykitError.write(error, into: &buf)
-
-
-        case let .uncertain(error):
-            writeInt(&buf, Int32(3))
-            FfiConverterTypePaykitError.write(error, into: &buf)
-
-        }
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypePaymentRequestPublication_lift(_ buf: RustBuffer) throws -> PaymentRequestPublication {
-    return try FfiConverterTypePaymentRequestPublication.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypePaymentRequestPublication_lower(_ value: PaymentRequestPublication) -> RustBuffer {
-    return FfiConverterTypePaymentRequestPublication.lower(value)
-}
-
-
-extension PaymentRequestPublication: Equatable, Hashable {}
-
-extension PaymentRequestPublication: Codable {}
-
-
-
-
-
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-/**
  * Encrypted Link and Private Payment List state observed during resolution.
  */
 
@@ -18477,9 +18340,6 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_payment_request() != 35762) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_payment_request_with_ids() != 56638) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_encrypted_link_recovery_marker() != 60401) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18597,7 +18457,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_unblock_peer() != 6518) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_upload_profile_avatar() != 39708) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_upload_profile_avatar() != 49965) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaymentpayload_export_text() != 53824) {

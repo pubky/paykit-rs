@@ -134,46 +134,19 @@ Helpers that both queue and attempt delivery return
 `LINKING` can appear in `queued`; the message remains eligible for a later
 outbound worker run after the link becomes `LINKED`.
 
-### Payment Requests
+### Public file downloads
 
-For recoverable proposal creation, persist two fresh UUID-v4 values as the Event
-ID and Payment Request ID, the counterparty and receiver path, and the exact
-terms before calling `proposePaymentRequestWithIds`. Keep these together in the
-same identity's durable app state.
-
-- `Queued(outboundMessageId)` confirms that the exact proposal is in local
-  durable storage, possibly already sent. Load `paymentRequestsWith` for delivery
-  and lifecycle state. A view-loading error does not undo the queued proposal.
-- `NotQueued(error)` confirms no matching proposal was in that target's queue
-  when the transaction completed. Correct the readiness or validation error.
-- `Uncertain(error)` means storage failed or the IDs conflict. Preserve the
-  target, IDs, terms and image, then retry the same call to reconcile. Matching
-  proposals reuse the existing queue entry, including after an ambiguous write,
-  concurrent retries, or a restart. Conflicting content never overwrites it.
-
-Argument conversion can throw before this attempt. That does not disprove an
-earlier attempt. Never generate fresh IDs just because a call failed or was
-canceled. Deduplication depends on retaining queue history and the same local
-identity. Clearing state or restoring an older backup loses that evidence.
-
-The existing `proposePaymentRequest` remains compatible but can throw after
-enqueueing while loading its derived record. Use the stable-ID API when callers
-need to distinguish publication outcomes.
-
-`uploadProfileAvatar` derives shared filenames from the image content. Neither a
-failed proposal nor `NotQueued` proves exclusive ownership of that public blob.
-These proposal APIs never delete images. Callers must establish that no other
-proposal or profile references a blob before deleting it.
-
-For downloads, `fetchPubkyFileBounded(uri, maxBytes)` enforces a caller-selected
-byte limit while reading successful response bodies, before returning bytes across FFI. It
-returns `nil` for missing files and throws for oversized or truncated bodies.
+`fetchPubkyFileBounded(uri, maxBytes)` enforces a caller-selected byte limit while
+reading successful response bodies, before returning bytes across FFI. It returns
+`nil` for missing files and throws for oversized or truncated bodies.
 Zero permits only an empty body. Transport buffers and the current chunk are
 additional memory. Image decode, pixel, cache and request-timeout limits remain
 the app's responsibility. HTTP error bodies remain unbounded inside the current
 Pubky client before Paykit regains control. Closing that gap through this path
 requires a Pubky client API change. This is not complete response-size protection.
 The older `fetchPubkyFile` is unbounded.
+
+### Payment Requests
 
 - `PaykitSdk.proposePaymentRequest`, `acceptPaymentRequest`,
   `rejectPaymentRequest`, `cancelPaymentRequest`, and `submitPaymentProof` —

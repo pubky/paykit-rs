@@ -228,8 +228,6 @@ impl FfiPaykitSdk {
     }
 
     /// Upload profile avatar bytes and return the published blob record.
-    /// Identical uploads share a URI. Proposal failure is not permission to
-    /// delete an image that may be referenced by other proposals or profiles.
     pub async fn upload_profile_avatar(
         &self,
         bytes: Vec<u8>,

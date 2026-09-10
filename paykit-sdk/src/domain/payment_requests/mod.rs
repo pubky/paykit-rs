@@ -30,9 +30,6 @@ use crate::{
 };
 
 mod derivation;
-mod publication;
-pub(crate) use publication::publish_payment_request;
-pub use publication::PaymentRequestPublication;
 
 use derivation::recurrence_unit_to_str;
 pub(crate) use derivation::{
