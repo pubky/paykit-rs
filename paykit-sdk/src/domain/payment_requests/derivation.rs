@@ -812,7 +812,8 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
             // later Acceptance falls through to the transition check below.
             let crosses_payee_cancellation = record.state == PaymentRequestLifecycleState::Canceled
                 && cancellation_was_sent_by_payee(record)
-                && record.accepted_event_id.is_none();
+                && record.accepted_event_id.is_none()
+                && record.rejected_event_id.is_none();
             if !matches!(record.state, PaymentRequestLifecycleState::Proposed)
                 && !crosses_payee_cancellation
             {
@@ -846,7 +847,15 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
             ) {
                 return;
             }
-            if !matches!(record.state, PaymentRequestLifecycleState::Proposed) {
+            // Opposite-direction FIFO histories cannot order this payer
+            // decision against the payee's Cancellation. Retain the first
+            // response only when the payer had not already transitioned.
+            let crosses_payee_cancellation = record.state == PaymentRequestLifecycleState::Canceled
+                && cancellation_was_sent_by_payee(record)
+                && record.accepted_event_id.is_none()
+                && record.rejected_event_id.is_none();
+            if record.state != PaymentRequestLifecycleState::Proposed && !crosses_payee_cancellation
+            {
                 mark_invalid_stored(
                     record,
                     stored,
@@ -856,7 +865,9 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
             }
             record.rejected_event_id = Some(rejection.event_id.as_str().to_owned());
             record.rejected_outbound_status = outbound_status(stored);
-            record.state = PaymentRequestLifecycleState::Rejected;
+            if !crosses_payee_cancellation {
+                record.state = PaymentRequestLifecycleState::Rejected;
+            }
             touch_stored(record, stored);
         }
         PaymentRequestEvent::Cancellation(cancellation) => {
@@ -867,13 +878,16 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
             ) {
                 return;
             }
+            let crosses_payer_rejection = record.state == PaymentRequestLifecycleState::Rejected
+                && !payer_action_source_allowed(record, stored);
             if matches!(
                 record.state,
                 PaymentRequestLifecycleState::Rejected
                     | PaymentRequestLifecycleState::Canceled
                     | PaymentRequestLifecycleState::RecoveryRequired
                     | PaymentRequestLifecycleState::InvalidConflict
-            ) {
+            ) && !crosses_payer_rejection
+            {
                 mark_invalid_stored(
                     record,
                     stored,
@@ -892,7 +906,7 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
                 return;
             }
             let follows_cancellation = record.state == PaymentRequestLifecycleState::Canceled;
-            if !proof_follows_acceptance(record) {
+            if record.rejected_event_id.is_some() || !proof_follows_acceptance(record) {
                 mark_invalid_stored(record, stored, "Payment Proof arrived before acceptance");
                 return;
             }

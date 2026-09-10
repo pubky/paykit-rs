@@ -136,7 +136,7 @@ where
             )?;
             let proposal_event_id = bound_proposal_event_id(&record)?;
             let event = match record.state {
-                AllowanceLifecycleState::Proposed => {
+                AllowanceLifecycleState::Proposed | AllowanceLifecycleState::Rejected => {
                     if !local_sent_proposal(&record) {
                         return Err(PaykitSdkError::Policy {
                             context: "cannot withdraw Allowance proposal: local identity did not send the proposal".into(),
