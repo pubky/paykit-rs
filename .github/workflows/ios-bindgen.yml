@@ -52,6 +52,23 @@ jobs:
 
           test -s paykit-ffi/dist/ios/Paykit.xcframework.zip
 
+      - name: Check committed iOS interface files
+        shell: bash
+        run: |
+          set -euo pipefail
+          generated_sources=(
+            paykit-ffi/bindings/ios/PaykitPublicKeys.swift
+            paykit-ffi/bindings/ios/module.modulemap
+            paykit-ffi/bindings/ios/paykit.swift
+            paykit-ffi/bindings/ios/paykitFFI.h
+          )
+
+          if ! git diff --quiet -- "${generated_sources[@]}"; then
+            echo "::error::Committed iOS interface files are stale. Run 'cd paykit-ffi && ./build_ios.sh', restore Package.swift unless preparing a release, and commit the updated interface files."
+            git diff --name-only -- "${generated_sources[@]}"
+            exit 1
+          fi
+
       - name: Upload generated iOS artifact
         uses: actions/upload-artifact@v4
         with:
