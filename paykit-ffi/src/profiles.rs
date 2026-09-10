@@ -256,13 +256,18 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Fetch public file bytes with a limit on successful response bodies.
-    /// The limit is checked before appending each chunk. Missing files return None.
-    /// Oversized successful bodies fail before full buffering. HTTP error bodies
-    /// remain unbounded inside the current Pubky client before Paykit regains
-    /// control. Closing that gap requires a Pubky client API change.
-    /// Transport buffers are additional memory. Image decoding, cache limits,
-    /// request duration, and Pubky client configuration remain caller-owned.
+    /// Fetch public Pubky file bytes with a limit on successful response bodies.
+    ///
+    /// The limit is checked before appending each chunk. Missing files return `None`.
+    /// Oversized successful bodies fail before full buffering. Zero permits only
+    /// an empty successful body.
+    ///
+    /// HTTP error bodies remain unbounded inside the current Pubky client before
+    /// Paykit regains control. Closing that gap requires a Pubky client API change.
+    /// Transport buffers and the current chunk use additional memory.
+    ///
+    /// Image decoding, pixel and cache limits, request duration, and Pubky client
+    /// configuration remain the caller's responsibility.
     pub async fn fetch_pubky_file_bounded(
         &self,
         uri: String,

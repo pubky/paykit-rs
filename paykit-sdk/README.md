@@ -138,7 +138,7 @@ Common workflows:
   Paykit regains control. Closing that gap through this path requires a Pubky
   client API change. This is not complete response-size protection.
   Callers still set image decode, pixel, cache, and Pubky request-timeout limits.
-  The compatibility methods `fetch_pubky_file` / `fetch_pubky_text` are unbounded.
+  `fetch_pubky_file` / `fetch_pubky_text` have no byte limit.
 - use `fetch_pubky_profile` / `fetch_pubky_follows` for read-only Pubky app
   profile and follows data
 - use `resolve_contact_profile` when contact display should prefer Paykit

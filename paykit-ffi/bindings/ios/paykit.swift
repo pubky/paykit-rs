@@ -647,13 +647,18 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func fetchPubkyFile(uri: String) async throws  -> Data?
 
     /**
-     * Fetch public file bytes with a limit on successful response bodies.
-     * The limit is checked before appending each chunk. Missing files return None.
-     * Oversized successful bodies fail before full buffering. HTTP error bodies
-     * remain unbounded inside the current Pubky client before Paykit regains
-     * control. Closing that gap requires a Pubky client API change.
-     * Transport buffers are additional memory. Image decoding, cache limits,
-     * request duration, and Pubky client configuration remain caller-owned.
+     * Fetch public Pubky file bytes with a limit on successful response bodies.
+     *
+     * The limit is checked before appending each chunk. Missing files return `None`.
+     * Oversized successful bodies fail before full buffering. Zero permits only
+     * an empty successful body.
+     *
+     * HTTP error bodies remain unbounded inside the current Pubky client before
+     * Paykit regains control. Closing that gap requires a Pubky client API change.
+     * Transport buffers and the current chunk use additional memory.
+     *
+     * Image decoding, pixel and cache limits, request duration, and Pubky client
+     * configuration remain the caller's responsibility.
      */
     func fetchPubkyFileBounded(uri: String, maxBytes: UInt64) async throws  -> Data?
 
@@ -1570,13 +1575,18 @@ open func fetchPubkyFile(uri: String)async throws  -> Data?  {
 }
 
     /**
-     * Fetch public file bytes with a limit on successful response bodies.
-     * The limit is checked before appending each chunk. Missing files return None.
-     * Oversized successful bodies fail before full buffering. HTTP error bodies
-     * remain unbounded inside the current Pubky client before Paykit regains
-     * control. Closing that gap requires a Pubky client API change.
-     * Transport buffers are additional memory. Image decoding, cache limits,
-     * request duration, and Pubky client configuration remain caller-owned.
+     * Fetch public Pubky file bytes with a limit on successful response bodies.
+     *
+     * The limit is checked before appending each chunk. Missing files return `None`.
+     * Oversized successful bodies fail before full buffering. Zero permits only
+     * an empty successful body.
+     *
+     * HTTP error bodies remain unbounded inside the current Pubky client before
+     * Paykit regains control. Closing that gap requires a Pubky client API change.
+     * Transport buffers and the current chunk use additional memory.
+     *
+     * Image decoding, pixel and cache limits, request duration, and Pubky client
+     * configuration remain the caller's responsibility.
      */
 open func fetchPubkyFileBounded(uri: String, maxBytes: UInt64)async throws  -> Data?  {
     return
@@ -18265,7 +18275,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_file() != 313) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_file_bounded() != 24197) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_file_bounded() != 29910) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_follows() != 44041) {

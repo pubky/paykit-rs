@@ -134,17 +134,18 @@ Helpers that both queue and attempt delivery return
 `LINKING` can appear in `queued`; the message remains eligible for a later
 outbound worker run after the link becomes `LINKED`.
 
-### Public file downloads
+### Public File Downloads
 
 `fetchPubkyFileBounded(uri, maxBytes)` enforces a caller-selected byte limit while
 reading successful response bodies, before returning bytes across FFI. It returns
-`nil` for missing files and throws for oversized or truncated bodies.
+`nil` in Swift or `null` in Kotlin for missing files and throws for oversized
+or truncated bodies.
 Zero permits only an empty body. Transport buffers and the current chunk are
 additional memory. Image decode, pixel, cache and request-timeout limits remain
 the app's responsibility. HTTP error bodies remain unbounded inside the current
 Pubky client before Paykit regains control. Closing that gap through this path
 requires a Pubky client API change. This is not complete response-size protection.
-The older `fetchPubkyFile` is unbounded.
+`fetchPubkyFile` has no byte limit.
 
 ### Payment Requests
 

@@ -164,7 +164,7 @@ where
 
     /// Fetch a public `pubky://` file referenced by profile metadata.
     ///
-    /// This compatibility API has no byte limit. Use
+    /// This method has no byte limit. Use
     /// [`Self::fetch_pubky_file_bounded`] for untrusted files or images.
     pub async fn fetch_pubky_file(&self, uri: &str) -> Result<Option<Vec<u8>>> {
         let public_storage =
