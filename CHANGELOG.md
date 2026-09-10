@@ -7,6 +7,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc52] - 2026-09-10
+
 ### Security
 - Bound public response reads while streaming (JSON documents, profile files, Encrypted Receipts, and Encrypted Link recovery markers) and cap directory listing pagination, rejecting non-advancing cursors.
 - Keep decrypted private-message plaintext out of parse errors and zeroize FFI auth URL inputs.
