@@ -13,7 +13,3 @@ paykit-ffi/bindings/android/native-debug-symbols.zip
 
 # Generated iOS release artifacts
 paykit-ffi/dist/
-paykit-ffi/bindings/ios/Paykit.xcframework/
-paykit-ffi/bindings/ios/Paykit.xcframework.zip
-paykit-ffi/bindings/ios/ios-arm64/
-paykit-ffi/bindings/ios/ios-arm64-sim/

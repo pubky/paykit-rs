@@ -3,7 +3,27 @@ name: Android Bindgen
 on:
   push:
     branches: [master]
+    paths:
+      - '.cargo/**'
+      - '.github/workflows/android-bindgen.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'paykit-ffi/**'
+      - 'paykit-lib/**'
+      - 'paykit-sdk/**'
+      - 'rust-toolchain*'
+      - 'vendor/**'
   pull_request:
+    paths:
+      - '.cargo/**'
+      - '.github/workflows/android-bindgen.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'paykit-ffi/**'
+      - 'paykit-lib/**'
+      - 'paykit-sdk/**'
+      - 'rust-toolchain*'
+      - 'vendor/**'
   workflow_dispatch:
 
 concurrency:

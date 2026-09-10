@@ -3,7 +3,29 @@ name: iOS Bindgen
 on:
   push:
     branches: [master]
+    paths:
+      - '.cargo/**'
+      - '.github/workflows/ios-bindgen.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'Package.swift'
+      - 'paykit-ffi/**'
+      - 'paykit-lib/**'
+      - 'paykit-sdk/**'
+      - 'rust-toolchain*'
+      - 'vendor/**'
   pull_request:
+    paths:
+      - '.cargo/**'
+      - '.github/workflows/ios-bindgen.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'Package.swift'
+      - 'paykit-ffi/**'
+      - 'paykit-lib/**'
+      - 'paykit-sdk/**'
+      - 'rust-toolchain*'
+      - 'vendor/**'
   workflow_dispatch:
 
 concurrency:
