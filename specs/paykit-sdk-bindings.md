@@ -285,7 +285,7 @@ misleading known platform value.
 
 This applies especially to:
 
-- Payment Request lifecycle actions and events
+- Payment Request and Allowance lifecycle actions and events
 - payment resolution results
 - payable endpoint ordering results
 - Receipt retrieval status

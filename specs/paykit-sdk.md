@@ -75,10 +75,11 @@ The system should have three main layers:
 - Paykit Protocol / `paykit-lib`: stateless wire types, Pubky path helpers,
   Encrypted Link send/receive helpers, parsers, serializers, and structural
   validation.
-- Paykit SDK runtime: durable state, private stream routing, lifecycle
-  derivation, endpoint publication, contact payment resolution, retries,
-  recovery, Pubky session bootstrap/capability handling, Pubky-backed Paykit
-  profile/contact metadata, and app-facing APIs.
+- Paykit SDK runtime: durable state, private stream routing, Event ID dedupe,
+  Payment Request and Allowance lifecycle derivation, endpoint publication,
+  contact payment resolution, retries, recovery, Pubky session bootstrap and
+  capability handling, Pubky-backed Paykit profile/contact metadata, and
+  app-facing lifecycle/history views and APIs.
 - Payment adapter layer: receiving-detail generation, payable endpoint
   ordering, payment-target construction, method/provider state, and activity
   records.
@@ -597,9 +598,9 @@ One record per counterparty receiver/runtime in the current Rust SDK:
 
 Private and payment state is scoped by counterparty Pubky key plus
 counterparty receiver path. APIs that operate on private links, private streams,
-Private Payment Lists, Payment Requests, payment resolution, Receipt Access, and
-recovery markers require that exact receiver path instead of deriving it from the
-local runtime config.
+Private Payment Lists, Payment Requests, Allowances, payment resolution, Receipt
+Access, and recovery markers require that exact receiver path instead of deriving
+it from the local runtime config.
 
 ### EncryptedLinkState
 
@@ -649,6 +650,11 @@ Tracks Event Message idempotency:
 - conflict status
 
 Conflicting reused Event IDs must fail closed for the affected derived state.
+Recognized malformed Event Messages with a parseable Event ID also contribute
+dedupe evidence. This records ID usage, not successful protocol validation, and
+does not make a malformed message eligible for lifecycle or Receipt Access
+processing. Changing payload bytes requires a fresh Event ID; backup validation
+and legacy migration preserve the same conflict-detection rules as live intake.
 
 ### PrivatePaymentListView
 
@@ -993,7 +999,9 @@ Payment Requests, Payment Proofs, and Receipts.
 8. Return a receive report.
 
 Receive routing should extend the same raw stream log to Payment Requests,
-Payment Proofs, and any other Event Message kinds.
+Payment Proofs, Allowance lifecycle events, and any other Event Message kinds.
+Allowance lifecycle/history views derive from retained events on the exact
+Encrypted Link and preserve invalid or unresolved evidence for recovery.
 
 ### Resolve Public Payment
 
