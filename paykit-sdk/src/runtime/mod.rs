@@ -39,7 +39,7 @@ use crate::{
         expired_outbound_reservation_cancellations, invalid_private_list_reservation_cancellations,
         queue_private_payment_list_with_reservations_with_link_lease, reservation_payload_hash,
         unattempted_superseded_reservation_cancellations,
-        PaymentEndpointReservationCancellationRecord,
+        PaymentEndpointReservationCancellationRecord, PrivatePaymentListQueuePolicy,
     },
     domain::endpoints::{
         failed_record, normalize_receiving_details, pending_publication_record,
@@ -47,11 +47,12 @@ use crate::{
         EndpointSyncReport,
     },
     domain::linked_peers::{
-        default_linked_peer, mark_recovery_required_for_marker_in_transaction,
-        mark_recovery_required_in_transaction, mark_recovery_required_with_lease,
-        save_link_handshake_state_if_generation_with_lease, save_link_handshake_state_with_lease,
-        save_linked_peer_link_state_if_generation_with_lease, save_linked_peer_state_with_lease,
-        EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport, LinkedPeerState,
+        default_linked_peer, load_encrypted_link_state,
+        mark_recovery_required_for_marker_in_transaction, mark_recovery_required_in_transaction,
+        mark_recovery_required_with_lease, save_link_handshake_state_if_generation_with_lease,
+        save_link_handshake_state_with_lease, save_linked_peer_link_state_if_generation_with_lease,
+        save_linked_peer_state_with_lease, EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport,
+        LinkedPeerState,
     },
     domain::outbound_private::{
         claim_next_outbound_private_message_with_peer_lease, mark_outbound_failed,
@@ -159,6 +160,13 @@ pub struct PaykitSdk<S, K, P, C = SystemClock> {
     config: PaykitSdkConfig,
     clock: C,
     identity_operation_in_progress: Arc<Mutex<bool>>,
+    private_payment_list_publications:
+        Mutex<HashMap<(PubkyPublicKey, PaykitReceiverPath), PrivatePaymentListPublication>>,
+}
+
+struct PrivatePaymentListPublication {
+    link_id: [u8; 32],
+    outbound_message_id: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,6 +227,7 @@ where
             config,
             clock,
             identity_operation_in_progress: Arc::new(Mutex::new(false)),
+            private_payment_list_publications: Mutex::new(HashMap::new()),
         })
     }
 
@@ -560,7 +569,9 @@ fn refresh_active_identity(
             tx.clear_identity_scoped_state();
         }
         IdentityTransition::ReceiverNoiseKeyChanged => tx.clear_private_identity_scoped_state(),
-        IdentityTransition::Unchanged => {}
+        IdentityTransition::Unchanged => {
+            return Ok(previous.expect("unchanged identity has persisted state"));
+        }
     }
 
     let sign_out_generation = match transition {

@@ -115,7 +115,7 @@ async fn test_persist_private_stream_batch_stores_messages_and_checkpoint() {
     .unwrap();
 
     let snapshot = storage.snapshot().unwrap();
-    assert_eq!(report.receive_batch_id, 0);
+    assert_eq!(report.receive_batch_id, Some(0));
     assert_eq!(report.stream_item_ids, vec![0, 1]);
     assert_eq!(snapshot.private_stream_items.len(), 2);
     assert_eq!(
@@ -192,6 +192,8 @@ async fn test_persist_private_stream_batch_empty_checkpoint_updates_sync_time() 
         .get(&(counterparty.clone(), receiver_path()))
         .unwrap();
     assert!(report.stream_item_ids.is_empty());
+    assert_eq!(report.receive_batch_id, None);
+    assert_eq!(snapshot.next_receive_batch_id, 0);
     assert_eq!(peer.last_private_receive_at, None);
     assert_eq!(peer.last_sync_at, Some(timestamp()));
 }

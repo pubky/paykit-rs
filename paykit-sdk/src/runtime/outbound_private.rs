@@ -418,7 +418,8 @@ where
     ) -> Result<()> {
         let now = self.clock.now();
         let sent = mark_outbound_sent(sending, now);
-        link_state.link_snapshot = Some(link.serialize()?);
+        let snapshot = link.snapshot()?;
+        link_state.link_snapshot = Some(snapshot.serialize());
         link_state.handshake_snapshot = None;
         link_state.handshake_role = None;
         link_state.generation = link_state.generation.saturating_add(1);
@@ -436,6 +437,22 @@ where
                 }
             })
             .await?;
+        if sent.kind == PrivateMessageKind::PrivatePaymentList.as_str() {
+            if let Some(link_id) = snapshot.link_id() {
+                if let Ok(mut publications) = self.private_payment_list_publications.lock() {
+                    publications.insert(
+                        (
+                            sent.counterparty.clone(),
+                            sent.counterparty_receiver_path.clone(),
+                        ),
+                        PrivatePaymentListPublication {
+                            link_id,
+                            outbound_message_id: sent.outbound_message_id,
+                        },
+                    );
+                }
+            }
+        }
         report.sent.push(sent.outbound_message_id);
         Ok(())
     }
