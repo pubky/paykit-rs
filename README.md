@@ -246,9 +246,10 @@ before executing a payment through their existing infrastructure.
 `paykit-sdk` is the Rust runtime layer for SDK-managed local
 state such as endpoint sync, Encrypted Link snapshots, private stream intake,
 Private Payment Lists, Paykit Profiles, Paykit Blob helpers, read-only Pubky
-app profile/follows helpers, local Contact Records, and contact payment resolution. Payment
-execution, settlement detection, product UI, and platform session storage
-remain with the integrating application and its adapters.
+app profile/follows helpers, local Contact Records, contact payment resolution,
+Payment Requests, and Allowance lifecycle views. Payment execution, Allowance
+matching and usage, settlement detection, product UI, and platform session
+storage remain with the integrating application and its adapters.
 
 ## Library Crates
 
@@ -412,6 +413,26 @@ Metadata.
   so SDK/runtime code can persist the outbound payload before sending.
 - `PaymentProof::validate_for_request(request)`: validate stateless proof and
   request correlation fields.
+
+### Allowances
+
+- `AllowanceTerms::builder(asset)`: construct validated immutable Allowance
+  Terms.
+- `AllowanceProposal`, `AllowanceAcceptance`, `AllowanceRejection`, and
+  `AllowanceEnd`: typed lifecycle messages carried by `AllowanceEvent`.
+- `parse_allowance_event_message(message)`: parse a raw Private Application
+  Message when its kind is recognized as an Allowance event. Malformed
+  recognized messages retain their raw payload and validation result.
+- `serialize_allowance_event(event)`: serialize an Allowance event for durable
+  outbound storage before sending.
+- `send_allowance_proposal(link, proposal)` /
+  `send_allowance_acceptance(link, acceptance)` /
+  `send_allowance_rejection(link, rejection)` /
+  `send_allowance_end(link, end)`: send typed lifecycle events over the exact
+  authenticated Encrypted Link.
+
+These `paykit-lib` helpers are stateless. Use the SDK for durable lifecycle
+views and commands; the wallet owns automatic payment decisions and execution.
 
 ### Receipts
 
