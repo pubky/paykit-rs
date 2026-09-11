@@ -74,6 +74,10 @@ declare_private_message_kind_routing! {
     PaymentRequestRejection => true,
     PaymentRequestCancellation => true,
     PaymentProof => true,
+    AllowanceProposal => false,
+    AllowanceAcceptance => false,
+    AllowanceRejection => false,
+    AllowanceEnd => false,
 }
 
 /// Canonical kind strings the parser routes, derived from

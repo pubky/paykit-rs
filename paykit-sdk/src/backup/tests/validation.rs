@@ -1,6 +1,38 @@
 use super::*;
 use crate::EncryptedLinkHandshakeRole;
 
+#[test]
+fn test_validate_private_stream_items_reparses_allowance_bodies() {
+    let counterparty = public_key();
+    let mut records = allowance_event_jsons()
+        .into_iter()
+        .enumerate()
+        .map(|(index, (kind, raw_json))| PrivateStreamItemRecord {
+            stream_item_id: index as u64,
+            counterparty: counterparty.clone(),
+            counterparty_receiver_path: receiver_path(),
+            receive_batch_id: 0,
+            raw_json,
+            parsed_version: Some(1),
+            parsed_kind: Some(kind.clone()),
+            known_paykit_kind: Some(kind),
+            parse_status: PrivateStreamParseStatus::Valid,
+            parse_error: None,
+            received_at: timestamp(),
+        })
+        .collect::<Vec<_>>();
+
+    validate_private_stream_items(&records).unwrap();
+
+    records[0].raw_json = records[0]
+        .raw_json
+        .replacen("{", "{\"unexpected\":true,", 1);
+    assert!(matches!(
+        validate_private_stream_items(&records),
+        Err(PaykitSdkError::Protocol { .. })
+    ));
+}
+
 #[tokio::test]
 async fn test_restore_backup_state_rejects_malformed_link_snapshot() {
     let storage = InMemoryStorage::new();
