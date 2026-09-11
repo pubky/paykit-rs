@@ -95,6 +95,10 @@ fn proof_raw(event_id: &str, request_id: &str, reference: &str) -> String {
     )
 }
 
+fn allowance_proposal_raw(event_id: &str) -> String {
+    crate::test_utils::allowance_event_json("paykit.allowance_proposal", event_id)
+}
+
 async fn persist_messages(
     storage: &InMemoryStorage,
     counterparty: PubkyPublicKey,
@@ -124,3 +128,4 @@ async fn persist_messages_at(
 mod enqueue;
 mod outbound_records;
 mod received_records;
+mod rejection_cancellation;

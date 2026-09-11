@@ -545,19 +545,7 @@ where
         counterparty: &PubkyPublicKey,
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<()> {
-        let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.local_pubky_public_key.is_none() {
-            return Err(PaykitSdkError::Identity {
-                context: "local Pubky identity is not initialized".into(),
-                source: None,
-            });
-        }
-        if session_access.is_none() {
-            return Err(PaykitSdkError::Identity {
-                context: "no Pubky session available".into(),
-                source: None,
-            });
-        }
+        self.require_identity_and_session().await?;
         self.private_queue_readiness(counterparty, counterparty_receiver_path)
             .await
             .map(|_| ())

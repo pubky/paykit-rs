@@ -37,6 +37,39 @@ pub enum LinkedPeerState {
     Blocked,
 }
 
+/// Decide whether private automation may proceed on one exact Encrypted Link.
+///
+/// This is the single readiness rule shared by every private-message command;
+/// callers read `peer_state` and `has_active_link` inside their own storage
+/// transaction so the decision and any append stay atomic.
+pub(crate) fn require_private_automation_ready(
+    peer_state: Option<LinkedPeerState>,
+    has_active_link: bool,
+    counterparty: &PubkyPublicKey,
+) -> Result<()> {
+    match peer_state {
+        Some(LinkedPeerState::Linked) if has_active_link => Ok(()),
+        Some(LinkedPeerState::Linking) => Err(PaykitSdkError::RecoveryRequired {
+            context: format!(
+                "Encrypted Link Handshake is still in progress for counterparty {counterparty}"
+            ),
+            source: None,
+        }),
+        Some(LinkedPeerState::RecoveryRequired) => Err(PaykitSdkError::RecoveryRequired {
+            context: format!("Encrypted Link recovery is required for counterparty {counterparty}"),
+            source: None,
+        }),
+        Some(LinkedPeerState::Blocked) => Err(PaykitSdkError::Policy {
+            context: format!("counterparty {counterparty} is blocked"),
+            source: None,
+        }),
+        _ => Err(PaykitSdkError::RecoveryRequired {
+            context: format!("no active Encrypted Link snapshot for counterparty {counterparty}"),
+            source: None,
+        }),
+    }
+}
+
 /// Result of starting or advancing an Encrypted Link Handshake.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkedPeerHandshakeReport {

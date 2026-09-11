@@ -650,6 +650,11 @@ Tracks Event Message idempotency:
 - conflict status
 
 Conflicting reused Event IDs must fail closed for the affected derived state.
+Recognized malformed Event Messages with a parseable Event ID also contribute
+dedupe evidence. This records ID usage, not successful protocol validation, and
+does not make a malformed message eligible for lifecycle or Receipt Access
+processing. Changing payload bytes requires a fresh Event ID; backup validation
+and legacy migration preserve the same conflict-detection rules as live intake.
 
 ### PrivatePaymentListView
 

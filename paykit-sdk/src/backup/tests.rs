@@ -162,5 +162,6 @@ fn receipt_access_raw_with_context(
 
 mod basic;
 mod counters;
+mod migration;
 mod recovery;
 mod validation;

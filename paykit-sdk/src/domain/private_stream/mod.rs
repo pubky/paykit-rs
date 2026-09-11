@@ -4,11 +4,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use std::collections::{HashMap, HashSet};
+
 use crate::{
-    domain::receipts::ReceiptAccessRecord,
+    domain::{outbound_private::OutboundPrivateMessageStatus, receipts::ReceiptAccessRecord},
     storage::{
         require_peer_link_operation_lease, EncryptedLinkStateRecord, EventDedupRecord,
-        NewPrivateStreamItem, NewPrivateStreamItemDetails, PeerLinkOperationLease, StorageAdapter,
+        NewPrivateStreamItem, NewPrivateStreamItemDetails, OutboundPrivateMessageRecord,
+        PeerLinkOperationLease, StorageAdapter,
     },
     PaykitReceiverPath, PaykitSdkError, PubkyPublicKey, Result,
 };
@@ -428,6 +431,104 @@ fn update_event_dedupe(
 pub(crate) fn payload_hash(raw_json: &str) -> String {
     let digest = Sha256::digest(raw_json.as_bytes());
     format!("sha256:{digest:x}")
+}
+
+/// Return a canonical Event ID from a JSON carrier when one is present.
+pub(crate) fn canonical_event_id(raw_json: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(raw_json).ok()?;
+    let value = value.get("event_id")?.as_str()?;
+    EventId::new(value)
+        .ok()
+        .map(|event_id| event_id.as_str().to_owned())
+}
+
+/// Whether a recognized Private Message Kind uses Event Message semantics.
+///
+/// Keep this match exhaustive so adding a new recognized kind requires an
+/// explicit Event ID policy decision at compile time.
+pub(crate) fn is_event_message_kind(kind: &str) -> bool {
+    match PrivateMessageKind::parse(kind) {
+        None | Some(PrivateMessageKind::PrivatePaymentList) => false,
+        Some(
+            PrivateMessageKind::ReceiptAccess
+            | PrivateMessageKind::PaymentRequest
+            | PrivateMessageKind::PaymentRequestAcceptance
+            | PrivateMessageKind::PaymentRequestRejection
+            | PrivateMessageKind::PaymentRequestCancellation
+            | PrivateMessageKind::PaymentProof
+            | PrivateMessageKind::AllowanceProposal
+            | PrivateMessageKind::AllowanceAcceptance
+            | PrivateMessageKind::AllowanceRejection
+            | PrivateMessageKind::AllowanceEnd,
+        ) => true,
+    }
+}
+
+/// Whether a Private Message Kind carries an Allowance lifecycle event.
+pub(crate) fn is_allowance_kind(kind: &str) -> bool {
+    match PrivateMessageKind::parse(kind) {
+        None
+        | Some(
+            PrivateMessageKind::PrivatePaymentList
+            | PrivateMessageKind::ReceiptAccess
+            | PrivateMessageKind::PaymentRequest
+            | PrivateMessageKind::PaymentRequestAcceptance
+            | PrivateMessageKind::PaymentRequestRejection
+            | PrivateMessageKind::PaymentRequestCancellation
+            | PrivateMessageKind::PaymentProof,
+        ) => false,
+        Some(
+            PrivateMessageKind::AllowanceProposal
+            | PrivateMessageKind::AllowanceAcceptance
+            | PrivateMessageKind::AllowanceRejection
+            | PrivateMessageKind::AllowanceEnd,
+        ) => true,
+    }
+}
+
+/// Event IDs carried by the local outbound queue on one exact Encrypted Link.
+///
+/// Inbound Event IDs are indexed durably at intake; outbound ones are not, so
+/// every derivation that must detect Event ID reuse across the two sending
+/// directions folds the outbound queue through this one policy.
+#[derive(Default)]
+pub(crate) struct OutboundEventCarriers {
+    /// Every Event ID carried by a live outbound Event Message.
+    pub(crate) event_ids: HashSet<String>,
+    /// Event IDs reused by outbound Event Messages with different payloads.
+    pub(crate) conflicted_event_ids: HashSet<String>,
+}
+
+/// Fold one link's outbound queue into its Event ID carriers.
+///
+/// `Invalid` and `Superseded` records never advance the link, so they do not
+/// count as carriers.
+pub(crate) fn outbound_event_carriers(
+    outbound: &[OutboundPrivateMessageRecord],
+) -> OutboundEventCarriers {
+    let mut payloads_by_event_id = HashMap::<String, HashSet<&str>>::new();
+    for message in outbound {
+        if matches!(
+            message.status,
+            OutboundPrivateMessageStatus::Invalid | OutboundPrivateMessageStatus::Superseded
+        ) || !is_event_message_kind(&message.kind)
+        {
+            continue;
+        }
+        if let Some(event_id) = canonical_event_id(&message.raw_json) {
+            payloads_by_event_id
+                .entry(event_id)
+                .or_default()
+                .insert(&message.raw_json);
+        }
+    }
+    OutboundEventCarriers {
+        event_ids: payloads_by_event_id.keys().cloned().collect(),
+        conflicted_event_ids: payloads_by_event_id
+            .into_iter()
+            .filter_map(|(event_id, payloads)| (payloads.len() > 1).then_some(event_id))
+            .collect(),
+    }
 }
 
 #[cfg(test)]

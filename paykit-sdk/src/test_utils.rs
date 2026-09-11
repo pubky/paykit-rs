@@ -1,3 +1,14 @@
+use paykit_lib::{serialize_allowance_event, AllowanceEvent, PrivateApplicationMessage};
+
+/// Wrap a typed Allowance event as the private message its intake would see.
+pub(crate) fn allowance_application_message(event: &AllowanceEvent) -> PrivateApplicationMessage {
+    PrivateApplicationMessage {
+        version: Some(1),
+        kind: Some(event.kind().as_str().to_owned()),
+        raw_json: serialize_allowance_event(event).unwrap(),
+    }
+}
+
 pub(crate) const ALLOWANCE_EVENT_FIXTURES: [(&str, &str); 4] = [
     (
         "paykit.allowance_proposal",
