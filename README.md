@@ -466,6 +466,11 @@ cd paykit-ffi
 ./build.sh all
 ```
 
+The mobile build scripts regenerate ignored Android bindgen/JNI outputs and the
+iOS release XCFramework under `paykit-ffi/dist/ios`. See
+[`paykit-ffi/README.md`](paykit-ffi/README.md) for platform-specific build and
+release notes.
+
 ## Resources
 
 - First draft implementation of paykit library:

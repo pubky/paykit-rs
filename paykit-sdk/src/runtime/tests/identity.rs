@@ -156,13 +156,7 @@ async fn test_receiver_noise_key_change_clears_only_private_identity_scoped_stat
         local_receiver_noise_public_key: next_receiver_noise_public_key.clone(),
     };
     storage
-        .transaction(move |tx| {
-            Ok(refresh_active_identity(
-                tx,
-                active_identity,
-                FixedClock.now(),
-            ))
-        })
+        .transaction(move |tx| refresh_active_identity(tx, active_identity, FixedClock.now(), 3))
         .await
         .unwrap();
 
@@ -175,6 +169,66 @@ async fn test_receiver_noise_key_change_clears_only_private_identity_scoped_stat
     assert_eq!(identity.sign_out_generation, 3);
     assert!(snapshot.linked_peers.is_empty());
     assert_eq!(snapshot.public_endpoint_records.len(), 1);
+}
+
+#[tokio::test]
+async fn test_refresh_active_identity_rejects_stale_generation() {
+    let storage = InMemoryStorage::new();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .transaction({
+            let local_public_key = local_public_key.clone();
+            let counterparty = counterparty.clone();
+            move |tx| {
+                tx.save_identity_state(IdentityState {
+                    local_pubky_public_key: Some(local_public_key),
+                    local_receiver_noise_public_key: Some(receiver_noise_public_key()),
+                    initialized_at: FixedClock.now(),
+                    sign_out_generation: 3,
+                });
+                tx.save_linked_peer(LinkedPeerRecord {
+                    counterparty: counterparty.clone(),
+                    counterparty_receiver_path: receiver_path(),
+                    state: LinkedPeerState::Linked,
+                    last_sync_at: Some(FixedClock.now()),
+                    last_private_receive_at: None,
+                    failure_count: 0,
+                    local_recovery_attempt_id: None,
+                    local_recovery_marker_created_at: None,
+                    local_recovery_marker_last_error: None,
+                    remote_recovery_attempt_id: None,
+                    remote_recovery_marker_observed_at: None,
+                });
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    // Simulate a session load that started before a sign-out bumped the
+    // generation from 2 to 3. The loaded identity rotates the receiver Noise
+    // key, so proceeding would pair stale session access with newer state.
+    let rotated_receiver_noise_public_key =
+        PubkyPublicKey::from_public_key(&pubky::Keypair::from_secret(&[8; 32]).public_key());
+    let active_identity = ActiveReceiverIdentity {
+        local_pubky_public_key: local_public_key,
+        local_receiver_noise_public_key: rotated_receiver_noise_public_key,
+    };
+    let err = storage
+        .transaction(move |tx| refresh_active_identity(tx, active_identity, FixedClock.now(), 2))
+        .await
+        .expect_err("a stale refresh must fail closed");
+    assert!(matches!(err, PaykitSdkError::Identity { .. }));
+
+    let snapshot = storage.snapshot().unwrap();
+    let stored = snapshot.identity_state.unwrap();
+    assert_eq!(stored.sign_out_generation, 3);
+    assert_eq!(
+        stored.local_receiver_noise_public_key,
+        Some(receiver_noise_public_key())
+    );
+    assert_eq!(snapshot.linked_peers.len(), 1);
 }
 
 #[tokio::test]

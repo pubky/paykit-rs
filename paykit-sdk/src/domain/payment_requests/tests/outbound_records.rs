@@ -1504,6 +1504,16 @@ async fn test_payment_request_records_keep_malformed_inbound_audit_position() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();
     let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
+    let sentinel = "sentinel-private-cancellation-reason";
+    let malformed_cancellation = format!(
+        concat!(
+            r#"{{"version":1,"kind":"paykit.payment_request_cancellation","#,
+            r#""event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104","#,
+            r#""payment_request_id":"{request_id}","reason":{{"token":"{sentinel}"}}}}"#
+        ),
+        request_id = request_id,
+        sentinel = sentinel,
+    );
     persist_messages(
         &storage,
         counterparty.clone(),
@@ -1515,7 +1525,7 @@ async fn test_payment_request_records_keep_malformed_inbound_audit_position() {
                 None,
                 None,
             ),
-            malformed_cancellation_raw("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104", request_id),
+            malformed_cancellation,
         ],
     )
     .await;
@@ -1529,8 +1539,16 @@ async fn test_payment_request_records_keep_malformed_inbound_audit_position() {
         PaymentRequestLifecycleState::InvalidConflict
     );
     assert_eq!(records[0].last_stream_item_id, Some(1));
-    assert!(records[0]
+    let reason = records[0]
         .invalid_reason
         .as_ref()
-        .is_some_and(|reason| reason.contains("reason must be a string")));
+        .expect("malformed inbound event should record a reason");
+    assert!(
+        reason.contains("failed to parse Payment Request Cancellation JSON"),
+        "expected a static parse-failure label, got: {reason}"
+    );
+    assert!(
+        !reason.contains(sentinel),
+        "decrypted plaintext must not be embedded in the audit reason, got: {reason}"
+    );
 }

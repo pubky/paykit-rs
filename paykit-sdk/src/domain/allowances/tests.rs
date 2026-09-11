@@ -13,7 +13,7 @@ use crate::{
         linked_peers::{default_linked_peer, LinkedPeerState},
         outbound_private::{enqueue_private_message, mark_outbound_recovery_required},
         payment_requests::{payment_request_records, PaymentRequestLifecycleState},
-        private_stream::persist_private_stream_batch,
+        private_stream::{persist_private_stream_batch, PrivateStreamParseStatus},
     },
     storage::{EncryptedLinkStateRecord, InMemoryStorage, LinkedPeerRecord, StorageAdapter},
     test_utils::allowance_application_message,
@@ -1305,94 +1305,127 @@ async fn test_allowance_derivation_blocks_on_malformed_recognized_request_with_a
 
 #[tokio::test]
 async fn test_allowance_derivation_blocks_on_allowance_correlated_unknown_kind() {
-    let storage = InMemoryStorage::new();
-    let peer = counterparty();
-    queue_outbound(
-        &storage,
-        peer.clone(),
-        receiver_path(),
-        proposal(PROPOSAL_ID, AllowanceRole::Allower),
-        timestamp(),
-    )
-    .await;
-    persist_inbound(
-        &storage,
-        peer.clone(),
-        receiver_path(),
-        vec![acceptance(PROPOSAL_ID)],
-        timestamp(),
-    )
-    .await;
-    let accepted = derived(&storage, &peer, &receiver_path()).await;
-    assert_eq!(accepted.state, AllowanceLifecycleState::Accepted);
-    assert_eq!(accepted.history_status, AllowanceHistoryStatus::Consistent);
+    for (version, raw_version, parse_status) in [
+        (Some(1), "1", PrivateStreamParseStatus::UnknownKind),
+        (None, "256", PrivateStreamParseStatus::InvalidJson),
+        (None, "-1", PrivateStreamParseStatus::InvalidJson),
+        (None, "\"1\"", PrivateStreamParseStatus::InvalidJson),
+        (None, "null", PrivateStreamParseStatus::InvalidJson),
+    ] {
+        let storage = InMemoryStorage::new();
+        let peer = counterparty();
+        queue_outbound(
+            &storage,
+            peer.clone(),
+            receiver_path(),
+            proposal(PROPOSAL_ID, AllowanceRole::Allower),
+            timestamp(),
+        )
+        .await;
+        persist_inbound(
+            &storage,
+            peer.clone(),
+            receiver_path(),
+            vec![acceptance(PROPOSAL_ID)],
+            timestamp(),
+        )
+        .await;
+        let accepted = derived(&storage, &peer, &receiver_path()).await;
+        assert_eq!(accepted.state, AllowanceLifecycleState::Accepted);
+        assert_eq!(accepted.history_status, AllowanceHistoryStatus::Consistent);
 
-    persist_private_stream_batch(
-        &storage,
-        peer.clone(),
-        receiver_path(),
-        vec![PrivateApplicationMessage {
-            version: Some(1),
-            kind: Some("paykit.allowance_future".into()),
-            raw_json: format!(
-                r#"{{"version":1,"kind":"paykit.allowance_future","allowance_id":"{ALLOWANCE_ID}","private_sentinel":true}}"#
-            ),
-        }],
-        None,
-        timestamp(),
-    )
-    .await
-    .unwrap();
+        persist_private_stream_batch(
+            &storage,
+            peer.clone(),
+            receiver_path(),
+            vec![PrivateApplicationMessage {
+                version,
+                kind: Some("paykit.allowance_future".into()),
+                raw_json: serde_json::json!({
+                    "version": serde_json::from_str::<serde_json::Value>(raw_version).unwrap(),
+                    "kind": "paykit.allowance_future",
+                    "allowance_id": ALLOWANCE_ID,
+                    "private_sentinel": true,
+                })
+                .to_string(),
+            }],
+            None,
+            timestamp(),
+        )
+        .await
+        .unwrap();
 
-    let record = derived(&storage, &peer, &receiver_path()).await;
+        let snapshot = storage.snapshot().unwrap();
+        let item = snapshot.private_stream_items.last().unwrap();
+        assert_eq!(item.parse_status, parse_status);
+        assert!(item.raw_json.contains("private_sentinel"));
 
-    assert_eq!(record.state, AllowanceLifecycleState::Accepted);
-    assert_eq!(record.history_status, AllowanceHistoryStatus::Invalid);
-    assert_eq!(
-        record.invalid_reason.as_deref(),
-        Some("unsupported Allowance-correlated private message")
-    );
-    assert!(!format!("{record:?}").contains("private_sentinel"));
+        let record = derived(&storage, &peer, &receiver_path()).await;
+
+        assert_eq!(record.state, AllowanceLifecycleState::Accepted);
+        assert_eq!(record.history_status, AllowanceHistoryStatus::Invalid);
+        assert_eq!(
+            record.invalid_reason.as_deref(),
+            Some("unsupported Allowance-correlated private message")
+        );
+        assert!(!format!("{record:?}").contains("private_sentinel"));
+    }
 }
 
 #[tokio::test]
 async fn test_allowance_derivation_ignores_unknown_kind_without_top_level_allowance_id() {
-    let storage = InMemoryStorage::new();
-    let peer = counterparty();
-    persist_inbound(
-        &storage,
-        peer.clone(),
-        receiver_path(),
-        vec![proposal(PROPOSAL_ID, AllowanceRole::Allower)],
-        timestamp(),
-    )
-    .await;
-    let unknown = |raw_json: String| PrivateApplicationMessage {
-        version: Some(1),
-        kind: Some("paykit.allowance_future".into()),
-        raw_json,
-    };
-    persist_private_stream_batch(
-        &storage,
-        peer.clone(),
-        receiver_path(),
-        vec![
-            unknown(r#"{"version":1,"kind":"paykit.allowance_future"}"#.into()),
-            unknown(format!(
-                r#"{{"version":1,"kind":"paykit.allowance_future","payload":{{"allowance_id":"{ALLOWANCE_ID}"}}}}"#
-            )),
-        ],
-        None,
-        timestamp(),
-    )
-    .await
-    .unwrap();
+    for (version, raw_version) in [(Some(1), "1"), (None, "256")] {
+        let storage = InMemoryStorage::new();
+        let peer = counterparty();
+        persist_inbound(
+            &storage,
+            peer.clone(),
+            receiver_path(),
+            vec![proposal(PROPOSAL_ID, AllowanceRole::Allower)],
+            timestamp(),
+        )
+        .await;
+        let unknown = |fields: serde_json::Value| {
+            let mut value = serde_json::json!({
+                "version": serde_json::from_str::<serde_json::Value>(raw_version).unwrap(),
+                "kind": "paykit.allowance_future",
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            PrivateApplicationMessage {
+                version,
+                kind: Some("paykit.allowance_future".into()),
+                raw_json: value.to_string(),
+            }
+        };
+        persist_private_stream_batch(
+            &storage,
+            peer.clone(),
+            receiver_path(),
+            vec![
+                unknown(serde_json::json!({})),
+                unknown(serde_json::json!({"payload": {"allowance_id": ALLOWANCE_ID}})),
+                unknown(serde_json::json!({"allowance_id": "not-a-uuid"})),
+                PrivateApplicationMessage {
+                    version: None,
+                    kind: None,
+                    raw_json: "not JSON".into(),
+                },
+            ],
+            None,
+            timestamp(),
+        )
+        .await
+        .unwrap();
 
-    let record = derived(&storage, &peer, &receiver_path()).await;
+        let record = derived(&storage, &peer, &receiver_path()).await;
 
-    assert_eq!(record.state, AllowanceLifecycleState::Proposed);
-    assert_eq!(record.history_status, AllowanceHistoryStatus::Consistent);
-    assert!(record.invalid_reason.is_none());
+        assert_eq!(record.state, AllowanceLifecycleState::Proposed);
+        assert_eq!(record.history_status, AllowanceHistoryStatus::Consistent);
+        assert!(record.invalid_reason.is_none());
+    }
 }
 
 #[tokio::test]

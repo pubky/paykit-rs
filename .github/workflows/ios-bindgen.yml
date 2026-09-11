@@ -1,0 +1,106 @@
+name: iOS Bindgen
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - '.cargo/**'
+      - '.github/workflows/ios-bindgen.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'build.rs'
+      - 'Package.swift'
+      - 'paykit-ffi/**'
+      - 'paykit-lib/**'
+      - 'paykit-sdk/**'
+      - 'rust-toolchain*'
+      - 'vendor/**'
+  pull_request:
+    paths:
+      - '.cargo/**'
+      - '.github/workflows/ios-bindgen.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'build.rs'
+      - 'Package.swift'
+      - 'paykit-ffi/**'
+      - 'paykit-lib/**'
+      - 'paykit-sdk/**'
+      - 'rust-toolchain*'
+      - 'vendor/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios-bindgen:
+    name: Generate iOS bindings
+    permissions:
+      contents: read
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+
+      - name: Generate iOS bindings and XCFramework
+        working-directory: paykit-ffi
+        run: ./build_ios.sh
+
+      - name: Verify generated iOS outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            paykit-ffi/bindings/ios/PaykitPublicKeys.swift
+            paykit-ffi/bindings/ios/module.modulemap
+            paykit-ffi/bindings/ios/paykit.swift
+            paykit-ffi/bindings/ios/paykitFFI.h
+            paykit-ffi/dist/ios/Paykit.xcframework
+            paykit-ffi/dist/ios/Paykit.xcframework.zip
+          )
+
+          for path in "${required[@]}"; do
+            if [ ! -e "$path" ]; then
+              echo "::error::Missing generated iOS output: $path"
+              exit 1
+            fi
+          done
+
+          test -s paykit-ffi/dist/ios/Paykit.xcframework.zip
+
+      - name: Check committed iOS interface files
+        shell: bash
+        run: |
+          set -euo pipefail
+          generated_sources=(
+            paykit-ffi/bindings/ios/PaykitPublicKeys.swift
+            paykit-ffi/bindings/ios/module.modulemap
+            paykit-ffi/bindings/ios/paykit.swift
+            paykit-ffi/bindings/ios/paykitFFI.h
+          )
+
+          if ! git diff --quiet -- "${generated_sources[@]}"; then
+            echo "::error::Committed iOS interface files are stale. Run 'cd paykit-ffi && ./build_ios.sh', restore Package.swift unless preparing a release, and commit the updated interface files."
+            git diff --name-only -- "${generated_sources[@]}"
+            exit 1
+          fi
+
+      - name: Upload generated iOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: paykit-ios-bindgen
+          path: |
+            paykit-ffi/bindings/ios/PaykitPublicKeys.swift
+            paykit-ffi/bindings/ios/module.modulemap
+            paykit-ffi/bindings/ios/paykit.swift
+            paykit-ffi/bindings/ios/paykitFFI.h
+            paykit-ffi/dist/ios/Paykit.xcframework.zip
+          if-no-files-found: error

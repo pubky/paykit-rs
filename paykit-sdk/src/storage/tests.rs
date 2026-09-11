@@ -651,6 +651,59 @@ async fn test_private_payment_list_queue_reclaims_stale_sending_before_newer_lis
 }
 
 #[tokio::test]
+async fn test_private_payment_list_queue_keeps_failed_send_before_newer_list() {
+    let storage = InMemoryStorage::new();
+    let counterparty = random_public_key();
+
+    let (first, second) = storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                let mut first = tx.insert_outbound_private_message(outbound_private_message(
+                    counterparty.clone(),
+                ));
+                first.status = OutboundPrivateMessageStatus::Failed;
+                first.last_attempt_at = Some(timestamp() - chrono::Duration::seconds(120));
+                tx.save_outbound_private_message(first.clone())?;
+                let second =
+                    tx.insert_outbound_private_message(outbound_private_message(counterparty));
+                Ok((first, second))
+            }
+        })
+        .await
+        .unwrap();
+
+    let claimed = claim_next_outbound_private_message(
+        &storage,
+        &counterparty,
+        &receiver_path(),
+        timestamp(),
+        timestamp() - chrono::Duration::seconds(60),
+        timestamp() - chrono::Duration::seconds(60),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // A failed send may have reached the homeserver, so the queue retries the
+    // identical packet instead of superseding it with a different list.
+    assert_eq!(claimed.outbound_message_id, first.outbound_message_id);
+    let snapshot = storage.snapshot().unwrap();
+    let first = snapshot
+        .outbound_private_messages
+        .iter()
+        .find(|message| message.outbound_message_id == first.outbound_message_id)
+        .unwrap();
+    assert_ne!(first.status, OutboundPrivateMessageStatus::Superseded);
+    let second = snapshot
+        .outbound_private_messages
+        .iter()
+        .find(|message| message.outbound_message_id == second.outbound_message_id)
+        .unwrap();
+    assert_eq!(second.status, OutboundPrivateMessageStatus::Pending);
+}
+
+#[tokio::test]
 async fn test_event_message_queue_preserves_fifo() {
     let storage = InMemoryStorage::new();
     let counterparty = random_public_key();
@@ -1134,4 +1187,34 @@ async fn test_transaction_rolls_back_on_error() {
     assert!(result.is_err());
     let snapshot = storage.snapshot().unwrap();
     assert!(snapshot.linked_peers.is_empty());
+}
+
+#[tokio::test]
+async fn test_ensure_sign_out_generation_rejects_stale_writers() {
+    let storage = InMemoryStorage::new();
+    storage
+        .transaction(|tx| {
+            tx.save_identity_state(IdentityState {
+                local_pubky_public_key: None,
+                local_receiver_noise_public_key: None,
+                initialized_at: timestamp(),
+                sign_out_generation: 5,
+            });
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let stale = storage
+        .transaction(|tx| ensure_sign_out_generation(tx, 4, "test write"))
+        .await;
+    assert!(
+        matches!(stale, Err(PaykitSdkError::Identity { .. })),
+        "writes captured before a sign-out must be rejected"
+    );
+
+    let current = storage
+        .transaction(|tx| ensure_sign_out_generation(tx, 5, "test write"))
+        .await;
+    assert!(current.is_ok());
 }

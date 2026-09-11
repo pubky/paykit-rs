@@ -24,6 +24,7 @@ where
         draft: ReceiptDraft,
     ) -> Result<ReceiptIssuanceView> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
+        let expected_generation = identity.sign_out_generation;
         if identity.local_pubky_public_key.is_none() {
             return Err(PaykitSdkError::Identity {
                 context: "no local Pubky identity available for receipt issuance".into(),
@@ -83,6 +84,11 @@ where
             .transaction({
                 let record = record.clone();
                 move |tx| {
+                    ensure_sign_out_generation(
+                        tx,
+                        expected_generation,
+                        "persist receipt issuance",
+                    )?;
                     if tx
                         .receipt_issuance_record_by_receipt_id(&record.receipt_id)
                         .is_some()
@@ -138,7 +144,7 @@ where
         counterparty_receiver_path: PaykitReceiverPath,
         receipt_id: &str,
     ) -> Result<ReceiptIssuanceView> {
-        let (session_access, _) = self.private_link_session_access().await?;
+        let (session_access, _, expected_generation) = self.private_link_session_access().await?;
         let record = load_receipt_issuance_record(
             &self.storage,
             &counterparty,
@@ -170,6 +176,11 @@ where
                         .transaction({
                             let stored = stored.clone();
                             move |tx| {
+                                ensure_sign_out_generation(
+                                    tx,
+                                    expected_generation,
+                                    "mark receipt issuance stored",
+                                )?;
                                 tx.save_receipt_issuance_record(stored);
                                 Ok(())
                             }
@@ -183,6 +194,11 @@ where
                         .transaction({
                             let failed = failed.clone();
                             move |tx| {
+                                ensure_sign_out_generation(
+                                    tx,
+                                    expected_generation,
+                                    "mark receipt issuance failed",
+                                )?;
                                 tx.save_receipt_issuance_record(failed);
                                 Ok(())
                             }
@@ -193,8 +209,13 @@ where
             }
         };
 
-        match enqueue_receipt_access_for_issuance(&self.storage, record.clone(), self.clock.now())
-            .await
+        match enqueue_receipt_access_for_issuance(
+            &self.storage,
+            record.clone(),
+            self.clock.now(),
+            expected_generation,
+        )
+        .await
         {
             Ok(queued) => Ok(ReceiptIssuanceView::from(&queued)),
             Err(err) => {
@@ -203,6 +224,11 @@ where
                     .transaction({
                         let failed = failed.clone();
                         move |tx| {
+                            ensure_sign_out_generation(
+                                tx,
+                                expected_generation,
+                                "mark receipt issuance queueing failed",
+                            )?;
                             tx.save_receipt_issuance_record(failed);
                             Ok(())
                         }
@@ -287,6 +313,7 @@ where
         receipt_id: &str,
     ) -> Result<ReceiptRecord> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
+        let expected_generation = identity.sign_out_generation;
         let local_public_key =
             identity
                 .local_pubky_public_key
@@ -344,6 +371,7 @@ where
                 &record,
                 &access_records,
                 self.clock.now(),
+                expected_generation,
             )
             .await?;
             return Ok(record);
@@ -396,6 +424,7 @@ where
                         ReceiptRetrievalStatus::NotFound,
                         now,
                         error,
+                        expected_generation,
                     )
                     .await?;
                     last_error = Some(merge_retrieval_error(
@@ -411,6 +440,7 @@ where
                         ReceiptRetrievalStatus::Failed,
                         now,
                         error,
+                        expected_generation,
                     )
                     .await?;
                     last_error = Some(err);
@@ -430,14 +460,24 @@ where
                             let access = access.mark_retrieved(now);
                             let record = record.clone();
                             move |tx| {
+                                ensure_sign_out_generation(
+                                    tx,
+                                    expected_generation,
+                                    "persist retrieved receipt",
+                                )?;
                                 tx.save_receipt_access_record(access);
                                 tx.save_receipt_record(record);
                                 Ok(())
                             }
                         })
                         .await?;
-                    self.reconcile_cached_receipt_access_records(&record, &all_access_records, now)
-                        .await?;
+                    self.reconcile_cached_receipt_access_records(
+                        &record,
+                        &all_access_records,
+                        now,
+                        expected_generation,
+                    )
+                    .await?;
                     return Ok(record);
                 }
                 Err(err) => {
@@ -447,6 +487,7 @@ where
                         ReceiptRetrievalStatus::Failed,
                         now,
                         error,
+                        expected_generation,
                     )
                     .await?;
                     last_error = Some(err);
@@ -604,6 +645,7 @@ where
         record: &ReceiptRecord,
         access_records: &[ReceiptAccessRecord],
         now: DateTime<Utc>,
+        expected_generation: u64,
     ) -> Result<()> {
         let has_mismatched_access = self
             .storage
@@ -611,6 +653,11 @@ where
                 let record = record.clone();
                 let access_records = access_records.to_vec();
                 move |tx| {
+                    ensure_sign_out_generation(
+                        tx,
+                        expected_generation,
+                        "reconcile receipt access records",
+                    )?;
                     let mut has_mismatched_access = false;
                     for access in access_records {
                         if receipt_record_matches_access(&record, &access) {
@@ -662,11 +709,17 @@ where
         status: ReceiptRetrievalStatus,
         attempted_at: DateTime<Utc>,
         error: String,
+        expected_generation: u64,
     ) -> Result<()> {
         self.storage
             .transaction({
                 let access = access.mark_retrieval_error(status, attempted_at, error);
                 move |tx| {
+                    ensure_sign_out_generation(
+                        tx,
+                        expected_generation,
+                        "persist receipt retrieval error",
+                    )?;
                     tx.save_receipt_access_record(access);
                     Ok(())
                 }

@@ -16,7 +16,7 @@ where
         counterparty: PubkyPublicKey,
         counterparty_receiver_path: PaykitReceiverPath,
     ) -> Result<PrivateStreamIntakeReport> {
-        let (session_access, _) = self.private_link_session_access().await?;
+        let (session_access, ..) = self.private_link_session_access().await?;
         self.ensure_peer_allows_private_automation(&counterparty, &counterparty_receiver_path)
             .await?;
         let lease = self
@@ -187,7 +187,7 @@ where
         let next_link_state = EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
             counterparty_receiver_path: stored_link_state.counterparty_receiver_path.clone(),
-            link_snapshot: Some(link.serialize()),
+            link_snapshot: Some(link.serialize()?),
             handshake_snapshot: None,
             handshake_role: None,
             generation: stored_link_state.generation.saturating_add(1),

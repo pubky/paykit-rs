@@ -80,6 +80,7 @@ pub use receipt::{
     prepare_receipt, prepare_receipt_for_recipient, send_receipt_access,
     serialize_receipt_access_json, store_prepared_receipt, PreparedReceipt, Receipt, ReceiptAccess,
     ReceiptAccessEventMessage, ReceiptDecryptionKey, ReceiptDraft, ReceiptId,
+    MAX_ENCRYPTED_RECEIPT_BYTES,
 };
 #[doc(inline)]
 pub use receiver::PaykitReceiverPath;

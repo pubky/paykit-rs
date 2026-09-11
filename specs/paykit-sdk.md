@@ -790,12 +790,15 @@ Durable outbound Private Application Message queue:
 The SDK should use one generic outbound Private Application Message record type
 for all Private Application Message kinds. Event Messages are processed as FIFO
 per counterparty receiver/Encrypted Link. Private Payment Lists use latest-state
-semantics, so older unsent lists may be superseded by a newer complete list.
-Send workers must claim the next sendable message through storage before
-sending it. A stale `Sending` queue head can be reclaimed after the lease
+semantics, so older lists that were never sent may be superseded by a newer
+complete list. Send workers must claim the next sendable message through storage
+before sending it. A stale `Sending` queue head can be reclaimed after the lease
 timeout, but the SDK must retry that same message before later private messages
-advance the Encrypted Link. Stale `Sending` messages must not be superseded by
-newer latest-state messages until the stale send is checkpointed or fails.
+advance the Encrypted Link. `Sending` and `Failed` messages must not be
+superseded by newer latest-state messages: either may have reached the
+homeserver, and the next send restores the last confirmed checkpoint, so
+skipping ahead would reuse the transport key and nonce. They are retried at the
+queue head until the send is checkpointed or the link is recovered.
 
 Event Message retries must reuse the same Event ID and exact payload.
 
