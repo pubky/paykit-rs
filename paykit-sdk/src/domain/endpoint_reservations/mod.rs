@@ -282,6 +282,9 @@ where
             }
 
             if let PrivatePaymentListQueuePolicy::Sync { sent_message_id } = policy {
+                // Pending, sending, and failed messages remain on the retry path, so
+                // they can be reused. A sent message is reusable only when this
+                // runtime witnessed its delivery on the current Encrypted Link.
                 let latest = tx
                     .outbound_private_messages(&counterparty, &counterparty_receiver_path)
                     .into_iter()
@@ -308,7 +311,8 @@ where
                         == checked_drafts.len();
                     if reusable
                         && same_reservations
-                        && parse_private_payment_list_json(&message.raw_json)? == list
+                        && parse_private_payment_list_json(&message.raw_json)
+                            .is_ok_and(|stored| stored == list)
                     {
                         return Ok(message);
                     }

@@ -113,7 +113,7 @@ pub struct FfiLinkedPeerRecord {
     pub counterparty_receiver_path: String,
     /// Current local relationship/link state.
     pub state: FfiLinkedPeerState,
-    /// Last successful sync time as RFC3339 text.
+    /// Last time sync changed local link state, as RFC3339 text.
     pub last_sync_at: Option<String>,
     /// Last private receive time as RFC3339 text.
     pub last_private_receive_at: Option<String>,

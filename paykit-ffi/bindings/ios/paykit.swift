@@ -7596,7 +7596,7 @@ public struct LinkedPeerRecord {
      */
     public var state: LinkedPeerState
     /**
-     * Last successful sync time as RFC3339 text.
+     * Last time sync changed local link state, as RFC3339 text.
      */
     public var lastSyncAt: String?
     /**
@@ -7641,7 +7641,7 @@ public struct LinkedPeerRecord {
          * Current local relationship/link state.
          */state: LinkedPeerState,
         /**
-         * Last successful sync time as RFC3339 text.
+         * Last time sync changed local link state, as RFC3339 text.
          */lastSyncAt: String?,
         /**
          * Last private receive time as RFC3339 text.

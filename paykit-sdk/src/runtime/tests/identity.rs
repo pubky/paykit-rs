@@ -232,6 +232,31 @@ async fn test_refresh_active_identity_rejects_stale_generation() {
 }
 
 #[tokio::test]
+async fn test_refresh_active_identity_preserves_unchanged_state() {
+    let storage = InMemoryStorage::new();
+    let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let original = IdentityState {
+        local_pubky_public_key: Some(local_public_key.clone()),
+        local_receiver_noise_public_key: Some(receiver_noise_public_key()),
+        initialized_at: FixedClock.now() - ChronoDuration::minutes(1),
+        sign_out_generation: 3,
+    };
+    storage.save_identity_state(original.clone()).await.unwrap();
+    let active_identity = ActiveReceiverIdentity {
+        local_pubky_public_key: local_public_key,
+        local_receiver_noise_public_key: receiver_noise_public_key(),
+    };
+
+    let refreshed = storage
+        .transaction(move |tx| refresh_active_identity(tx, active_identity, FixedClock.now(), 3))
+        .await
+        .unwrap();
+
+    assert_eq!(refreshed, original);
+    assert_eq!(storage.snapshot().unwrap().identity_state, Some(original));
+}
+
+#[tokio::test]
 async fn test_identity_status_cached_identity_requires_live_session() {
     let storage = InMemoryStorage::new();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

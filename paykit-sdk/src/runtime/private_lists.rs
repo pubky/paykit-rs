@@ -180,7 +180,15 @@ where
         else {
             return Ok(None);
         };
-        let link_id = paykit_lib::EncryptedLinkSnapshot::deserialize(&snapshot)?.link_id();
+        // Only a delivery witnessed on the current Noise link can make a sent row
+        // reusable. Corrupt snapshots fall through so the outbound worker can mark
+        // the peer as requiring recovery.
+        let Some(link_id) = paykit_lib::EncryptedLinkSnapshot::deserialize(&snapshot)
+            .ok()
+            .and_then(|snapshot| snapshot.link_id())
+        else {
+            return Ok(None);
+        };
         Ok(self
             .private_payment_list_publications
             .lock()
@@ -188,7 +196,7 @@ where
             .and_then(|publications| {
                 publications
                     .get(&(counterparty.clone(), counterparty_receiver_path.clone()))
-                    .filter(|publication| Some(publication.link_id) == link_id)
+                    .filter(|publication| publication.link_id == link_id)
                     .map(|publication| publication.outbound_message_id)
             }))
     }

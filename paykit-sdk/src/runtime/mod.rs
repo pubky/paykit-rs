@@ -160,6 +160,9 @@ pub struct PaykitSdk<S, K, P, C = SystemClock> {
     config: PaykitSdkConfig,
     clock: C,
     identity_operation_in_progress: Arc<Mutex<bool>>,
+    // Best-effort runtime-local delivery witnesses. They are unavailable after
+    // restart or lock poisoning, and the Noise link id prevents a sent message
+    // from an older Encrypted Link from being reused.
     private_payment_list_publications:
         Mutex<HashMap<(PubkyPublicKey, PaykitReceiverPath), PrivatePaymentListPublication>>,
 }
@@ -534,7 +537,6 @@ enum IdentityTransition {
     Initial,
     PubkyIdentityChanged,
     ReceiverNoiseKeyChanged,
-    Unchanged,
 }
 
 fn refresh_active_identity(
@@ -558,25 +560,32 @@ fn refresh_active_identity(
         });
     }
 
-    let transition = identity_transition(previous.as_ref(), &active);
-    let previous_generation = previous
-        .as_ref()
-        .map(|state| state.sign_out_generation)
-        .unwrap_or_default();
+    let transition = match previous {
+        None => IdentityTransition::Initial,
+        Some(previous)
+            if previous.local_pubky_public_key.as_ref() != Some(&active.local_pubky_public_key) =>
+        {
+            IdentityTransition::PubkyIdentityChanged
+        }
+        Some(previous)
+            if previous.local_receiver_noise_public_key.as_ref()
+                != Some(&active.local_receiver_noise_public_key) =>
+        {
+            IdentityTransition::ReceiverNoiseKeyChanged
+        }
+        Some(previous) => return Ok(previous),
+    };
 
     match transition {
         IdentityTransition::Initial | IdentityTransition::PubkyIdentityChanged => {
             tx.clear_identity_scoped_state();
         }
         IdentityTransition::ReceiverNoiseKeyChanged => tx.clear_private_identity_scoped_state(),
-        IdentityTransition::Unchanged => {
-            return Ok(previous.expect("unchanged identity has persisted state"));
-        }
     }
 
     let sign_out_generation = match transition {
-        IdentityTransition::PubkyIdentityChanged => previous_generation.saturating_add(1),
-        _ => previous_generation,
+        IdentityTransition::PubkyIdentityChanged => current_generation.saturating_add(1),
+        _ => current_generation,
     };
     let state = IdentityState {
         local_pubky_public_key: Some(active.local_pubky_public_key),
@@ -586,24 +595,6 @@ fn refresh_active_identity(
     };
     tx.save_identity_state(state.clone());
     Ok(state)
-}
-
-fn identity_transition(
-    previous: Option<&IdentityState>,
-    active: &ActiveReceiverIdentity,
-) -> IdentityTransition {
-    let Some(previous) = previous else {
-        return IdentityTransition::Initial;
-    };
-    if previous.local_pubky_public_key.as_ref() != Some(&active.local_pubky_public_key) {
-        return IdentityTransition::PubkyIdentityChanged;
-    }
-    if previous.local_receiver_noise_public_key.as_ref()
-        != Some(&active.local_receiver_noise_public_key)
-    {
-        return IdentityTransition::ReceiverNoiseKeyChanged;
-    }
-    IdentityTransition::Unchanged
 }
 
 /// Maximum accepted size for a public Paykit document fetched from another

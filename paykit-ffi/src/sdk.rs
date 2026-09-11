@@ -188,8 +188,9 @@ impl FfiPaykitSdk {
         let backup = self.runtime.export_backup_state().await?;
         let mut value = serde_json::to_value(backup)
             .map_err(|_| storage_error("backup_encode_failed", "failed to encode SDK backup"))?;
-        // Nested maps (such as endpoint attribution) must not change the fingerprint
-        // merely because the platform reloaded the state blob.
+        // The Value conversion canonicalizes HashMap key order with serde_json's
+        // default map. Keep recursive sorting as a guard if feature unification
+        // enables preserve_order.
         value.sort_all_objects();
         let bytes = serde_json::to_vec(&value)
             .map_err(|_| storage_error("backup_encode_failed", "failed to encode SDK backup"))?;
