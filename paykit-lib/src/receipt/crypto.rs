@@ -14,6 +14,13 @@ use super::{
     Receipt, ReceiptAccess, ReceiptDecryptionKey, RECEIPT_ENCRYPTION_ALGORITHM,
 };
 
+/// Maximum size of an Encrypted Receipt document.
+///
+/// Receipts are small documents; this bound keeps a malicious or buggy issuer
+/// from producing a receipt that retrieval would refuse to read. Both issuance
+/// and retrieval use this limit so they cannot disagree.
+pub const MAX_ENCRYPTED_RECEIPT_BYTES: usize = 256 * 1024;
+
 impl Receipt {
     pub(super) fn aad_for_location(location: &str) -> String {
         format!("paykit.receipt.v1:{location}")
@@ -78,10 +85,20 @@ impl Receipt {
             nonce: URL_SAFE_NO_PAD.encode(nonce),
             ciphertext: URL_SAFE_NO_PAD.encode(ciphertext),
         };
-        serde_json::to_string(&wire).map_err(|err| PaykitError::InvalidData {
-            context: format!("failed to serialize encrypted receipt JSON: {err}"),
-            source: Some(err.into()),
-        })
+        let encrypted_json =
+            serde_json::to_string(&wire).map_err(|err| PaykitError::InvalidData {
+                context: format!("failed to serialize encrypted receipt JSON: {err}"),
+                source: Some(err.into()),
+            })?;
+        if encrypted_json.len() > MAX_ENCRYPTED_RECEIPT_BYTES {
+            return Err(crate::validation::invalid_data(
+                format!(
+                    "Encrypted Receipt exceeds the maximum size of {MAX_ENCRYPTED_RECEIPT_BYTES} bytes"
+                ),
+                None,
+            ));
+        }
+        Ok(encrypted_json)
     }
 
     /// Decrypt an Encrypted Receipt fetched from a homeserver.

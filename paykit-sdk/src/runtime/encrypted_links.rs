@@ -319,7 +319,7 @@ where
         counterparty_receiver_path: PaykitReceiverPath,
         max_advance_steps: u32,
     ) -> Result<LinkedPeerHandshakeReport> {
-        let (session_access, _) = self.private_link_session_access().await?;
+        let (session_access, ..) = self.private_link_session_access().await?;
         let local_public_key = session_access.public_key()?;
         if local_public_key == counterparty {
             return Err(PaykitSdkError::Policy {
@@ -571,7 +571,7 @@ where
         counterparty_receiver_path: &PaykitReceiverPath,
         snapshot_bytes: &[u8],
     ) -> Result<paykit_lib::EncryptedLinkHandshake> {
-        let (session_access, secret_key) = self.private_link_session_access().await?;
+        let (session_access, secret_key, _) = self.private_link_session_access().await?;
         let remote_public_key = counterparty.to_public_key()?;
         let snapshot = paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(snapshot_bytes)?;
         paykit_lib::restore_encrypted_link_handshake(
@@ -623,7 +623,7 @@ where
                     &self.storage,
                     counterparty,
                     handshake_role,
-                    handshake.serialize(),
+                    handshake.serialize()?,
                     expected_generation,
                     lease,
                     self.clock.now(),
@@ -635,7 +635,7 @@ where
                 let report = save_linked_peer_link_state_if_generation_with_lease(
                     &self.storage,
                     counterparty.clone(),
-                    link.serialize(),
+                    link.serialize()?,
                     expected_generation,
                     lease,
                     self.clock.now(),
@@ -754,7 +754,7 @@ where
             }
         }
 
-        let (session_access, secret_key) = self.private_link_session_access().await?;
+        let (session_access, secret_key, _) = self.private_link_session_access().await?;
         let remote_public_key = counterparty.to_public_key()?;
         let remote_noise_public_key = self
             .receiver_noise_public_key(&counterparty, &lease.counterparty_receiver_path)
@@ -795,7 +795,7 @@ where
             &self.storage,
             counterparty,
             role,
-            handshake.serialize(),
+            handshake.serialize()?,
             lease,
             self.clock.now(),
         )
@@ -863,14 +863,14 @@ where
 
     pub(super) async fn private_link_session_access(
         &self,
-    ) -> Result<(PubkySessionAccess, [u8; 32])> {
-        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
+    ) -> Result<(PubkySessionAccess, [u8; 32], u64)> {
+        let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
         let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky session available".into(),
             source: None,
         })?;
         let secret_key = *session_access.receiver_noise_secret_key.as_bytes();
-        Ok((session_access, secret_key))
+        Ok((session_access, secret_key, identity.sign_out_generation))
     }
 }
 
