@@ -168,8 +168,9 @@ Allowances add a consent lifecycle to ordinary Payment Requests without adding
 an Allowance-specific request or payment message. Either party may propose
 immutable terms on an exact Encrypted Link, the recipient may accept or reject,
 and a proposal sender may withdraw while either party may end accepted
-authority. `paykit-sdk` durably derives these shared lifecycle views across
-restart, backup restore, Event ID replay, and Encrypted Link recovery.
+authority. The SDK/runtime is responsible for durably deriving these shared
+lifecycle views across restart, backup restore, Event ID replay, and Encrypted
+Link recovery.
 
 A one-time or Recurring Payment Request remains unchanged: it carries no
 Allowance ID and follows the normal acceptance, cancellation, Payment Proof,
