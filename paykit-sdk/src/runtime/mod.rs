@@ -636,7 +636,7 @@ async fn fetch_public_file_uri(
     storage: &pubky::PublicStorage,
     uri: &str,
     context: &'static str,
-    max_bytes: Option<u64>,
+    max_bytes: u64,
 ) -> Result<Option<Vec<u8>>> {
     let resource = uri
         .parse::<pubky::PubkyResource>()
@@ -644,18 +644,16 @@ async fn fetch_public_file_uri(
             context: format!("{context}: invalid Pubky URI: {err}"),
             source: None,
         })?;
-    // Pubky buffers HTTP error bodies before returning. This limit applies
-    // only to successful responses exposed by the current PublicStorage API.
     match storage.get(resource).await {
-        Ok(resp) => match max_bytes {
-            Some(limit) => profiles::read_bounded_public_file(resp, limit)
-                .await
-                .map(Some),
-            None => {
-                let bytes = crate::net::read_bounded_body(resp, MAX_PUBLIC_FILE_BYTES, context).await?;
-                Ok(Some(bytes))
-            }
-        },
+        Ok(resp) => {
+            let bytes = crate::net::read_bounded_body(
+                resp,
+                max_bytes.min(MAX_PUBLIC_FILE_BYTES as u64) as usize,
+                context,
+            )
+            .await?;
+            Ok(Some(bytes))
+        }
         Err(err) if is_pubky_not_found(&err) => Ok(None),
         Err(err) => Err(map_pubky_transport_error(context, err)),
     }

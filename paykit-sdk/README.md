@@ -129,16 +129,19 @@ Common workflows:
 - use `publish_paykit_blob` / `delete_paykit_blob` for files under the
   configured Paykit blob prefix
 - use `fetch_pubky_file_bounded(uri, max_bytes)` for untrusted public files
-  and images. The limit applies to successful response bodies and is checked
-  while reading, before each chunk is appended.
+  and images. The effective limit is the smaller of `max_bytes` and 5 MiB. It
+  applies to successful response bodies and is checked while reading, before
+  each chunk is appended.
   Missing files return `None`, oversized bodies return a protocol error, and zero
   permits only empty bodies. Content-Length can reject a response early but is
   not required. Transport buffers and the current chunk use additional memory.
   HTTP error bodies remain unbounded inside the current Pubky client before
   Paykit regains control. Closing that gap through this path requires a Pubky
   client API change. This is not complete response-size protection.
+  A hostile homeserver can bypass the limit by returning an HTTP error status.
+  A Pubky request timeout limits that request's duration, not its memory use.
   Callers still set image decode, pixel, cache, and Pubky request-timeout limits.
-  `fetch_pubky_file` / `fetch_pubky_text` have no byte limit.
+  `fetch_pubky_file` / `fetch_pubky_text` limit successful bodies to 5 MiB.
 - use `fetch_pubky_profile` / `fetch_pubky_follows` for read-only Pubky app
   profile and follows data
 - use `resolve_contact_profile` when contact display should prefer Paykit
