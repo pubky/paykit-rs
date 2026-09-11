@@ -25,6 +25,16 @@ pub const PAYKIT_PATH_PREFIX: &str = "/pub/paykit/v0";
 pub const PAYKIT_PRIVATE_PATH_PREFIX: &str = "/pub/paykit/v0/private";
 
 const LIST_PAGE_LIMIT: u16 = 100;
+const LIST_MAX_PAGES: usize = 100;
+
+/// Maximum accepted size for a public Paykit document (Payment Endpoint
+/// payloads, receiver markers).
+///
+/// Public objects are served by other users' homeservers and must not be
+/// trusted to fit in memory; an unbounded read lets a hostile publisher
+/// exhaust the client. 64 KiB is far above any legitimate descriptor
+/// (LNURL, BOLT11 invoice, JSON endpoint payload).
+pub(crate) const MAX_PUBLIC_RESOURCE_BYTES: usize = 64 * 1024;
 
 /// Writes or updates a receiver-scoped Payment Endpoint document.
 #[instrument(skip(session, payload), fields(receiver = %receiver_path, identifier = %identifier))]
@@ -397,23 +407,56 @@ fn is_valid_receiver_app_segment(segment: &str) -> bool {
     PaykitReceiverPath::new(format!("{segment}/wallet")).is_ok()
 }
 
+/// Read a public response body with a hard size bound.
+///
+/// A hostile homeserver can stream an arbitrarily large body, so the limit is
+/// enforced while reading rather than after buffering. `Content-Length` is
+/// checked first as a cheap early rejection when present.
+pub(crate) async fn read_bounded_body(
+    mut resp: reqwest::Response,
+    max_bytes: usize,
+    label: &str,
+) -> Result<Vec<u8>> {
+    if let Some(content_length) = resp.content_length() {
+        if content_length > max_bytes as u64 {
+            return Err(resource_too_large(label, max_bytes));
+        }
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|err| {
+        error!(error = %err, "failed to read response bytes");
+        PaykitError::Transport {
+            context: label.to_string(),
+            source: err.into(),
+        }
+    })? {
+        if body.len() + chunk.len() > max_bytes {
+            return Err(resource_too_large(label, max_bytes));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn resource_too_large(label: &str, max_bytes: usize) -> PaykitError {
+    invalid_data(
+        format!("{label}: resource exceeds maximum size of {max_bytes} bytes"),
+        None,
+    )
+}
+
 #[instrument(skip(storage), fields(addr = %addr, label = %label))]
 async fn fetch_text(storage: &PublicStorage, addr: String, label: &str) -> Result<Option<String>> {
     trace!("fetching text resource");
     match storage.get(&addr).await {
         Ok(resp) => {
-            let bytes = resp.bytes().await.map_err(|err| {
-                error!(error = %err, "failed to read response bytes");
-                PaykitError::Transport {
-                    context: label.to_string(),
-                    source: err.into(),
-                }
-            })?;
+            let bytes = read_bounded_body(resp, MAX_PUBLIC_RESOURCE_BYTES, label).await?;
             if bytes.is_empty() {
                 debug!("resource is empty, returning None");
                 return Ok(None);
             }
-            let data = String::from_utf8(bytes.to_vec()).map_err(|err| {
+            let data = String::from_utf8(bytes).map_err(|err| {
                 let pos = err.utf8_error().valid_up_to();
                 error!(
                     error = %err,
@@ -451,20 +494,14 @@ async fn fetch_nonempty_text(
     trace!("fetching non-empty text resource");
     match storage.get(&addr).await {
         Ok(resp) => {
-            let bytes = resp.bytes().await.map_err(|err| {
-                error!(error = %err, "failed to read response bytes");
-                PaykitError::Transport {
-                    context: label.to_string(),
-                    source: err.into(),
-                }
-            })?;
+            let bytes = read_bounded_body(resp, MAX_PUBLIC_RESOURCE_BYTES, label).await?;
             if bytes.is_empty() {
                 return Err(invalid_data(
                     format!("{label}: resource must not be empty"),
                     None,
                 ));
             }
-            let data = String::from_utf8(bytes.to_vec()).map_err(|err| {
+            let data = String::from_utf8(bytes).map_err(|err| {
                 let pos = err.utf8_error().valid_up_to();
                 error!(
                     error = %err,
@@ -502,6 +539,7 @@ async fn list_resources(
     trace!("listing directory resources");
     let mut resources = Vec::new();
     let mut cursor = None::<String>;
+    let mut pages = 0usize;
 
     loop {
         let mut builder = match storage.list(&addr) {
@@ -542,10 +580,25 @@ async fn list_resources(
             break;
         }
 
+        pages += 1;
+        if pages > LIST_MAX_PAGES {
+            return Err(invalid_data(
+                format!("{label}: listing exceeded {LIST_MAX_PAGES} pages"),
+                None,
+            ));
+        }
+
         let page_len = page.len();
-        cursor = page
+        let next_cursor = page
             .last()
             .map(|resource| format!("{}{}", resource.owner.z32(), resource.path.as_str()));
+        if cursor.is_some() && next_cursor == cursor {
+            return Err(invalid_data(
+                format!("{label}: listing cursor did not advance"),
+                None,
+            ));
+        }
+        cursor = next_cursor;
         resources.extend(page);
 
         if page_len < LIST_PAGE_LIMIT as usize {
