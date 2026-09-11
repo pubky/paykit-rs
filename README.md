@@ -414,6 +414,26 @@ Metadata.
 - `PaymentProof::validate_for_request(request)`: validate stateless proof and
   request correlation fields.
 
+### Allowances
+
+- `AllowanceTerms::builder(asset)`: construct validated immutable Allowance
+  Terms.
+- `AllowanceProposal`, `AllowanceAcceptance`, `AllowanceRejection`, and
+  `AllowanceEnd`: typed lifecycle messages carried by `AllowanceEvent`.
+- `parse_allowance_event_message(message)`: parse a raw Private Application
+  Message when its kind is recognized as an Allowance event. Malformed
+  recognized messages retain their raw payload and validation result.
+- `serialize_allowance_event(event)`: serialize an Allowance event for durable
+  outbound storage before sending.
+- `send_allowance_proposal(link, proposal)` /
+  `send_allowance_acceptance(link, acceptance)` /
+  `send_allowance_rejection(link, rejection)` /
+  `send_allowance_end(link, end)`: send typed lifecycle events over the exact
+  authenticated Encrypted Link.
+
+These `paykit-lib` helpers are stateless. Use the SDK for durable lifecycle
+views and commands; the wallet owns automatic payment decisions and execution.
+
 ### Receipts
 
 - `prepare_receipt(link, receiver_path, draft)`: build the plaintext Receipt,
