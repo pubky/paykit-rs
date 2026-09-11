@@ -241,14 +241,16 @@ pub async fn fetch_encrypted_link_recovery_marker(
     let addr = format!("{remote_identity_public_key}{read_path}");
     match storage.get(&addr).await {
         Ok(resp) => {
-            let bytes = resp.bytes().await.map_err(|err| PaykitError::Transport {
-                context: "fetch Encrypted Link recovery marker".into(),
-                source: err.into(),
-            })?;
+            let bytes = crate::pubky_routing::read_bounded_body(
+                resp,
+                crate::pubky_routing::MAX_PUBLIC_RESOURCE_BYTES,
+                "Encrypted Link recovery marker",
+            )
+            .await?;
             if bytes.is_empty() {
                 return Ok(None);
             }
-            let raw_json = String::from_utf8(bytes.to_vec()).map_err(|err| {
+            let raw_json = String::from_utf8(bytes).map_err(|err| {
                 let pos = err.utf8_error().valid_up_to();
                 invalid_data(
                     format!("Encrypted Link recovery marker is invalid UTF-8 at byte {pos}"),

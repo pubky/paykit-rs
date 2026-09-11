@@ -19,7 +19,7 @@ where
             &counterparty_receiver_path,
         )
         .await?;
-        let (session_access, _) = self.private_link_session_access().await?;
+        let (session_access, ..) = self.private_link_session_access().await?;
         self.ensure_peer_allows_private_automation(&counterparty, &counterparty_receiver_path)
             .await?;
         let queued = queued_outbound_private_messages(
@@ -418,7 +418,7 @@ where
     ) -> Result<()> {
         let now = self.clock.now();
         let sent = mark_outbound_sent(sending, now);
-        link_state.link_snapshot = Some(link.serialize());
+        link_state.link_snapshot = Some(link.serialize()?);
         link_state.handshake_snapshot = None;
         link_state.handshake_role = None;
         link_state.generation = link_state.generation.saturating_add(1);

@@ -10,7 +10,7 @@ async fn test_handshake_snapshot_serialize_roundtrip() {
         responder_handshake: _responder_handshake,
     } = InProgressHandshakeSetup::new().await;
 
-    let snapshot = initiator_handshake.snapshot();
+    let snapshot = initiator_handshake.snapshot().unwrap();
     let bytes = snapshot.serialize();
     assert!(
         bytes.len() > 197,
@@ -59,7 +59,7 @@ async fn test_handshake_restore_from_config_rejects_mismatched_paths() {
         responder_handshake,
     } = InProgressHandshakeSetup::new().await;
 
-    let snapshot = initiator_handshake.snapshot();
+    let snapshot = initiator_handshake.snapshot().unwrap();
     let wrong_config = responder_handshake.config().clone();
     let remote = snapshot.recipient().clone();
 
@@ -81,7 +81,7 @@ async fn test_handshake_restore_from_config_rejects_mismatched_paths() {
 #[tokio::test]
 async fn test_handshake_restore_rejects_mismatched_receiver_scope() {
     let setup = InProgressHandshakeSetup::new().await;
-    let snapshot = setup.initiator_handshake.snapshot();
+    let snapshot = setup.initiator_handshake.snapshot().unwrap();
     let remote = snapshot.recipient().clone();
     let local_receiver_path = snapshot.local_receiver_path().clone();
     let wrong_receiver_path = PaykitReceiverPath::new("bitkit/server").unwrap();
@@ -140,8 +140,8 @@ async fn test_handshake_restore_and_complete() {
     let initiator_config = initiator_handshake.config().clone();
     let responder_config = responder_handshake.config().clone();
 
-    let initiator_snapshot_bytes = initiator_handshake.serialize();
-    let responder_snapshot_bytes = responder_handshake.serialize();
+    let initiator_snapshot_bytes = initiator_handshake.serialize().unwrap();
+    let responder_snapshot_bytes = responder_handshake.serialize().unwrap();
     let initiator_snapshot =
         EncryptedLinkHandshakeSnapshot::deserialize(&initiator_snapshot_bytes).unwrap();
     let responder_snapshot =
@@ -215,7 +215,7 @@ async fn test_handshake_restore_rejects_mismatched_remote_pubkey() {
         responder_handshake: _responder_handshake,
     } = InProgressHandshakeSetup::new().await;
 
-    let snapshot = initiator_handshake.snapshot();
+    let snapshot = initiator_handshake.snapshot().unwrap();
     let config = initiator_handshake.config().clone();
     let wrong_remote = initiator_session.info().public_key().clone();
 
@@ -239,7 +239,7 @@ async fn test_handshake_restore_rejects_transport_phase_snapshot() {
     let setup = PrivateTestSetup::new().await;
 
     // Build a handshake snapshot value from a transport-mode link snapshot.
-    let transport_bytes = setup.sender_link.serialize();
+    let transport_bytes = setup.sender_link.serialize().unwrap();
     let handshake_snapshot = EncryptedLinkHandshakeSnapshot::deserialize(&transport_bytes).unwrap();
     let sender_config = setup.sender_link.config().clone();
     let remote = handshake_snapshot.recipient().clone();
@@ -324,7 +324,7 @@ async fn test_encrypted_link_snapshot_serialize_roundtrip() {
     .unwrap();
 
     // Take a snapshot and serialize.
-    let snapshot = setup.sender_link.snapshot();
+    let snapshot = setup.sender_link.snapshot().unwrap();
     let bytes = snapshot.serialize();
     assert!(
         bytes.len() > 197,
@@ -389,8 +389,8 @@ async fn test_encrypted_link_restore_and_continue() {
     assert_eq!(received_v1.payment_endpoints.len(), 1);
 
     // Snapshot both sides after the first exchange.
-    let sender_snapshot = setup.sender_link.snapshot();
-    let receiver_snapshot = setup.receiver_link.snapshot();
+    let sender_snapshot = setup.sender_link.snapshot().unwrap();
+    let receiver_snapshot = setup.receiver_link.snapshot().unwrap();
 
     // Serialize and deserialize (simulating persistence).
     let sender_bytes = sender_snapshot.serialize();
@@ -506,7 +506,7 @@ async fn test_receive_private_application_messages_returns_full_stream() {
 async fn test_encrypted_link_restore_from_config_rejects_mismatched_paths() {
     let setup = PrivateTestSetup::new().await;
 
-    let snapshot = setup.sender_link.snapshot();
+    let snapshot = setup.sender_link.snapshot().unwrap();
     let wrong_config = setup.receiver_link.config().clone();
     let remote = snapshot.recipient().clone();
 
@@ -529,7 +529,7 @@ async fn test_encrypted_link_restore_from_config_rejects_mismatched_paths() {
 #[tokio::test]
 async fn test_encrypted_link_restore_rejects_mismatched_receiver_scope() {
     let setup = PrivateTestSetup::new().await;
-    let snapshot = setup.sender_link.snapshot();
+    let snapshot = setup.sender_link.snapshot().unwrap();
     let remote = snapshot.recipient().clone();
     let local_receiver_path = snapshot.local_receiver_path().clone();
     let wrong_receiver_path = PaykitReceiverPath::new("bitkit/server").unwrap();
@@ -563,7 +563,7 @@ async fn test_encrypted_link_restore_rejects_mismatched_receiver_scope() {
 async fn test_encrypted_link_restore_rejects_mismatched_remote_pubkey() {
     let setup = PrivateTestSetup::new().await;
 
-    let snapshot = setup.sender_link.snapshot();
+    let snapshot = setup.sender_link.snapshot().unwrap();
     let sender_config = setup.sender_link.config().clone();
     let wrong_remote = setup.sender_session.info().public_key().clone();
 
@@ -588,8 +588,8 @@ async fn test_encrypted_link_serialize_convenience() {
     let setup = PrivateTestSetup::new().await;
 
     // The convenience method should produce the same bytes as snapshot().serialize().
-    let via_snapshot = setup.sender_link.snapshot().serialize();
-    let via_convenience = setup.sender_link.serialize();
+    let via_snapshot = setup.sender_link.snapshot().unwrap().serialize();
+    let via_convenience = setup.sender_link.serialize().unwrap();
     assert_eq!(
         via_snapshot, via_convenience,
         "serialize() should equal snapshot().serialize()"
@@ -670,6 +670,107 @@ fn test_encrypted_link_snapshot_deserialize_rejects_reserved_noise_nonce() {
             "reserved Noise nonce should be rejected"
         );
     }
+}
+
+#[tokio::test]
+async fn test_malformed_private_application_message_packet_is_rejected() {
+    let setup = PrivateTestSetup::new().await;
+    let mut receiver_link = setup.receiver_link;
+
+    // The receiver reads `{owner}/{storage-path}/{slot}`; an outbox write from
+    // the counterparty session uses the storage path without the owner segment.
+    let receive_path = receiver_link.next_receive_path_for_test().unwrap();
+    let outbox_path = receive_path
+        .split_once('/')
+        .map(|(_, storage_path)| storage_path.to_string())
+        .expect("receive path should include an owner segment");
+
+    // Malformed packets a hostile counterparty (or its homeserver) could write
+    // to the receiver's current read slot: an empty body, an incomplete length
+    // prefix, and a length prefix that overstates the body length. Framing
+    // must be rejected before any authentication runs.
+    let malformed_packets: [Vec<u8>; 3] = [Vec::new(), vec![0x00], vec![0xff, 0xff, 0x00]];
+
+    for packet in malformed_packets {
+        setup
+            .sender_session
+            .storage()
+            .put(outbox_path.clone(), packet)
+            .await
+            .expect("malformed outbox fixture should be stored");
+
+        let result = receiver_link.receive_private_application_messages().await;
+        assert!(
+            result.is_err(),
+            "malformed packet must be rejected as an error, not panic"
+        );
+    }
+
+    close_encrypted_link(receiver_link).await.unwrap();
+    close_encrypted_link(setup.sender_link).await.unwrap();
+    setup.sender_session.signout().await.unwrap();
+    setup.receiver_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_send_retries_republish_after_write_failure() {
+    let mut setup = PrivateTestSetup::new().await;
+    setup.sender_link.enable_write_failure_for_test();
+
+    let json = r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#;
+    let err = setup
+        .sender_link
+        .send_private_application_message_for_test(json.as_bytes())
+        .await
+        .expect_err("simulated outbox write failure should fail the send");
+
+    // The retry budget must be spent on outbox write failures, not consumed by
+    // a non-retryable prepared-transport state error.
+    let message = err.to_string();
+    assert!(
+        message.contains("after 4 attempts"),
+        "expected the retry budget to be exhausted by write failures, got: {message}"
+    );
+
+    close_encrypted_link(setup.sender_link).await.unwrap();
+    close_encrypted_link(setup.receiver_link).await.unwrap();
+    setup.sender_session.signout().await.unwrap();
+    setup.receiver_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_send_can_recover_retained_packet_after_write_failure() {
+    let mut setup = PrivateTestSetup::new().await;
+    setup.sender_link.enable_write_failure_for_test();
+
+    let json = r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#;
+    setup
+        .sender_link
+        .send_private_application_message_for_test(json.as_bytes())
+        .await
+        .expect_err("simulated outbox write failure should fail the send");
+
+    // The retained packet blocks other operations on this link.
+    assert!(setup.sender_link.snapshot().is_err());
+
+    // Once connectivity recovers, the retained packet can be republished and
+    // the original message still reaches the receiver.
+    setup.sender_link.disable_write_failure_for_test();
+    setup.sender_link.retry_pending_send().await.unwrap();
+    setup.sender_link.snapshot().unwrap();
+
+    let mut receiver_link = setup.receiver_link;
+    let received = receiver_link
+        .receive_private_application_messages()
+        .await
+        .unwrap();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].raw_json, json);
+
+    close_encrypted_link(setup.sender_link).await.unwrap();
+    close_encrypted_link(receiver_link).await.unwrap();
+    setup.sender_session.signout().await.unwrap();
+    setup.receiver_session.signout().await.unwrap();
 }
 
 fn scoped_snapshot_bytes(state: pubky_noise::serializer::PubkyNoiseSessionState) -> Vec<u8> {

@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     domain::outbound_private::validate_outbound_private_message,
     domain::records::{AmountRecord, BillingPeriodRecord},
-    storage::{NewOutboundPrivateMessage, StorageAdapter},
+    storage::{ensure_sign_out_generation, NewOutboundPrivateMessage, StorageAdapter},
     PaykitReceiverPath, PaykitSdkError, PubkyPublicKey, Result,
 };
 
@@ -760,6 +760,12 @@ where
         .await
 }
 
+/// Maximum accepted size for an Encrypted Receipt document.
+///
+/// Encrypted Receipts are served by an issuer's homeserver and must not be
+/// trusted to fit in memory.
+const MAX_ENCRYPTED_RECEIPT_BYTES: usize = paykit_lib::MAX_ENCRYPTED_RECEIPT_BYTES;
+
 pub(crate) async fn fetch_encrypted_receipt_json(
     public_storage: &pubky::PublicStorage,
     issuer: &PubkyPublicKey,
@@ -768,13 +774,12 @@ pub(crate) async fn fetch_encrypted_receipt_json(
     let addr = format!("{}{}", issuer.to_public_key()?, location);
     match public_storage.get(addr).await {
         Ok(response) => {
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|err| PaykitSdkError::Transport {
-                    context: "read encrypted receipt bytes".into(),
-                    source: Some(err.into()),
-                })?;
+            let bytes = crate::net::read_bounded_body(
+                response,
+                MAX_ENCRYPTED_RECEIPT_BYTES,
+                "encrypted receipt",
+            )
+            .await?;
             let json = encrypted_receipt_json_from_bytes(&bytes)?;
             Ok(Some(json))
         }
@@ -935,6 +940,7 @@ pub(crate) async fn enqueue_receipt_access_for_issuance<S>(
     storage: &S,
     record: ReceiptIssuanceRecord,
     now: DateTime<Utc>,
+    expected_generation: u64,
 ) -> Result<ReceiptIssuanceRecord>
 where
     S: StorageAdapter,
@@ -951,6 +957,7 @@ where
     }
     storage
         .transaction(move |tx| {
+            ensure_sign_out_generation(tx, expected_generation, "queue receipt access")?;
             let outbound = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                 record.counterparty.clone(),
                 record.counterparty_receiver_path.clone(),

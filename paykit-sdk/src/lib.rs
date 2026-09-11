@@ -6,6 +6,7 @@ mod config;
 mod domain;
 mod error;
 mod identity;
+mod net;
 mod pubky_session;
 mod runtime;
 /// Durable storage traits and in-memory test storage.
