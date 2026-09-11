@@ -145,6 +145,61 @@ async fn test_sync_private_payment_list_preserves_delivery_and_reservation_state
 }
 
 #[tokio::test]
+async fn test_sync_private_payment_list_replaces_unparseable_stored_message() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let reservations = vec![reservation("res-1", "ln-secret")];
+    let original = queue_private_payment_list_with_reservations(
+        &storage,
+        &counterparty,
+        &receiver_path(),
+        reservations.clone(),
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    storage
+        .transaction({
+            let original = original.clone();
+            move |tx| {
+                let mut corrupt = original;
+                corrupt.raw_json = "{}".into();
+                tx.save_outbound_private_message(corrupt)?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let replacement = queue_private_payment_list_with_reservations_inner(
+        &storage,
+        &counterparty,
+        &receiver_path(),
+        reservations,
+        timestamp() + ChronoDuration::minutes(1),
+        None,
+        PrivatePaymentListQueuePolicy::Sync {
+            sent_message_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_ne!(
+        replacement.outbound_message_id,
+        original.outbound_message_id
+    );
+    let stored = payment_endpoint_reservations(&storage, &counterparty, &receiver_path())
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0].outbound_message_id,
+        replacement.outbound_message_id
+    );
+}
+
+#[tokio::test]
 async fn test_sync_private_payment_list_keeps_new_reservations_and_explicit_enqueues() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();

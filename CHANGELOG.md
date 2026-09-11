@@ -10,7 +10,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ## [0.1.0-rc53] - 2026-09-11
 
 ### Added
-- Expose `PaykitSdk.backup_state_revision()` in Rust, Swift, and Kotlin to detect backup-content changes without treating transient operation leases as wallet changes.
+- Expose `PaykitSdk.backupStateRevision` in Swift and Kotlin to detect backup-content changes without treating transient operation leases as wallet changes.
 
 ### Fixed
 - Avoid unnecessary SDK writes for empty private receives and unchanged identity or established-link checks.

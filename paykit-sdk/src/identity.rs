@@ -376,7 +376,9 @@ pub struct IdentityState {
     pub local_pubky_public_key: Option<PubkyPublicKey>,
     /// Persisted local receiver-scoped Noise public key, or `None` after sign-out.
     pub local_receiver_noise_public_key: Option<PubkyPublicKey>,
-    /// Last successful initialization time.
+    /// Time the current identity keys were initialized.
+    ///
+    /// Unchanged re-initialization does not refresh this timestamp.
     pub initialized_at: DateTime<Utc>,
     /// Monotonic generation used to separate state across sign-outs.
     pub sign_out_generation: u64,

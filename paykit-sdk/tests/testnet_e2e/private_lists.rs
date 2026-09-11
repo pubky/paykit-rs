@@ -1,6 +1,6 @@
 use paykit_sdk::{
-    OutboundPrivateMessageStatus, PaykitSdkError, PrivatePaymentEndpointReservation,
-    PrivatePaymentListReservationUpdate,
+    LinkedPeerState, OutboundPrivateMessageStatus, PaykitSdkError,
+    PrivatePaymentEndpointReservation, PrivatePaymentListReservationUpdate, StorageAdapter,
 };
 
 use crate::harness::{linked_two_party, private_receiving_detail, two_party};
@@ -269,6 +269,57 @@ async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
         assert_ne!(explicit.cleared[0].outbound_message_id, clear_id);
         clear_id = explicit.cleared[0].outbound_message_id;
     }
+}
+
+#[tokio::test]
+async fn test_private_list_sync_corrupt_snapshot_marks_recovery_required() {
+    let pair = linked_two_party().await;
+    pair.alice
+        .storage
+        .transaction({
+            let counterparty = pair.bob.public_key.clone();
+            let counterparty_receiver_path = pair.bob.receiver_path.clone();
+            move |tx| {
+                let mut link_state = tx
+                    .encrypted_link_state(&counterparty, &counterparty_receiver_path)
+                    .expect("linked peer should have Encrypted Link state");
+                link_state.link_snapshot = Some(vec![1, 2, 3]);
+                tx.save_encrypted_link_state(link_state);
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let report = pair
+        .alice
+        .sdk
+        .sync_private_payment_lists_with_reservations_and_process_outbound(
+            vec![PrivatePaymentListReservationUpdate {
+                counterparty: pair.bob.public_key.clone(),
+                counterparty_receiver_path: pair.bob.receiver_path.clone(),
+                reservations: Vec::new(),
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(report.cleared.len(), 1);
+    assert!(report.failed_to_queue.is_empty());
+    assert_eq!(report.failed_to_deliver.len(), 1);
+    let peer = pair
+        .alice
+        .storage
+        .transaction({
+            let counterparty = pair.bob.public_key.clone();
+            let counterparty_receiver_path = pair.bob.receiver_path.clone();
+            move |tx| Ok(tx.linked_peer(&counterparty, &counterparty_receiver_path))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
 }
 
 #[tokio::test]
