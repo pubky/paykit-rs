@@ -1,14 +1,33 @@
 use chrono::Utc;
 use paykit_sdk::{
-    LinkedPeerState, PaykitReceiverPath, PaykitSdkError, PubkyPublicKey, StorageAdapter,
+    LinkedPeerState, PaykitReceiverPath, PaykitSdkError, PrivatePaymentListReservationUpdate,
+    PubkyPublicKey, StorageAdapter,
 };
 use std::time::{Duration, Instant};
 
-use crate::harness::{linked_two_party, private_receiving_detail, two_party, TestUser};
+use crate::harness::{
+    drive_link_to_linked, linked_two_party, private_receiving_detail, two_party, TestUser,
+};
 
 #[tokio::test]
 async fn test_recovery_marker_publish_observe_remove_roundtrip() {
     let pair = linked_two_party().await;
+    let sent = pair
+        .alice
+        .sdk
+        .clear_private_payment_list_and_process_outbound(
+            pair.bob.public_key.clone(),
+            pair.bob.receiver_path.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent.cleared.len(), 1);
+    assert!(sent.failed_to_deliver.is_empty());
+    pair.bob
+        .sdk
+        .receive_private_messages_from_linked_peers()
+        .await
+        .unwrap();
     wait_until_marker_is_newer_than_observer_checkpoint(
         &pair.bob,
         &pair.alice.public_key,
@@ -139,6 +158,40 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
         .await
         .expect("re-observing after removal should succeed");
     assert!(!observed_again.remote_marker_changed);
+
+    pair.alice
+        .sdk
+        .initiate_link_with_peer(pair.bob.public_key.clone(), pair.bob.receiver_path.clone())
+        .await
+        .unwrap();
+    pair.bob
+        .sdk
+        .accept_link_with_peer(
+            pair.alice.public_key.clone(),
+            pair.alice.receiver_path.clone(),
+        )
+        .await
+        .unwrap();
+    drive_link_to_linked(&pair.alice, &pair.bob).await;
+    let republished = pair
+        .alice
+        .sdk
+        .sync_private_payment_lists_with_reservations_and_process_outbound(
+            vec![PrivatePaymentListReservationUpdate {
+                counterparty: pair.bob.public_key.clone(),
+                counterparty_receiver_path: pair.bob.receiver_path.clone(),
+                reservations: Vec::new(),
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(republished.cleared.len(), 1);
+    assert!(republished.failed_to_deliver.is_empty());
+    assert_ne!(
+        republished.cleared[0].outbound_message_id,
+        sent.cleared[0].outbound_message_id
+    );
 }
 
 async fn wait_until_marker_is_newer_than_observer_checkpoint(

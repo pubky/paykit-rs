@@ -96,6 +96,22 @@ where
         counterparty_receiver_path: PaykitReceiverPath,
         reservations: Vec<PrivatePaymentEndpointReservation>,
     ) -> Result<OutboundPrivateMessageRecord> {
+        self.queue_private_payment_list_with_reservations(
+            counterparty,
+            counterparty_receiver_path,
+            reservations,
+            false,
+        )
+        .await
+    }
+
+    async fn queue_private_payment_list_with_reservations(
+        &self,
+        counterparty: PubkyPublicKey,
+        counterparty_receiver_path: PaykitReceiverPath,
+        reservations: Vec<PrivatePaymentEndpointReservation>,
+        reuse_unchanged: bool,
+    ) -> Result<OutboundPrivateMessageRecord> {
         let cancellations = reservations
             .iter()
             .map(|reservation| {
@@ -119,12 +135,25 @@ where
                 &lease.counterparty_receiver_path,
             )
             .await?;
+            let policy = if reuse_unchanged {
+                PrivatePaymentListQueuePolicy::Sync {
+                    sent_message_id: self
+                        .published_private_payment_list_id(
+                            &counterparty,
+                            &counterparty_receiver_path,
+                        )
+                        .await?,
+                }
+            } else {
+                PrivatePaymentListQueuePolicy::Always
+            };
             queue_private_payment_list_with_reservations_with_link_lease(
                 &self.storage,
                 &counterparty,
                 reservations,
                 self.clock.now(),
                 &lease,
+                policy,
             )
             .await
         }
@@ -137,6 +166,39 @@ where
             }
         };
         self.finish_peer_link_operation(lease, result).await
+    }
+
+    async fn published_private_payment_list_id(
+        &self,
+        counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
+    ) -> Result<Option<u64>> {
+        let Some(snapshot) =
+            load_encrypted_link_state(&self.storage, counterparty, counterparty_receiver_path)
+                .await?
+                .and_then(|state| state.link_snapshot)
+        else {
+            return Ok(None);
+        };
+        // Only a delivery witnessed on the current Noise link can make a sent row
+        // reusable. Corrupt snapshots fall through so the outbound worker can mark
+        // the peer as requiring recovery.
+        let Some(link_id) = paykit_lib::EncryptedLinkSnapshot::deserialize(&snapshot)
+            .ok()
+            .and_then(|snapshot| snapshot.link_id())
+        else {
+            return Ok(None);
+        };
+        Ok(self
+            .private_payment_list_publications
+            .lock()
+            .ok()
+            .and_then(|publications| {
+                publications
+                    .get(&(counterparty.clone(), counterparty_receiver_path.clone()))
+                    .filter(|publication| publication.link_id == link_id)
+                    .map(|publication| publication.outbound_message_id)
+            }))
     }
 
     /// Enqueue an empty Private Payment List for one counterparty.
@@ -177,12 +239,13 @@ where
         counterparty: PubkyPublicKey,
         counterparty_receiver_path: PaykitReceiverPath,
     ) -> Result<PrivatePaymentListDeliveryReport> {
-        self.sync_private_payment_lists_with_reservations_and_process_outbound(
+        self.sync_private_payment_lists_with_reservations(
             vec![PrivatePaymentListReservationUpdate {
                 counterparty,
                 counterparty_receiver_path,
                 reservations: Vec::new(),
             }],
+            false,
             false,
         )
         .await
@@ -334,10 +397,28 @@ where
     /// Counterparties with an in-progress Encrypted Link can still have their
     /// lists queued; they remain eligible for a later outbound worker run after
     /// the link reaches `Linked`.
+    /// Unchanged lists with the same reservations reuse their existing outbound
+    /// record, including lists already sent on the current Encrypted Link.
+    /// Outbound retries and reservation cleanup still run for reused records.
+    /// Sent-list reuse is runtime-local; restarting the SDK conservatively republishes the list.
     pub async fn sync_private_payment_lists_with_reservations_and_process_outbound(
+        &self,
+        updates: Vec<PrivatePaymentListReservationUpdate>,
+        clear_unlisted_linked_peers: bool,
+    ) -> Result<PrivatePaymentListDeliveryReport> {
+        self.sync_private_payment_lists_with_reservations(
+            updates,
+            clear_unlisted_linked_peers,
+            true,
+        )
+        .await
+    }
+
+    async fn sync_private_payment_lists_with_reservations(
         &self,
         mut updates: Vec<PrivatePaymentListReservationUpdate>,
         clear_unlisted_linked_peers: bool,
+        reuse_unchanged: bool,
     ) -> Result<PrivatePaymentListDeliveryReport> {
         self.require_initialized_identity("sync reservation-backed Private Payment Lists")
             .await?;
@@ -424,10 +505,11 @@ where
                 continue;
             }
             match self
-                .enqueue_private_payment_list_with_reservations(
+                .queue_private_payment_list_with_reservations(
                     counterparty.clone(),
                     counterparty_receiver_path.clone(),
                     update.reservations,
+                    reuse_unchanged,
                 )
                 .await
             {
@@ -457,9 +539,11 @@ where
 
         for (counterparty, counterparty_receiver_path) in clear_counterparties {
             match self
-                .clear_private_payment_list(
+                .queue_private_payment_list_with_reservations(
                     counterparty.clone(),
                     counterparty_receiver_path.clone(),
+                    Vec::new(),
+                    reuse_unchanged,
                 )
                 .await
             {
@@ -632,6 +716,7 @@ where
                 reservations,
                 now,
                 lease,
+                PrivatePaymentListQueuePolicy::Always,
             )
             .await;
             match result {
