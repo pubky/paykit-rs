@@ -7,6 +7,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## [0.1.0-rc53] - 2026-09-11
+
+### Added
+- Expose `PaykitSdk.backup_state_revision()` in Rust, Swift, and Kotlin to detect backup-content changes without treating transient operation leases as wallet changes.
+
+### Fixed
+- Avoid unnecessary SDK writes for empty private receives and unchanged identity or established-link checks.
+- Reuse unchanged reservation-backed Private Payment Lists during routine synchronization while preserving outbound retries and conservative republication after restart or relink.
+
+### Changed
+- Make `PrivateStreamIntakeReport.receive_batch_id` optional because an empty receive no longer allocates a batch.
+
 ## [0.1.0-rc52] - 2026-09-10
 
 ### Security
