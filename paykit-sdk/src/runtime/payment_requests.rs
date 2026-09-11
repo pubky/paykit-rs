@@ -442,9 +442,10 @@ where
     /// Queue a Payment Proof for an accepted Payment Request and return local derived state.
     ///
     /// A canceled request remains eligible only when its record retains a valid
-    /// Acceptance. In that case, the caller is responsible for establishing
-    /// that payment execution passed its irreversible boundary before the
-    /// cancellation was observed; Paykit cannot derive that fact from events.
+    /// Acceptance. In that case, the caller must have durably recorded in its
+    /// own wallet state that payment execution passed its irreversible boundary
+    /// before observing cancellation. Paykit cannot derive that fact from events.
+    /// Queueing the proof does not execute a payment or reopen the request.
     ///
     /// The returned record reflects the local outbound queue, not delivery or
     /// counterparty processing.

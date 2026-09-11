@@ -12,6 +12,11 @@ where
     /// Results retain the exact counterparty and receiver path and are sorted
     /// newest-first by local record time. Lifecycle state is not an
     /// eligibility or payment-authorization decision.
+    ///
+    /// Only Allowance IDs with a structurally valid Proposal appear. Evidence
+    /// without such a Proposal remains in the durable private stream and does
+    /// not create a lifecycle record. If a Proposal is later available, earlier
+    /// correlated invalid evidence is included in its history status.
     pub async fn list_allowances(&self, filter: AllowanceFilter) -> Result<Vec<AllowanceRecord>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.local_pubky_public_key.is_none() {
@@ -65,6 +70,11 @@ where
     }
 
     /// Return one Allowance from one exact authenticated Encrypted Link.
+    ///
+    /// Returns `None` when there is no structurally valid Proposal for this ID,
+    /// even if the durable private stream contains correlated invalid messages
+    /// or other lifecycle events. No lifecycle record means there is no accepted
+    /// Allowance to use. A later Proposal incorporates that retained evidence.
     pub async fn allowance_record(
         &self,
         counterparty: &PubkyPublicKey,
