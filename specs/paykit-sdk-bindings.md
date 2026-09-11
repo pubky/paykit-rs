@@ -285,7 +285,7 @@ misleading known platform value.
 
 This applies especially to:
 
-- Payment Request lifecycle actions and events
+- Payment Request and Allowance lifecycle actions and events
 - payment resolution results
 - payable endpoint ordering results
 - Receipt retrieval status
@@ -401,6 +401,7 @@ Bindings should expose high-level workflows before low-level records:
   a public-only result
 - queue and list Payment Requests
 - submit Payment Proofs with caller-supplied proof data
+- propose, inspect, accept, reject, and end Allowances
 - retrieve Receipts
 - export and restore SDK-managed backup state, including text-form wrappers
 
