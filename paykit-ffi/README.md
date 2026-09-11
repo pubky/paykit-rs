@@ -30,6 +30,8 @@ on low-level `paykit-lib` protocol bindings.
   performs explicit local-only cleanup.
 - `PaykitSdk.stateRevision` — return the platform SDK state revision so
   apps can detect when SDK-managed state changed.
+- `PaykitSdk.backupStateRevision` — fingerprint the backup contents without
+  transient operation leases, so empty polls do not trigger app backups.
 - `PubkySessionAccess` — opaque Pubky session access material. Use its
   explicit export methods only when persisting or loading platform-protected
   session state.
@@ -268,8 +270,9 @@ app-specific public profile fields without exposing an FFI JSON value model.
 
 `PaykitSdk.exportBackupString` and `restoreBackupString` are text-form
 wrappers for platforms that prefer a single encoded SDK backup string.
-`PaykitSdk.stateRevision` lets apps compare the platform state revision
-before and after SDK-mutating workflows to mark app backups dirty.
+`PaykitSdk.backupStateRevision` lets apps compare backup contents before and
+after SDK-mutating workflows to mark app backups dirty. `stateRevision`
+remains the platform storage revision, including transient lease changes.
 `encodeSdkStateBlobSnapshot` and `decodeSdkStateBlobSnapshot` are convenience
 helpers for apps that store the opaque state blob and revision in one platform
 record.
@@ -299,14 +302,16 @@ explicit sign-out; a present `publicKey` with `liveSessionAvailable == false`
 means the identity is remembered but Pubky-backed workflows must wait.
 
 `SdkStateBlobStore` must persist every blob save atomically. If the app stores
-the SDK blob inside a larger app backup record, compare `stateRevision`
+the SDK backup inside a larger app backup record, compare `backupStateRevision`
 before and after SDK-mutating workflows and mark the app backup dirty when it
-changes.
+changes, including when a workflow fails after persisting progress. If the
+comparison fails, conservatively mark the app backup dirty. Do not use this
+fingerprint as the state store's compare-and-swap revision.
 
 ```text
-before = sdk.stateRevision()
+before = sdk.backupStateRevision()
 report = sdk.syncPublicEndpointsWithReceivingDetails(details)
-after = sdk.stateRevision()
+after = sdk.backupStateRevision()
 
 if after != before:
     markAppBackupDirty()

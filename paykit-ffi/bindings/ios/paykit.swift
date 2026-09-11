@@ -552,6 +552,15 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func advanceLinkHandshake(counterparty: String, counterpartyReceiverPath: String) async throws  -> LinkedPeerHandshakeReport
 
     /**
+     * Return a content fingerprint for SDK-managed backup state.
+     *
+     * Unlike `state_revision`, this excludes transient operation leases. Compare it
+     * before and after SDK workflows, including failures, to schedule app backups.
+     * This is not a storage compare-and-swap revision.
+     */
+    func backupStateRevision() async throws  -> String
+
+    /**
      * Block a counterparty for local Paykit private workflows.
      */
     func blockPeer(counterparty: String, counterpartyReceiverPath: String) async throws  -> LinkedPeerRecord
@@ -1184,6 +1193,30 @@ open func advanceLinkHandshake(counterparty: String, counterpartyReceiverPath: S
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeLinkedPeerHandshakeReport_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Return a content fingerprint for SDK-managed backup state.
+     *
+     * Unlike `state_revision`, this excludes transient operation leases. Compare it
+     * before and after SDK workflows, including failures, to schedule app backups.
+     * This is not a storage compare-and-swap revision.
+     */
+open func backupStateRevision()async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_backup_state_revision(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -11335,9 +11368,9 @@ public func FfiConverterTypePrivateStreamCounterpartyIntakeReport_lower(_ value:
  */
 public struct PrivateStreamIntakeReport {
     /**
-     * Receive batch id assigned by storage.
+     * Receive batch id assigned by storage, or `None` when no messages arrived.
      */
-    public var receiveBatchId: UInt64
+    public var receiveBatchId: UInt64?
     /**
      * Stored stream item ids in input order.
      */
@@ -11351,8 +11384,8 @@ public struct PrivateStreamIntakeReport {
     // declare one manually.
     public init(
         /**
-         * Receive batch id assigned by storage.
-         */receiveBatchId: UInt64,
+         * Receive batch id assigned by storage, or `None` when no messages arrived.
+         */receiveBatchId: UInt64?,
         /**
          * Stored stream item ids in input order.
          */streamItemIds: [UInt64],
@@ -11402,14 +11435,14 @@ public struct FfiConverterTypePrivateStreamIntakeReport: FfiConverterRustBuffer 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrivateStreamIntakeReport {
         return
             try PrivateStreamIntakeReport(
-                receiveBatchId: FfiConverterUInt64.read(from: &buf),
+                receiveBatchId: FfiConverterOptionUInt64.read(from: &buf),
                 streamItemIds: FfiConverterSequenceUInt64.read(from: &buf),
                 eventConflicts: FfiConverterSequenceTypeEventIdConflict.read(from: &buf)
         )
     }
 
     public static func write(_ value: PrivateStreamIntakeReport, into buf: inout [UInt8]) {
-        FfiConverterUInt64.write(value.receiveBatchId, into: &buf)
+        FfiConverterOptionUInt64.write(value.receiveBatchId, into: &buf)
         FfiConverterSequenceUInt64.write(value.streamItemIds, into: &buf)
         FfiConverterSequenceTypeEventIdConflict.write(value.eventConflicts, into: &buf)
     }
@@ -18169,6 +18202,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_advance_link_handshake() != 21645) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_backup_state_revision() != 4088) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_block_peer() != 26542) {

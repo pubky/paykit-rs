@@ -36,8 +36,8 @@ pub enum PrivateStreamParseStatus {
 /// Summary of a persisted private stream batch.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivateStreamIntakeReport {
-    /// Receive batch id assigned by storage.
-    pub receive_batch_id: u64,
+    /// Receive batch id assigned by storage, or `None` when no messages arrived.
+    pub receive_batch_id: Option<u64>,
     /// Stored stream item ids in input order.
     pub stream_item_ids: Vec<u64>,
     /// Event ID conflicts found while updating dedupe records.
@@ -108,7 +108,10 @@ where
 {
     storage
         .transaction(move |tx| {
-            let receive_batch_id = tx.allocate_receive_batch_id();
+            if let Some(lease) = link_lease.as_ref() {
+                require_peer_link_operation_lease(tx, lease)?;
+            }
+            let receive_batch_id = (!messages.is_empty()).then(|| tx.allocate_receive_batch_id());
             let mut report = PrivateStreamIntakeReport {
                 receive_batch_id,
                 stream_item_ids: Vec::with_capacity(messages.len()),
@@ -116,6 +119,7 @@ where
             };
 
             for message in messages {
+                let receive_batch_id = receive_batch_id.expect("nonempty batch has an id");
                 let mut classification = classify_private_application_message(&message);
                 enforce_receipt_access_receiver_scope(
                     &mut classification,
@@ -177,9 +181,6 @@ where
 
             let checkpointed_link = link_state.is_some();
             if let Some(link_state) = link_state {
-                if let Some(lease) = link_lease.as_ref() {
-                    require_peer_link_operation_lease(tx, lease)?;
-                }
                 tx.save_encrypted_link_state(link_state);
             }
             if let Some(mut peer) = tx.linked_peer(&counterparty, &counterparty_receiver_path) {

@@ -137,6 +137,11 @@ impl EncryptedLinkSnapshot {
         &self.remote_receiver_path
     }
 
+    /// Stable identifier of the completed Noise handshake, unchanged by transport messages.
+    pub fn link_id(&self) -> Option<[u8; 32]> {
+        self.state.link_id
+    }
+
     pub(super) fn validate_receiver_scope(
         &self,
         local_receiver_path: &PaykitReceiverPath,

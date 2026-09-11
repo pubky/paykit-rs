@@ -581,10 +581,36 @@ async fn test_encoded_state_blob_snapshot_store_supports_repeated_transactions()
         }
     }
 
+    struct NoSessionProvider;
+
+    impl FfiSdkPubkySessionProvider for NoSessionProvider {
+        fn load_session_access(
+            &self,
+        ) -> Result<Option<Arc<FfiPubkySessionAccess>>, PaykitFfiError> {
+            Ok(None)
+        }
+
+        fn public_storage_available(&self) -> Result<bool, PaykitFfiError> {
+            Ok(false)
+        }
+
+        fn clear_session_access(&self) -> Result<(), PaykitFfiError> {
+            Ok(())
+        }
+    }
+
+    let store = Arc::new(EncodedSnapshotStore::default());
+    let sdk = FfiPaykitSdk::new(
+        store.clone(),
+        Arc::new(NoSessionProvider),
+        default_config("bitkit/wallet".into()).unwrap(),
+    )
+    .unwrap();
     let storage = FfiSdkStorage {
-        store: Arc::new(EncodedSnapshotStore::default()),
+        store,
         transaction_lock: Arc::new(Mutex::new(())),
     };
+    let before = sdk.backup_state_revision().await.unwrap();
 
     storage
         .transaction_erased(Box::new(|tx| {
@@ -593,6 +619,7 @@ async fn test_encoded_state_blob_snapshot_store_supports_repeated_transactions()
         }))
         .await
         .unwrap();
+    assert_ne!(sdk.backup_state_revision().await.unwrap(), before);
     storage
         .transaction_erased(Box::new(|tx| {
             tx.allocate_receive_batch_id();
@@ -600,6 +627,64 @@ async fn test_encoded_state_blob_snapshot_store_supports_repeated_transactions()
         }))
         .await
         .unwrap();
+    let before = sdk.backup_state_revision().await.unwrap();
+    let storage_revision = sdk.state_revision().unwrap();
+    let peer = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let path = paykit_sdk::PaykitReceiverPath::new("bitkit/server").unwrap();
+    let lease = storage
+        .transaction(|tx| {
+            Ok(tx
+                .claim_peer_link_operation(
+                    &peer,
+                    &path,
+                    Utc::now(),
+                    Utc::now() + chrono::Duration::seconds(30),
+                )
+                .unwrap())
+        })
+        .await
+        .unwrap();
+    assert_ne!(sdk.state_revision().unwrap(), storage_revision);
+    assert_eq!(sdk.backup_state_revision().await.unwrap(), before);
+    storage
+        .transaction(|tx| {
+            tx.release_peer_link_operation(&peer, &path, lease.lease_id);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(sdk.backup_state_revision().await.unwrap(), before);
+
+    storage
+        .transaction(|tx| {
+            tx.save_payment_endpoint_reservation(PaymentEndpointReservationRecord {
+                reservation_id: "reservation".into(),
+                counterparty: peer.clone(),
+                counterparty_receiver_path: path.clone(),
+                identifier: "btc-lightning-bolt11".into(),
+                payload_hash: "hash".into(),
+                outbound_message_id: 0,
+                attribution: HashMap::from([
+                    ("payment_hash".into(), "hash".into()),
+                    ("invoice".into(), "invoice".into()),
+                    ("other".into(), "value".into()),
+                ]),
+                expires_at: None,
+                cancellation_started_at: None,
+                created_at: Utc::now(),
+            });
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let after_reservation = sdk.backup_state_revision().await.unwrap();
+    assert_ne!(after_reservation, before);
+    for _ in 0..10 {
+        assert_eq!(
+            sdk.backup_state_revision().await.unwrap(),
+            after_reservation
+        );
+    }
 }
 
 #[test]

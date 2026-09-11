@@ -160,6 +160,7 @@ where
                 return Err(err.into());
             }
         };
+        let previous_snapshot = link.serialize()?;
         let messages = match link.receive_private_application_messages().await {
             Ok(messages) => messages,
             Err(err) if err.is_non_retryable_private_receive_error() => {
@@ -184,22 +185,26 @@ where
             Err(err) => return Err(err.into()),
         };
         let now = self.clock.now();
-        let next_link_state = EncryptedLinkStateRecord {
+        let next_snapshot = link.serialize()?;
+        // A receive can advance Noise state without yielding application messages.
+        // Only skip the checkpoint when both the inbox and the snapshot are unchanged.
+        let checkpoint_changed = !messages.is_empty() || next_snapshot != previous_snapshot;
+        let next_link_state = checkpoint_changed.then(|| EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
             counterparty_receiver_path: stored_link_state.counterparty_receiver_path.clone(),
-            link_snapshot: Some(link.serialize()?),
+            link_snapshot: Some(next_snapshot),
             handshake_snapshot: None,
             handshake_role: None,
             generation: stored_link_state.generation.saturating_add(1),
             checkpointed_at: now,
-        };
+        });
 
         persist_private_stream_batch_with_link_lease(
             &self.storage,
             counterparty,
             stored_link_state.counterparty_receiver_path,
             messages,
-            Some(next_link_state),
+            next_link_state,
             Some(lease),
             now,
         )

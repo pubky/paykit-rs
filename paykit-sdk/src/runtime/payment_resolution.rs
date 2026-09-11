@@ -572,6 +572,7 @@ pub(super) fn merge_receive_report(
         *current = Some(report);
         return;
     };
+    current.receive_batch_id = current.receive_batch_id.or(report.receive_batch_id);
     current.stream_item_ids.append(&mut report.stream_item_ids);
     current.event_conflicts.append(&mut report.event_conflicts);
 }
