@@ -163,6 +163,9 @@ where
     }
 
     /// Fetch a public `pubky://` file referenced by profile metadata.
+    ///
+    /// Successful response bodies are limited to 5 MiB. Use
+    /// [`Self::fetch_pubky_file_bounded`] to select a lower limit.
     pub async fn fetch_pubky_file(&self, uri: &str) -> Result<Option<Vec<u8>>> {
         let public_storage =
             self.pubky
@@ -172,7 +175,46 @@ where
                     context: "no Pubky public storage available for Pubky file fetch".into(),
                     source: None,
                 })?;
-        fetch_public_file_uri(&public_storage, uri, "fetch Pubky file").await
+        fetch_public_file_uri(
+            &public_storage,
+            uri,
+            "fetch Pubky file",
+            MAX_PUBLIC_FILE_BYTES as u64,
+        )
+        .await
+    }
+
+    /// Fetch a public file while limiting the accumulated successful response body.
+    ///
+    /// Missing files return `None`. The effective limit is the smaller of `max_bytes`
+    /// and 5 MiB. Larger successful bodies return a protocol error, including
+    /// streams without Content-Length. The limit is
+    /// checked before each chunk is appended and the response is dropped on
+    /// overflow. Transport buffers and the current chunk are additional memory.
+    ///
+    /// HTTP error bodies are not bounded: the current Pubky client buffers them
+    /// before Paykit regains control. Closing that gap through this API requires
+    /// a Pubky client API change. This is not complete response-size protection.
+    /// A hostile homeserver can bypass the limit by returning an HTTP error status.
+    /// A Pubky request timeout limits that request's duration, not its memory use.
+    ///
+    /// Zero permits only an empty successful body. This does not decode images or limit
+    /// pixels, cache storage, or request duration. Pubky client configuration,
+    /// sessions, capabilities, and key rotation remain the caller's responsibility.
+    pub async fn fetch_pubky_file_bounded(
+        &self,
+        uri: &str,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>> {
+        let public_storage =
+            self.pubky
+                .load_public_storage()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no Pubky public storage available for Pubky file fetch".into(),
+                    source: None,
+                })?;
+        fetch_public_file_uri(&public_storage, uri, "fetch Pubky file", max_bytes).await
     }
 
     /// Fetch a public `pubky://` text file referenced by profile metadata.

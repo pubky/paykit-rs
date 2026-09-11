@@ -84,42 +84,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_bounded_body_rejects_streamed_body_over_limit() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0u8; 1024];
-            let _ = socket.read(&mut request).await;
-            // Chunked transfer encoding with no Content-Length, streaming
-            // forever. A reader that buffers the body first would never
-            // terminate; the bounded reader must reject it while reading.
-            let _ = socket
-                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
-                .await;
-            loop {
-                if socket.write_all(b"8\r\nAAAAAAAA\r\n").await.is_err() {
-                    break;
+    async fn test_read_bounded_body_drops_oversized_response_before_eof() {
+        for raw in [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 32\r\n\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n8\r\nAAAAAAAA\r\n8\r\nAAAAAAAA\r\n",
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(socket.read_u8().await.unwrap());
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        });
-
-        let resp = reqwest::Client::new()
-            .get(format!("http://{addr}/"))
-            .send()
+                socket.write_all(raw).await.unwrap();
+                // Keep the response incomplete until the reader drops the connection.
+                let mut byte = [0];
+                assert_eq!(socket.read(&mut byte).await.unwrap(), 0);
+            });
+            let resp = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .get(format!("http://{addr}/"))
+                .send()
+                .await
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                let err = read_bounded_body(resp, 8, "test fetch")
+                    .await
+                    .expect_err("oversized response must be rejected before EOF");
+                assert!(matches!(err, PaykitSdkError::Protocol { .. }));
+                server.await.unwrap();
+            })
             .await
-            .unwrap();
-        let err = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            read_bounded_body(resp, 8, "test fetch"),
-        )
-        .await
-        .expect("bounded read must terminate")
-        .expect_err("a streamed body over the limit must be rejected");
-        assert!(
-            matches!(err, PaykitSdkError::Protocol { .. }),
-            "expected a size-limit error, got: {err:?}"
-        );
+            .expect("bounded read and connection shutdown must finish");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_bounded_body_accepts_streamed_and_empty_bodies() {
+        for (raw, limit, expected) in [
+            (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n12\r\n2\r\n34\r\n0\r\n\r\n".as_slice(), 4, b"1234".as_slice()),
+            (b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n1234", 4, b"1234"),
+            (b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", 0, b""),
+        ] {
+            let resp = spawn_single_response(raw).await;
+            assert_eq!(read_bounded_body(resp, limit, "test fetch").await.unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_bounded_body_reports_detectable_truncation() {
+        for raw in [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n12".as_slice(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n12\r\n",
+        ] {
+            let resp = spawn_single_response(raw).await;
+            assert!(matches!(
+                read_bounded_body(resp, 4, "test fetch").await,
+                Err(PaykitSdkError::Transport { .. })
+            ));
+        }
     }
 }
