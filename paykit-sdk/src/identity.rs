@@ -115,14 +115,16 @@ impl PubkyLocalSecretKey {
     /// Parse a 32-byte secret key from hex text.
     pub fn from_hex(value: &str) -> crate::Result<Self> {
         let mut bytes = [0; 32];
-        hex::decode_to_slice(value, &mut bytes).map_err(|err| {
+        hex::decode_to_slice(value, &mut bytes).map_err(|_err| {
+            // The hex error embeds the offending character and offset; the
+            // input is secret key material, so keep the context static.
             let context = if value.len() != 64 {
-                "Pubky secret key hex must decode to 32 bytes".into()
+                "Pubky secret key hex must decode to 32 bytes"
             } else {
-                format!("invalid Pubky secret key hex: {err}")
+                "Pubky secret key hex contains an invalid character"
             };
             crate::PaykitSdkError::Identity {
-                context,
+                context: context.into(),
                 source: None,
             }
         })?;

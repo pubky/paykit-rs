@@ -23,7 +23,7 @@ where
         counterparty_receiver_path: PaykitReceiverPath,
     ) -> Result<EncryptedLinkRecoveryMarkerReport> {
         self.ensure_recovery_marker_publishing_enabled()?;
-        let (session_access, _) = self.private_link_session_access().await?;
+        let (session_access, ..) = self.private_link_session_access().await?;
         let lease = self
             .claim_peer_link_operation(&counterparty, &counterparty_receiver_path)
             .await?;
@@ -43,7 +43,7 @@ where
         counterparty: PubkyPublicKey,
         counterparty_receiver_path: PaykitReceiverPath,
     ) -> Result<EncryptedLinkRecoveryMarkerReport> {
-        let (session_access, _) = self.private_link_session_access().await?;
+        let (session_access, ..) = self.private_link_session_access().await?;
         self.observe_remote_recovery_marker_with_session(
             &counterparty,
             &counterparty_receiver_path,
@@ -58,7 +58,7 @@ where
         counterparty: PubkyPublicKey,
         counterparty_receiver_path: PaykitReceiverPath,
     ) -> Result<EncryptedLinkRecoveryMarkerReport> {
-        let (session_access, secret_key) = self.private_link_session_access().await?;
+        let (session_access, secret_key, _) = self.private_link_session_access().await?;
         let remote_public_key = counterparty.to_public_key()?;
         let remote_noise_public_key = self
             .receiver_noise_public_key(&counterparty, &counterparty_receiver_path)
@@ -200,7 +200,7 @@ where
         counterparty_receiver_path: &PaykitReceiverPath,
         force_new_attempt: bool,
     ) {
-        let (session_access, _) = match self.private_link_session_access().await {
+        let (session_access, ..) = match self.private_link_session_access().await {
             Ok(value) => value,
             Err(err) => {
                 let _ = self
@@ -377,7 +377,7 @@ where
         let session_access = match session_access {
             Some(session_access) => session_access,
             None => {
-                let (session_access, _) = self.private_link_session_access().await?;
+                let (session_access, ..) = self.private_link_session_access().await?;
                 return self
                     .observe_remote_recovery_marker_with_session(
                         counterparty,
@@ -633,7 +633,7 @@ where
         counterparty: &PubkyPublicKey,
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<()> {
-        let (session_access, secret_key) = match self.private_link_session_access().await {
+        let (session_access, secret_key, _) = match self.private_link_session_access().await {
             Ok(value) => value,
             Err(err) => {
                 if self

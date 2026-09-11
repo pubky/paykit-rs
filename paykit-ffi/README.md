@@ -424,6 +424,45 @@ cd paykit-ffi
 ./build.sh all
 ```
 
+Build only iOS artifacts for local debugging:
+
+```bash
+cd paykit-ffi
+./build_ios.sh
+```
+
+The iOS script regenerates the SwiftPM interface files in `bindings/ios` and
+writes release artifacts to:
+
+```text
+dist/ios/Paykit.xcframework
+dist/ios/Paykit.xcframework.zip
+```
+
+It also computes the zip checksum and updates the root `Package.swift`. The
+generated XCFramework directory and zip are ignored and must not be committed.
+
+Build only Android artifacts for local debugging:
+
+```bash
+cd paykit-ffi
+./build_android.sh
+```
+
+The Android script regenerates ignored UniFFI Kotlin bindings, JNI libraries,
+native debug symbols, and a local Maven publication:
+
+```text
+bindings/android/lib/src/main/kotlin/com/synonym/paykit/paykit.android.kt
+bindings/android/lib/src/main/kotlin/com/synonym/paykit/paykit.common.kt
+bindings/android/lib/src/main/jniLibs/**/libpaykit.so
+bindings/android/native-debug-symbols.zip
+```
+
+The Gradle wrapper/configuration, `AndroidManifest.xml`, ProGuard files, and
+`kotlin-manual` helper sources are tracked because Android consumers need them
+at source checkout time.
+
 Release builds use the same script with `-r`:
 
 ```bash
@@ -457,6 +496,7 @@ paykit-ffi/
 ├── build.sh                # Unified all-platform build script
 ├── build_ios.sh            # Internal iOS sub-build script
 ├── build_android.sh        # Internal Android sub-build script
-├── bindings/ios/           # Generated Swift + XCFramework
-└── bindings/android/       # Generated Kotlin + Android library
+├── bindings/ios/           # SwiftPM source/interface files
+├── bindings/android/       # Android Gradle source/config files
+└── dist/ios/               # Ignored generated XCFramework release artifacts
 ```
