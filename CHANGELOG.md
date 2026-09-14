@@ -7,10 +7,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-## [0.1.0-rc53] - 2026-09-11
+## [0.1.0-rc54] - 2026-09-14
 
 ### Added
 - Expose `PaykitSdk.backupStateRevision` in Swift and Kotlin to detect backup-content changes without treating transient operation leases as wallet changes.
+- Allow callers to set a smaller public-file download limit through the SDK and platform bindings.
 
 ### Fixed
 - Avoid unnecessary SDK writes for empty private receives and unchanged identity or established-link checks.
