@@ -113,7 +113,7 @@ pub struct FfiLinkedPeerRecord {
     pub counterparty_receiver_path: String,
     /// Current local relationship/link state.
     pub state: FfiLinkedPeerState,
-    /// Last successful sync time as RFC3339 text.
+    /// Last time sync changed local link state, as RFC3339 text.
     pub last_sync_at: Option<String>,
     /// Last private receive time as RFC3339 text.
     pub last_private_receive_at: Option<String>,
@@ -160,8 +160,8 @@ pub struct FfiEventIdConflict {
 /// Summary of a persisted private stream batch.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct FfiPrivateStreamIntakeReport {
-    /// Receive batch id assigned by storage.
-    pub receive_batch_id: u64,
+    /// Receive batch id assigned by storage, or `None` when no messages arrived.
+    pub receive_batch_id: Option<u64>,
     /// Stored stream item ids in input order.
     pub stream_item_ids: Vec<u64>,
     /// Event ID conflicts found while updating dedupe records.
@@ -813,7 +813,7 @@ mod tests {
     #[test]
     fn test_private_stream_report_maps_conflicts() {
         let report = PrivateStreamIntakeReport {
-            receive_batch_id: 7,
+            receive_batch_id: Some(7),
             stream_item_ids: vec![10, 11],
             event_conflicts: vec![EventIdConflict {
                 event_id: "event-1".into(),
@@ -824,7 +824,7 @@ mod tests {
 
         let ffi = FfiPrivateStreamIntakeReport::from(report);
 
-        assert_eq!(ffi.receive_batch_id, 7);
+        assert_eq!(ffi.receive_batch_id, Some(7));
         assert_eq!(ffi.stream_item_ids, vec![10, 11]);
         assert_eq!(ffi.event_conflicts[0].event_id, "event-1");
     }

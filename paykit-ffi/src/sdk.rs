@@ -1,9 +1,10 @@
 use std::sync::{Arc, Mutex};
 
 use paykit_sdk::{IdentityStatus, InitializationReport, PaykitSdk, RestoreReport};
+use sha2::{Digest, Sha256};
 
 use crate::config::{default_pubky_client_config, FfiPaykitSdkConfig, FfiPubkyClientConfig};
-use crate::errors::{validation_error, PaykitFfiError};
+use crate::errors::{storage_error, validation_error, PaykitFfiError};
 use crate::payment_adapter::{
     FfiNoopSdkPaymentAdapter, FfiSdkPaymentAdapter, FfiSdkPaymentAdapterAdapter,
 };
@@ -176,6 +177,24 @@ impl FfiPaykitSdk {
         self.state_store
             .load_state_blob()
             .map(|snapshot| snapshot.map(|snapshot| snapshot.revision))
+    }
+
+    /// Return a content fingerprint for SDK-managed backup state.
+    ///
+    /// Unlike `state_revision`, this excludes transient operation leases. Compare it
+    /// before and after SDK workflows, including failures, to schedule app backups.
+    /// This is not a storage compare-and-swap revision.
+    pub async fn backup_state_revision(&self) -> Result<String, PaykitFfiError> {
+        let backup = self.runtime.export_backup_state().await?;
+        let mut value = serde_json::to_value(backup)
+            .map_err(|_| storage_error("backup_encode_failed", "failed to encode SDK backup"))?;
+        // The Value conversion canonicalizes HashMap key order with serde_json's
+        // default map. Keep recursive sorting as a guard if feature unification
+        // enables preserve_order.
+        value.sort_all_objects();
+        let bytes = serde_json::to_vec(&value)
+            .map_err(|_| storage_error("backup_encode_failed", "failed to encode SDK backup"))?;
+        Ok(hex::encode(Sha256::digest(bytes)))
     }
 
     /// Initialize durable SDK identity state.

@@ -249,6 +249,12 @@ where
                     source: None,
                 });
             }
+            if record.state == LinkedPeerState::Linked
+                && state == LinkedPeerState::Linked
+                && record.failure_count == 0
+            {
+                return Ok(record);
+            }
             record.state = state;
             record.last_sync_at = Some(now);
             if matches!(

@@ -18,9 +18,17 @@ use crate::{
     },
     PaykitReceiverPath, PaykitSdkError, PubkyPublicKey, Result,
 };
-use paykit_lib::{serialize_private_payment_list_json, PrivateMessageKind, PrivatePaymentList};
+use paykit_lib::{
+    parse_private_payment_list_json, serialize_private_payment_list_json, PrivateMessageKind,
+    PrivatePaymentList,
+};
 
 const MAX_RESERVATION_ID_LEN: usize = 128;
+
+pub(crate) enum PrivatePaymentListQueuePolicy {
+    Always,
+    Sync { sent_message_id: Option<u64> },
+}
 
 /// SDK cleanup record for a reserved endpoint tied to a queued private list.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -187,6 +195,7 @@ where
         reservations,
         now,
         None,
+        PrivatePaymentListQueuePolicy::Always,
     )
     .await
 }
@@ -199,6 +208,7 @@ pub(crate) async fn queue_private_payment_list_with_reservations_with_link_lease
     reservations: Vec<PrivatePaymentEndpointReservation>,
     now: DateTime<Utc>,
     lease: &PeerLinkOperationLease,
+    policy: PrivatePaymentListQueuePolicy,
 ) -> Result<OutboundPrivateMessageRecord>
 where
     S: StorageAdapter,
@@ -210,6 +220,7 @@ where
         reservations,
         now,
         Some(lease.clone()),
+        policy,
     )
     .await
 }
@@ -221,6 +232,7 @@ async fn queue_private_payment_list_with_reservations_inner<S>(
     reservations: Vec<PrivatePaymentEndpointReservation>,
     now: DateTime<Utc>,
     lease: Option<PeerLinkOperationLease>,
+    policy: PrivatePaymentListQueuePolicy,
 ) -> Result<OutboundPrivateMessageRecord>
 where
     S: StorageAdapter,
@@ -267,6 +279,44 @@ where
                     }
                 }
                 checked_drafts.push((draft, existing));
+            }
+
+            if let PrivatePaymentListQueuePolicy::Sync { sent_message_id } = policy {
+                // Pending, sending, and failed messages remain on the retry path, so
+                // they can be reused. A sent message is reusable only when this
+                // runtime witnessed its delivery on the current Encrypted Link.
+                let latest = tx
+                    .outbound_private_messages(&counterparty, &counterparty_receiver_path)
+                    .into_iter()
+                    .filter(|message| message.kind == PrivateMessageKind::PrivatePaymentList.as_str())
+                    .max_by_key(|message| message.outbound_message_id);
+                if let Some(message) = latest {
+                    let reusable = match message.status {
+                        OutboundPrivateMessageStatus::Pending
+                        | OutboundPrivateMessageStatus::Sending
+                        | OutboundPrivateMessageStatus::Failed => true,
+                        OutboundPrivateMessageStatus::Sent => sent_message_id == Some(message.outbound_message_id),
+                        _ => false,
+                    };
+                    let same_reservations = checked_drafts.iter().all(|(_, existing)| {
+                        existing.as_ref().is_some_and(|record| {
+                            record.outbound_message_id == message.outbound_message_id
+                                && record.expires_at.is_none_or(|expiry| expiry > now)
+                        })
+                    }) && tx
+                        .payment_endpoint_reservations(&counterparty, &counterparty_receiver_path)
+                        .iter()
+                        .filter(|record| record.outbound_message_id == message.outbound_message_id)
+                        .count()
+                        == checked_drafts.len();
+                    if reusable
+                        && same_reservations
+                        && parse_private_payment_list_json(&message.raw_json)
+                            .is_ok_and(|stored| stored == list)
+                    {
+                        return Ok(message);
+                    }
+                }
             }
 
             let outbound = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
