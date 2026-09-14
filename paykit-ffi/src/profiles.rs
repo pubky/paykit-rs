@@ -256,6 +256,32 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
+    /// Fetch public Pubky file bytes with a limit on successful response bodies.
+    ///
+    /// The effective limit is the smaller of `max_bytes` and 5 MiB and is checked
+    /// before appending each chunk. Missing files return `None`.
+    /// Oversized successful bodies fail before full buffering. Zero permits only
+    /// an empty successful body.
+    ///
+    /// HTTP error bodies remain unbounded inside the current Pubky client before
+    /// Paykit regains control. Closing that gap requires a Pubky client API change.
+    /// A hostile homeserver can bypass the limit by returning an HTTP error status.
+    /// A Pubky request timeout limits that request's duration, not its memory use.
+    /// Transport buffers and the current chunk use additional memory.
+    ///
+    /// Image decoding, pixel and cache limits, request duration, and Pubky client
+    /// configuration remain the caller's responsibility.
+    pub async fn fetch_pubky_file_bounded(
+        &self,
+        uri: String,
+        max_bytes: u64,
+    ) -> Result<Option<Vec<u8>>, PaykitFfiError> {
+        self.runtime
+            .fetch_pubky_file_bounded(&uri, max_bytes)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Fetch a public Pubky UTF-8 text file.
     pub async fn fetch_pubky_text(&self, uri: String) -> Result<Option<String>, PaykitFfiError> {
         self.runtime

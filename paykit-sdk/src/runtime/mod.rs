@@ -636,6 +636,7 @@ async fn fetch_public_file_uri(
     storage: &pubky::PublicStorage,
     uri: &str,
     context: &'static str,
+    max_bytes: u64,
 ) -> Result<Option<Vec<u8>>> {
     let resource = uri
         .parse::<pubky::PubkyResource>()
@@ -645,7 +646,12 @@ async fn fetch_public_file_uri(
         })?;
     match storage.get(resource).await {
         Ok(resp) => {
-            let bytes = crate::net::read_bounded_body(resp, MAX_PUBLIC_FILE_BYTES, context).await?;
+            let bytes = crate::net::read_bounded_body(
+                resp,
+                max_bytes.min(MAX_PUBLIC_FILE_BYTES as u64) as usize,
+                context,
+            )
+            .await?;
             Ok(Some(bytes))
         }
         Err(err) if is_pubky_not_found(&err) => Ok(None),

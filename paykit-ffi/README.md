@@ -134,6 +134,24 @@ Helpers that both queue and attempt delivery return
 `LINKING` can appear in `queued`; the message remains eligible for a later
 outbound worker run after the link becomes `LINKED`.
 
+### Public File Downloads
+
+`fetchPubkyFileBounded(uri, maxBytes)` enforces a caller-selected byte limit while
+reading successful response bodies, before returning bytes across FFI. The
+effective limit is the smaller of `maxBytes` and 5 MiB. It returns
+`nil` in Swift or `null` in Kotlin for missing files and throws for oversized
+bodies and truncation the transport can detect, such as a Content-Length
+shortfall or an incomplete chunked body. A close-delimited body has no declared
+length, so an early connection close can return partial bytes successfully.
+Zero permits only an empty body. Transport buffers and the current chunk are
+additional memory. Image decode, pixel, cache and request-timeout limits remain
+the app's responsibility. HTTP error bodies remain unbounded inside the current
+Pubky client before Paykit regains control. Closing that gap through this path
+requires a Pubky client API change. This is not complete response-size protection.
+A hostile homeserver can bypass the limit by returning an HTTP error status.
+A Pubky request timeout limits that request's duration, not its memory use.
+`fetchPubkyFile` limits successful bodies to 5 MiB.
+
 ### Payment Requests
 
 - `PaykitSdk.proposePaymentRequest`, `acceptPaymentRequest`,
@@ -238,7 +256,7 @@ bootstrap.approveAuthWithCompanionClaim(
   public Paykit Profiles.
 - `PaykitSdk.deletePaykitProfile` — remove this identity's Paykit Profile.
 - `PaykitSdk.publishPaykitBlob`, `uploadProfileAvatar`,
-  `deletePaykitBlob`, `fetchPubkyFile`, and `fetchPubkyText` — publish profile
+  `deletePaykitBlob`, `fetchPubkyFile`, `fetchPubkyFileBounded`, and `fetchPubkyText` — publish profile
   blobs and read public Pubky resources.
 - `PaykitSdk.saveContact`, `contactRecord`, `contactRecords`, and
   `removeContact` — manage local Contact Records. Each contact is one Pubky
