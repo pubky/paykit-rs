@@ -2,6 +2,7 @@
 //! No payment rail is invoked: the SDK records durable admission and handoff.
 
 use super::*;
+use async_trait::async_trait;
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use paykit_lib::{
     BillingPeriod, PaymentAmount, PaymentEndpointIdentifier, PaymentReference, PaymentRequestId,
@@ -13,6 +14,11 @@ use paykit_sdk::{
     PaymentExecutionChecks, PaymentExecutionStatus, PaymentOccurrence, PaymentOutcome,
     PaymentOutcomeReport, PaymentRequestLifecycleState, PaymentRequestScope,
 };
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+use tokio::sync::Notify;
 
 fn endpoint() -> PaymentEndpointIdentifier {
     PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap()
@@ -463,4 +469,172 @@ async fn test_allowance_accounting_future_reassociation_preserves_prior_payment(
             .sum::<usize>(),
         2
     );
+}
+
+struct PausedSessionProvider {
+    inner: crate::harness::TestnetSessionProvider,
+    loads: AtomicUsize,
+    pause: bool,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl paykit_sdk::PubkySessionProvider for PausedSessionProvider {
+    async fn load_session_access(
+        &self,
+    ) -> paykit_sdk::Result<Option<paykit_sdk::PubkySessionAccess>> {
+        // The second session read is after manual Acceptance's initial Proposed
+        // read, or before automatic Acceptance's transaction. Suspend only the
+        // session provider so the competing command can use the same storage.
+        if self.pause && self.loads.fetch_add(1, Ordering::SeqCst) == 1 {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.load_session_access().await
+    }
+
+    async fn load_public_storage(&self) -> paykit_sdk::Result<Option<pubky::PublicStorage>> {
+        self.inner.load_public_storage().await
+    }
+
+    async fn clear_session_access(&self) -> paykit_sdk::Result<()> {
+        self.inner.clear_session_access().await
+    }
+}
+
+#[tokio::test]
+async fn test_allowance_accounting_manual_and_automatic_acceptance_interleave() {
+    let pair = linked_two_party().await;
+    let id = accepted_allowance(&pair.alice, &pair.bob).await;
+    initialize_accounting(&pair.alice, Utc::now()).await;
+    for pause_manual in [true, false] {
+        let scope = proposed_request(&pair.alice, &pair.bob, None).await;
+        let time = Utc::now();
+        pair.alice
+            .sdk
+            .select_allowance(
+                scope.clone(),
+                AllowanceSelectionInput {
+                    allowance_id: id.clone(),
+                    expected_revision: None,
+                    trusted_time: time,
+                },
+            )
+            .await
+            .unwrap();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let runtime = |pause| {
+            paykit_sdk::PaykitSdk::new(
+                pair.alice.storage.clone(),
+                PausedSessionProvider {
+                    inner: crate::harness::TestnetSessionProvider::new(
+                        pair.alice.access.clone(),
+                        pair.alice.session_secret.clone(),
+                    ),
+                    loads: AtomicUsize::new(0),
+                    pause,
+                    entered: entered.clone(),
+                    release: release.clone(),
+                },
+                pair.alice.adapter.clone(),
+                paykit_sdk::PaykitSdkConfig::new(pair.alice.receiver_path.clone()),
+            )
+            .unwrap()
+        };
+        let manual_sdk = runtime(pause_manual);
+        let automatic_sdk = runtime(!pause_manual);
+        let manual = async {
+            if !pause_manual {
+                entered.notified().await;
+            }
+            let result = manual_sdk
+                .accept_payment_request(
+                    scope.counterparty.clone(),
+                    scope.counterparty_receiver_path.clone(),
+                    &scope.payment_request_id,
+                )
+                .await;
+            if !pause_manual {
+                release.notify_one();
+            }
+            result
+        };
+        let automatic = async {
+            if pause_manual {
+                entered.notified().await;
+            }
+            let result = automatic_sdk
+                .accept_payment_request_automatically(
+                    scope.clone(),
+                    AllowanceSelectionInput {
+                        allowance_id: id.clone(),
+                        expected_revision: Some(1),
+                        trusted_time: time,
+                    },
+                    checks(time),
+                )
+                .await;
+            if pause_manual {
+                release.notify_one();
+            }
+            result
+        };
+        let (manual, automatic) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            tokio::join!(manual, automatic)
+        })
+        .await
+        .expect("Acceptance interleaving must complete");
+        assert_eq!(manual.is_ok(), !pause_manual, "manual result: {manual:?}");
+        assert_eq!(
+            automatic.is_ok(),
+            pause_manual,
+            "automatic result: {automatic:?}"
+        );
+        let backup = pair.alice.sdk.export_backup_state().await.unwrap();
+        let acceptance_count = backup
+            .outbound_private_messages
+            .iter()
+            .filter(|message| {
+                message.kind == "paykit.payment_request_acceptance"
+                    && serde_json::from_str::<serde_json::Value>(&message.raw_json).unwrap()
+                        ["payment_request_id"]
+                        == scope.payment_request_id.as_str()
+            })
+            .count();
+        assert_eq!(acceptance_count, 1);
+        deliver(&pair.alice, &pair.bob).await;
+        for (local, peer) in [(&pair.alice, &pair.bob), (&pair.bob, &pair.alice)] {
+            let records = local
+                .sdk
+                .payment_requests_with(&peer.public_key, &peer.receiver_path)
+                .await
+                .unwrap();
+            let record = records
+                .iter()
+                .find(|record| record.payment_request_id == scope.payment_request_id.as_str())
+                .unwrap();
+            assert_eq!(record.state, PaymentRequestLifecycleState::Accepted);
+            assert!(record.invalid_reason.is_none());
+        }
+        let decision = pair
+            .alice
+            .sdk
+            .reserve_automatic_payment(
+                PaymentOccurrence {
+                    request: scope,
+                    billing_period: None,
+                },
+                1,
+                checks(time),
+            )
+            .await
+            .unwrap();
+        if pause_manual {
+            ready(decision, PaymentExecutionStatus::Prepared);
+        } else {
+            blocked(decision, AllowanceAccountingBlock::ManualOnly);
+        }
+    }
 }
