@@ -7,7 +7,7 @@ use crate::{
         invalid_data, invalid_plaintext_json, invalid_wire, validate_outgoing_version_kind,
         validate_wire_version_kind,
     },
-    EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
+    AllowanceId, EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
     PrivateMessageKind, Result,
 };
 
@@ -72,6 +72,9 @@ struct PaymentProofWire {
     payment_reference: String,
     billing_period: RequiredNullable<BillingPeriodWire>,
     payment_endpoint_identifier: String,
+    #[serde(default, deserialize_with = "deserialize_optional_string_no_null")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allowance_id: Option<String>,
     proof: JsonMap<String, JsonValue>,
 }
 
@@ -259,6 +262,7 @@ impl From<&PaymentProof> for PaymentProofWire {
                 event.billing_period.as_ref().map(BillingPeriodWire::from),
             ),
             payment_endpoint_identifier: event.payment_endpoint_identifier.as_str().to_string(),
+            allowance_id: event.allowance_id().map(|id| id.as_str().to_owned()),
             proof: event.proof.clone(),
         }
     }
@@ -288,9 +292,20 @@ impl TryFrom<PaymentProofWire> for PaymentProof {
             payment_endpoint_identifier: PaymentEndpointIdentifier::new(
                 wire.payment_endpoint_identifier,
             )?,
+            allowance_id: wire.allowance_id.map(parse_allowance_id).transpose()?,
             proof: wire.proof,
         })
     }
+}
+
+fn parse_allowance_id(value: String) -> Result<AllowanceId> {
+    let id = AllowanceId::new(&value)?;
+    if id.as_str() != value {
+        return Err(PaykitError::Validation(
+            "Payment Proof allowance_id must use canonical UUID-v4 spelling".into(),
+        ));
+    }
+    Ok(id)
 }
 
 pub(super) fn serialize_payment_request_json(event: &PaymentRequest) -> Result<String> {
@@ -489,6 +504,73 @@ mod tests {
             .unwrap()],
             metadata: JsonMap::new(),
         }
+    }
+
+    fn payment_proof() -> PaymentProof {
+        PaymentProof::new(
+            EventId::new_v4(),
+            PaymentRequestId::new_v4(),
+            PaymentReference::new("invoice-2026-0001").unwrap(),
+            None,
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            JsonMap::new(),
+        )
+    }
+
+    #[test]
+    fn test_payment_proof_round_trips_optional_allowance_id() {
+        let proof = payment_proof();
+        let raw = serialize_payment_proof_json(&proof).unwrap();
+        assert!(!raw.contains("allowance_id"));
+        assert_eq!(parse_payment_proof_json(&raw).unwrap(), proof);
+
+        let allowance_id = AllowanceId::new_v4();
+        let proof = proof.with_allowance_id(allowance_id.clone());
+        let raw = serialize_payment_proof_json(&proof).unwrap();
+        let parsed = parse_payment_proof_json(&raw).unwrap();
+        assert_eq!(parsed.allowance_id(), Some(&allowance_id));
+        assert_eq!(parsed, proof);
+    }
+
+    #[test]
+    fn test_payment_proof_rejects_noncanonical_allowance_ids_and_null() {
+        let raw = serialize_payment_proof_json(&payment_proof()).unwrap();
+        let mut value: JsonValue = serde_json::from_str(&raw).unwrap();
+        for id in [
+            JsonValue::Null,
+            JsonValue::from(1),
+            JsonValue::from("not-a-uuid"),
+            JsonValue::from("B7F9C2A1-6D43-4B0E-A8D4-0FE2C712AB44"),
+            JsonValue::from("b7f9c2a16d434b0ea8d40fe2c712ab44"),
+            JsonValue::from("b7f9c2a1-6d43-1b0e-a8d4-0fe2c712ab44"),
+        ] {
+            value["allowance_id"] = id;
+            let raw = value.to_string();
+            assert!(matches!(
+                parse_payment_proof_json(&raw),
+                Err(PaykitError::InvalidData { .. })
+            ));
+            let message = crate::PrivateApplicationMessage {
+                version: Some(1),
+                kind: Some("paykit.payment_proof".into()),
+                raw_json: raw.clone(),
+            };
+            let parsed = crate::parse_payment_request_event_message(&message).unwrap();
+            assert!(!parsed.is_valid());
+            assert_eq!(parsed.raw_json, raw);
+        }
+    }
+
+    #[test]
+    fn test_payment_proof_rejects_duplicate_allowance_id() {
+        let id = AllowanceId::new_v4();
+        let proof = payment_proof().with_allowance_id(id.clone());
+        let raw = serialize_payment_proof_json(&proof).unwrap();
+        let duplicate = raw.replacen('{', &format!("{{\"allowance_id\":\"{id}\","), 1);
+        assert!(matches!(
+            parse_payment_proof_json(&duplicate),
+            Err(PaykitError::InvalidData { .. })
+        ));
     }
 
     #[test]
