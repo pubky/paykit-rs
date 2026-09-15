@@ -148,7 +148,8 @@ outbound worker run after the link becomes `LINKED`.
 `fetchPubkyFile(uri, maxBytes)` and `fetchPubkyText(uri, maxBytes)` require a
 positive byte limit. `fetchPubkyFileBounded(uri, maxBytes)` additionally caps
 the limit at 5 MiB and permits zero for an empty body. Missing files return
-`nil`/`null`; oversized bodies fail before full buffering. Image decoding,
+`nil`/`null`; oversized successful bodies fail before full buffering. Pubky
+currently buffers HTTP error bodies before returning them to Paykit. Image decoding,
 pixel and cache limits, and request timeouts remain app responsibilities.
 
 ### Payment Requests

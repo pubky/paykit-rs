@@ -250,7 +250,7 @@ async fn test_restore_backup_state_marks_sending_outbound_recovery_required() {
             paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX,
             "0".repeat(64)
         ),
-        ciphertext: vec![0; pubky_noise::snow_crypto::PUBKY_NOISE_CIPHERTEXT_LEN + 2],
+        ciphertext: vec![0; pubky_noise::snow_crypto::PUBKY_NOISE_TRANSPORT_PACKET_LEN],
     });
     let backup = SdkBackupState {
         version: SDK_BACKUP_VERSION,
@@ -299,7 +299,7 @@ async fn test_restore_backup_state_rejects_prepared_send_on_pending_message() {
             paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX,
             "0".repeat(64)
         ),
-        ciphertext: vec![0; pubky_noise::snow_crypto::PUBKY_NOISE_CIPHERTEXT_LEN + 2],
+        ciphertext: vec![0; pubky_noise::snow_crypto::PUBKY_NOISE_TRANSPORT_PACKET_LEN],
     });
 
     assert_restore_rejects_outbound_record(pending).await;

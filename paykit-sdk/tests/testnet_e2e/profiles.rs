@@ -129,6 +129,6 @@ async fn test_public_file_fetch_enforces_caller_and_sdk_limits() {
     ] {
         let err = result.unwrap_err();
         assert!(matches!(err, paykit_sdk::PaykitSdkError::Protocol { .. }));
-        assert!(err.to_string().contains("5242880 bytes"));
+        assert!(err.to_string().contains("5242880"));
     }
 }

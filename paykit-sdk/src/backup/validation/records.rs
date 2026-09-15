@@ -464,7 +464,7 @@ fn validate_prepared_private_send(
         });
     }
 
-    if prepared.ciphertext.len() != pubky_noise::snow_crypto::PUBKY_NOISE_CIPHERTEXT_LEN + 2 {
+    if prepared.ciphertext.len() != pubky_noise::snow_crypto::PUBKY_NOISE_TRANSPORT_PACKET_LEN {
         return Err(PaykitSdkError::Protocol {
             context: format!(
                 "outbound Private Application Message {outbound_message_id} has invalid prepared ciphertext"

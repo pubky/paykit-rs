@@ -134,6 +134,9 @@ Common workflows:
   identity-wide Paykit blob prefix
 - use `fetch_pubky_file` / `fetch_pubky_text` with an explicit byte limit to
   load public `pubky://` files referenced by profile metadata
+- use `fetch_pubky_file_bounded` for a caller-selected limit capped at 5 MiB,
+  including zero for an empty body. Limits apply while reading successful
+  responses; Pubky currently buffers error bodies before returning to Paykit.
 - use bounded `fetch_pubky_profile` and call `fetch_pubky_follows` with an
   explicit entry limit for read-only Pubky app profile and follows data
 - use `resolve_profile` when contact display should prefer Paykit

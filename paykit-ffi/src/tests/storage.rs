@@ -734,6 +734,14 @@ async fn test_encoded_state_blob_snapshot_store_supports_repeated_transactions()
     }
 
     let store = Arc::new(EncodedSnapshotStore::default());
+    store
+        .save_state_blob_atomically(
+            Arc::new(FfiSdkStateBlob::new(
+                encode_storage_state(&outbound_state(&[], 0)).unwrap(),
+            )),
+            None,
+        )
+        .unwrap();
     let sdk = FfiPaykitSdk::new(
         store.clone(),
         Arc::new(NoSessionProvider),
