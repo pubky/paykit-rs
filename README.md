@@ -214,6 +214,13 @@ app profile/follows helpers, local Contact Records, and contact payment resoluti
 execution, settlement detection, product UI, and platform session storage
 remain with the integrating application and its adapters.
 
+Since `0.1.0-rc55`, `PubkySessionBootstrap::republish_identity(public_key)`
+(`republishIdentity(publicKey)` in Swift and Kotlin) can rebroadcast an existing
+signed Pubky identity record unchanged, without a secret key or restored session.
+Applications own scheduling, throttling, retries, and timeouts. See the
+[Pubky Session Bootstrap API](paykit-ffi/README.md#pubky-session-bootstrap)
+for return values and limitations.
+
 ## Library Crates
 
 - [`paykit-lib`](paykit-lib/) is the canonical Rust Paykit Library. It consumes

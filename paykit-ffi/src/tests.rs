@@ -84,6 +84,16 @@ fn test_default_pubky_client_config_uses_production() {
     assert!(pubky_from_config(&config).is_ok());
 }
 
+#[tokio::test]
+async fn test_republish_identity_rejects_invalid_public_key() {
+    let bootstrap = FfiPubkySessionBootstrap::new(TEST_CLIENT_ID.into()).unwrap();
+
+    assert!(bootstrap
+        .republish_identity("not-a-public-key".into())
+        .await
+        .is_err());
+}
+
 #[test]
 fn test_pubky_client_config_validates_auth_relay_url() {
     let mut config = default_pubky_client_config();

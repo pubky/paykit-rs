@@ -474,6 +474,22 @@ impl FfiPubkySessionBootstrap {
         Ok(Self { inner: bootstrap })
     }
 
+    /// Rebroadcast the newest existing signed identity record without changing it.
+    ///
+    /// Returns `true` if a publishing backend accepted the record, or `false`
+    /// if none was found. Operational failures return errors.
+    /// Requires only a public key, not a secret key or restored session. Reuse
+    /// this helper for its cache. The caller owns scheduling, throttling and
+    /// retries; the configured Pubky client owns request timeouts. Missing
+    /// records are not reconstructed.
+    pub async fn republish_identity(&self, public_key: String) -> Result<bool, PaykitFfiError> {
+        let public_key = parse_public_key(public_key)?;
+        self.inner
+            .republish_identity(&public_key)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Sign up on a homeserver with the receiver-owned Noise key.
     pub async fn sign_up(
         &self,
