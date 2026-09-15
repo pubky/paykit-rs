@@ -61,6 +61,27 @@ private func compileAllowanceBindingsSurface(
         allowanceId: allowanceId
     )
 
+    let proof = try PrivateJsonObject(text: "{}")
+    let automaticProof = PaymentProofSubmission(
+        billingPeriod: nil,
+        paymentEndpointIdentifier: "btc-lightning-bolt11",
+        allowanceId: allowanceId,
+        proof: proof
+    )
+    let manualProof = PaymentProofSubmission(
+        billingPeriod: nil,
+        paymentEndpointIdentifier: "btc-lightning-bolt11",
+        allowanceId: nil,
+        proof: proof
+    )
+    let requestWithProof = try await sdk.submitPaymentProof(
+        counterparty: counterparty,
+        counterpartyReceiverPath: receiverPath,
+        paymentRequestId: "550e8400-e29b-41d4-a716-446655440000",
+        proof: automaticProof
+    )
+    let reportedAllowances: [String?] = requestWithProof.paymentProofs.map { $0.allowanceId }
+
     let privateGetters = (
         amountRange.minimum(),
         period.kind(),
@@ -91,6 +112,8 @@ private func compileAllowanceBindingsSurface(
         proposed,
         accepted,
         rejected,
-        ended
+        ended,
+        manualProof,
+        reportedAllowances
     )
 }

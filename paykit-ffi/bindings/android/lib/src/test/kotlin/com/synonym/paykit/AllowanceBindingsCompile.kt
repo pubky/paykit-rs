@@ -42,6 +42,26 @@ internal suspend fun compileAllowanceBindingsSurface(
     val accepted: AllowanceRecord = sdk.acceptAllowance(counterparty, receiverPath, allowanceId)
     val rejected: AllowanceRecord = sdk.rejectAllowance(counterparty, receiverPath, allowanceId)
     val ended: AllowanceRecord = sdk.endAllowance(counterparty, receiverPath, allowanceId)
+    val proof = PrivateJsonObject(text = "{}")
+    val automaticProof = PaymentProofSubmission(
+        billingPeriod = null,
+        paymentEndpointIdentifier = "btc-lightning-bolt11",
+        allowanceId = allowanceId,
+        proof = proof,
+    )
+    val manualProof = PaymentProofSubmission(
+        billingPeriod = null,
+        paymentEndpointIdentifier = "btc-lightning-bolt11",
+        allowanceId = null,
+        proof = proof,
+    )
+    val requestWithProof = sdk.submitPaymentProof(
+        counterparty,
+        receiverPath,
+        "550e8400-e29b-41d4-a716-446655440000",
+        automaticProof,
+    )
+    val reportedAllowances: List<String?> = requestWithProof.paymentProofs.map { it.allowanceId }
     val amountRangeInterface: AllowanceAmountRangeInterface = amountRange
     val periodInterface: AllowancePeriodInterface = period
     val periodLimitInterface: AllowancePeriodLimitInterface = periodLimit
