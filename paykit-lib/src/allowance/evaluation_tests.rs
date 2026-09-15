@@ -14,17 +14,16 @@ fn endpoint(value: &str) -> PaymentEndpointIdentifier {
 }
 
 fn request(value: &str, asset: &str) -> PaymentRequestTerms {
-    PaymentRequestTerms {
-        amount: PaymentAmount::new(value, asset).unwrap(),
-        payment_reference: PaymentReference::new("invoice-1").unwrap(),
-        proposal_expires_at: None,
-        recurrence: None,
-        accepted_payment_endpoint_identifiers: vec![
+    PaymentRequestTerms::builder(
+        PaymentAmount::new(value, asset).unwrap(),
+        PaymentReference::new("invoice-1").unwrap(),
+        vec![
             endpoint("btc-lightning-bolt11"),
             endpoint("btc-lightning-bolt12"),
         ],
-        metadata: serde_json::Map::new(),
-    }
+    )
+    .build()
+    .unwrap()
 }
 
 fn usage(value: &str, admitted_at: DateTime<Utc>) -> AllowanceUsageEntry {
