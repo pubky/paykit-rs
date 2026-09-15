@@ -485,6 +485,46 @@ mod tests {
     }
 
     #[test]
+    fn test_payment_proof_allowance_id_counts_toward_send_size_limit() {
+        use crate::{
+            serialize_payment_request_event, AllowanceId, EventId, PaymentEndpointIdentifier,
+            PaymentProof, PaymentReference, PaymentRequestEvent, PaymentRequestId,
+        };
+
+        let mut proof = PaymentProof::new(
+            EventId::new_v4(),
+            PaymentRequestId::new_v4(),
+            PaymentReference::new("invoice-2026-0001").unwrap(),
+            None,
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            serde_json::Map::from_iter([("data".into(), serde_json::Value::from(""))]),
+        )
+        .with_allowance_id(AllowanceId::new_v4());
+        let serialize = |proof: &PaymentProof| {
+            serialize_payment_request_event(&PaymentRequestEvent::Proof(proof.clone())).unwrap()
+        };
+        let padding = pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN - serialize(&proof).len();
+        proof
+            .proof
+            .insert("data".into(), "x".repeat(padding).into());
+        let at_limit = serialize(&proof);
+        assert_eq!(
+            at_limit.len(),
+            pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN
+        );
+        validate_private_application_message_size(at_limit.as_bytes(), "Payment Proof").unwrap();
+
+        proof
+            .proof
+            .insert("data".into(), "x".repeat(padding + 1).into());
+        let oversized = serialize(&proof);
+        assert!(matches!(
+            validate_private_application_message_size(oversized.as_bytes(), "Payment Proof"),
+            Err(PaykitError::Validation(_))
+        ));
+    }
+
+    #[test]
     fn test_private_application_message_size_validation_rejects_oversized_private_payment_list() {
         // A Private Payment List can cross the pubky-noise message ceiling via
         // many small Payment Endpoints rather than one oversized payload.
