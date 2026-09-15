@@ -10,6 +10,7 @@ use crate::harness::{
 };
 
 mod cancellation_restore;
+mod accounting;
 mod proofs;
 
 fn terms() -> AllowanceTerms {
