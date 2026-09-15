@@ -1,13 +1,9 @@
-use chrono::Utc;
-use paykit_sdk::{
-    LinkedPeerState, PaykitReceiverPath, PaykitSdkError, PrivatePaymentListReservationUpdate,
-    PubkyPublicKey, StorageAdapter,
-};
+use paykit_sdk::{LinkedPeerState, PaykitSdkError, PrivatePaymentListReservationUpdate};
 use std::time::{Duration, Instant};
 
 use crate::harness::{
     drive_link_to_linked, linked_two_party, private_receiving_detail, two_party,
-    wait_until_marker_is_newer_than_observer_checkpoint, TestUser,
+    wait_until_marker_is_newer_than_observer_checkpoint,
 };
 
 #[tokio::test]
