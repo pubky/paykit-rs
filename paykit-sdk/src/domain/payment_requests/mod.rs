@@ -11,8 +11,9 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use paykit_lib::{
-    parse_payment_request_event_message, serialize_payment_request_event, PaymentProof,
-    PaymentRequest, PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
+    parse_payment_request_event_message, serialize_payment_request_event, AllowanceId,
+    BillingPeriod, PaymentEndpointIdentifier, PaymentProof, PaymentRequest,
+    PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
     PaymentRequestRejection, PrivateApplicationMessage,
 };
 use serde::{Deserialize, Serialize};
@@ -204,6 +205,43 @@ impl From<&paykit_lib::PaymentRequestTerms> for PaymentRequestTermsRecord {
     }
 }
 
+/// Caller-supplied evidence for one Payment Proof.
+///
+/// This input reports a payment; it does not authorize or execute one. The
+/// caller owns settlement validation and must derive any Allowance attribution
+/// from its durable payment association, not the currently matching Allowance.
+#[derive(Clone, PartialEq)]
+pub struct PaymentProofSubmission {
+    /// Required for recurring requests and absent for one-time requests.
+    pub billing_period: Option<BillingPeriod>,
+    /// Payment Endpoint Identifier used by this payment execution.
+    pub payment_endpoint_identifier: PaymentEndpointIdentifier,
+    /// Method-specific evidence; Paykit does not verify its settlement claims.
+    pub proof: JsonMap<String, JsonValue>,
+    /// Optional report of the Allowance consumed by this payment.
+    ///
+    /// Absence means no attribution was supplied. This field never changes
+    /// Allowance authority, reservations, or usage accounting.
+    pub allowance_id: Option<AllowanceId>,
+}
+
+impl fmt::Debug for PaymentProofSubmission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PaymentProofSubmission")
+            .field("billing_period", &self.billing_period)
+            .field(
+                "payment_endpoint_identifier",
+                &self.payment_endpoint_identifier,
+            )
+            .field("allowance_id", &self.allowance_id)
+            .field(
+                "proof",
+                &format_args!("<redacted:{} fields>", self.proof.len()),
+            )
+            .finish()
+    }
+}
+
 /// Payment Proof captured in a derived Payment Request record.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaymentProofRecord {
@@ -221,6 +259,12 @@ pub struct PaymentProofRecord {
     pub billing_period: Option<BillingPeriodRecord>,
     /// Payment Endpoint Identifier used for payment.
     pub payment_endpoint_identifier: String,
+    /// Informational Allowance attribution copied from the proof, when supplied.
+    ///
+    /// Unknown or ended Allowances remain reportable historical claims. This
+    /// value does not prove settlement or change Allowance authority or usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowance_id: Option<String>,
     /// Method-specific proof object.
     pub proof: JsonMap<String, JsonValue>,
     /// Local record time for this proof.
@@ -236,6 +280,7 @@ impl fmt::Debug for PaymentProofRecord {
             .field("stream_item_id", &self.stream_item_id)
             .field("payment_reference", &"<redacted>")
             .field("billing_period", &self.billing_period)
+            .field("allowance_id", &self.allowance_id)
             .field(
                 "payment_endpoint_identifier",
                 &self.payment_endpoint_identifier,

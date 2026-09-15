@@ -683,6 +683,79 @@ async fn test_submit_payment_proof_canceled_with_acceptance_passes_state_gate() 
 }
 
 #[tokio::test]
+async fn test_submit_payment_proof_submission_allows_corrective_proof_before_readiness_check() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let request_id = PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        receiver_path(),
+        vec![payment_request_message(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+            request_id.as_str(),
+            None,
+        )],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let acceptance = parsed_payment_request_event(payment_request_acceptance_raw(
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
+        request_id.as_str(),
+    ));
+    let proof = PaymentRequestEvent::Proof(PaymentProof::new(
+        EventId::new_v4(),
+        request_id.clone(),
+        paykit_lib::PaymentReference::new("invoice-2026-0001").unwrap(),
+        None,
+        PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+        JsonMap::new(),
+    ));
+    for event in [acceptance, proof] {
+        crate::domain::payment_requests::enqueue_payment_request_event(
+            &storage,
+            counterparty.clone(),
+            receiver_path(),
+            &event,
+            FixedClock.now(),
+        )
+        .await
+        .unwrap();
+    }
+    let before = storage.snapshot().unwrap().outbound_private_messages.len();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::default(),
+        FixedClock,
+    );
+
+    let result = sdk
+        .submit_payment_proof_submission(
+            counterparty,
+            receiver_path(),
+            &request_id,
+            PaymentProofSubmission {
+                billing_period: None,
+                payment_endpoint_identifier: PaymentEndpointIdentifier::new("btc-lightning-bolt11")
+                    .unwrap(),
+                proof: JsonMap::new(),
+                allowance_id: Some(AllowanceId::new_v4()),
+            },
+        )
+        .await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    assert_eq!(
+        storage.snapshot().unwrap().outbound_private_messages.len(),
+        before
+    );
+}
+
+#[tokio::test]
 async fn test_submit_payment_proof_rejects_canceled_request_without_acceptance() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
