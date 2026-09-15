@@ -36,7 +36,7 @@ async fn test_private_payment_list_roundtrip_between_linked_peers() {
     let queued = pair
         .alice
         .sdk
-        .enqueue_private_payment_list(pair.bob.public_key.clone(), pair.bob.receiver_path.clone())
+        .enqueue_private_payment_list(pair.bob.public_key.clone())
         .await
         .expect("enqueue should succeed for a linked peer");
     assert_eq!(queued.status, OutboundPrivateMessageStatus::Pending);
@@ -44,22 +44,27 @@ async fn test_private_payment_list_roundtrip_between_linked_peers() {
     let send_report = pair
         .alice
         .sdk
-        .process_outbound_private_messages(
-            pair.bob.public_key.clone(),
-            pair.bob.receiver_path.clone(),
-        )
+        .process_outbound_private_messages(pair.bob.public_key.clone())
         .await
         .expect("processing the outbound queue should succeed");
     assert_eq!(send_report.sent, vec![queued.outbound_message_id]);
     assert!(send_report.failed.is_empty());
+    let sent = pair
+        .alice
+        .storage
+        .snapshot()
+        .unwrap()
+        .outbound_private_messages
+        .into_iter()
+        .find(|record| record.outbound_message_id == queued.outbound_message_id)
+        .expect("sent message should remain in the audit log");
+    assert_eq!(sent.status, OutboundPrivateMessageStatus::Sent);
+    assert!(sent.prepared_send.is_none());
 
     let intake = pair
         .bob
         .sdk
-        .receive_private_messages(
-            pair.alice.public_key.clone(),
-            pair.alice.receiver_path.clone(),
-        )
+        .receive_private_messages(pair.alice.public_key.clone())
         .await
         .expect("receiving private messages should succeed");
     assert!(!intake.stream_item_ids.is_empty());
@@ -77,13 +82,16 @@ async fn test_private_payment_list_roundtrip_between_linked_peers() {
         after_receive
     );
 
-    let view = pair
+    let views = pair
         .bob
         .sdk
-        .current_private_payment_list(&pair.alice.public_key, &pair.alice.receiver_path)
+        .current_private_payment_lists(&pair.alice.public_key)
         .await
-        .expect("reading the Private Payment List should succeed")
-        .expect("a valid list should be present after receive");
+        .expect("reading Private Payment Lists should succeed");
+    let view = views
+        .iter()
+        .find(|view| view.app_id == pair.alice.app_id)
+        .expect("the sender app's valid list should be present after receive");
     assert_eq!(
         view.payment_endpoints
             .get("btc-lightning-bolt11")
@@ -98,7 +106,6 @@ async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
     let pair = linked_two_party().await;
     let mut update = PrivatePaymentListReservationUpdate {
         counterparty: pair.bob.public_key.clone(),
-        counterparty_receiver_path: pair.bob.receiver_path.clone(),
         reservations: vec![PrivatePaymentEndpointReservation {
             reservation_id: "invoice-1".into(),
             receiving_detail: private_receiving_detail("btc-lightning-bolt11", "ln-private-1"),
@@ -129,16 +136,12 @@ async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
     for _ in 0..3 {
         pair.alice
             .sdk
-            .ensure_link_with_peer(
-                pair.bob.public_key.clone(),
-                pair.bob.receiver_path.clone(),
-                1,
-            )
+            .ensure_link_with_peer(pair.bob.public_key.clone(), 1)
             .await
             .unwrap();
         pair.alice
             .sdk
-            .advance_link_handshake(pair.bob.public_key.clone(), pair.bob.receiver_path.clone())
+            .advance_link_handshake(pair.bob.public_key.clone())
             .await
             .unwrap();
         let unchanged = pair
@@ -177,10 +180,7 @@ async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
 
     pair.bob
         .sdk
-        .clear_private_payment_list_and_process_outbound(
-            pair.alice.public_key.clone(),
-            pair.alice.receiver_path.clone(),
-        )
+        .clear_private_payment_list_and_process_outbound(pair.alice.public_key.clone())
         .await
         .unwrap();
     pair.alice
@@ -224,9 +224,11 @@ async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
     let view = pair
         .bob
         .sdk
-        .current_private_payment_list(&pair.alice.public_key, &pair.alice.receiver_path)
+        .current_private_payment_lists(&pair.alice.public_key)
         .await
         .unwrap()
+        .into_iter()
+        .find(|view| view.app_id == pair.alice.app_id)
         .unwrap();
     assert_eq!(
         view.payment_endpoints
@@ -258,10 +260,7 @@ async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
         let explicit = pair
             .alice
             .sdk
-            .clear_private_payment_list_and_process_outbound(
-                pair.bob.public_key.clone(),
-                pair.bob.receiver_path.clone(),
-            )
+            .clear_private_payment_list_and_process_outbound(pair.bob.public_key.clone())
             .await
             .unwrap();
         assert_eq!(explicit.cleared.len(), 1);
@@ -278,10 +277,9 @@ async fn test_private_list_sync_corrupt_snapshot_marks_recovery_required() {
         .storage
         .transaction({
             let counterparty = pair.bob.public_key.clone();
-            let counterparty_receiver_path = pair.bob.receiver_path.clone();
             move |tx| {
                 let mut link_state = tx
-                    .encrypted_link_state(&counterparty, &counterparty_receiver_path)
+                    .encrypted_link_state(&counterparty)
                     .expect("linked peer should have Encrypted Link state");
                 link_state.link_snapshot = Some(vec![1, 2, 3]);
                 tx.save_encrypted_link_state(link_state);
@@ -297,7 +295,6 @@ async fn test_private_list_sync_corrupt_snapshot_marks_recovery_required() {
         .sync_private_payment_lists_with_reservations_and_process_outbound(
             vec![PrivatePaymentListReservationUpdate {
                 counterparty: pair.bob.public_key.clone(),
-                counterparty_receiver_path: pair.bob.receiver_path.clone(),
                 reservations: Vec::new(),
             }],
             false,
@@ -313,8 +310,7 @@ async fn test_private_list_sync_corrupt_snapshot_marks_recovery_required() {
         .storage
         .transaction({
             let counterparty = pair.bob.public_key.clone();
-            let counterparty_receiver_path = pair.bob.receiver_path.clone();
-            move |tx| Ok(tx.linked_peer(&counterparty, &counterparty_receiver_path))
+            move |tx| Ok(tx.linked_peer(&counterparty))
         })
         .await
         .unwrap()
@@ -335,7 +331,7 @@ async fn test_enqueue_private_payment_list_without_link_fails() {
     let err = pair
         .alice
         .sdk
-        .enqueue_private_payment_list(pair.bob.public_key.clone(), pair.bob.receiver_path.clone())
+        .enqueue_private_payment_list(pair.bob.public_key.clone())
         .await
         .expect_err("enqueue without an Encrypted Link must fail");
     assert!(

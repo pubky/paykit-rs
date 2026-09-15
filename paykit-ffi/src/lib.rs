@@ -1,5 +1,18 @@
 #![doc = "UniFFI bindings for Paykit SDK."]
 
+macro_rules! impl_redacted_debug {
+    ($($type:ident),+ $(,)?) => {
+        $(
+            impl std::fmt::Debug for $type {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str(concat!(stringify!($type), "(<redacted>)"))
+                }
+            }
+        )+
+    };
+}
+
+mod app_registry;
 mod config;
 mod conversions_common;
 mod errors;
@@ -19,6 +32,7 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
+pub use app_registry::*;
 pub use config::*;
 pub use errors::PaykitFfiError;
 pub use json::*;
@@ -36,7 +50,7 @@ pub use storage::*;
 
 uniffi::setup_scaffolding!();
 
-pub(crate) const SDK_STATE_BLOB_VERSION: u32 = 1;
+pub(crate) const SDK_STATE_BLOB_VERSION: u32 = paykit_sdk::storage::SDK_STATE_BLOB_VERSION;
 pub(crate) const SDK_BACKUP_BLOB_VERSION: u32 = 1;
 pub(crate) const DEFAULT_PUBKY_REQUEST_TIMEOUT_SECS: u64 = 30;
 

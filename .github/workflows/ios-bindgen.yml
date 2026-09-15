@@ -60,6 +60,7 @@ jobs:
           set -euo pipefail
           required=(
             paykit-ffi/bindings/ios/PaykitPublicKeys.swift
+            paykit-ffi/bindings/ios/PaykitRedaction.swift
             paykit-ffi/bindings/ios/module.modulemap
             paykit-ffi/bindings/ios/paykit.swift
             paykit-ffi/bindings/ios/paykitFFI.h
@@ -82,6 +83,7 @@ jobs:
           set -euo pipefail
           generated_sources=(
             paykit-ffi/bindings/ios/PaykitPublicKeys.swift
+            paykit-ffi/bindings/ios/PaykitRedaction.swift
             paykit-ffi/bindings/ios/module.modulemap
             paykit-ffi/bindings/ios/paykit.swift
             paykit-ffi/bindings/ios/paykitFFI.h
@@ -99,6 +101,7 @@ jobs:
           name: paykit-ios-bindgen
           path: |
             paykit-ffi/bindings/ios/PaykitPublicKeys.swift
+            paykit-ffi/bindings/ios/PaykitRedaction.swift
             paykit-ffi/bindings/ios/module.modulemap
             paykit-ffi/bindings/ios/paykit.swift
             paykit-ffi/bindings/ios/paykitFFI.h

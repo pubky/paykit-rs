@@ -8,6 +8,10 @@ fn receipt_access_json(access: &ReceiptAccess) -> String {
         serde_json::json!("paykit.receipt_access"),
     );
     object.insert(
+        "app_id".to_string(),
+        serde_json::json!(test_app_id().as_str()),
+    );
+    object.insert(
         "event_id".to_string(),
         serde_json::json!(access.event_id.as_str()),
     );
@@ -59,12 +63,12 @@ async fn prepared_receipt_can_be_stored_and_sent_in_retryable_steps() {
         .unwrap(),
     };
 
-    let prepared = prepare_receipt(&setup.sender_link, &receiver_path(), draft).unwrap();
+    let prepared = prepare_receipt(&setup.sender_link, draft).unwrap();
     assert_eq!(prepared.access.payment_reference, reference);
     assert_eq!(prepared.receipt.receipt_id, prepared.access.receipt_id);
     assert_eq!(
         prepared.access.location,
-        ReceiptAccess::location(&receiver_path(), &prepared.access.receipt_id)
+        ReceiptAccess::location_for(&prepared.access.receipt_id)
     );
 
     store_prepared_receipt(&setup.sender_session, &prepared)
@@ -84,58 +88,12 @@ async fn prepared_receipt_can_be_stored_and_sent_in_retryable_steps() {
         decrypt_receipt(&stored, &prepared.access.key, &prepared.access.location).unwrap();
     assert_eq!(receipt, prepared.receipt);
 
-    send_receipt_access(&mut setup.sender_link, &prepared.access)
+    send_receipt_access(&mut setup.sender_link, &test_app_id(), &prepared.access)
         .await
         .unwrap();
     let access = receive_receipt_access_for_test(&mut setup.receiver_link).await;
 
     assert_eq!(access, vec![prepared.access]);
-}
-
-#[tokio::test]
-async fn prepare_receipt_rejects_receiver_mismatch_with_link_scope() {
-    let setup = PrivateTestSetup::new().await;
-    let draft = ReceiptDraft {
-        receipt_id: None,
-        payment_reference: PaymentReference::new("invoice-2026-0001").unwrap(),
-        payment_request_id: None,
-        billing_period: None,
-        payment_endpoint_identifier: Some(PaymentEndpointIdentifier::new("lightning").unwrap()),
-        amount: Some(PaymentAmount::new("2500", "sats").unwrap()),
-        metadata: serde_json::Map::new(),
-    };
-
-    let result = prepare_receipt(
-        &setup.sender_link,
-        &PaykitReceiverPath::new("tether/wallet").unwrap(),
-        draft,
-    );
-
-    assert!(matches!(result, Err(PaykitError::Validation(_))));
-}
-
-#[tokio::test]
-async fn send_receipt_access_rejects_receiver_mismatch_with_link_scope() {
-    let mut setup = PrivateTestSetup::new().await;
-    let draft = ReceiptDraft {
-        receipt_id: None,
-        payment_reference: PaymentReference::new("invoice-2026-0001").unwrap(),
-        payment_request_id: None,
-        billing_period: None,
-        payment_endpoint_identifier: Some(PaymentEndpointIdentifier::new("lightning").unwrap()),
-        amount: Some(PaymentAmount::new("2500", "sats").unwrap()),
-        metadata: serde_json::Map::new(),
-    };
-    let prepared = prepare_receipt_for_recipient(
-        setup.sender_link.recipient().clone(),
-        &PaykitReceiverPath::new("tether/wallet").unwrap(),
-        draft,
-    )
-    .unwrap();
-
-    let result = send_receipt_access(&mut setup.sender_link, &prepared.access).await;
-
-    assert!(matches!(result, Err(PaykitError::Validation(_))));
 }
 
 #[tokio::test]
@@ -152,7 +110,7 @@ async fn receipt_access_parser_returns_all_available_receipts_in_fifo_order() {
         receipt_id: first_receipt_id.clone(),
         payment_request_id: None,
         billing_period: None,
-        location: ReceiptAccess::location(&receiver_path(), &first_receipt_id),
+        location: ReceiptAccess::location_for(&first_receipt_id),
         key: ReceiptDecryptionKey::generate(),
         payment_reference: first_reference.clone(),
     };
@@ -163,7 +121,7 @@ async fn receipt_access_parser_returns_all_available_receipts_in_fifo_order() {
         receipt_id: second_receipt_id.clone(),
         payment_request_id: None,
         billing_period: None,
-        location: ReceiptAccess::location(&receiver_path(), &second_receipt_id),
+        location: ReceiptAccess::location_for(&second_receipt_id),
         key: ReceiptDecryptionKey::generate(),
         payment_reference: second_reference.clone(),
     };
@@ -201,7 +159,7 @@ async fn receipt_access_parser_preserves_valid_receipts_when_one_message_is_malf
         receipt_id: first_receipt_id.clone(),
         payment_request_id: None,
         billing_period: None,
-        location: ReceiptAccess::location(&receiver_path(), &first_receipt_id),
+        location: ReceiptAccess::location_for(&first_receipt_id),
         key: ReceiptDecryptionKey::generate(),
         payment_reference: first_reference.clone(),
     };
@@ -212,7 +170,7 @@ async fn receipt_access_parser_preserves_valid_receipts_when_one_message_is_malf
         receipt_id: malformed_receipt_id,
         payment_request_id: None,
         billing_period: None,
-        location: ReceiptAccess::location(&receiver_path(), &ReceiptId::new_v4()),
+        location: ReceiptAccess::location_for(&ReceiptId::new_v4()),
         key: ReceiptDecryptionKey::generate(),
         payment_reference: malformed_reference,
     };
@@ -223,7 +181,7 @@ async fn receipt_access_parser_preserves_valid_receipts_when_one_message_is_malf
         receipt_id: second_receipt_id.clone(),
         payment_request_id: None,
         billing_period: None,
-        location: ReceiptAccess::location(&receiver_path(), &second_receipt_id),
+        location: ReceiptAccess::location_for(&second_receipt_id),
         key: ReceiptDecryptionKey::generate(),
         payment_reference: second_reference.clone(),
     };

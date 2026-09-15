@@ -2,13 +2,13 @@ use std::collections::HashMap;
 
 use tracing::{debug, instrument};
 
-use crate::{error::map_error, pubky_routing, PaykitError, PaykitReceiverPath, PublicKey, Result};
+use crate::{error::map_error, pubky_routing, PaykitAppId, PaykitError, PublicKey, Result};
 
 /// Machine-readable identifier for a Payment Endpoint.
 ///
-/// A `PaymentEndpointIdentifier` is a single, safe path segment stored under a
-/// receiver's endpoint folder. It is validated at construction time to prevent
-/// path injection attacks.
+/// A `PaymentEndpointIdentifier` is a single, safe path segment stored in an
+/// app-owned endpoint directory. It is validated at construction time to
+/// prevent path injection attacks.
 ///
 /// # Allowed characters
 /// ASCII alphanumeric (`a-z`, `A-Z`, `0-9`), hyphens (`-`), underscores (`_`),
@@ -36,8 +36,6 @@ pub struct PaymentEndpointIdentifier(String);
 const PAYMENT_ENDPOINT_IDENTIFIER_MAX_LEN: usize = 64;
 /// Reserved [`PaymentEndpointIdentifier`] value used by private Paykit storage.
 const PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_PRIVATE: &str = "private";
-/// Reserved [`PaymentEndpointIdentifier`] value used by recovery marker storage.
-const PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_RECOVERY: &str = "encrypted-link-recovery";
 
 impl PaymentEndpointIdentifier {
     /// Create a new `PaymentEndpointIdentifier` after validating the identifier.
@@ -61,9 +59,7 @@ impl PaymentEndpointIdentifier {
             )));
         }
 
-        if id == PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_PRIVATE
-            || id == PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_RECOVERY
-        {
+        if id == PAYMENT_ENDPOINT_IDENTIFIER_RESERVED_PRIVATE {
             return Err(PaykitError::Validation(format!(
                 "PaymentEndpointIdentifier '{id}' is reserved for Paykit storage"
             )));
@@ -113,8 +109,15 @@ impl AsRef<str> for PaymentEndpointIdentifier {
 /// The payload is UTF-8 text such as JSON, lnurl, or another payment-specific
 /// descriptor. If you need to transmit binary payloads, encode them (for
 /// example base64) before wrapping in `PaymentEndpointPayload`.
+/// Public storage helpers reject payloads larger than
+/// [`PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaymentEndpointPayload(String);
+
+/// Maximum encoded size of one public Payment Endpoint payload.
+pub const PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
+/// Maximum number of public Payment Endpoints fetched for one Paykit App.
+pub const PAYMENT_LIST_MAX_ENDPOINTS: usize = 256;
 
 impl PaymentEndpointPayload {
     /// Wrap a UTF-8 string as a Payment Endpoint Payload.
@@ -156,42 +159,90 @@ pub struct PaymentList {
 ///
 /// # Examples
 /// ```
-/// # use paykit_lib::{set_payment_endpoint, PaykitReceiverPath, PaymentEndpointIdentifier, PaymentEndpointPayload};
+/// # use paykit_lib::{set_payment_endpoint, PaykitAppId, PaymentEndpointIdentifier, PaymentEndpointPayload};
 /// # async fn demo(session: &pubky::PubkySession) -> paykit_lib::Result<()> {
-/// let receiver_path = PaykitReceiverPath::new("bitkit/wallet")?;
+/// let app_id = PaykitAppId::new("bitkit")?;
 /// let identifier = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
 /// let payload = PaymentEndpointPayload::new("ln...");
-/// set_payment_endpoint(session, &receiver_path, identifier, payload).await?;
+/// set_payment_endpoint(session, &app_id, identifier, payload).await?;
 /// # Ok(())
 /// # }
 /// ```
-#[instrument(skip(session, payload), fields(receiver = %receiver_path, identifier = %identifier))]
+#[instrument(skip(session, payload), fields(identifier = %identifier))]
 pub async fn set_payment_endpoint(
     session: &pubky::PubkySession,
-    receiver_path: &PaykitReceiverPath,
+    app_id: &PaykitAppId,
     identifier: PaymentEndpointIdentifier,
     payload: PaymentEndpointPayload,
 ) -> Result<()> {
     debug!("storing payment endpoint");
-    pubky_routing::upsert_payment_endpoint(session, receiver_path, &identifier, &payload)
+    pubky_routing::upsert_payment_endpoint(session, app_id, &identifier, &payload)
         .await
         .map_err(|err| map_error("set_payment_endpoint", err))
 }
 
+/// Creates a public Payment Endpoint only when it is currently absent.
+pub async fn create_payment_endpoint(
+    session: &pubky::PubkySession,
+    app_id: &PaykitAppId,
+    identifier: PaymentEndpointIdentifier,
+    payload: PaymentEndpointPayload,
+) -> Result<()> {
+    pubky_routing::create_payment_endpoint(session, app_id, &identifier, &payload)
+        .await
+        .map_err(|err| map_error("create_payment_endpoint", err))
+}
+
+/// Replaces a public Payment Endpoint only at the supplied strong revision.
+pub async fn update_payment_endpoint(
+    session: &pubky::PubkySession,
+    app_id: &PaykitAppId,
+    identifier: PaymentEndpointIdentifier,
+    payload: PaymentEndpointPayload,
+    expected_revision: &str,
+) -> Result<()> {
+    pubky_routing::update_payment_endpoint(
+        session,
+        app_id,
+        &identifier,
+        &payload,
+        expected_revision,
+    )
+    .await
+    .map_err(|err| map_error("update_payment_endpoint", err))
+}
+
 /// Removes a public payment endpoint from the authenticated Pubky session.
-#[instrument(skip(session), fields(receiver = %receiver_path, identifier = %identifier))]
+#[instrument(skip(session), fields(identifier = %identifier))]
 pub async fn remove_payment_endpoint(
     session: &pubky::PubkySession,
-    receiver_path: &PaykitReceiverPath,
+    app_id: &PaykitAppId,
     identifier: PaymentEndpointIdentifier,
 ) -> Result<()> {
     debug!("removing payment endpoint");
-    pubky_routing::delete_payment_endpoint(session, receiver_path, &identifier)
+    pubky_routing::delete_payment_endpoint(session, app_id, &identifier)
         .await
         .map_err(|err| map_error("remove_payment_endpoint", err))
 }
 
-/// Retrieves the public Payment List for the given payee receiver.
+/// Removes a public Payment Endpoint only at the supplied strong revision.
+pub async fn remove_payment_endpoint_if_revision(
+    session: &pubky::PubkySession,
+    app_id: &PaykitAppId,
+    identifier: PaymentEndpointIdentifier,
+    expected_revision: &str,
+) -> Result<()> {
+    pubky_routing::delete_payment_endpoint_if_revision(
+        session,
+        app_id,
+        &identifier,
+        expected_revision,
+    )
+    .await
+    .map_err(|err| map_error("remove_payment_endpoint_if_revision", err))
+}
+
+/// Retrieves the public Payment List for the given payee.
 ///
 /// # Semantics
 /// - Returns an empty map when the payee has not published any endpoints or their
@@ -202,10 +253,11 @@ pub async fn remove_payment_endpoint(
 ///
 /// # Examples
 /// ```
-/// # use paykit_lib::{get_payment_list, PaykitReceiverPath};
+/// # #![recursion_limit = "256"]
+/// # use paykit_lib::{get_payment_list, PaykitAppId};
 /// # async fn demo(storage: &pubky::PublicStorage, pk: &paykit_lib::PublicKey) -> paykit_lib::Result<()> {
-/// let receiver_path = PaykitReceiverPath::new("bitkit/wallet")?;
-/// let payments = get_payment_list(storage, pk, &receiver_path).await?;
+/// let app_id = PaykitAppId::new("bitkit")?;
+/// let payments = get_payment_list(storage, pk, &app_id).await?;
 /// if payments.payment_endpoints.is_empty() {
 ///     println!("payee published no endpoints yet");
 /// } else {
@@ -220,16 +272,44 @@ pub async fn remove_payment_endpoint(
 /// # Ok(())
 /// # }
 /// ```
-#[instrument(skip(storage), fields(receiver = %receiver_path))]
+#[instrument(skip(storage))]
 pub async fn get_payment_list(
     storage: &pubky::PublicStorage,
     payee: &PublicKey,
-    receiver_path: &PaykitReceiverPath,
+    app_id: &PaykitAppId,
+) -> Result<PaymentList> {
+    get_payment_list_with_limits(
+        storage,
+        payee,
+        app_id,
+        PAYMENT_LIST_MAX_ENDPOINTS,
+        PAYMENT_LIST_MAX_ENDPOINTS * PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES,
+    )
+    .await
+}
+
+/// Fetch an app's public Payment Endpoints within caller-supplied aggregate limits.
+///
+/// The fetch fails if the app publishes more endpoints or total payload bytes
+/// than the supplied limits. Per-endpoint protocol limits still apply.
+#[instrument(skip(storage))]
+pub async fn get_payment_list_with_limits(
+    storage: &pubky::PublicStorage,
+    payee: &PublicKey,
+    app_id: &PaykitAppId,
+    max_endpoints: usize,
+    max_total_payload_bytes: usize,
 ) -> Result<PaymentList> {
     debug!("fetching Payment List");
-    let result = pubky_routing::fetch_payment_list(storage, payee, receiver_path)
-        .await
-        .map_err(|err| map_error("get_payment_list", err))?;
+    let result = pubky_routing::fetch_payment_list_with_limits(
+        storage,
+        payee,
+        app_id,
+        max_endpoints.min(PAYMENT_LIST_MAX_ENDPOINTS),
+        max_total_payload_bytes,
+    )
+    .await
+    .map_err(|err| map_error("get_payment_list", err))?;
     debug!(
         count = result.payment_endpoints.len(),
         "Payment List retrieved"
@@ -237,24 +317,12 @@ pub async fn get_payment_list(
     Ok(result)
 }
 
-/// Lists public Paykit receiver paths for a Pubky identity.
-///
-/// This is a discovery helper only. Payment flows should still use the exact
-/// receiver path selected by the app/user instead of guessing one. Discovery
-/// returns receiver paths that publish a valid Receiver Marker or at least one
-/// public Payment Endpoint.
-#[instrument(skip(storage))]
-pub async fn list_paykit_receiver_paths(
-    storage: &pubky::PublicStorage,
-    owner: &PublicKey,
-) -> Result<Vec<PaykitReceiverPath>> {
-    debug!("listing Paykit receiver paths");
-    pubky_routing::fetch_paykit_receiver_paths(storage, owner)
-        .await
-        .map_err(|err| map_error("list_paykit_receiver_paths", err))
+/// Return whether a Payment List fetch failed because it exceeded caller-supplied limits.
+pub fn is_payment_list_limit_exceeded(error: &PaykitError) -> bool {
+    pubky_routing::is_payment_list_limit_exceeded(error)
 }
 
-/// Retrieves a specific Payment Endpoint for `payee`, `receiver_path`, and `identifier`.
+/// Retrieves a specific Payment Endpoint for `payee` and `identifier`.
 ///
 /// # Semantics
 /// - Returns `Ok(None)` when the endpoint file is missing or empty.
@@ -263,11 +331,11 @@ pub async fn list_paykit_receiver_paths(
 ///
 /// # Examples
 /// ```
-/// # use paykit_lib::{get_payment_endpoint, PaykitReceiverPath, PaymentEndpointIdentifier, PublicKey};
+/// # use paykit_lib::{get_payment_endpoint, PaykitAppId, PaymentEndpointIdentifier, PublicKey};
 /// # async fn inspect(storage: &pubky::PublicStorage, pk: &PublicKey) -> paykit_lib::Result<()> {
-/// let receiver_path = PaykitReceiverPath::new("bitkit/wallet")?;
+/// let app_id = PaykitAppId::new("bitkit")?;
 /// let lightning = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
-/// if let Some(endpoint) = get_payment_endpoint(storage, pk, &receiver_path, &lightning).await? {
+/// if let Some(endpoint) = get_payment_endpoint(storage, pk, &app_id, &lightning).await? {
 ///     println!("lightning endpoint: {}", endpoint.as_str());
 /// } else {
 ///     println!("no lightning endpoint published");
@@ -275,19 +343,34 @@ pub async fn list_paykit_receiver_paths(
 /// # Ok(())
 /// # }
 /// ```
-#[instrument(skip(storage), fields(receiver = %receiver_path, identifier = %identifier))]
+#[instrument(skip(storage), fields(identifier = %identifier))]
 pub async fn get_payment_endpoint(
     storage: &pubky::PublicStorage,
     payee: &PublicKey,
-    receiver_path: &PaykitReceiverPath,
+    app_id: &PaykitAppId,
     identifier: &PaymentEndpointIdentifier,
 ) -> Result<Option<PaymentEndpointPayload>> {
     debug!("fetching payment endpoint");
-    let result = pubky_routing::fetch_payment_endpoint(storage, payee, receiver_path, identifier)
+    let result = pubky_routing::fetch_payment_endpoint(storage, payee, app_id, identifier)
         .await
         .map_err(|err| map_error("get_payment_endpoint", err))?;
     debug!(found = result.is_some(), "payment endpoint lookup complete");
     Ok(result)
+}
+
+/// Retrieves a specific public Payment Endpoint and its strong revision.
+///
+/// The outer `Option` is `None` when the resource is absent. The inner payload
+/// is `None` when the resource exists but is empty.
+pub async fn get_payment_endpoint_with_revision(
+    storage: &pubky::PublicStorage,
+    payee: &PublicKey,
+    app_id: &PaykitAppId,
+    identifier: &PaymentEndpointIdentifier,
+) -> Result<Option<(Option<PaymentEndpointPayload>, String)>> {
+    pubky_routing::fetch_payment_endpoint_with_revision(storage, payee, app_id, identifier)
+        .await
+        .map_err(|err| map_error("get_payment_endpoint_with_revision", err))
 }
 
 #[cfg(test)]
@@ -427,10 +510,8 @@ mod validation_tests {
 
     #[test]
     fn test_payment_endpoint_identifier_reject_reserved_values() {
-        for reserved in ["private", "encrypted-link-recovery"] {
-            let err = PaymentEndpointIdentifier::new(reserved).unwrap_err();
-            assert!(matches!(err, PaykitError::Validation(msg) if msg.contains("reserved")));
-        }
+        let err = PaymentEndpointIdentifier::new("private").unwrap_err();
+        assert!(matches!(err, PaykitError::Validation(msg) if msg.contains("reserved")));
     }
 
     // ── PaymentEndpointPayload: basic accessors ───────────────────────────────────

@@ -3,9 +3,40 @@ use chrono::{TimeZone, Utc};
 use super::*;
 use crate::{
     domain::linked_peers::LinkedPeerState,
-    storage::{EncryptedLinkStateRecord, InMemoryStorage, LinkedPeerRecord},
-    PaykitSdkError, PrivateStreamParseStatus,
+    storage::{
+        EncryptedLinkStateRecord, InMemoryStorage, LinkedPeerRecord, PaymentRequestExecutionClaim,
+    },
+    IdentityState, PaykitSdkError, PrivateStreamParseStatus,
 };
+
+struct ValidatingStorage(InMemoryStorage);
+
+#[async_trait::async_trait]
+impl StorageAdapter for ValidatingStorage {
+    async fn transaction_erased<'a>(
+        &self,
+        f: crate::storage::StorageTransactionCallback<'a>,
+    ) -> Result<Box<dyn std::any::Any + Send>> {
+        self.0
+            .transaction_erased(Box::new(move |tx| {
+                crate::validate_storage_state(&tx.export_storage_state())?;
+                let result = f(tx)?;
+                crate::validate_storage_state(&tx.export_storage_state())?;
+                Ok(result)
+            }))
+            .await
+    }
+}
+
+fn validating_storage() -> ValidatingStorage {
+    ValidatingStorage(InMemoryStorage::from_state(crate::storage::StorageState {
+        identity_state: Some(IdentityState {
+            public_key: Some(counterparty()),
+            initialized_at: timestamp(),
+        }),
+        ..Default::default()
+    }))
+}
 
 fn counterparty() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
@@ -13,10 +44,6 @@ fn counterparty() -> PubkyPublicKey {
 
 fn timestamp() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap()
-}
-
-fn receiver_path() -> paykit_lib::PaykitReceiverPath {
-    paykit_lib::PaykitReceiverPath::new("bitkit/wallet").unwrap()
 }
 
 fn private_message(raw_json: &str) -> PrivateApplicationMessage {
@@ -30,14 +57,22 @@ fn private_message(raw_json: &str) -> PrivateApplicationMessage {
             .get("kind")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
+        app_id: value
+            .get("app_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
         raw_json: raw_json.to_owned(),
     }
 }
 
 fn payment_request_raw(reference: &str) -> String {
     format!(
-        r#"{{"version":1,"kind":"paykit.payment_request","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101","payment_request_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33","request":{{"amount":{{"value":"0.001","asset":"btc"}},"payment_reference":"{reference}","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"metadata":{{}}}}}}"#
+        r#"{{"version":1,"kind":"paykit.payment_request","app_id":"bitkit","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101","payment_request_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33","request":{{"amount":{{"value":"0.001","asset":"btc"}},"payment_reference":"{reference}","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"required_app_id":null,"metadata":{{}}}}}}"#
     )
+}
+
+fn payment_request_cancellation_raw() -> &'static str {
+    r#"{"version":1,"kind":"paykit.payment_request_cancellation","app_id":"bitkit","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102","payment_request_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33"}"#
 }
 
 fn receipt_access_raw(event_id: &str, receipt_id: &str, reference: &str) -> String {
@@ -46,7 +81,7 @@ fn receipt_access_raw(event_id: &str, receipt_id: &str, reference: &str) -> Stri
         event_id,
         receipt_id.as_str(),
         reference,
-        &paykit_lib::ReceiptAccess::location(&receiver_path(), &receipt_id),
+        &paykit_lib::ReceiptAccess::location_for(&receipt_id),
     )
 }
 
@@ -58,9 +93,27 @@ fn receipt_access_raw_with_location(
 ) -> String {
     let key = paykit_lib::ReceiptDecryptionKey::generate();
     format!(
-        r#"{{"version":1,"kind":"paykit.receipt_access","event_id":"{event_id}","receipt_id":"{receipt_id}","payment_reference":"{reference}","location":"{location}","key":"{}"}}"#,
+        r#"{{"version":1,"kind":"paykit.receipt_access","app_id":"bitkit","event_id":"{event_id}","receipt_id":"{receipt_id}","payment_reference":"{reference}","location":"{location}","key":"{}"}}"#,
         key.as_str()
     )
+}
+
+#[test]
+fn test_unknown_private_message_requires_valid_app_id() {
+    for raw_json in [
+        r#"{"version":1,"kind":"paykit.future"}"#,
+        r#"{"version":1,"kind":"paykit.future","app_id":"bad/path"}"#,
+    ] {
+        let classification = classify_private_application_message(&private_message(raw_json));
+        assert_eq!(classification.status, PrivateStreamParseStatus::InvalidJson);
+        assert!(classification.app_id.is_none());
+    }
+
+    let classification = classify_private_application_message(&private_message(
+        r#"{"version":1,"kind":"paykit.future","app_id":"bitkit"}"#,
+    ));
+    assert_eq!(classification.status, PrivateStreamParseStatus::UnknownKind);
+    assert_eq!(classification.app_id.unwrap().as_str(), "bitkit");
 }
 
 #[tokio::test]
@@ -73,7 +126,6 @@ async fn test_persist_private_stream_batch_stores_messages_and_checkpoint() {
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty,
-                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: None,
                     last_private_receive_at: None,
@@ -91,7 +143,6 @@ async fn test_persist_private_stream_batch_stores_messages_and_checkpoint() {
         .unwrap();
     let link_state = EncryptedLinkStateRecord {
         counterparty: counterparty.clone(),
-        counterparty_receiver_path: receiver_path(),
         link_snapshot: Some(vec![1, 2, 3]),
         handshake_snapshot: None,
         handshake_role: None,
@@ -99,14 +150,13 @@ async fn test_persist_private_stream_batch_stores_messages_and_checkpoint() {
         checkpointed_at: timestamp(),
     };
     let messages = vec![
-        private_message(r#"{"version":1,"kind":"paykit.unknown","body":{}}"#),
+        private_message(r#"{"version":1,"kind":"paykit.unknown","app_id":"bitkit","body":{}}"#),
         private_message(&payment_request_raw("invoice-2026-0001")),
     ];
 
     let report = persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_path(),
         messages,
         Some(link_state.clone()),
         timestamp(),
@@ -126,17 +176,227 @@ async fn test_persist_private_stream_batch_stores_messages_and_checkpoint() {
         snapshot.private_stream_items[1].parse_status,
         PrivateStreamParseStatus::Valid
     );
-    assert_eq!(
-        snapshot.encrypted_link_states[&(counterparty.clone(), receiver_path())],
-        link_state
-    );
+    assert_eq!(snapshot.encrypted_link_states[&counterparty], link_state);
     assert_eq!(snapshot.event_dedup_records.len(), 1);
-    let peer = snapshot
-        .linked_peers
-        .get(&(counterparty.clone(), receiver_path()))
-        .unwrap();
+    let peer = snapshot.linked_peers.get(&counterparty).unwrap();
     assert_eq!(peer.last_private_receive_at, Some(timestamp()));
     assert_eq!(peer.last_sync_at, Some(timestamp()));
+}
+
+#[tokio::test]
+async fn test_persist_private_stream_batch_reconciles_terminal_execution_claims() {
+    let mut malformed: serde_json::Value =
+        serde_json::from_str(payment_request_cancellation_raw()).unwrap();
+    malformed["reason"] = serde_json::Value::Null;
+    for (raw, expected_state) in [
+        (
+            payment_request_cancellation_raw().to_owned(),
+            PaymentRequestLifecycleState::Canceled,
+        ),
+        (
+            payment_request_raw("conflicting-reference"),
+            PaymentRequestLifecycleState::InvalidConflict,
+        ),
+        (
+            malformed.to_string(),
+            PaymentRequestLifecycleState::InvalidConflict,
+        ),
+    ] {
+        let storage = validating_storage();
+        let counterparty = counterparty();
+        persist_private_stream_batch(
+            &storage,
+            counterparty.clone(),
+            vec![private_message(&payment_request_raw("invoice-2026-0001"))],
+            None,
+            timestamp(),
+        )
+        .await
+        .unwrap();
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    tx.save_payment_request_execution_claim(PaymentRequestExecutionClaim {
+                        counterparty,
+                        payment_request_id: "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33".into(),
+                        app_id: PaykitAppId::new("wallet").unwrap(),
+                        claimed_at: timestamp(),
+                    });
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+
+        let checkpoint = EncryptedLinkStateRecord {
+            counterparty: counterparty.clone(),
+            link_snapshot: None,
+            handshake_snapshot: None,
+            handshake_role: None,
+            generation: 1,
+            checkpointed_at: timestamp(),
+        };
+        let report = persist_private_stream_batch(
+            &storage,
+            counterparty.clone(),
+            vec![private_message(&raw)],
+            Some(checkpoint.clone()),
+            timestamp(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.stream_item_ids, vec![1]);
+        storage
+            .transaction(|tx| {
+                assert!(tx
+                    .payment_request_execution_claim(
+                        &counterparty,
+                        "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
+                    )
+                    .is_none());
+                let records =
+                    payment_request_records_from_transaction(tx, &counterparty, timestamp())?;
+                assert_eq!(records[0].state, expected_state);
+                assert_eq!(tx.encrypted_link_state(&counterparty), Some(checkpoint));
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_persist_private_stream_batch_preserves_cached_receipt_conflict_history() {
+    struct Offline;
+
+    #[async_trait::async_trait]
+    impl crate::PubkySessionProvider for Offline {
+        async fn load_session_access(&self) -> Result<Option<crate::PubkySessionAccess>> {
+            Ok(None)
+        }
+
+        async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
+            Ok(None)
+        }
+
+        async fn clear_session_access(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::PaymentAdapter for Offline {}
+
+    for conflicting_event_id in [
+        "650e8400-e29b-41d4-a716-446655440000",
+        "750e8400-e29b-41d4-a716-446655440000",
+    ] {
+        let storage = validating_storage();
+        let counterparty = counterparty();
+        let event_id = "650e8400-e29b-41d4-a716-446655440000";
+        let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
+        let raw = receipt_access_raw(event_id, receipt_id, "invoice-2026-0001");
+        persist_private_stream_batch_with_link_lease(
+            &storage,
+            counterparty.clone(),
+            vec![private_message(&raw)],
+            None,
+            Some(vec![PaykitAppId::new("bitkit").unwrap()]),
+            None,
+            timestamp(),
+        )
+        .await
+        .unwrap();
+        storage
+            .transaction(|tx| {
+                let mut access = tx
+                    .receipt_access_record_by_receipt_id(&counterparty, receipt_id)
+                    .unwrap();
+                access.retrieval_status = crate::ReceiptRetrievalStatus::Retrieved;
+                access.retrieval_attempted_at = Some(timestamp());
+                access.retrieved_at = Some(timestamp());
+                tx.save_receipt_record(crate::ReceiptRecord {
+                    issuer: counterparty.clone(),
+                    app_id: access.app_id.clone(),
+                    receipt_access_event_id: access.event_id.clone(),
+                    receipt_access_key_hash: crate::domain::receipts::receipt_access_key_hash(
+                        &access.key,
+                    ),
+                    receipt_id: receipt_id.into(),
+                    payment_reference: access.payment_reference.clone(),
+                    payment_request_id: None,
+                    billing_period: None,
+                    recipient_public_key: tx.load_identity_state().unwrap().public_key.unwrap(),
+                    payment_endpoint_identifier: None,
+                    amount: None,
+                    metadata: Default::default(),
+                    location: access.location.clone(),
+                    retrieved_at: timestamp(),
+                });
+                tx.save_receipt_access_record(access);
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let mut conflicting: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        conflicting["event_id"] = conflicting_event_id.into();
+        conflicting["payment_reference"] = "conflicting-reference".into();
+        let checkpoint = EncryptedLinkStateRecord {
+            counterparty: counterparty.clone(),
+            link_snapshot: None,
+            handshake_snapshot: None,
+            handshake_role: None,
+            generation: 1,
+            checkpointed_at: timestamp(),
+        };
+        let report = persist_private_stream_batch_with_link_lease(
+            &storage,
+            counterparty.clone(),
+            vec![private_message(&conflicting.to_string())],
+            Some(checkpoint.clone()),
+            Some(vec![PaykitAppId::new("bitkit").unwrap()]),
+            None,
+            timestamp(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.stream_item_ids, vec![1]);
+        storage
+            .transaction(|tx| {
+                assert!(tx.receipt_record(&counterparty, receipt_id).is_some());
+                assert_eq!(tx.private_stream_items(&counterparty).len(), 2);
+                assert_eq!(tx.encrypted_link_state(&counterparty), Some(checkpoint));
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let backup = crate::export_backup_state(&storage).await.unwrap();
+        let backup = serde_json::from_str(&serde_json::to_string(&backup).unwrap()).unwrap();
+        let restored = ValidatingStorage(InMemoryStorage::new());
+        crate::backup::restore_backup_state(&restored, backup)
+            .await
+            .unwrap();
+        assert_eq!(restored.0.snapshot().unwrap().receipt_records.len(), 1);
+        for storage in [storage, restored] {
+            let sdk = crate::PaykitSdk::new(
+                storage,
+                Offline,
+                Offline,
+                crate::PaykitSdkConfig::new("wallet").unwrap(),
+            );
+            assert!(sdk.receipt_records(&counterparty).await.unwrap().is_empty());
+            assert!(sdk.receipts_from(&counterparty).await.unwrap().is_empty());
+            assert!(sdk.receipts().await.unwrap().is_empty());
+            assert!(matches!(
+                sdk.retrieve_receipt(counterparty.clone(), receipt_id).await,
+                Err(PaykitSdkError::Protocol { .. })
+            ));
+        }
+    }
 }
 
 #[tokio::test]
@@ -149,7 +409,6 @@ async fn test_persist_private_stream_batch_empty_checkpoint_updates_sync_time() 
             move |tx| {
                 tx.save_linked_peer(LinkedPeerRecord {
                     counterparty,
-                    counterparty_receiver_path: receiver_path(),
                     state: LinkedPeerState::Linked,
                     last_sync_at: None,
                     last_private_receive_at: None,
@@ -167,7 +426,6 @@ async fn test_persist_private_stream_batch_empty_checkpoint_updates_sync_time() 
         .unwrap();
     let link_state = EncryptedLinkStateRecord {
         counterparty: counterparty.clone(),
-        counterparty_receiver_path: receiver_path(),
         link_snapshot: Some(vec![1, 2, 3]),
         handshake_snapshot: None,
         handshake_role: None,
@@ -178,7 +436,6 @@ async fn test_persist_private_stream_batch_empty_checkpoint_updates_sync_time() 
     let report = persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_path(),
         Vec::new(),
         Some(link_state),
         timestamp(),
@@ -187,10 +444,7 @@ async fn test_persist_private_stream_batch_empty_checkpoint_updates_sync_time() 
     .unwrap();
 
     let snapshot = storage.snapshot().unwrap();
-    let peer = snapshot
-        .linked_peers
-        .get(&(counterparty.clone(), receiver_path()))
-        .unwrap();
+    let peer = snapshot.linked_peers.get(&counterparty).unwrap();
     assert!(report.stream_item_ids.is_empty());
     assert_eq!(report.receive_batch_id, None);
     assert_eq!(snapshot.next_receive_batch_id, 0);
@@ -209,7 +463,6 @@ async fn test_persist_private_stream_batch_indexes_receipt_access() {
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_path(),
         vec![private_message(&raw)],
         None,
         timestamp(),
@@ -217,10 +470,9 @@ async fn test_persist_private_stream_batch_indexes_receipt_access() {
     .await
     .unwrap();
 
-    let records =
-        crate::domain::receipts::receipt_access_records(&storage, &counterparty, &receiver_path())
-            .await
-            .unwrap();
+    let records = crate::domain::receipts::receipt_access_records(&storage, &counterparty)
+        .await
+        .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].stream_item_id, 0);
     assert_eq!(records[0].receive_batch_id, 0);
@@ -237,7 +489,6 @@ async fn test_persist_private_stream_batch_indexes_receipt_access() {
     let indexed = crate::domain::receipts::receipt_access_record_by_receipt_id(
         &storage,
         &counterparty,
-        &receiver_path(),
         receipt_id,
     )
     .await
@@ -262,7 +513,6 @@ async fn test_persist_private_stream_batch_dedupes_receipt_access_index() {
     let report = persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_path(),
         vec![
             private_message(&duplicate_raw),
             private_message(&duplicate_raw),
@@ -274,10 +524,9 @@ async fn test_persist_private_stream_batch_dedupes_receipt_access_index() {
     .await
     .unwrap();
 
-    let records =
-        crate::domain::receipts::receipt_access_records(&storage, &counterparty, &receiver_path())
-            .await
-            .unwrap();
+    let records = crate::domain::receipts::receipt_access_records(&storage, &counterparty)
+        .await
+        .unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].stream_item_id, 0);
     assert_eq!(records[0].receipt_id, receipt_id);
@@ -286,7 +535,7 @@ async fn test_persist_private_stream_batch_dedupes_receipt_access_index() {
     let snapshot = storage.snapshot().unwrap();
     let dedupe = snapshot
         .event_dedup_records
-        .get(&(counterparty, receiver_path(), event_id.into()))
+        .get(&(counterparty, event_id.into()))
         .unwrap();
     assert_eq!(dedupe.duplicate_stream_item_ids, vec![1]);
     assert_eq!(dedupe.conflicting_stream_item_ids, vec![2]);
@@ -300,13 +549,12 @@ async fn test_persist_private_stream_batch_skips_malformed_receipt_access_index(
         "650e8400-e29b-41d4-a716-446655440000",
         "550e8400-e29b-41d4-a716-446655440000",
         "invoice-2026-0001",
-        "/pub/paykit/v0/private/bitkit/wallet/receipts/not-the-receipt-id",
+        "/pub/paykit/v0/private/receipts/not-the-receipt-id",
     );
 
     persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_path(),
         vec![private_message(&raw)],
         None,
         timestamp(),
@@ -319,53 +567,9 @@ async fn test_persist_private_stream_batch_skips_malformed_receipt_access_index(
         snapshot.private_stream_items[0].parse_status,
         PrivateStreamParseStatus::MalformedRecognized
     );
-    let records =
-        crate::domain::receipts::receipt_access_records(&storage, &counterparty, &receiver_path())
-            .await
-            .unwrap();
-    assert!(records.is_empty());
-}
-
-#[tokio::test]
-async fn test_persist_private_stream_batch_skips_wrong_receiver_receipt_access_index() {
-    let storage = InMemoryStorage::new();
-    let counterparty = counterparty();
-    let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
-    let wrong_receiver_path = paykit_lib::PaykitReceiverPath::new("tether/wallet").unwrap();
-    let raw = receipt_access_raw_with_location(
-        "650e8400-e29b-41d4-a716-446655440000",
-        receipt_id,
-        "invoice-2026-0001",
-        &paykit_lib::ReceiptAccess::location(
-            &wrong_receiver_path,
-            &paykit_lib::ReceiptId::new(receipt_id).unwrap(),
-        ),
-    );
-
-    persist_private_stream_batch(
-        &storage,
-        counterparty.clone(),
-        receiver_path(),
-        vec![private_message(&raw)],
-        None,
-        timestamp(),
-    )
-    .await
-    .unwrap();
-
-    let snapshot = storage.snapshot().unwrap();
-    assert_eq!(
-        snapshot.private_stream_items[0].parse_status,
-        PrivateStreamParseStatus::MalformedRecognized
-    );
-    assert_eq!(
-        snapshot.private_stream_items[0].parse_error.as_deref(),
-        Some("Receipt Access location does not match counterparty receiver bitkit/wallet")
-    );
-    let records =
-        crate::domain::receipts::receipt_access_records(&storage, &counterparty, &receiver_path())
-            .await
-            .unwrap();
+    let records = crate::domain::receipts::receipt_access_records(&storage, &counterparty)
+        .await
+        .unwrap();
     assert!(records.is_empty());
 }
 
@@ -378,25 +582,15 @@ async fn test_persist_private_stream_batch_marks_event_id_conflicts() {
         private_message(&payment_request_raw("invoice-2026-0002")),
     ];
 
-    let report = persist_private_stream_batch(
-        &storage,
-        counterparty.clone(),
-        receiver_path(),
-        messages,
-        None,
-        timestamp(),
-    )
-    .await
-    .unwrap();
+    let report =
+        persist_private_stream_batch(&storage, counterparty.clone(), messages, None, timestamp())
+            .await
+            .unwrap();
 
     let snapshot = storage.snapshot().unwrap();
     let record = snapshot
         .event_dedup_records
-        .get(&(
-            counterparty,
-            receiver_path(),
-            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101".into(),
-        ))
+        .get(&(counterparty, "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101".into()))
         .unwrap();
     assert_eq!(report.event_conflicts.len(), 1);
     assert_eq!(record.first_stream_item_id, 0);
@@ -412,7 +606,6 @@ async fn test_persist_private_stream_batch_scopes_event_dedupe_by_counterparty()
     let first_report = persist_private_stream_batch(
         &storage,
         first_counterparty,
-        receiver_path(),
         vec![private_message(&payment_request_raw("invoice-2026-0001"))],
         None,
         timestamp(),
@@ -422,7 +615,6 @@ async fn test_persist_private_stream_batch_scopes_event_dedupe_by_counterparty()
     let second_report = persist_private_stream_batch(
         &storage,
         second_counterparty,
-        receiver_path(),
         vec![private_message(&payment_request_raw("invoice-2026-0002"))],
         None,
         timestamp(),
@@ -440,12 +632,11 @@ async fn test_persist_private_stream_batch_scopes_event_dedupe_by_counterparty()
 async fn test_persist_private_stream_batch_keeps_malformed_recognized_messages() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();
-    let malformed = r#"{"version":1,"kind":"paykit.payment_request","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101","payment_request_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33","request":{"amount":{"value":"ten","asset":"btc"},"payment_reference":"invoice-2026-0001","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"metadata":{}}}"#;
+    let malformed = r#"{"version":1,"kind":"paykit.payment_request","app_id":"bitkit","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101","payment_request_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33","request":{"amount":{"value":"ten","asset":"btc"},"payment_reference":"invoice-2026-0001","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"required_app_id":null,"metadata":{}}}"#;
 
     persist_private_stream_batch(
         &storage,
         counterparty,
-        receiver_path(),
         vec![private_message(malformed)],
         None,
         timestamp(),
@@ -475,10 +666,10 @@ async fn test_persist_private_stream_batch_keeps_invalid_json_payloads() {
     let report = persist_private_stream_batch(
         &storage,
         counterparty.clone(),
-        receiver_path(),
         vec![PrivateApplicationMessage {
             version: None,
             kind: None,
+            app_id: None,
             raw_json: raw_json.into(),
         }],
         None,
@@ -504,10 +695,10 @@ async fn test_persist_private_stream_batch_records_invalid_utf8_marker_error() {
     persist_private_stream_batch(
         &storage,
         counterparty,
-        receiver_path(),
         vec![PrivateApplicationMessage {
             version: None,
             kind: None,
+            app_id: None,
             raw_json: raw_json.into(),
         }],
         None,
@@ -533,12 +724,11 @@ async fn test_persist_private_stream_batch_rolls_back_with_stale_lease() {
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                Ok(tx.claim_peer_link_operation(
+                tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_path(),
                     timestamp(),
                     timestamp() + chrono::Duration::seconds(10),
-                ))
+                )
             }
         })
         .await
@@ -550,10 +740,9 @@ async fn test_persist_private_stream_batch_rolls_back_with_stale_lease() {
             move |tx| {
                 tx.claim_peer_link_operation(
                     &counterparty,
-                    &receiver_path(),
                     timestamp() + chrono::Duration::seconds(11),
                     timestamp() + chrono::Duration::seconds(71),
-                );
+                )?;
                 Ok(())
             }
         })
@@ -561,7 +750,6 @@ async fn test_persist_private_stream_batch_rolls_back_with_stale_lease() {
         .unwrap();
     let link_state = EncryptedLinkStateRecord {
         counterparty: counterparty.clone(),
-        counterparty_receiver_path: receiver_path(),
         link_snapshot: Some(vec![1, 2, 3]),
         handshake_snapshot: None,
         handshake_role: None,
@@ -572,9 +760,11 @@ async fn test_persist_private_stream_batch_rolls_back_with_stale_lease() {
     let result = persist_private_stream_batch_with_link_lease(
         &storage,
         counterparty,
-        receiver_path(),
-        vec![private_message(r#"{"version":1,"kind":"paykit.unknown"}"#)],
+        vec![private_message(
+            r#"{"version":1,"kind":"paykit.unknown","app_id":"bitkit"}"#,
+        )],
         Some(link_state),
+        None,
         Some(first_lease),
         timestamp() + chrono::Duration::seconds(12),
     )

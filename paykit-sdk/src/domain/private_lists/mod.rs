@@ -1,10 +1,13 @@
 //! Private Payment List latest-state records.
 
-use std::{collections::HashMap, fmt};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+};
 
 use chrono::{DateTime, Utc};
 use paykit_lib::{
-    parse_private_payment_list_json, serialize_private_payment_list_json,
+    parse_private_payment_list_json, serialize_private_payment_list_json, PaykitAppId,
     PaymentEndpointIdentifier, PaymentEndpointPayload, PrivateMessageKind, PrivatePaymentList,
 };
 use serde::{Deserialize, Serialize};
@@ -13,18 +16,65 @@ use serde::{Deserialize, Serialize};
 use crate::domain::outbound_private::enqueue_private_message;
 use crate::{
     domain::adapters::{PrivatePaymentEndpointReservation, PrivateReceivingDetail},
-    domain::outbound_private::enqueue_private_message_with_link_lease,
+    domain::outbound_private::{
+        enqueue_private_message_with_link_lease, OutboundPrivateMessageStatus,
+    },
     domain::private_stream::PrivateStreamParseStatus,
     storage::{
         OutboundPrivateMessageRecord, PeerLinkOperationLease, PrivateStreamItemRecord,
         StorageAdapter,
     },
-    PaykitReceiverPath, PubkyPublicKey, Result,
+    PubkyPublicKey, Result,
 };
 
+pub(crate) fn counterparties_with_shared_private_payment_lists(
+    messages: &[OutboundPrivateMessageRecord],
+    app_id: &PaykitAppId,
+) -> Result<HashSet<PubkyPublicKey>> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum PublicationState {
+        Shared,
+        Cleared,
+        UncertainClear,
+    }
+
+    let mut latest_state_by_counterparty = HashMap::new();
+    for message in messages.iter().filter(|message| {
+        message.app_id == *app_id
+            && message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
+            && (message.status == OutboundPrivateMessageStatus::Sent
+                || message.last_attempt_at.is_some())
+    }) {
+        let list = parse_private_payment_list_json(&message.raw_json)?;
+        let state = if !list.is_empty() {
+            PublicationState::Shared
+        } else if message.status == OutboundPrivateMessageStatus::Sent {
+            PublicationState::Cleared
+        } else {
+            PublicationState::UncertainClear
+        };
+        latest_state_by_counterparty
+            .entry(message.counterparty.clone())
+            .and_modify(|current: &mut (u64, PublicationState)| {
+                if message.outbound_message_id > current.0 {
+                    *current = (message.outbound_message_id, state);
+                }
+            })
+            .or_insert((message.outbound_message_id, state));
+    }
+    Ok(latest_state_by_counterparty
+        .into_iter()
+        .filter_map(|(counterparty, (_, state))| {
+            (state != PublicationState::Cleared).then_some(counterparty)
+        })
+        .collect())
+}
+
 /// Derived latest-state view of a counterparty's Private Payment List.
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivatePaymentListView {
+    /// Application that published this list.
+    pub app_id: PaykitAppId,
     /// Stream item id of the latest valid list.
     pub latest_stream_item_id: Option<u64>,
     /// Current endpoint payloads keyed by identifier string.
@@ -37,6 +87,7 @@ impl fmt::Debug for PrivatePaymentListView {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let identifiers = self.payment_endpoints.keys().collect::<Vec<_>>();
         f.debug_struct("PrivatePaymentListView")
+            .field("app_id", &self.app_id)
             .field("latest_stream_item_id", &self.latest_stream_item_id)
             .field("payment_endpoint_identifiers", &identifiers)
             .field("last_refresh_at", &self.last_refresh_at)
@@ -44,7 +95,7 @@ impl fmt::Debug for PrivatePaymentListView {
     }
 }
 
-/// Report from syncing Private Payment Lists for local contacts.
+/// Report from syncing Private Payment Lists for saved contacts.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivatePaymentListSyncReport {
     /// Counterparties that had a current Private Payment List queued.
@@ -70,8 +121,6 @@ impl fmt::Debug for PrivatePaymentListSyncReport {
 pub struct PrivatePaymentListSyncChange {
     /// Counterparty affected by the sync.
     pub counterparty: PubkyPublicKey,
-    /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Queued outbound message id, when queueing succeeded.
     pub outbound_message_id: Option<u64>,
     /// Error text, when queueing failed.
@@ -82,10 +131,6 @@ impl fmt::Debug for PrivatePaymentListSyncChange {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PrivatePaymentListSyncChange")
             .field("counterparty", &self.counterparty.redacted_app_key())
-            .field(
-                "counterparty_receiver_path",
-                &self.counterparty_receiver_path,
-            )
             .field("outbound_message_id", &self.outbound_message_id)
             .field("error", &self.error.as_ref().map(|_| "<redacted>"))
             .finish()
@@ -97,8 +142,6 @@ impl fmt::Debug for PrivatePaymentListSyncChange {
 pub struct PrivatePaymentListReservationUpdate {
     /// Counterparty that should receive the Private Payment List.
     pub counterparty: PubkyPublicKey,
-    /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Complete reserved receiving details to share with this counterparty.
     ///
     /// An empty list queues an empty Private Payment List for this counterparty.
@@ -109,10 +152,6 @@ impl fmt::Debug for PrivatePaymentListReservationUpdate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PrivatePaymentListReservationUpdate")
             .field("counterparty", &self.counterparty.redacted_app_key())
-            .field(
-                "counterparty_receiver_path",
-                &self.counterparty_receiver_path,
-            )
             .field("reservations", &self.reservations.len())
             .finish()
     }
@@ -123,8 +162,6 @@ impl fmt::Debug for PrivatePaymentListReservationUpdate {
 pub struct PrivatePaymentListDeliveryFailure {
     /// Counterparty whose outbound delivery failed.
     pub counterparty: PubkyPublicKey,
-    /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Outbound message id, when the failure is tied to one message.
     pub outbound_message_id: Option<u64>,
     /// Reservation id, when the failure is tied to reservation cleanup.
@@ -137,12 +174,11 @@ impl fmt::Debug for PrivatePaymentListDeliveryFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PrivatePaymentListDeliveryFailure")
             .field("counterparty", &self.counterparty.redacted_app_key())
-            .field(
-                "counterparty_receiver_path",
-                &self.counterparty_receiver_path,
-            )
             .field("outbound_message_id", &self.outbound_message_id)
-            .field("reservation_id", &self.reservation_id)
+            .field(
+                "reservation_id",
+                &self.reservation_id.as_ref().map(|_| "<redacted>"),
+            )
             .field(
                 "error",
                 &format_args!("<redacted:{} bytes>", self.error.len()),
@@ -175,30 +211,30 @@ impl fmt::Debug for PrivatePaymentListDeliveryReport {
     }
 }
 
-/// Load the current Private Payment List view for one counterparty.
-pub(crate) async fn current_private_payment_list<S>(
+/// Load the current Private Payment List views for one counterparty.
+pub(crate) async fn current_private_payment_lists<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_path: &PaykitReceiverPath,
-) -> Result<Option<PrivatePaymentListView>>
+) -> Result<Vec<PrivatePaymentListView>>
 where
     S: StorageAdapter,
 {
     let items = storage
-        .transaction(|tx| Ok(tx.private_stream_items(counterparty, counterparty_receiver_path)))
+        .transaction(|tx| Ok(tx.private_stream_items(counterparty)))
         .await?;
-    derive_private_payment_list_view(items)
+    derive_private_payment_list_views(items)
 }
 
 /// Queue a complete Private Payment List for delivery to one counterparty.
 ///
-/// The list replaces the counterparty's latest Private Payment List view when
-/// received, so callers should pass every endpoint they want to share.
+/// The list replaces this application's latest Private Payment List view when
+/// received, so callers should pass every endpoint the application wants to
+/// share.
 #[cfg(test)]
 pub(crate) async fn enqueue_private_payment_list<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
-    counterparty_receiver_path: PaykitReceiverPath,
+    app_id: PaykitAppId,
     receiving_details: Vec<PrivateReceivingDetail>,
     now: DateTime<Utc>,
 ) -> Result<OutboundPrivateMessageRecord>
@@ -206,22 +242,16 @@ where
     S: StorageAdapter,
 {
     let payment_endpoints = normalize_private_receiving_details(receiving_details)?;
-    let list = PrivatePaymentList::new(payment_endpoints);
+    let list = PrivatePaymentList::new(app_id, payment_endpoints);
     let raw_json = serialize_private_payment_list_json(&list)?;
-    enqueue_private_message(
-        storage,
-        counterparty,
-        counterparty_receiver_path,
-        raw_json,
-        now,
-    )
-    .await
+    enqueue_private_message(storage, counterparty, raw_json, now).await
 }
 
 /// Queue a complete Private Payment List while a peer operation lease is active.
 pub(crate) async fn enqueue_private_payment_list_with_link_lease<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
+    app_id: PaykitAppId,
     receiving_details: Vec<PrivateReceivingDetail>,
     now: DateTime<Utc>,
     lease: &PeerLinkOperationLease,
@@ -230,7 +260,7 @@ where
     S: StorageAdapter,
 {
     let payment_endpoints = normalize_private_receiving_details(receiving_details)?;
-    let list = PrivatePaymentList::new(payment_endpoints);
+    let list = PrivatePaymentList::new(app_id, payment_endpoints);
     let raw_json = serialize_private_payment_list_json(&list)?;
     enqueue_private_message_with_link_lease(storage, counterparty, raw_json, now, lease).await
 }
@@ -257,34 +287,40 @@ pub(crate) fn normalize_private_receiving_details(
     Ok(desired)
 }
 
-/// Derive the latest valid Private Payment List view from private stream items.
-pub(crate) fn derive_private_payment_list_view(
+/// Derive the latest valid Private Payment List from each application.
+pub(crate) fn derive_private_payment_list_views(
     mut items: Vec<PrivateStreamItemRecord>,
-) -> Result<Option<PrivatePaymentListView>> {
+) -> Result<Vec<PrivatePaymentListView>> {
     items.sort_by_key(|item| item.stream_item_id);
+    let mut latest_by_app = HashMap::new();
+    for item in items {
+        if item.parse_status != PrivateStreamParseStatus::Valid
+            || item.known_paykit_kind.as_deref()
+                != Some(PrivateMessageKind::PrivatePaymentList.as_str())
+        {
+            continue;
+        }
+        let list = parse_private_payment_list_json(&item.raw_json)?;
+        latest_by_app.insert(list.app_id().clone(), (item, list));
+    }
 
-    let latest = items.into_iter().rev().find(|item| {
-        item.parse_status == PrivateStreamParseStatus::Valid
-            && item.known_paykit_kind.as_deref()
-                == Some(PrivateMessageKind::PrivatePaymentList.as_str())
-    });
-
-    let Some(item) = latest else {
-        return Ok(None);
-    };
-
-    let list = parse_private_payment_list_json(&item.raw_json)?;
-    let payment_endpoints = list
-        .payment_endpoints
+    let mut views = latest_by_app
         .into_iter()
-        .map(|(identifier, payload)| (identifier.as_str().to_owned(), payload.as_str().to_owned()))
-        .collect();
-
-    Ok(Some(PrivatePaymentListView {
-        latest_stream_item_id: Some(item.stream_item_id),
-        payment_endpoints,
-        last_refresh_at: Some(item.received_at),
-    }))
+        .map(|(app_id, (item, list))| PrivatePaymentListView {
+            app_id,
+            latest_stream_item_id: Some(item.stream_item_id),
+            payment_endpoints: list
+                .payment_endpoints
+                .into_iter()
+                .map(|(identifier, payload)| {
+                    (identifier.as_str().to_owned(), payload.as_str().to_owned())
+                })
+                .collect(),
+            last_refresh_at: Some(item.received_at),
+        })
+        .collect::<Vec<_>>();
+    views.sort_by(|left, right| left.app_id.as_str().cmp(right.app_id.as_str()));
+    Ok(views)
 }
 
 #[cfg(test)]

@@ -246,8 +246,7 @@ Payment Endpoint Payloads are stored as [`PaymentEndpointPayload`](../paykit-lib
 UTF-8 strings. The reference implementation does not parse or validate payloads
 as JSON at the Paykit layer.
 
-The reserved identifiers `private` and `encrypted-link-recovery` are used
-internally by Paykit storage paths; they are rejected at
+The reserved identifier `private` is used internally by Paykit storage paths; it is rejected at
 `PaymentEndpointIdentifier` construction and therefore cannot appear as
 conforming identifiers under this specification either.
 

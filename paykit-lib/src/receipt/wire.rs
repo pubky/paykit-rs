@@ -7,7 +7,7 @@ use crate::{
         invalid_data, invalid_plaintext_json, validate_wire_version_kind,
         validate_wire_version_kind_str,
     },
-    BillingPeriod, EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier,
+    BillingPeriod, EventId, PaykitAppId, PaykitError, PaymentAmount, PaymentEndpointIdentifier,
     PaymentReference, PaymentRequestId, PrivateApplicationMessage, PrivateMessageKind, PublicKey,
     Result,
 };
@@ -50,6 +50,7 @@ pub(super) struct EncryptedReceiptWire {
 pub(super) struct ReceiptAccessWire {
     pub(super) version: u8,
     pub(super) kind: String,
+    pub(super) app_id: String,
     pub(super) event_id: String,
     pub(super) receipt_id: String,
     pub(super) payment_reference: String,
@@ -166,11 +167,12 @@ impl TryFrom<ReceiptWire> for Receipt {
     }
 }
 
-impl From<&ReceiptAccess> for ReceiptAccessWire {
-    fn from(access: &ReceiptAccess) -> Self {
+impl ReceiptAccessWire {
+    fn from_access(app_id: &PaykitAppId, access: &ReceiptAccess) -> Self {
         Self {
             version: access.version,
             kind: access.kind.as_str().to_string(),
+            app_id: app_id.as_str().to_string(),
             event_id: access.event_id.as_str().to_string(),
             receipt_id: access.receipt_id.as_str().to_string(),
             payment_reference: access.payment_reference.as_str().to_string(),
@@ -195,6 +197,10 @@ impl TryFrom<ReceiptAccessWire> for ReceiptAccess {
             PrivateMessageKind::ReceiptAccess,
             "Receipt Access",
         )?;
+        PaykitAppId::new(&wire.app_id).map_err(|err| PaykitError::InvalidData {
+            context: "Receipt Access contains invalid App ID".into(),
+            source: Some(err.into()),
+        })?;
         let event_id = EventId::new(wire.event_id).map_err(|err| PaykitError::InvalidData {
             context: "Receipt Access contains invalid Event ID".into(),
             source: Some(err.into()),
@@ -252,8 +258,12 @@ impl TryFrom<ReceiptAccessWire> for ReceiptAccess {
     }
 }
 
-pub fn serialize_receipt_access_json(access: &ReceiptAccess) -> Result<String> {
-    serde_json::to_string(&ReceiptAccessWire::from(access)).map_err(|err| {
+/// Serialize an app-attributed Receipt Access Event Message.
+pub fn serialize_receipt_access_json(
+    app_id: &PaykitAppId,
+    access: &ReceiptAccess,
+) -> Result<String> {
+    serde_json::to_string(&ReceiptAccessWire::from_access(app_id, access)).map_err(|err| {
         invalid_data(
             format!("failed to serialize Receipt Access JSON: {err}"),
             Some(err.into()),
@@ -276,10 +286,16 @@ pub fn parse_receipt_access_json(json: &str) -> Result<ReceiptAccess> {
     ReceiptAccess::try_from(wire)
 }
 
-fn parse_receipt_access_header_ids(raw: &str) -> (Option<EventId>, Option<ReceiptId>) {
+fn parse_receipt_access_header(
+    raw: &str,
+) -> (Option<PaykitAppId>, Option<EventId>, Option<ReceiptId>) {
     let Ok(value) = serde_json::from_str::<JsonValue>(raw) else {
-        return (None, None);
+        return (None, None, None);
     };
+    let app_id = value
+        .get("app_id")
+        .and_then(JsonValue::as_str)
+        .and_then(|id| PaykitAppId::new(id).ok());
     let event_id = value
         .get("event_id")
         .and_then(JsonValue::as_str)
@@ -288,7 +304,7 @@ fn parse_receipt_access_header_ids(raw: &str) -> (Option<EventId>, Option<Receip
         .get("receipt_id")
         .and_then(JsonValue::as_str)
         .and_then(|id| ReceiptId::new(id).ok());
-    (event_id, receipt_id)
+    (app_id, event_id, receipt_id)
 }
 
 /// Parse a raw Private Application Message as a Receipt Access Event Message.
@@ -301,10 +317,11 @@ pub fn parse_receipt_access_event_message(
 ) -> Option<ReceiptAccessEventMessage> {
     let kind = message.known_kind()?;
     (kind == PrivateMessageKind::ReceiptAccess).then(|| {
-        let (event_id, receipt_id) = parse_receipt_access_header_ids(&message.raw_json);
+        let (app_id, event_id, receipt_id) = parse_receipt_access_header(&message.raw_json);
         let access = parse_receipt_access_json(&message.raw_json).map_err(|err| err.to_string());
         ReceiptAccessEventMessage {
             kind,
+            app_id,
             event_id,
             receipt_id,
             raw_json: message.raw_json.clone(),

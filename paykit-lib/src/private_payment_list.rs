@@ -6,7 +6,8 @@ use tracing::{debug, instrument};
 use crate::{
     error::map_error,
     validation::{invalid_data, invalid_plaintext_json},
-    EncryptedLink, PaymentEndpointIdentifier, PaymentEndpointPayload, PrivateMessageKind, Result,
+    EncryptedLink, PaykitAppId, PaymentEndpointIdentifier, PaymentEndpointPayload,
+    PrivateMessageKind, Result,
 };
 
 /// Versioned Private Payment List sent over an established Encrypted Link.
@@ -14,6 +15,7 @@ use crate::{
 pub struct PrivatePaymentList {
     version: u8,
     kind: PrivateMessageKind,
+    app_id: PaykitAppId,
     /// Complete Payment List carried by this Latest-State Message.
     pub payment_endpoints: HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
 }
@@ -23,6 +25,7 @@ impl fmt::Debug for PrivatePaymentList {
         f.debug_struct("PrivatePaymentList")
             .field("version", &self.version)
             .field("kind", &self.kind)
+            .field("app_id", &self.app_id)
             .field(
                 "payment_endpoints",
                 &format_args!("<redacted:{} endpoints>", self.payment_endpoints.len()),
@@ -37,11 +40,13 @@ impl PrivatePaymentList {
     ///
     /// `payment_endpoints` is the complete list to share, not a patch.
     pub fn new(
+        app_id: PaykitAppId,
         payment_endpoints: HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>,
     ) -> Self {
         Self {
             version: 1,
             kind: PrivateMessageKind::PrivatePaymentList,
+            app_id,
             payment_endpoints,
         }
     }
@@ -54,6 +59,11 @@ impl PrivatePaymentList {
     /// Private Message Kind used by this list message.
     pub fn kind(&self) -> PrivateMessageKind {
         self.kind
+    }
+
+    /// App that published this Private Payment List.
+    pub fn app_id(&self) -> &PaykitAppId {
+        &self.app_id
     }
 
     /// Number of Payment Endpoints in this private list message.
@@ -77,6 +87,7 @@ impl PrivatePaymentList {
 struct PrivatePaymentListWire {
     version: u8,
     kind: String,
+    app_id: String,
     #[serde(deserialize_with = "deserialize_payment_endpoints")]
     payment_endpoints: HashMap<String, String>,
 }
@@ -85,6 +96,7 @@ struct PrivatePaymentListWire {
 struct PrivatePaymentListWireRef<'a> {
     version: u8,
     kind: &'static str,
+    app_id: &'a str,
     payment_endpoints: HashMap<&'a str, &'a str>,
 }
 
@@ -133,16 +145,19 @@ pub fn parse_private_payment_list_json(json: &str) -> Result<PrivatePaymentList>
         .map_err(|_| invalid_plaintext_json("failed to parse Private Payment List JSON"))?;
     if wire.version != 1 {
         return Err(invalid_data(
-            format!("unsupported Private Payment List version {}", wire.version),
+            "unsupported Private Payment List version",
             None,
         ));
     }
     if wire.kind != PrivateMessageKind::PrivatePaymentList.as_str() {
-        return Err(invalid_data(
-            format!("unsupported Private Payment List kind '{}'", wire.kind),
-            None,
-        ));
+        return Err(invalid_data("unsupported Private Payment List kind", None));
     }
+    let app_id = PaykitAppId::new(&wire.app_id).map_err(|err| {
+        invalid_data(
+            "Private Payment List contains invalid App ID",
+            Some(err.into()),
+        )
+    })?;
     let mut payment_endpoints = HashMap::new();
     for (key, value) in wire.payment_endpoints {
         let payment_endpoint_identifier = PaymentEndpointIdentifier::new(&key).map_err(|err| {
@@ -158,7 +173,7 @@ pub fn parse_private_payment_list_json(json: &str) -> Result<PrivatePaymentList>
             PaymentEndpointPayload::new(value),
         );
     }
-    Ok(PrivatePaymentList::new(payment_endpoints))
+    Ok(PrivatePaymentList::new(app_id, payment_endpoints))
 }
 
 /// Serialize a Private Payment List into its JSON wire representation.
@@ -171,6 +186,7 @@ pub fn serialize_private_payment_list_json(list: &PrivatePaymentList) -> Result<
     let wire = PrivatePaymentListWireRef {
         version: list.version,
         kind: list.kind.as_str(),
+        app_id: list.app_id.as_str(),
         payment_endpoints,
     };
     serde_json::to_string(&wire).map_err(|err| {
@@ -206,6 +222,10 @@ mod tests {
     use crate::{PaykitError, PaymentEndpointIdentifier, PaymentEndpointPayload};
     use std::collections::HashMap;
 
+    fn app_id() -> PaykitAppId {
+        PaykitAppId::new("test-app").unwrap()
+    }
+
     #[test]
     fn test_serialize_private_payment_list_json_uses_versioned_message() {
         let mut payment_endpoints = HashMap::new();
@@ -213,11 +233,12 @@ mod tests {
             PaymentEndpointIdentifier::new("lightning").unwrap(),
             PaymentEndpointPayload::new("ln..."),
         );
-        let payload = PrivatePaymentList::new(payment_endpoints);
+        let payload = PrivatePaymentList::new(app_id(), payment_endpoints);
         let json = serialize_private_payment_list_json(&payload).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["version"], 1);
         assert_eq!(value["kind"], "paykit.private_payment_list");
+        assert_eq!(value["app_id"], "test-app");
         assert!(value.get("reference").is_none());
         assert_eq!(value["payment_endpoints"]["lightning"], "ln...");
     }
@@ -229,7 +250,7 @@ mod tests {
             PaymentEndpointIdentifier::new("lightning").unwrap(),
             PaymentEndpointPayload::new("ln-secret"),
         );
-        let list = PrivatePaymentList::new(payment_endpoints);
+        let list = PrivatePaymentList::new(app_id(), payment_endpoints);
         let debug = format!("{list:?}");
 
         assert!(!debug.contains("ln-secret"));
@@ -247,11 +268,11 @@ mod tests {
     #[test]
     fn test_parse_private_payment_list_json_rejects_unsupported_version() {
         let err = parse_private_payment_list_json(
-            r#"{"version":2,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#,
+            r#"{"version":2,"kind":"paykit.private_payment_list","app_id":"test-app","payment_endpoints":{}}"#,
         )
         .unwrap_err();
         assert!(
-            matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("unsupported Private Payment List version 2")),
+            matches!(err, PaykitError::InvalidData { ref context, .. } if context == "unsupported Private Payment List version"),
             "expected unsupported version error, got: {err}"
         );
     }
@@ -259,7 +280,7 @@ mod tests {
     #[test]
     fn test_parse_private_payment_list_json_rejects_unsupported_kind() {
         let err = parse_private_payment_list_json(
-            r#"{"version":1,"kind":"paykit.receipt","payment_endpoints":{}}"#,
+            r#"{"version":1,"kind":"paykit.receipt","app_id":"test-app","payment_endpoints":{}}"#,
         )
         .unwrap_err();
         assert!(
@@ -271,7 +292,7 @@ mod tests {
     #[test]
     fn test_parse_private_payment_list_json_rejects_reference_field() {
         let err = parse_private_payment_list_json(
-            r#"{"version":1,"kind":"paykit.private_payment_list","reference":"invoice-2026-0001","payment_endpoints":{}}"#,
+            r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"test-app","reference":"invoice-2026-0001","payment_endpoints":{}}"#,
         )
         .unwrap_err();
         let context = match err {
@@ -335,7 +356,7 @@ mod tests {
     #[test]
     fn test_parse_private_payment_list_json_non_string_values() {
         let err = parse_private_payment_list_json(
-            r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"lightning":123,"onchain":true}}"#,
+            r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"test-app","payment_endpoints":{"lightning":123,"onchain":true}}"#,
         )
         .unwrap_err();
         assert!(
@@ -347,7 +368,7 @@ mod tests {
     #[test]
     fn test_parse_private_payment_list_json_rejects_duplicate_identifiers() {
         let err = parse_private_payment_list_json(
-            r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"lightning":"ln-one","lightning":"ln-two"}}"#,
+            r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"test-app","payment_endpoints":{"lightning":"ln-one","lightning":"ln-two"}}"#,
         )
         .unwrap_err();
         let context = match err {
@@ -363,7 +384,7 @@ mod tests {
     fn test_parse_private_payment_list_json_error_does_not_embed_plaintext() {
         let sentinel = "sentinel-private-payload";
         let json = format!(
-            r#"{{"version":"{sentinel}","kind":"paykit.private_payment_list","payment_endpoints":{{}}}}"#
+            r#"{{"version":"{sentinel}","kind":"paykit.private_payment_list","app_id":"test-app","payment_endpoints":{{}}}}"#
         );
 
         let err = parse_private_payment_list_json(&json).unwrap_err();
@@ -377,6 +398,26 @@ mod tests {
             !message.contains(sentinel),
             "decrypted plaintext must not appear in errors, got: {message}"
         );
+    }
+
+    #[test]
+    fn test_private_payment_list_invalid_header_does_not_embed_plaintext() {
+        let sentinel = "SENTINEL_PRIVATE_HEADER";
+        for field in ["kind", "app_id"] {
+            let mut json = serde_json::json!({
+                "version": 1,
+                "kind": "paykit.private_payment_list",
+                "app_id": "test-app",
+                "payment_endpoints": {},
+            });
+            json[field] = sentinel.into();
+
+            let error = parse_private_payment_list_json(&json.to_string()).unwrap_err();
+
+            assert!(matches!(error, PaykitError::InvalidData { .. }));
+            assert!(!format!("{error:?}").contains(sentinel));
+            assert!(!error.to_string().contains(sentinel));
+        }
     }
 
     #[test]
@@ -402,7 +443,7 @@ mod tests {
     #[test]
     fn test_parse_private_payment_list_json_empty_key() {
         let err = parse_private_payment_list_json(
-            r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"":"ln..."}}"#,
+            r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"test-app","payment_endpoints":{"":"ln..."}}"#,
         )
         .unwrap_err();
         assert!(
@@ -414,7 +455,7 @@ mod tests {
     #[test]
     fn test_parse_private_payment_list_json_path_traversal_key() {
         let err = parse_private_payment_list_json(
-            r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"..":"ln..."}}"#,
+            r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"test-app","payment_endpoints":{"..":"ln..."}}"#,
         )
         .unwrap_err();
         assert!(
@@ -426,7 +467,7 @@ mod tests {
     #[test]
     fn test_parse_private_payment_list_json_slash_in_key() {
         let err = parse_private_payment_list_json(
-            r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"foo/bar":"ln..."}}"#,
+            r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"test-app","payment_endpoints":{"foo/bar":"ln..."}}"#,
         )
         .unwrap_err();
         assert!(
@@ -438,7 +479,7 @@ mod tests {
     #[test]
     fn test_parse_private_payment_list_json_reserved_private_key() {
         let err = parse_private_payment_list_json(
-            r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"private":"secret..."}}"#,
+            r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"test-app","payment_endpoints":{"private":"secret..."}}"#,
         )
         .unwrap_err();
         assert!(
@@ -451,7 +492,7 @@ mod tests {
     fn test_parse_private_payment_list_json_oversized_key() {
         let long_key = "a".repeat(65);
         let json = format!(
-            r#"{{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{{"{long_key}":"ln..."}}}}"#
+            r#"{{"version":1,"kind":"paykit.private_payment_list","app_id":"test-app","payment_endpoints":{{"{long_key}":"ln..."}}}}"#
         );
         let err = parse_private_payment_list_json(&json).unwrap_err();
         assert!(
@@ -464,7 +505,7 @@ mod tests {
     fn test_parse_private_payment_list_json_one_valid_one_invalid_key() {
         // The valid key should not mask the invalid one.
         let err =
-            parse_private_payment_list_json(r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"lightning":"ln...","":"bc1..."}}"#).unwrap_err();
+            parse_private_payment_list_json(r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"test-app","payment_endpoints":{"lightning":"ln...","":"bc1..."}}"#).unwrap_err();
         assert!(
             matches!(err, PaykitError::InvalidData { ref context, .. } if context.contains("invalid Payment Endpoint Identifier")),
             "expected InvalidData when one key is invalid, got: {err}"
@@ -476,7 +517,7 @@ mod tests {
     #[test]
     fn test_parse_private_payment_list_json_valid_single_payment_endpoint() {
         let result = parse_private_payment_list_json(
-            r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"lightning":"ln..."}}"#,
+            r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"test-app","payment_endpoints":{"lightning":"ln..."}}"#,
         )
         .unwrap();
         assert_eq!(result.len(), 1);
@@ -489,7 +530,7 @@ mod tests {
     #[test]
     fn test_parse_private_payment_list_json_valid_multiple_payment_endpoints() {
         let result =
-            parse_private_payment_list_json(r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{"lightning":"ln...","onchain":"bc1..."}}"#).unwrap();
+            parse_private_payment_list_json(r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"test-app","payment_endpoints":{"lightning":"ln...","onchain":"bc1..."}}"#).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(
             result.get(&PaymentEndpointIdentifier::new("lightning").unwrap()),
@@ -504,7 +545,7 @@ mod tests {
     #[test]
     fn test_parse_private_payment_list_json_empty_object() {
         let result = parse_private_payment_list_json(
-            r#"{"version":1,"kind":"paykit.private_payment_list","payment_endpoints":{}}"#,
+            r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"test-app","payment_endpoints":{}}"#,
         )
         .unwrap();
         assert!(result.is_empty());
