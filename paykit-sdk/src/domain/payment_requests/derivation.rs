@@ -938,6 +938,7 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
                 payment_reference: proof.payment_reference.as_str().to_owned(),
                 billing_period: proof.billing_period.as_ref().map(BillingPeriodRecord::from),
                 payment_endpoint_identifier: proof.payment_endpoint_identifier.as_str().to_owned(),
+                allowance_id: proof.allowance_id().map(|id| id.as_str().to_owned()),
                 proof: proof.proof.clone(),
                 recorded_at: stored.record_time(),
             });
@@ -1032,6 +1033,8 @@ fn cancellation_was_sent_by_payee(record: &PaymentRequestRecord) -> bool {
 ///
 /// A canceled request stays eligible only while its record retains a valid
 /// Acceptance, so evidence of payment that crossed the cancellation is kept.
+/// The same requirement allows corrective proofs after a one-time request has
+/// reached Proof Submitted; another proof is evidence, not another payment.
 pub(crate) fn payment_proof_allowed_states(
     record: &PaymentRequestRecord,
 ) -> &'static [PaymentRequestLifecycleState] {
@@ -1040,6 +1043,7 @@ pub(crate) fn payment_proof_allowed_states(
             PaymentRequestLifecycleState::Accepted,
             PaymentRequestLifecycleState::ActiveRecurring,
             PaymentRequestLifecycleState::Canceled,
+            PaymentRequestLifecycleState::ProofSubmitted,
         ]
     } else {
         &[

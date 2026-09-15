@@ -77,8 +77,8 @@ use crate::{
         enqueue_payment_request_rejection as enqueue_payment_request_rejection_message,
         payment_proof_allowed_states, payment_request_records as derive_payment_request_records,
         received_payment_request_records as derive_received_payment_request_records,
-        request_from_record, PaymentRequestFilter, PaymentRequestLifecycleState,
-        PaymentRequestLocalRole, PaymentRequestRecord,
+        request_from_record, PaymentProofSubmission, PaymentRequestFilter,
+        PaymentRequestLifecycleState, PaymentRequestLocalRole, PaymentRequestRecord,
     },
     domain::payment_resolution::{
         PreparedPrivateContactPayment, PrivateContactPaymentResolution,
