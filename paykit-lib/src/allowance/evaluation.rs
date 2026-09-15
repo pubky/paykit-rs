@@ -19,18 +19,18 @@ pub fn match_allowance_request(
     request
         .validate()
         .map_err(|_| AllowanceEvaluationBlock::InvalidRequest)?;
-    if request.amount.asset != terms.asset() {
+    if request.amount().asset() != terms.asset() {
         return Err(AllowanceEvaluationBlock::AssetMismatch);
     }
     if let Some(range) = terms.per_payment_amount() {
-        if compare_decimals(&request.amount.value, range.minimum()).is_lt()
-            || compare_decimals(&request.amount.value, range.maximum()).is_gt()
+        if compare_decimals(request.amount().value(), range.minimum()).is_lt()
+            || compare_decimals(request.amount().value(), range.maximum()).is_gt()
         {
             return Err(AllowanceEvaluationBlock::AmountOutsideRange);
         }
     }
     let mut endpoints = Vec::new();
-    for endpoint in &request.accepted_payment_endpoint_identifiers {
+    for endpoint in request.accepted_payment_endpoint_identifiers() {
         if terms
             .allowed_payment_endpoint_identifiers()
             .is_none_or(|allowed| allowed.contains(endpoint))
@@ -113,7 +113,7 @@ fn validate_usage(
         if entry.admitted_at() > input.trusted_time {
             return Err(AllowanceEvaluationBlock::FutureUsage);
         }
-        if entry.amount().asset != input.terms.asset() {
+        if entry.amount().asset() != input.terms.asset() {
             return Err(AllowanceEvaluationBlock::UsageAssetMismatch);
         }
     }
@@ -127,8 +127,8 @@ fn check_lifetime_limit(
         let total = input
             .usage
             .iter()
-            .fold(input.request.amount.value.clone(), |sum, entry| {
-                add_decimals(&sum, &entry.amount().value)
+            .fold(input.request.amount().value().to_owned(), |sum, entry| {
+                add_decimals(&sum, entry.amount().value())
             });
         if compare_decimals(&total, limit).is_gt() {
             return Err(AllowanceEvaluationBlock::LifetimeAmountLimit);
@@ -142,14 +142,14 @@ fn check_period_limits(
 ) -> std::result::Result<(), AllowanceEvaluationBlock> {
     for (index, limit) in input.terms.period_limits().iter().enumerate() {
         let window = allowance_period_window(limit.period(), input.trusted_time)?;
-        let mut total = input.request.amount.value.clone();
+        let mut total = input.request.amount().value().to_owned();
         let mut count = 1_u64;
         for entry in input
             .usage
             .iter()
             .filter(|entry| window.contains(entry.admitted_at()))
         {
-            total = add_decimals(&total, &entry.amount().value);
+            total = add_decimals(&total, entry.amount().value());
             count = count
                 .checked_add(1)
                 .ok_or(AllowanceEvaluationBlock::ArithmeticOverflow)?;
