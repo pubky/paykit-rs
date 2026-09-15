@@ -434,21 +434,37 @@ private-safeguard preflight check that does not require prior Acceptance before
 queuing Acceptance. Durable local processing order, not a claimed sender
 timestamp, determines this boundary.
 
-If automatic handling stops before Acceptance is recorded while the request
-remains a valid, actionable proposal, the wallet records the whole request as
-manual-only and leaves it proposed. Proposal expiry or a terminal lifecycle
-event takes precedence and MUST NOT be presented as payable.
+The wallet MUST distinguish a deferred automatic decision from an explicit
+manual-only disposition. A temporary endpoint-resolution or availability
+failure MAY defer automatic handling while preserving the ordinary manual
+flow. Deferral MUST retain its reason, any selected Allowance, and the relevant
+request or Billing Period identity durably. It grants no authority to pay and
+does not queue Acceptance by itself. An explicit manual-only decision remains
+sticky and MUST NOT be cleared merely because an endpoint or other condition
+later changes.
+
+Before Acceptance, a deferred request remains proposed. On reconsideration the
+wallet MUST recheck proposal expiry, request and Allowance lifecycle, shared
+terms, current endpoint details, capacity where applicable, local enablement,
+and payment/reservation history. It MUST use any persisted selection; deferral
+does not authorize silent reselection. A concurrent manual response or payment
+MUST exclude conflicting automatic work through the same durable concurrency
+control. Proposal expiry or a terminal lifecycle event takes precedence and
+MUST NOT be presented as payable.
 
 If automatic handling stops after Acceptance is recorded and the request is not
 cancelled, the Payment Request remains accepted. The wallet MUST first establish
 that no automatic attempt or Allowance reservation is unresolved and that no
 successful or unresolved payment, including an in-flight, pending, unknown, or
 recovery-incomplete payment through any automatic or manual path, exists for the
-semantic payment key. It then durably marks that one-time request or affected
-Billing Period manual-only and makes it available for explicit payment without
-sending another Acceptance. Once marked manual-only, that occurrence MUST NOT be
-retried automatically. Cancellation or a successful or unresolved payment makes
-the occurrence unavailable for manual execution.
+semantic payment key. It may then durably defer that occurrence after a
+temporary failure, or mark it manual-only, and make explicit payment available
+without sending another Acceptance. Reconsidering a deferred occurrence MUST
+repeat the full current eligibility and exclusion checks. Once marked
+manual-only, that occurrence MUST NOT be retried automatically. Cancellation or
+a successful or unresolved payment makes the occurrence unavailable for manual
+execution. A pending, unknown, or recovery-incomplete attempt is unresolved
+execution, not a deferred occurrence eligible for a new attempt.
 
 This accepted-but-unpaid action state is wallet-local and cannot be inferred
 from the Payment Request's `accepted` state alone. It is separate from an
