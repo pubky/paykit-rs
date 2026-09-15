@@ -278,8 +278,9 @@ while the payer's wallet schedules each payment and submits its proof. The
 service validates each period's payment and applies its own access policy.
 
 Payment Requests and Subscriptions do not require an
-[Allowance](allowances.md), and their wire messages and ordinary manual flow do
-not change when Allowances are implemented. A wallet may use one matching,
+[Allowance](allowances.md), and their proposal and ordinary manual flow do not
+change when Allowances are implemented. A Payment Proof may optionally name the
+Allowance used for an execution as described below. A wallet may use one matching,
 accepted Allowance as prior permission to send the ordinary Acceptance and pay
 automatically. This is optional wallet behavior, not a Payment Request
 requirement or a guarantee of payment. Allowance matching, accepted-but-unpaid
@@ -477,8 +478,37 @@ Validation rules:
   or index recurring payments SHOULD enforce recurrence eligibility according
   to their local scheduling policy.
 - `payment_endpoint_identifier` MUST be one of the request's `accepted_payment_endpoint_identifiers`.
+- `allowance_id` is optional. When absent it MUST be omitted, not serialized as
+  `null`. When present it MUST be a canonical lowercase, hyphenated UUID-v4
+  identifying the Allowance used for this execution. It is not permitted on
+  the Payment Request proposal or other Payment Request lifecycle messages.
+- Manual payments MUST omit `allowance_id`. Automatic attribution MUST come
+  from the payer's retained execution/reservation history, including when the
+  Allowance has since ended, expired, or been replaced for future periods.
 - `proof` MUST be a JSON object. Its internal fields are method-specific and are
   not interpreted by Paykit v0.2.
+
+For example, an attributed proof adds this member to the object above:
+
+```json
+{"allowance_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44"}
+```
+
+The optional member is a coordinated pre-release addition to wire version 1.
+Older closed-world readers reject it. Peers MUST support the extension before
+it is sent; proofs without attribution retain their previous wire shape.
+Attribution is informational, not authorization or settlement evidence. Its
+presence MUST NOT alter Allowance lifecycle or usage counters, and absence MUST
+NOT be interpreted as proof that an automatic payment did not occur.
+
+Repeated or corrective proofs for the same execution MUST retain their event
+history without creating another payment or usage entry. Changing or omitting
+a prior attribution requires reconciliation; it MUST NOT silently reassign
+usage or overwrite conflicting evidence. Current Allowance selection MUST NOT
+rewrite attribution for an earlier execution. A structurally valid attribution
+does not require the recipient to know that Allowance's lifecycle history;
+method-specific proof validation and the payer's durable execution ledger
+remain separate responsibilities. See [Allowance attribution](allowances.md#payment-proof-attribution).
 
 Paykit validates the message shape and can validate stateless request/proof
 correlation fields against a known Payment Request. Integrating applications,

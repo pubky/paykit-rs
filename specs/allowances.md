@@ -11,11 +11,11 @@ Allowee automatically, without fresh user approval for each payment. The
 Allower remains the Payer, retains custody, and controls whether automatic
 handling is enabled.
 
-Allowances do not replace or modify the Payment Request protocol. A Payment
-Request remains valid and usable without an Allowance, and a wallet may always
-require its ordinary manual flow. A Subscription remains an accepted Recurring
-Payment Request; an Allowance neither schedules payments nor creates a separate
-subscription object.
+Allowances do not replace the Payment Request protocol or its lifecycle. A
+Payment Request remains valid and usable without an Allowance, and a wallet may
+always require its ordinary manual flow. A Subscription remains an accepted
+Recurring Payment Request; an Allowance neither schedules payments nor creates
+a separate subscription object.
 
 This specification defines the V1 Allowance lifecycle, immutable Allowance
 Terms, compatibility with Payment Requests, usage boundaries, wire
@@ -375,7 +375,7 @@ state.
 
 An ordinary `paykit.payment_request` is the only V1 request that may exercise
 an Allowance. V1 defines no Allowance-specific payment message. Payment Request
-messages do not carry an Allowance ID or use an alternate lifecycle. They follow
+proposals do not carry an Allowance ID or use an alternate lifecycle. They follow
 the Payment Request validation, endpoint lookup, cancellation, and proof rules.
 
 The request sender MUST be the Allowee on the Allowance's exact Encrypted Link.
@@ -404,9 +404,10 @@ the wallet MUST NOT combine authority or capacity from multiple Allowances for
 one payment. If local policy cannot choose, the ordinary manual flow remains
 available.
 
-The selected Allowance and decision MUST be durably persisted before any
-automatic side effect. Selection MUST be serialized with payment admission and
-manual handling for the same semantic payment key. A retry uses the persisted
+The selected Allowance and decision MUST be durably persisted before queuing
+automatic Acceptance or any other automatic side effect. Selection MUST be
+serialized with payment admission and manual handling for the same semantic
+payment key. A retry uses the persisted
 selection rather than choosing again because capacity, priority, or candidate
 availability changed. A manual-only decision MUST NOT be reversed by automatic
 matching. Explicit recurring reassociation follows the rules below.
@@ -571,9 +572,9 @@ time `t`. Shared eligibility requires all of:
 - a current, usable Payment Endpoint allowed by the request and Allowance.
 
 Usage is durable SDK/runtime state driven by wallet payment outcomes. Payment
-Request Acceptance consumes no
-capacity. A manual payment consumes no Allowance capacity, but its successful
-or unresolved occurrence blocks automatic execution for the same semantic
+Request Acceptance consumes no capacity. A manual payment consumes no Allowance
+capacity, but its successful or unresolved occurrence blocks automatic
+execution for the same semantic
 payment key. Counted usage consists only of committed automatic payments and
 unresolved automatic reservations; released reservations are excluded. An
 automatic payment reserves one count and the exact requested Payment Amount
@@ -597,8 +598,35 @@ reconciled. Proof for an execution that was already past its irreversible
 boundary when cancellation was observed, and Acceptances that cross a payee
 Cancellation, follow the Payment Request rules in
 [payment-requests.md](payment-requests.md); the request remains cancelled. V1
-does not communicate Allowance usage or selection to the Allowee; the existing
-Payment Request messages communicate acceptance and proof.
+allows optional historical attribution in the existing Payment Proof as defined
+below; it does not communicate an authoritative usage ledger.
+
+### Payment Proof attribution
+
+A Payment Proof MAY carry the optional top-level `allowance_id` defined in
+[Payment Requests](payment-requests.md#paykitpayment_proof). It identifies the
+Allowance used for that execution, not the request's current association. It
+MUST be omitted when attribution is absent; explicit `null` is invalid. When
+present it MUST be a canonical lowercase, hyphenated UUID-v4. Manual payments
+MUST omit it. Absence is not evidence that a payment was manual: attribution
+is optional even for automatic payments.
+
+The payer MUST derive attribution from retained execution/reservation history.
+An Allowance that has since ended or expired may still be named for a valid
+earlier execution. Reassociation MUST NOT rewrite attribution to the new
+Allowance. The field does not grant authority, establish settlement, create a
+reservation, or commit, release, or restore usage. The Allower's durable ledger
+remains authoritative; the Allowee may use attribution only as informational
+evidence with method-specific payment verification.
+
+Receiving, replaying, or correcting a proof MUST NOT change Allowance capacity.
+Different proof Event IDs for the same semantic payment key MUST NOT be counted
+as different executions. A later proof that omits, adds, or changes attribution
+MUST NOT silently replace a prior attribution; retain the evidence and flag
+disagreement for reconciliation without moving usage. A well-formed proof does
+not require the receiver to have the named Allowance's complete history to be
+structurally valid. No proof field substitutes for missing local execution
+history or enables automatic handling.
 
 ## Durability and recovery
 
@@ -629,6 +657,12 @@ V1 is closed-world. Unknown fields, enum values, or period shapes inside a
 recognized V1 kind are invalid. Unsupported versions and unknown kinds MUST
 NOT be interpreted as V1 or cause side effects. Durable private-stream
 implementations MUST retain their raw bytes for audit and future upgrade.
+
+The optional Payment Proof `allowance_id` is a coordinated pre-release extension
+of Payment Request wire version 1. Implementations predating this extension
+reject it as an unknown field. Absence preserves the prior proof shape; this
+change is not transparent compatibility with those older readers. Both peers
+must support the extension before a payer sends attributed proofs.
 
 A message is Allowance-correlated when it is a JSON object whose top-level
 `allowance_id` member is a canonical UUID string as defined above; this probe

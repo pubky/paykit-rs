@@ -185,6 +185,10 @@ explicit manual-only decisions remain sticky. Recurring requests retain their
 selected Allowance unless the user authorizes a durable reassociation of future
 unpaid Billing Periods. Existing payment and reservation history survives that
 change, preventing duplicate payment across old and replacement Allowances.
+Payment Proofs may optionally identify the Allowance actually used for an
+execution. This is informational attribution; proofs do not update usage
+accounting. The optional field requires peers that support the coordinated
+pre-release wire extension.
 
 The specification assigns exact matching and limit math to stateless Library
 helpers and durable selection, occurrence exclusion, reservation accounting,

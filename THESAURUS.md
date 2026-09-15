@@ -347,10 +347,10 @@
 - **Related terms**: Payment Request, Recurrence
 
 ### Payment Proof
-- **Definition**: Method-specific evidence for one concrete payment execution, correlated by Payment Request ID, Payment Reference, Payment Endpoint Identifier, and Billing Period when recurring.
+- **Definition**: Method-specific evidence for one concrete payment execution, correlated by Payment Request ID, Payment Reference, Payment Endpoint Identifier, and Billing Period when recurring, with optional informational Allowance ID attribution to the authority used for that execution.
 - **NOT**: A Paykit Receipt, Receipt Access, or proof that Paykit itself validates generically.
 - **Synonyms to AVOID**: PaymentReceipt, payment receipt when referring to method-specific proof
-- **Related terms**: Payment Request, Payment Reference, Payment Endpoint Identifier, Billing Period, Receipt, Receipt Access
+- **Related terms**: Payment Request, Payment Reference, Payment Endpoint Identifier, Billing Period, Allowance ID, Receipt, Receipt Access
 
 ### Proof Submitted
 - **Definition**: A derived lifecycle state meaning a valid `paykit.payment_proof` Event Message was received for a one-time Payment Request.
