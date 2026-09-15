@@ -570,7 +570,8 @@ time `t`. Shared eligibility requires all of:
   path, and no unresolved Allowance reservation for it; and
 - a current, usable Payment Endpoint allowed by the request and Allowance.
 
-Usage is wallet-owned durable state. Payment Request Acceptance consumes no
+Usage is durable SDK/runtime state driven by wallet payment outcomes. Payment
+Request Acceptance consumes no
 capacity. A manual payment consumes no Allowance capacity, but its successful
 or unresolved occurrence blocks automatic execution for the same semantic
 payment key. Counted usage consists only of committed automatic payments and
@@ -648,9 +649,40 @@ fragmentation or indirection.
 
 | Component | V1 responsibility |
 | --- | --- |
-| Paykit Protocol / Paykit Library | Closed Allowance lifecycle wire types, parsing, serialization, structural validation, and stateless lifecycle correlation helpers. |
-| Paykit SDK/runtime | Durable ordered events, Event ID dedupe, Allowance and Payment Request lifecycle derivation, recovery, and wallet-facing views. |
-| Wallet | Local auto-payment enablement, Allowance matching and pinning, trusted time, private safeguards, usage and concurrency, endpoint and payment-method validation, scheduling, capacity, signing, execution, and settlement. |
+| Paykit Protocol / Paykit Library | Closed lifecycle wire types, parsing, serialization, structural validation, stateless lifecycle correlation, exact decimal and period math, and shared eligibility/limit evaluation. |
+| Paykit SDK/runtime | Durable ordered events, Event ID dedupe, lifecycle derivation, candidate evaluation, persisted selections and dispositions, association revisions, semantic payment exclusion, atomic reservations and outcome accounting, watermarks, backup/recovery, and wallet-facing views. |
+| Wallet | Local enablement and candidate priority, explicit consent, trusted time, private safeguards, endpoint and payment-method validation, scheduling, signing, irreversible execution, and settlement reconciliation. |
+
+The Library's evaluation helpers MUST take explicit terms, time, scope, and
+usage inputs and return an eligibility result; they MUST NOT store usage or
+perform payment side effects. They MUST use the exact arithmetic and boundary
+rules above. A match result is evidence for a wallet decision, not authority
+to execute without the remaining current checks.
+
+The SDK/runtime MUST provide one durable admission path that validates the
+selected association and its revision, checks lifecycle/history and the
+semantic payment key, evaluates current capacity, and atomically records the
+reservation and evaluation-time watermark before execution. All automatic and
+manual paths MUST participate in the same occurrence exclusion. Candidate
+lists are advisory snapshots; admission MUST recheck rather than trust a prior
+query. Outcome updates MUST be idempotent: confirmed success commits once,
+confirmed terminal failure releases once, and uncertain outcomes remain
+reserved. A callback or replay MUST NOT turn committed usage back into free
+capacity. Payment Proof receipt is not a settlement callback.
+
+The wallet MUST report manual in-flight, successful, and unresolved payments
+to the shared occurrence ledger before allowing competing automatic work. The
+SDK/runtime cannot prevent a duplicate payment made outside this coordination.
+Independent devices MUST NOT each assume exclusive admission authority merely
+because they restored the same backup. One coordinated durable writer or an
+equivalent exclusion mechanism is required for the affected payment scope.
+
+Backups MUST retain association/decision history, semantic payment keys,
+reservations, outcome history, and evaluation-time watermarks together with
+lifecycle evidence. Restored or recovery-incomplete execution state MUST remain
+ineligible until wallet reconciliation establishes that no later successful or
+unresolved payment is missing. Missing accounting MUST NOT be reconstructed as
+zero usage from lifecycle messages or Payment Proofs.
 
 The Library MUST remain stateless and does not authorize payment. The
 SDK/runtime coordinates evidence and MUST NOT turn eligibility into a payment

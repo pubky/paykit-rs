@@ -175,22 +175,24 @@ Link recovery.
 A one-time or Recurring Payment Request remains unchanged: it carries no
 Allowance ID and follows the normal acceptance, cancellation, Payment Proof,
 endpoint-resolution, and scheduling rules. At the first automatic-handling
-decision, a wallet may associate it with exactly one matching accepted
-Allowance. No match or multiple matches leaves the request on its ordinary
-manual path.
+decision, a wallet may select exactly one matching accepted Allowance using
+local priority or explicit user choice. A payment cannot pool multiple
+Allowances. Without a selection, the ordinary manual path remains available.
 
-Automatic payment remains wallet-owned. An integrating wallet must durably
-record local enablement and the first selected-Allowance or manual-only
-decision before side effects; never retroactively rematch; pin a Recurring
-Payment Request to its selected Allowance and recheck every Billing Period;
-prevent duplicate semantic payments; count only automatic payments and their
-unresolved reservations against capacity; reserve before an irreversible
-payment step and release only on confirmed terminal failure; never auto-retry
-a manual-only occurrence; and expose an explicit, safe accepted-but-unpaid
-manual path that stays separate from the payer-response query.
-Paykit does not implement matching, usage accounting, scheduling, or payment
-execution. See [the Allowances specification](specs/allowances.md) for the full
-eligibility, durability, and recovery requirements.
+Automatic payment remains a wallet decision. The protocol requires a monetary
+ceiling or expiry in every Allowance. Temporary failures may defer handling;
+explicit manual-only decisions remain sticky. Recurring requests retain their
+selected Allowance unless the user authorizes a durable reassociation of future
+unpaid Billing Periods. Existing payment and reservation history survives that
+change, preventing duplicate payment across old and replacement Allowances.
+
+The specification assigns exact matching and limit math to stateless Library
+helpers and durable selection, occurrence exclusion, reservation accounting,
+and recovery to the SDK/runtime. Wallets retain priority rules, consent,
+scheduling, payment-method validation, execution, and outcome reconciliation.
+These are component requirements, not a claim that the protocol-only change
+implements execution support. See [the Allowances specification](specs/allowances.md)
+for the eligibility, durability, and recovery rules.
 
 ## Receipts
 
