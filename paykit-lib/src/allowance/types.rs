@@ -396,14 +396,15 @@ impl AllowanceTerms {
         validate_unique_period_limits(&self.period_limits)?;
         validate_allowlist(self.allowed_payment_endpoint_identifiers.as_deref())?;
         if self.per_payment_amount.is_none()
-            && self.period_limits.is_empty()
+            && !self
+                .period_limits
+                .iter()
+                .any(|limit| limit.amount_limit().is_some())
             && self.lifetime_amount_limit.is_none()
-            && self.active_from.is_none()
             && self.expires_at.is_none()
-            && self.allowed_payment_endpoint_identifiers.is_none()
         {
             return Err(PaykitError::Validation(
-                "Allowance Terms must constrain authority beyond asset".into(),
+                "Allowance Terms must include an amount ceiling or expiry".into(),
             ));
         }
         Ok(())
@@ -983,6 +984,41 @@ mod tests {
             .allowed_payment_endpoint_identifiers(vec![endpoint.clone(), endpoint])
             .build()
             .is_err());
+    }
+
+    #[test]
+    fn test_terms_require_amount_ceiling_or_expiry() {
+        let endpoint = PaymentEndpointIdentifier::new("btc-lightning-bolt12").unwrap();
+        let period = AllowancePeriod::rolling(1, AllowancePeriodUnit::Day).unwrap();
+        let count_only = AllowancePeriodLimit::new(None, Some(0), period.clone()).unwrap();
+        let builders = [
+            AllowanceTerms::builder("btc").active_from("2026-01-01T00:00:00Z"),
+            AllowanceTerms::builder("btc")
+                .allowed_payment_endpoint_identifiers(vec![endpoint.clone()]),
+            AllowanceTerms::builder("btc").period_limits(vec![count_only.clone()]),
+            AllowanceTerms::builder("btc")
+                .active_from("2026-01-01T00:00:00Z")
+                .allowed_payment_endpoint_identifiers(vec![endpoint])
+                .period_limits(vec![count_only]),
+        ];
+        for builder in builders {
+            assert!(matches!(builder.build(), Err(PaykitError::Validation(_))));
+        }
+
+        for builder in [
+            AllowanceTerms::builder("btc")
+                .per_payment_amount(AllowanceAmountRange::new("0", "0").unwrap()),
+            AllowanceTerms::builder("btc").period_limits(vec![AllowancePeriodLimit::new(
+                Some("0".into()),
+                None,
+                period,
+            )
+            .unwrap()]),
+            AllowanceTerms::builder("btc").lifetime_amount_limit("0"),
+            AllowanceTerms::builder("btc").expires_at("2000-01-01T00:00:00Z"),
+        ] {
+            assert!(builder.build().is_ok());
+        }
     }
 
     #[test]

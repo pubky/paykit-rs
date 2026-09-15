@@ -865,10 +865,44 @@ mod tests {
     }
 
     #[test]
+    fn test_wire_requires_amount_ceiling_or_expiry() {
+        let raw = serialize_allowance_json(&full_proposal()).unwrap();
+        let mut proposal: JsonValue = serde_json::from_str(&raw).unwrap();
+        proposal["terms"] = serde_json::json!({
+            "asset": "btc",
+            "per_payment_amount": null,
+            "period_limits": [],
+            "lifetime_amount_limit": null,
+            "active_from": "1999-01-01T00:00:00Z",
+            "expires_at": null,
+            "allowed_payment_endpoint_identifiers": ["btc-lightning-bolt12"]
+        });
+        for count in [0, u64::MAX] {
+            proposal["terms"]["period_limits"] = serde_json::json!([{
+                "amount_limit": null,
+                "payment_count_limit": count,
+                "period": {"kind": "rolling", "every": 1, "unit": "day"}
+            }]);
+            assert!(matches!(
+                parse_proposal_json(&proposal.to_string()),
+                Err(PaykitError::InvalidData { .. })
+            ));
+        }
+
+        // Historical expiry is structurally valid; current eligibility belongs to the wallet.
+        proposal["terms"]["expires_at"] = JsonValue::from("2000-01-01T00:00:00Z");
+        assert!(parse_proposal_json(&proposal.to_string()).is_ok());
+        proposal["terms"]["expires_at"] = JsonValue::Null;
+        proposal["terms"]["period_limits"][0]["amount_limit"] = JsonValue::from("0");
+        assert!(parse_proposal_json(&proposal.to_string()).is_ok());
+    }
+
+    #[test]
     fn test_wire_accepts_u64_count_boundaries_and_distinct_decimal_spellings() {
         let period = AllowancePeriod::rolling(1, AllowancePeriodUnit::Day).unwrap();
         for count in [0, u64::MAX] {
             let terms = AllowanceTerms::builder("btc")
+                .lifetime_amount_limit("1")
                 .period_limits(vec![AllowancePeriodLimit::new(
                     None,
                     Some(count),
