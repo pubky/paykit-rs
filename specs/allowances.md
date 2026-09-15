@@ -394,13 +394,20 @@ not ended, and its active time window includes the wallet's trusted time. The
 request MUST be a known, valid proposal that remains proposed, unexpired, and
 neither rejected nor cancelled.
 
-Because the request carries no Allowance ID, initial automatic handling
-requires exactly one candidate. On this first decision, the wallet MUST durably
-persist either the selected Allowance or a manual-only disposition; the
-disposition MUST be stored before any automatic side effect. The wallet MUST
-NOT automatically select among multiple candidates or later rematch a
-manual-only request because Allowances, local enablement, capacity, or endpoint
-availability changed.
+Because the request carries no Allowance ID, the wallet selects the authority.
+It MAY choose one of multiple candidates using local priority rules or explicit
+user choice. Every candidate considered MUST satisfy the shared matching and
+lifecycle rules. Automatic handling requires exactly one selected Allowance;
+the wallet MUST NOT combine authority or capacity from multiple Allowances for
+one payment. If local policy cannot choose, the ordinary manual flow remains
+available.
+
+The selected Allowance and decision MUST be durably persisted before any
+automatic side effect. Selection MUST be serialized with payment admission and
+manual handling for the same semantic payment key. A retry uses the persisted
+selection rather than choosing again because capacity, priority, or candidate
+availability changed. A manual-only decision MUST NOT be reversed by automatic
+matching. Explicit recurring reassociation follows the rules below.
 
 The wallet resolves current Payment Endpoint details using the normal Payment
 Request rules. Private/current details SHOULD be preferred, and a wallet MAY
@@ -418,7 +425,7 @@ amount the wallet cannot determine before execution, MUST be treated as
 unusable for automatic payment, with the same manual-flow outcome as a stale or
 invalid endpoint.
 
-Before automatic Acceptance, zero or multiple candidates, disabled local
+Before automatic Acceptance, no selected candidate, disabled local
 automatic handling, failed endpoint resolution, unsupported payment methods,
 or any stricter wallet check preserve the proposed request's ordinary manual
 response flow; they do not cause an automatic rejection or cancellation. A
