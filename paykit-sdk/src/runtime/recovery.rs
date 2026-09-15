@@ -64,6 +64,7 @@ where
             paykit_lib::remove_encrypted_link_recovery_marker(
                 &session_access.session,
                 &secret_key,
+                &counterparty.to_public_key()?,
                 &remote_noise_public_key,
             )
             .await?;
@@ -300,6 +301,7 @@ where
         if let Err(err) = paykit_lib::publish_encrypted_link_recovery_marker(
             &session_access.session,
             &secret_key,
+            &counterparty.to_public_key()?,
             &remote_noise_public_key,
             &marker,
         )
@@ -373,6 +375,7 @@ where
         let Some(marker) = paykit_lib::fetch_encrypted_link_recovery_marker(
             &public_storage,
             &secret_key,
+            session_access.session.info().public_key(),
             &remote_public_key,
             remote_noise_public_key,
         )
@@ -384,16 +387,10 @@ where
         };
 
         let attempt_id = marker.attempt_id().to_owned();
-        let marker_created_at = parse_recovery_marker_created_at(&marker)?;
         let lease = self.claim_peer_link_operation(counterparty).await?;
         let result = async {
             let should_observe = self
-                .should_observe_remote_recovery_marker_with_lease(
-                    counterparty,
-                    &attempt_id,
-                    marker_created_at,
-                    &lease,
-                )
+                .should_observe_remote_recovery_marker_with_lease(counterparty, &attempt_id, &lease)
                 .await?;
             if !should_observe {
                 return Ok(false);
@@ -403,13 +400,13 @@ where
             paykit_lib::clear_encrypted_link_outbox(
                 &session_access.session,
                 &secret_key,
+                &remote_public_key,
                 remote_noise_public_key,
             )
             .await?;
             self.mark_remote_recovery_marker_observed_with_lease(
                 counterparty,
                 &attempt_id,
-                marker_created_at,
                 lease.clone(),
             )
             .await
@@ -425,7 +422,6 @@ where
         &self,
         counterparty: &PubkyPublicKey,
         attempt_id: &str,
-        marker_created_at: DateTime<Utc>,
     ) -> Result<bool> {
         let should_mutate = self
             .storage
@@ -437,7 +433,6 @@ where
                     link_state.as_ref(),
                     counterparty,
                     attempt_id,
-                    marker_created_at,
                 )
             })
             .await?;
@@ -450,7 +445,6 @@ where
             .mark_remote_recovery_marker_observed_with_lease(
                 counterparty,
                 attempt_id,
-                marker_created_at,
                 lease.clone(),
             )
             .await;
@@ -461,7 +455,6 @@ where
         &self,
         counterparty: &PubkyPublicKey,
         attempt_id: &str,
-        marker_created_at: DateTime<Utc>,
         lease: &PeerLinkOperationLease,
     ) -> Result<bool> {
         self.storage
@@ -474,7 +467,6 @@ where
                     link_state.as_ref(),
                     counterparty,
                     attempt_id,
-                    marker_created_at,
                 )
             })
             .await
@@ -484,7 +476,6 @@ where
         &self,
         counterparty: &PubkyPublicKey,
         attempt_id: &str,
-        marker_created_at: DateTime<Utc>,
         lease: PeerLinkOperationLease,
     ) -> Result<bool> {
         let now = self.clock.now();
@@ -501,7 +492,6 @@ where
                     link_state.as_ref(),
                     &counterparty,
                     &attempt_id,
-                    marker_created_at,
                 )? {
                     return Ok(false);
                 }
@@ -575,6 +565,7 @@ where
         if let Err(err) = paykit_lib::remove_encrypted_link_recovery_marker(
             &session_access.session,
             &secret_key,
+            &counterparty.to_public_key()?,
             &remote_noise_public_key,
         )
         .await
@@ -665,7 +656,6 @@ fn should_observe_remote_recovery_marker(
     link_state: Option<&EncryptedLinkStateRecord>,
     counterparty: &PubkyPublicKey,
     attempt_id: &str,
-    _marker_created_at: DateTime<Utc>,
 ) -> Result<bool> {
     if existing_peer.is_some_and(|peer| peer.state == LinkedPeerState::Blocked) {
         return Err(PaykitSdkError::Policy {
@@ -678,15 +668,6 @@ fn should_observe_remote_recovery_marker(
             && existing_peer.and_then(|peer| peer.remote_recovery_attempt_id.as_deref())
                 != Some(attempt_id),
     )
-}
-
-fn parse_recovery_marker_created_at(marker: &EncryptedLinkRecoveryMarker) -> Result<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(marker.created_at())
-        .map(|timestamp| timestamp.with_timezone(&Utc))
-        .map_err(|err| PaykitSdkError::Protocol {
-            context: format!("invalid recovery marker timestamp: {err}"),
-            source: None,
-        })
 }
 
 pub(super) fn local_recovery_marker_belongs_to_current_episode(peer: &LinkedPeerRecord) -> bool {

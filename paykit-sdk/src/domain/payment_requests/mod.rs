@@ -279,7 +279,7 @@ pub struct PaymentRequestRecord {
     pub proposal_event_id: Option<String>,
     /// Application that created the proposal.
     pub proposal_app_id: Option<paykit_lib::PaykitAppId>,
-    /// Payer application that first accepted the proposal.
+    /// Payer application associated with the request, independent of its current execution claim.
     pub payer_app_id: Option<paykit_lib::PaykitAppId>,
     /// Paykit App that currently owns payment execution for this identity.
     pub execution_claim_app_id: Option<paykit_lib::PaykitAppId>,

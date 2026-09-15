@@ -155,7 +155,7 @@ async fn test_concurrent_payment_request_claims_allow_only_one_app() {
 }
 
 #[tokio::test]
-async fn test_open_accepted_request_can_be_released_and_claimed_by_another_app() {
+async fn test_open_accepted_request_can_be_canceled_after_execution_handoff() {
     let storage = registered_storage();
     let counterparty = counterparty();
     let bitkit = app_id();
@@ -195,14 +195,38 @@ async fn test_open_accepted_request_can_be_released_and_claimed_by_another_app()
     )
     .await
     .unwrap();
-    let claimed =
-        claim_payment_request_execution(&storage, counterparty, &server, &request_id, timestamp())
-            .await
-            .unwrap();
+    let claimed = claim_payment_request_execution(
+        &storage,
+        counterparty.clone(),
+        &server,
+        &request_id,
+        timestamp(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(released.state, PaymentRequestLifecycleState::Accepted);
     assert!(released.execution_claim_app_id.is_none());
-    assert_eq!(claimed.execution_claim_app_id, Some(server));
+    assert_eq!(claimed.execution_claim_app_id, Some(server.clone()));
+
+    enqueue_checked_payment_request_action(
+        &storage,
+        counterparty.clone(),
+        &server,
+        &parsed_event(cancellation_raw_for_app(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103",
+            request_id.as_str(),
+            server.as_str(),
+        )),
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    let records = payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
+    assert_eq!(records[0].state, PaymentRequestLifecycleState::Canceled);
+    assert!(records[0].execution_claim_app_id.is_none());
 }
 
 #[tokio::test]

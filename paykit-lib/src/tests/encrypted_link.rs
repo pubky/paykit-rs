@@ -1,6 +1,176 @@
 use super::*;
 
 #[tokio::test]
+async fn test_handshake_paths_isolate_copied_noise_key() {
+    let setup = TestSetup::new().await;
+    let local_noise_secret = derive_paykit_noise_secret_key(&[1; 32]);
+    let remote_noise_public = derive_paykit_noise_public_key(&[2; 32]);
+    let bob = Keypair::from_secret(&[3; 32]).public_key();
+    let other_identity = Keypair::from_secret(&[4; 32]).public_key();
+    let outbox_client = setup._testnet.sdk().unwrap();
+    let handshake = |remote_identity: &PublicKey| {
+        initiate_encrypted_link(
+            setup.session.clone(),
+            local_noise_secret,
+            remote_identity,
+            &remote_noise_public,
+            outbox_client.clone(),
+        )
+        .unwrap()
+    };
+
+    let bob_handshake = handshake(&bob);
+    let other_handshake = handshake(&other_identity);
+
+    assert_ne!(
+        bob_handshake.config().write_path,
+        other_handshake.config().write_path,
+    );
+    assert_ne!(
+        bob_handshake.config().read_path,
+        other_handshake.config().read_path,
+    );
+
+    let bob_slot = format!("{}/0", bob_handshake.config().write_path);
+    setup
+        .session
+        .storage()
+        .put(&bob_slot, "bob-slot")
+        .await
+        .unwrap();
+    let other_slot = format!("{}/0", other_handshake.config().write_path);
+    let _ = advance_handshake(other_handshake).await.unwrap();
+    assert_eq!(
+        setup
+            .session
+            .storage()
+            .get(&bob_slot)
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+        "bob-slot",
+    );
+    assert_eq!(
+        clear_encrypted_link_outbox(
+            &setup.session,
+            &local_noise_secret,
+            &other_identity,
+            &remote_noise_public,
+        )
+        .await
+        .unwrap(),
+        1,
+    );
+    assert_eq!(
+        setup
+            .session
+            .storage()
+            .get(&bob_slot)
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+        "bob-slot",
+    );
+    assert!(setup.session.storage().get(&other_slot).await.is_err());
+}
+
+#[tokio::test]
+async fn test_recovery_markers_isolate_copied_noise_key() {
+    let setup = TestSetup::new().await;
+    let local_noise_secret = derive_paykit_noise_secret_key(&[1; 32]);
+    let local_noise_public = derive_paykit_noise_public_key(&[1; 32]);
+    let remote_noise_secret = derive_paykit_noise_secret_key(&[2; 32]);
+    let remote_noise_public = derive_paykit_noise_public_key(&[2; 32]);
+    let bob = Keypair::from_secret(&[3; 32]).public_key();
+    let other_identity = Keypair::from_secret(&[4; 32]).public_key();
+    let bob_marker = EncryptedLinkRecoveryMarker::new(
+        "650e8400-e29b-41d4-a716-446655440000",
+        "2026-06-03T12:00:00Z",
+    )
+    .unwrap();
+    let other_marker = EncryptedLinkRecoveryMarker::new(
+        "650e8400-e29b-41d4-a716-446655440001",
+        "2026-06-03T12:00:00Z",
+    )
+    .unwrap();
+
+    for (identity, marker) in [(&bob, &bob_marker), (&other_identity, &other_marker)] {
+        publish_encrypted_link_recovery_marker(
+            &setup.session,
+            &local_noise_secret,
+            identity,
+            &remote_noise_public,
+            marker,
+        )
+        .await
+        .unwrap();
+    }
+    for (identity, expected) in [
+        (&bob, Some(bob_marker.clone())),
+        (&other_identity, Some(other_marker)),
+    ] {
+        let fetched = fetch_encrypted_link_recovery_marker(
+            &setup.public_storage,
+            &remote_noise_secret,
+            identity,
+            &setup.public_key,
+            &local_noise_public,
+        )
+        .await
+        .unwrap();
+        assert_eq!(fetched, expected);
+    }
+
+    remove_encrypted_link_recovery_marker(
+        &setup.session,
+        &local_noise_secret,
+        &other_identity,
+        &remote_noise_public,
+    )
+    .await
+    .unwrap();
+    for (identity, expected) in [(&bob, Some(bob_marker)), (&other_identity, None)] {
+        let fetched = fetch_encrypted_link_recovery_marker(
+            &setup.public_storage,
+            &remote_noise_secret,
+            identity,
+            &setup.public_key,
+            &local_noise_public,
+        )
+        .await
+        .unwrap();
+        assert_eq!(fetched, expected);
+    }
+}
+
+#[tokio::test]
+async fn test_encrypted_link_restore_rejects_other_identity_paths() {
+    let setup = PrivateTestSetup::new().await;
+    let snapshot = setup.sender_link.snapshot().unwrap();
+    let config = setup.sender_link.config();
+    let other_identity = Keypair::from_secret(&[5; 32]).public_key();
+    let other_handshake = initiate_encrypted_link(
+        setup.sender_session.clone(),
+        config.pubky_root_keypair.secret_key(),
+        &other_identity,
+        snapshot.remote_noise_public_key(),
+        config.outbox_client.clone(),
+    )
+    .unwrap();
+
+    let recipient = snapshot.recipient().clone();
+    let result =
+        restore_encrypted_link_from_config(other_handshake.config().clone(), &recipient, snapshot)
+            .await;
+    assert!(matches!(result, Err(PaykitError::Validation(message))
+        if message == "Noise config paths do not match Pubky identity pair"));
+}
+
+#[tokio::test]
 async fn test_handshake_snapshot_serialize_roundtrip() {
     let InProgressHandshakeSetup {
         _testnet,
@@ -77,9 +247,11 @@ async fn test_handshake_restore_and_complete() {
     let initiator_remote = initiator_snapshot.recipient().clone();
     let responder_remote = responder_snapshot.recipient().clone();
 
-    let restored_initiator = restore_encrypted_link_handshake_from_config(
-        initiator_config,
+    let restored_initiator = restore_encrypted_link_handshake(
+        initiator_session.clone(),
+        initiator_config.pubky_root_keypair.secret_key(),
         &initiator_remote,
+        initiator_config.outbox_client.clone(),
         initiator_snapshot,
     )
     .await
@@ -312,16 +484,21 @@ async fn test_encrypted_link_restore_and_continue() {
     let sender_state = EncryptedLinkSnapshot::deserialize(&sender_bytes).unwrap();
     let receiver_state = EncryptedLinkSnapshot::deserialize(&receiver_bytes).unwrap();
 
-    // Restore both sides using the in-process config variant.
+    // Exercise cross-restart path derivation and in-process config reuse.
     let sender_config = setup.sender_link.config().clone();
     let receiver_config = setup.receiver_link.config().clone();
     let sender_recipient = sender_state.recipient().clone();
     let receiver_recipient = receiver_state.recipient().clone();
 
-    let mut restored_sender =
-        restore_encrypted_link_from_config(sender_config, &sender_recipient, sender_state)
-            .await
-            .unwrap();
+    let mut restored_sender = restore_encrypted_link(
+        setup.sender_session.clone(),
+        sender_config.pubky_root_keypair.secret_key(),
+        &sender_recipient,
+        sender_config.outbox_client.clone(),
+        sender_state,
+    )
+    .await
+    .unwrap();
     let mut restored_receiver =
         restore_encrypted_link_from_config(receiver_config, &receiver_recipient, receiver_state)
             .await

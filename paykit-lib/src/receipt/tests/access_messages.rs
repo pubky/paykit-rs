@@ -62,7 +62,7 @@ fn test_receipt_access_event_message_preserves_raw_and_ids_when_body_is_invalid(
 }
 
 #[test]
-fn test_receipt_access_event_parser_uses_raw_json_kind() {
+fn test_receipt_access_event_parser_uses_raw_json_headers() {
     let receipt_id = ReceiptId::new("450e8400-e29b-41d4-a716-446655440000").unwrap();
     let access = ReceiptAccess {
         version: 1,
@@ -79,7 +79,7 @@ fn test_receipt_access_event_parser_uses_raw_json_kind() {
     let stale_message = PrivateApplicationMessage {
         version: Some(1),
         kind: Some(PrivateMessageKind::PaymentRequest.as_str().to_string()),
-        app_id: Some(app_id().as_str().to_string()),
+        app_id: Some("different-app".into()),
         raw_json,
     };
 
@@ -87,6 +87,7 @@ fn test_receipt_access_event_parser_uses_raw_json_kind() {
         .expect("raw JSON kind should route to Receipt Access parser");
 
     assert_eq!(event_message.kind(), PrivateMessageKind::ReceiptAccess);
+    assert_eq!(event_message.app_id(), Some(&app_id()));
     assert_eq!(event_message.parsed_access(), Some(&access));
 }
 

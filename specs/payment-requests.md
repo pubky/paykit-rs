@@ -199,8 +199,7 @@ Rules:
 - `recurrence` MUST be an object for recurring requests.
 - `accepted_payment_endpoint_identifiers` MUST be a non-empty array of valid Payment Endpoint Identifiers.
 - `required_app_id` is required and MUST be either `null` or a valid Paykit App
-  ID. When present, it constrains payment execution to that App and an endpoint
-  owned by it.
+  ID. When non-null, payment MUST use an endpoint owned by that payee App.
 - `metadata` is optional. If present, it MUST be a JSON object.
 - Request terms are immutable after the initial `paykit.payment_request` event.
 

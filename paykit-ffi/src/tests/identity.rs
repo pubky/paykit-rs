@@ -71,6 +71,108 @@ fn test_paykit_identity_secret_derivation_and_generation() {
 }
 
 #[tokio::test]
+async fn test_ffi_shared_storage_rotation_reencrypts_with_replacement_key() {
+    use paykit_sdk::storage::{PubkySharedStateStorage, StorageAdapter};
+    use std::sync::Mutex;
+
+    struct SessionProvider(Mutex<Arc<FfiPubkySessionAccess>>);
+
+    impl FfiSdkPubkySessionProvider for SessionProvider {
+        fn load_session_access(
+            &self,
+        ) -> Result<Option<Arc<FfiPubkySessionAccess>>, PaykitFfiError> {
+            Ok(Some(self.0.lock().unwrap().clone()))
+        }
+
+        fn public_storage_available(&self) -> Result<bool, PaykitFfiError> {
+            Ok(true)
+        }
+
+        fn clear_session_access(&self) -> Result<(), PaykitFfiError> {
+            Ok(())
+        }
+    }
+
+    let testnet = build_testnet().await;
+    let pubky = testnet.sdk().unwrap();
+    let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
+    let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
+    let bootstrap = PubkySessionBootstrap::with_pubky(pubky.clone(), TEST_CLIENT_ID)
+        .unwrap()
+        .with_auth_relay(
+            testnet
+                .http_relay()
+                .local_url()
+                .join("inbox")
+                .unwrap()
+                .as_str(),
+        )
+        .unwrap();
+    let result = bootstrap
+        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .await
+        .unwrap();
+    let session_secret = result.export_session_secret().await.unwrap().into_inner();
+    let current_key = secret.derive_paykit_identity_secret_key(1).unwrap();
+    let replacement_key = secret.derive_paykit_identity_secret_key(2).unwrap();
+    let access_for_key = |key: &paykit_sdk::PaykitIdentitySecretKey| {
+        Arc::new(
+            FfiPubkySessionAccess::new(
+                TEST_CLIENT_ID.into(),
+                session_secret.clone(),
+                None,
+                Some(Arc::new(
+                    FfiPaykitIdentitySecretKey::new(key.as_bytes().to_vec(), key.key_generation())
+                        .unwrap(),
+                )),
+            )
+            .unwrap(),
+        )
+    };
+    let provider = Arc::new(SessionProvider(Mutex::new(access_for_key(&current_key))));
+    let storage = crate::storage::FfiSdkStorageAdapter::PubkyShared(PubkySharedStateStorage::new(
+        FfiSdkPubkySessionProviderAdapter::new(
+            provider.clone(),
+            pubky,
+            default_pubky_client_config(),
+        ),
+    ));
+    let identity = paykit_sdk::IdentityState {
+        public_key: Some(result.public_key),
+        initialized_at: chrono::Utc::now(),
+    };
+    storage.save_identity_state(identity.clone()).await.unwrap();
+    storage
+        .rotate_paykit_identity_key(
+            current_key.clone(),
+            replacement_key.clone(),
+            |tx, already_rotated| {
+                assert!(!already_rotated);
+                tx.allocate_receive_batch_id()
+            },
+        )
+        .await
+        .unwrap();
+
+    *provider.0.lock().unwrap() = access_for_key(&replacement_key);
+    assert_eq!(storage.load_identity_state().await.unwrap(), Some(identity));
+    storage
+        .rotate_paykit_identity_key(
+            current_key.clone(),
+            replacement_key,
+            |tx, already_rotated| {
+                assert!(already_rotated);
+                assert_eq!(tx.export_storage_state().next_receive_batch_id, 1);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    *provider.0.lock().unwrap() = access_for_key(&current_key);
+    assert!(storage.load_identity_state().await.is_err());
+}
+
+#[tokio::test]
 async fn test_ffi_session_provider_caches_restores_and_revokes_rotated_bearer() {
     struct RestoredSessionProvider {
         session_secret: String,

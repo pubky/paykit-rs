@@ -8,7 +8,7 @@ use super::{
         PaymentRequestEvent, PaymentRequestEventMessage, PaymentRequestRejection,
     },
     wire::{
-        parse_acceptance_json, parse_cancellation_json, parse_event_header_ids,
+        parse_acceptance_json, parse_cancellation_json, parse_event_header,
         parse_payment_proof_json, parse_payment_request_json, parse_rejection_json,
         serialize_acceptance_json, serialize_cancellation_json, serialize_payment_proof_json,
         serialize_payment_request_json, serialize_rejection_json,
@@ -57,11 +57,7 @@ pub fn parse_payment_request_event_message(
 ) -> Option<PaymentRequestEventMessage> {
     let kind = message.known_kind()?;
     let event = parse_event(kind, &message.raw_json)?.map_err(|err| err.to_string());
-    let (event_id, payment_request_id) = parse_event_header_ids(&message.raw_json);
-    let app_id = message
-        .app_id
-        .as_deref()
-        .and_then(|app_id| PaykitAppId::new(app_id).ok());
+    let (app_id, event_id, payment_request_id) = parse_event_header(&message.raw_json);
     Some(PaymentRequestEventMessage {
         kind,
         app_id,
@@ -248,7 +244,7 @@ mod tests {
         assert_eq!(parsed.parsed_event(), Some(&event));
     }
 
-    // Mirror of `payment_request_event_parser_uses_raw_json_kind` in
+    // Mirror of `payment_request_event_parser_uses_raw_json_headers` in
     // `crate::tests::payment_request`, which pins a stale ReceiptAccess header
     // routing a payment-request raw payload. Here the header claims
     // `paykit.payment_request` while the raw JSON kind is

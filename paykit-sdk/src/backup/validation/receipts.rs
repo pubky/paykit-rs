@@ -133,7 +133,6 @@ fn validate_receipt_access_retrieval_status(record: &ReceiptAccessRecord) -> Res
 pub(in crate::backup) fn validate_receipt_records(
     records: &HashMap<(PubkyPublicKey, String), ReceiptRecord>,
     access_records: &HashMap<(PubkyPublicKey, String), ReceiptAccessRecord>,
-    event_dedup_records: &HashMap<(PubkyPublicKey, String), EventDedupRecord>,
     expected_recipient: Option<&PubkyPublicKey>,
 ) -> Result<()> {
     for record in records.values() {
@@ -183,24 +182,8 @@ pub(in crate::backup) fn validate_receipt_records(
                 source: None,
             });
         }
-        for candidate in access_records.values().filter(|candidate| {
-            candidate.counterparty == record.issuer
-                && candidate.receipt_id == record.receipt_id
-                && candidate.app_authorized
-        }) {
-            let conflicted = event_dedup_records
-                .get(&(candidate.counterparty.clone(), candidate.event_id.clone()))
-                .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty());
-            if conflicted || !receipt_record_matches_access(record, candidate) {
-                return Err(PaykitSdkError::Protocol {
-                    context: format!(
-                        "Receipt record '{}' has conflicting authorized Receipt Access",
-                        record.receipt_id
-                    ),
-                    source: None,
-                });
-            }
-        }
+        // Later conflicts invalidate runtime use, not the original cached provenance.
+        // Retain that history so intake can commit the conflict and its checkpoint.
     }
     Ok(())
 }

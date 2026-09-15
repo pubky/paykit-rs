@@ -65,7 +65,7 @@ Not implemented in this crate yet:
 - first-party durable mobile storage helpers
 - payment execution, settlement confirmation, balances, fees, or route policy
 - product UI/profile screens, localization, and app backup transport
-- multi-device checkpoint synchronization and recurring payment scheduling
+- recurring payment scheduling
 
 The SDK derives and persists Recurring Payment Request lifecycle state, but the
 integrating application owns scheduling, payment authorization, execution,
@@ -262,8 +262,9 @@ restored and the grant can be revoked. An app that should also withdraw its
 published payment capability calls `remove_paykit_app` while authenticated
 before signing out.
 
-Read-only private views such as cached Private Payment Lists can still be
-returned for the initialized identity when live session access is missing.
+Local storage adapters can return cached private views for the initialized
+identity without live session access. `PubkySharedStateStorage` requires an
+active session and the identity's Paykit secret to read private state.
 These cached views are stored state, not proof that the Encrypted Link is
 currently healthy; apps should surface linked-peer recovery status when using
 cached private endpoints for payment resolution.

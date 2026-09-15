@@ -51,7 +51,7 @@ fn event_header_ids_are_parsed_independently() {
             "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33"
         }"#;
 
-    let (event_id, payment_request_id) = parse_event_header_ids(json);
+    let (_, event_id, payment_request_id) = parse_event_header(json);
 
     assert_eq!(
         event_id.as_ref().map(EventId::as_str),
@@ -69,7 +69,7 @@ fn event_header_ids_keep_payment_request_id_when_event_id_is_missing() {
             "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33"
         }"#;
 
-    let (event_id, payment_request_id) = parse_event_header_ids(json);
+    let (_, event_id, payment_request_id) = parse_event_header(json);
 
     assert!(event_id.is_none());
     assert_eq!(
@@ -84,7 +84,7 @@ fn event_header_ids_keep_event_id_when_payment_request_id_is_missing() {
             "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101"
         }"#;
 
-    let (event_id, payment_request_id) = parse_event_header_ids(json);
+    let (_, event_id, payment_request_id) = parse_event_header(json);
 
     assert_eq!(
         event_id.as_ref().map(EventId::as_str),

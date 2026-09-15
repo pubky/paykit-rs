@@ -105,6 +105,7 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
     let marker = paykit_lib::fetch_encrypted_link_recovery_marker(
         &storage,
         &bob_noise_secret_key,
+        pair.bob.access.session.info().public_key(),
         &alice_public_key,
         &alice_noise_public_key,
     )
@@ -128,6 +129,7 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
     let marker = paykit_lib::fetch_encrypted_link_recovery_marker(
         &storage,
         &bob_noise_secret_key,
+        pair.bob.access.session.info().public_key(),
         &alice_public_key,
         &alice_noise_public_key,
     )

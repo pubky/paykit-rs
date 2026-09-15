@@ -481,7 +481,7 @@ where
         &self.config
     }
 
-    /// List locally tracked Linked Peer records.
+    /// List Linked Peer records for the shared identity.
     pub async fn linked_peers(&self) -> Result<Vec<LinkedPeerRecord>> {
         self.storage
             .transaction(|tx| {

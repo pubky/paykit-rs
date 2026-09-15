@@ -231,27 +231,13 @@ pub(super) fn apply_stored_event(
             }
             let payer_action = payer_action_source_allowed(record, stored);
             let cancellation_app_id = stored.app_id();
-            let allowed = if payer_action {
-                record
-                    .payer_app_id
-                    .as_ref()
-                    .is_none_or(|payer_app_id| Some(payer_app_id) == cancellation_app_id.as_ref())
-            } else {
-                record.proposal_app_id.as_ref() == cancellation_app_id.as_ref()
-            };
-            if !allowed {
-                if payer_action && is_competing_payer_app(record, stored) {
-                    touch_stored_audit(record, stored);
-                    return;
-                }
+            // Payer execution claims may move between Apps without another acceptance.
+            // The peer observes the payer identity, not its local execution claim.
+            if !payer_action && record.proposal_app_id.as_ref() != cancellation_app_id.as_ref() {
                 mark_invalid_stored(
                     record,
                     stored,
-                    if payer_action {
-                        "Payment Request cancellation came from a different payer application"
-                    } else {
-                        "Payment Request cancellation came from a different payee application"
-                    },
+                    "Payment Request cancellation came from a different payee application",
                 );
                 return;
             }

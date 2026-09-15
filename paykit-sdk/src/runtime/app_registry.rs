@@ -586,10 +586,10 @@ where
                     });
                 }
             };
+            let unchanged = registry.clone();
             if validate_local_noise_key {
                 self.validate_local_registry_noise_key(session_access, &mut registry)?;
             }
-            let unchanged = registry.clone();
             update(&mut registry)?;
             if registry == unchanged {
                 return Ok(registry);

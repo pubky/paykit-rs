@@ -7,7 +7,7 @@ Describe the Paykit SDK layer that sits above Paykit Library.
 Paykit Library remains the stateless Rust implementation of Paykit Protocol
 wire formats, Pubky storage helpers, Encrypted Link transport helpers, and
 structural validation. Paykit SDK is the durable runtime that wallets, payment
-processors, and apps can use when they need local state, recovery behavior,
+processors, and apps can use when they need durable state, recovery behavior,
 contact/payment workflows, and ergonomic platform APIs.
 
 The SDK should be product-neutral and payment-method-neutral. It should support

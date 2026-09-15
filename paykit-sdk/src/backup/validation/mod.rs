@@ -59,7 +59,6 @@ pub fn validate_storage_state(state: &StorageState) -> Result<()> {
     validate_receipt_records(
         &state.receipt_records,
         &state.receipt_access_records,
-        &state.event_dedup_records,
         expected_receipt_recipient,
     )?;
     validate_receipt_issuance_records(&state.receipt_issuance_records, &outbound_private_messages)?;

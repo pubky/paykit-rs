@@ -213,7 +213,7 @@ before executing a payment through their existing infrastructure.
 - manage Pubky session creation, authorization scope, key rotation, or account
   recovery
 
-`paykit-sdk` is the Rust runtime layer for SDK-managed local
+`paykit-sdk` is the Rust runtime layer for identity-wide durable
 state such as endpoint sync, Encrypted Link snapshots, private stream intake,
 Private Payment Lists, Paykit Profiles, Paykit Blob helpers, read-only Pubky
 app profile/follows helpers, Contact Records, and contact payment resolution. Payment

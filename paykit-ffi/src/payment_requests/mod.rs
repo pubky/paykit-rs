@@ -220,7 +220,7 @@ pub struct FfiPaymentRequestRecord {
     pub proposal_event_id: Option<String>,
     /// Application that created the proposal.
     pub proposal_app_id: Option<String>,
-    /// Payer application that first accepted the proposal.
+    /// Payer application associated with the request, independent of its current execution claim.
     pub payer_app_id: Option<String>,
     /// Paykit App currently preparing to execute this payment.
     pub execution_claim_app_id: Option<String>,

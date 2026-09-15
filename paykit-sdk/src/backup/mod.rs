@@ -23,8 +23,8 @@ use crate::{
     },
     domain::publication::PublicationStatus,
     domain::receipts::{
-        receipt_access_key_hash, receipt_record_matches_access, ReceiptAccessRecord,
-        ReceiptIssuanceRecord, ReceiptIssuanceStatus, ReceiptRecord, ReceiptRetrievalStatus,
+        receipt_access_key_hash, ReceiptAccessRecord, ReceiptIssuanceRecord, ReceiptIssuanceStatus,
+        ReceiptRecord, ReceiptRetrievalStatus,
     },
     domain::records::{AmountRecord, BillingPeriodRecord},
     identity::{IdentityState, PubkyPublicKey},
@@ -490,7 +490,6 @@ impl SdkBackupState {
         validate_receipt_records(
             &receipt_records,
             &receipt_access_records,
-            &event_dedup_records,
             expected_receipt_recipient,
         )?;
         let receipt_issuance_records = keyed_by_tuple(

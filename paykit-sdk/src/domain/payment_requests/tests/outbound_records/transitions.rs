@@ -296,91 +296,113 @@ async fn test_payment_request_records_apply_later_cancellation_after_acceptance(
 }
 
 #[tokio::test]
-async fn test_payment_request_records_allow_open_request_proof_from_another_app() {
-    let storage = registered_storage();
-    let counterparty = counterparty();
-    let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
-    let PaymentRequestEvent::Request(request) = parsed_event(request_raw(
-        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
-        request_id,
-        "invoice-2026-0001",
-        None,
-        None,
-    )) else {
-        panic!("expected request event");
-    };
-    enqueue_payment_request(
-        &storage,
-        counterparty.clone(),
-        &app_id(),
-        &request,
-        timestamp(),
-    )
-    .await
-    .unwrap();
-    persist_messages_at(
-        &storage,
-        counterparty.clone(),
-        vec![
-            acceptance_raw_for_app(
-                "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
-                request_id,
-                "first-payer",
-            ),
-            acceptance_raw_for_app(
-                "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103",
-                request_id,
-                "competing-payer",
-            ),
-            rejection_raw_for_app(
-                "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104",
-                request_id,
-                "competing-payer",
-            ),
+async fn test_payment_request_records_allow_open_request_completion_from_another_app() {
+    for cancel in [false, true] {
+        let storage = registered_storage();
+        let counterparty = counterparty();
+        let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
+        let PaymentRequestEvent::Request(request) = parsed_event(request_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+            request_id,
+            "invoice-2026-0001",
+            None,
+            None,
+        )) else {
+            panic!("expected request event");
+        };
+        enqueue_payment_request(
+            &storage,
+            counterparty.clone(),
+            &app_id(),
+            &request,
+            timestamp(),
+        )
+        .await
+        .unwrap();
+        let terminal_event = if cancel {
             cancellation_raw_for_app(
                 "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d105",
                 request_id,
                 "competing-payer",
-            ),
+            )
+        } else {
             proof_raw_for_apps(
                 "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d106",
                 request_id,
                 "invoice-2026-0001",
                 "competing-payer",
                 "bitkit",
-            ),
-        ],
-        timestamp() + ChronoDuration::minutes(1),
-    )
-    .await;
+            )
+        };
+        persist_messages_at(
+            &storage,
+            counterparty.clone(),
+            vec![
+                acceptance_raw_for_app(
+                    "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
+                    request_id,
+                    "first-payer",
+                ),
+                acceptance_raw_for_app(
+                    "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103",
+                    request_id,
+                    "competing-payer",
+                ),
+                rejection_raw_for_app(
+                    "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104",
+                    request_id,
+                    "competing-payer",
+                ),
+                terminal_event,
+            ],
+            timestamp() + ChronoDuration::minutes(1),
+        )
+        .await;
 
-    let records = payment_request_records(&storage, &counterparty, timestamp())
-        .await
-        .unwrap();
+        let records = payment_request_records(&storage, &counterparty, timestamp())
+            .await
+            .unwrap();
 
-    assert_eq!(
-        records[0].state,
-        PaymentRequestLifecycleState::ProofSubmitted
-    );
-    assert_eq!(
-        records[0]
-            .payer_app_id
-            .as_ref()
-            .map(|app_id| app_id.as_str()),
-        Some("competing-payer")
-    );
-    assert_eq!(
-        records[0].accepted_event_id.as_deref(),
-        Some("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102")
-    );
-    assert!(records[0].rejected_event_id.is_none());
-    assert!(records[0].canceled_event_id.is_none());
-    assert_eq!(records[0].payment_proofs.len(), 1);
-    assert_eq!(
-        records[0].payment_proofs[0].payment_app_id.as_str(),
-        "bitkit"
-    );
-    assert!(records[0].invalid_reason.is_none());
+        assert_eq!(
+            records[0].state,
+            if cancel {
+                PaymentRequestLifecycleState::Canceled
+            } else {
+                PaymentRequestLifecycleState::ProofSubmitted
+            }
+        );
+        assert_eq!(
+            records[0]
+                .payer_app_id
+                .as_ref()
+                .map(|app_id| app_id.as_str()),
+            Some(if cancel {
+                "first-payer"
+            } else {
+                "competing-payer"
+            })
+        );
+        assert_eq!(
+            records[0].accepted_event_id.as_deref(),
+            Some("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102")
+        );
+        assert!(records[0].rejected_event_id.is_none());
+        if cancel {
+            assert_eq!(
+                records[0].canceled_event_id.as_deref(),
+                Some("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d105")
+            );
+            assert!(records[0].payment_proofs.is_empty());
+        } else {
+            assert!(records[0].canceled_event_id.is_none());
+            assert_eq!(records[0].payment_proofs.len(), 1);
+            assert_eq!(
+                records[0].payment_proofs[0].payment_app_id.as_str(),
+                "bitkit"
+            );
+        }
+        assert!(records[0].invalid_reason.is_none());
+    }
 }
 
 #[tokio::test]

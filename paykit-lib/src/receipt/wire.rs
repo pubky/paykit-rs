@@ -286,10 +286,16 @@ pub fn parse_receipt_access_json(json: &str) -> Result<ReceiptAccess> {
     ReceiptAccess::try_from(wire)
 }
 
-fn parse_receipt_access_header_ids(raw: &str) -> (Option<EventId>, Option<ReceiptId>) {
+fn parse_receipt_access_header(
+    raw: &str,
+) -> (Option<PaykitAppId>, Option<EventId>, Option<ReceiptId>) {
     let Ok(value) = serde_json::from_str::<JsonValue>(raw) else {
-        return (None, None);
+        return (None, None, None);
     };
+    let app_id = value
+        .get("app_id")
+        .and_then(JsonValue::as_str)
+        .and_then(|id| PaykitAppId::new(id).ok());
     let event_id = value
         .get("event_id")
         .and_then(JsonValue::as_str)
@@ -298,7 +304,7 @@ fn parse_receipt_access_header_ids(raw: &str) -> (Option<EventId>, Option<Receip
         .get("receipt_id")
         .and_then(JsonValue::as_str)
         .and_then(|id| ReceiptId::new(id).ok());
-    (event_id, receipt_id)
+    (app_id, event_id, receipt_id)
 }
 
 /// Parse a raw Private Application Message as a Receipt Access Event Message.
@@ -311,12 +317,8 @@ pub fn parse_receipt_access_event_message(
 ) -> Option<ReceiptAccessEventMessage> {
     let kind = message.known_kind()?;
     (kind == PrivateMessageKind::ReceiptAccess).then(|| {
-        let (event_id, receipt_id) = parse_receipt_access_header_ids(&message.raw_json);
+        let (app_id, event_id, receipt_id) = parse_receipt_access_header(&message.raw_json);
         let access = parse_receipt_access_json(&message.raw_json).map_err(|err| err.to_string());
-        let app_id = message
-            .app_id
-            .as_deref()
-            .and_then(|app_id| PaykitAppId::new(app_id).ok());
         ReceiptAccessEventMessage {
             kind,
             app_id,

@@ -3,9 +3,9 @@
 //! Recovery markers are public Pubky records used when a runtime decides an
 //! Encrypted Link with one counterparty can no longer be used safely. They are
 //! not sent over the broken link. Instead, each peer derives a pairwise marker
-//! path from its local Noise secret key and the counterparty Noise public key, writes a
-//! minimal marker to its own homeserver, and polls the counterparty's derived
-//! marker path.
+//! path from its local Noise secret key, the counterparty Noise public key, and
+//! the sorted Pubky identity pair. It writes a minimal marker to its own
+//! homeserver and polls the counterparty's derived marker path.
 //!
 //! Marker payloads intentionally contain only `version`, `kind`, `attempt_id`,
 //! and `created_at`. They do not contain payment data, endpoint data, message
@@ -22,7 +22,7 @@ use pubky::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    pubky_routing::fetch_text,
+    pubky_routing::{fetch_text, identity_pair_path_domain},
     validation::{invalid_data, invalid_wire, parse_utc_timestamp, validate_uuid_v4},
     PaykitError, Result, PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX,
 };
@@ -135,14 +135,25 @@ pub fn parse_encrypted_link_recovery_marker_json(
 }
 
 /// Compute local write and remote read paths for recovery markers.
+///
+/// Both Pubky identities bind the paths independently of the advertised Noise
+/// keys. The Noise DH secret keeps the paths private, and canonical identity
+/// ordering makes each peer's write path match the other's read path.
 pub fn encrypted_link_recovery_marker_paths(
     local_secret_key: &[u8; 32],
+    local_identity_public_key: &PublicKey,
+    remote_identity_public_key: &PublicKey,
     remote_noise_public_key: &PublicKey,
 ) -> (String, String) {
+    let path_domain = identity_pair_path_domain(
+        RECOVERY_MARKER_PATH_DOMAIN,
+        local_identity_public_key,
+        remote_identity_public_key,
+    );
     pubky_noise::path_derivation::derive_asymmetric_paths(
         local_secret_key,
         remote_noise_public_key,
-        RECOVERY_MARKER_PATH_DOMAIN,
+        &path_domain,
         PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX,
     )
 }
@@ -153,6 +164,8 @@ pub fn encrypted_link_recovery_marker_paths(
 /// marker path and the same local Noise key used for the peer relationship. The
 /// caller owns session creation, capability scope, key rotation, and recovery
 /// policy. Request timeouts are configured on the Pubky client.
+/// The session supplies the local Pubky identity; `remote_identity_public_key`
+/// selects the counterparty independently of its advertised Noise key.
 ///
 /// # Errors
 ///
@@ -161,11 +174,16 @@ pub fn encrypted_link_recovery_marker_paths(
 pub async fn publish_encrypted_link_recovery_marker(
     session: &PubkySession,
     local_secret_key: &[u8; 32],
+    remote_identity_public_key: &PublicKey,
     remote_noise_public_key: &PublicKey,
     marker: &EncryptedLinkRecoveryMarker,
 ) -> Result<String> {
-    let (write_path, _) =
-        encrypted_link_recovery_marker_paths(local_secret_key, remote_noise_public_key);
+    let (write_path, _) = encrypted_link_recovery_marker_paths(
+        local_secret_key,
+        session.info().public_key(),
+        remote_identity_public_key,
+        remote_noise_public_key,
+    );
     let payload = serialize_encrypted_link_recovery_marker(marker)?;
     session
         .storage()
@@ -184,6 +202,8 @@ pub async fn publish_encrypted_link_recovery_marker(
 /// session with write access to the derived marker path and owns session
 /// creation, capability scope, key rotation, recovery policy, and Pubky-client
 /// timeout configuration.
+/// The session supplies the local Pubky identity; the remote identity and Noise
+/// key must belong to the intended counterparty.
 ///
 /// # Errors
 ///
@@ -192,10 +212,15 @@ pub async fn publish_encrypted_link_recovery_marker(
 pub async fn remove_encrypted_link_recovery_marker(
     session: &PubkySession,
     local_secret_key: &[u8; 32],
+    remote_identity_public_key: &PublicKey,
     remote_noise_public_key: &PublicKey,
 ) -> Result<String> {
-    let (write_path, _) =
-        encrypted_link_recovery_marker_paths(local_secret_key, remote_noise_public_key);
+    let (write_path, _) = encrypted_link_recovery_marker_paths(
+        local_secret_key,
+        session.info().public_key(),
+        remote_identity_public_key,
+        remote_noise_public_key,
+    );
     match session.storage().delete(write_path.clone()).await {
         Ok(_) => Ok(write_path),
         Err(err) if is_not_found(&err) => Ok(write_path),
@@ -209,8 +234,8 @@ pub async fn remove_encrypted_link_recovery_marker(
 /// Fetch a counterparty's recovery marker, if one is present.
 ///
 /// This unauthenticated read returns `Ok(None)` when the derived marker resource
-/// is missing or empty. The caller supplies the peer identity and Noise keys and
-/// owns key rotation, recovery policy, and Pubky-client timeout configuration.
+/// is missing or empty. The caller supplies both Pubky identities and Noise keys
+/// and owns key rotation, recovery policy, and Pubky-client timeout configuration.
 ///
 /// # Errors
 ///
@@ -219,11 +244,16 @@ pub async fn remove_encrypted_link_recovery_marker(
 pub async fn fetch_encrypted_link_recovery_marker(
     storage: &PublicStorage,
     local_secret_key: &[u8; 32],
+    local_identity_public_key: &PublicKey,
     remote_identity_public_key: &PublicKey,
     remote_noise_public_key: &PublicKey,
 ) -> Result<Option<EncryptedLinkRecoveryMarker>> {
-    let (_, read_path) =
-        encrypted_link_recovery_marker_paths(local_secret_key, remote_noise_public_key);
+    let (_, read_path) = encrypted_link_recovery_marker_paths(
+        local_secret_key,
+        local_identity_public_key,
+        remote_identity_public_key,
+        remote_noise_public_key,
+    );
     let addr = format!("{remote_identity_public_key}{read_path}");
     fetch_text(
         storage,
@@ -292,15 +322,42 @@ mod tests {
     fn test_recovery_marker_paths_are_pairwise_symmetric() {
         let (alice_secret, alice_public) = secret_pair();
         let (bob_secret, bob_public) = secret_pair();
+        let alice_identity = Keypair::from_secret(&[1; 32]).public_key();
+        let bob_identity = Keypair::from_secret(&[2; 32]).public_key();
 
-        let (alice_write, alice_read) =
-            encrypted_link_recovery_marker_paths(&alice_secret, &bob_public);
-        let (bob_write, bob_read) =
-            encrypted_link_recovery_marker_paths(&bob_secret, &alice_public);
+        let (alice_write, alice_read) = encrypted_link_recovery_marker_paths(
+            &alice_secret,
+            &alice_identity,
+            &bob_identity,
+            &bob_public,
+        );
+        let (bob_write, bob_read) = encrypted_link_recovery_marker_paths(
+            &bob_secret,
+            &bob_identity,
+            &alice_identity,
+            &alice_public,
+        );
 
         assert_eq!(alice_write, bob_read);
         assert_eq!(alice_read, bob_write);
         assert!(alice_write.starts_with(PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX));
         assert_ne!(alice_write, alice_read);
+    }
+
+    #[test]
+    fn test_recovery_marker_paths_bind_both_identities_with_shared_noise_keys() {
+        let alice = Keypair::from_secret(&[1; 32]).public_key();
+        let bob = Keypair::from_secret(&[2; 32]).public_key();
+        let other = Keypair::from_secret(&[3; 32]).public_key();
+        let (secret, _) = secret_pair();
+        let (_, remote_noise) = secret_pair();
+        let original = encrypted_link_recovery_marker_paths(&secret, &alice, &bob, &remote_noise);
+
+        for (local, remote) in [(&alice, &other), (&other, &bob)] {
+            let changed =
+                encrypted_link_recovery_marker_paths(&secret, local, remote, &remote_noise);
+            assert_ne!(original.0, changed.0);
+            assert_ne!(original.1, changed.1);
+        }
     }
 }

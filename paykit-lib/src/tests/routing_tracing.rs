@@ -42,6 +42,8 @@ async fn test_recovery_marker_fetch_tracing_redacts_derived_address() {
     let remote_noise_keypair = Keypair::random();
     let (_, read_path) = encrypted_link_recovery_marker_paths(
         &local_keypair.secret_key(),
+        &local_keypair.public_key(),
+        &remote_identity_keypair.public_key(),
         &remote_noise_keypair.public_key(),
     );
     let address = format!("{}{}", remote_identity_keypair.public_key(), read_path);
@@ -57,6 +59,7 @@ async fn test_recovery_marker_fetch_tracing_redacts_derived_address() {
     let result = fetch_encrypted_link_recovery_marker(
         &storage,
         &local_keypair.secret_key(),
+        &local_keypair.public_key(),
         &remote_identity_keypair.public_key(),
         &remote_noise_keypair.public_key(),
     )

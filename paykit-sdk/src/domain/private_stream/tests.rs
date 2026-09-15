@@ -6,8 +6,37 @@ use crate::{
     storage::{
         EncryptedLinkStateRecord, InMemoryStorage, LinkedPeerRecord, PaymentRequestExecutionClaim,
     },
-    PaykitSdkError, PrivateStreamParseStatus,
+    IdentityState, PaykitSdkError, PrivateStreamParseStatus,
 };
+
+struct ValidatingStorage(InMemoryStorage);
+
+#[async_trait::async_trait]
+impl StorageAdapter for ValidatingStorage {
+    async fn transaction_erased<'a>(
+        &self,
+        f: crate::storage::StorageTransactionCallback<'a>,
+    ) -> Result<Box<dyn std::any::Any + Send>> {
+        self.0
+            .transaction_erased(Box::new(move |tx| {
+                crate::validate_storage_state(&tx.export_storage_state())?;
+                let result = f(tx)?;
+                crate::validate_storage_state(&tx.export_storage_state())?;
+                Ok(result)
+            }))
+            .await
+    }
+}
+
+fn validating_storage() -> ValidatingStorage {
+    ValidatingStorage(InMemoryStorage::from_state(crate::storage::StorageState {
+        identity_state: Some(IdentityState {
+            public_key: Some(counterparty()),
+            initialized_at: timestamp(),
+        }),
+        ..Default::default()
+    }))
+}
 
 fn counterparty() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
@@ -155,52 +184,219 @@ async fn test_persist_private_stream_batch_stores_messages_and_checkpoint() {
 }
 
 #[tokio::test]
-async fn test_persist_private_stream_batch_releases_claim_for_inbound_cancellation() {
-    let storage = InMemoryStorage::new();
-    let counterparty = counterparty();
-    persist_private_stream_batch(
-        &storage,
-        counterparty.clone(),
-        vec![private_message(&payment_request_raw("invoice-2026-0001"))],
-        None,
-        timestamp(),
-    )
-    .await
-    .unwrap();
-    storage
-        .transaction({
-            let counterparty = counterparty.clone();
-            move |tx| {
-                tx.save_payment_request_execution_claim(PaymentRequestExecutionClaim {
-                    counterparty,
-                    payment_request_id: "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33".into(),
-                    app_id: PaykitAppId::new("wallet").unwrap(),
-                    claimed_at: timestamp(),
-                });
-                Ok(())
-            }
-        })
+async fn test_persist_private_stream_batch_reconciles_terminal_execution_claims() {
+    let mut malformed: serde_json::Value =
+        serde_json::from_str(payment_request_cancellation_raw()).unwrap();
+    malformed["reason"] = serde_json::Value::Null;
+    for (raw, expected_state) in [
+        (
+            payment_request_cancellation_raw().to_owned(),
+            PaymentRequestLifecycleState::Canceled,
+        ),
+        (
+            payment_request_raw("conflicting-reference"),
+            PaymentRequestLifecycleState::InvalidConflict,
+        ),
+        (
+            malformed.to_string(),
+            PaymentRequestLifecycleState::InvalidConflict,
+        ),
+    ] {
+        let storage = validating_storage();
+        let counterparty = counterparty();
+        persist_private_stream_batch(
+            &storage,
+            counterparty.clone(),
+            vec![private_message(&payment_request_raw("invoice-2026-0001"))],
+            None,
+            timestamp(),
+        )
+        .await
+        .unwrap();
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    tx.save_payment_request_execution_claim(PaymentRequestExecutionClaim {
+                        counterparty,
+                        payment_request_id: "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33".into(),
+                        app_id: PaykitAppId::new("wallet").unwrap(),
+                        claimed_at: timestamp(),
+                    });
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+
+        let checkpoint = EncryptedLinkStateRecord {
+            counterparty: counterparty.clone(),
+            link_snapshot: None,
+            handshake_snapshot: None,
+            handshake_role: None,
+            generation: 1,
+            checkpointed_at: timestamp(),
+        };
+        let report = persist_private_stream_batch(
+            &storage,
+            counterparty.clone(),
+            vec![private_message(&raw)],
+            Some(checkpoint.clone()),
+            timestamp(),
+        )
         .await
         .unwrap();
 
-    persist_private_stream_batch(
-        &storage,
-        counterparty.clone(),
-        vec![private_message(payment_request_cancellation_raw())],
-        None,
-        timestamp(),
-    )
-    .await
-    .unwrap();
+        assert_eq!(report.stream_item_ids, vec![1]);
+        storage
+            .transaction(|tx| {
+                assert!(tx
+                    .payment_request_execution_claim(
+                        &counterparty,
+                        "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
+                    )
+                    .is_none());
+                let records =
+                    payment_request_records_from_transaction(tx, &counterparty, timestamp())?;
+                assert_eq!(records[0].state, expected_state);
+                assert_eq!(tx.encrypted_link_state(&counterparty), Some(checkpoint));
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+}
 
-    assert!(storage
-        .transaction(move |tx| Ok(tx.payment_request_execution_claim(
-            &counterparty,
-            "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
-        )))
+#[tokio::test]
+async fn test_persist_private_stream_batch_preserves_cached_receipt_conflict_history() {
+    struct Offline;
+
+    #[async_trait::async_trait]
+    impl crate::PubkySessionProvider for Offline {
+        async fn load_session_access(&self) -> Result<Option<crate::PubkySessionAccess>> {
+            Ok(None)
+        }
+
+        async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
+            Ok(None)
+        }
+
+        async fn clear_session_access(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::PaymentAdapter for Offline {}
+
+    for conflicting_event_id in [
+        "650e8400-e29b-41d4-a716-446655440000",
+        "750e8400-e29b-41d4-a716-446655440000",
+    ] {
+        let storage = validating_storage();
+        let counterparty = counterparty();
+        let event_id = "650e8400-e29b-41d4-a716-446655440000";
+        let receipt_id = "550e8400-e29b-41d4-a716-446655440000";
+        let raw = receipt_access_raw(event_id, receipt_id, "invoice-2026-0001");
+        persist_private_stream_batch_with_link_lease(
+            &storage,
+            counterparty.clone(),
+            vec![private_message(&raw)],
+            None,
+            Some(vec![PaykitAppId::new("bitkit").unwrap()]),
+            None,
+            timestamp(),
+        )
         .await
-        .unwrap()
-        .is_none());
+        .unwrap();
+        storage
+            .transaction(|tx| {
+                let mut access = tx
+                    .receipt_access_record_by_receipt_id(&counterparty, receipt_id)
+                    .unwrap();
+                access.retrieval_status = crate::ReceiptRetrievalStatus::Retrieved;
+                access.retrieval_attempted_at = Some(timestamp());
+                access.retrieved_at = Some(timestamp());
+                tx.save_receipt_record(crate::ReceiptRecord {
+                    issuer: counterparty.clone(),
+                    app_id: access.app_id.clone(),
+                    receipt_access_event_id: access.event_id.clone(),
+                    receipt_access_key_hash: crate::domain::receipts::receipt_access_key_hash(
+                        &access.key,
+                    ),
+                    receipt_id: receipt_id.into(),
+                    payment_reference: access.payment_reference.clone(),
+                    payment_request_id: None,
+                    billing_period: None,
+                    recipient_public_key: tx.load_identity_state().unwrap().public_key.unwrap(),
+                    payment_endpoint_identifier: None,
+                    amount: None,
+                    metadata: Default::default(),
+                    location: access.location.clone(),
+                    retrieved_at: timestamp(),
+                });
+                tx.save_receipt_access_record(access);
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let mut conflicting: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        conflicting["event_id"] = conflicting_event_id.into();
+        conflicting["payment_reference"] = "conflicting-reference".into();
+        let checkpoint = EncryptedLinkStateRecord {
+            counterparty: counterparty.clone(),
+            link_snapshot: None,
+            handshake_snapshot: None,
+            handshake_role: None,
+            generation: 1,
+            checkpointed_at: timestamp(),
+        };
+        let report = persist_private_stream_batch_with_link_lease(
+            &storage,
+            counterparty.clone(),
+            vec![private_message(&conflicting.to_string())],
+            Some(checkpoint.clone()),
+            Some(vec![PaykitAppId::new("bitkit").unwrap()]),
+            None,
+            timestamp(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.stream_item_ids, vec![1]);
+        storage
+            .transaction(|tx| {
+                assert!(tx.receipt_record(&counterparty, receipt_id).is_some());
+                assert_eq!(tx.private_stream_items(&counterparty).len(), 2);
+                assert_eq!(tx.encrypted_link_state(&counterparty), Some(checkpoint));
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let backup = crate::export_backup_state(&storage).await.unwrap();
+        let backup = serde_json::from_str(&serde_json::to_string(&backup).unwrap()).unwrap();
+        let restored = ValidatingStorage(InMemoryStorage::new());
+        crate::backup::restore_backup_state(&restored, backup)
+            .await
+            .unwrap();
+        assert_eq!(restored.0.snapshot().unwrap().receipt_records.len(), 1);
+        for storage in [storage, restored] {
+            let sdk = crate::PaykitSdk::new(
+                storage,
+                Offline,
+                Offline,
+                crate::PaykitSdkConfig::new("wallet").unwrap(),
+            );
+            assert!(sdk.receipt_records(&counterparty).await.unwrap().is_empty());
+            assert!(sdk.receipts_from(&counterparty).await.unwrap().is_empty());
+            assert!(sdk.receipts().await.unwrap().is_empty());
+            assert!(matches!(
+                sdk.retrieve_receipt(counterparty.clone(), receipt_id).await,
+                Err(PaykitSdkError::Protocol { .. })
+            ));
+        }
+    }
 }
 
 #[tokio::test]

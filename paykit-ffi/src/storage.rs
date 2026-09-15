@@ -6,7 +6,8 @@ use std::{
 use async_trait::async_trait;
 use paykit_sdk::storage::{
     decode_storage_state_blob, encode_storage_state_blob, run_storage_state_transaction,
-    PubkySharedStateStorage, StorageAdapter, StorageState, StorageTransactionCallback,
+    PubkySharedStateStorage, StorageAdapter, StorageKeyRotationCallback, StorageState,
+    StorageTransactionCallback,
 };
 use paykit_sdk::{validate_storage_state, PaykitSdkError, SdkBackupState};
 use serde::{Deserialize, Serialize};
@@ -81,6 +82,26 @@ impl StorageAdapter for FfiSdkStorageAdapter {
         match self {
             Self::Callback(storage) => storage.transaction_erased(f).await,
             Self::PubkyShared(storage) => storage.transaction_erased(f).await,
+        }
+    }
+
+    async fn rotate_paykit_identity_key_erased<'a>(
+        &self,
+        current_key: paykit_sdk::PaykitIdentitySecretKey,
+        replacement_key: paykit_sdk::PaykitIdentitySecretKey,
+        f: StorageKeyRotationCallback<'a>,
+    ) -> paykit_sdk::Result<Box<dyn Any + Send>> {
+        match self {
+            Self::Callback(storage) => {
+                storage
+                    .rotate_paykit_identity_key_erased(current_key, replacement_key, f)
+                    .await
+            }
+            Self::PubkyShared(storage) => {
+                storage
+                    .rotate_paykit_identity_key_erased(current_key, replacement_key, f)
+                    .await
+            }
         }
     }
 }

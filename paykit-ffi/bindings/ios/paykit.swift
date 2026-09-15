@@ -886,7 +886,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func issuedReceiptsTo(counterparty: String) async throws  -> [ReceiptIssuanceView]
 
     /**
-     * List locally tracked Linked Peer records.
+     * List Linked Peer records for the shared identity.
      */
     func linkedPeers() async throws  -> [LinkedPeerRecord]
 
@@ -2129,7 +2129,7 @@ open func issuedReceiptsTo(counterparty: String)async throws  -> [ReceiptIssuanc
 }
 
     /**
-     * List locally tracked Linked Peer records.
+     * List Linked Peer records for the shared identity.
      */
 open func linkedPeers()async throws  -> [LinkedPeerRecord]  {
     return
@@ -7564,7 +7564,7 @@ public func FfiConverterTypeLinkedPeerHandshakeReport_lower(_ value: LinkedPeerH
 
 
 /**
- * Locally tracked Linked Peer record.
+ * Linked Peer record for the shared identity.
  */
 public struct LinkedPeerRecord {
     /**
@@ -9455,7 +9455,7 @@ public struct PaymentRequestRecord {
      */
     public var proposalAppId: String?
     /**
-     * Payer application that first accepted the proposal.
+     * Payer application associated with the request, independent of its current execution claim.
      */
     public var payerAppId: String?
     /**
@@ -9546,7 +9546,7 @@ public struct PaymentRequestRecord {
          * Application that created the proposal.
          */proposalAppId: String?,
         /**
-         * Payer application that first accepted the proposal.
+         * Payer application associated with the request, independent of its current execution claim.
          */payerAppId: String?,
         /**
          * Paykit App currently preparing to execute this payment.
@@ -18813,7 +18813,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_issued_receipts_to() != 40853) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_linked_peers() != 57246) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_linked_peers() != 30970) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_list_payment_requests() != 43354) {

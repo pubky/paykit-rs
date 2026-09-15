@@ -293,6 +293,12 @@ Private Payment Lists are end-to-end encrypted via a Noise protocol handshake ma
 
 Storage paths for private Paykit data are derived per-counterparty pair using `pubky_noise::path_derivation::derive_asymmetric_paths`. Each party writes to a different path than they read from (`write_path` vs `read_path`), preventing third parties from enumerating communication relationships. The base prefix is `/pub/paykit/v0/private`; the derived hex component is appended as a child segment. Within each derived folder, `pubky-noise` manages individual file slots using a counter-based scheme — Paykit does not control file names or locations for private Paykit data.
 
+The path domain is `paykit-path-v0` followed by the two 32-byte Pubky identity
+keys in lexicographic byte order. The Noise DH secret remains part of the path
+hash. Copying another identity's advertised Noise key therefore does not share
+its stream, while apps under the same identity still share one path pair.
+Session-based helpers obtain the local identity from the Pubky session.
+
 #### Handshake Initiation
 - `initiate_encrypted_link(session, sender_noise_secret_key, receiver_identity_public_key, receiver_noise_public_key, outbox_client) -> Result<EncryptedLinkHandshake>`
   Initializes a Noise XX handshake as the **initiator**. Returns a handshake handle to be driven forward with `advance_handshake`.
@@ -501,6 +507,9 @@ An established `EncryptedLink` can be snapshotted, serialized to bytes, persiste
 - `restore_encrypted_link_from_config(config, remote_identity_public_key, snapshot) -> Result<EncryptedLink>`
   In-process restore. Reuses an existing `Arc<PubkyNoiseConfig>` (obtainable via `EncryptedLink::config()`) when the link needs rebuilding without an app restart.
 
+Both handshake and established-link restore validate that supplied config paths
+match the Pubky identity pair and Noise keys before restoring Noise state.
+
 After link restore, `max_send_retries` resets to `DEFAULT_MAX_SEND_RETRIES`. Call `EncryptedLink::set_max_send_retries` after restore if you need a non-default value.
 
 **Recovery markers:**
@@ -509,6 +518,11 @@ After link restore, `max_send_retries` resets to `DEFAULT_MAX_SEND_RETRIES`. Cal
 coordination when an Encrypted Link can no longer be trusted. `paykit-lib`
 provides stateless marker parsing, serialization, path derivation, and
 publish/fetch/remove helpers. SDKs decide when to publish or act on markers.
+Marker derivation uses the same sorted Pubky identity pair under the distinct
+`paykit-link-recovery-v0` domain, retaining the Noise DH secret. Pure path and
+unauthenticated fetch helpers require both identities explicitly; publish,
+remove, and outbox cleanup helpers take the remote identity and obtain the
+local identity from the supplied session.
 
 **When to snapshot:**
 

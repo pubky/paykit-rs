@@ -128,13 +128,8 @@ where
             {
                 Ok(Some(encrypted_json)) => encrypted_json,
                 Ok(None) => {
-                    // The persisted record error may carry the Receipt
-                    // Location: it stays in local storage, is redacted from
-                    // record Debug output, and the record carries the location
-                    // as a field anyway. The error returned to the caller must
-                    // not: it crosses the FFI boundary, where its message is
-                    // rendered verbatim into the generated Kotlin/Swift
-                    // exception.
+                    // Keep the Receipt Location in private SDK state, not in
+                    // caller-visible errors that become native exceptions.
                     let error = format!(
                         "encrypted receipt {} was not found at {}",
                         access.receipt_id, access.location

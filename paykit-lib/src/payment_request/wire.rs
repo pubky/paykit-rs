@@ -494,10 +494,20 @@ fn validate_app_id(app_id: &str, label: &'static str) -> Result<()> {
         .map_err(|err| invalid_data(format!("{label} contains invalid App ID"), Some(err.into())))
 }
 
-pub(super) fn parse_event_header_ids(json: &str) -> (Option<EventId>, Option<PaymentRequestId>) {
+pub(super) fn parse_event_header(
+    json: &str,
+) -> (
+    Option<PaykitAppId>,
+    Option<EventId>,
+    Option<PaymentRequestId>,
+) {
     let Ok(value) = serde_json::from_str::<JsonValue>(json) else {
-        return (None, None);
+        return (None, None, None);
     };
+    let app_id = value
+        .get("app_id")
+        .and_then(JsonValue::as_str)
+        .and_then(|value| PaykitAppId::new(value).ok());
     let event_id = value
         .get("event_id")
         .and_then(JsonValue::as_str)
@@ -506,7 +516,7 @@ pub(super) fn parse_event_header_ids(json: &str) -> (Option<EventId>, Option<Pay
         .get("payment_request_id")
         .and_then(JsonValue::as_str)
         .and_then(|value| PaymentRequestId::new(value).ok());
-    (event_id, payment_request_id)
+    (app_id, event_id, payment_request_id)
 }
 
 fn parse_basic_event_json(json: &str, context: &'static str) -> Result<BasicEventWire> {

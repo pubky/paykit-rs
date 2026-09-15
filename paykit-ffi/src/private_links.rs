@@ -104,7 +104,7 @@ pub enum FfiEncryptedLinkHandshakeRole {
     Unknown,
 }
 
-/// Locally tracked Linked Peer record.
+/// Linked Peer record for the shared identity.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct FfiLinkedPeerRecord {
     /// Counterparty public key.
@@ -263,7 +263,7 @@ pub struct FfiEncryptedLinkRecoveryMarkerReport {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
-    /// List locally tracked Linked Peer records.
+    /// List Linked Peer records for the shared identity.
     pub async fn linked_peers(&self) -> Result<Vec<FfiLinkedPeerRecord>, PaykitFfiError> {
         self.runtime
             .linked_peers()

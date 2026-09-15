@@ -210,13 +210,21 @@ pub(super) async fn receive_private_application_messages(
 /// This clears the local write path used by the counterparty as their read path.
 /// It is intended for recovery before starting a fresh Encrypted Link Handshake
 /// after the previous link state has been abandoned. The counterparty's outbox
-/// is not touched.
+/// is not touched. The local Pubky identity comes from `session`; the remote
+/// identity and Noise key must belong to the intended counterparty. The caller
+/// owns session creation, capability scope, key rotation, and request timeouts.
 pub async fn clear_encrypted_link_outbox(
     session: &PubkySession,
     local_secret_key: &[u8; 32],
+    remote_identity_public_key: &PublicKey,
     remote_noise_public_key: &PublicKey,
 ) -> Result<usize> {
-    let (write_path, _) = compute_private_payment_paths(local_secret_key, remote_noise_public_key);
+    let (write_path, _) = compute_private_payment_paths(
+        local_secret_key,
+        session.info().public_key(),
+        remote_identity_public_key,
+        remote_noise_public_key,
+    );
     let list_path = format!("{write_path}/");
     let storage = session.storage();
     let mut deleted_count = 0;

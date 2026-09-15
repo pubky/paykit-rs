@@ -43,6 +43,25 @@ pub const PAYKIT_PRIVATE_PATH_PREFIX: &str = "/pub/paykit/v0/private";
 pub const PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX: &str =
     "/pub/paykit/v0/encrypted-link-recovery";
 
+pub(crate) fn identity_pair_path_domain(
+    domain: &[u8],
+    local_identity_public_key: &PublicKey,
+    remote_identity_public_key: &PublicKey,
+) -> Vec<u8> {
+    let mut identities = [
+        local_identity_public_key.to_bytes(),
+        remote_identity_public_key.to_bytes(),
+    ];
+    identities.sort_unstable();
+    // Fixed-width keys make the pair unambiguous; sorting preserves peer parity.
+    // The caller still derives paths with a Noise DH secret to keep them private.
+    let mut path_domain = Vec::with_capacity(domain.len() + 64);
+    path_domain.extend_from_slice(domain);
+    path_domain.extend_from_slice(&identities[0]);
+    path_domain.extend_from_slice(&identities[1]);
+    path_domain
+}
+
 const LIST_PAGE_LIMIT: u16 = 100;
 const LIST_MAX_PAGES: usize = 100;
 

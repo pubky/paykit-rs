@@ -79,6 +79,55 @@ async fn test_independent_apps_register_concurrently_without_lost_updates() {
 }
 
 #[tokio::test]
+async fn test_unchanged_app_publication_initializes_noise_key() {
+    let testnet = build_testnet().await;
+    let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
+    let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
+    let result = session_bootstrap(&testnet, "bitkit.test")
+        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .await
+        .unwrap();
+    let storage = InMemoryStorage::new();
+    let mut public_only_access = result.access.clone();
+    public_only_access.local_secret_key = None;
+    let app = PaykitApp::new(
+        "Bitkit",
+        PaykitAppCapabilities {
+            private_payments: false,
+            payment_requests: false,
+            receipts: false,
+            outgoing_payments: false,
+        },
+    )
+    .unwrap();
+    let public_only = PaykitSdk::new(
+        storage.clone(),
+        TestnetSessionProvider::new(public_only_access),
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new("bitkit").unwrap(),
+    );
+    public_only.initialize().await.unwrap();
+    let registry = public_only.publish_paykit_app(app.clone()).await.unwrap();
+    assert!(registry.noise_public_key().is_none());
+
+    let private_capable = PaykitSdk::new(
+        storage,
+        TestnetSessionProvider::new(result.access),
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new("bitkit").unwrap(),
+    );
+    private_capable.initialize().await.unwrap();
+    let published = private_capable.publish_paykit_app(app).await.unwrap();
+    assert!(published.noise_public_key().is_some());
+    let fetched = private_capable
+        .paykit_app_registry(result.public_key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched, published);
+}
+
+#[tokio::test]
 async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sign_out() {
     let testnet = build_testnet().await;
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());

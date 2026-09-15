@@ -171,8 +171,6 @@ where
                 stream_item_ids: Vec::with_capacity(messages.len()),
                 event_conflicts: Vec::new(),
             };
-            let mut terminal_payment_request_ids = Vec::new();
-
             for message in messages {
                 let receive_batch_id = receive_batch_id.expect("nonempty batch has an id");
                 let PrivateStreamMessageClassification {
@@ -181,7 +179,6 @@ where
                     event,
                     receipt_access,
                     app_id: classification_app_id,
-                    terminal_payment_request_id,
                 } = classify_private_application_message(&message);
                 let stream_item_id = tx.insert_private_stream_item(NewPrivateStreamItem::new(
                     NewPrivateStreamItemDetails {
@@ -213,9 +210,6 @@ where
                 });
 
                 if matches!(dedupe_outcome, Some(EventDedupeOutcome::First)) {
-                    if let Some(payment_request_id) = terminal_payment_request_id {
-                        terminal_payment_request_ids.push(payment_request_id);
-                    }
                     if let Some(access) = receipt_access.as_ref() {
                         tx.save_receipt_access_record(ReceiptAccessRecord::from_access(
                             counterparty.clone(),
@@ -241,23 +235,21 @@ where
                 report.stream_item_ids.push(stream_item_id);
             }
 
-            if !terminal_payment_request_ids.is_empty() {
+            if !report.stream_item_ids.is_empty() {
+                // Conflicts can invalidate earlier events, not only requests named by this batch.
                 let records =
                     payment_request_records_from_transaction(tx, &counterparty, received_at)?;
-                for payment_request_id in terminal_payment_request_ids {
-                    if records.iter().any(|record| {
-                        record.payment_request_id == payment_request_id
-                            && matches!(
-                                record.state,
-                                PaymentRequestLifecycleState::Canceled
-                                    | PaymentRequestLifecycleState::Rejected
-                                    | PaymentRequestLifecycleState::ProofSubmitted
-                                    | PaymentRequestLifecycleState::InvalidConflict
-                            )
-                    }) {
+                for record in records {
+                    if matches!(
+                        record.state,
+                        PaymentRequestLifecycleState::Canceled
+                            | PaymentRequestLifecycleState::Rejected
+                            | PaymentRequestLifecycleState::ProofSubmitted
+                            | PaymentRequestLifecycleState::InvalidConflict
+                    ) {
                         tx.remove_payment_request_execution_claim(
                             &counterparty,
-                            &payment_request_id,
+                            &record.payment_request_id,
                         );
                     }
                 }
@@ -289,7 +281,6 @@ pub(crate) struct PrivateStreamMessageClassification {
     pub(crate) event: Option<PrivateStreamEventHeader>,
     pub(crate) receipt_access: Option<ReceiptAccess>,
     pub(crate) app_id: Option<PaykitAppId>,
-    pub(crate) terminal_payment_request_id: Option<String>,
 }
 
 pub(crate) struct PrivateStreamEventHeader {
@@ -315,7 +306,6 @@ pub(crate) fn classify_private_application_message(
             event: None,
             receipt_access: None,
             app_id,
-            terminal_payment_request_id: None,
         };
     };
 
@@ -328,7 +318,6 @@ pub(crate) fn classify_private_application_message(
                     event: None,
                     receipt_access: None,
                     app_id: Some(list.app_id().clone()),
-                    terminal_payment_request_id: None,
                 },
                 Err(err) => PrivateStreamMessageClassification {
                     status: PrivateStreamParseStatus::MalformedRecognized,
@@ -336,7 +325,6 @@ pub(crate) fn classify_private_application_message(
                     event: None,
                     receipt_access: None,
                     app_id: None,
-                    terminal_payment_request_id: None,
                 },
             }
         }
@@ -361,7 +349,6 @@ pub(crate) fn classify_private_application_message(
                 event,
                 receipt_access: parsed.and_then(|parsed| parsed.parsed_access().cloned()),
                 app_id,
-                terminal_payment_request_id: None,
             }
         }
         PrivateMessageKind::PaymentRequest
@@ -377,14 +364,6 @@ pub(crate) fn classify_private_application_message(
                     event_id: event_id.as_str().to_owned(),
                     event_kind: kind.as_str().to_owned(),
                 });
-            let terminal_payment_request_id = parsed
-                .as_ref()
-                .filter(|parsed| {
-                    parsed.is_valid()
-                        && parsed.kind() == PrivateMessageKind::PaymentRequestCancellation
-                })
-                .and_then(|parsed| parsed.payment_request_id())
-                .map(|payment_request_id| payment_request_id.as_str().to_owned());
             PrivateStreamMessageClassification {
                 status: status_from_event_validity(
                     parsed.as_ref().is_some_and(|parsed| parsed.is_valid()),
@@ -396,7 +375,6 @@ pub(crate) fn classify_private_application_message(
                 event,
                 receipt_access: None,
                 app_id: parsed.as_ref().and_then(|parsed| parsed.app_id().cloned()),
-                terminal_payment_request_id,
             }
         }
     }

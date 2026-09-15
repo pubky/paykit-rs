@@ -250,19 +250,22 @@ fn payment_request_event_serialization_supports_outbound_idempotency() {
 }
 
 #[test]
-fn payment_request_event_parser_uses_raw_json_kind() {
+fn payment_request_event_parser_uses_raw_json_headers() {
     let request = payment_request();
     let serialized = serialize_payment_request_event(
         &test_app_id(),
         &PaymentRequestEvent::Request(request.clone()),
     )
     .unwrap();
-    let stale_message = private_application_message(PrivateMessageKind::ReceiptAccess, &serialized);
+    let mut stale_message =
+        private_application_message(PrivateMessageKind::ReceiptAccess, &serialized);
+    stale_message.app_id = Some("different-app".into());
 
     let parsed = parse_payment_request_event_message(&stale_message)
         .expect("raw JSON kind should route to Payment Request parser");
 
     assert_eq!(parsed.kind(), PrivateMessageKind::PaymentRequest);
+    assert_eq!(parsed.app_id(), Some(&test_app_id()));
     assert_eq!(
         parsed.parsed_event(),
         Some(&PaymentRequestEvent::Request(request))

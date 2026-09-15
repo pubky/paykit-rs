@@ -3,7 +3,7 @@ use tracing::{debug, instrument};
 use crate::{PaykitAppId, PaykitError, PublicKey, Result};
 
 use super::{
-    paths::compute_private_payment_paths,
+    paths::{compute_private_payment_paths, validate_private_payment_paths},
     private_application_message::{self, PrivateApplicationMessage},
     EncryptedLinkSnapshot,
 };
@@ -582,8 +582,12 @@ pub async fn restore_encrypted_link(
 ) -> Result<EncryptedLink> {
     debug!("restoring Encrypted Link from snapshot (raw params)");
 
-    let (write_path, read_path) =
-        compute_private_payment_paths(&secret_key, snapshot.remote_noise_public_key());
+    let (write_path, read_path) = compute_private_payment_paths(
+        &secret_key,
+        session.info().public_key(),
+        remote_identity_public_key,
+        snapshot.remote_noise_public_key(),
+    );
 
     let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
         secret_key,
@@ -610,6 +614,8 @@ pub async fn restore_encrypted_link(
 ///
 /// Restored links reset `max_send_retries` to [`DEFAULT_MAX_SEND_RETRIES`].
 /// `remote_identity_public_key` must match `snapshot.recipient()`.
+/// The config paths must match the session's local Pubky identity, the remote
+/// identity, and the Noise keys; mismatches return [`PaykitError::Validation`].
 #[instrument(skip(config, snapshot))]
 pub async fn restore_encrypted_link_from_config(
     config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
@@ -643,6 +649,11 @@ async fn restore_encrypted_link_inner(
     }
 
     let remote_noise_public_key = snapshot.remote_noise_public_key().clone();
+    validate_private_payment_paths(
+        &config,
+        remote_identity_public_key,
+        &remote_noise_public_key,
+    )?;
     let state = snapshot.into_state();
     let encryptor = pubky_noise::PubkyNoiseEncryptor::restore(
         config.clone(),
