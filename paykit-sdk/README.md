@@ -242,48 +242,50 @@ let current = sdk
 let all = sdk.list_allowances(AllowanceFilter::default()).await?;
 ```
 
-Ordinary one-time and Recurring Payment Requests do not change when an
-Allowance is present. They carry no Allowance ID and keep the existing proposal,
-Acceptance, Cancellation, Payment Proof, endpoint-resolution, and recurrence
-rules. The SDK supplies durable lifecycle history; the wallet owns the decision
-to use it.
+Ordinary one-time and Recurring Payment Requests carry no Allowance ID and keep
+the existing proposal, Acceptance, Cancellation, endpoint-resolution, and
+recurrence rules. Payment Proof may report the Allowance actually used through
+an optional `allowance_id`; it remains informational and never updates usage.
+The lifecycle APIs supply durable evidence, not a decision to pay.
 
-Before automatic work, wallet code must apply all of these local requirements:
+Before automatic work, an integrating wallet must satisfy these requirements:
 
-- automatic handling is locally enabled and exactly one accepted Allowance
-  matches the request on the exact Encrypted Link;
-- the first selected-Allowance or manual-only decision is durably recorded
-  before side effects; no match or ambiguity is manual-only, and later state
-  changes never retroactively rematch it;
-- a Recurring Payment Request pins that first Allowance, then rechecks its
-  lifecycle, terms, current capacity, endpoint, and each Billing Period when
-  payment becomes due;
-- a semantic payment key prevents duplicate automatic or manual execution;
+- automatic handling is locally enabled and wallet policy selects one matching
+  accepted Allowance on the exact Encrypted Link; that Allowance must cover the
+  entire payment without pooling capacity from other Allowances;
+- the selected association is durably recorded before side effects and survives
+  restart, replay, and changes to wallet priorities;
+- a temporary inability to pay can be deferred for policy-controlled
+  reconsideration under the same association; an explicit manual-only decision
+  is never cleared by background changes;
+- a Recurring Payment Request retains its association, with an explicit
+  user-authorized revision required to select replacement authority for future
+  unpaid Billing Periods; prior payments and reservations keep their original
+  attribution and accounting;
+- the same semantic payment key coordinates automatic and manual execution
+  across all Allowances, including successful and unresolved payments;
 - only committed automatic payments and unresolved automatic reservations
-  consume Allowance capacity; manual payments do not;
-- capacity is reserved atomically before an irreversible payment side effect,
-  and pending, unknown, or recovery-incomplete outcomes remain reserved; and
-- a verified successful payment commits the reservation, a confirmed terminal
-  failure before settlement releases it, and once an occurrence is durably
-  marked manual-only it is never retried automatically;
-- if automatic handling stops before Acceptance, the request stays on its
-  proposed manual flow only while it remains actionable; if it stops after
-  Acceptance on a non-cancelled request, the explicit-payment path is used
-  without sending a second Acceptance;
-- the accepted-but-unpaid manual path is exposed only after durable payment and
-  reservation state proves another successful or unresolved attempt cannot
-  exist; that state is wallet-local, must not make every accepted request
-  payable, must not widen an existing query whose purpose is finding proposals
-  that need a payer response, and for a Recurring Payment Request applies only
-  to the affected Billing Period; and
-- an ordinary Payment Proof remains valid for an execution that crossed the
-  irreversible boundary before Cancellation.
+  consume Allowance capacity; admission checks and reservations are atomic;
+- verified success commits a reservation, confirmed failure without settlement
+  releases it, and pending, unknown, or recovery-incomplete outcomes stay
+  reserved until reconciled;
+- every reconsideration repeats current lifecycle, time, capacity, endpoint,
+  and local safeguard checks; an accepted request never sends another
+  Acceptance merely because payment was deferred; and
+- explicit payment of an accepted-but-unpaid occurrence requires complete
+  payment and reservation evidence and coordination with automatic admission.
+
+The shared SDK evaluation and accounting work extends these lifecycle APIs in
+follow-on stacked PRs. Wallets retain consent, selection policy, scheduling,
+endpoint and transfer validation, signing, execution, and settlement decisions.
 
 During incomplete history or Encrypted Link recovery, automatic handling must
-fail closed. Restore the full SDK backup, relink the same Receiver References,
-then rederive a consistent history before resuming. See
-[Allowances](../specs/allowances.md) for the normative matching, usage,
-reservation, and execution-boundary rules.
+fail closed. Recovery must retain associations, usage, unresolved reservations,
+and the evaluation-time watermark. Restoring an old but valid backup does not
+prove accounting freshness; reconcile it with authoritative wallet execution
+records before resuming automatic handling. Optional Payment Proofs cannot
+reconstruct complete spending history. See [Allowances](../specs/allowances.md)
+for the normative rules.
 
 ## Profile And Contact Namespace
 
