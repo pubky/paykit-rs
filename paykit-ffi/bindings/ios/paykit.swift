@@ -10351,6 +10351,10 @@ public struct PaymentProofRecord {
      */
     public var paymentEndpointIdentifier: String
     /**
+     * Optional canonical Allowance ID reported for this payment execution.
+     */
+    public var allowanceId: String?
+    /**
      * Method-specific proof object encoded as JSON.
      */
     public var proof: PrivateJsonObject
@@ -10384,6 +10388,9 @@ public struct PaymentProofRecord {
          * Payment Endpoint Identifier used for payment.
          */paymentEndpointIdentifier: String,
         /**
+         * Optional canonical Allowance ID reported for this payment execution.
+         */allowanceId: String?,
+        /**
          * Method-specific proof object encoded as JSON.
          */proof: PrivateJsonObject,
         /**
@@ -10396,6 +10403,7 @@ public struct PaymentProofRecord {
         self.paymentReference = paymentReference
         self.billingPeriod = billingPeriod
         self.paymentEndpointIdentifier = paymentEndpointIdentifier
+        self.allowanceId = allowanceId
         self.proof = proof
         self.recordedAt = recordedAt
     }
@@ -10421,6 +10429,7 @@ public struct FfiConverterTypePaymentProofRecord: FfiConverterRustBuffer {
                 paymentReference: FfiConverterTypePaymentReference.read(from: &buf),
                 billingPeriod: FfiConverterOptionTypeBillingPeriod.read(from: &buf),
                 paymentEndpointIdentifier: FfiConverterString.read(from: &buf),
+                allowanceId: FfiConverterOptionString.read(from: &buf),
                 proof: FfiConverterTypePrivateJsonObject.read(from: &buf),
                 recordedAt: FfiConverterString.read(from: &buf)
         )
@@ -10434,6 +10443,7 @@ public struct FfiConverterTypePaymentProofRecord: FfiConverterRustBuffer {
         FfiConverterTypePaymentReference.write(value.paymentReference, into: &buf)
         FfiConverterOptionTypeBillingPeriod.write(value.billingPeriod, into: &buf)
         FfiConverterString.write(value.paymentEndpointIdentifier, into: &buf)
+        FfiConverterOptionString.write(value.allowanceId, into: &buf)
         FfiConverterTypePrivateJsonObject.write(value.proof, into: &buf)
         FfiConverterString.write(value.recordedAt, into: &buf)
     }
@@ -10468,6 +10478,11 @@ public struct PaymentProofSubmission {
      */
     public var paymentEndpointIdentifier: String
     /**
+     * Canonical Allowance ID from the wallet's persisted payment association, when used.
+     * This field reports usage; it does not authorize or account for payment.
+     */
+    public var allowanceId: String?
+    /**
      * Method-specific proof object encoded as JSON.
      */
     public var proof: PrivateJsonObject
@@ -10482,10 +10497,15 @@ public struct PaymentProofSubmission {
          * Payment Endpoint Identifier used for payment.
          */paymentEndpointIdentifier: String,
         /**
+         * Canonical Allowance ID from the wallet's persisted payment association, when used.
+         * This field reports usage; it does not authorize or account for payment.
+         */allowanceId: String?,
+        /**
          * Method-specific proof object encoded as JSON.
          */proof: PrivateJsonObject) {
         self.billingPeriod = billingPeriod
         self.paymentEndpointIdentifier = paymentEndpointIdentifier
+        self.allowanceId = allowanceId
         self.proof = proof
     }
 }
@@ -10505,6 +10525,7 @@ public struct FfiConverterTypePaymentProofSubmission: FfiConverterRustBuffer {
             try PaymentProofSubmission(
                 billingPeriod: FfiConverterOptionTypeBillingPeriod.read(from: &buf),
                 paymentEndpointIdentifier: FfiConverterString.read(from: &buf),
+                allowanceId: FfiConverterOptionString.read(from: &buf),
                 proof: FfiConverterTypePrivateJsonObject.read(from: &buf)
         )
     }
@@ -10512,6 +10533,7 @@ public struct FfiConverterTypePaymentProofSubmission: FfiConverterRustBuffer {
     public static func write(_ value: PaymentProofSubmission, into buf: inout [UInt8]) {
         FfiConverterOptionTypeBillingPeriod.write(value.billingPeriod, into: &buf)
         FfiConverterString.write(value.paymentEndpointIdentifier, into: &buf)
+        FfiConverterOptionString.write(value.allowanceId, into: &buf)
         FfiConverterTypePrivateJsonObject.write(value.proof, into: &buf)
     }
 }
