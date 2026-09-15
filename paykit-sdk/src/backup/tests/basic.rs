@@ -47,6 +47,7 @@ async fn test_export_backup_state_redacts_debug() {
 async fn test_restore_backup_state_rejects_wrong_local_receiver_path() {
     let storage = InMemoryStorage::new();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: other_receiver_path(),
         identity_state: None,
@@ -76,6 +77,7 @@ async fn test_restore_backup_state_marks_missing_link_checkpoint_recovery_requir
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
@@ -254,6 +256,7 @@ async fn test_restore_backup_state_rejects_inconsistent_contact_marker_state() {
     let mut contact = contact_record(contact_public_key);
     contact.public_contact_published_at = Some(timestamp());
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key)),
@@ -290,6 +293,7 @@ async fn test_restore_backup_state_rejects_dual_contact_marker_timestamps() {
     contact.public_contact_marker_status = crate::PublicationStatus::Failed;
     contact.public_contact_last_error = Some("failed".into());
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key)),
@@ -323,6 +327,7 @@ async fn test_restore_backup_state_accepts_pending_contact_marker_removal() {
         .mark_public_contact_published(timestamp())
         .mark_public_contact_removal_pending(receiver_path(), timestamp());
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key)),
@@ -370,6 +375,7 @@ async fn test_restore_backup_state_preserves_next_peer_lease_id() {
         .await
         .unwrap();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: None,

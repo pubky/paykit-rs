@@ -571,6 +571,7 @@ async fn seed_initialized_identity_and_handshake(
         .unwrap();
 }
 
+mod allowance_accounting;
 mod allowances;
 mod backup;
 mod contacts;
