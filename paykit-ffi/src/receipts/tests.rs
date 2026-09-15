@@ -39,7 +39,7 @@ fn test_receipt_draft_parses_inputs() {
         "550e8400-e29b-41d4-a716-446655440000"
     );
     assert_eq!(parsed.payment_reference.as_str(), "invoice-1");
-    assert_eq!(parsed.amount.as_ref().unwrap().asset, "usd");
+    assert_eq!(parsed.amount.as_ref().unwrap().asset(), "usd");
     assert_eq!(
         parsed
             .metadata

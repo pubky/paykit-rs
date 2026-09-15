@@ -134,10 +134,7 @@ impl TryFrom<FfiBillingPeriod> for BillingPeriod {
     type Error = PaykitFfiError;
 
     fn try_from(value: FfiBillingPeriod) -> Result<Self, Self::Error> {
-        Ok(Self {
-            starts_at: value.starts_at,
-            ends_at: value.ends_at,
-        })
+        Self::new(value.starts_at, value.ends_at).map_err(|err| validation_error(err.to_string()))
     }
 }
 
@@ -157,13 +154,14 @@ impl TryFrom<FfiPaymentRequestRecurrence> for Recurrence {
     type Error = PaykitFfiError;
 
     fn try_from(value: FfiPaymentRequestRecurrence) -> Result<Self, Self::Error> {
-        Ok(Self {
+        Self::try_from(paykit_lib::RecurrenceConfig {
             every: value.every,
             unit: parse_recurrence_unit(&value.unit)?,
             starts_at: value.starts_at,
             anchor: value.anchor,
             ends_at: value.ends_at,
         })
+        .map_err(|err| validation_error(err.to_string()))
     }
 }
 
@@ -171,20 +169,22 @@ impl TryFrom<FfiPaymentRequestTerms> for PaymentRequestTerms {
     type Error = PaykitFfiError;
 
     fn try_from(value: FfiPaymentRequestTerms) -> Result<Self, Self::Error> {
-        Ok(Self {
-            amount: PaymentAmount::new(value.amount.value, value.amount.asset)
+        Self::builder(
+            PaymentAmount::new(value.amount.value, value.amount.asset)
                 .map_err(|err| validation_error(err.to_string()))?,
-            payment_reference: PaymentReference::new(value.payment_reference.export_text())
+            PaymentReference::new(value.payment_reference.export_text())
                 .map_err(|err| validation_error(err.to_string()))?,
-            proposal_expires_at: value.proposal_expires_at,
-            recurrence: value.recurrence.map(TryInto::try_into).transpose()?,
-            accepted_payment_endpoint_identifiers: value
+            value
                 .accepted_payment_endpoint_identifiers
                 .into_iter()
                 .map(parse_endpoint_identifier)
                 .collect::<Result<Vec<_>, _>>()?,
-            metadata: value.metadata.parse_map("Payment Request metadata")?,
-        })
+        )
+        .proposal_expires_at(value.proposal_expires_at)
+        .recurrence(value.recurrence.map(TryInto::try_into).transpose()?)
+        .metadata(value.metadata.parse_map("Payment Request metadata")?)
+        .build()
+        .map_err(|err| validation_error(err.to_string()))
     }
 }
 

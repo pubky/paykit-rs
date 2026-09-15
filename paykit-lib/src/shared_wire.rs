@@ -34,23 +34,18 @@ pub(crate) struct PaymentAmountWire {
     pub(crate) asset: String,
 }
 
-// Intentionally performs no validation so deserialization can carry raw wire
-// strings across the parse boundary. Callers must validate the resulting
-// `PaymentAmount` before treating it as well-formed.
-impl From<PaymentAmountWire> for PaymentAmount {
-    fn from(wire: PaymentAmountWire) -> Self {
-        Self {
-            value: wire.value,
-            asset: wire.asset,
-        }
+impl TryFrom<PaymentAmountWire> for PaymentAmount {
+    type Error = crate::PaykitError;
+    fn try_from(wire: PaymentAmountWire) -> crate::Result<Self> {
+        Self::new(wire.value, wire.asset)
     }
 }
 
 impl From<&PaymentAmount> for PaymentAmountWire {
     fn from(amount: &PaymentAmount) -> Self {
         Self {
-            value: amount.value.clone(),
-            asset: amount.asset.clone(),
+            value: amount.value().to_owned(),
+            asset: amount.asset().to_owned(),
         }
     }
 }
@@ -62,20 +57,30 @@ pub(crate) struct BillingPeriodWire {
     pub(crate) ends_at: String,
 }
 
-impl From<BillingPeriodWire> for BillingPeriod {
-    fn from(wire: BillingPeriodWire) -> Self {
-        Self {
-            starts_at: wire.starts_at,
-            ends_at: wire.ends_at,
-        }
+impl TryFrom<BillingPeriodWire> for BillingPeriod {
+    type Error = crate::PaykitError;
+    fn try_from(wire: BillingPeriodWire) -> crate::Result<Self> {
+        Self::new(wire.starts_at, wire.ends_at)
     }
 }
 
 impl From<&BillingPeriod> for BillingPeriodWire {
     fn from(period: &BillingPeriod) -> Self {
         Self {
-            starts_at: period.starts_at.clone(),
-            ends_at: period.ends_at.clone(),
+            starts_at: period.starts_at().to_owned(),
+            ends_at: period.ends_at().to_owned(),
         }
+    }
+}
+
+impl PaymentAmountWire {
+    pub(crate) fn try_into_with_label(self, label: &'static str) -> crate::Result<PaymentAmount> {
+        PaymentAmount::new_with_label(self.value, self.asset, label)
+    }
+}
+
+impl BillingPeriodWire {
+    pub(crate) fn try_into_with_label(self, label: &str) -> crate::Result<BillingPeriod> {
+        BillingPeriod::new_with_label(self.starts_at, self.ends_at, label)
     }
 }
