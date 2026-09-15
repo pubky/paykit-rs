@@ -1425,3 +1425,65 @@ Platform tests:
   Request execution coordinate without rewinding private message counters.
 - Explicit connected-key or linked-receiver records for aggregating multiple
   app-owned Paykit runtimes under one user identity.
+
+## Durable Allowance payment accounting
+
+The runtime exposes one wallet-coordinated ledger through
+`allowance_accounting_state` and `reconcile_allowance_accounting`. A missing
+ledger does not mean zero usage: both automatic and manual admission require
+explicit complete wallet reconciliation first. The wallet must reconcile its
+external execution/idempotency records and every payment path. Empty recovered
+history attests no prior payments when initializing; it never clears existing
+evidence. Only explicit outcome reports resolve already retained uncertainty.
+Payment Proofs and Receipts never construct, commit, or release this accounting.
+
+`evaluate_allowance_candidates` returns advisory static/time/lifecycle results.
+`select_allowance` persists exactly one choice. The atomic
+`accept_payment_request_automatically` operation persists that choice and queues
+ordinary Acceptance after current wallet preflight checks. Acceptance consumes
+no capacity. Existing manual Acceptance, Rejection, and Cancellation operations
+serialize with the same ledger and recheck current request state before queuing.
+A manual response excludes conflicting automatic handling; it can revoke an
+unissued preparation but never releases a Submitted or Unknown attempt.
+
+`reserve_automatic_payment` and `reserve_manual_payment` share one transaction
+key: actual local Pubky key and receiver path, counterparty Pubky key and receiver
+path, canonical Payment Request ID, and normalized UTC Billing Period instants
+when recurring. Allowance ID is excluded from this key. Automatic reservation
+reruns shared exact decimal, period, lifetime, and trusted-time checks using
+complete successful and unresolved automatic usage. Manual payments consume no
+Allowance capacity but exclude automatic payment of the same occurrence.
+The trusted-time watermark advances even when evaluation is blocked.
+
+A Ready reservation has status Prepared and grants no execution authority.
+Immediately before execution the wallet calls `begin_payment_execution` with
+fresh endpoint, actual amount, scheduling, local enablement, and private checks.
+Only Ready with status Submitted authorizes a wallet handoff. The SDK rechecks
+current lifecycle and the effective association revision in that transaction.
+The wallet must use the returned attempt ID for external idempotency and run one
+coordinated admission/execution runtime. SDK storage and external settlement
+cannot commit atomically: a crash after handoff issuance requires external
+reconciliation, never a second execution or timeout-based release. The wallet
+reports definitive pre-settlement failure, verified success, or Unknown through
+`record_payment_outcome`; verified success cannot be undone by refunds or replay.
+When a pre-handoff check blocks, the wallet must abort execution and report
+verified failure before releasing or replacing its reservation.
+
+`defer_payment_occurrence` records a temporary endpoint or policy failure for
+later full reconsideration. It cannot relabel unresolved execution as retryable.
+`mark_payment_manual_only` is sticky. Explicit future-only
+`authorize_allowance_reassociation` appends a user authorization and revision;
+old usage and attempts remain on the original Allowance, earlier occurrences and
+other requests remain independent, and manual-only decisions survive. Background
+matching cannot change the persisted choice or provide this user authorization.
+
+SDK backup schema and both platform storage envelopes are version 2. Older
+formats are rejected; no development migration invents missing accounting.
+Restore preserves newer destination evidence for the same actual payer identity,
+merges histories conservatively, invalidates prepared handoffs, and blocks new
+admission until complete wallet reconciliation. Receiver Noise key rotation
+retains payment history and imposes the same recovery block. Explicit sign-out,
+forget, or a different actual Pubky identity retains the existing privacy-clearing
+semantics; returning to an identity with missing history requires complete wallet
+reconciliation before further admission. Restored identifiers must have canonical
+lowercase UUID-v4 spelling, and malformed or inconsistent accounting fails closed.

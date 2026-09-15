@@ -221,10 +221,22 @@ where
 {
     storage
         .transaction(|tx| {
-            let history = AllowanceLinkHistory::load(tx, counterparty, counterparty_receiver_path);
-            Ok(derive_records(&history, None))
+            Ok(allowance_records_in_transaction(
+                tx,
+                counterparty,
+                counterparty_receiver_path,
+            ))
         })
         .await
+}
+
+pub(crate) fn allowance_records_in_transaction(
+    tx: &dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    counterparty_receiver_path: &PaykitReceiverPath,
+) -> Vec<AllowanceRecord> {
+    let history = AllowanceLinkHistory::load(tx, counterparty, counterparty_receiver_path);
+    derive_records(&history, None)
 }
 
 /// Derive one Allowance by exact link scope and Allowance ID.

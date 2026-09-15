@@ -119,6 +119,10 @@ where
 
 /// Mutable operations available inside one storage transaction.
 pub trait StorageTransaction {
+    /// Load durable wallet accounting evidence.
+    fn allowance_accounting_state(&self) -> Option<crate::AllowanceAccountingState>;
+    /// Save validated durable wallet accounting evidence atomically.
+    fn save_allowance_accounting_state(&mut self, state: crate::AllowanceAccountingState);
     /// Export the full logical SDK storage state.
     fn export_storage_state(&self) -> StorageState;
 

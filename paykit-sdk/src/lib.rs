@@ -29,6 +29,8 @@ pub use domain::adapters::{
     PublicPaymentEndpointCandidate, PublicPaymentEndpointSelectionRequest, PublicReceivingDetail,
 };
 #[doc(inline)]
+pub use domain::allowance_accounting::*;
+#[doc(inline)]
 pub use domain::allowances::{
     AllowanceAmountRangeRecord, AllowanceFilter, AllowanceHistoryStatus, AllowanceLifecycleState,
     AllowanceLocalRole, AllowancePeriodLimitRecord, AllowancePeriodRecord, AllowanceRecord,

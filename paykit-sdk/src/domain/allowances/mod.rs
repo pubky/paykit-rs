@@ -21,7 +21,8 @@ pub(crate) use commands::{
     AllowanceResponse,
 };
 pub(crate) use derivation::{
-    allowance_record, allowance_records, allowance_scopes, sort_allowances_newest_first,
+    allowance_record, allowance_records, allowance_records_in_transaction, allowance_scopes,
+    sort_allowances_newest_first,
 };
 
 /// Local party role for one Allowance.

@@ -38,8 +38,8 @@ pub use storage::*;
 
 uniffi::setup_scaffolding!();
 
-pub(crate) const SDK_STATE_BLOB_VERSION: u32 = 1;
-pub(crate) const SDK_BACKUP_BLOB_VERSION: u32 = 1;
+pub(crate) const SDK_STATE_BLOB_VERSION: u32 = 2;
+pub(crate) const SDK_BACKUP_BLOB_VERSION: u32 = 2;
 pub(crate) const DEFAULT_PUBKY_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 #[cfg(target_os = "android")]

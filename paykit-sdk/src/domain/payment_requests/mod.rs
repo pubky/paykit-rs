@@ -520,6 +520,7 @@ where
 }
 
 /// Queue a raw Payment Request acceptance for outbound delivery.
+#[cfg(test)]
 pub(crate) async fn enqueue_payment_request_acceptance<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
@@ -542,6 +543,7 @@ where
 }
 
 /// Queue a raw Payment Request rejection for outbound delivery.
+#[cfg(test)]
 pub(crate) async fn enqueue_payment_request_rejection<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
@@ -564,6 +566,7 @@ where
 }
 
 /// Queue a raw Payment Request cancellation for outbound delivery.
+#[cfg(test)]
 pub(crate) async fn enqueue_payment_request_cancellation<S>(
     storage: &S,
     counterparty: PubkyPublicKey,

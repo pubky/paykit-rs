@@ -70,11 +70,8 @@ use crate::{
     },
     domain::payment_requests::{
         enqueue_payment_proof as enqueue_payment_proof_message,
-        enqueue_payment_request as enqueue_payment_request_message,
-        enqueue_payment_request_acceptance as enqueue_payment_request_acceptance_message,
-        enqueue_payment_request_cancellation as enqueue_payment_request_cancellation_message,
-        enqueue_payment_request_rejection as enqueue_payment_request_rejection_message,
-        payment_proof_allowed_states, payment_request_records as derive_payment_request_records,
+        enqueue_payment_request as enqueue_payment_request_message, payment_proof_allowed_states,
+        payment_request_records as derive_payment_request_records,
         received_payment_request_records as derive_received_payment_request_records,
         request_from_record, PaymentProofSubmission, PaymentRequestFilter,
         PaymentRequestLifecycleState, PaymentRequestLocalRole, PaymentRequestRecord,
@@ -122,6 +119,7 @@ use crate::{
     PublicPaymentEndpointSelectionRequest, PublicReceivingDetail, Result,
 };
 
+mod allowance_accounting;
 mod allowances;
 mod backup;
 mod contacts;
