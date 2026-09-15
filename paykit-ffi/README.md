@@ -187,7 +187,7 @@ object.
 
 ### Pubky Session Bootstrap
 
-- `PubkySessionBootstrap.republishIdentity(publicKey)` — rebroadcast the newest
+- `PubkySessionBootstrap.republishIdentity(publicKey)` - rebroadcast the newest
   existing signed PKARR identity record found on the configured networks or in
   their caches, without signing or changing it. Returns `true` when published or
   `false` when no record was found; resolution/publication failures remain errors.
