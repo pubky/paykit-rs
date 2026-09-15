@@ -1,8 +1,10 @@
 //! Pubky account, session, and auth-flow helpers.
 
 mod companion_claim;
+mod republish;
 
 pub use companion_claim::{PubkyAuthCompanionClaim, PubkyAuthCompanionClaimApprovalError};
+pub use republish::PubkyIdentityRepublishOutcome;
 
 use std::{fmt, str::FromStr};
 

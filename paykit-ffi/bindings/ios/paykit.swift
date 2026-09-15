@@ -4342,6 +4342,16 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
     func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, receiverNoiseSecretKey: ReceiverNoiseSecretKey, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
     /**
+     * Rebroadcast the newest existing signed identity record without changing it.
+     *
+     * Requires only a public key, not a secret key or restored session. Reuse
+     * this helper for its cache. The caller owns scheduling, throttling and
+     * retries; the configured Pubky client owns request timeouts. Missing
+     * records are not reconstructed, and operational failures remain errors.
+     */
+    func republishIdentity(publicKey: String) async throws  -> PubkyIdentityRepublishOutcome
+
+    /**
      * Resume a short-lived grant auth flow from securely persisted state.
      */
     func resumeAuth(state: PubkyAuthRequestState, expectedCapabilities: String) async throws  -> PubkyAuthRequest
@@ -4515,6 +4525,31 @@ open func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretK
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypePubkySessionBootstrapResult_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Rebroadcast the newest existing signed identity record without changing it.
+     *
+     * Requires only a public key, not a secret key or restored session. Reuse
+     * this helper for its cache. The caller owns scheduling, throttling and
+     * retries; the configured Pubky client owns request timeouts. Missing
+     * records are not reconstructed, and operational failures remain errors.
+     */
+open func republishIdentity(publicKey: String)async throws  -> PubkyIdentityRepublishOutcome  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipubkysessionbootstrap_republish_identity(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(publicKey)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePubkyIdentityRepublishOutcome_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -15733,6 +15768,97 @@ extension PubkyAuthRequestKind: Codable {}
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * Result of rebroadcasting an existing signed Pubky identity record.
+ */
+
+public enum PubkyIdentityRepublishOutcome {
+
+    /**
+     * At least one configured publishing backend accepted the record.
+     */
+    case published
+    /**
+     * No record was found on the configured networks or in their caches.
+     */
+    case notFound
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    case unknown
+}
+
+
+#if compiler(>=6)
+extension PubkyIdentityRepublishOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePubkyIdentityRepublishOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = PubkyIdentityRepublishOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyIdentityRepublishOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .published
+
+        case 2: return .notFound
+
+        case 3: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PubkyIdentityRepublishOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .published:
+            writeInt(&buf, Int32(1))
+
+
+        case .notFound:
+            writeInt(&buf, Int32(2))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyIdentityRepublishOutcome_lift(_ buf: RustBuffer) throws -> PubkyIdentityRepublishOutcome {
+    return try FfiConverterTypePubkyIdentityRepublishOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyIdentityRepublishOutcome_lower(_ value: PubkyIdentityRepublishOutcome) -> RustBuffer {
+    return FfiConverterTypePubkyIdentityRepublishOutcome.lower(value)
+}
+
+
+extension PubkyIdentityRepublishOutcome: Equatable, Hashable {}
+
+extension PubkyIdentityRepublishOutcome: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * SDK policy for public contact marker publication.
  */
 
@@ -18570,6 +18696,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 26538) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_republish_identity() != 37588) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_resume_auth() != 52728) {

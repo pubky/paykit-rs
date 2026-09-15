@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use paykit_sdk::{
     PaykitReceiverPath, PaykitSdkError, PubkyAuthCompanionClaim,
     PubkyAuthCompanionClaimApprovalError, PubkyAuthDetails, PubkyAuthRequest, PubkyAuthRequestKind,
-    PubkyAuthRequestState, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
-    PubkySessionBootstrap, PubkySessionBootstrapResult, PubkySessionProvider,
+    PubkyAuthRequestState, PubkyIdentityRepublishOutcome, PubkyLocalSecretKey, PubkyPublicKey,
+    PubkySessionAccess, PubkySessionBootstrap, PubkySessionBootstrapResult, PubkySessionProvider,
     ReceiverNoiseSecretKey,
 };
 use pubky::{ClientId, Pubky, PubkyHttpClient};
@@ -40,6 +40,17 @@ pub enum FfiPubkyAuthRequestKind {
     SignIn,
     /// Sign up on a Pubky homeserver.
     SignUp,
+    /// SDK returned a value this binding version does not understand.
+    Unknown,
+}
+
+/// Result of rebroadcasting an existing signed Pubky identity record.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfiPubkyIdentityRepublishOutcome {
+    /// At least one configured publishing backend accepted the record.
+    Published,
+    /// No record was found on the configured networks or in their caches.
+    NotFound,
     /// SDK returned a value this binding version does not understand.
     Unknown,
 }
@@ -472,6 +483,24 @@ impl FfiPubkySessionBootstrap {
             bootstrap = bootstrap.with_auth_relay(&auth_relay_url)?;
         }
         Ok(Self { inner: bootstrap })
+    }
+
+    /// Rebroadcast the newest existing signed identity record without changing it.
+    ///
+    /// Requires only a public key, not a secret key or restored session. Reuse
+    /// this helper for its cache. The caller owns scheduling, throttling and
+    /// retries; the configured Pubky client owns request timeouts. Missing
+    /// records are not reconstructed, and operational failures remain errors.
+    pub async fn republish_identity(
+        &self,
+        public_key: String,
+    ) -> Result<FfiPubkyIdentityRepublishOutcome, PaykitFfiError> {
+        let public_key = parse_public_key(public_key)?;
+        Ok(match self.inner.republish_identity(&public_key).await? {
+            PubkyIdentityRepublishOutcome::Published => FfiPubkyIdentityRepublishOutcome::Published,
+            PubkyIdentityRepublishOutcome::NotFound => FfiPubkyIdentityRepublishOutcome::NotFound,
+            _ => FfiPubkyIdentityRepublishOutcome::Unknown,
+        })
     }
 
     /// Sign up on a homeserver with the receiver-owned Noise key.

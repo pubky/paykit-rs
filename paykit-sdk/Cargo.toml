@@ -1,6 +1,6 @@
 [package]
 name = "paykit-sdk"
-version = "0.1.0-rc54"
+version = "0.1.0-rc55"
 authors = ["ben@synonym.to", "denys@synonym.to"]
 description = "Stateful Paykit SDK runtime"
 license = "MIT"
@@ -22,7 +22,7 @@ blake3 = "1"
 chrono = { version = "0.4.44", default-features = false, features = ["clock", "serde", "std"] }
 crypto_secretbox = "0.1"
 hex = "0.4"
-paykit-lib = { path = "../paykit-lib", version = "0.1.0-rc54" }
+paykit-lib = { path = "../paykit-lib", version = "0.1.0-rc55" }
 pubky = "0.11.0"
 reqwest = { version = "0.13", default-features = false }
 serde = { version = "1", features = ["derive"] }
@@ -34,5 +34,7 @@ zeroize = "1"
 
 [dev-dependencies]
 http-relay = { version = "0.7.0", default-features = false, features = ["server"] }
+mainline = "8.0.0"
+pkarr-relay = "2.0.0"
 pubky-testnet = { version = "0.11.0", features = ["docker-postgres"] }
 tokio = { version = "1.48.0", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
