@@ -9,6 +9,8 @@ use crate::harness::{
     wait_until_marker_is_newer_than_observer_checkpoint, TestUser,
 };
 
+mod proofs;
+
 fn terms() -> AllowanceTerms {
     AllowanceTerms::builder("btc")
         .per_payment_amount(AllowanceAmountRange::new("0.0001", "0.01").unwrap())
