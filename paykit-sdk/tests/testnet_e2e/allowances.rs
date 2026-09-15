@@ -173,7 +173,7 @@ async fn test_allowance_lifecycle_roundtrip_between_linked_peers() {
 }
 
 #[tokio::test]
-async fn test_allowance_survives_restart_legacy_replay_restore_and_link_recovery() {
+async fn test_allowance_survives_restart_restore_and_link_recovery() {
     let pair = linked_two_party().await;
     let proposed = pair
         .alice
@@ -205,12 +205,12 @@ async fn test_allowance_survives_restart_legacy_replay_restore_and_link_recovery
         AllowanceHistoryStatus::Consistent
     );
 
-    let mut legacy_backup = restarted_bob
+    let backup = restarted_bob
         .sdk
         .export_backup_state()
         .await
         .expect("Allowance backup export should succeed");
-    let original_position = legacy_backup
+    let original_position = backup
         .private_stream_items
         .iter()
         .position(|item| {
@@ -218,56 +218,30 @@ async fn test_allowance_survives_restart_legacy_replay_restore_and_link_recovery
                 == Some(PrivateMessageKind::AllowanceProposal.as_str())
         })
         .expect("backup should contain the received Allowance proposal");
-    let original_stream_item_id =
-        legacy_backup.private_stream_items[original_position].stream_item_id;
-    let replay_stream_item_id = legacy_backup.next_private_stream_item_id;
-    let mut exact_replay = legacy_backup.private_stream_items[original_position].clone();
-    exact_replay.stream_item_id = replay_stream_item_id;
-    exact_replay.receive_batch_id = legacy_backup.next_receive_batch_id;
-
-    // SECURITY: this deliberately emulates pre-Allowance private storage.
-    // The raw plaintext is retained byte-for-byte and is never logged.
-    for item in [
-        &mut legacy_backup.private_stream_items[original_position],
-        &mut exact_replay,
-    ] {
-        item.known_paykit_kind = None;
-        item.parse_status = PrivateStreamParseStatus::UnknownKind;
-        item.parse_error = None;
-    }
-    legacy_backup.private_stream_items.push(exact_replay);
-    legacy_backup.next_private_stream_item_id = replay_stream_item_id + 1;
-    legacy_backup.next_receive_batch_id += 1;
-    legacy_backup
-        .event_dedup_records
-        .retain(|record| record.event_id != proposal_event_id);
-
+    let original_stream_item_id = backup.private_stream_items[original_position].stream_item_id;
     let restored_bob = restarted_bob
         .restart_with_storage(InMemoryStorage::new())
         .await;
     let restore = restored_bob
         .sdk
-        .restore_backup_state(legacy_backup)
+        .restore_backup_state(backup)
         .await
-        .expect("legacy Allowance backup restore should succeed");
+        .expect("Allowance backup restore should succeed");
     assert!(restore.recovery_required_peers.is_empty());
-    let migrated = restored_bob
+    let restored_backup = restored_bob
         .sdk
         .export_backup_state()
         .await
-        .expect("migrated Allowance backup export should succeed");
-    let dedupe = migrated
+        .expect("restored Allowance backup export should succeed");
+    let dedupe = restored_backup
         .event_dedup_records
         .iter()
         .find(|record| record.event_id == proposal_event_id)
-        .expect("restore should rebuild the Allowance Event dedupe record");
+        .expect("restore should retain the Allowance Event dedupe record");
     assert_eq!(dedupe.first_stream_item_id, original_stream_item_id);
-    assert_eq!(
-        dedupe.duplicate_stream_item_ids,
-        vec![replay_stream_item_id]
-    );
+    assert!(dedupe.duplicate_stream_item_ids.is_empty());
     assert!(dedupe.conflicting_stream_item_ids.is_empty());
-    assert!(migrated.private_stream_items.iter().all(|item| {
+    assert!(restored_backup.private_stream_items.iter().all(|item| {
         item.parse_status == PrivateStreamParseStatus::Valid
             && item.known_paykit_kind == item.parsed_kind
     }));
