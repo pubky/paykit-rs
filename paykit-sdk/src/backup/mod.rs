@@ -44,7 +44,7 @@ use validation::*;
 type PeerStorageKey = (PubkyPublicKey, PaykitReceiverPath);
 
 /// Current SDK backup schema version.
-pub const SDK_BACKUP_VERSION: u32 = 1;
+pub const SDK_BACKUP_VERSION: u32 = 2;
 
 /// Versioned SDK-managed backup payload.
 ///
@@ -53,6 +53,8 @@ pub const SDK_BACKUP_VERSION: u32 = 1;
 /// Decryption Keys. Store and transport it with caller-managed encryption.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SdkBackupState {
+    /// Complete durable wallet accounting; restore always requires reconciliation.
+    pub allowance_accounting: Option<crate::AllowanceAccountingState>,
     /// Backup schema version.
     pub version: u32,
     /// Local Paykit receiver/runtime folder that exported this backup.
@@ -245,11 +247,29 @@ where
             let current_identity = trusted_identity.as_ref().or(stored_identity.as_ref());
             let current_next_peer_link_operation_lease_id =
                 tx.export_storage_state().next_peer_link_operation_lease_id;
-            let (state, report) = backup.into_storage_state(
+            let (mut state, report) = backup.into_storage_state(
                 current_identity,
                 &local_receiver_path,
                 current_next_peer_link_operation_lease_id,
             )?;
+            let current_accounting = if stored_identity
+                .as_ref()
+                .and_then(|i| i.local_pubky_public_key.as_ref())
+                == state
+                    .state
+                    .identity_state
+                    .as_ref()
+                    .and_then(|i| i.local_pubky_public_key.as_ref())
+            {
+                tx.allowance_accounting_state()
+            } else {
+                None
+            };
+            state.state.allowance_accounting =
+                crate::domain::allowance_accounting::merge_restored_accounting(
+                    current_accounting,
+                    state.state.allowance_accounting,
+                )?;
             tx.replace_storage_state(state);
             Ok(report)
         })
@@ -374,6 +394,7 @@ impl SdkBackupState {
 
         Self {
             version: SDK_BACKUP_VERSION,
+            allowance_accounting: state.allowance_accounting,
             local_receiver_path,
             identity_state: state.identity_state,
             linked_peers,
@@ -557,6 +578,7 @@ impl SdkBackupState {
         };
 
         let state = StorageState {
+            allowance_accounting: self.allowance_accounting,
             identity_state,
             linked_peers,
             contact_records,
@@ -584,6 +606,29 @@ impl SdkBackupState {
         current_identity: Option<&IdentityState>,
         local_receiver_path: &PaykitReceiverPath,
     ) -> Result<()> {
+        if let Some(accounting) = &self.allowance_accounting {
+            crate::domain::allowance_accounting::validate_accounting(accounting)?;
+            let identity =
+                self.local_pubky_public_key()
+                    .ok_or_else(|| PaykitSdkError::Protocol {
+                        context: "Accounting backup requires an identity".into(),
+                        source: None,
+                    })?;
+            if accounting.history.associations.iter().any(|a| {
+                &a.request.local_public_key != identity
+                    || &a.request.local_receiver_path != local_receiver_path
+            }) || accounting.history.occurrences.iter().any(|o| {
+                &o.key.request.local_public_key != identity
+                    || &o.key.request.local_receiver_path != local_receiver_path
+            }) || accounting.history.watermarks.iter().any(|w| {
+                &w.local_public_key != identity || &w.local_receiver_path != local_receiver_path
+            }) {
+                return Err(PaykitSdkError::Protocol {
+                    context: "Accounting backup has another payer scope".into(),
+                    source: None,
+                });
+            }
+        }
         if self.version != SDK_BACKUP_VERSION {
             return Err(PaykitSdkError::Protocol {
                 context: format!("unsupported SDK backup version {}", self.version),
@@ -657,7 +702,8 @@ impl SdkBackupState {
     }
 
     pub(crate) fn has_identity_scoped_state(&self) -> bool {
-        !self.linked_peers.is_empty()
+        self.allowance_accounting.is_some()
+            || !self.linked_peers.is_empty()
             || !self.contact_records.is_empty()
             || !self.public_endpoint_records.is_empty()
             || !self.payment_endpoint_reservations.is_empty()

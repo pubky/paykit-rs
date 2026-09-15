@@ -5,6 +5,7 @@ async fn test_restore_backup_state_advances_counters() {
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),

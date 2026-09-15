@@ -12,10 +12,11 @@ use std::{
 use chrono::{DateTime, Utc};
 use paykit_lib::{
     parse_payment_request_event_message, serialize_payment_request_event, AllowanceId,
-    BillingPeriod, PaymentEndpointIdentifier, PaymentProof, PaymentRequest,
-    PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
-    PaymentRequestRejection, PrivateApplicationMessage,
+    BillingPeriod, PaymentEndpointIdentifier, PaymentProof, PaymentRequest, PaymentRequestEvent,
+    PrivateApplicationMessage,
 };
+#[cfg(test)]
+use paykit_lib::{PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestRejection};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -34,8 +35,8 @@ mod derivation;
 
 use derivation::recurrence_unit_to_str;
 pub(crate) use derivation::{
-    payment_proof_allowed_states, payment_request_records, received_payment_request_records,
-    request_from_record,
+    payment_proof_allowed_states, payment_request_records, payment_request_records_in_transaction,
+    received_payment_request_records, request_from_record,
 };
 
 /// Local role for one Payment Request.
@@ -485,6 +486,7 @@ where
 }
 
 /// Queue a raw Payment Request acceptance for outbound delivery.
+#[cfg(test)]
 pub(crate) async fn enqueue_payment_request_acceptance<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
@@ -507,6 +509,7 @@ where
 }
 
 /// Queue a raw Payment Request rejection for outbound delivery.
+#[cfg(test)]
 pub(crate) async fn enqueue_payment_request_rejection<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
@@ -529,6 +532,7 @@ where
 }
 
 /// Queue a raw Payment Request cancellation for outbound delivery.
+#[cfg(test)]
 pub(crate) async fn enqueue_payment_request_cancellation<S>(
     storage: &S,
     counterparty: PubkyPublicKey,

@@ -1,4 +1,5 @@
 pub(crate) mod adapters;
+pub(crate) mod allowance_accounting;
 pub(crate) mod allowances;
 pub(crate) mod contacts;
 pub(crate) mod endpoint_reservations;

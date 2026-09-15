@@ -275,9 +275,32 @@ Before automatic work, an integrating wallet must satisfy these requirements:
 - explicit payment of an accepted-but-unpaid occurrence requires complete
   payment and reservation evidence and coordination with automatic admission.
 
-The shared SDK evaluation and accounting work extends these lifecycle APIs in
-follow-on stacked PRs. Wallets retain consent, selection policy, scheduling,
-endpoint and transfer validation, signing, execution, and settlement decisions.
+The SDK implements this durable coordination through the following workflow:
+
+1. Call `reconcile_allowance_accounting` with complete authoritative wallet
+   history before first admission or after recovery. Missing history never means
+   zero usage; an empty reconciliation cannot erase retained evidence.
+2. Inspect `evaluate_allowance_candidates`, then persist a choice with
+   `select_allowance` or atomically select and queue ordinary Acceptance through
+   `accept_payment_request_automatically`. Acceptance reserves no capacity.
+3. Call `reserve_automatic_payment` for an occurrence and expected association
+   revision, or `reserve_manual_payment` for an explicitly authorized manual
+   payment. Both use the same scoped exclusion key.
+4. Immediately before execution, call `begin_payment_execution` with fresh
+   wallet checks. Only Ready with status Submitted grants one handoff. Use the
+   returned attempt ID for external wallet idempotency, then report the verified
+   outcome through `record_payment_outcome`.
+
+`defer_payment_occurrence` retains temporary failures for reconsideration;
+`mark_payment_manual_only` is sticky. A pending execution cannot be relabeled
+as deferred. `authorize_allowance_reassociation` requires explicit user approval
+for a future recurring boundary and preserves earlier attempts and usage.
+`allowance_accounting_state` exposes the retained ledger and recovery status.
+Wallets retain consent, selection policy, scheduling, endpoint and transfer
+validation, signing, execution, and settlement decisions. Use one coordinated
+runtime: SDK storage cannot atomically commit an external payment. A crash after
+handoff issuance requires reconciliation, never a timeout-based release or a
+second execution.
 
 During incomplete history or Encrypted Link recovery, automatic handling must
 fail closed. Recovery must retain associations, usage, unresolved reservations,

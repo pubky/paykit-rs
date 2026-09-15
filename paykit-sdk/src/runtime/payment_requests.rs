@@ -323,6 +323,7 @@ where
         counterparty_receiver_path: PaykitReceiverPath,
         payment_request_id: &PaymentRequestId,
     ) -> Result<PaymentRequestRecord> {
+        let (_, expected_identity) = self.load_session_access_and_refresh_identity().await?;
         let record = self
             .load_payment_request_record(
                 &counterparty,
@@ -337,10 +338,11 @@ where
             "accept Payment Request",
         )?;
         let event = PaymentRequestAcceptance::new(EventId::new_v4(), payment_request_id.clone());
-        self.enqueue_raw_payment_request_acceptance(
+        self.enqueue_manual_payment_request_response(
             counterparty.clone(),
             counterparty_receiver_path.clone(),
-            &event,
+            paykit_lib::PaymentRequestEvent::Acceptance(event),
+            Some(expected_identity),
         )
         .await?;
         self.load_payment_request_record(
@@ -362,6 +364,7 @@ where
         payment_request_id: &PaymentRequestId,
         reason: Option<String>,
     ) -> Result<PaymentRequestRecord> {
+        let (_, expected_identity) = self.load_session_access_and_refresh_identity().await?;
         let record = self
             .load_payment_request_record(
                 &counterparty,
@@ -380,10 +383,11 @@ where
         )?;
         let event =
             PaymentRequestRejection::new(EventId::new_v4(), payment_request_id.clone(), reason);
-        self.enqueue_raw_payment_request_rejection(
+        self.enqueue_manual_payment_request_response(
             counterparty.clone(),
             counterparty_receiver_path.clone(),
-            &event,
+            paykit_lib::PaymentRequestEvent::Rejection(event),
+            Some(expected_identity),
         )
         .await?;
         self.load_payment_request_record(
@@ -405,6 +409,7 @@ where
         payment_request_id: &PaymentRequestId,
         reason: Option<String>,
     ) -> Result<PaymentRequestRecord> {
+        let (_, expected_identity) = self.load_session_access_and_refresh_identity().await?;
         let record = self
             .load_payment_request_record(
                 &counterparty,
@@ -425,10 +430,11 @@ where
         )?;
         let event =
             PaymentRequestCancellation::new(EventId::new_v4(), payment_request_id.clone(), reason);
-        self.enqueue_raw_payment_request_cancellation(
+        self.enqueue_manual_payment_request_response(
             counterparty.clone(),
             counterparty_receiver_path.clone(),
-            &event,
+            paykit_lib::PaymentRequestEvent::Cancellation(event),
+            Some(expected_identity),
         )
         .await?;
         self.load_payment_request_record(
@@ -621,58 +627,103 @@ where
         .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn enqueue_raw_payment_request_acceptance(
         &self,
         counterparty: PubkyPublicKey,
         counterparty_receiver_path: PaykitReceiverPath,
         event: &PaymentRequestAcceptance,
     ) -> Result<OutboundPrivateMessageRecord> {
-        self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_path)
-            .await?;
-        enqueue_payment_request_acceptance_message(
-            &self.storage,
+        self.enqueue_manual_payment_request_response(
             counterparty,
             counterparty_receiver_path,
-            event,
-            self.clock.now(),
+            paykit_lib::PaymentRequestEvent::Acceptance(event.clone()),
+            None,
         )
         .await
     }
 
-    pub(crate) async fn enqueue_raw_payment_request_rejection(
+    async fn enqueue_manual_payment_request_response(
         &self,
         counterparty: PubkyPublicKey,
         counterparty_receiver_path: PaykitReceiverPath,
-        event: &PaymentRequestRejection,
+        event: paykit_lib::PaymentRequestEvent,
+        expected_identity: Option<IdentityState>,
     ) -> Result<OutboundPrivateMessageRecord> {
+        let (_, current_identity) = self.load_session_access_and_refresh_identity().await?;
+        let validate_current_state = expected_identity.is_some();
+        let identity = expected_identity.unwrap_or(current_identity);
         self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_path)
             .await?;
-        enqueue_payment_request_rejection_message(
-            &self.storage,
-            counterparty,
-            counterparty_receiver_path,
-            event,
-            self.clock.now(),
-        )
-        .await
-    }
-
-    pub(crate) async fn enqueue_raw_payment_request_cancellation(
-        &self,
-        counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
-        event: &PaymentRequestCancellation,
-    ) -> Result<OutboundPrivateMessageRecord> {
-        self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_path)
-            .await?;
-        enqueue_payment_request_cancellation_message(
-            &self.storage,
-            counterparty,
-            counterparty_receiver_path,
-            event,
-            self.clock.now(),
-        )
-        .await
+        let local = self.config.receiver_path.clone();
+        let now = self.clock.now();
+        let raw = paykit_lib::serialize_payment_request_event(&event)?;
+        let kind = crate::domain::outbound_private::validate_outbound_private_message(&raw)?;
+        self.storage
+            .transaction(move |tx| {
+                super::allowance_accounting::ensure_accounting_identity(tx, &identity)?;
+                if validate_current_state {
+                    let record =
+                        crate::domain::payment_requests::payment_request_records_in_transaction(
+                            tx,
+                            &counterparty,
+                            &counterparty_receiver_path,
+                            now,
+                        )?
+                        .into_iter()
+                        .find(|r| r.payment_request_id == event.payment_request_id().as_str())
+                        .ok_or_else(|| PaykitSdkError::Policy {
+                            context: "Payment Request changed before manual response".into(),
+                            source: None,
+                        })?;
+                    use PaymentRequestLifecycleState as State;
+                    match &event {
+                        paykit_lib::PaymentRequestEvent::Acceptance(_) => {
+                            require_payer_role(&record, "accept Payment Request")?;
+                            require_state(&record, &[State::Proposed], "accept Payment Request")?;
+                        }
+                        paykit_lib::PaymentRequestEvent::Rejection(_) => {
+                            require_payer_role(&record, "reject Payment Request")?;
+                            require_state(
+                                &record,
+                                &[State::Proposed, State::ProposalExpired],
+                                "reject Payment Request",
+                            )?;
+                        }
+                        paykit_lib::PaymentRequestEvent::Cancellation(_) => require_state(
+                            &record,
+                            &[
+                                State::Proposed,
+                                State::ProposalExpired,
+                                State::Accepted,
+                                State::ActiveRecurring,
+                                State::ProofSubmitted,
+                            ],
+                            "cancel Payment Request",
+                        )?,
+                        _ => unreachable!("Private helper only receives manual response events"),
+                    }
+                }
+                crate::domain::allowance_accounting::manual_response(
+                    tx,
+                    &local,
+                    crate::PaymentRequestScope {
+                        counterparty: counterparty.clone(),
+                        counterparty_receiver_path: counterparty_receiver_path.clone(),
+                        payment_request_id: event.payment_request_id().clone(),
+                    },
+                )?;
+                Ok(tx.insert_outbound_private_message(
+                    crate::storage::NewOutboundPrivateMessage::new(
+                        counterparty,
+                        counterparty_receiver_path,
+                        kind,
+                        raw,
+                        now,
+                    ),
+                ))
+            })
+            .await
     }
 
     pub(crate) async fn enqueue_raw_payment_proof(

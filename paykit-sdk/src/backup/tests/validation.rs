@@ -38,6 +38,7 @@ async fn test_restore_backup_state_rejects_malformed_link_snapshot() {
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
@@ -282,6 +283,7 @@ async fn test_restore_backup_state_rejects_local_recovery_marker_without_created
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
@@ -323,6 +325,7 @@ async fn test_restore_backup_state_rejects_invalid_remote_recovery_attempt_id() 
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
@@ -363,6 +366,7 @@ async fn test_restore_backup_state_rejects_invalid_remote_recovery_attempt_id() 
 async fn test_restore_backup_state_rejects_records_without_identity() {
     let storage = InMemoryStorage::new();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: None,
@@ -398,6 +402,7 @@ async fn test_restore_backup_state_rejects_invalid_public_endpoint_record() {
     let storage = InMemoryStorage::new();
     let local_public_key = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key)),
@@ -433,6 +438,7 @@ async fn test_restore_backup_state_rejects_inconsistent_public_endpoint_status()
     let storage = InMemoryStorage::new();
     let local_public_key = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key)),
@@ -468,6 +474,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_metadata() {
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
@@ -511,6 +518,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_parse_status() {
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
@@ -569,6 +577,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_parse_error() {
         "/pub/paykit/v0/private/bitkit/wallet/receipts/not-the-receipt-id",
     );
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
@@ -611,6 +620,7 @@ async fn test_restore_backup_state_rejects_stale_dedupe_event_header() {
     let counterparty = public_key();
     let raw_json = payment_request_json("650e8400-e29b-41d4-a716-446655440000");
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
@@ -662,6 +672,7 @@ async fn test_restore_backup_state_rejects_overlapping_event_dedupe_membership()
     let counterparty = public_key();
     let raw_json = payment_request_json("650e8400-e29b-41d4-a716-446655440000");
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
@@ -727,6 +738,7 @@ async fn test_restore_backup_state_accepts_wrong_receiver_receipt_access_dedupe_
     let wrong_location = paykit_lib::ReceiptAccess::location(&other_receiver_path(), &receipt_id);
     let raw_json = raw_json.replace(&original_location, &wrong_location);
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
@@ -804,6 +816,7 @@ async fn test_restore_backup_state_accepts_cross_kind_event_id_conflict() {
         &period,
     );
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
@@ -868,6 +881,7 @@ async fn test_restore_backup_state_rejects_missing_event_dedupe_index() {
     let counterparty = public_key();
     let raw_json = payment_request_json("650e8400-e29b-41d4-a716-446655440000");
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
@@ -921,6 +935,7 @@ async fn test_restore_backup_state_rejects_missing_receipt_access_index() {
         &period,
     );
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
@@ -985,6 +1000,7 @@ async fn test_restore_backup_state_rejects_receipt_access_context_mismatch() {
         &period,
     );
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
@@ -1062,6 +1078,7 @@ async fn test_restore_backup_state_rejects_receipt_access_receiver_mismatch() {
     );
     let raw_json = raw_json.replace(&original_location, &wrong_location);
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
@@ -1135,6 +1152,7 @@ async fn test_restore_backup_state_rejects_inconsistent_receipt_access_status() 
         &period,
     );
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
@@ -1197,6 +1215,7 @@ async fn test_restore_backup_state_preserves_invalid_outbound_audit_record() {
     invalid.status = OutboundPrivateMessageStatus::Invalid;
     invalid.last_error = Some("invalid private message JSON".into());
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty)),
@@ -1237,6 +1256,7 @@ async fn test_restore_backup_state_preserves_recovery_required_outbound_audit_re
     recovery_required.status = OutboundPrivateMessageStatus::RecoveryRequired;
     recovery_required.last_error = Some("Encrypted Link recovery is required".into());
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty)),
@@ -1276,6 +1296,7 @@ async fn test_restore_backup_state_marks_sending_outbound_recovery_required() {
     sending.attempt_count = 1;
     sending.last_attempt_at = Some(timestamp());
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty)),
@@ -1350,6 +1371,7 @@ async fn test_restore_backup_state_rejects_wrong_identity() {
         .unwrap();
 
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(backup_public_key)),
@@ -1405,6 +1427,7 @@ async fn test_restore_backup_state_preserves_current_sign_out_generation() {
     current_identity.sign_out_generation = 7;
     storage.save_identity_state(current_identity).await.unwrap();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key.clone())),
@@ -1449,6 +1472,7 @@ async fn test_restore_backup_state_allows_trusted_identity_switch() {
     let mut trusted_identity = identity(backup_public_key.clone());
     trusted_identity.sign_out_generation = 3;
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(backup_public_key.clone())),
@@ -1488,6 +1512,7 @@ async fn test_restore_identity_less_backup_preserves_signed_out_generation() {
         .await
         .unwrap();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: None,
@@ -1519,6 +1544,7 @@ async fn test_restore_backup_state_rejects_orphan_endpoint_reservation() {
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
@@ -1559,6 +1585,7 @@ async fn test_restore_backup_state_rejects_invalid_endpoint_reservation_id() {
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
@@ -1603,6 +1630,7 @@ async fn test_restore_backup_state_rejects_mismatched_endpoint_reservation_paylo
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty.clone())),
@@ -1682,6 +1710,7 @@ async fn test_restore_backup_state_rejects_receipt_key_hash_mismatch() {
         retrieved_at: timestamp(),
     };
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty)),
@@ -1761,6 +1790,7 @@ async fn test_restore_backup_state_rejects_receipt_recipient_mismatch() {
         retrieved_at: timestamp(),
     };
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key)),
@@ -1834,6 +1864,7 @@ async fn test_restore_backup_state_rejects_receipt_issuance_access_mismatch() {
             .unwrap();
     issuance.payment_reference = "different-reference".into();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key)),
@@ -1887,6 +1918,7 @@ async fn test_restore_backup_state_redacts_invalid_receipt_issuance() {
     let sentinel = "SENTINEL_PRIVATE_RECEIPT_CONTENT";
     issuance.encrypted_receipt = format!(r#"{{"sentinel":"{sentinel}""#);
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key)),
@@ -1947,6 +1979,7 @@ async fn test_restore_backup_state_rejects_receipt_issuance_wrong_local_receiver
         ReceiptIssuanceRecord::from_prepared(counterparty, receiver_path(), prepared, timestamp())
             .unwrap();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key)),
@@ -2002,6 +2035,7 @@ async fn test_restore_backup_state_rejects_outbound_receipt_access_wrong_local_r
     )
     .unwrap();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key)),
@@ -2082,6 +2116,7 @@ async fn test_restore_backup_state_rejects_duplicate_receipt_issuance_ids() {
     )
     .unwrap();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(local_public_key)),

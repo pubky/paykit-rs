@@ -115,6 +115,7 @@ async fn assert_restore_rejects_outbound_record(record: OutboundPrivateMessageRe
     let counterparty = record.counterparty.clone();
     let next_id = record.outbound_message_id.saturating_add(1);
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(identity(counterparty)),

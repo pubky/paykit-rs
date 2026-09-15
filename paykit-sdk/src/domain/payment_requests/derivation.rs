@@ -66,32 +66,45 @@ pub(crate) async fn payment_request_records<S>(
 where
     S: StorageAdapter,
 {
-    let (items, outbound, dedupe_records, outbound_carriers) = storage
+    storage
         .transaction(|tx| {
-            let items = tx.private_stream_items(counterparty, counterparty_receiver_path);
-            let outbound = tx.outbound_private_messages(counterparty, counterparty_receiver_path);
-            let outbound_carriers = outbound_event_carriers(&outbound);
-            let received_event_ids = items
-                .iter()
-                .filter_map(payment_request_message_from_item)
-                .filter_map(|message| parse_payment_request_event_message(&message))
-                .filter_map(|parsed| parsed.event_id().map(|id| id.as_str().to_owned()))
-                .collect::<HashSet<_>>();
-            let mut dedupe_records = HashMap::new();
-            for event_id in outbound_carriers
-                .event_ids
-                .iter()
-                .chain(&received_event_ids)
-            {
-                if let Some(record) =
-                    tx.event_dedup_record(counterparty, counterparty_receiver_path, event_id)
-                {
-                    dedupe_records.insert(event_id.clone(), record);
-                }
-            }
-            Ok((items, outbound, dedupe_records, outbound_carriers))
+            payment_request_records_in_transaction(
+                tx,
+                counterparty,
+                counterparty_receiver_path,
+                now,
+            )
         })
-        .await?;
+        .await
+}
+
+pub(crate) fn payment_request_records_in_transaction(
+    tx: &dyn crate::storage::StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    counterparty_receiver_path: &PaykitReceiverPath,
+    now: DateTime<Utc>,
+) -> Result<Vec<PaymentRequestRecord>> {
+    let items = tx.private_stream_items(counterparty, counterparty_receiver_path);
+    let outbound = tx.outbound_private_messages(counterparty, counterparty_receiver_path);
+    let outbound_carriers = outbound_event_carriers(&outbound);
+    let received_event_ids = items
+        .iter()
+        .filter_map(payment_request_message_from_item)
+        .filter_map(|message| parse_payment_request_event_message(&message))
+        .filter_map(|parsed| parsed.event_id().map(|id| id.as_str().to_owned()))
+        .collect::<HashSet<_>>();
+    let mut dedupe_records = HashMap::new();
+    for event_id in outbound_carriers
+        .event_ids
+        .iter()
+        .chain(&received_event_ids)
+    {
+        if let Some(record) =
+            tx.event_dedup_record(counterparty, counterparty_receiver_path, event_id)
+        {
+            dedupe_records.insert(event_id.clone(), record);
+        }
+    }
     derive_payment_request_records(
         counterparty.clone(),
         counterparty_receiver_path.clone(),
