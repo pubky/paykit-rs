@@ -265,10 +265,7 @@ impl TryFrom<FfiAllowanceAssociationRevision> for sdk::AllowanceAssociationRevis
         Ok(Self {
             revision: value.revision,
             allowance_id: parse_allowance_id(value.allowance_id)?.as_str().to_owned(),
-            effective_from: value
-                .effective_from
-                .map(|value| -> Result<_, PaykitFfiError> { Ok(parse_time(value)?) })
-                .transpose()?,
+            effective_from: value.effective_from.map(parse_time).transpose()?,
             authorization_id: value.authorization_id,
             authorized_at: parse_time(value.authorized_at)?,
         })
@@ -556,7 +553,7 @@ impl TryFrom<FfiPaymentDisposition> for sdk::PaymentDisposition {
     fn try_from(value: FfiPaymentDisposition) -> Result<Self, Self::Error> {
         Ok(match value {
             FfiPaymentDisposition::Automatic => Self::Automatic,
-            FfiPaymentDisposition::Deferred { reason } => Self::Deferred { reason: reason },
+            FfiPaymentDisposition::Deferred { reason } => Self::Deferred { reason },
             FfiPaymentDisposition::ManualOnly => Self::ManualOnly,
         })
     }
@@ -567,7 +564,7 @@ impl TryFrom<sdk::PaymentDisposition> for FfiPaymentDisposition {
     fn try_from(value: sdk::PaymentDisposition) -> Result<Self, Self::Error> {
         Ok(match value {
             sdk::PaymentDisposition::Automatic => Self::Automatic,
-            sdk::PaymentDisposition::Deferred { reason } => Self::Deferred { reason: reason },
+            sdk::PaymentDisposition::Deferred { reason } => Self::Deferred { reason },
             sdk::PaymentDisposition::ManualOnly => Self::ManualOnly,
         })
     }
@@ -630,7 +627,7 @@ impl TryFrom<FfiAllowanceAccountingBlock> for sdk::AllowanceAccountingBlock {
             FfiAllowanceAccountingBlock::ManualOnly => Self::ManualOnly,
             FfiAllowanceAccountingBlock::PaymentAlreadyRecorded => Self::PaymentAlreadyRecorded,
             FfiAllowanceAccountingBlock::WalletChecksFailed => Self::WalletChecksFailed,
-            FfiAllowanceAccountingBlock::SharedRule { code } => Self::SharedRule { code: code },
+            FfiAllowanceAccountingBlock::SharedRule { code } => Self::SharedRule { code },
         })
     }
 }
@@ -646,7 +643,7 @@ impl TryFrom<sdk::AllowanceAccountingBlock> for FfiAllowanceAccountingBlock {
             sdk::AllowanceAccountingBlock::ManualOnly => Self::ManualOnly,
             sdk::AllowanceAccountingBlock::PaymentAlreadyRecorded => Self::PaymentAlreadyRecorded,
             sdk::AllowanceAccountingBlock::WalletChecksFailed => Self::WalletChecksFailed,
-            sdk::AllowanceAccountingBlock::SharedRule { code } => Self::SharedRule { code: code },
+            sdk::AllowanceAccountingBlock::SharedRule { code } => Self::SharedRule { code },
         })
     }
 }
