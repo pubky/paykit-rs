@@ -737,11 +737,14 @@ async fn test_allowance_end_after_rejection_allows_proposer_withdrawal() {
             &storage,
             peer.clone(),
             receiver_path(),
-            vec![AllowanceEvent::Rejection(AllowanceRejection::new(
-                event_id(ACCEPTANCE_ID),
-                allowance_id(),
-                event_id(PROPOSAL_ID),
-            ))],
+            vec![AllowanceEvent::Rejection(
+                AllowanceRejection::new(
+                    event_id(ACCEPTANCE_ID),
+                    allowance_id(),
+                    event_id(PROPOSAL_ID),
+                )
+                .unwrap(),
+            )],
             timestamp(),
         )
         .await;
