@@ -40,15 +40,18 @@ fn test_payment_request_terms_parse_protocol_inputs() {
 
     let parsed = PaymentRequestTerms::try_from(terms).unwrap();
 
-    assert_eq!(parsed.amount.value, "25.50");
-    assert_eq!(parsed.payment_reference.as_str(), "invoice-1");
+    assert_eq!(parsed.amount().value(), "25.50");
+    assert_eq!(parsed.payment_reference().as_str(), "invoice-1");
     assert!(matches!(
-        parsed.recurrence.as_ref().map(|recurrence| recurrence.unit),
+        parsed
+            .recurrence()
+            .as_ref()
+            .map(|recurrence| recurrence.unit()),
         Some(RecurrenceUnit::Month)
     ));
     assert_eq!(
         parsed
-            .metadata
+            .metadata()
             .get("order")
             .and_then(serde_json::Value::as_str),
         Some("123")
