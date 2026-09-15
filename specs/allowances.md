@@ -157,9 +157,18 @@ cardinality limit beyond the complete-message byte limit.
 
 Every rule is conjunctive: a payment qualifies only if all configured rules
 pass. V1 has no OR groups, deny rules, precedence, conversion, or implied
-defaults. At least one field other than `asset` MUST constrain the authority;
-terms with null amount, lifetime, time, and endpoint-identifier fields and no
-period limits are invalid.
+defaults. Terms MUST configure at least one monetary ceiling or expiry: a
+non-null `per_payment_amount`, a `period_limits` entry with non-null
+`amount_limit`, a non-null `lifetime_amount_limit`, or non-null `expires_at`.
+An endpoint allowlist, `active_from`, or payment-count limits alone do not
+satisfy this requirement, including a zero payment-count limit. Zero amount
+ceilings are valid; zero is not absence.
+
+This minimum rule does not guarantee a lifetime spending budget. A per-payment
+maximum limits each payment, period amount limits renew, and expiry alone
+limits time without limiting the amount spent before expiry. Wallet policy MAY
+require stronger bounds. Structural validation MUST accept past expiry times
+for historical replay; current eligibility is evaluated separately.
 
 Allowance Terms are immutable. Changed accepted terms require a proposal with
 a new Allowance ID and a separate End for the old Allowance. V1 defines no
