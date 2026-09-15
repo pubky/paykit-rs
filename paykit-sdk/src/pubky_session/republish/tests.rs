@@ -100,13 +100,10 @@ async fn test_republish_identity_preserves_newest_packet_on_dht_and_relay() {
             )
             .unwrap();
 
-            assert_eq!(
-                bootstrap
-                    .republish_identity(&PubkyPublicKey::new(public_key.to_z32()).unwrap())
-                    .await
-                    .unwrap(),
-                PubkyIdentityRepublishOutcome::Published
-            );
+            assert!(bootstrap
+                .republish_identity(&PubkyPublicKey::new(public_key.to_z32()).unwrap())
+                .await
+                .unwrap());
             let resolved = testnet_pubky(&testnet, empty_cache(), None)
                 .client()
                 .pkarr()
@@ -129,10 +126,7 @@ async fn test_republish_identity_missing_record_is_not_created() {
     .unwrap();
     let public_key = PubkyPublicKey::new(Keypair::random().public_key().to_z32()).unwrap();
 
-    assert_eq!(
-        bootstrap.republish_identity(&public_key).await.unwrap(),
-        PubkyIdentityRepublishOutcome::NotFound
-    );
+    assert!(!bootstrap.republish_identity(&public_key).await.unwrap());
     assert_eq!(
         testnet_pubky(&testnet, empty_cache(), None)
             .client()
