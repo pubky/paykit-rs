@@ -10,7 +10,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ### Added
 
 - Added the V1 Allowance lifecycle across the Rust library, SDK runtime, and
-  Swift/Kotlin bindings, including durable derivation, backup migration, Event
+  Swift/Kotlin bindings, including durable derivation, backup/restore, Event
   ID replay handling, and Encrypted Link recovery behavior.
 - Added the Private Message Kinds `paykit.allowance_proposal`,
   `paykit.allowance_acceptance`, `paykit.allowance_rejection`, and
