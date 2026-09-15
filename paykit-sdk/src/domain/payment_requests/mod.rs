@@ -183,24 +183,24 @@ impl fmt::Debug for PaymentRequestTermsRecord {
 impl From<&paykit_lib::PaymentRequestTerms> for PaymentRequestTermsRecord {
     fn from(terms: &paykit_lib::PaymentRequestTerms) -> Self {
         Self {
-            amount: AmountRecord::from(&terms.amount),
-            payment_reference: terms.payment_reference.as_str().to_owned(),
-            proposal_expires_at: terms.proposal_expires_at.clone(),
-            recurrence: terms.recurrence.as_ref().map(|recurrence| {
+            amount: AmountRecord::from(terms.amount()),
+            payment_reference: terms.payment_reference().as_str().to_owned(),
+            proposal_expires_at: terms.proposal_expires_at().clone(),
+            recurrence: terms.recurrence().as_ref().map(|recurrence| {
                 PaymentRequestRecurrenceRecord {
-                    every: recurrence.every,
-                    unit: recurrence_unit_to_str(recurrence.unit).to_owned(),
-                    starts_at: recurrence.starts_at.clone(),
-                    anchor: recurrence.anchor.clone(),
-                    ends_at: recurrence.ends_at.clone(),
+                    every: recurrence.every(),
+                    unit: recurrence_unit_to_str(recurrence.unit()).to_owned(),
+                    starts_at: recurrence.starts_at().to_owned(),
+                    anchor: recurrence.anchor().to_owned(),
+                    ends_at: recurrence.ends_at().to_owned(),
                 }
             }),
             accepted_payment_endpoint_identifiers: terms
-                .accepted_payment_endpoint_identifiers
+                .accepted_payment_endpoint_identifiers()
                 .iter()
                 .map(|identifier| identifier.as_str().to_owned())
                 .collect(),
-            metadata: terms.metadata.clone(),
+            metadata: terms.metadata().clone(),
         }
     }
 }

@@ -306,3 +306,5 @@ async fn receive_payment_request_events_for_test(
         .filter_map(parse_payment_request_event_message)
         .collect()
 }
+
+mod validated_payment_request_types;

@@ -13,24 +13,42 @@ use crate::{
 /// non-empty and contain no control characters. Beyond these checks, Paykit
 /// defines no range, precision, scale, normalization, or asset-registry policy.
 ///
-/// [`PaymentAmount::new`] validates only during construction. Direct struct
-/// construction and later field mutation are unchecked.
+/// Fields are private so validation survives construction and cloning.
+///
+/// ```compile_fail,E0616
+/// let mut amount = paykit_lib::PaymentAmount::new("1", "btc").unwrap();
+/// amount.value = "invalid".into();
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaymentAmount {
-    /// Decimal string, such as `10.00`. Mutation is not revalidated.
-    pub value: String,
-    /// Asset code or unit, such as `usd`, `btc`, or `usdt`. Mutation is not revalidated.
-    pub asset: String,
+    /// Decimal string, such as `10.00`.
+    value: String,
+    /// Asset code or unit, such as `usd`, `btc`, or `usdt`.
+    asset: String,
 }
 
 impl PaymentAmount {
+    /// Access the preserved decimal spelling.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+    /// Access the exact asset text.
+    pub fn asset(&self) -> &str {
+        &self.asset
+    }
+
     /// Create a Payment Amount after validating its value and asset fields.
     pub fn new(value: impl Into<String>, asset: impl Into<String>) -> Result<Self> {
-        let amount = Self {
-            value: value.into(),
-            asset: asset.into(),
-        };
-        amount.validate_with_label("Payment Amount")?;
+        Self::new_with_label(value.into(), asset.into(), "Payment Amount")
+    }
+
+    pub(crate) fn new_with_label(
+        value: String,
+        asset: String,
+        label: &'static str,
+    ) -> Result<Self> {
+        let amount = Self { value, asset };
+        amount.validate_with_label(label)?;
         Ok(amount)
     }
 
