@@ -6,8 +6,8 @@ use paykit_sdk::{
 use std::time::{Duration, Instant};
 
 use crate::harness::{
-    drive_link_to_linked, linked_two_party, private_receiving_detail, two_party, TestUser,
-    wait_until_marker_is_newer_than_observer_checkpoint,
+    drive_link_to_linked, linked_two_party, private_receiving_detail, two_party,
+    wait_until_marker_is_newer_than_observer_checkpoint, TestUser,
 };
 
 #[tokio::test]
