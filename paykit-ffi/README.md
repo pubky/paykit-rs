@@ -191,6 +191,13 @@ object.
 
 ### Pubky Session Bootstrap
 
+- `PubkySessionBootstrap.republishIdentity(publicKey)` - rebroadcast the newest
+  existing signed PKARR identity record found on the configured networks or in
+  their caches, without signing or changing it. Returns `true` when published or
+  `false` when no record was found; resolution/publication failures remain errors.
+  No secret key or restored session is needed. Reuse the bootstrap helper for
+  its cache; the app owns scheduling, throttling and retries, and the Pubky client
+  owns timeouts.
 - `PubkySessionBootstrap(clientId)` — create/import grant sessions and grant
   auth flows for a stable app-owned Pubky client ID.
 - `PubkyClientConfig.authRelayUrl` — select a local or private grant-auth

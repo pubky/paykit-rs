@@ -30,6 +30,16 @@ fn test_pubky_client_config_accepts_local_testnet() {
     );
 }
 
+#[tokio::test]
+async fn test_republish_identity_rejects_invalid_public_key() {
+    let bootstrap = FfiPubkySessionBootstrap::new("paykit.test".into()).unwrap();
+
+    assert!(bootstrap
+        .republish_identity("not-a-public-key".into())
+        .await
+        .is_err());
+}
+
 #[test]
 fn test_pubky_client_config_rejects_invalid_local_testnet_host() {
     for host in ["", " not-a-host", "not a host", "::1"] {

@@ -153,6 +153,15 @@ Common workflows:
   restore the proof-of-possession key. Once completion fetches an approval,
   cancellation or a later credential-exchange failure requires a new auth
   request because Pubky relay approvals are consumed when read
+- use `PubkySessionBootstrap::republish_identity` to rebroadcast an existing
+  signed PKARR identity record, even before session restoration. It chooses the
+  newest record found across the configured networks and cache without changing
+  its timestamp, signature, homeserver or other records. Returns `true` when
+  published or `false` when no record was found; operational failures return
+  errors. Cached records can be used when discovery fails, but a reported newer
+  invalid DHT item is not overwritten. Reuse the bootstrap client for its cache.
+  Apps own scheduling, throttling and retries; no background task or persistent
+  packet store is added.
 - use `PubkySessionBootstrap::approve_auth_with_companion_claim` for a
   `pubkyauth://` request carrying an application-defined companion claim; the
   integrator supplies the query parameter, claim type, exact expected

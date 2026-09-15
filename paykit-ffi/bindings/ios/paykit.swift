@@ -4777,6 +4777,18 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
     func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
     /**
+     * Rebroadcast the newest existing signed identity record without changing it.
+     *
+     * Returns `true` if a publishing backend accepted the record, or `false`
+     * if none was found. Operational failures return errors.
+     * Requires only a public key, not a secret key or restored session. Reuse
+     * this helper for its cache. The caller owns scheduling, throttling and
+     * retries; the configured Pubky client owns request timeouts. Missing
+     * records are not reconstructed.
+     */
+    func republishIdentity(publicKey: String) async throws  -> Bool
+
+    /**
      * Resume a short-lived grant auth flow from securely persisted state.
      */
     func resumeAuth(state: PubkyAuthRequestState, expectedCapabilities: String) async throws  -> PubkyAuthRequest
@@ -4950,6 +4962,33 @@ open func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretK
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypePubkySessionBootstrapResult_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Rebroadcast the newest existing signed identity record without changing it.
+     *
+     * Returns `true` if a publishing backend accepted the record, or `false`
+     * if none was found. Operational failures return errors.
+     * Requires only a public key, not a secret key or restored session. Reuse
+     * this helper for its cache. The caller owns scheduling, throttling and
+     * retries; the configured Pubky client owns request timeouts. Missing
+     * records are not reconstructed.
+     */
+open func republishIdentity(publicKey: String)async throws  -> Bool  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipubkysessionbootstrap_republish_identity(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(publicKey)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_i8,
+            completeFunc: ffi_paykit_rust_future_complete_i8,
+            freeFunc: ffi_paykit_rust_future_free_i8,
+            liftFunc: FfiConverterBool.lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -19054,6 +19093,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 26600) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_republish_identity() != 55914) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_resume_auth() != 52728) {

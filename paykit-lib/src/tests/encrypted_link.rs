@@ -755,7 +755,7 @@ fn test_encrypted_link_snapshot_deserialize_rejects_reserved_noise_nonce() {
 
 #[tokio::test]
 async fn test_malformed_private_application_message_packet_is_rejected() {
-    let setup = PrivateTestSetup::new().await;
+    let mut setup = PrivateTestSetup::new().await;
     let mut receiver_link = setup.receiver_link;
 
     // The receiver reads `{owner}/{storage-path}/{slot}`; an outbox write from
@@ -766,19 +766,33 @@ async fn test_malformed_private_application_message_packet_is_rejected() {
         .map(|(_, storage_path)| storage_path.to_string())
         .expect("receive path should include an owner segment");
 
-    // Transport packets are fixed-size authenticated ciphertext, without an
-    // outer length prefix. Invalid sizes and unauthenticated full-size packets
-    // must fail without advancing the receive checkpoint.
     let packet_len = pubky_noise::snow_crypto::PUBKY_NOISE_TRANSPORT_PACKET_LEN;
+    let json = r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"bitkit","payment_endpoints":{}}"#;
+    send_raw_private_application_message(&mut setup.sender_link, json).await;
+    let ciphertext = setup
+        .sender_session
+        .storage()
+        .get(outbox_path.clone())
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap()
+        .to_vec();
+    assert_eq!(ciphertext.len(), packet_len);
+    let checkpoint = receiver_link.serialize().unwrap();
+
+    let mut tampered = ciphertext.clone();
+    tampered[0] ^= 1;
     let malformed_packets = [
         Vec::new(),
         vec![0x00],
         vec![0xff, 0xff, 0x00],
-        vec![0; packet_len - 1],
+        ciphertext[..packet_len - 1].to_vec(),
         vec![0; packet_len],
         vec![0; packet_len + 1],
+        tampered,
     ];
-    let checkpoint = receiver_link.serialize().unwrap();
 
     for packet in malformed_packets {
         setup
@@ -800,6 +814,19 @@ async fn test_malformed_private_application_message_packet_is_rejected() {
             .is_err());
         assert_eq!(receiver_link.serialize().unwrap(), checkpoint);
     }
+
+    setup
+        .sender_session
+        .storage()
+        .put(outbox_path, ciphertext)
+        .await
+        .unwrap();
+    let messages = receiver_link
+        .receive_private_application_messages()
+        .await
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].raw_json, json);
 
     close_encrypted_link(receiver_link).await.unwrap();
     close_encrypted_link(setup.sender_link).await.unwrap();
