@@ -37,10 +37,8 @@ use paykit_lib::{
     PrivateApplicationMessage, PrivateMessageKind, ReceiptId,
 };
 
-mod migration;
 mod validation;
 
-use migration::migrate_legacy_allowance_stream_state;
 use validation::*;
 
 type PeerStorageKey = (PubkyPublicKey, PaykitReceiverPath);
@@ -440,8 +438,8 @@ impl SdkBackupState {
             &payment_endpoint_reservations,
             &outbound_private_messages,
         )?;
-        let mut private_stream_items = unique_private_stream_items(self.private_stream_items)?;
-        let mut event_dedup_records = keyed_by_tuple(
+        let private_stream_items = unique_private_stream_items(self.private_stream_items)?;
+        let event_dedup_records = keyed_by_tuple(
             self.event_dedup_records,
             |record| {
                 (
@@ -452,7 +450,7 @@ impl SdkBackupState {
             },
             "Event dedupe",
         )?;
-        let mut receipt_access_records = keyed_by_tuple(
+        let receipt_access_records = keyed_by_tuple(
             self.receipt_access_records,
             |record| {
                 (
@@ -463,7 +461,7 @@ impl SdkBackupState {
             },
             "Receipt Access",
         )?;
-        let mut receipt_records = keyed_by_tuple(
+        let receipt_records = keyed_by_tuple(
             self.receipt_records,
             |record| {
                 (
@@ -474,12 +472,6 @@ impl SdkBackupState {
             },
             "Receipt",
         )?;
-        migrate_legacy_allowance_stream_state(
-            &mut private_stream_items,
-            &mut event_dedup_records,
-            &mut receipt_access_records,
-            &mut receipt_records,
-        );
         validate_private_stream_items(&private_stream_items)?;
         validate_event_dedup_records(&event_dedup_records, &private_stream_items)?;
         validate_receipt_access_records(&receipt_access_records, &private_stream_items)?;
