@@ -522,6 +522,185 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 /**
+ * Validated private Payment Amount. Default native formatting is redacted.
+ */
+public protocol AccountingAmountProtocol: AnyObject, Sendable {
+
+    /**
+     * Explicitly access the asset spelling.
+     */
+    func asset()  -> String
+
+    /**
+     * Explicitly access the sensitive decimal spelling.
+     */
+    func value()  -> String
+
+}
+/**
+ * Validated private Payment Amount. Default native formatting is redacted.
+ */
+open class AccountingAmount: AccountingAmountProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffiaccountingamount(self.pointer, $0) }
+    }
+    /**
+     * Validate exact decimal and asset text without rounding or converting precision.
+     */
+public convenience init(value: String, asset: String)throws  {
+    let pointer =
+        try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_constructor_ffiaccountingamount_new(
+        FfiConverterString.lower(value),
+        FfiConverterString.lower(asset),$0
+    )
+}
+    self.init(unsafeFromRawPointer: pointer)
+}
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffiaccountingamount(pointer, $0) }
+    }
+
+
+
+
+    /**
+     * Explicitly access the asset spelling.
+     */
+open func asset() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiaccountingamount_asset(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Explicitly access the sensitive decimal spelling.
+     */
+open func value() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiaccountingamount_value(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    open var debugDescription: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_paykit_fn_method_ffiaccountingamount_uniffi_trait_debug(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+    open var description: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_paykit_fn_method_ffiaccountingamount_uniffi_trait_display(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+
+}
+extension AccountingAmount: CustomDebugStringConvertible {}
+extension AccountingAmount: CustomStringConvertible {}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAccountingAmount: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = AccountingAmount
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> AccountingAmount {
+        return AccountingAmount(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: AccountingAmount) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AccountingAmount {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: AccountingAmount, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccountingAmount_lift(_ pointer: UnsafeMutableRawPointer) throws -> AccountingAmount {
+    return try FfiConverterTypeAccountingAmount.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccountingAmount_lower(_ value: AccountingAmount) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeAccountingAmount.lower(value)
+}
+
+
+
+
+
+
+/**
  * Inclusive per-payment amount range for Allowance Terms.
  *
  * The object and values returned by its getters are sensitive. Its exported
@@ -1410,6 +1589,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func acceptPaymentRequest(counterparty: String, counterpartyReceiverPath: String, paymentRequestId: String) async throws  -> PaymentRequestRecord
 
     /**
+     * Select and queue automatic Acceptance after SDK validation. This does not reserve or execute a payment.
+     */
+    func acceptPaymentRequestAutomatically(scope: PaymentRequestScope, selection: AllowanceSelectionInput, checks: PaymentExecutionChecks) async throws  -> AllowanceAssociationRecord
+
+    /**
      * Return received Payment Requests that need a local payer response.
      */
     func actionableReceivedPaymentRequests() async throws  -> [PaymentRequestRecord]
@@ -1425,6 +1609,16 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func advanceLinkHandshake(counterparty: String, counterpartyReceiverPath: String) async throws  -> LinkedPeerHandshakeReport
 
     /**
+     * Return durable accounting, or None before complete wallet reconciliation.
+     */
+    func allowanceAccountingState() async throws  -> AllowanceAccountingState?
+
+    /**
+     * Authorize a replacement for future recurring occurrences, preserving previous attempts and usage.
+     */
+    func authorizeAllowanceReassociation(scope: PaymentRequestScope, reassociation: AllowanceReassociationInput) async throws  -> AllowanceAssociationRecord
+
+    /**
      * Return a content fingerprint for SDK-managed backup state.
      *
      * Unlike `state_revision`, this excludes transient operation leases. Compare it
@@ -1432,6 +1626,12 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * This is not a storage compare-and-swap revision.
      */
     func backupStateRevision() async throws  -> String
+
+    /**
+     * Recheck a preparation and durably issue a handoff before wallet execution. Use the returned attempt ID for executor idempotency.
+     * A Blocked value is a successful durable decision, including its updated watermark.
+     */
+    func beginPaymentExecution(attemptId: String, checks: PaymentExecutionChecks) async throws  -> PaymentAttemptDecision
 
     /**
      * Block a counterparty for local Paykit private workflows.
@@ -1479,6 +1679,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func currentProfile(allowPubkyProfileFallback: Bool) async throws  -> ContactProfileResolution?
 
     /**
+     * Persist temporary deferral; later attempts repeat all SDK and wallet checks.
+     */
+    func deferPaymentOccurrence(occurrence: PaymentOccurrence, reason: String) async throws  -> PaymentOccurrenceRecord
+
+    /**
      * Delete a blob by `pubky://` URI or configured Paykit profile path.
      */
     func deletePaykitBlob(uriOrPath: String) async throws
@@ -1512,6 +1717,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Start or advance an Encrypted Link Handshake for one counterparty.
      */
     func ensureLinkWithPeer(counterparty: String, counterpartyReceiverPath: String, maxAdvanceSteps: UInt32) async throws  -> LinkedPeerHandshakeReport
+
+    /**
+     * Evaluate candidates using shared SDK rules without selecting or reserving an Allowance.
+     */
+    func evaluateAllowanceCandidates(scope: PaymentRequestScope, trustedTime: String) async throws  -> [AllowanceCandidate]
 
     /**
      * Export SDK-managed backup state as an opaque blob.
@@ -1624,6 +1834,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Return Payment Requests matching a local SDK filter.
      */
     func listPaymentRequests(filter: PaymentRequestFilter) async throws  -> [PaymentRequestRecord]
+
+    /**
+     * Persist a sticky manual-only decision that background candidate matching cannot clear.
+     */
+    func markPaymentManualOnly(occurrence: PaymentOccurrence) async throws  -> PaymentOccurrenceRecord
 
     /**
      * Observe a counterparty's public recovery marker.
@@ -1769,6 +1984,16 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func receivedPaymentRequestsFrom(counterparty: String, counterpartyReceiverPath: String) async throws  -> [PaymentRequestRecord]
 
     /**
+     * Merge complete wallet-attested history. An empty history cannot reset existing evidence.
+     */
+    func reconcileAllowanceAccounting(reconciliation: AllowanceAccountingReconciliation) async throws  -> AllowanceAccountingState
+
+    /**
+     * Record wallet-verified settlement. A timeout is Unknown; only definitive failure releases capacity.
+     */
+    func recordPaymentOutcome(report: PaymentOutcomeReport) async throws  -> PaymentAttemptRecord
+
+    /**
      * Refresh the cached Paykit Profile for a local Contact Record.
      */
     func refreshContactPaykitProfile(publicKey: String, receiverPath: String) async throws  -> ContactRecord?
@@ -1802,6 +2027,18 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Remove a public Contact Marker.
      */
     func removePublicContact(publicKey: String, receiverPath: String) async throws  -> ContactRecord?
+
+    /**
+     * Atomically reserve one occurrence. Ready with Prepared status is not an execution permit.
+     * A Blocked value is a successful durable decision, including its updated watermark.
+     */
+    func reserveAutomaticPayment(occurrence: PaymentOccurrence, expectedAssociationRevision: UInt64, checks: PaymentExecutionChecks) async throws  -> PaymentAttemptDecision
+
+    /**
+     * Reserve manual execution under the same semantic dedupe key without consuming Allowance capacity.
+     * A Blocked value is a successful durable decision, including its updated watermark.
+     */
+    func reserveManualPayment(occurrence: PaymentOccurrence, checks: PaymentExecutionChecks) async throws  -> PaymentAttemptDecision
 
     /**
      * Resolve display metadata for a contact.
@@ -1846,6 +2083,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Save or update a local Contact Record.
      */
     func saveContact(update: ContactUpdate) async throws  -> ContactRecord
+
+    /**
+     * Persist the wallet-selected candidate under the expected association revision.
+     */
+    func selectAllowance(scope: PaymentRequestScope, selection: AllowanceSelectionInput) async throws  -> AllowanceAssociationRecord
 
     /**
      * Revoke the current Pubky grant and clear local SDK identity state.
@@ -2075,6 +2317,26 @@ open func acceptPaymentRequest(counterparty: String, counterpartyReceiverPath: S
 }
 
     /**
+     * Select and queue automatic Acceptance after SDK validation. This does not reserve or execute a payment.
+     */
+open func acceptPaymentRequestAutomatically(scope: PaymentRequestScope, selection: AllowanceSelectionInput, checks: PaymentExecutionChecks)async throws  -> AllowanceAssociationRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_accept_payment_request_automatically(
+                    self.uniffiClonePointer(),
+                    FfiConverterTypePaymentRequestScope_lower(scope),FfiConverterTypeAllowanceSelectionInput_lower(selection),FfiConverterTypePaymentExecutionChecks_lower(checks)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAllowanceAssociationRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
      * Return received Payment Requests that need a local payer response.
      */
 open func actionableReceivedPaymentRequests()async throws  -> [PaymentRequestRecord]  {
@@ -2135,6 +2397,46 @@ open func advanceLinkHandshake(counterparty: String, counterpartyReceiverPath: S
 }
 
     /**
+     * Return durable accounting, or None before complete wallet reconciliation.
+     */
+open func allowanceAccountingState()async throws  -> AllowanceAccountingState?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_allowance_accounting_state(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeAllowanceAccountingState.lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Authorize a replacement for future recurring occurrences, preserving previous attempts and usage.
+     */
+open func authorizeAllowanceReassociation(scope: PaymentRequestScope, reassociation: AllowanceReassociationInput)async throws  -> AllowanceAssociationRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_authorize_allowance_reassociation(
+                    self.uniffiClonePointer(),
+                    FfiConverterTypePaymentRequestScope_lower(scope),FfiConverterTypeAllowanceReassociationInput_lower(reassociation)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAllowanceAssociationRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
      * Return a content fingerprint for SDK-managed backup state.
      *
      * Unlike `state_revision`, this excludes transient operation leases. Compare it
@@ -2154,6 +2456,27 @@ open func backupStateRevision()async throws  -> String  {
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Recheck a preparation and durably issue a handoff before wallet execution. Use the returned attempt ID for executor idempotency.
+     * A Blocked value is a successful durable decision, including its updated watermark.
+     */
+open func beginPaymentExecution(attemptId: String, checks: PaymentExecutionChecks)async throws  -> PaymentAttemptDecision  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_begin_payment_execution(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(attemptId),FfiConverterTypePaymentExecutionChecks_lower(checks)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaymentAttemptDecision_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -2329,6 +2652,26 @@ open func currentProfile(allowPubkyProfileFallback: Bool)async throws  -> Contac
 }
 
     /**
+     * Persist temporary deferral; later attempts repeat all SDK and wallet checks.
+     */
+open func deferPaymentOccurrence(occurrence: PaymentOccurrence, reason: String)async throws  -> PaymentOccurrenceRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_defer_payment_occurrence(
+                    self.uniffiClonePointer(),
+                    FfiConverterTypePaymentOccurrence_lower(occurrence),FfiConverterString.lower(reason)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaymentOccurrenceRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
      * Delete a blob by `pubky://` URI or configured Paykit profile path.
      */
 open func deletePaykitBlob(uriOrPath: String)async throws   {
@@ -2464,6 +2807,26 @@ open func ensureLinkWithPeer(counterparty: String, counterpartyReceiverPath: Str
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeLinkedPeerHandshakeReport_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Evaluate candidates using shared SDK rules without selecting or reserving an Allowance.
+     */
+open func evaluateAllowanceCandidates(scope: PaymentRequestScope, trustedTime: String)async throws  -> [AllowanceCandidate]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_evaluate_allowance_candidates(
+                    self.uniffiClonePointer(),
+                    FfiConverterTypePaymentRequestScope_lower(scope),FfiConverterString.lower(trustedTime)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeAllowanceCandidate.lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -2861,6 +3224,26 @@ open func listPaymentRequests(filter: PaymentRequestFilter)async throws  -> [Pay
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterSequenceTypePaymentRequestRecord.lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Persist a sticky manual-only decision that background candidate matching cannot clear.
+     */
+open func markPaymentManualOnly(occurrence: PaymentOccurrence)async throws  -> PaymentOccurrenceRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_mark_payment_manual_only(
+                    self.uniffiClonePointer(),
+                    FfiConverterTypePaymentOccurrence_lower(occurrence)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaymentOccurrenceRecord_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -3429,6 +3812,46 @@ open func receivedPaymentRequestsFrom(counterparty: String, counterpartyReceiver
 }
 
     /**
+     * Merge complete wallet-attested history. An empty history cannot reset existing evidence.
+     */
+open func reconcileAllowanceAccounting(reconciliation: AllowanceAccountingReconciliation)async throws  -> AllowanceAccountingState  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_reconcile_allowance_accounting(
+                    self.uniffiClonePointer(),
+                    FfiConverterTypeAllowanceAccountingReconciliation_lower(reconciliation)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAllowanceAccountingState_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Record wallet-verified settlement. A timeout is Unknown; only definitive failure releases capacity.
+     */
+open func recordPaymentOutcome(report: PaymentOutcomeReport)async throws  -> PaymentAttemptRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_record_payment_outcome(
+                    self.uniffiClonePointer(),
+                    FfiConverterTypePaymentOutcomeReport_lower(report)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaymentAttemptRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
      * Refresh the cached Paykit Profile for a local Contact Record.
      */
 open func refreshContactPaykitProfile(publicKey: String, receiverPath: String)async throws  -> ContactRecord?  {
@@ -3564,6 +3987,48 @@ open func removePublicContact(publicKey: String, receiverPath: String)async thro
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionTypeContactRecord.lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Atomically reserve one occurrence. Ready with Prepared status is not an execution permit.
+     * A Blocked value is a successful durable decision, including its updated watermark.
+     */
+open func reserveAutomaticPayment(occurrence: PaymentOccurrence, expectedAssociationRevision: UInt64, checks: PaymentExecutionChecks)async throws  -> PaymentAttemptDecision  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_reserve_automatic_payment(
+                    self.uniffiClonePointer(),
+                    FfiConverterTypePaymentOccurrence_lower(occurrence),FfiConverterUInt64.lower(expectedAssociationRevision),FfiConverterTypePaymentExecutionChecks_lower(checks)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaymentAttemptDecision_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Reserve manual execution under the same semantic dedupe key without consuming Allowance capacity.
+     * A Blocked value is a successful durable decision, including its updated watermark.
+     */
+open func reserveManualPayment(occurrence: PaymentOccurrence, checks: PaymentExecutionChecks)async throws  -> PaymentAttemptDecision  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_reserve_manual_payment(
+                    self.uniffiClonePointer(),
+                    FfiConverterTypePaymentOccurrence_lower(occurrence),FfiConverterTypePaymentExecutionChecks_lower(checks)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaymentAttemptDecision_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -3728,6 +4193,26 @@ open func saveContact(update: ContactUpdate)async throws  -> ContactRecord  {
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeContactRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Persist the wallet-selected candidate under the expected association revision.
+     */
+open func selectAllowance(scope: PaymentRequestScope, selection: AllowanceSelectionInput)async throws  -> AllowanceAssociationRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_select_allowance(
+                    self.uniffiClonePointer(),
+                    FfiConverterTypePaymentRequestScope_lower(scope),FfiConverterTypeAllowanceSelectionInput_lower(selection)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAllowanceAssociationRecord_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -7302,6 +7787,679 @@ public func FfiConverterTypeSdkStateBlobStore_lower(_ value: SdkStateBlobStore) 
 
 
 /**
+ * Canonical recurring occurrence interval, independent of wire timestamp spelling.
+ *
+ * Treat these fields as private wallet data; do not log or describe the record.
+ */
+public struct AccountingBillingPeriod {
+    /**
+     * Inclusive beginning.
+     */
+    public var startsAt: String
+    /**
+     * Exclusive end.
+     */
+    public var endsAt: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Inclusive beginning.
+         */startsAt: String,
+        /**
+         * Exclusive end.
+         */endsAt: String) {
+        self.startsAt = startsAt
+        self.endsAt = endsAt
+    }
+}
+
+#if compiler(>=6)
+extension AccountingBillingPeriod: Sendable {}
+#endif
+
+
+extension AccountingBillingPeriod: Equatable, Hashable {
+    public static func ==(lhs: AccountingBillingPeriod, rhs: AccountingBillingPeriod) -> Bool {
+        if lhs.startsAt != rhs.startsAt {
+            return false
+        }
+        if lhs.endsAt != rhs.endsAt {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(startsAt)
+        hasher.combine(endsAt)
+    }
+}
+
+extension AccountingBillingPeriod: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAccountingBillingPeriod: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AccountingBillingPeriod {
+        return
+            try AccountingBillingPeriod(
+                startsAt: FfiConverterString.read(from: &buf),
+                endsAt: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AccountingBillingPeriod, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.startsAt, into: &buf)
+        FfiConverterString.write(value.endsAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccountingBillingPeriod_lift(_ buf: RustBuffer) throws -> AccountingBillingPeriod {
+    return try FfiConverterTypeAccountingBillingPeriod.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccountingBillingPeriod_lower(_ value: AccountingBillingPeriod) -> RustBuffer {
+    return FfiConverterTypeAccountingBillingPeriod.lower(value)
+}
+
+
+/**
+ * Complete wallet-attested accounting history; proofs cannot reconstruct it.
+ *
+ * Treat these fields as private wallet data; do not log or describe the record.
+ */
+public struct AllowanceAccountingHistory {
+    /**
+     * Request selection history.
+     */
+    public var associations: [AllowanceAssociationRecord]
+    /**
+     * Complete semantic payment history through all wallet execution paths.
+     */
+    public var occurrences: [PaymentOccurrenceRecord]
+    /**
+     * Durable trusted time for every evaluated Allowance.
+     */
+    public var watermarks: [AllowanceWatermarkRecord]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Request selection history.
+         */associations: [AllowanceAssociationRecord],
+        /**
+         * Complete semantic payment history through all wallet execution paths.
+         */occurrences: [PaymentOccurrenceRecord],
+        /**
+         * Durable trusted time for every evaluated Allowance.
+         */watermarks: [AllowanceWatermarkRecord]) {
+        self.associations = associations
+        self.occurrences = occurrences
+        self.watermarks = watermarks
+    }
+}
+
+#if compiler(>=6)
+extension AllowanceAccountingHistory: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowanceAccountingHistory: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowanceAccountingHistory {
+        return
+            try AllowanceAccountingHistory(
+                associations: FfiConverterSequenceTypeAllowanceAssociationRecord.read(from: &buf),
+                occurrences: FfiConverterSequenceTypePaymentOccurrenceRecord.read(from: &buf),
+                watermarks: FfiConverterSequenceTypeAllowanceWatermarkRecord.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AllowanceAccountingHistory, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeAllowanceAssociationRecord.write(value.associations, into: &buf)
+        FfiConverterSequenceTypePaymentOccurrenceRecord.write(value.occurrences, into: &buf)
+        FfiConverterSequenceTypeAllowanceWatermarkRecord.write(value.watermarks, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceAccountingHistory_lift(_ buf: RustBuffer) throws -> AllowanceAccountingHistory {
+    return try FfiConverterTypeAllowanceAccountingHistory.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceAccountingHistory_lower(_ value: AllowanceAccountingHistory) -> RustBuffer {
+    return FfiConverterTypeAllowanceAccountingHistory.lower(value)
+}
+
+
+/**
+ * Explicit complete-history reconciliation after initialization, restore, or loss.
+ *
+ * The caller must reconcile external idempotency records and all payment paths.
+ * An empty history attests that there were no previous payments; it never
+ * clears evidence already retained by this SDK.
+ *
+ * Treat these fields as private wallet data; do not log or describe the record.
+ */
+public struct AllowanceAccountingReconciliation {
+    /**
+     * Expected ledger revision, or None only when no ledger exists.
+     */
+    public var expectedRevision: UInt64?
+    /**
+     * Complete recovered history to merge with existing evidence.
+     */
+    public var history: AllowanceAccountingHistory
+    /**
+     * Explicit outcome attestations; unmentioned uncertain attempts stay reserved.
+     */
+    public var outcomes: [PaymentOutcomeReport]
+    /**
+     * Trusted reconciliation time, not inferred from proof receipt times.
+     */
+    public var trustedTime: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Expected ledger revision, or None only when no ledger exists.
+         */expectedRevision: UInt64?,
+        /**
+         * Complete recovered history to merge with existing evidence.
+         */history: AllowanceAccountingHistory,
+        /**
+         * Explicit outcome attestations; unmentioned uncertain attempts stay reserved.
+         */outcomes: [PaymentOutcomeReport],
+        /**
+         * Trusted reconciliation time, not inferred from proof receipt times.
+         */trustedTime: String) {
+        self.expectedRevision = expectedRevision
+        self.history = history
+        self.outcomes = outcomes
+        self.trustedTime = trustedTime
+    }
+}
+
+#if compiler(>=6)
+extension AllowanceAccountingReconciliation: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowanceAccountingReconciliation: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowanceAccountingReconciliation {
+        return
+            try AllowanceAccountingReconciliation(
+                expectedRevision: FfiConverterOptionUInt64.read(from: &buf),
+                history: FfiConverterTypeAllowanceAccountingHistory.read(from: &buf),
+                outcomes: FfiConverterSequenceTypePaymentOutcomeReport.read(from: &buf),
+                trustedTime: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AllowanceAccountingReconciliation, into buf: inout [UInt8]) {
+        FfiConverterOptionUInt64.write(value.expectedRevision, into: &buf)
+        FfiConverterTypeAllowanceAccountingHistory.write(value.history, into: &buf)
+        FfiConverterSequenceTypePaymentOutcomeReport.write(value.outcomes, into: &buf)
+        FfiConverterString.write(value.trustedTime, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceAccountingReconciliation_lift(_ buf: RustBuffer) throws -> AllowanceAccountingReconciliation {
+    return try FfiConverterTypeAllowanceAccountingReconciliation.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceAccountingReconciliation_lower(_ value: AllowanceAccountingReconciliation) -> RustBuffer {
+    return FfiConverterTypeAllowanceAccountingReconciliation.lower(value)
+}
+
+
+/**
+ * Durable ledger coordinated by one SDK runtime and its wallet executor.
+ *
+ * Treat these fields as private wallet data; do not log or describe the record.
+ */
+public struct AllowanceAccountingState {
+    /**
+     * Monotonic local ledger revision for reconciliation compare-and-set.
+     */
+    public var revision: UInt64
+    /**
+     * Epoch invalidating prepared handoffs after restore or private-state loss.
+     */
+    public var epoch: String
+    /**
+     * Automatic and manual admission remain blocked until complete reconciliation.
+     */
+    public var requiresReconciliation: Bool
+    /**
+     * Complete retained evidence.
+     */
+    public var history: AllowanceAccountingHistory
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Monotonic local ledger revision for reconciliation compare-and-set.
+         */revision: UInt64,
+        /**
+         * Epoch invalidating prepared handoffs after restore or private-state loss.
+         */epoch: String,
+        /**
+         * Automatic and manual admission remain blocked until complete reconciliation.
+         */requiresReconciliation: Bool,
+        /**
+         * Complete retained evidence.
+         */history: AllowanceAccountingHistory) {
+        self.revision = revision
+        self.epoch = epoch
+        self.requiresReconciliation = requiresReconciliation
+        self.history = history
+    }
+}
+
+#if compiler(>=6)
+extension AllowanceAccountingState: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowanceAccountingState: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowanceAccountingState {
+        return
+            try AllowanceAccountingState(
+                revision: FfiConverterUInt64.read(from: &buf),
+                epoch: FfiConverterString.read(from: &buf),
+                requiresReconciliation: FfiConverterBool.read(from: &buf),
+                history: FfiConverterTypeAllowanceAccountingHistory.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AllowanceAccountingState, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.revision, into: &buf)
+        FfiConverterString.write(value.epoch, into: &buf)
+        FfiConverterBool.write(value.requiresReconciliation, into: &buf)
+        FfiConverterTypeAllowanceAccountingHistory.write(value.history, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceAccountingState_lift(_ buf: RustBuffer) throws -> AllowanceAccountingState {
+    return try FfiConverterTypeAllowanceAccountingState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceAccountingState_lower(_ value: AllowanceAccountingState) -> RustBuffer {
+    return FfiConverterTypeAllowanceAccountingState.lower(value)
+}
+
+
+/**
+ * Complete selection history for one request.
+ *
+ * Treat these fields as private wallet data; do not log or describe the record.
+ */
+public struct AllowanceAssociationRecord {
+    /**
+     * Exact scoped request.
+     */
+    public var request: PaymentAccountingScope
+    /**
+     * Append-only authorized selections.
+     */
+    public var revisions: [AllowanceAssociationRevision]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Exact scoped request.
+         */request: PaymentAccountingScope,
+        /**
+         * Append-only authorized selections.
+         */revisions: [AllowanceAssociationRevision]) {
+        self.request = request
+        self.revisions = revisions
+    }
+}
+
+#if compiler(>=6)
+extension AllowanceAssociationRecord: Sendable {}
+#endif
+
+
+extension AllowanceAssociationRecord: Equatable, Hashable {
+    public static func ==(lhs: AllowanceAssociationRecord, rhs: AllowanceAssociationRecord) -> Bool {
+        if lhs.request != rhs.request {
+            return false
+        }
+        if lhs.revisions != rhs.revisions {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(request)
+        hasher.combine(revisions)
+    }
+}
+
+extension AllowanceAssociationRecord: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowanceAssociationRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowanceAssociationRecord {
+        return
+            try AllowanceAssociationRecord(
+                request: FfiConverterTypePaymentAccountingScope.read(from: &buf),
+                revisions: FfiConverterSequenceTypeAllowanceAssociationRevision.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AllowanceAssociationRecord, into buf: inout [UInt8]) {
+        FfiConverterTypePaymentAccountingScope.write(value.request, into: &buf)
+        FfiConverterSequenceTypeAllowanceAssociationRevision.write(value.revisions, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceAssociationRecord_lift(_ buf: RustBuffer) throws -> AllowanceAssociationRecord {
+    return try FfiConverterTypeAllowanceAssociationRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceAssociationRecord_lower(_ value: AllowanceAssociationRecord) -> RustBuffer {
+    return FfiConverterTypeAllowanceAssociationRecord.lower(value)
+}
+
+
+/**
+ * One explicit request-to-Allowance selection decision.
+ *
+ * Treat these fields as private wallet data; do not log or describe the record.
+ */
+public struct AllowanceAssociationRevision {
+    /**
+     * Monotonic request association revision.
+     */
+    public var revision: UInt64
+    /**
+     * Selected authority, never combined with another Allowance.
+     */
+    public var allowanceId: String
+    /**
+     * Initial selection has no boundary; replacements apply from this instant.
+     */
+    public var effectiveFrom: String?
+    /**
+     * Explicit wallet authorization reference for replacement.
+     */
+    public var authorizationId: String?
+    /**
+     * Trusted decision time.
+     */
+    public var authorizedAt: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Monotonic request association revision.
+         */revision: UInt64,
+        /**
+         * Selected authority, never combined with another Allowance.
+         */allowanceId: String,
+        /**
+         * Initial selection has no boundary; replacements apply from this instant.
+         */effectiveFrom: String?,
+        /**
+         * Explicit wallet authorization reference for replacement.
+         */authorizationId: String?,
+        /**
+         * Trusted decision time.
+         */authorizedAt: String) {
+        self.revision = revision
+        self.allowanceId = allowanceId
+        self.effectiveFrom = effectiveFrom
+        self.authorizationId = authorizationId
+        self.authorizedAt = authorizedAt
+    }
+}
+
+#if compiler(>=6)
+extension AllowanceAssociationRevision: Sendable {}
+#endif
+
+
+extension AllowanceAssociationRevision: Equatable, Hashable {
+    public static func ==(lhs: AllowanceAssociationRevision, rhs: AllowanceAssociationRevision) -> Bool {
+        if lhs.revision != rhs.revision {
+            return false
+        }
+        if lhs.allowanceId != rhs.allowanceId {
+            return false
+        }
+        if lhs.effectiveFrom != rhs.effectiveFrom {
+            return false
+        }
+        if lhs.authorizationId != rhs.authorizationId {
+            return false
+        }
+        if lhs.authorizedAt != rhs.authorizedAt {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(revision)
+        hasher.combine(allowanceId)
+        hasher.combine(effectiveFrom)
+        hasher.combine(authorizationId)
+        hasher.combine(authorizedAt)
+    }
+}
+
+extension AllowanceAssociationRevision: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowanceAssociationRevision: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowanceAssociationRevision {
+        return
+            try AllowanceAssociationRevision(
+                revision: FfiConverterUInt64.read(from: &buf),
+                allowanceId: FfiConverterString.read(from: &buf),
+                effectiveFrom: FfiConverterOptionString.read(from: &buf),
+                authorizationId: FfiConverterOptionString.read(from: &buf),
+                authorizedAt: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AllowanceAssociationRevision, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.revision, into: &buf)
+        FfiConverterString.write(value.allowanceId, into: &buf)
+        FfiConverterOptionString.write(value.effectiveFrom, into: &buf)
+        FfiConverterOptionString.write(value.authorizationId, into: &buf)
+        FfiConverterString.write(value.authorizedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceAssociationRevision_lift(_ buf: RustBuffer) throws -> AllowanceAssociationRevision {
+    return try FfiConverterTypeAllowanceAssociationRevision.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceAssociationRevision_lower(_ value: AllowanceAssociationRevision) -> RustBuffer {
+    return FfiConverterTypeAllowanceAssociationRevision.lower(value)
+}
+
+
+/**
+ * Per-Allowance candidate result; this never selects or reserves authority.
+ *
+ * Treat these fields as private wallet data; do not log or describe the record.
+ */
+public struct AllowanceCandidate {
+    /**
+     * Candidate Allowance ID.
+     */
+    public var allowanceId: String
+    /**
+     * Static endpoint intersection when eligible.
+     */
+    public var eligiblePaymentEndpointIdentifiers: [String]
+    /**
+     * Reason it cannot currently be selected.
+     */
+    public var blocked: AllowanceAccountingBlock?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Candidate Allowance ID.
+         */allowanceId: String,
+        /**
+         * Static endpoint intersection when eligible.
+         */eligiblePaymentEndpointIdentifiers: [String],
+        /**
+         * Reason it cannot currently be selected.
+         */blocked: AllowanceAccountingBlock?) {
+        self.allowanceId = allowanceId
+        self.eligiblePaymentEndpointIdentifiers = eligiblePaymentEndpointIdentifiers
+        self.blocked = blocked
+    }
+}
+
+#if compiler(>=6)
+extension AllowanceCandidate: Sendable {}
+#endif
+
+
+extension AllowanceCandidate: Equatable, Hashable {
+    public static func ==(lhs: AllowanceCandidate, rhs: AllowanceCandidate) -> Bool {
+        if lhs.allowanceId != rhs.allowanceId {
+            return false
+        }
+        if lhs.eligiblePaymentEndpointIdentifiers != rhs.eligiblePaymentEndpointIdentifiers {
+            return false
+        }
+        if lhs.blocked != rhs.blocked {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(allowanceId)
+        hasher.combine(eligiblePaymentEndpointIdentifiers)
+        hasher.combine(blocked)
+    }
+}
+
+extension AllowanceCandidate: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowanceCandidate: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowanceCandidate {
+        return
+            try AllowanceCandidate(
+                allowanceId: FfiConverterString.read(from: &buf),
+                eligiblePaymentEndpointIdentifiers: FfiConverterSequenceString.read(from: &buf),
+                blocked: FfiConverterOptionTypeAllowanceAccountingBlock.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AllowanceCandidate, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.allowanceId, into: &buf)
+        FfiConverterSequenceString.write(value.eligiblePaymentEndpointIdentifiers, into: &buf)
+        FfiConverterOptionTypeAllowanceAccountingBlock.write(value.blocked, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceCandidate_lift(_ buf: RustBuffer) throws -> AllowanceCandidate {
+    return try FfiConverterTypeAllowanceCandidate.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceCandidate_lower(_ value: AllowanceCandidate) -> RustBuffer {
+    return FfiConverterTypeAllowanceCandidate.lower(value)
+}
+
+
+/**
  * Filter for listing SDK-derived Allowances.
  */
 public struct AllowanceFilter {
@@ -7413,6 +8571,137 @@ public func FfiConverterTypeAllowanceFilter_lift(_ buf: RustBuffer) throws -> Al
 #endif
 public func FfiConverterTypeAllowanceFilter_lower(_ value: AllowanceFilter) -> RustBuffer {
     return FfiConverterTypeAllowanceFilter.lower(value)
+}
+
+
+/**
+ * Explicit user-approved replacement for future recurring occurrences.
+ *
+ * Treat these fields as private wallet data; do not log or describe the record.
+ */
+public struct AllowanceReassociationInput {
+    /**
+     * Replacement authority on the same link.
+     */
+    public var allowanceId: String
+    /**
+     * Expected current association revision.
+     */
+    public var expectedRevision: UInt64
+    /**
+     * Future Billing Period boundary approved by the user.
+     */
+    public var effectiveFrom: String
+    /**
+     * Stable UUID-v4 reference to the wallet's explicit user authorization.
+     */
+    public var authorizationId: String
+    /**
+     * Wallet-supplied trusted time; the boundary cannot precede it.
+     */
+    public var trustedTime: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Replacement authority on the same link.
+         */allowanceId: String,
+        /**
+         * Expected current association revision.
+         */expectedRevision: UInt64,
+        /**
+         * Future Billing Period boundary approved by the user.
+         */effectiveFrom: String,
+        /**
+         * Stable UUID-v4 reference to the wallet's explicit user authorization.
+         */authorizationId: String,
+        /**
+         * Wallet-supplied trusted time; the boundary cannot precede it.
+         */trustedTime: String) {
+        self.allowanceId = allowanceId
+        self.expectedRevision = expectedRevision
+        self.effectiveFrom = effectiveFrom
+        self.authorizationId = authorizationId
+        self.trustedTime = trustedTime
+    }
+}
+
+#if compiler(>=6)
+extension AllowanceReassociationInput: Sendable {}
+#endif
+
+
+extension AllowanceReassociationInput: Equatable, Hashable {
+    public static func ==(lhs: AllowanceReassociationInput, rhs: AllowanceReassociationInput) -> Bool {
+        if lhs.allowanceId != rhs.allowanceId {
+            return false
+        }
+        if lhs.expectedRevision != rhs.expectedRevision {
+            return false
+        }
+        if lhs.effectiveFrom != rhs.effectiveFrom {
+            return false
+        }
+        if lhs.authorizationId != rhs.authorizationId {
+            return false
+        }
+        if lhs.trustedTime != rhs.trustedTime {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(allowanceId)
+        hasher.combine(expectedRevision)
+        hasher.combine(effectiveFrom)
+        hasher.combine(authorizationId)
+        hasher.combine(trustedTime)
+    }
+}
+
+extension AllowanceReassociationInput: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowanceReassociationInput: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowanceReassociationInput {
+        return
+            try AllowanceReassociationInput(
+                allowanceId: FfiConverterString.read(from: &buf),
+                expectedRevision: FfiConverterUInt64.read(from: &buf),
+                effectiveFrom: FfiConverterString.read(from: &buf),
+                authorizationId: FfiConverterString.read(from: &buf),
+                trustedTime: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AllowanceReassociationInput, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.allowanceId, into: &buf)
+        FfiConverterUInt64.write(value.expectedRevision, into: &buf)
+        FfiConverterString.write(value.effectiveFrom, into: &buf)
+        FfiConverterString.write(value.authorizationId, into: &buf)
+        FfiConverterString.write(value.trustedTime, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceReassociationInput_lift(_ buf: RustBuffer) throws -> AllowanceReassociationInput {
+    return try FfiConverterTypeAllowanceReassociationInput.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceReassociationInput_lower(_ value: AllowanceReassociationInput) -> RustBuffer {
+    return FfiConverterTypeAllowanceReassociationInput.lower(value)
 }
 
 
@@ -7700,6 +8989,254 @@ public func FfiConverterTypeAllowanceRecord_lift(_ buf: RustBuffer) throws -> Al
 #endif
 public func FfiConverterTypeAllowanceRecord_lower(_ value: AllowanceRecord) -> RustBuffer {
     return FfiConverterTypeAllowanceRecord.lower(value)
+}
+
+
+/**
+ * Initial explicit selection; retries must name the existing revision.
+ *
+ * Treat these fields as private wallet data; do not log or describe the record.
+ */
+public struct AllowanceSelectionInput {
+    /**
+     * Chosen candidate after wallet priority or user choice.
+     */
+    public var allowanceId: String
+    /**
+     * Absent only for an initial decision.
+     */
+    public var expectedRevision: UInt64?
+    /**
+     * Wallet-supplied trusted UTC time.
+     */
+    public var trustedTime: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Chosen candidate after wallet priority or user choice.
+         */allowanceId: String,
+        /**
+         * Absent only for an initial decision.
+         */expectedRevision: UInt64?,
+        /**
+         * Wallet-supplied trusted UTC time.
+         */trustedTime: String) {
+        self.allowanceId = allowanceId
+        self.expectedRevision = expectedRevision
+        self.trustedTime = trustedTime
+    }
+}
+
+#if compiler(>=6)
+extension AllowanceSelectionInput: Sendable {}
+#endif
+
+
+extension AllowanceSelectionInput: Equatable, Hashable {
+    public static func ==(lhs: AllowanceSelectionInput, rhs: AllowanceSelectionInput) -> Bool {
+        if lhs.allowanceId != rhs.allowanceId {
+            return false
+        }
+        if lhs.expectedRevision != rhs.expectedRevision {
+            return false
+        }
+        if lhs.trustedTime != rhs.trustedTime {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(allowanceId)
+        hasher.combine(expectedRevision)
+        hasher.combine(trustedTime)
+    }
+}
+
+extension AllowanceSelectionInput: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowanceSelectionInput: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowanceSelectionInput {
+        return
+            try AllowanceSelectionInput(
+                allowanceId: FfiConverterString.read(from: &buf),
+                expectedRevision: FfiConverterOptionUInt64.read(from: &buf),
+                trustedTime: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AllowanceSelectionInput, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.allowanceId, into: &buf)
+        FfiConverterOptionUInt64.write(value.expectedRevision, into: &buf)
+        FfiConverterString.write(value.trustedTime, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceSelectionInput_lift(_ buf: RustBuffer) throws -> AllowanceSelectionInput {
+    return try FfiConverterTypeAllowanceSelectionInput.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceSelectionInput_lower(_ value: AllowanceSelectionInput) -> RustBuffer {
+    return FfiConverterTypeAllowanceSelectionInput.lower(value)
+}
+
+
+/**
+ * Nondecreasing evaluation time for one exact Allowance scope.
+ *
+ * Treat these fields as private wallet data; do not log or describe the record.
+ */
+public struct AllowanceWatermarkRecord {
+    /**
+     * Local payer identity.
+     */
+    public var localPublicKey: String
+    /**
+     * Local runtime folder.
+     */
+    public var localReceiverPath: String
+    /**
+     * Remote Allowee identity.
+     */
+    public var counterparty: String
+    /**
+     * Remote runtime folder.
+     */
+    public var counterpartyReceiverPath: String
+    /**
+     * Allowance whose usage and evaluation time are tracked.
+     */
+    public var allowanceId: String
+    /**
+     * Latest trusted evaluation instant, including blocked evaluations.
+     */
+    public var evaluatedAt: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Local payer identity.
+         */localPublicKey: String,
+        /**
+         * Local runtime folder.
+         */localReceiverPath: String,
+        /**
+         * Remote Allowee identity.
+         */counterparty: String,
+        /**
+         * Remote runtime folder.
+         */counterpartyReceiverPath: String,
+        /**
+         * Allowance whose usage and evaluation time are tracked.
+         */allowanceId: String,
+        /**
+         * Latest trusted evaluation instant, including blocked evaluations.
+         */evaluatedAt: String) {
+        self.localPublicKey = localPublicKey
+        self.localReceiverPath = localReceiverPath
+        self.counterparty = counterparty
+        self.counterpartyReceiverPath = counterpartyReceiverPath
+        self.allowanceId = allowanceId
+        self.evaluatedAt = evaluatedAt
+    }
+}
+
+#if compiler(>=6)
+extension AllowanceWatermarkRecord: Sendable {}
+#endif
+
+
+extension AllowanceWatermarkRecord: Equatable, Hashable {
+    public static func ==(lhs: AllowanceWatermarkRecord, rhs: AllowanceWatermarkRecord) -> Bool {
+        if lhs.localPublicKey != rhs.localPublicKey {
+            return false
+        }
+        if lhs.localReceiverPath != rhs.localReceiverPath {
+            return false
+        }
+        if lhs.counterparty != rhs.counterparty {
+            return false
+        }
+        if lhs.counterpartyReceiverPath != rhs.counterpartyReceiverPath {
+            return false
+        }
+        if lhs.allowanceId != rhs.allowanceId {
+            return false
+        }
+        if lhs.evaluatedAt != rhs.evaluatedAt {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(localPublicKey)
+        hasher.combine(localReceiverPath)
+        hasher.combine(counterparty)
+        hasher.combine(counterpartyReceiverPath)
+        hasher.combine(allowanceId)
+        hasher.combine(evaluatedAt)
+    }
+}
+
+extension AllowanceWatermarkRecord: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowanceWatermarkRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowanceWatermarkRecord {
+        return
+            try AllowanceWatermarkRecord(
+                localPublicKey: FfiConverterString.read(from: &buf),
+                localReceiverPath: FfiConverterString.read(from: &buf),
+                counterparty: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
+                allowanceId: FfiConverterString.read(from: &buf),
+                evaluatedAt: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AllowanceWatermarkRecord, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.localPublicKey, into: &buf)
+        FfiConverterString.write(value.localReceiverPath, into: &buf)
+        FfiConverterString.write(value.counterparty, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
+        FfiConverterString.write(value.allowanceId, into: &buf)
+        FfiConverterString.write(value.evaluatedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceWatermarkRecord_lift(_ buf: RustBuffer) throws -> AllowanceWatermarkRecord {
+    return try FfiConverterTypeAllowanceWatermarkRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceWatermarkRecord_lower(_ value: AllowanceWatermarkRecord) -> RustBuffer {
+    return FfiConverterTypeAllowanceWatermarkRecord.lower(value)
 }
 
 
@@ -10232,6 +11769,137 @@ public func FfiConverterTypePaykitSdkConfig_lower(_ value: PaykitSdkConfig) -> R
 
 
 /**
+ * Authoritative identity of a request in durable accounting.
+ *
+ * Treat these fields as private wallet data; do not log or describe the record.
+ */
+public struct PaymentAccountingScope {
+    /**
+     * Payer identity, taken from the SDK's identity state.
+     */
+    public var localPublicKey: String
+    /**
+     * Payer runtime folder, taken from SDK configuration.
+     */
+    public var localReceiverPath: String
+    /**
+     * Authenticated payee identity.
+     */
+    public var counterparty: String
+    /**
+     * Authenticated payee runtime folder.
+     */
+    public var counterpartyReceiverPath: String
+    /**
+     * Stable Payment Request ID.
+     */
+    public var paymentRequestId: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Payer identity, taken from the SDK's identity state.
+         */localPublicKey: String,
+        /**
+         * Payer runtime folder, taken from SDK configuration.
+         */localReceiverPath: String,
+        /**
+         * Authenticated payee identity.
+         */counterparty: String,
+        /**
+         * Authenticated payee runtime folder.
+         */counterpartyReceiverPath: String,
+        /**
+         * Stable Payment Request ID.
+         */paymentRequestId: String) {
+        self.localPublicKey = localPublicKey
+        self.localReceiverPath = localReceiverPath
+        self.counterparty = counterparty
+        self.counterpartyReceiverPath = counterpartyReceiverPath
+        self.paymentRequestId = paymentRequestId
+    }
+}
+
+#if compiler(>=6)
+extension PaymentAccountingScope: Sendable {}
+#endif
+
+
+extension PaymentAccountingScope: Equatable, Hashable {
+    public static func ==(lhs: PaymentAccountingScope, rhs: PaymentAccountingScope) -> Bool {
+        if lhs.localPublicKey != rhs.localPublicKey {
+            return false
+        }
+        if lhs.localReceiverPath != rhs.localReceiverPath {
+            return false
+        }
+        if lhs.counterparty != rhs.counterparty {
+            return false
+        }
+        if lhs.counterpartyReceiverPath != rhs.counterpartyReceiverPath {
+            return false
+        }
+        if lhs.paymentRequestId != rhs.paymentRequestId {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(localPublicKey)
+        hasher.combine(localReceiverPath)
+        hasher.combine(counterparty)
+        hasher.combine(counterpartyReceiverPath)
+        hasher.combine(paymentRequestId)
+    }
+}
+
+extension PaymentAccountingScope: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentAccountingScope: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentAccountingScope {
+        return
+            try PaymentAccountingScope(
+                localPublicKey: FfiConverterString.read(from: &buf),
+                localReceiverPath: FfiConverterString.read(from: &buf),
+                counterparty: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
+                paymentRequestId: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PaymentAccountingScope, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.localPublicKey, into: &buf)
+        FfiConverterString.write(value.localReceiverPath, into: &buf)
+        FfiConverterString.write(value.counterparty, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
+        FfiConverterString.write(value.paymentRequestId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentAccountingScope_lift(_ buf: RustBuffer) throws -> PaymentAccountingScope {
+    return try FfiConverterTypePaymentAccountingScope.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentAccountingScope_lower(_ value: PaymentAccountingScope) -> RustBuffer {
+    return FfiConverterTypePaymentAccountingScope.lower(value)
+}
+
+
+/**
  * Optional amount context for endpoint selection.
  */
 public struct PaymentAmountContext {
@@ -10315,6 +11983,612 @@ public func FfiConverterTypePaymentAmountContext_lift(_ buf: RustBuffer) throws 
 #endif
 public func FfiConverterTypePaymentAmountContext_lower(_ value: PaymentAmountContext) -> RustBuffer {
     return FfiConverterTypePaymentAmountContext.lower(value)
+}
+
+
+/**
+ * One durable attempt, retaining its original authority and admission time.
+ *
+ * Treat these fields as private wallet data; do not log or describe the record.
+ */
+public struct PaymentAttemptRecord {
+    /**
+     * Stable wallet idempotency key, not a Paykit Event ID.
+     */
+    public var attemptId: String
+    /**
+     * Automatic or manual execution.
+     */
+    public var mode: PaymentExecutionMode
+    /**
+     * Original Allowance; absent for manual execution.
+     */
+    public var allowanceId: String?
+    /**
+     * Association revision used at admission.
+     */
+    public var associationRevision: UInt64?
+    /**
+     * Exact requested amount; excludes fees and refunds.
+     */
+    public var amount: AccountingAmount
+    /**
+     * Original trusted admission time.
+     */
+    public var admittedAt: String
+    /**
+     * Execution phase.
+     */
+    public var status: PaymentExecutionStatus
+    /**
+     * Recovery epoch binding a prepared token to its original state.
+     */
+    public var epoch: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Stable wallet idempotency key, not a Paykit Event ID.
+         */attemptId: String,
+        /**
+         * Automatic or manual execution.
+         */mode: PaymentExecutionMode,
+        /**
+         * Original Allowance; absent for manual execution.
+         */allowanceId: String?,
+        /**
+         * Association revision used at admission.
+         */associationRevision: UInt64?,
+        /**
+         * Exact requested amount; excludes fees and refunds.
+         */amount: AccountingAmount,
+        /**
+         * Original trusted admission time.
+         */admittedAt: String,
+        /**
+         * Execution phase.
+         */status: PaymentExecutionStatus,
+        /**
+         * Recovery epoch binding a prepared token to its original state.
+         */epoch: String) {
+        self.attemptId = attemptId
+        self.mode = mode
+        self.allowanceId = allowanceId
+        self.associationRevision = associationRevision
+        self.amount = amount
+        self.admittedAt = admittedAt
+        self.status = status
+        self.epoch = epoch
+    }
+}
+
+#if compiler(>=6)
+extension PaymentAttemptRecord: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentAttemptRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentAttemptRecord {
+        return
+            try PaymentAttemptRecord(
+                attemptId: FfiConverterString.read(from: &buf),
+                mode: FfiConverterTypePaymentExecutionMode.read(from: &buf),
+                allowanceId: FfiConverterOptionString.read(from: &buf),
+                associationRevision: FfiConverterOptionUInt64.read(from: &buf),
+                amount: FfiConverterTypeAccountingAmount.read(from: &buf),
+                admittedAt: FfiConverterString.read(from: &buf),
+                status: FfiConverterTypePaymentExecutionStatus.read(from: &buf),
+                epoch: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PaymentAttemptRecord, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.attemptId, into: &buf)
+        FfiConverterTypePaymentExecutionMode.write(value.mode, into: &buf)
+        FfiConverterOptionString.write(value.allowanceId, into: &buf)
+        FfiConverterOptionUInt64.write(value.associationRevision, into: &buf)
+        FfiConverterTypeAccountingAmount.write(value.amount, into: &buf)
+        FfiConverterString.write(value.admittedAt, into: &buf)
+        FfiConverterTypePaymentExecutionStatus.write(value.status, into: &buf)
+        FfiConverterString.write(value.epoch, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentAttemptRecord_lift(_ buf: RustBuffer) throws -> PaymentAttemptRecord {
+    return try FfiConverterTypePaymentAttemptRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentAttemptRecord_lower(_ value: PaymentAttemptRecord) -> RustBuffer {
+    return FfiConverterTypePaymentAttemptRecord.lower(value)
+}
+
+
+/**
+ * Fresh wallet checks the SDK cannot establish from protocol evidence.
+ *
+ * Treat these fields as private wallet data; do not log or describe the record.
+ */
+public struct PaymentExecutionChecks {
+    /**
+     * Trusted UTC time for this decision.
+     */
+    public var trustedTime: String
+    /**
+     * Method actually selected by the wallet.
+     */
+    public var paymentEndpointIdentifier: String
+    /**
+     * Amount and asset the wallet has verified will actually be transferred.
+     */
+    public var actualAmount: AccountingAmount
+    /**
+     * Endpoint details are current, usable, and unconsumed.
+     */
+    public var endpointCurrent: Bool
+    /**
+     * Local enablement and every private safeguard passed.
+     */
+    public var localEnabled: Bool
+    /**
+     * Wallet scheduler verified this recurring interval; true for one-time payments.
+     */
+    public var recurrenceEligible: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Trusted UTC time for this decision.
+         */trustedTime: String,
+        /**
+         * Method actually selected by the wallet.
+         */paymentEndpointIdentifier: String,
+        /**
+         * Amount and asset the wallet has verified will actually be transferred.
+         */actualAmount: AccountingAmount,
+        /**
+         * Endpoint details are current, usable, and unconsumed.
+         */endpointCurrent: Bool,
+        /**
+         * Local enablement and every private safeguard passed.
+         */localEnabled: Bool,
+        /**
+         * Wallet scheduler verified this recurring interval; true for one-time payments.
+         */recurrenceEligible: Bool) {
+        self.trustedTime = trustedTime
+        self.paymentEndpointIdentifier = paymentEndpointIdentifier
+        self.actualAmount = actualAmount
+        self.endpointCurrent = endpointCurrent
+        self.localEnabled = localEnabled
+        self.recurrenceEligible = recurrenceEligible
+    }
+}
+
+#if compiler(>=6)
+extension PaymentExecutionChecks: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentExecutionChecks: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentExecutionChecks {
+        return
+            try PaymentExecutionChecks(
+                trustedTime: FfiConverterString.read(from: &buf),
+                paymentEndpointIdentifier: FfiConverterString.read(from: &buf),
+                actualAmount: FfiConverterTypeAccountingAmount.read(from: &buf),
+                endpointCurrent: FfiConverterBool.read(from: &buf),
+                localEnabled: FfiConverterBool.read(from: &buf),
+                recurrenceEligible: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PaymentExecutionChecks, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.trustedTime, into: &buf)
+        FfiConverterString.write(value.paymentEndpointIdentifier, into: &buf)
+        FfiConverterTypeAccountingAmount.write(value.actualAmount, into: &buf)
+        FfiConverterBool.write(value.endpointCurrent, into: &buf)
+        FfiConverterBool.write(value.localEnabled, into: &buf)
+        FfiConverterBool.write(value.recurrenceEligible, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentExecutionChecks_lift(_ buf: RustBuffer) throws -> PaymentExecutionChecks {
+    return try FfiConverterTypePaymentExecutionChecks.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentExecutionChecks_lower(_ value: PaymentExecutionChecks) -> RustBuffer {
+    return FfiConverterTypePaymentExecutionChecks.lower(value)
+}
+
+
+/**
+ * One payment occurrence supplied by the wallet's scheduler.
+ *
+ * Treat these fields as private wallet data; do not log or describe the record.
+ */
+public struct PaymentOccurrence {
+    /**
+     * Exact request scope.
+     */
+    public var request: PaymentRequestScope
+    /**
+     * Absent for one-time requests; validated, normalized interval for recurring requests.
+     */
+    public var billingPeriod: BillingPeriod?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Exact request scope.
+         */request: PaymentRequestScope,
+        /**
+         * Absent for one-time requests; validated, normalized interval for recurring requests.
+         */billingPeriod: BillingPeriod?) {
+        self.request = request
+        self.billingPeriod = billingPeriod
+    }
+}
+
+#if compiler(>=6)
+extension PaymentOccurrence: Sendable {}
+#endif
+
+
+extension PaymentOccurrence: Equatable, Hashable {
+    public static func ==(lhs: PaymentOccurrence, rhs: PaymentOccurrence) -> Bool {
+        if lhs.request != rhs.request {
+            return false
+        }
+        if lhs.billingPeriod != rhs.billingPeriod {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(request)
+        hasher.combine(billingPeriod)
+    }
+}
+
+extension PaymentOccurrence: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentOccurrence: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentOccurrence {
+        return
+            try PaymentOccurrence(
+                request: FfiConverterTypePaymentRequestScope.read(from: &buf),
+                billingPeriod: FfiConverterOptionTypeBillingPeriod.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PaymentOccurrence, into buf: inout [UInt8]) {
+        FfiConverterTypePaymentRequestScope.write(value.request, into: &buf)
+        FfiConverterOptionTypeBillingPeriod.write(value.billingPeriod, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentOccurrence_lift(_ buf: RustBuffer) throws -> PaymentOccurrence {
+    return try FfiConverterTypePaymentOccurrence.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentOccurrence_lower(_ value: PaymentOccurrence) -> RustBuffer {
+    return FfiConverterTypePaymentOccurrence.lower(value)
+}
+
+
+/**
+ * Payment dedupe identity shared by manual and automatic execution.
+ *
+ * Allowance ID deliberately does not participate in this key.
+ *
+ * Treat these fields as private wallet data; do not log or describe the record.
+ */
+public struct PaymentOccurrenceKey {
+    /**
+     * Exact payer, payee, and request scope.
+     */
+    public var request: PaymentAccountingScope
+    /**
+     * Canonical recurring interval, or no interval for a one-time occurrence.
+     */
+    public var billingPeriod: AccountingBillingPeriod?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Exact payer, payee, and request scope.
+         */request: PaymentAccountingScope,
+        /**
+         * Canonical recurring interval, or no interval for a one-time occurrence.
+         */billingPeriod: AccountingBillingPeriod?) {
+        self.request = request
+        self.billingPeriod = billingPeriod
+    }
+}
+
+#if compiler(>=6)
+extension PaymentOccurrenceKey: Sendable {}
+#endif
+
+
+extension PaymentOccurrenceKey: Equatable, Hashable {
+    public static func ==(lhs: PaymentOccurrenceKey, rhs: PaymentOccurrenceKey) -> Bool {
+        if lhs.request != rhs.request {
+            return false
+        }
+        if lhs.billingPeriod != rhs.billingPeriod {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(request)
+        hasher.combine(billingPeriod)
+    }
+}
+
+extension PaymentOccurrenceKey: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentOccurrenceKey: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentOccurrenceKey {
+        return
+            try PaymentOccurrenceKey(
+                request: FfiConverterTypePaymentAccountingScope.read(from: &buf),
+                billingPeriod: FfiConverterOptionTypeAccountingBillingPeriod.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PaymentOccurrenceKey, into buf: inout [UInt8]) {
+        FfiConverterTypePaymentAccountingScope.write(value.request, into: &buf)
+        FfiConverterOptionTypeAccountingBillingPeriod.write(value.billingPeriod, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentOccurrenceKey_lift(_ buf: RustBuffer) throws -> PaymentOccurrenceKey {
+    return try FfiConverterTypePaymentOccurrenceKey.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentOccurrenceKey_lower(_ value: PaymentOccurrenceKey) -> RustBuffer {
+    return FfiConverterTypePaymentOccurrenceKey.lower(value)
+}
+
+
+/**
+ * Local action state and complete attempts for one semantic payment key.
+ *
+ * Treat these fields as private wallet data; do not log or describe the record.
+ */
+public struct PaymentOccurrenceRecord {
+    /**
+     * Stable identity across Allowance changes.
+     */
+    public var key: PaymentOccurrenceKey
+    /**
+     * Explicit wallet handling disposition.
+     */
+    public var disposition: PaymentDisposition
+    /**
+     * Persisted selection for this occurrence.
+     */
+    public var allowanceId: String?
+    /**
+     * Selection revision for this occurrence.
+     */
+    public var associationRevision: UInt64?
+    /**
+     * Retained failed, unresolved, and successful attempts.
+     */
+    public var attempts: [PaymentAttemptRecord]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Stable identity across Allowance changes.
+         */key: PaymentOccurrenceKey,
+        /**
+         * Explicit wallet handling disposition.
+         */disposition: PaymentDisposition,
+        /**
+         * Persisted selection for this occurrence.
+         */allowanceId: String?,
+        /**
+         * Selection revision for this occurrence.
+         */associationRevision: UInt64?,
+        /**
+         * Retained failed, unresolved, and successful attempts.
+         */attempts: [PaymentAttemptRecord]) {
+        self.key = key
+        self.disposition = disposition
+        self.allowanceId = allowanceId
+        self.associationRevision = associationRevision
+        self.attempts = attempts
+    }
+}
+
+#if compiler(>=6)
+extension PaymentOccurrenceRecord: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentOccurrenceRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentOccurrenceRecord {
+        return
+            try PaymentOccurrenceRecord(
+                key: FfiConverterTypePaymentOccurrenceKey.read(from: &buf),
+                disposition: FfiConverterTypePaymentDisposition.read(from: &buf),
+                allowanceId: FfiConverterOptionString.read(from: &buf),
+                associationRevision: FfiConverterOptionUInt64.read(from: &buf),
+                attempts: FfiConverterSequenceTypePaymentAttemptRecord.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PaymentOccurrenceRecord, into buf: inout [UInt8]) {
+        FfiConverterTypePaymentOccurrenceKey.write(value.key, into: &buf)
+        FfiConverterTypePaymentDisposition.write(value.disposition, into: &buf)
+        FfiConverterOptionString.write(value.allowanceId, into: &buf)
+        FfiConverterOptionUInt64.write(value.associationRevision, into: &buf)
+        FfiConverterSequenceTypePaymentAttemptRecord.write(value.attempts, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentOccurrenceRecord_lift(_ buf: RustBuffer) throws -> PaymentOccurrenceRecord {
+    return try FfiConverterTypePaymentOccurrenceRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentOccurrenceRecord_lower(_ value: PaymentOccurrenceRecord) -> RustBuffer {
+    return FfiConverterTypePaymentOccurrenceRecord.lower(value)
+}
+
+
+/**
+ * Explicit executor attestation for one stable attempt.
+ *
+ * Treat these fields as private wallet data; do not log or describe the record.
+ */
+public struct PaymentOutcomeReport {
+    /**
+     * Attempt returned by admission.
+     */
+    public var attemptId: String
+    /**
+     * Wallet-verified outcome.
+     */
+    public var outcome: PaymentOutcome
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Attempt returned by admission.
+         */attemptId: String,
+        /**
+         * Wallet-verified outcome.
+         */outcome: PaymentOutcome) {
+        self.attemptId = attemptId
+        self.outcome = outcome
+    }
+}
+
+#if compiler(>=6)
+extension PaymentOutcomeReport: Sendable {}
+#endif
+
+
+extension PaymentOutcomeReport: Equatable, Hashable {
+    public static func ==(lhs: PaymentOutcomeReport, rhs: PaymentOutcomeReport) -> Bool {
+        if lhs.attemptId != rhs.attemptId {
+            return false
+        }
+        if lhs.outcome != rhs.outcome {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(attemptId)
+        hasher.combine(outcome)
+    }
+}
+
+extension PaymentOutcomeReport: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentOutcomeReport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentOutcomeReport {
+        return
+            try PaymentOutcomeReport(
+                attemptId: FfiConverterString.read(from: &buf),
+                outcome: FfiConverterTypePaymentOutcome.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PaymentOutcomeReport, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.attemptId, into: &buf)
+        FfiConverterTypePaymentOutcome.write(value.outcome, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentOutcomeReport_lift(_ buf: RustBuffer) throws -> PaymentOutcomeReport {
+    return try FfiConverterTypePaymentOutcomeReport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentOutcomeReport_lower(_ value: PaymentOutcomeReport) -> RustBuffer {
+    return FfiConverterTypePaymentOutcomeReport.lower(value)
 }
 
 
@@ -11179,6 +13453,109 @@ public func FfiConverterTypePaymentRequestRecurrence_lift(_ buf: RustBuffer) thr
 #endif
 public func FfiConverterTypePaymentRequestRecurrence_lower(_ value: PaymentRequestRecurrence) -> RustBuffer {
     return FfiConverterTypePaymentRequestRecurrence.lower(value)
+}
+
+
+/**
+ * Exact remote Payment Request scope; the SDK supplies the current local identity.
+ *
+ * Treat these fields as private wallet data; do not log or describe the record.
+ */
+public struct PaymentRequestScope {
+    /**
+     * Authenticated counterparty.
+     */
+    public var counterparty: String
+    /**
+     * Counterparty runtime folder.
+     */
+    public var counterpartyReceiverPath: String
+    /**
+     * Immutable Payment Request identifier.
+     */
+    public var paymentRequestId: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Authenticated counterparty.
+         */counterparty: String,
+        /**
+         * Counterparty runtime folder.
+         */counterpartyReceiverPath: String,
+        /**
+         * Immutable Payment Request identifier.
+         */paymentRequestId: String) {
+        self.counterparty = counterparty
+        self.counterpartyReceiverPath = counterpartyReceiverPath
+        self.paymentRequestId = paymentRequestId
+    }
+}
+
+#if compiler(>=6)
+extension PaymentRequestScope: Sendable {}
+#endif
+
+
+extension PaymentRequestScope: Equatable, Hashable {
+    public static func ==(lhs: PaymentRequestScope, rhs: PaymentRequestScope) -> Bool {
+        if lhs.counterparty != rhs.counterparty {
+            return false
+        }
+        if lhs.counterpartyReceiverPath != rhs.counterpartyReceiverPath {
+            return false
+        }
+        if lhs.paymentRequestId != rhs.paymentRequestId {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(counterparty)
+        hasher.combine(counterpartyReceiverPath)
+        hasher.combine(paymentRequestId)
+    }
+}
+
+extension PaymentRequestScope: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentRequestScope: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentRequestScope {
+        return
+            try PaymentRequestScope(
+                counterparty: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
+                paymentRequestId: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PaymentRequestScope, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.counterparty, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
+        FfiConverterString.write(value.paymentRequestId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentRequestScope_lift(_ buf: RustBuffer) throws -> PaymentRequestScope {
+    return try FfiConverterTypePaymentRequestScope.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentRequestScope_lower(_ value: PaymentRequestScope) -> RustBuffer {
+    return FfiConverterTypePaymentRequestScope.lower(value)
 }
 
 
@@ -15780,6 +18157,153 @@ public func FfiConverterTypeSdkStateBlobSnapshot_lower(_ value: SdkStateBlobSnap
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * Fixed, redaction-safe reasons why an operation did not proceed.
+ */
+
+public enum AllowanceAccountingBlock {
+
+    /**
+     * Accounting is absent or requires wallet reconciliation.
+     */
+    case reconciliationRequired
+    /**
+     * Request or Allowance lifecycle, authenticated role, or history is unsuitable.
+     */
+    case invalidLifecycle
+    /**
+     * The expected association revision is obsolete.
+     */
+    case staleRevision
+    /**
+     * No persisted Allowance selection exists.
+     */
+    case noSelection
+    /**
+     * An explicit manual-only decision excludes automatic handling.
+     */
+    case manualOnly
+    /**
+     * A successful or unresolved attempt already owns this occurrence.
+     */
+    case paymentAlreadyRecorded
+    /**
+     * Endpoint, amount, scheduling, or private wallet checks failed.
+     */
+    case walletChecksFailed
+    /**
+     * Shared exact amount, time, or capacity rules failed.
+     */
+    case sharedRule(
+        /**
+         * Stable evaluator code, without private amounts.
+         */code: String
+    )
+}
+
+
+#if compiler(>=6)
+extension AllowanceAccountingBlock: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowanceAccountingBlock: FfiConverterRustBuffer {
+    typealias SwiftType = AllowanceAccountingBlock
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowanceAccountingBlock {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .reconciliationRequired
+
+        case 2: return .invalidLifecycle
+
+        case 3: return .staleRevision
+
+        case 4: return .noSelection
+
+        case 5: return .manualOnly
+
+        case 6: return .paymentAlreadyRecorded
+
+        case 7: return .walletChecksFailed
+
+        case 8: return .sharedRule(code: try FfiConverterString.read(from: &buf)
+        )
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AllowanceAccountingBlock, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .reconciliationRequired:
+            writeInt(&buf, Int32(1))
+
+
+        case .invalidLifecycle:
+            writeInt(&buf, Int32(2))
+
+
+        case .staleRevision:
+            writeInt(&buf, Int32(3))
+
+
+        case .noSelection:
+            writeInt(&buf, Int32(4))
+
+
+        case .manualOnly:
+            writeInt(&buf, Int32(5))
+
+
+        case .paymentAlreadyRecorded:
+            writeInt(&buf, Int32(6))
+
+
+        case .walletChecksFailed:
+            writeInt(&buf, Int32(7))
+
+
+        case let .sharedRule(code):
+            writeInt(&buf, Int32(8))
+            FfiConverterString.write(code, into: &buf)
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceAccountingBlock_lift(_ buf: RustBuffer) throws -> AllowanceAccountingBlock {
+    return try FfiConverterTypeAllowanceAccountingBlock.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceAccountingBlock_lower(_ value: AllowanceAccountingBlock) -> RustBuffer {
+    return FfiConverterTypeAllowanceAccountingBlock.lower(value)
+}
+
+
+extension AllowanceAccountingBlock: Equatable, Hashable {}
+
+extension AllowanceAccountingBlock: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * Health of the durable history used to derive one Allowance.
  */
 
@@ -16720,6 +19244,474 @@ public func FfiConverterTypeOutboundPrivateMessageStatus_lower(_ value: Outbound
 extension OutboundPrivateMessageStatus: Equatable, Hashable {}
 
 extension OutboundPrivateMessageStatus: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * A blocked decision is successful storage work so its watermark remains durable.
+ */
+
+public enum PaymentAttemptDecision {
+
+    /**
+     * Prepared reservation or freshly issued handoff, according to status.
+     */
+    case ready(
+        /**
+         * Authoritative durable attempt; use its stable ID for wallet idempotency.
+         */attempt: PaymentAttemptRecord
+    )
+    /**
+     * No new attempt or handoff was authorized.
+     */
+    case blocked(
+        /**
+         * Redaction-safe explanation.
+         */reason: AllowanceAccountingBlock
+    )
+}
+
+
+#if compiler(>=6)
+extension PaymentAttemptDecision: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentAttemptDecision: FfiConverterRustBuffer {
+    typealias SwiftType = PaymentAttemptDecision
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentAttemptDecision {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .ready(attempt: try FfiConverterTypePaymentAttemptRecord.read(from: &buf)
+        )
+
+        case 2: return .blocked(reason: try FfiConverterTypeAllowanceAccountingBlock.read(from: &buf)
+        )
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PaymentAttemptDecision, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .ready(attempt):
+            writeInt(&buf, Int32(1))
+            FfiConverterTypePaymentAttemptRecord.write(attempt, into: &buf)
+
+
+        case let .blocked(reason):
+            writeInt(&buf, Int32(2))
+            FfiConverterTypeAllowanceAccountingBlock.write(reason, into: &buf)
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentAttemptDecision_lift(_ buf: RustBuffer) throws -> PaymentAttemptDecision {
+    return try FfiConverterTypePaymentAttemptDecision.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentAttemptDecision_lower(_ value: PaymentAttemptDecision) -> RustBuffer {
+    return FfiConverterTypePaymentAttemptDecision.lower(value)
+}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Durable wallet decision, separate from payment execution status.
+ */
+
+public enum PaymentDisposition {
+
+    /**
+     * Automatic reconsideration may proceed under the persisted selection.
+     */
+    case automatic
+    /**
+     * Temporary failure; reconsideration must repeat all checks.
+     */
+    case deferred(
+        /**
+         * Private wallet reason, bounded to 256 characters.
+         */reason: String
+    )
+    /**
+     * Sticky explicit decision; background matching never clears it.
+     */
+    case manualOnly
+}
+
+
+#if compiler(>=6)
+extension PaymentDisposition: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentDisposition: FfiConverterRustBuffer {
+    typealias SwiftType = PaymentDisposition
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentDisposition {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .automatic
+
+        case 2: return .deferred(reason: try FfiConverterString.read(from: &buf)
+        )
+
+        case 3: return .manualOnly
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PaymentDisposition, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .automatic:
+            writeInt(&buf, Int32(1))
+
+
+        case let .deferred(reason):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(reason, into: &buf)
+
+
+        case .manualOnly:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentDisposition_lift(_ buf: RustBuffer) throws -> PaymentDisposition {
+    return try FfiConverterTypePaymentDisposition.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentDisposition_lower(_ value: PaymentDisposition) -> RustBuffer {
+    return FfiConverterTypePaymentDisposition.lower(value)
+}
+
+
+extension PaymentDisposition: Equatable, Hashable {}
+
+extension PaymentDisposition: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Source of payment authorization for accounting purposes.
+ */
+
+public enum PaymentExecutionMode {
+
+    /**
+     * Consumes the selected Allowance.
+     */
+    case automatic
+    /**
+     * Does not consume Allowance capacity.
+     */
+    case manual
+}
+
+
+#if compiler(>=6)
+extension PaymentExecutionMode: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentExecutionMode: FfiConverterRustBuffer {
+    typealias SwiftType = PaymentExecutionMode
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentExecutionMode {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .automatic
+
+        case 2: return .manual
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PaymentExecutionMode, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .automatic:
+            writeInt(&buf, Int32(1))
+
+
+        case .manual:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentExecutionMode_lift(_ buf: RustBuffer) throws -> PaymentExecutionMode {
+    return try FfiConverterTypePaymentExecutionMode.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentExecutionMode_lower(_ value: PaymentExecutionMode) -> RustBuffer {
+    return FfiConverterTypePaymentExecutionMode.lower(value)
+}
+
+
+extension PaymentExecutionMode: Equatable, Hashable {}
+
+extension PaymentExecutionMode: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Durable execution phase. Only definitive failure releases capacity.
+ */
+
+public enum PaymentExecutionStatus {
+
+    /**
+     * Capacity held; no handoff permit has been issued.
+     */
+    case prepared
+    /**
+     * Handoff issued; settlement must be reconciled even after a crash.
+     */
+    case submitted
+    /**
+     * Outcome is uncertain, including a stale restored preparation.
+     */
+    case unknown
+    /**
+     * Wallet verified success; committed usage never decreases.
+     */
+    case succeeded
+    /**
+     * Wallet confirmed terminal failure before settlement.
+     */
+    case failed
+}
+
+
+#if compiler(>=6)
+extension PaymentExecutionStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentExecutionStatus: FfiConverterRustBuffer {
+    typealias SwiftType = PaymentExecutionStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentExecutionStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .prepared
+
+        case 2: return .submitted
+
+        case 3: return .unknown
+
+        case 4: return .succeeded
+
+        case 5: return .failed
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PaymentExecutionStatus, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .prepared:
+            writeInt(&buf, Int32(1))
+
+
+        case .submitted:
+            writeInt(&buf, Int32(2))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(3))
+
+
+        case .succeeded:
+            writeInt(&buf, Int32(4))
+
+
+        case .failed:
+            writeInt(&buf, Int32(5))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentExecutionStatus_lift(_ buf: RustBuffer) throws -> PaymentExecutionStatus {
+    return try FfiConverterTypePaymentExecutionStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentExecutionStatus_lower(_ value: PaymentExecutionStatus) -> RustBuffer {
+    return FfiConverterTypePaymentExecutionStatus.lower(value)
+}
+
+
+extension PaymentExecutionStatus: Equatable, Hashable {}
+
+extension PaymentExecutionStatus: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Wallet-verified outcome. A timeout is Unknown, never Failed.
+ */
+
+public enum PaymentOutcome {
+
+    /**
+     * Settlement was verified.
+     */
+    case succeeded
+    /**
+     * Terminal failure before settlement was verified.
+     */
+    case failed
+    /**
+     * Settlement remains uncertain.
+     */
+    case unknown
+}
+
+
+#if compiler(>=6)
+extension PaymentOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = PaymentOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .succeeded
+
+        case 2: return .failed
+
+        case 3: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PaymentOutcome, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .succeeded:
+            writeInt(&buf, Int32(1))
+
+
+        case .failed:
+            writeInt(&buf, Int32(2))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentOutcome_lift(_ buf: RustBuffer) throws -> PaymentOutcome {
+    return try FfiConverterTypePaymentOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentOutcome_lower(_ value: PaymentOutcome) -> RustBuffer {
+    return FfiConverterTypePaymentOutcome.lower(value)
+}
+
+
+extension PaymentOutcome: Equatable, Hashable {}
+
+extension PaymentOutcome: Codable {}
 
 
 
@@ -18489,6 +21481,54 @@ fileprivate struct FfiConverterOptionTypePubkySessionAccess: FfiConverterRustBuf
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeAccountingBillingPeriod: FfiConverterRustBuffer {
+    typealias SwiftType = AccountingBillingPeriod?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeAccountingBillingPeriod.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeAccountingBillingPeriod.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeAllowanceAccountingState: FfiConverterRustBuffer {
+    typealias SwiftType = AllowanceAccountingState?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeAllowanceAccountingState.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeAllowanceAccountingState.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeAllowanceRecord: FfiConverterRustBuffer {
     typealias SwiftType = AllowanceRecord?
 
@@ -18969,6 +22009,30 @@ fileprivate struct FfiConverterOptionTypeSdkStateBlobSnapshot: FfiConverterRustB
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeAllowanceAccountingBlock: FfiConverterRustBuffer {
+    typealias SwiftType = AllowanceAccountingBlock?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeAllowanceAccountingBlock.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeAllowanceAccountingBlock.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeAllowanceLocalRole: FfiConverterRustBuffer {
     typealias SwiftType = AllowanceLocalRole?
 
@@ -19164,6 +22228,81 @@ fileprivate struct FfiConverterSequenceTypeAllowancePeriodLimit: FfiConverterRus
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeAllowanceAssociationRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [AllowanceAssociationRecord]
+
+    public static func write(_ value: [AllowanceAssociationRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAllowanceAssociationRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AllowanceAssociationRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AllowanceAssociationRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAllowanceAssociationRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeAllowanceAssociationRevision: FfiConverterRustBuffer {
+    typealias SwiftType = [AllowanceAssociationRevision]
+
+    public static func write(_ value: [AllowanceAssociationRevision], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAllowanceAssociationRevision.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AllowanceAssociationRevision] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AllowanceAssociationRevision]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAllowanceAssociationRevision.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeAllowanceCandidate: FfiConverterRustBuffer {
+    typealias SwiftType = [AllowanceCandidate]
+
+    public static func write(_ value: [AllowanceCandidate], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAllowanceCandidate.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AllowanceCandidate] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AllowanceCandidate]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAllowanceCandidate.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeAllowanceRecord: FfiConverterRustBuffer {
     typealias SwiftType = [AllowanceRecord]
 
@@ -19181,6 +22320,31 @@ fileprivate struct FfiConverterSequenceTypeAllowanceRecord: FfiConverterRustBuff
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeAllowanceRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeAllowanceWatermarkRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [AllowanceWatermarkRecord]
+
+    public static func write(_ value: [AllowanceWatermarkRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAllowanceWatermarkRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AllowanceWatermarkRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AllowanceWatermarkRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAllowanceWatermarkRecord.read(from: &buf))
         }
         return seq
     }
@@ -19356,6 +22520,81 @@ fileprivate struct FfiConverterSequenceTypeOutboundPrivateSendFailure: FfiConver
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeOutboundPrivateSendFailure.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePaymentAttemptRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [PaymentAttemptRecord]
+
+    public static func write(_ value: [PaymentAttemptRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePaymentAttemptRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PaymentAttemptRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PaymentAttemptRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePaymentAttemptRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePaymentOccurrenceRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [PaymentOccurrenceRecord]
+
+    public static func write(_ value: [PaymentOccurrenceRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePaymentOccurrenceRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PaymentOccurrenceRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PaymentOccurrenceRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePaymentOccurrenceRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePaymentOutcomeReport: FfiConverterRustBuffer {
+    typealias SwiftType = [PaymentOutcomeReport]
+
+    public static func write(_ value: [PaymentOutcomeReport], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePaymentOutcomeReport.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PaymentOutcomeReport] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PaymentOutcomeReport]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePaymentOutcomeReport.read(from: &buf))
         }
         return seq
     }
@@ -20241,6 +23480,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_resolve_pubky_url() != 12085) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffiaccountingamount_asset() != 29648) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiaccountingamount_value() != 61914) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffiallowanceamountrange_maximum() != 52035) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -20298,6 +23543,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request() != 859) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request_automatically() != 59610) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_actionable_received_payment_requests() != 10342) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -20307,7 +23555,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_advance_link_handshake() != 21645) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_allowance_accounting_state() != 43672) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_authorize_allowance_reassociation() != 14050) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_backup_state_revision() != 4088) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_begin_payment_execution() != 18142) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_block_peer() != 26542) {
@@ -20337,6 +23594,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_current_profile() != 37415) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_defer_payment_occurrence() != 62584) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_delete_paykit_blob() != 43993) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -20356,6 +23616,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_ensure_link_with_peer() != 15662) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_evaluate_allowance_candidates() != 24568) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_export_backup_state() != 29122) {
@@ -20413,6 +23676,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_list_payment_requests() != 43354) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_mark_payment_manual_only() != 61290) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_observe_encrypted_link_recovery_marker() != 54332) {
@@ -20499,6 +23765,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_received_payment_requests_from() != 14) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_reconcile_allowance_accounting() != 25077) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_record_payment_outcome() != 2286) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_refresh_contact_paykit_profile() != 26474) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -20518,6 +23790,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_public_contact() != 4060) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_reserve_automatic_payment() != 11908) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_reserve_manual_payment() != 65334) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_contact_profile() != 57380) {
@@ -20542,6 +23820,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contact() != 7511) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_select_allowance() != 13682) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_sign_out() != 37726) {
@@ -20704,6 +23985,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffisdkstateblobstore_save_state_blob_atomically() != 4172) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_constructor_ffiaccountingamount_new() != 11690) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffiallowanceamountrange_new() != 19415) {
