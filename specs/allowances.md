@@ -172,8 +172,10 @@ for historical replay; current eligibility is evaluated separately.
 
 Allowance Terms are immutable. Changed accepted terms require a proposal with
 a new Allowance ID and a separate End for the old Allowance. V1 defines no
-update, counteroffer, replacement-link, or cross-message atomicity. Until the
-old End is observed, the old and new Allowances remain independent.
+update, counteroffer, wire replacement-link, or cross-message atomicity. Until
+the old End is observed, the old and new Allowances remain independent. This
+does not prohibit explicitly authorized local reassociation of future Billing
+Periods as defined below.
 
 ## Time and period math
 
@@ -513,8 +515,43 @@ Unavailable period or lifetime capacity blocks the affected Billing Period;
 the wallet makes that period available for explicit payment when the
 accepted-but-unpaid safety conditions above pass. Later Billing Periods are
 evaluated independently against then-current capacity. None of these conditions
-rebinds the request to another Allowance, rejects or cancels the Payment Request,
-or ends an accepted Subscription.
+automatically rebinds the request to another Allowance, rejects or cancels the
+Payment Request, or ends an accepted Subscription.
+
+### Authorized recurring reassociation
+
+The Allower MAY explicitly authorize another accepted Allowance for future,
+unpaid Billing Periods of an accepted, non-cancelled Recurring Payment Request.
+This is a local selection change, not a mutation of either Allowance, a new
+Payment Request Acceptance, or an automatic consequence of accepting or ending
+an Allowance. The replacement MUST have the exact same authenticated party
+scope and statically cover the request. Current eligibility and capacity MUST
+still be checked separately when each payment becomes due.
+
+The wallet MUST durably record the authorization, old and replacement Allowance
+IDs, an effective Billing Period boundary, and an association revision before
+the change can affect execution. Only periods starting at or after that
+explicit boundary are covered; overdue or already-started periods MUST NOT be
+silently included. The change MUST compare the expected previous revision and
+be serialized with automatic admission and manual handling. A worker using an
+obsolete revision MUST NOT start an irreversible payment after the change has
+taken effect.
+
+Reassociation MUST preserve existing occurrence identities and selection
+history. A successful or unresolved payment through any path blocks another
+payment for the same semantic key, independent of the selected Allowance ID.
+Existing reservations MUST remain attached to their original Allowance until
+reconciled; committed usage MUST remain charged to that Allowance. Neither
+Allowance's counters or evaluation-time watermark may be reset. Future
+admissions use the replacement's own existing usage and limits. An earlier
+period's unresolved attempt does not by itself reassign its reservation or
+prevent a different future period from being evaluated.
+
+Explicit manual-only dispositions MUST survive reassociation. A blanket change
+of future association does not restore automatic permission for such an
+occurrence. Missing authorization, revision, payment, or reservation history
+MUST block automatic handling after restart or restore; lifecycle messages alone
+cannot reconstruct a local reassociation decision.
 
 ## Eligibility, usage, and execution boundary
 
@@ -570,7 +607,9 @@ events after a checkpoint loss are expected and use Event ID and Payment
 Request dedupe rules.
 
 The wallet/runtime MUST durably retain Request-to-Allowance associations,
-semantic payment keys, and usage reservations before automatic execution.
+their revisions and reassociation authorizations, deferred and manual-only
+decisions, semantic payment keys, and usage reservations before automatic
+execution.
 Validated Encrypted Link recovery for the same Receiver References does not
 require fresh Allowance consent when the complete durable event history and
 wallet-owned state are retained.
