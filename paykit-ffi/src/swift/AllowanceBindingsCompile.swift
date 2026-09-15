@@ -117,3 +117,86 @@ private func compileAllowanceBindingsSurface(
         reportedAllowances
     )
 }
+
+// This fixture compiles the entire accounting surface; it never executes payments.
+private func compileAllowanceAccountingBindingsSurface(
+    sdk: PaykitSdkProtocol,
+    counterparty: String,
+    receiverPath: String,
+    allowanceId: String,
+    recoveredHistory: AllowanceAccountingHistory,
+    preparedAttemptId: String
+) async throws {
+    let time = "2026-09-15T12:00:00Z"
+    let amount = try AccountingAmount(value: "1.000000000000000001", asset: "usd")
+    let amountProtocol: AccountingAmountProtocol = amount
+    let scope = PaymentRequestScope(
+        counterparty: counterparty,
+        counterpartyReceiverPath: receiverPath,
+        paymentRequestId: "550e8400-e29b-41d4-a716-446655440000"
+    )
+    let occurrence = PaymentOccurrence(request: scope, billingPeriod: nil)
+    let recurringOccurrence = PaymentOccurrence(
+        request: scope,
+        billingPeriod: BillingPeriod(startsAt: time, endsAt: "2026-09-16T12:00:00Z")
+    )
+    let checks = PaymentExecutionChecks(
+        trustedTime: time,
+        paymentEndpointIdentifier: "btc-lightning-bolt11",
+        actualAmount: amount,
+        endpointCurrent: true,
+        localEnabled: true,
+        recurrenceEligible: true
+    )
+    let state: AllowanceAccountingState? = try await sdk.allowanceAccountingState()
+    let reconciliation = AllowanceAccountingReconciliation(
+        expectedRevision: state?.revision,
+        history: recoveredHistory,
+        outcomes: [PaymentOutcomeReport(attemptId: preparedAttemptId, outcome: .unknown)],
+        trustedTime: time
+    )
+    let recovered: AllowanceAccountingState = try await sdk.reconcileAllowanceAccounting(
+        reconciliation: reconciliation
+    )
+    let candidates: [AllowanceCandidate] = try await sdk.evaluateAllowanceCandidates(
+        scope: scope, trustedTime: time
+    )
+    let selection = AllowanceSelectionInput(
+        allowanceId: allowanceId, expectedRevision: nil, trustedTime: time
+    )
+    let association: AllowanceAssociationRecord = try await sdk.selectAllowance(
+        scope: scope, selection: selection
+    )
+    let accepted = try await sdk.acceptPaymentRequestAutomatically(
+        scope: scope, selection: selection, checks: checks
+    )
+    let deferred = try await sdk.deferPaymentOccurrence(occurrence: occurrence, reason: "retry later")
+    let manualOnly = try await sdk.markPaymentManualOnly(occurrence: occurrence)
+    let reassociation = AllowanceReassociationInput(
+        allowanceId: allowanceId,
+        expectedRevision: 1,
+        effectiveFrom: "2026-09-16T12:00:00Z",
+        authorizationId: "550e8400-e29b-41d4-a716-446655440000",
+        trustedTime: time
+    )
+    let replacement = try await sdk.authorizeAllowanceReassociation(
+        scope: scope, reassociation: reassociation
+    )
+    let reserved: PaymentAttemptDecision = try await sdk.reserveAutomaticPayment(
+        occurrence: recurringOccurrence, expectedAssociationRevision: 1, checks: checks
+    )
+    let manual = try await sdk.reserveManualPayment(occurrence: occurrence, checks: checks)
+    let handoff = try await sdk.beginPaymentExecution(attemptId: preparedAttemptId, checks: checks)
+    let reported: PaymentAttemptRecord = try await sdk.recordPaymentOutcome(
+        report: PaymentOutcomeReport(attemptId: preparedAttemptId, outcome: .succeeded)
+    )
+    let failed: PaymentOutcome = .failed
+    let phases: [PaymentExecutionStatus] = [.prepared, .submitted, .unknown, .succeeded, .failed]
+    let modes: [PaymentExecutionMode] = [.automatic, .manual]
+    let decisions: [PaymentDisposition] = [.automatic, .manualOnly, .deferred(reason: "private reason")]
+    let blocked = PaymentAttemptDecision.blocked(reason: .sharedRule(code: "clock_rollback"))
+    let ready = PaymentAttemptDecision.ready(attempt: reported)
+    _ = (amountProtocol, amount.value(), amount.asset(), amount.description, amount.debugDescription,
+         recovered, candidates, association, accepted, deferred, manualOnly, replacement, reserved,
+         manual, handoff, reported, failed, phases, modes, decisions, blocked, ready)
+}

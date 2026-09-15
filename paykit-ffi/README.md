@@ -189,6 +189,86 @@ they do not determine payment eligibility or authorize payment execution.
 Existing Swift `PaykitSdkProtocol` mocks and Kotlin `PaykitSdkInterface`
 implementations must add the six Allowance methods when adopting these bindings.
 
+### Allowance payment accounting
+
+The accounting APIs use the SDK's shared matching and exact decimal rules. They
+never execute a wallet payment. Use one coordinated SDK runtime and executor for
+the local identity; sessions, capabilities, key rotation, endpoint freshness,
+trusted time, user consent, and wallet idempotency remain the caller's responsibility.
+
+1. Read `allowanceAccountingState`. Before first admission, reconcile the complete
+   wallet journal through `reconcileAllowanceAccounting`. Supply an empty history
+   only when the wallet has established that no previous manual or automatic
+   payment exists. Initialization is an explicit completeness attestation.
+2. Call `evaluateAllowanceCandidates` with a scoped Payment Request and trusted
+   UTC time. Apply wallet priority or obtain user choice among eligible candidates.
+   `selectAllowance` persists one choice with its expected revision; candidate
+   discovery itself never chooses or combines Allowances. Candidate checks cover
+   static matching and active time; actual capacity is checked at admission.
+3. `acceptPaymentRequestAutomatically` atomically persists selection and queues
+   ordinary Acceptance after SDK and wallet checks. Recurring Acceptance reserves
+   no amount or count. Each scheduled Billing Period needs its own later admission.
+4. Call `reserveAutomaticPayment` with the occurrence, expected association
+   revision, and fresh `PaymentExecutionChecks`. The checks include the actual
+   validated `AccountingAmount`, selected Payment Endpoint, trusted UTC time, and
+   wallet attestations for endpoint usability, local safeguards, and recurrence.
+   `Ready` with status `Prepared` holds capacity but does not permit execution.
+5. Immediately before wallet execution, call `beginPaymentExecution` with that
+   attempt ID and fresh checks. Only a new `Ready` response with `Submitted`
+   status permits handoff. Use its stable attempt ID as the external wallet's
+   idempotency key. An admission or handoff `Blocked` result is a successful
+   durable decision: its updated trusted-time watermark must remain saved.
+6. Report wallet-verified settlement through `recordPaymentOutcome`. `Succeeded`
+   commits usage; verified terminal `Failed` releases it. Timeouts, missing
+   callbacks, or uncertain settlement are `Unknown` and keep capacity reserved.
+   A crash between handoff and settlement requires external reconciliation.
+
+`deferPaymentOccurrence` records a temporary private reason; reconsideration must
+repeat all checks. `markPaymentManualOnly` is sticky and background matching never
+clears it. A user-authorized manual payment must use `reserveManualPayment`, the
+same handoff/outcome flow, and the same semantic occurrence key. It consumes no
+Allowance capacity but cannot duplicate an unresolved or successful automatic
+payment. Calls directly to a separate wallet executor would bypass this guarantee.
+
+For an explicit user-approved replacement on a recurring request, call
+`authorizeAllowanceReassociation` with the expected revision, a future Billing
+Period boundary, and the stable UUID-v4 authorization reference. Future occurrences
+use the new revision; previous attempts and their usage remain attributed to the
+original Allowance. Reassociation never clears a manual-only decision or converts
+an unresolved payment into a new execution opportunity.
+
+`AllowanceAccountingHistory` contains typed associations, occurrences, attempts,
+and per-Allowance watermarks. Treat every record and value accessed through
+`AccountingAmount` getters as private wallet data. Rust debug formatting and the
+amount object's native default formatting are redacted; platform record fields
+remain explicit data and must not be logged or included in generated descriptions.
+
+State and backup blobs use version 2 for this positional schema. Older development
+blobs are rejected; there is no migration or empty-state fallback after decode
+failure. The platform `saveStateBlobAtomically` callback must durably save the
+whole blob and enforce its expected revision before acknowledging success.
+Preserve opaque blobs with caller-managed encryption in storage and backups.
+
+After restore or private-state loss, accounting remains blocked until complete
+wallet reconciliation. A stale but internally valid backup can omit later spend:
+restoring its ledger and watermark does not establish freshness. Reconcile every
+payment path and the executor's durable idempotency journal, then submit the
+complete recovered history and verified outcomes with the expected ledger
+revision. Reconciliation merges retained evidence; it never resets usage from
+Allowance lifecycle events, Payment Proofs, timeouts, or missing files. Unresolved
+attempts remain reserved, and prepared tokens from an earlier recovery epoch
+cannot be used as fresh handoff permits.
+
+The Swift and Kotlin `AllowanceBindingsCompile` fixtures exercise all accounting
+methods and typed records. They are compile-only surface checks, not a payment
+workflow to execute in sequence. SDK protocol mocks must implement these methods
+when adopting this binding version.
+
+Review context: [candidate selection](https://github.com/pubky/paykit-rs/pull/136#discussion_r4004039601),
+[deferral](https://github.com/pubky/paykit-rs/pull/136#discussion_r4004039605),
+[future reassociation](https://github.com/pubky/paykit-rs/pull/136#discussion_r4004039611), and
+[shared SDK support](https://github.com/pubky/paykit-rs/pull/136#discussion_r4004039617).
+
 ### Receipts
 
 - `generateReceiptId` — create a caller-stable Receipt ID for retry-safe
