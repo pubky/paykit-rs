@@ -1,6 +1,79 @@
 use super::*;
 use crate::storage::PreparedOutboundPrivateSend;
 
+fn published_event() -> OutboundPrivateMessageRecord {
+    let mut event = private_payment_list_outbound(public_key(), 7, "unused");
+    event.kind = PrivateMessageKind::PaymentRequest.as_str().into();
+    event.raw_json = payment_request_json("550e8400-e29b-41d4-a716-446655440001");
+    event.status = OutboundPrivateMessageStatus::Sent;
+    event.attempt_count = 1;
+    event.last_attempt_at = Some(timestamp());
+    event.sent_at = Some(timestamp());
+    event
+}
+
+#[test]
+fn test_event_retry_statuses_preserve_first_publication() {
+    for status in [
+        OutboundPrivateMessageStatus::Pending,
+        OutboundPrivateMessageStatus::Sending,
+        OutboundPrivateMessageStatus::Failed,
+        OutboundPrivateMessageStatus::RecoveryRequired,
+    ] {
+        let mut event = published_event();
+        event.status = status;
+        if matches!(
+            event.status,
+            OutboundPrivateMessageStatus::Failed | OutboundPrivateMessageStatus::RecoveryRequired
+        ) {
+            event.last_error = Some("retry".into());
+        }
+        validate_outbound_private_messages(&[event]).unwrap();
+    }
+}
+
+#[test]
+fn test_confirmation_metadata_requires_attempted_event() {
+    let mut event = published_event();
+    event.confirmed_at = Some(timestamp());
+    validate_outbound_private_messages(&[event.clone()]).unwrap();
+    event.last_attempt_at = None;
+    assert!(validate_outbound_private_messages(&[event]).is_err());
+    let mut list = private_payment_list_outbound(public_key(), 7, "unused");
+    list.confirmed_at = Some(timestamp());
+    assert!(validate_outbound_private_messages(&[list]).is_err());
+}
+
+#[test]
+fn test_retired_app_allows_confirmation_but_not_unconfirmed_event() {
+    let retired = HashSet::from([app_id()]);
+    let mut event = published_event();
+    assert!(validate_retired_app_outbound_messages(&retired, &[event.clone()]).is_err());
+    event.confirmed_at = Some(timestamp());
+    event.status = OutboundPrivateMessageStatus::Pending;
+    validate_retired_app_outbound_messages(&retired, &[event.clone()]).unwrap();
+    event.kind = PrivateMessageKind::DeliveryConfirmation.as_str().into();
+    event.confirmed_at = None;
+    validate_retired_app_outbound_messages(&retired, &[event]).unwrap();
+}
+
+#[test]
+fn test_restore_unconfirmed_publication_requires_recovery_without_checkpoint() {
+    let mut events = vec![published_event()];
+    let mut peers = HashMap::new();
+    let recovery = reconcile_restored_linked_peers(&mut peers, &HashMap::new(), &events);
+    assert_eq!(recovery, vec![events[0].counterparty.clone()]);
+    mark_restored_sending_outbound_recovery_required(&mut events, &recovery);
+    assert_eq!(
+        events[0].status,
+        OutboundPrivateMessageStatus::RecoveryRequired
+    );
+    assert_eq!(events[0].sent_at, Some(timestamp()));
+    assert_eq!(events[0].last_attempt_at, Some(timestamp()));
+    assert!(events[0].prepared_send.is_none());
+    validate_outbound_private_messages(&events).unwrap();
+}
+
 #[tokio::test]
 async fn test_restore_backup_state_preserves_invalid_outbound_audit_record() {
     let storage = InMemoryStorage::new();

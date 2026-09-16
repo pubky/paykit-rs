@@ -168,7 +168,11 @@ pixel and cache limits, and request timeouts remain app responsibilities.
   while enforcing its accepted endpoint identifiers and required payee App.
 
 Returned records reflect local stream and outbound queue state. Outbound
-statuses still indicate whether a queued event has been sent.
+statuses indicate publication, not that the peer accepted the request or
+executed payment. The SDK tracks durable receipt separately and retries
+unconfirmed events across relinks without changing their Event IDs.
+Run receive and outbound processing
+to exchange confirmations; apps do not create these messages themselves.
 `actionableReceivedPaymentRequests` includes every request that still needs a
 payer response. A required Paykit App constrains the payee endpoint, not the
 payer app that responds.

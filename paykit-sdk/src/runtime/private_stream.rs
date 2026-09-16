@@ -231,6 +231,7 @@ where
                 &self.storage,
                 PrivateStreamBatchWrite {
                     counterparty: counterparty.clone(),
+                    confirmation_app_id: self.config.app_id.clone(),
                     messages: vec![prepared.message().clone()],
                     link_state: Some(next_link_state.clone()),
                     authorized_receipt_apps: authorized_receipt_apps.clone(),
@@ -256,14 +257,18 @@ where
         match aggregate {
             Some(report) => Ok(report),
             None => {
-                persist_private_stream_batch_with_link_lease(
+                persist_private_stream_batch_write(
                     &self.storage,
-                    counterparty,
-                    Vec::new(),
-                    None,
-                    authorized_receipt_apps,
-                    Some(lease),
-                    self.clock.now(),
+                    PrivateStreamBatchWrite {
+                        counterparty,
+                        confirmation_app_id: self.config.app_id.clone(),
+                        messages: Vec::new(),
+                        link_state: None,
+                        authorized_receipt_apps,
+                        link_lease: Some(lease),
+                        receive_batch_id: None,
+                        received_at: self.clock.now(),
+                    },
                 )
                 .await
             }

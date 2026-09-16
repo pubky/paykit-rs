@@ -183,6 +183,11 @@
 - **Synonyms to AVOID**: event reference, message reference when naming the protocol identifier
 - **Related terms**: Event Message, Payment Request, Payment Request ID
 
+### Delivery Confirmation
+- **Definition**: A private `paykit.delivery_confirmation` message from the confirming Paykit App that acknowledges durable receipt of an Event Message by its original Event ID and SHA-256 hash of the exact raw UTF-8 JSON (`sha256:<64 lowercase hex>`).
+- **NOT**: An Event Message, a fresh Event ID, payment acceptance, or settlement confirmation. Delivery Confirmations are never confirmed.
+- **Related terms**: Private Application Message, Paykit App, Event Message, Event ID
+
 ### Encrypted Link Recovery Marker
 - **Definition**: A minimal public Pubky marker that one peer publishes to signal that a counterparty should relink an Encrypted Link. Marker paths are pairwise-derived; marker payloads carry only version, kind, recovery attempt ID, and creation time.
 - **NOT**: A Private Application Message, payment message, recovery transcript, or proof that the counterparty received the marker.
@@ -375,6 +380,7 @@ Protocol concepts:
 - Latest-State Message
 - Event Message
 - Event ID
+- Delivery Confirmation
 - Private Payment List
 - Payment Reference
 - Payment Request

@@ -19,6 +19,7 @@ async fn test_key_rotation_preserves_history_and_resets_private_link_state() {
     let owner = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let storage = registered_test_storage();
+    let raw_event = r#"{"version":1,"kind":"paykit.payment_request_cancellation","app_id":"bitkit","event_id":"650e8400-e29b-41d4-a716-446655440000","payment_request_id":"550e8400-e29b-41d4-a716-446655440000"}"#;
     storage
         .transaction({
             let owner = owner.clone();
@@ -62,7 +63,7 @@ async fn test_key_rotation_preserves_history_and_resets_private_link_state() {
                     checkpointed_at: FixedClock.now(),
                 });
                 let mut message = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
-                    counterparty,
+                    counterparty.clone(),
                     app_id(),
                     PrivateMessageKind::PrivatePaymentList.as_str().into(),
                     r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"bitkit","payment_endpoints":{}}"#.into(),
@@ -74,6 +75,21 @@ async fn test_key_rotation_preserves_history_and_resets_private_link_state() {
                     ciphertext: vec![4, 5, 6],
                 });
                 tx.save_outbound_private_message(message)?;
+                for confirmed in [false, true] {
+                    let mut event = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                        counterparty.clone(),
+                        app_id(),
+                        PrivateMessageKind::PaymentRequestCancellation.as_str().into(),
+                        raw_event.into(),
+                        FixedClock.now(),
+                    ))?;
+                    event.status = OutboundPrivateMessageStatus::Sent;
+                    event.attempt_count = 1;
+                    event.last_attempt_at = Some(FixedClock.now());
+                    event.sent_at = Some(FixedClock.now());
+                    event.confirmed_at = confirmed.then_some(FixedClock.now());
+                    tx.save_outbound_private_message(event)?;
+                }
                 Ok(())
             }
         })
@@ -102,4 +118,20 @@ async fn test_key_rotation_preserves_history_and_resets_private_link_state() {
         OutboundPrivateMessageStatus::RecoveryRequired
     );
     assert!(state.outbound_private_messages[0].prepared_send.is_none());
+    let replay = &state.outbound_private_messages[1];
+    assert_eq!(
+        replay.status,
+        OutboundPrivateMessageStatus::RecoveryRequired
+    );
+    assert_eq!(replay.outbound_message_id, 1);
+    assert_eq!(replay.raw_json, raw_event);
+    assert_eq!(replay.app_id, app_id());
+    assert_eq!(replay.attempt_count, 1);
+    assert_eq!(replay.last_attempt_at, Some(FixedClock.now()));
+    assert_eq!(replay.sent_at, Some(FixedClock.now()));
+    assert!(replay.confirmed_at.is_none());
+    assert!(replay.prepared_send.is_none());
+    let confirmed = &state.outbound_private_messages[2];
+    assert_eq!(confirmed.status, OutboundPrivateMessageStatus::Sent);
+    assert_eq!(confirmed.confirmed_at, Some(FixedClock.now()));
 }

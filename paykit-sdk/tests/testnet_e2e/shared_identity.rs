@@ -691,7 +691,7 @@ async fn test_independent_grants_share_homeserver_noise_state_under_concurrency(
         .process_outbound_private_messages(pair.bitkit.public_key.clone())
         .await
         .expect("the peer should send both inbound Payment Requests");
-    assert_eq!(peer_send.sent.len(), 2);
+    assert_eq!(peer_send.sent.len(), 4);
 
     let (bitkit_receive_sdk, receive_loaded, continue_receive) = pair.bitkit.paused_sdk();
     let receive_counterparty = pair.bob.public_key.clone();
@@ -711,8 +711,8 @@ async fn test_independent_grants_share_homeserver_noise_state_under_concurrency(
         .sdk
         .receive_private_messages(pair.bob.public_key.clone())
         .await
-        .expect("the concurrent receiver should commit both inbound messages");
-    assert_eq!(successful_receive.stream_item_ids.len(), 2);
+        .expect("the concurrent receiver should commit the confirmations and requests");
+    assert_eq!(successful_receive.stream_item_ids.len(), 4);
     continue_receive
         .send(())
         .expect("the stale receiver should resume");
@@ -729,17 +729,22 @@ async fn test_independent_grants_share_homeserver_noise_state_under_concurrency(
     assert!(bitkit_state
         .outbound_private_messages
         .iter()
-        .all(
-            |message| message.status == OutboundPrivateMessageStatus::Sent
-                && message.prepared_send.is_none()
-        ));
+        .all(|message| {
+            message.prepared_send.is_none()
+                && if message.kind == "paykit.delivery_confirmation" {
+                    message.status == OutboundPrivateMessageStatus::Pending
+                } else {
+                    message.status == OutboundPrivateMessageStatus::Sent
+                        && message.confirmed_at.is_some()
+                }
+        }));
     assert_eq!(
         bitkit_state
             .private_stream_items
             .iter()
             .filter(|item| item.counterparty == pair.bob.public_key)
             .count(),
-        2
+        4
     );
 }
 
@@ -1799,6 +1804,16 @@ async fn test_two_apps_share_private_request_state_and_app_lifecycle() {
         .receive_private_messages(pair.alice.public_key.clone())
         .await
         .expect("the payee should receive the cancellation");
+    pair.bob
+        .sdk
+        .process_outbound_private_messages(pair.alice.public_key.clone())
+        .await
+        .expect("the payee should confirm receipt of the acceptance and cancellation");
+    alice_server
+        .sdk
+        .receive_private_messages(pair.bob.public_key.clone())
+        .await
+        .expect("the removing application should consume the confirmations");
 
     let registry = alice_server
         .sdk

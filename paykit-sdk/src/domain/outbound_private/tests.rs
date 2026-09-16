@@ -30,6 +30,37 @@ fn raw_payment_request(app_id: &str) -> String {
     )
 }
 
+#[tokio::test]
+async fn test_delivery_confirmation_validates_payload_for_retired_app() {
+    let storage = registered_storage();
+    storage
+        .transaction(|tx| {
+            tx.retire_paykit_app(app_id());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let confirmation = paykit_lib::DeliveryConfirmation::new(
+        app_id(),
+        paykit_lib::EventId::new("650e8400-e29b-41d4-a716-446655440000").unwrap(),
+        format!("sha256:{}", "0".repeat(64)),
+    )
+    .unwrap();
+    let json = paykit_lib::serialize_delivery_confirmation(&confirmation).unwrap();
+    let record = enqueue_private_message(&storage, counterparty(), json.clone(), timestamp())
+        .await
+        .unwrap();
+    assert!(record.is_delivery_confirmation());
+    assert!(record.confirmed_at.is_none());
+    let mut invalid: serde_json::Value = serde_json::from_str(&json).unwrap();
+    invalid["payload_hash"] = "sha256:invalid".into();
+    assert!(
+        enqueue_private_message(&storage, counterparty(), invalid.to_string(), timestamp())
+            .await
+            .is_err()
+    );
+}
+
 #[test]
 fn test_failure_report_debug_redacts_errors() {
     let report = OutboundPrivateCounterpartySendReport {
@@ -270,6 +301,7 @@ fn test_validate_queued_outbound_private_message_rejects_malformed_known_body() 
         updated_at: timestamp(),
         last_attempt_at: None,
         sent_at: None,
+        confirmed_at: None,
         last_error: None,
         prepared_send: None,
     };

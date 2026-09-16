@@ -76,6 +76,7 @@ pub struct EventIdConflict {
 #[derive(Clone)]
 pub(crate) struct PrivateStreamBatchWrite {
     pub(crate) counterparty: PubkyPublicKey,
+    pub(crate) confirmation_app_id: PaykitAppId,
     pub(crate) messages: Vec<PrivateApplicationMessage>,
     pub(crate) link_state: Option<EncryptedLinkStateRecord>,
     pub(crate) authorized_receipt_apps: Option<Vec<PaykitAppId>>,
@@ -109,6 +110,7 @@ where
 }
 
 /// Persist a batch and checkpoint only if the peer link lease is still active.
+#[cfg(test)]
 pub(crate) async fn persist_private_stream_batch_with_link_lease<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
@@ -125,6 +127,7 @@ where
         storage,
         PrivateStreamBatchWrite {
             counterparty,
+            confirmation_app_id: PaykitAppId::new("bitkit").unwrap(),
             messages,
             link_state,
             authorized_receipt_apps,
@@ -147,6 +150,7 @@ where
     retry_storage_transaction(storage, || {
         let PrivateStreamBatchWrite {
             counterparty,
+            confirmation_app_id,
             messages,
             link_state,
             authorized_receipt_apps,
@@ -180,6 +184,7 @@ where
                     receipt_access,
                     app_id: classification_app_id,
                 } = classify_private_application_message(&message);
+                let valid = status == PrivateStreamParseStatus::Valid;
                 let stream_item_id = tx.insert_private_stream_item(NewPrivateStreamItem::new(
                     NewPrivateStreamItemDetails {
                         counterparty: counterparty.clone(),
@@ -197,6 +202,7 @@ where
                     },
                 ))?;
 
+                let delivery_event_id = event.as_ref().map(|event| event.event_id.clone());
                 let dedupe_outcome = event.map(|event| {
                     update_event_dedupe(
                         tx,
@@ -208,6 +214,24 @@ where
                         &mut report,
                     )
                 });
+
+                if valid {
+                    if let Some(event_id) = delivery_event_id {
+                        queue_delivery_confirmation(
+                            tx,
+                            &counterparty,
+                            &confirmation_app_id,
+                            &event_id,
+                            &message.raw_json,
+                            received_at,
+                        )?;
+                    } else if message.known_kind() == Some(PrivateMessageKind::DeliveryConfirmation)
+                    {
+                        let confirmation =
+                            paykit_lib::parse_delivery_confirmation_json(&message.raw_json)?;
+                        apply_delivery_confirmation(tx, &counterparty, &confirmation, received_at)?;
+                    }
+                }
 
                 if matches!(dedupe_outcome, Some(EventDedupeOutcome::First)) {
                     if let Some(access) = receipt_access.as_ref() {
@@ -310,6 +334,24 @@ pub(crate) fn classify_private_application_message(
     };
 
     match kind {
+        PrivateMessageKind::DeliveryConfirmation => {
+            match paykit_lib::parse_delivery_confirmation_json(&message.raw_json) {
+                Ok(confirmation) => PrivateStreamMessageClassification {
+                    status: PrivateStreamParseStatus::Valid,
+                    parse_error: None,
+                    event: None,
+                    receipt_access: None,
+                    app_id: Some(confirmation.app_id().clone()),
+                },
+                Err(err) => PrivateStreamMessageClassification {
+                    status: PrivateStreamParseStatus::MalformedRecognized,
+                    parse_error: Some(err.to_string()),
+                    event: None,
+                    receipt_access: None,
+                    app_id: None,
+                },
+            }
+        }
         PrivateMessageKind::PrivatePaymentList => {
             match parse_private_payment_list_json(&message.raw_json) {
                 Ok(list) => PrivateStreamMessageClassification {
@@ -437,6 +479,93 @@ fn update_event_dedupe(
 pub(crate) fn payload_hash(raw_json: &str) -> String {
     let digest = Sha256::digest(raw_json.as_bytes());
     format!("sha256:{digest:x}")
+}
+
+fn queue_delivery_confirmation(
+    tx: &mut dyn crate::storage::StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    app_id: &PaykitAppId,
+    event_id: &str,
+    raw_json: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    use crate::{storage::NewOutboundPrivateMessage, OutboundPrivateMessageStatus};
+    let hash = payload_hash(raw_json);
+    for mut message in tx.outbound_private_messages(counterparty) {
+        if message.kind != PrivateMessageKind::DeliveryConfirmation.as_str() {
+            continue;
+        }
+        let Ok(confirmation) = paykit_lib::parse_delivery_confirmation_json(&message.raw_json)
+        else {
+            continue;
+        };
+        if confirmation.event_id().as_str() != event_id || confirmation.payload_hash() != hash {
+            continue;
+        }
+        match message.status {
+            OutboundPrivateMessageStatus::Sent => {
+                message.status = OutboundPrivateMessageStatus::Pending;
+                message.attempt_count = 0;
+                message.last_attempt_at = None;
+                message.sent_at = None;
+                message.last_error = None;
+                message.updated_at = now;
+                tx.save_outbound_private_message(message)?;
+                return Ok(());
+            }
+            OutboundPrivateMessageStatus::Pending
+            | OutboundPrivateMessageStatus::Sending
+            | OutboundPrivateMessageStatus::Failed
+            | OutboundPrivateMessageStatus::RecoveryRequired => return Ok(()),
+            OutboundPrivateMessageStatus::Invalid | OutboundPrivateMessageStatus::Superseded => {}
+        }
+    }
+    let confirmation = paykit_lib::DeliveryConfirmation::new(
+        app_id.clone(),
+        paykit_lib::EventId::new(event_id)?,
+        hash,
+    )?;
+    tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+        counterparty.clone(),
+        app_id.clone(),
+        PrivateMessageKind::DeliveryConfirmation.as_str().to_owned(),
+        paykit_lib::serialize_delivery_confirmation(&confirmation)?,
+        now,
+    ))?;
+    Ok(())
+}
+
+fn apply_delivery_confirmation(
+    tx: &mut dyn crate::storage::StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    confirmation: &paykit_lib::DeliveryConfirmation,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    for mut message in tx.outbound_private_messages(counterparty) {
+        if !PrivateMessageKind::parse(&message.kind).is_some_and(|kind| kind.is_event())
+            || message.confirmed_at.is_some()
+            || message.last_attempt_at.is_none()
+            || payload_hash(&message.raw_json) != confirmation.payload_hash()
+        {
+            continue;
+        }
+        let parsed = PrivateApplicationMessage {
+            version: Some(1),
+            kind: Some(message.kind.clone()),
+            app_id: Some(message.app_id.as_str().to_owned()),
+            raw_json: message.raw_json.clone(),
+        };
+        if classify_private_application_message(&parsed)
+            .event
+            .is_some_and(|event| event.event_id == confirmation.event_id().as_str())
+        {
+            // A staged ciphertext still owns its Noise slot, even if a previous publication reached the peer.
+            message.confirmed_at = Some(now);
+            message.updated_at = now;
+            tx.save_outbound_private_message(message)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -87,8 +87,8 @@ use crate::{
         PrivatePaymentListSyncReport,
     },
     domain::private_stream::{
-        persist_private_stream_batch_with_link_lease, persist_private_stream_batch_write,
-        PrivateStreamBatchWrite, PrivateStreamCounterpartyIntakeReport, PrivateStreamIntakeReport,
+        persist_private_stream_batch_write, PrivateStreamBatchWrite,
+        PrivateStreamCounterpartyIntakeReport, PrivateStreamIntakeReport,
     },
     domain::publication::PublicationStatus,
     domain::receipts::{
