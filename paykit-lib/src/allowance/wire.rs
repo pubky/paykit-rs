@@ -425,7 +425,37 @@ pub(super) fn parse_event_header_ids(json: &str) -> (Option<EventId>, Option<All
 }
 
 fn parse_proposal(json: &str) -> Result<AllowanceEvent> {
-    AllowanceProposal::try_from(parse_wire::<ProposalWire>(json)?).map(AllowanceEvent::Proposal)
+    // SECURITY: Deserialize the original bytes to retain duplicate-field
+    // rejection. The Value used for shape checks must not replace this parse.
+    let wire = parse_wire::<ProposalWire>(json)?;
+    validate_proposal_object_shapes(json)?;
+    AllowanceProposal::try_from(wire).map(AllowanceEvent::Proposal)
+}
+
+fn validate_proposal_object_shapes(json: &str) -> Result<()> {
+    let value: JsonValue = parse_wire(json)?;
+    let terms = value
+        .get("terms")
+        .filter(|terms| terms.is_object())
+        .ok_or_else(invalid_allowance_message)?;
+    if !terms
+        .get("per_payment_amount")
+        .is_some_and(|range| range.is_null() || range.is_object())
+    {
+        return Err(invalid_allowance_message());
+    }
+    validate_period_limit_object_shapes(&terms["period_limits"])
+}
+
+fn validate_period_limit_object_shapes(value: &JsonValue) -> Result<()> {
+    let limits = value.as_array().ok_or_else(invalid_allowance_message)?;
+    if limits
+        .iter()
+        .any(|limit| !limit.is_object() || !limit.get("period").is_some_and(JsonValue::is_object))
+    {
+        return Err(invalid_allowance_message());
+    }
+    Ok(())
 }
 
 fn parse_acceptance(json: &str) -> Result<AllowanceEvent> {
@@ -576,6 +606,100 @@ mod tests {
             .build()
             .unwrap();
         AllowanceEvent::Proposal(proposal_with_terms(terms))
+    }
+
+    fn assert_malformed_proposal_preserves_correlation(raw_json: String) {
+        let message = crate::PrivateApplicationMessage {
+            version: Some(1),
+            kind: Some(PrivateMessageKind::AllowanceProposal.as_str().into()),
+            raw_json,
+        };
+        let parsed = crate::parse_allowance_event_message(&message).unwrap();
+        assert!(!parsed.is_valid());
+        assert_eq!(parsed.event_id(), Some(&event_id(EVENT_ID)));
+        assert_eq!(parsed.allowance_id().unwrap().as_str(), ALLOWANCE_ID);
+        assert_eq!(parsed.raw_json(), message.raw_json);
+        let expected_error = invalid_allowance_message().to_string();
+        assert_eq!(parsed.validation_error(), Some(expected_error.as_str()));
+    }
+
+    #[test]
+    fn test_allowance_proposal_rejects_positional_object_arrays() {
+        let original: JsonValue =
+            serde_json::from_str(&serialize_allowance_json(&full_proposal()).unwrap()).unwrap();
+        for (pointer, array) in [
+            (
+                "/terms",
+                serde_json::json!(["btc", null, [], "1", null, null, null]),
+            ),
+            (
+                "/terms/per_payment_amount",
+                serde_json::json!(["0.0001", "0.01"]),
+            ),
+            (
+                "/terms/period_limits/0",
+                serde_json::json!(["0.03", 5, {
+                    "kind": "anchored", "every": 1, "unit": "month",
+                    "anchor": "2026-01-31T00:00:00Z"
+                }]),
+            ),
+            (
+                "/terms/period_limits/0/period",
+                serde_json::json!(["rolling", 1, "day"]),
+            ),
+            (
+                "/terms/period_limits/0/period",
+                serde_json::json!(["anchored", 1, "month", "2026-01-31T00:00:00Z"]),
+            ),
+        ] {
+            let mut invalid = original.clone();
+            *invalid.pointer_mut(pointer).unwrap() = array;
+            assert_malformed_proposal_preserves_correlation(invalid.to_string());
+        }
+    }
+
+    #[test]
+    fn test_allowance_proposal_preserves_duplicate_member_rejection() {
+        let compact = serialize_allowance_json(&full_proposal()).unwrap();
+        let original: JsonValue = serde_json::from_str(&compact).unwrap();
+        for (pointer, field, different) in [
+            ("", "proposer_role", serde_json::json!("allowee")),
+            ("/terms", "asset", serde_json::json!("private-sentinel")),
+            (
+                "/terms/per_payment_amount",
+                "minimum",
+                serde_json::json!("0"),
+            ),
+            (
+                "/terms/period_limits/0",
+                "amount_limit",
+                serde_json::json!("0.04"),
+            ),
+            (
+                "/terms/period_limits/0/period",
+                "every",
+                serde_json::json!(2),
+            ),
+        ] {
+            let original_value = &original.pointer(pointer).unwrap()[field];
+            let member = format!("\"{field}\":{original_value}");
+            for duplicate_value in [original_value, &different] {
+                // Build raw JSON: a Value would erase the duplicate under test.
+                let duplicate = format!("{member},\"{field}\":{duplicate_value}");
+                let invalid = compact.replacen(&member, &duplicate, 1);
+                assert_ne!(invalid, compact);
+                assert_malformed_proposal_preserves_correlation(invalid);
+            }
+        }
+    }
+
+    #[test]
+    fn test_allowance_proposal_keeps_nullable_ranges_and_collection_arrays() {
+        let mut value: JsonValue =
+            serde_json::from_str(&serialize_allowance_json(&full_proposal()).unwrap()).unwrap();
+        value["terms"]["per_payment_amount"] = JsonValue::Null;
+        value["terms"]["period_limits"] = serde_json::json!([]);
+        assert!(parse_proposal_json(&value.to_string()).is_ok());
     }
 
     #[test]
