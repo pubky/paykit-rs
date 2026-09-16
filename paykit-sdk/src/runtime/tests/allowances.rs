@@ -69,7 +69,18 @@ async fn test_app_removal_preserves_identity_wide_allowance_authority() {
     )
     .await
     .unwrap();
-    enqueue_allowance_response(
+    let proposal_confirmation = storage
+        .snapshot()
+        .unwrap()
+        .outbound_private_messages
+        .into_iter()
+        .find(|message| message.is_delivery_confirmation())
+        .unwrap();
+    assert_eq!(
+        proposal_confirmation.status,
+        OutboundPrivateMessageStatus::Pending
+    );
+    let accepted = enqueue_allowance_response(
         &storage,
         counterparty.clone(),
         app_id(),
@@ -88,14 +99,66 @@ async fn test_app_removal_preserves_identity_wide_allowance_authority() {
     .await
     .unwrap();
     assert_eq!(pending.undelivered_private_events, 1);
-    storage
+    let acceptance_message = storage
         .transaction(|tx| {
-            let mut message = tx.export_storage_state().outbound_private_messages[0].clone();
-            message.status = OutboundPrivateMessageStatus::Sent;
-            tx.save_outbound_private_message(message)
+            let mut message = tx
+                .outbound_private_messages(&counterparty)
+                .into_iter()
+                .find(|message| message.kind == PrivateMessageKind::AllowanceAcceptance.as_str())
+                .unwrap();
+            message.attempt_count = 1;
+            message.last_attempt_at = Some(FixedClock.now());
+            let message =
+                crate::domain::outbound_private::mark_outbound_sent(message, FixedClock.now());
+            tx.save_outbound_private_message(message.clone())?;
+            Ok(message)
         })
         .await
         .unwrap();
+    let published = crate::runtime::app_removal::begin_paykit_app_removal(
+        &storage,
+        &test_app_operation(&storage).await,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(published.undelivered_private_events, 1);
+
+    // Publication is not durable receipt. The peer must confirm the acceptance,
+    // independently of our pending confirmation of its proposal.
+    let confirmation = paykit_lib::DeliveryConfirmation::new(
+        app_id(),
+        EventId::new(accepted.acceptance_event_id.as_deref().unwrap()).unwrap(),
+        crate::domain::private_stream::payload_hash(&acceptance_message.raw_json),
+    )
+    .unwrap();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        vec![PrivateApplicationMessage {
+            version: Some(1),
+            kind: Some(PrivateMessageKind::DeliveryConfirmation.as_str().into()),
+            app_id: Some(app_id().as_str().into()),
+            raw_json: paykit_lib::serialize_delivery_confirmation(&confirmation).unwrap(),
+        }],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let confirmed_queue = storage.snapshot().unwrap().outbound_private_messages;
+    let confirmed_acceptance = confirmed_queue
+        .iter()
+        .find(|message| message.outbound_message_id == acceptance_message.outbound_message_id)
+        .unwrap();
+    assert_eq!(confirmed_acceptance.confirmed_at, Some(FixedClock.now()));
+    assert_eq!(
+        confirmed_queue
+            .iter()
+            .filter(|message| message.is_delivery_confirmation())
+            .collect::<Vec<_>>(),
+        vec![&proposal_confirmation],
+    );
     let delivered = crate::runtime::app_removal::begin_paykit_app_removal(
         &storage,
         &test_app_operation(&storage).await,
@@ -104,6 +167,10 @@ async fn test_app_removal_preserves_identity_wide_allowance_authority() {
     .await
     .unwrap();
     assert!(delivered.is_empty());
+    assert_eq!(
+        storage.snapshot().unwrap().outbound_private_messages,
+        confirmed_queue
+    );
     let record = derive_allowance_record(&storage, &counterparty, &allowance_id)
         .await
         .unwrap()
@@ -120,12 +187,14 @@ async fn test_app_removal_preserves_identity_wide_allowance_authority() {
     .await
     .unwrap();
     assert_eq!(ended.state, crate::AllowanceLifecycleState::Ended);
+    let after = storage.snapshot().unwrap().outbound_private_messages;
+    assert_eq!(after.len(), confirmed_queue.len() + 1);
+    assert_eq!(&after[..confirmed_queue.len()], confirmed_queue.as_slice());
     assert_eq!(
-        storage.snapshot().unwrap().outbound_private_messages[1]
-            .app_id
-            .as_str(),
-        "server"
+        after.last().unwrap().kind,
+        PrivateMessageKind::AllowanceEnd.as_str(),
     );
+    assert_eq!(after.last().unwrap().app_id.as_str(), "server");
 }
 
 fn allowance_message(
@@ -235,6 +304,7 @@ async fn test_allowance_commands_require_session_without_queue_mutation() {
         PaykitSdkConfig::new("bitkit").unwrap(),
         FixedClock,
     );
+    let before = storage.snapshot().unwrap().outbound_private_messages;
 
     let proposed = sdk
         .propose_allowance(
@@ -257,11 +327,10 @@ async fn test_allowance_commands_require_session_without_queue_mutation() {
     for result in [proposed, accepted, rejected, ended] {
         assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     }
-    assert!(storage
-        .snapshot()
-        .unwrap()
-        .outbound_private_messages
-        .is_empty());
+    assert_eq!(
+        storage.snapshot().unwrap().outbound_private_messages,
+        before
+    );
 }
 
 #[tokio::test]

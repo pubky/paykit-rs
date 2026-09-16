@@ -62,9 +62,7 @@ pub(in crate::backup) fn reconcile_restored_linked_peers(
         .cloned()
         .collect::<HashSet<_>>();
     for message in outbound_private_messages {
-        if outbound_status_requires_link(&message.status)
-            && !active_link_counterparties.contains(&message.counterparty)
-        {
+        if message.is_queued() && !active_link_counterparties.contains(&message.counterparty) {
             linked_peers
                 .entry(message.counterparty.clone())
                 .and_modify(|peer| {
@@ -127,15 +125,6 @@ fn restored_peer_record(
     }
 }
 
-fn outbound_status_requires_link(status: &OutboundPrivateMessageStatus) -> bool {
-    matches!(
-        status,
-        OutboundPrivateMessageStatus::Pending
-            | OutboundPrivateMessageStatus::Sending
-            | OutboundPrivateMessageStatus::Failed
-    )
-}
-
 pub(in crate::backup) fn clear_recovery_required_link_snapshots(
     encrypted_link_states: &mut HashMap<PubkyPublicKey, EncryptedLinkStateRecord>,
     recovery_required_peers: &[PubkyPublicKey],
@@ -166,7 +155,7 @@ pub(in crate::backup) fn mark_restored_outbound_recovery_required(
         .cloned()
         .collect::<HashSet<_>>();
     for record in records.iter_mut() {
-        if (outbound_status_requires_link(&record.status) || record.prepared_send.is_some())
+        if (record.is_queued() || record.prepared_send.is_some())
             && (key_changed || recovery_required_peers.contains(&record.counterparty))
         {
             record.status = OutboundPrivateMessageStatus::RecoveryRequired;

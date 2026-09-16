@@ -557,6 +557,8 @@ async fn test_allowance_acceptance_precondition_and_append_are_atomic() {
     )
     .await;
 
+    let before = storage.snapshot().unwrap().outbound_private_messages;
+
     let first = enqueue_allowance_acceptance(
         &storage,
         peer.clone(),
@@ -579,10 +581,10 @@ async fn test_allowance_acceptance_precondition_and_append_are_atomic() {
         .err()
         .or_else(|| second.as_ref().err())
         .is_some_and(|error| matches!(error, PaykitSdkError::Policy { .. })));
-    assert_eq!(
-        storage.snapshot().unwrap().outbound_private_messages.len(),
-        1
-    );
+    let after = storage.snapshot().unwrap().outbound_private_messages;
+    assert_eq!(after.len(), before.len() + 1);
+    assert_eq!(&after[..before.len()], before.as_slice());
+    assert_eq!(after.last().unwrap().kind, "paykit.allowance_acceptance");
 }
 
 #[tokio::test]
@@ -653,6 +655,8 @@ async fn test_allowance_rejection_blocks_later_response_without_queue_mutation()
     )
     .await
     .unwrap();
+    let before = storage.snapshot().unwrap().outbound_private_messages;
+
     let later = enqueue_allowance_acceptance(
         &storage,
         peer,
@@ -665,8 +669,8 @@ async fn test_allowance_rejection_blocks_later_response_without_queue_mutation()
     assert_eq!(rejected.state, AllowanceLifecycleState::Rejected);
     assert!(matches!(later, Err(PaykitSdkError::Policy { .. })));
     assert_eq!(
-        storage.snapshot().unwrap().outbound_private_messages.len(),
-        1
+        storage.snapshot().unwrap().outbound_private_messages,
+        before
     );
 }
 
@@ -702,6 +706,8 @@ async fn test_allowance_end_after_rejection_allows_proposer_withdrawal() {
             AllowanceLifecycleState::Rejected
         );
 
+        let before = storage.snapshot().unwrap().outbound_private_messages;
+
         let ended = enqueue_allowance_end(
             &storage,
             peer.clone(),
@@ -715,7 +721,11 @@ async fn test_allowance_end_after_rejection_allows_proposer_withdrawal() {
         assert_eq!(ended.state, AllowanceLifecycleState::Ended);
         assert_eq!(ended.history_status, AllowanceHistoryStatus::Consistent);
         let state = storage.snapshot().unwrap();
-        assert_eq!(state.outbound_private_messages.len(), 2);
+        assert_eq!(state.outbound_private_messages.len(), before.len() + 1);
+        assert_eq!(
+            &state.outbound_private_messages[..before.len()],
+            before.as_slice()
+        );
         let end_message = state.outbound_private_messages.last().unwrap();
         let parsed = parse_allowance_event_message(&PrivateApplicationMessage {
             app_id: Some("bitkit".into()),
@@ -761,6 +771,8 @@ async fn test_allowance_end_after_rejection_rejects_recipient_without_queue_muta
         .unwrap();
         assert_eq!(rejected.state, AllowanceLifecycleState::Rejected);
 
+        let before = storage.snapshot().unwrap().outbound_private_messages;
+
         let result = enqueue_allowance_end(
             &storage,
             peer.clone(),
@@ -772,8 +784,8 @@ async fn test_allowance_end_after_rejection_rejects_recipient_without_queue_muta
 
         assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
         assert_eq!(
-            storage.snapshot().unwrap().outbound_private_messages.len(),
-            1
+            storage.snapshot().unwrap().outbound_private_messages,
+            before
         );
         let record = derived(&storage, &peer).await;
         assert_eq!(record.state, AllowanceLifecycleState::Rejected);
@@ -901,6 +913,8 @@ async fn test_allowance_end_command_succeeds_on_invalid_history() {
         AllowanceHistoryStatus::Invalid
     );
 
+    let before = storage.snapshot().unwrap().outbound_private_messages;
+
     let ended = enqueue_allowance_end(
         &storage,
         peer,
@@ -930,7 +944,11 @@ async fn test_allowance_end_command_succeeds_on_invalid_history() {
         end_event.acceptance_event_id().map(EventId::as_str),
         Some(ACCEPTANCE_ID)
     );
-    assert_eq!(state.outbound_private_messages.len(), 3);
+    assert_eq!(state.outbound_private_messages.len(), before.len() + 1);
+    assert_eq!(
+        &state.outbound_private_messages[..before.len()],
+        before.as_slice()
+    );
 }
 
 #[tokio::test]
@@ -962,6 +980,8 @@ async fn test_allowance_end_command_blocked_when_history_needs_recovery() {
         .await
         .unwrap();
 
+    let before = storage.snapshot().unwrap().outbound_private_messages;
+
     let result = enqueue_allowance_end(
         &storage,
         peer,
@@ -976,8 +996,8 @@ async fn test_allowance_end_command_blocked_when_history_needs_recovery() {
         Err(PaykitSdkError::RecoveryRequired { .. })
     ));
     assert_eq!(
-        storage.snapshot().unwrap().outbound_private_messages.len(),
-        1
+        storage.snapshot().unwrap().outbound_private_messages,
+        before
     );
 }
 
@@ -1082,6 +1102,8 @@ async fn test_allowance_commands_reject_wrong_party_without_queue_mutation() {
     )
     .await;
 
+    let before = storage.snapshot().unwrap().outbound_private_messages;
+
     let result = enqueue_allowance_acceptance(
         &storage,
         peer,
@@ -1093,8 +1115,8 @@ async fn test_allowance_commands_reject_wrong_party_without_queue_mutation() {
 
     assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
     assert_eq!(
-        storage.snapshot().unwrap().outbound_private_messages.len(),
-        1
+        storage.snapshot().unwrap().outbound_private_messages,
+        before
     );
 }
 
@@ -1194,6 +1216,8 @@ async fn test_allowance_response_rejects_invalid_history_without_queue_mutation(
     .await
     .unwrap();
 
+    let before = storage.snapshot().unwrap().outbound_private_messages;
+
     let accepted = enqueue_allowance_acceptance(
         &storage,
         peer.clone(),
@@ -1213,11 +1237,10 @@ async fn test_allowance_response_rejects_invalid_history_without_queue_mutation(
 
     assert!(matches!(accepted, Err(PaykitSdkError::Protocol { .. })));
     assert!(matches!(rejected, Err(PaykitSdkError::Protocol { .. })));
-    assert!(storage
-        .snapshot()
-        .unwrap()
-        .outbound_private_messages
-        .is_empty());
+    assert_eq!(
+        storage.snapshot().unwrap().outbound_private_messages,
+        before
+    );
 }
 
 #[tokio::test]
@@ -1461,6 +1484,8 @@ async fn test_allowance_end_command_rejects_later_end_without_queue_mutation() {
     )
     .await
     .unwrap();
+    let before = storage.snapshot().unwrap().outbound_private_messages;
+
     let duplicate = enqueue_allowance_end(
         &storage,
         peer,
@@ -1473,8 +1498,8 @@ async fn test_allowance_end_command_rejects_later_end_without_queue_mutation() {
     assert_eq!(ended.state, AllowanceLifecycleState::Ended);
     assert!(matches!(duplicate, Err(PaykitSdkError::Policy { .. })));
     assert_eq!(
-        storage.snapshot().unwrap().outbound_private_messages.len(),
-        2
+        storage.snapshot().unwrap().outbound_private_messages,
+        before
     );
 }
 

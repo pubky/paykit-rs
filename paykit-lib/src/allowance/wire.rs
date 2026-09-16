@@ -350,6 +350,7 @@ pub(super) fn parse_allowance_json(
         // `json` (decrypted private payload), so there is no error context to
         // leak.
         PrivateMessageKind::PrivatePaymentList
+        | PrivateMessageKind::DeliveryConfirmation
         | PrivateMessageKind::ReceiptAccess
         | PrivateMessageKind::PaymentRequest
         | PrivateMessageKind::PaymentRequestAcceptance

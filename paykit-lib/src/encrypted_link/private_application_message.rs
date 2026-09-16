@@ -27,6 +27,8 @@ pub const PRIVATE_APPLICATION_MESSAGE_RECEIVE_LIMIT: usize = 100;
 pub enum PrivateMessageKind {
     /// Private Payment List Latest-State Message (`paykit.private_payment_list`).
     PrivatePaymentList,
+    /// Delivery Confirmation (`paykit.delivery_confirmation`), not an Event Message.
+    DeliveryConfirmation,
     /// Receipt Access Event Message (`paykit.receipt_access`).
     ReceiptAccess,
     /// Payment Request Event Message (`paykit.payment_request`).
@@ -56,6 +58,7 @@ impl PrivateMessageKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::PrivatePaymentList => "paykit.private_payment_list",
+            Self::DeliveryConfirmation => "paykit.delivery_confirmation",
             Self::ReceiptAccess => "paykit.receipt_access",
             Self::PaymentRequest => "paykit.payment_request",
             Self::PaymentRequestAcceptance => "paykit.payment_request_acceptance",
@@ -74,6 +77,7 @@ impl PrivateMessageKind {
     pub fn parse(kind: &str) -> Option<Self> {
         match kind {
             "paykit.private_payment_list" => Some(Self::PrivatePaymentList),
+            "paykit.delivery_confirmation" => Some(Self::DeliveryConfirmation),
             "paykit.receipt_access" => Some(Self::ReceiptAccess),
             "paykit.payment_request" => Some(Self::PaymentRequest),
             "paykit.payment_request_acceptance" => Some(Self::PaymentRequestAcceptance),
@@ -86,6 +90,27 @@ impl PrivateMessageKind {
             "paykit.allowance_rejection" => Some(Self::AllowanceRejection),
             "paykit.allowance_end" => Some(Self::AllowanceEnd),
             _ => None,
+        }
+    }
+
+    /// Whether this kind carries an Event Message with its own Event ID.
+    ///
+    /// Delivery Confirmations refer to an existing event and must not themselves
+    /// receive confirmations. Private Payment Lists use Latest-State semantics.
+    pub fn is_event(self) -> bool {
+        match self {
+            Self::ReceiptAccess
+            | Self::PaymentRequest
+            | Self::PaymentRequestAcceptance
+            | Self::PaymentRequestRejection
+            | Self::PaymentRequestCancellation
+            | Self::PaymentConversionQuote
+            | Self::AllowanceProposal
+            | Self::AllowanceAcceptance
+            | Self::AllowanceRejection
+            | Self::AllowanceEnd
+            | Self::PaymentProof => true,
+            Self::PrivatePaymentList | Self::DeliveryConfirmation => false,
         }
     }
 }
