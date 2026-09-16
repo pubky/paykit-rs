@@ -58,6 +58,7 @@ fn outbound_state(outbound_ids: &[u64], next_outbound_id: u64) -> StorageState {
             updated_at: now,
             last_attempt_at: None,
             sent_at: None,
+            confirmed_at: None,
             last_error: None,
             prepared_send: None,
         })
@@ -405,6 +406,7 @@ async fn test_storage_and_backup_blobs_round_trip_private_sync_records() {
         updated_at: now,
         last_attempt_at: None,
         sent_at: None,
+        confirmed_at: None,
         last_error: None,
         prepared_send: None,
     };

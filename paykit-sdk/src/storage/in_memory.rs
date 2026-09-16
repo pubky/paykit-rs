@@ -1,8 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use super::queue::{
-    inactive_outbound_private_message_blocks_queue, is_claimable_outbound_private_message,
-    supersede_outdated_private_payment_lists,
+    next_claimable_outbound_private_message, supersede_outdated_private_payment_lists,
 };
 use super::*;
 use crate::OutboundPrivateMessageStatus;
@@ -443,15 +442,7 @@ impl StorageTransaction for StorageStateTransaction {
             .state
             .outbound_private_messages
             .iter()
-            .filter(|message| {
-                &message.counterparty == counterparty
-                    && matches!(
-                        message.status,
-                        OutboundPrivateMessageStatus::Pending
-                            | OutboundPrivateMessageStatus::Sending
-                            | OutboundPrivateMessageStatus::Failed
-                    )
-            })
+            .filter(|message| &message.counterparty == counterparty && message.is_queued())
             .cloned()
             .collect::<Vec<_>>();
         messages.sort_by_key(|message| message.outbound_message_id);
@@ -482,47 +473,19 @@ impl StorageTransaction for StorageStateTransaction {
     ) -> Option<OutboundPrivateMessageRecord> {
         supersede_outdated_private_payment_lists(&mut self.state, counterparty, now);
 
-        let mut indexes = self
+        let messages = self.outbound_private_messages(counterparty);
+        let outbound_message_id = next_claimable_outbound_private_message(
+            &messages,
+            &self.state.registered_paykit_apps,
+            &self.state.retired_paykit_apps,
+            stale_before,
+            failed_retry_after,
+        )?;
+        let message = self
             .state
             .outbound_private_messages
-            .iter()
-            .enumerate()
-            .filter(|(_, message)| {
-                &message.counterparty == counterparty
-                    && !matches!(
-                        message.status,
-                        OutboundPrivateMessageStatus::Sent
-                            | OutboundPrivateMessageStatus::Invalid
-                            | OutboundPrivateMessageStatus::RecoveryRequired
-                            | OutboundPrivateMessageStatus::Superseded
-                    )
-            })
-            .map(|(index, message)| (index, message.outbound_message_id))
-            .collect::<Vec<_>>();
-        indexes.sort_by_key(|(_, outbound_message_id)| *outbound_message_id);
-
-        let index = indexes.into_iter().find_map(|(index, _)| {
-            let message = &self.state.outbound_private_messages[index];
-            if !self.state.registered_paykit_apps.contains(&message.app_id)
-                && !inactive_outbound_private_message_blocks_queue(
-                    message,
-                    &self.state.retired_paykit_apps,
-                )
-            {
-                None
-            } else {
-                Some(index)
-            }
-        })?;
-        let message = &mut self.state.outbound_private_messages[index];
-        if !self.state.registered_paykit_apps.contains(&message.app_id)
-            || self.state.retired_paykit_apps.contains(&message.app_id)
-        {
-            return None;
-        }
-        if !is_claimable_outbound_private_message(message, stale_before, failed_retry_after) {
-            return None;
-        }
+            .iter_mut()
+            .find(|message| message.outbound_message_id == outbound_message_id)?;
 
         message.status = OutboundPrivateMessageStatus::Sending;
         message.attempt_count = message.attempt_count.saturating_add(1);

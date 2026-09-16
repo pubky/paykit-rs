@@ -10,6 +10,29 @@ fn app_id() -> PaykitAppId {
 }
 
 #[test]
+fn test_private_message_kind_event_classification() {
+    for kind in [
+        PrivateMessageKind::ReceiptAccess,
+        PrivateMessageKind::PaymentRequest,
+        PrivateMessageKind::PaymentRequestAcceptance,
+        PrivateMessageKind::PaymentRequestRejection,
+        PrivateMessageKind::PaymentRequestCancellation,
+        PrivateMessageKind::PaymentProof,
+    ] {
+        assert!(kind.is_event(), "{kind}");
+        assert_eq!(PrivateMessageKind::parse(kind.as_str()), Some(kind));
+    }
+    for kind in [
+        PrivateMessageKind::PrivatePaymentList,
+        PrivateMessageKind::DeliveryConfirmation,
+    ] {
+        assert!(!kind.is_event(), "{kind}");
+        assert_eq!(PrivateMessageKind::parse(kind.as_str()), Some(kind));
+    }
+    assert_eq!(PrivateMessageKind::parse("paykit.future_kind"), None);
+}
+
+#[test]
 fn test_send_attempts_from_retries_bounds() {
     assert_eq!(send_attempts_from_retries(0), 1);
     assert_eq!(send_attempts_from_retries(3), 4);

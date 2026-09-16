@@ -578,6 +578,120 @@ async fn test_detach_shared_app_reservations_keeps_unshared_cleanup_work() {
     assert_eq!(records[0].reservation_id, "unshared");
 }
 
+#[tokio::test]
+async fn test_retirement_preserves_confirmation_and_blocks_unconfirmed_publication() {
+    let app = app_id();
+    let peer = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let storage = registered_test_storage();
+    let now = FixedClock.now();
+    let expires_at = now + chrono::Duration::minutes(1);
+    let confirmation = paykit_lib::DeliveryConfirmation::new(
+        app.clone(),
+        paykit_lib::EventId::new("650e8400-e29b-41d4-a716-446655440000").unwrap(),
+        format!("sha256:{}", "0".repeat(64)),
+    )
+    .unwrap();
+    let (event, ack) = storage.transaction(|tx| {
+        let mut event = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+            peer.clone(), app.clone(), PrivateMessageKind::PaymentRequestCancellation.as_str().into(),
+            r#"{"version":1,"kind":"paykit.payment_request_cancellation","app_id":"bitkit","event_id":"650e8400-e29b-41d4-a716-446655440000","payment_request_id":"550e8400-e29b-41d4-a716-446655440000"}"#.into(), now,
+        ))?;
+        event.attempt_count = 1;
+        event.last_attempt_at = Some(now);
+        event = mark_outbound_sent(event, now);
+        tx.save_outbound_private_message(event.clone())?;
+        let ack = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+            peer.clone(), app.clone(), PrivateMessageKind::DeliveryConfirmation.as_str().into(),
+            paykit_lib::serialize_delivery_confirmation(&confirmation)?, now,
+        ))?;
+        Ok((event, ack))
+    }).await.unwrap();
+    let blockers = app_removal_blockers(&storage, &app, now).await.unwrap();
+    assert_eq!(blockers.undelivered_private_events, 1);
+    assert!(storage
+        .transaction(|tx| retire_app_outbound_private_messages(tx, &app, now, expires_at))
+        .await
+        .is_err());
+
+    let mut confirmed = event.clone();
+    confirmed.confirmed_at = Some(now);
+    for status in [
+        OutboundPrivateMessageStatus::Pending,
+        OutboundPrivateMessageStatus::Failed,
+    ] {
+        confirmed.status = status;
+        confirmed.last_error = (confirmed.status == OutboundPrivateMessageStatus::Failed)
+            .then(|| "ambiguous publication".into());
+        storage
+            .transaction(|tx| tx.save_outbound_private_message(confirmed.clone()))
+            .await
+            .unwrap();
+        let blockers = app_removal_blockers(&storage, &app, now).await.unwrap();
+        assert_eq!(blockers.undelivered_private_events, 0);
+    }
+    confirmed.status = OutboundPrivateMessageStatus::Sent;
+    confirmed.last_error = None;
+    storage
+        .transaction(|tx| {
+            tx.save_outbound_private_message(confirmed)?;
+            assert!(retire_app_outbound_private_messages(tx, &app, now, expires_at)?.is_empty());
+            let messages = tx.outbound_private_messages(&peer);
+            assert_eq!(messages[1], ack);
+            assert_eq!(messages[0].status, OutboundPrivateMessageStatus::Sent);
+            let claimed = tx
+                .claim_next_outbound_private_message(&peer, now, now, now)
+                .unwrap();
+            assert_eq!(claimed.outbound_message_id, ack.outbound_message_id);
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_retirement_waits_for_confirmed_reserved_slot() {
+    let app = app_id();
+    let peer = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let storage = registered_test_storage();
+    let now = FixedClock.now();
+    storage
+        .transaction(|tx| {
+            let mut message =
+                tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                    peer,
+                    app.clone(),
+                    PrivateMessageKind::PaymentRequest.as_str().into(),
+                    "event".into(),
+                    now,
+                ))?;
+            message.status = OutboundPrivateMessageStatus::Sending;
+            message.last_attempt_at = Some(now);
+            message.attempt_count = 1;
+            message.confirmed_at = Some(now);
+            message.prepared_send = Some(PreparedOutboundPrivateSend {
+                destination_path: "reserved-slot".into(),
+                ciphertext: vec![1, 2, 3],
+            });
+            tx.save_outbound_private_message(message)
+        })
+        .await
+        .unwrap();
+    assert!(storage
+        .transaction(|tx| retire_app_outbound_private_messages(
+            tx,
+            &app,
+            now,
+            now + chrono::Duration::minutes(1)
+        ))
+        .await
+        .is_err());
+    assert!(!storage
+        .snapshot()
+        .unwrap()
+        .retired_paykit_apps
+        .contains(&app));
+}
+
 fn payment_request_removal_record(
     local_role: PaymentRequestLocalRole,
     state: PaymentRequestLifecycleState,

@@ -251,13 +251,19 @@ pub(in crate::backup) fn validate_retired_app_outbound_messages(
 ) -> Result<()> {
     for record in records {
         if retired_apps.contains(&record.app_id)
-            && matches!(
-                record.status,
-                OutboundPrivateMessageStatus::Pending
-                    | OutboundPrivateMessageStatus::Sending
-                    | OutboundPrivateMessageStatus::Failed
-                    | OutboundPrivateMessageStatus::RecoveryRequired
-            )
+            && !record.is_delivery_confirmation()
+            && (record.confirmed_at.is_none() || record.prepared_send.is_some())
+            && ((record.is_unconfirmed_event()
+                && record.last_attempt_at.is_some()
+                && (record.status != OutboundPrivateMessageStatus::Invalid
+                    || record.sent_at.is_some()))
+                || matches!(
+                    record.status,
+                    OutboundPrivateMessageStatus::Pending
+                        | OutboundPrivateMessageStatus::Sending
+                        | OutboundPrivateMessageStatus::Failed
+                        | OutboundPrivateMessageStatus::RecoveryRequired
+                ))
         {
             return Err(PaykitSdkError::Protocol {
                 context: format!(
@@ -347,9 +353,9 @@ pub(in crate::backup) fn validate_retired_app_receipt_issuance(
     issuance_records: &HashMap<(PubkyPublicKey, String), ReceiptIssuanceRecord>,
     outbound_messages: &[OutboundPrivateMessageRecord],
 ) -> Result<()> {
-    let outbound_statuses = outbound_messages
+    let outbound_by_id = outbound_messages
         .iter()
-        .map(|message| (message.outbound_message_id, &message.status))
+        .map(|message| (message.outbound_message_id, message))
         .collect::<HashMap<_, _>>();
     for record in issuance_records.values() {
         if !retired_apps.contains(&record.app_id) {
@@ -359,8 +365,13 @@ pub(in crate::backup) fn validate_retired_app_receipt_issuance(
             && record
                 .outbound_message_id
                 .is_some_and(|outbound_message_id| {
-                    outbound_statuses.get(&outbound_message_id)
-                        == Some(&&OutboundPrivateMessageStatus::Sent)
+                    outbound_by_id
+                        .get(&outbound_message_id)
+                        .is_some_and(|message| {
+                            message.prepared_send.is_none()
+                                && (message.status == OutboundPrivateMessageStatus::Sent
+                                    || message.confirmed_at.is_some())
+                        })
                 });
         if !complete {
             return Err(PaykitSdkError::Protocol {
@@ -376,6 +387,16 @@ pub(in crate::backup) fn validate_retired_app_receipt_issuance(
 }
 
 fn validate_outbound_private_status(record: &OutboundPrivateMessageRecord) -> Result<()> {
+    let is_event = PrivateMessageKind::parse(&record.kind).is_some_and(|kind| kind.is_event());
+    if record.confirmed_at.is_some() && (!is_event || record.last_attempt_at.is_none()) {
+        return Err(PaykitSdkError::Protocol {
+            context: format!(
+                "outbound Private Application Message {} has invalid confirmation metadata",
+                record.outbound_message_id
+            ),
+            source: None,
+        });
+    }
     if let Some(prepared) = &record.prepared_send {
         if !matches!(
             record.status,
@@ -394,15 +415,15 @@ fn validate_outbound_private_status(record: &OutboundPrivateMessageRecord) -> Re
 
     let invalid = match record.status {
         OutboundPrivateMessageStatus::Pending => {
-            record.attempt_count != 0
-                || record.last_attempt_at.is_some()
-                || record.sent_at.is_some()
+            (!is_event && (record.attempt_count != 0 || record.last_attempt_at.is_some()))
+                || (is_event && (record.attempt_count == 0) != record.last_attempt_at.is_none())
+                || (record.sent_at.is_some() && (!is_event || record.last_attempt_at.is_none()))
                 || record.last_error.is_some()
         }
         OutboundPrivateMessageStatus::Sending => {
             record.attempt_count == 0
                 || record.last_attempt_at.is_none()
-                || record.sent_at.is_some()
+                || (record.sent_at.is_some() && !is_event)
                 || record.last_error.is_some()
         }
         OutboundPrivateMessageStatus::Sent => {
@@ -414,11 +435,11 @@ fn validate_outbound_private_status(record: &OutboundPrivateMessageRecord) -> Re
         OutboundPrivateMessageStatus::Failed => {
             record.attempt_count == 0
                 || record.last_attempt_at.is_none()
-                || record.sent_at.is_some()
+                || (record.sent_at.is_some() && !is_event)
                 || record.last_error.is_none()
         }
         OutboundPrivateMessageStatus::Invalid | OutboundPrivateMessageStatus::RecoveryRequired => {
-            record.sent_at.is_some() || record.last_error.is_none()
+            (record.sent_at.is_some() && !is_event) || record.last_error.is_none()
         }
         OutboundPrivateMessageStatus::Superseded => {
             record.sent_at.is_some() || record.last_error.is_some()

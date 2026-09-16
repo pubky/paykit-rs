@@ -15,6 +15,145 @@ fn counterparty() -> PubkyPublicKey {
 }
 
 #[tokio::test]
+async fn test_recovery_replays_unconfirmed_events_in_original_order() {
+    let app = paykit_lib::PaykitAppId::new("bitkit").unwrap();
+    let storage = InMemoryStorage::with_registered_apps([app.clone()]);
+    let peer = counterparty();
+    let original = storage
+        .transaction(|tx| {
+            for index in 0..3 {
+                let mut event =
+                    tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                        peer.clone(),
+                        app.clone(),
+                        "paykit.payment_request".into(),
+                        format!("event-{index}"),
+                        timestamp(),
+                    ))?;
+                event.attempt_count = 1;
+                event.last_attempt_at = Some(timestamp());
+                event = crate::domain::outbound_private::mark_outbound_sent(event, timestamp());
+                if index == 1 {
+                    event.confirmed_at = Some(timestamp());
+                }
+                tx.save_outbound_private_message(event)?;
+            }
+            Ok(tx.outbound_private_messages(&peer))
+        })
+        .await
+        .unwrap();
+    storage
+        .transaction(|tx| {
+            mark_recovery_required_in_transaction(tx, &peer, timestamp())?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    save_linked_peer_link_state(&storage, peer.clone(), vec![1, 2, 3], timestamp())
+        .await
+        .unwrap();
+    storage
+        .transaction(|tx| {
+            tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                peer.clone(),
+                app,
+                "paykit.payment_request".into(),
+                "new-event".into(),
+                timestamp(),
+            ))?;
+            let queued = tx.queued_outbound_private_messages(&peer);
+            assert_eq!(
+                queued
+                    .iter()
+                    .map(|message| message.outbound_message_id)
+                    .collect::<Vec<_>>(),
+                vec![0, 2, 3]
+            );
+            for id in [0, 2, 3] {
+                let message = tx
+                    .claim_next_outbound_private_message(
+                        &peer,
+                        timestamp(),
+                        timestamp(),
+                        timestamp() - chrono::Duration::seconds(1),
+                    )
+                    .unwrap();
+                assert_eq!(message.outbound_message_id, id);
+                assert!(message.prepared_send.is_none());
+                if id < 3 {
+                    assert_eq!(message.raw_json, original[id as usize].raw_json);
+                    assert_eq!(message.sent_at, original[id as usize].sent_at);
+                }
+                tx.save_outbound_private_message(
+                    crate::domain::outbound_private::mark_outbound_sent(message, timestamp()),
+                )?;
+            }
+            assert!(tx
+                .claim_next_outbound_private_message(
+                    &peer,
+                    timestamp(),
+                    timestamp(),
+                    timestamp() - chrono::Duration::seconds(1)
+                )
+                .is_none());
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_recovery_requeues_retired_delivery_confirmation() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    let app = paykit_lib::PaykitAppId::new("bitkit").unwrap();
+    storage
+        .transaction(|tx| {
+            tx.retire_paykit_app(app.clone());
+            let mut message =
+                tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                    peer.clone(),
+                    app,
+                    "paykit.delivery_confirmation".into(),
+                    "confirmation".into(),
+                    timestamp(),
+                ))?;
+            message.status = OutboundPrivateMessageStatus::Failed;
+            message.attempt_count = 1;
+            message.last_attempt_at = Some(timestamp());
+            message.last_error = Some("ambiguous publication".into());
+            message.prepared_send = Some(crate::storage::PreparedOutboundPrivateSend {
+                destination_path: "old-slot".into(),
+                ciphertext: vec![1, 2, 3],
+            });
+            tx.save_outbound_private_message(message)?;
+            mark_recovery_required_in_transaction(tx, &peer, timestamp())?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    save_linked_peer_link_state(&storage, peer.clone(), vec![1, 2, 3], timestamp())
+        .await
+        .unwrap();
+    let message =
+        storage
+            .transaction(|tx| {
+                Ok(tx.claim_next_outbound_private_message(
+                    &peer,
+                    timestamp(),
+                    timestamp(),
+                    timestamp(),
+                ))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(message.is_delivery_confirmation());
+    assert_eq!(message.raw_json, "confirmation");
+    assert!(message.prepared_send.is_none());
+}
+
+#[tokio::test]
 async fn test_save_link_handshake_state_marks_peer_linking() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();
@@ -162,8 +301,8 @@ async fn test_save_linked_peer_link_state_requeues_recovery_required_messages() 
         .unwrap();
     assert_eq!(active.raw_json, active_payload);
     assert_eq!(active.status, OutboundPrivateMessageStatus::Pending);
-    assert_eq!(active.attempt_count, 0);
-    assert!(active.last_attempt_at.is_none());
+    assert_eq!(active.attempt_count, 1);
+    assert_eq!(active.last_attempt_at, Some(timestamp()));
     assert!(active.last_error.is_none());
     for app_id in [&retired_app_id, &unregistered_app_id] {
         let message = messages

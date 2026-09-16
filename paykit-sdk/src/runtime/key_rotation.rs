@@ -176,13 +176,15 @@ pub(super) fn rotate_private_state(
         peer.remote_recovery_marker_observed_at = None;
     }
     for message in &mut state.outbound_private_messages {
-        if matches!(
-            message.status,
-            OutboundPrivateMessageStatus::Pending
-                | OutboundPrivateMessageStatus::Sending
-                | OutboundPrivateMessageStatus::Failed
-                | OutboundPrivateMessageStatus::RecoveryRequired
-        ) {
+        if (message.status == OutboundPrivateMessageStatus::Sent && message.is_unconfirmed_event())
+            || matches!(
+                message.status,
+                OutboundPrivateMessageStatus::Pending
+                    | OutboundPrivateMessageStatus::Sending
+                    | OutboundPrivateMessageStatus::Failed
+                    | OutboundPrivateMessageStatus::RecoveryRequired
+            )
+        {
             message.status = OutboundPrivateMessageStatus::RecoveryRequired;
             message.updated_at = now;
             message.last_error = Some(KEY_ROTATION_RECOVERY_REASON.into());
