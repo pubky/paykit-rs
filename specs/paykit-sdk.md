@@ -1087,12 +1087,20 @@ settlement confirmation.
 
 ### Record Payment Proof
 
-1. Load accepted Payment Request.
+1. Load a known Payment Request with a valid prior Acceptance and a lifecycle
+   state that permits a Payment Proof.
 2. Ask `PaymentAdapter` for execution result or caller-supplied proof data.
 3. Validate stateless proof/request correlation through `paykit-lib`.
 4. Persist proof event before sending.
 5. Send Payment Proof.
-6. Update local state to `proof_submitted`.
+6. Derive local state from the retained lifecycle events: preserve `canceled`
+   after Cancellation, retain `active_recurring` for an ongoing Recurring Payment
+   Request, and use `proof_submitted` for a non-canceled one-time request.
+
+A proof after Cancellation may report only an execution the payer durably
+recorded as past its irreversible boundary before observing Cancellation. It
+does not reopen the request or authorize another payment. Apply the
+[Payment Proof validation rules](payment-requests.md#paykitpayment_proof).
 
 The SDK should not mark a payment as settled unless the payment adapter provides
 settlement confirmation.
