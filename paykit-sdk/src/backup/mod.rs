@@ -44,7 +44,7 @@ use validation::*;
 type PeerStorageKey = (PubkyPublicKey, PaykitReceiverPath);
 
 /// Current SDK backup schema version.
-pub const SDK_BACKUP_VERSION: u32 = 2;
+pub const SDK_BACKUP_VERSION: u32 = 1;
 
 /// Versioned SDK-managed backup payload.
 ///

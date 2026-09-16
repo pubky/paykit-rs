@@ -1477,8 +1477,9 @@ old usage and attempts remain on the original Allowance, earlier occurrences and
 other requests remain independent, and manual-only decisions survive. Background
 matching cannot change the persisted choice or provide this user authorization.
 
-SDK backup schema and both platform storage envelopes are version 2. Older
-formats are rejected; no development migration invents missing accounting.
+The unreleased SDK backup schema and both platform storage envelopes remain
+version 1 and may evolve directly during development. Previous development data
+is unsupported; no migration is provided.
 Restore preserves newer destination evidence for the same actual payer identity,
 merges histories conservatively, invalidates prepared handoffs, and blocks new
 admission until complete wallet reconciliation. Receiver Noise key rotation
