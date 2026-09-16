@@ -623,6 +623,44 @@ If an implementation persists Encrypted Link snapshots, it MUST treat the snapsh
 
 Paykit libraries may parse, order, and structurally validate messages, and should expose either raw or canonical payloads from ordered receive APIs. Durable idempotency is the caller's responsibility. Implementations MUST use persisted history to dedupe repeated `event_id`s, reject conflicting reused `event_id`s, and reject later `paykit.payment_request` events that reuse an existing `payment_request_id` with a different `event_id`.
 
+### Delivery Confirmations
+
+After durably storing a recognized, structurally valid Event Message, the
+receiver sends `paykit.delivery_confirmation` over the authenticated Encrypted
+Link to its sender:
+
+```json
+{
+  "version": 1,
+  "kind": "paykit.delivery_confirmation",
+  "app_id": "bitkit",
+  "event_id": "123e4567-e89b-42d3-a456-426614174000",
+  "payload_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
+```
+
+`app_id` identifies the confirming local App. `event_id` references the original
+event, and `payload_hash` is SHA-256 of its exact raw UTF-8 JSON bytes, including
+whitespace. The sender MUST match the authenticated counterparty, Event ID, and
+payload hash before treating an attempted event as confirmed.
+
+The received event, dedupe record, obligation to confirm, and advanced receive
+checkpoint MUST be committed atomically. Duplicates are confirmed again without
+reapplying business effects. A persisted conflicting Event ID can also be
+confirmed: confirmation means durable receipt of those bytes, not acceptance,
+valid business state, payment execution, or settlement. Existing conflict rules
+still apply. Confirmations are not Event Messages and MUST NOT be confirmed.
+
+Until confirmed, the sender retains and retries the original Event ID, App ID,
+and exact payload. After Encrypted Link recovery, unconfirmed events are replayed
+in their original order using the new link, not old prepared ciphertext.
+Latest-State Private Payment Lists do not use this mechanism.
+
+Event history and dedupe records MUST remain durable for as long as replay is
+possible; the SDK retains them without automatic pruning. Restoring an older
+backup or deleting previously confirmed history is not repaired by delivery
+confirmations and requires separate state reconciliation.
+
 ## Open questions
 
 1. Should Payment Proof payloads be opaque JSON objects or method-specific typed payloads?

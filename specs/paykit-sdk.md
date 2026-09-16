@@ -820,6 +820,7 @@ Durable outbound Private Application Message queue:
 - send status
 - attempt count
 - created, updated, attempted, and sent timestamps
+- optional durable receipt confirmation timestamp (`confirmed_at`)
 - last error
 
 The SDK should use one generic outbound Private Application Message record type
@@ -835,7 +836,16 @@ superseded by newer lists: either may have reached the homeserver. Their prepare
 ciphertext must be retried at the queue head until delivery is checkpointed or
 the link is recovered.
 
-Event Message retries must reuse the same Event ID and exact payload.
+Event Message retries must reuse the same Event ID, App ID, and exact payload.
+`Sent` records publication; `confirmed_at` separately records the authenticated
+counterparty's durable receipt. Unconfirmed events become eligible for retry
+after the outbound retry backoff and are requeued in original order
+when the link recovers. Waiting for confirmation does not block newer messages.
+Delivery Confirmations share this queue but are not themselves confirmed or
+periodically replayed after publication; duplicate events queue them again.
+They are identity-owned obligations and remain sendable after the confirming
+App signs out or is removed. Removing an App still requires its published
+unconfirmed events to be resolved first.
 
 Sending through Pubky is not atomic with SDK storage. The SDK first prepares a
 send without mutating live Noise state, then stores the exact ciphertext and
@@ -866,7 +876,8 @@ For each receive cycle:
 4. Persist the received Private Application Message plaintext and parse enough
    to identify version, kind, and source App ID when the payload is valid JSON.
 5. In one transaction, insert raw stream items, update Event Message dedupe
-   records, and then save the advanced link snapshot.
+   records, queue their Delivery Confirmations (or apply received confirmations),
+   and save the advanced link snapshot.
 6. Acknowledge the prepared receive, then repeat until no message is available.
 7. Release the lease.
 

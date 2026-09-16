@@ -140,10 +140,12 @@ where
         let (mut link, mut link_state) = self
             .restore_link_for_outbound_send(&counterparty, &lease, &session_access)
             .await?;
+        // Freeze retry eligibility so each event is attempted at most once per run.
+        let started_at = self.clock.now();
+        let (stale_before, failed_retry_after) = self.outbound_retry_thresholds(started_at)?;
 
         loop {
-            let now = self.clock.now();
-            let (stale_before, failed_retry_after) = self.outbound_retry_thresholds(now)?;
+            let now = self.clock.now().max(started_at);
             let sending = claim_next_outbound_private_message_with_peer_lease(
                 &self.storage,
                 &counterparty,

@@ -534,7 +534,11 @@ async fn test_payment_request_records_surface_recovery_required_outbound_event()
     .unwrap();
     storage
         .transaction(|tx| {
-            let mut outbound = tx.outbound_private_messages(&counterparty)[0].clone();
+            let mut outbound = tx
+                .outbound_private_messages(&counterparty)
+                .into_iter()
+                .find(|message| message.kind == "paykit.payment_request_acceptance")
+                .unwrap();
             outbound.status = OutboundPrivateMessageStatus::RecoveryRequired;
             outbound.updated_at = timestamp() + ChronoDuration::minutes(1);
             outbound.last_error = Some("Encrypted Link recovery is required".into());

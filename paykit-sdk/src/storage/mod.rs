@@ -431,6 +431,10 @@ pub trait StorageTransaction {
     /// state, so its exact stored ciphertext must be retried. Such records are
     /// reclaimed only at the queue head so the identical packet is retried
     /// before later private messages advance the Encrypted Link.
+    /// Published Event Messages without `confirmed_at` retry after
+    /// `failed_retry_after`, without blocking newer data during backoff.
+    /// Delivery Confirmations remain deliverable for inactive or retired apps
+    /// and may pass queued data, but never an outstanding prepared send.
     fn claim_next_outbound_private_message(
         &mut self,
         counterparty: &PubkyPublicKey,
@@ -552,6 +556,11 @@ pub(crate) fn require_paykit_app_capability(
     app_id: &paykit_lib::PaykitAppId,
     kind: paykit_lib::PrivateMessageKind,
 ) -> Result<()> {
+    if kind == paykit_lib::PrivateMessageKind::DeliveryConfirmation {
+        // Durable receipt confirmations are identity-level obligations, even
+        // after their attributing application stops participating.
+        return Ok(());
+    }
     require_paykit_app_active(tx, app_id)?;
     let capabilities =
         tx.paykit_app_capabilities(app_id)
@@ -560,6 +569,7 @@ pub(crate) fn require_paykit_app_capability(
                 source: None,
             })?;
     let (allowed, capability) = match kind {
+        paykit_lib::PrivateMessageKind::DeliveryConfirmation => return Ok(()),
         paykit_lib::PrivateMessageKind::PrivatePaymentList => {
             (capabilities.private_payments, "private_payments")
         }

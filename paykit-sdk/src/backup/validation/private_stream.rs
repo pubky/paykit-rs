@@ -357,6 +357,9 @@ fn validate_valid_private_stream_body(
     kind: PrivateMessageKind,
 ) -> Result<()> {
     match kind {
+        PrivateMessageKind::DeliveryConfirmation => {
+            paykit_lib::parse_delivery_confirmation_json(&record.raw_json)?;
+        }
         PrivateMessageKind::PrivatePaymentList => {
             paykit_lib::parse_private_payment_list_json(&record.raw_json)?;
         }

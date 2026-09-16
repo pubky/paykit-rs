@@ -1,13 +1,196 @@
 use chrono::Utc;
+use paykit_lib::{
+    PaymentAmount, PaymentEndpointIdentifier, PaymentReference, PaymentRequestId,
+    PaymentRequestTerms,
+};
 use paykit_sdk::{
-    LinkedPeerState, PaykitSdkError, PrivatePaymentListReservationUpdate, PubkyPublicKey,
+    InMemoryStorage, LinkedPeerState, PaykitSdk, PaykitSdkConfig, PaykitSdkError,
+    PaymentRequestLifecycleState, PrivatePaymentListReservationUpdate, PubkyPublicKey,
     StorageAdapter,
 };
 use std::time::{Duration, Instant};
 
 use crate::harness::{
     drive_link_to_linked, linked_two_party, private_receiving_detail, two_party, TestUser,
+    TestnetSessionProvider,
 };
+
+#[tokio::test]
+async fn test_published_events_survive_relink_and_lost_confirmations() {
+    let mut pair = linked_two_party().await;
+    let request = pair
+        .alice
+        .sdk
+        .propose_payment_request(
+            pair.bob.public_key.clone(),
+            PaymentRequestTerms {
+                amount: PaymentAmount {
+                    value: "0.001".into(),
+                    asset: "btc".into(),
+                },
+                payment_reference: PaymentReference::new("reliable-delivery").unwrap(),
+                proposal_expires_at: None,
+                recurrence: None,
+                accepted_payment_endpoint_identifiers: vec![PaymentEndpointIdentifier::new(
+                    "btc-lightning-bolt11",
+                )
+                .unwrap()],
+                required_app_id: None,
+                metadata: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let request_id = PaymentRequestId::new(request.payment_request_id).unwrap();
+    pair.alice
+        .sdk
+        .cancel_payment_request(pair.bob.public_key.clone(), &request_id, None)
+        .await
+        .unwrap();
+    let published = pair
+        .alice
+        .sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(published.sent.len(), 2);
+    assert!(pair
+        .bob
+        .sdk
+        .payment_requests_with(&pair.alice.public_key)
+        .await
+        .unwrap()
+        .is_empty());
+    let original = pair
+        .alice
+        .storage
+        .snapshot()
+        .unwrap()
+        .outbound_private_messages;
+
+    for round in 0..2 {
+        // The first recovery discards unread events; the second discards unread confirmations.
+        wait_until_marker_is_newer_than_observer_checkpoint(&pair.bob, &pair.alice.public_key)
+            .await;
+        pair.alice
+            .sdk
+            .publish_encrypted_link_recovery_marker(pair.bob.public_key.clone())
+            .await
+            .unwrap();
+        let observed = pair
+            .bob
+            .sdk
+            .observe_encrypted_link_recovery_marker(pair.alice.public_key.clone())
+            .await
+            .unwrap();
+        assert_eq!(observed.state, LinkedPeerState::RecoveryRequired);
+        pair.alice
+            .sdk
+            .initiate_link_with_peer(pair.bob.public_key.clone())
+            .await
+            .unwrap();
+        pair.bob
+            .sdk
+            .accept_link_with_peer(pair.alice.public_key.clone())
+            .await
+            .unwrap();
+        drive_link_to_linked(&pair.alice, &pair.bob).await;
+
+        let replay = pair
+            .alice
+            .sdk
+            .process_outbound_private_messages(pair.bob.public_key.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            replay.sent, published.sent,
+            "unconfirmed events retain their original order and IDs"
+        );
+        let received = pair
+            .bob
+            .sdk
+            .receive_private_messages(pair.alice.public_key.clone())
+            .await
+            .unwrap();
+        assert_eq!(received.stream_item_ids.len(), 2);
+        assert!(received.event_conflicts.is_empty());
+        let requests = pair
+            .bob
+            .sdk
+            .payment_requests_with(&pair.alice.public_key)
+            .await
+            .unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].state, PaymentRequestLifecycleState::Canceled);
+        assert_eq!(requests[0].last_stream_item_id, Some(1));
+
+        // Restart after intake but before sending confirmations, through the actual state codec.
+        let state = pair.bob.storage.snapshot().unwrap();
+        let bytes = paykit_sdk::storage::encode_storage_state_blob(&state).unwrap();
+        pair.bob.storage = InMemoryStorage::from_state(
+            paykit_sdk::storage::decode_storage_state_blob(&bytes).unwrap(),
+        );
+        pair.bob.sdk = PaykitSdk::new(
+            pair.bob.storage.clone(),
+            TestnetSessionProvider::new(pair.bob.access.clone()),
+            pair.bob.adapter.clone(),
+            PaykitSdkConfig::new(pair.bob.app_id.clone()).unwrap(),
+        );
+        let confirmations = pair
+            .bob
+            .sdk
+            .process_outbound_private_messages(pair.alice.public_key.clone())
+            .await
+            .unwrap();
+        assert_eq!(confirmations.sent.len(), 2);
+        assert!(confirmations.failed.is_empty());
+        if round == 0 {
+            assert!(pair
+                .alice
+                .storage
+                .snapshot()
+                .unwrap()
+                .outbound_private_messages
+                .iter()
+                .all(|event| event.confirmed_at.is_none()));
+        }
+    }
+    pair.alice
+        .sdk
+        .receive_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    let final_state = pair.alice.storage.snapshot().unwrap();
+    assert_eq!(final_state.outbound_private_messages.len(), 2);
+    for (event, original) in final_state.outbound_private_messages.iter().zip(original) {
+        assert!(event.confirmed_at.is_some());
+        assert_eq!(event.outbound_message_id, original.outbound_message_id);
+        assert_eq!(event.app_id, original.app_id);
+        assert_eq!(event.raw_json, original.raw_json);
+    }
+    assert!(pair
+        .alice
+        .sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap()
+        .attempted
+        .is_empty());
+    assert!(pair
+        .bob
+        .sdk
+        .process_outbound_private_messages(pair.alice.public_key.clone())
+        .await
+        .unwrap()
+        .attempted
+        .is_empty());
+    let receiver_state = pair.bob.storage.snapshot().unwrap();
+    assert_eq!(receiver_state.event_dedup_records.len(), 2);
+    assert!(receiver_state
+        .event_dedup_records
+        .values()
+        .all(|event| event.duplicate_stream_item_ids.len() == 1));
+}
 
 #[tokio::test]
 async fn test_recovery_marker_publish_observe_remove_roundtrip() {

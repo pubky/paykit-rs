@@ -235,8 +235,13 @@ Before publication, an outbound private send stores the exact prepared
 ciphertext and advanced Encrypted Link snapshot in one transaction. A retry
 publishes that same ciphertext, including after a crash or an uncertain write,
 before later messages can advance the link. Outbound status is local checkpoint
-state, not counterparty acknowledgement. Non-retryable link-state failures still
-pause the peer for recovery. Superseded reservation cleanup failures are
+state; `confirmed_at` separately records the counterparty's durable receipt of
+an Event Message, not business acceptance or payment execution. The SDK retries
+unconfirmed events with the same Event ID and payload, including after relinking,
+and confirms duplicates without reapplying them. Apps should run both receive
+and outbound processing; sending alone cannot consume confirmations.
+Non-retryable link-state failures still pause the peer for recovery.
+Superseded reservation cleanup failures are
 reported separately and do not block delivery of current outbound messages.
 
 Private Payment List helpers support adapter-reserved receiving details. Apps

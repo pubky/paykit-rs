@@ -28,6 +28,7 @@ async fn test_restore_backup_state_advances_counters() {
             updated_at: timestamp(),
             last_attempt_at: None,
             sent_at: None,
+            confirmed_at: None,
             last_error: None,
             prepared_send: None,
         }],

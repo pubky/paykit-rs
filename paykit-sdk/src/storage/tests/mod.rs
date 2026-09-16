@@ -12,6 +12,7 @@ use crate::{
 };
 
 mod adapter;
+mod event_delivery;
 mod leases;
 mod queue;
 mod records;

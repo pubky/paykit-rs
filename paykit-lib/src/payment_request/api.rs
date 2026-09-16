@@ -43,7 +43,9 @@ fn parse_event(kind: PrivateMessageKind, raw: &str) -> Option<Result<PaymentRequ
         }
         // Non-request kinds are ignored, producing nothing derived from `raw`
         // (decrypted private payload), so there is no error context to leak.
-        PrivateMessageKind::PrivatePaymentList | PrivateMessageKind::ReceiptAccess => None,
+        PrivateMessageKind::PrivatePaymentList
+        | PrivateMessageKind::DeliveryConfirmation
+        | PrivateMessageKind::ReceiptAccess => None,
     }
 }
 
@@ -184,6 +186,7 @@ mod tests {
         let raw = "{\"secret\":\"SENTINEL_DECRYPTED_PLAINTEXT\"}";
         for kind in [
             PrivateMessageKind::PrivatePaymentList,
+            PrivateMessageKind::DeliveryConfirmation,
             PrivateMessageKind::ReceiptAccess,
         ] {
             assert!(

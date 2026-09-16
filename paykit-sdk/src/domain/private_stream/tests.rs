@@ -178,9 +178,262 @@ async fn test_persist_private_stream_batch_stores_messages_and_checkpoint() {
     );
     assert_eq!(snapshot.encrypted_link_states[&counterparty], link_state);
     assert_eq!(snapshot.event_dedup_records.len(), 1);
+    assert_eq!(snapshot.outbound_private_messages.len(), 1);
+    let confirmation = paykit_lib::parse_delivery_confirmation_json(
+        &snapshot.outbound_private_messages[0].raw_json,
+    )
+    .unwrap();
+    assert_eq!(
+        confirmation.event_id().as_str(),
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101"
+    );
+    assert_eq!(
+        confirmation.payload_hash(),
+        payload_hash(&payment_request_raw("invoice-2026-0001"))
+    );
     let peer = snapshot.linked_peers.get(&counterparty).unwrap();
     assert_eq!(peer.last_private_receive_at, Some(timestamp()));
     assert_eq!(peer.last_sync_at, Some(timestamp()));
+}
+
+#[tokio::test]
+async fn test_duplicate_event_requeues_lost_confirmation_without_reapplying() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    let raw = payment_request_raw("invoice-1");
+    persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        vec![private_message(&raw)],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    let first = storage
+        .transaction(|tx| {
+            let mut confirmation = tx.outbound_private_messages(&peer).remove(0);
+            confirmation.attempt_count = 1;
+            confirmation.last_attempt_at = Some(timestamp());
+            let confirmation =
+                crate::domain::outbound_private::mark_outbound_sent(confirmation, timestamp());
+            tx.save_outbound_private_message(confirmation.clone())?;
+            Ok(confirmation)
+        })
+        .await
+        .unwrap();
+    let restarted = InMemoryStorage::from_state(storage.snapshot().unwrap());
+    persist_private_stream_batch(
+        &restarted,
+        peer.clone(),
+        vec![private_message(&raw), private_message(&raw)],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    let state = restarted.snapshot().unwrap();
+    assert_eq!(state.outbound_private_messages.len(), 1);
+    assert_eq!(
+        state.outbound_private_messages[0].outbound_message_id,
+        first.outbound_message_id
+    );
+    assert_eq!(state.outbound_private_messages[0].raw_json, first.raw_json);
+    assert_eq!(
+        state.outbound_private_messages[0].status,
+        crate::OutboundPrivateMessageStatus::Pending
+    );
+    assert_eq!(
+        state
+            .event_dedup_records
+            .values()
+            .next()
+            .unwrap()
+            .duplicate_stream_item_ids,
+        vec![1, 2]
+    );
+    restarted
+        .transaction(|tx| {
+            let requests = payment_request_records_from_transaction(tx, &peer, timestamp())?;
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].last_stream_item_id, Some(0));
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_confirmation_matches_attempted_event_peer_id_and_payload() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    let other_peer = counterparty();
+    let raw = payment_request_raw("invoice-1");
+    let event_id = "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101";
+    let app_id = PaykitAppId::new("bitkit").unwrap();
+    let outbound = storage
+        .transaction(|tx| {
+            tx.insert_outbound_private_message(crate::storage::NewOutboundPrivateMessage::new(
+                peer.clone(),
+                app_id.clone(),
+                "paykit.payment_request".into(),
+                raw.clone(),
+                timestamp(),
+            ))
+        })
+        .await
+        .unwrap();
+    let confirmation_json = |event_id: &str, payload: &str| {
+        paykit_lib::serialize_delivery_confirmation(
+            &paykit_lib::DeliveryConfirmation::new(
+                app_id.clone(),
+                paykit_lib::EventId::new(event_id).unwrap(),
+                payload_hash(payload),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let valid = confirmation_json(event_id, &raw);
+    // A guessed ID cannot confirm work that has never left the queue.
+    persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        vec![private_message(&valid)],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    assert!(storage.snapshot().unwrap().outbound_private_messages[0]
+        .confirmed_at
+        .is_none());
+    storage
+        .transaction(|tx| {
+            let mut attempted = outbound.clone();
+            attempted.status = crate::OutboundPrivateMessageStatus::Failed;
+            attempted.attempt_count = 1;
+            attempted.last_attempt_at = Some(timestamp());
+            attempted.last_error = Some("ambiguous publication".into());
+            attempted.prepared_send = Some(crate::storage::PreparedOutboundPrivateSend {
+                destination_path: "/reserved-slot".into(),
+                ciphertext: vec![1, 2, 3],
+            });
+            tx.save_outbound_private_message(attempted)
+        })
+        .await
+        .unwrap();
+    for (sender, confirmation) in [
+        (other_peer, valid.clone()),
+        (
+            peer.clone(),
+            confirmation_json("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102", &raw),
+        ),
+        (
+            peer.clone(),
+            confirmation_json(event_id, &payment_request_raw("different")),
+        ),
+    ] {
+        persist_private_stream_batch(
+            &storage,
+            sender,
+            vec![private_message(&confirmation)],
+            None,
+            timestamp(),
+        )
+        .await
+        .unwrap();
+        assert!(storage.snapshot().unwrap().outbound_private_messages[0]
+            .confirmed_at
+            .is_none());
+    }
+    persist_private_stream_batch(
+        &storage,
+        peer,
+        vec![private_message(&valid), private_message(&valid)],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    let state = storage.snapshot().unwrap();
+    assert_eq!(
+        state.outbound_private_messages.len(),
+        1,
+        "confirmations do not generate confirmations"
+    );
+    let confirmed = &state.outbound_private_messages[0];
+    assert_eq!(confirmed.confirmed_at, Some(timestamp()));
+    assert!(
+        confirmed.prepared_send.is_some(),
+        "the reserved Noise slot still needs publication"
+    );
+    assert_eq!(
+        confirmed.status,
+        crate::OutboundPrivateMessageStatus::Failed
+    );
+    assert!(state.event_dedup_records.is_empty());
+}
+
+#[tokio::test]
+async fn test_failed_intake_commit_keeps_event_checkpoint_and_confirmation_atomic() {
+    struct RejectCommit(InMemoryStorage);
+    #[async_trait::async_trait]
+    impl StorageAdapter for RejectCommit {
+        async fn transaction_erased<'a>(
+            &self,
+            f: crate::storage::StorageTransactionCallback<'a>,
+        ) -> Result<Box<dyn std::any::Any + Send>> {
+            self.0
+                .transaction_erased(Box::new(move |tx| {
+                    f(tx)?;
+                    Err(PaykitSdkError::Storage {
+                        context: "commit failed".into(),
+                        source: None,
+                    })
+                }))
+                .await
+        }
+    }
+    let storage = RejectCommit(InMemoryStorage::new());
+    let peer = counterparty();
+    let checkpoint = EncryptedLinkStateRecord {
+        counterparty: peer.clone(),
+        link_snapshot: Some(vec![1, 2, 3]),
+        handshake_snapshot: None,
+        handshake_role: None,
+        generation: 1,
+        checkpointed_at: timestamp(),
+    };
+    let message = private_message(&payment_request_raw("invoice-1"));
+    assert!(persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        vec![message.clone()],
+        Some(checkpoint.clone()),
+        timestamp()
+    )
+    .await
+    .is_err());
+    let state = storage.0.snapshot().unwrap();
+    assert!(state.private_stream_items.is_empty());
+    assert!(state.event_dedup_records.is_empty());
+    assert!(state.outbound_private_messages.is_empty());
+    assert!(state.encrypted_link_states.is_empty());
+    persist_private_stream_batch(
+        &storage.0,
+        peer.clone(),
+        vec![message],
+        Some(checkpoint.clone()),
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    let state = storage.0.snapshot().unwrap();
+    assert_eq!(state.private_stream_items.len(), 1);
+    assert_eq!(state.event_dedup_records.len(), 1);
+    assert_eq!(state.outbound_private_messages.len(), 1);
+    assert_eq!(state.encrypted_link_states[&peer], checkpoint);
 }
 
 #[tokio::test]
