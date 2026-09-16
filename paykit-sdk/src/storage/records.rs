@@ -340,8 +340,10 @@ pub struct OutboundPrivateMessageRecord {
     pub updated_at: DateTime<Utc>,
     /// Last send attempt time.
     pub last_attempt_at: Option<DateTime<Utc>>,
-    /// Successful send time.
+    /// First successful publication time, not durable receipt by the peer.
     pub sent_at: Option<DateTime<Utc>>,
+    /// Time the peer confirmed durable receipt of this Event Message.
+    pub confirmed_at: Option<DateTime<Utc>>,
     /// Last send error, when available.
     pub last_error: Option<String>,
     /// Exact staged send, when Noise state advanced before publication finished.
@@ -369,6 +371,7 @@ impl fmt::Debug for OutboundPrivateMessageRecord {
             .field("updated_at", &self.updated_at)
             .field("last_attempt_at", &self.last_attempt_at)
             .field("sent_at", &self.sent_at)
+            .field("confirmed_at", &self.confirmed_at)
             .field("last_error", &last_error)
             .field("prepared_send", &self.prepared_send)
             .finish()
@@ -376,6 +379,27 @@ impl fmt::Debug for OutboundPrivateMessageRecord {
 }
 
 impl OutboundPrivateMessageRecord {
+    pub(crate) fn is_unconfirmed_event(&self) -> bool {
+        self.confirmed_at.is_none()
+            && paykit_lib::PrivateMessageKind::parse(&self.kind).is_some_and(|kind| kind.is_event())
+    }
+
+    pub(crate) fn is_delivery_confirmation(&self) -> bool {
+        self.kind == paykit_lib::PrivateMessageKind::DeliveryConfirmation.as_str()
+    }
+
+    pub(crate) fn is_queued(&self) -> bool {
+        if self.confirmed_at.is_some() && self.prepared_send.is_none() {
+            return false;
+        }
+        matches!(
+            self.status,
+            OutboundPrivateMessageStatus::Pending
+                | OutboundPrivateMessageStatus::Sending
+                | OutboundPrivateMessageStatus::Failed
+        ) || (self.status == OutboundPrivateMessageStatus::Sent && self.is_unconfirmed_event())
+    }
+
     pub(super) fn from_new(outbound_message_id: u64, message: NewOutboundPrivateMessage) -> Self {
         Self {
             outbound_message_id,
@@ -389,6 +413,7 @@ impl OutboundPrivateMessageRecord {
             updated_at: message.created_at,
             last_attempt_at: None,
             sent_at: None,
+            confirmed_at: None,
             last_error: None,
             prepared_send: None,
         }

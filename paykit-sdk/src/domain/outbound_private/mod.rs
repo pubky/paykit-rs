@@ -24,7 +24,7 @@ pub enum OutboundPrivateMessageStatus {
     Pending,
     /// A worker is sending this message.
     Sending,
-    /// Message was sent successfully.
+    /// Message was published successfully, not necessarily durably received.
     Sent,
     /// Last send attempt failed.
     Failed,
@@ -265,7 +265,7 @@ pub(crate) fn mark_outbound_sent(
     now: DateTime<Utc>,
 ) -> OutboundPrivateMessageRecord {
     record.status = OutboundPrivateMessageStatus::Sent;
-    record.sent_at = Some(now);
+    record.sent_at.get_or_insert(now);
     record.updated_at = now;
     record.last_error = None;
     record.prepared_send = None;
@@ -374,6 +374,9 @@ pub(crate) fn validate_outbound_private_message(
 
 fn validate_outbound_private_message_body(kind: PrivateMessageKind, raw_json: &str) -> Result<()> {
     match kind {
+        PrivateMessageKind::DeliveryConfirmation => {
+            paykit_lib::parse_delivery_confirmation_json(raw_json)?;
+        }
         PrivateMessageKind::PrivatePaymentList => {
             paykit_lib::parse_private_payment_list_json(raw_json)?;
         }

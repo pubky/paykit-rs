@@ -316,6 +316,18 @@ where
                 continue;
             }
             if let Some(send_report) = counterparty_report.report {
+                let queued_message_ids = if send_report.failed.is_empty() {
+                    HashSet::new()
+                } else {
+                    queued_outbound_private_messages(
+                        &self.storage,
+                        &counterparty_report.counterparty,
+                    )
+                    .await?
+                    .into_iter()
+                    .map(|message| message.outbound_message_id)
+                    .collect()
+                };
                 let tracked_message_ids =
                     private_list_delivery_message_ids(&report, &counterparty_report.counterparty);
                 report
@@ -324,6 +336,7 @@ where
                         counterparty_report.counterparty.clone(),
                         send_report,
                         &tracked_message_ids,
+                        &queued_message_ids,
                     ));
             }
             if let Some(error) = counterparty_report.error {
@@ -507,6 +520,15 @@ where
                 .await
             {
                 Ok(send_report) => {
+                    let queued_message_ids = if send_report.failed.is_empty() {
+                        HashSet::new()
+                    } else {
+                        queued_outbound_private_messages(&self.storage, &counterparty)
+                            .await?
+                            .into_iter()
+                            .map(|message| message.outbound_message_id)
+                            .collect()
+                    };
                     let tracked_message_ids =
                         private_list_delivery_message_ids(&report, &counterparty);
                     report
@@ -515,6 +537,7 @@ where
                             counterparty,
                             send_report,
                             &tracked_message_ids,
+                            &queued_message_ids,
                         ));
                 }
                 Err(err) => report
@@ -718,28 +741,25 @@ fn delivery_failures_from_send_report(
     counterparty: PubkyPublicKey,
     report: OutboundPrivateSendReport,
     tracked_message_ids: &HashSet<u64>,
+    queued_message_ids: &HashSet<u64>,
 ) -> Vec<PrivatePaymentListDeliveryFailure> {
     let mut failures = Vec::new();
 
     let mut unattempted = tracked_message_ids
-        .iter()
+        .intersection(queued_message_ids)
         .filter(|id| !report.attempted.contains(id) && !report.sent.contains(id))
         .copied()
         .collect::<Vec<_>>();
     unattempted.sort_unstable();
     for message_id in unattempted {
-        if let Some(blocker) = report
-            .failed
-            .iter()
-            .find(|failure| failure.outbound_message_id < message_id)
-        {
+        if let Some(failure) = report.failed.first() {
             failures.push(PrivatePaymentListDeliveryFailure {
                 counterparty: counterparty.clone(),
                 outbound_message_id: Some(message_id),
                 reservation_id: None,
                 error: format!(
-                    "Private Payment List is queued behind failed message {}: {}",
-                    blocker.outbound_message_id, blocker.error,
+                    "Private Payment List remains queued after message {} failed: {}",
+                    failure.outbound_message_id, failure.error,
                 ),
             });
         }
@@ -794,20 +814,35 @@ mod delivery_report_tests {
     #[test]
     fn test_private_list_delivery_reports_blocked_unattempted_list() {
         let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-        let report = OutboundPrivateSendReport {
-            attempted: vec![7],
-            failed: vec![OutboundPrivateSendFailure {
-                outbound_message_id: 7,
-                error: "transport failed".into(),
-            }],
-            ..OutboundPrivateSendReport::default()
-        };
-        let failures =
-            delivery_failures_from_send_report(counterparty, report, &HashSet::from([8]));
+        for (failed_id, tracked_id, queued) in [(7, 8, true), (8, 7, true), (8, 7, false)] {
+            let report = OutboundPrivateSendReport {
+                attempted: vec![failed_id],
+                failed: vec![OutboundPrivateSendFailure {
+                    outbound_message_id: failed_id,
+                    error: "transport failed".into(),
+                }],
+                ..OutboundPrivateSendReport::default()
+            };
+            let queued_message_ids = if queued {
+                HashSet::from([tracked_id])
+            } else {
+                HashSet::new()
+            };
+            let failures = delivery_failures_from_send_report(
+                counterparty.clone(),
+                report,
+                &HashSet::from([tracked_id]),
+                &queued_message_ids,
+            );
 
-        assert_eq!(failures.len(), 1);
-        assert_eq!(failures[0].outbound_message_id, Some(8));
-        assert!(failures[0].error.contains("queued behind failed message 7"));
+            assert_eq!(failures.len(), usize::from(queued));
+            if queued {
+                assert_eq!(failures[0].outbound_message_id, Some(tracked_id));
+                assert!(failures[0]
+                    .error
+                    .contains(&format!("remains queued after message {failed_id} failed")));
+            }
+        }
     }
 
     #[test]
@@ -831,8 +866,12 @@ mod delivery_report_tests {
             ..OutboundPrivateSendReport::default()
         };
 
-        let failures =
-            delivery_failures_from_send_report(counterparty, report, &HashSet::from([7]));
+        let failures = delivery_failures_from_send_report(
+            counterparty,
+            report,
+            &HashSet::from([7]),
+            &HashSet::new(),
+        );
 
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].outbound_message_id, Some(7));

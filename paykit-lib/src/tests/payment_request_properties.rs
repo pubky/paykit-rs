@@ -72,6 +72,7 @@ macro_rules! declare_private_message_kind_routing {
 
 declare_private_message_kind_routing! {
     PrivatePaymentList => false,
+    DeliveryConfirmation => false,
     ReceiptAccess => false,
     PaymentRequest => true,
     PaymentRequestAcceptance => true,

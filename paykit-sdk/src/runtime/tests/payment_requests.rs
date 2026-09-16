@@ -732,7 +732,8 @@ async fn test_accept_payment_request_rejects_expired_proposal_before_enqueue() {
         .snapshot()
         .unwrap()
         .outbound_private_messages
-        .is_empty());
+        .iter()
+        .all(|message| message.is_delivery_confirmation()));
 }
 
 #[tokio::test]
@@ -771,7 +772,8 @@ async fn test_reject_payment_request_allows_expired_proposal_before_readiness_ch
         .snapshot()
         .unwrap()
         .outbound_private_messages
-        .is_empty());
+        .iter()
+        .all(|message| message.is_delivery_confirmation()));
 }
 
 #[tokio::test]
@@ -808,7 +810,8 @@ async fn test_accept_payment_request_does_not_queue_without_private_send_readine
         .snapshot()
         .unwrap()
         .outbound_private_messages
-        .is_empty());
+        .iter()
+        .all(|message| message.is_delivery_confirmation()));
 }
 
 #[tokio::test]
@@ -844,7 +847,8 @@ async fn test_accept_payment_request_rejects_unregistered_origin_app() {
         .snapshot()
         .unwrap()
         .outbound_private_messages
-        .is_empty());
+        .iter()
+        .all(|message| message.is_delivery_confirmation()));
 }
 
 async fn assert_local_response_actionability(
@@ -1094,6 +1098,7 @@ async fn test_acceptance_samples_time_after_transaction_fence() {
     )
     .await
     .unwrap();
+    let queued_before = inner.snapshot().unwrap().outbound_private_messages;
     let (storage, entered) = TransactionGateStorage::new(inner.clone());
     let clock = MutableClock::new(initial);
     let task = tokio::spawn({
@@ -1123,11 +1128,10 @@ async fn test_acceptance_samples_time_after_transaction_fence() {
         task.await.unwrap(),
         Err(PaykitSdkError::Policy { .. })
     ));
-    assert!(inner
-        .snapshot()
-        .unwrap()
-        .outbound_private_messages
-        .is_empty());
+    assert_eq!(
+        inner.snapshot().unwrap().outbound_private_messages,
+        queued_before
+    );
 }
 
 #[tokio::test]

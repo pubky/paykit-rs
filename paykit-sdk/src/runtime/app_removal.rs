@@ -18,7 +18,10 @@ where
                 let blockers = app_removal_blockers_in_transaction(tx, &app_id, now)?;
                 if blockers.is_empty() {
                     for mut message in tx.export_storage_state().outbound_private_messages {
-                        if message.app_id == app_id && message.prepared_send.is_some() {
+                        if message.app_id == app_id
+                            && !message.is_delivery_confirmation()
+                            && message.prepared_send.is_some()
+                        {
                             return Err(PaykitSdkError::Policy {
                                 context: "cannot remove Paykit app with a prepared private send"
                                     .into(),
@@ -57,13 +60,18 @@ pub(super) fn retire_app_outbound_private_messages(
     crate::storage::require_paykit_app_operation_lease(tx, lease)?;
     let app_id = &lease.app_id;
     let snapshot = tx.export_storage_state();
-    if snapshot
-        .outbound_private_messages
-        .iter()
-        .any(|message| message.app_id == *app_id && message.prepared_send.is_some())
-    {
+    if snapshot.outbound_private_messages.iter().any(|message| {
+        message.app_id == *app_id
+            && !message.is_delivery_confirmation()
+            && ((message.is_unconfirmed_event()
+                && message.last_attempt_at.is_some()
+                && (message.status != OutboundPrivateMessageStatus::Invalid
+                    || message.sent_at.is_some()))
+                || message.prepared_send.is_some())
+    }) {
         return Err(PaykitSdkError::Policy {
-            context: "cannot remove Paykit app with a prepared private send".into(),
+            context: "cannot remove Paykit app before published Event Messages are confirmed"
+                .into(),
             source: None,
         });
     }
@@ -72,6 +80,8 @@ pub(super) fn retire_app_outbound_private_messages(
         .iter()
         .filter(|message| {
             message.app_id == *app_id
+                && !message.is_delivery_confirmation()
+                && message.confirmed_at.is_none()
                 && matches!(
                     message.status,
                     OutboundPrivateMessageStatus::Pending
@@ -127,6 +137,8 @@ pub(super) fn retire_app_outbound_private_messages(
         .into_iter()
         .filter(|message| {
             message.app_id == *app_id
+                && !message.is_delivery_confirmation()
+                && message.confirmed_at.is_none()
                 && matches!(
                     message.status,
                     OutboundPrivateMessageStatus::Pending
@@ -211,7 +223,7 @@ where
                 && request_kinds
                     .iter()
                     .any(|kind| message.kind == kind.as_str())
-                && active_status(&message.status)
+                && outbound_event_blocks_app_removal(message)
         });
     if disables_requests && !request_blocked {
         let counterparties = snapshot
@@ -237,23 +249,25 @@ where
         }
     }
 
-    let outbound_statuses = snapshot
+    let outbound_by_id = snapshot
         .outbound_private_messages
         .iter()
-        .map(|message| (message.outbound_message_id, &message.status))
+        .map(|message| (message.outbound_message_id, message))
         .collect::<HashMap<_, _>>();
     let receipt_blocked = disables_receipts
         && (snapshot.outbound_private_messages.iter().any(|message| {
             message.app_id == *app_id
                 && message.kind == PrivateMessageKind::ReceiptAccess.as_str()
-                && active_status(&message.status)
+                && outbound_event_blocks_app_removal(message)
         }) || snapshot.receipt_issuance_records.values().any(|record| {
             record.app_id == *app_id
                 && (record.status != ReceiptIssuanceStatus::AccessQueued
                     || record.outbound_message_id.is_none_or(|message_id| {
-                        outbound_statuses
-                            .get(&message_id)
-                            .is_none_or(|status| **status != OutboundPrivateMessageStatus::Sent)
+                        outbound_by_id.get(&message_id).is_none_or(|message| {
+                            message.prepared_send.is_some()
+                                || (message.status != OutboundPrivateMessageStatus::Sent
+                                    && message.confirmed_at.is_none())
+                        })
                     }))
         }));
 
@@ -464,22 +478,12 @@ fn app_removal_blockers_in_transaction(
     let undelivered_private_events = snapshot
         .outbound_private_messages
         .iter()
-        .filter(|message| {
-            message.app_id == *app_id
-                && message.kind != PrivateMessageKind::PrivatePaymentList.as_str()
-                && matches!(
-                    message.status,
-                    OutboundPrivateMessageStatus::Pending
-                        | OutboundPrivateMessageStatus::Sending
-                        | OutboundPrivateMessageStatus::Failed
-                        | OutboundPrivateMessageStatus::RecoveryRequired
-                )
-        })
+        .filter(|message| message.app_id == *app_id && outbound_event_blocks_app_removal(message))
         .count();
-    let outbound_statuses = snapshot
+    let outbound_by_id = snapshot
         .outbound_private_messages
         .iter()
-        .map(|message| (message.outbound_message_id, &message.status))
+        .map(|message| (message.outbound_message_id, message))
         .collect::<HashMap<_, _>>();
     let incomplete_receipt_issuances = snapshot
         .receipt_issuance_records
@@ -490,9 +494,13 @@ fn app_removal_blockers_in_transaction(
                     || record
                         .outbound_message_id
                         .is_none_or(|outbound_message_id| {
-                            outbound_statuses
+                            outbound_by_id
                                 .get(&outbound_message_id)
-                                .is_none_or(|status| **status != OutboundPrivateMessageStatus::Sent)
+                                .is_none_or(|message| {
+                                    message.prepared_send.is_some()
+                                        || (message.status != OutboundPrivateMessageStatus::Sent
+                                            && message.confirmed_at.is_none())
+                                })
                         }))
         })
         .count();
@@ -509,6 +517,21 @@ fn app_removal_blockers_in_transaction(
         incomplete_receipt_issuances,
         shared_private_payment_lists,
     })
+}
+
+fn outbound_event_blocks_app_removal(message: &OutboundPrivateMessageRecord) -> bool {
+    !message.is_delivery_confirmation()
+        && (message.prepared_send.is_some()
+            || (message.is_unconfirmed_event()
+                && (message.sent_at.is_some()
+                    || matches!(
+                        message.status,
+                        OutboundPrivateMessageStatus::Pending
+                            | OutboundPrivateMessageStatus::Sending
+                            | OutboundPrivateMessageStatus::Failed
+                            | OutboundPrivateMessageStatus::RecoveryRequired
+                            | OutboundPrivateMessageStatus::Sent
+                    ))))
 }
 
 pub(super) fn detach_shared_app_reservations(

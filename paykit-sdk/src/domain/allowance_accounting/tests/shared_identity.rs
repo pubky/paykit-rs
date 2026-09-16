@@ -584,6 +584,14 @@ async fn test_requeue_canceled_request_releases_only_resolved_accounting_claims(
     }
 }
 
+#[tokio::test]
+async fn test_requeue_unconfirmed_cancellation_releases_only_resolved_accounting_claims() {
+    for restored in [false, true] {
+        assert_requeue_canceled_request_claims(crate::OutboundPrivateMessageStatus::Sent, restored)
+            .await;
+    }
+}
+
 async fn assert_requeue_canceled_request_claims(
     delivery: crate::OutboundPrivateMessageStatus,
     restored: bool,
