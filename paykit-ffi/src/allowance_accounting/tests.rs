@@ -287,17 +287,17 @@ fn test_accounting_state_blob_round_trip_and_version_truncation_rejection() {
     };
     let bytes = encode_storage_state(&state).unwrap();
     assert_eq!(decode_storage_state(&bytes).unwrap(), state);
-    assert_eq!(bytes[0], 2);
-    let mut old = bytes.clone();
-    old[0] = 1;
-    assert!(decode_storage_state(&old).is_err());
+    assert_eq!(bytes[0], 1);
+    let mut unsupported = bytes.clone();
+    unsupported[0] = 2;
+    assert!(decode_storage_state(&unsupported).is_err());
     for end in [0, 1, bytes.len() / 2, bytes.len() - 1] {
         assert!(decode_storage_state(&bytes[..end]).is_err());
     }
 }
 
 #[test]
-fn test_accounting_backup_blob_retains_all_history_and_rejects_old_or_truncated() {
+fn test_accounting_backup_blob_round_trip_and_version_truncation_rejection() {
     let backup = sdk::SdkBackupState {
         version: sdk::SDK_BACKUP_VERSION,
         local_receiver_path: sdk::PaykitReceiverPath::new("bitkit/wallet").unwrap(),
@@ -318,12 +318,13 @@ fn test_accounting_backup_blob_retains_all_history_and_rejects_old_or_truncated(
         next_private_stream_item_id: 0,
         allowance_accounting: Some(ledger()),
     };
+    assert_eq!(backup.version, 1);
     let bytes = encode_backup_state(&backup).unwrap();
     assert_eq!(decode_backup_state(&bytes).unwrap(), backup);
-    assert_eq!(bytes[0], 2);
-    let mut old = bytes.clone();
-    old[0] = 1;
-    assert!(decode_backup_state(&old).is_err());
+    assert_eq!(bytes[0], 1);
+    let mut unsupported = bytes.clone();
+    unsupported[0] = 2;
+    assert!(decode_backup_state(&unsupported).is_err());
     for end in [0, 1, bytes.len() / 2, bytes.len() - 1] {
         assert!(decode_backup_state(&bytes[..end]).is_err());
     }
@@ -356,8 +357,8 @@ async fn test_accounting_invalid_loaded_blob_never_runs_transaction_or_writes() 
         ..StorageState::default()
     })
     .unwrap();
-    bytes[0] = 1;
-    for bytes in [bytes, vec![2, 255]] {
+    bytes[0] = 2;
+    for bytes in [bytes, vec![1, 255]] {
         let store = Arc::new(Store {
             bytes,
             writes: AtomicUsize::new(0),

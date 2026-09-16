@@ -243,10 +243,11 @@ and per-Allowance watermarks. Treat every record and value accessed through
 amount object's native default formatting are redacted; platform record fields
 remain explicit data and must not be logged or included in generated descriptions.
 
-State and backup blobs use version 2 for this positional schema. Older development
-blobs are rejected; there is no migration or empty-state fallback after decode
-failure. The platform `saveStateBlobAtomically` callback must durably save the
-whole blob and enforce its expected revision before acknowledging success.
+The unreleased state and backup blob formats remain version 1 and may evolve
+directly during development. Previous development data is unsupported; no migration
+is provided. Decode failure never falls back to empty state. The platform
+`saveStateBlobAtomically` callback must durably save the whole blob and enforce
+its expected revision before acknowledging success.
 Preserve opaque blobs with caller-managed encryption in storage and backups.
 
 After restore or private-state loss, accounting remains blocked until complete
