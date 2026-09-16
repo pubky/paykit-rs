@@ -429,7 +429,12 @@ async fn test_cancellation_delivery_recovery_preserves_prior_payment_evidence() 
         // The payee's cancellation or payer's proof can require delivery recovery.
         storage
             .transaction(|tx| {
-                let mut outbound = tx.outbound_private_messages(&peer).last().unwrap().clone();
+                let mut outbound = tx
+                    .outbound_private_messages(&peer)
+                    .into_iter()
+                    .rev()
+                    .find(|message| !message.is_delivery_confirmation())
+                    .unwrap();
                 outbound.status = OutboundPrivateMessageStatus::RecoveryRequired;
                 outbound.last_error = Some("Encrypted Link recovery is required".into());
                 tx.save_outbound_private_message(outbound)?;

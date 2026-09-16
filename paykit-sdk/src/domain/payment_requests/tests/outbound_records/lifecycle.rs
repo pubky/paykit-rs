@@ -133,7 +133,11 @@ async fn test_payment_request_records_use_outbound_update_time_for_freshness() {
     let updated_at = timestamp() + ChronoDuration::minutes(5);
     storage
         .transaction(|tx| {
-            let mut outbound = tx.outbound_private_messages(&counterparty)[0].clone();
+            let mut outbound = tx
+                .outbound_private_messages(&counterparty)
+                .into_iter()
+                .find(|message| message.kind == "paykit.payment_request_acceptance")
+                .unwrap();
             outbound.status = OutboundPrivateMessageStatus::Sent;
             outbound.updated_at = updated_at;
             outbound.sent_at = Some(updated_at);

@@ -91,7 +91,7 @@ async fn test_payment_request_records_flag_outbound_event_id_conflict() {
     )
     .await
     .unwrap();
-    enqueue_payment_request_rejection(
+    let rejection = enqueue_payment_request_rejection(
         &storage,
         counterparty.clone(),
         &app_id(),
@@ -113,7 +113,10 @@ async fn test_payment_request_records_flag_outbound_event_id_conflict() {
         .invalid_reason
         .as_ref()
         .is_some_and(|reason| reason.contains("Event ID")));
-    assert_eq!(records[0].last_outbound_message_id, Some(1));
+    assert_eq!(
+        records[0].last_outbound_message_id,
+        Some(rejection.outbound_message_id)
+    );
     assert!(records[0].last_stream_item_id.is_none());
 }
 
