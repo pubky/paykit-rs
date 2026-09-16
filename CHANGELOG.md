@@ -42,11 +42,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Changed
 
-- **Breaking (storage):** SDK backup schema and both platform storage envelopes
-  are version 2. Restore retains newer same-payer accounting and requires complete
-  wallet reconciliation; missing history never implies zero usage. Custom storage
-  adapters must persist the new accounting field and transaction methods atomically.
-  Older development formats are rejected without migration.
+- **Storage:** The unreleased SDK backup schema and both platform storage
+  envelopes remain version 1 and may evolve directly during development. Previous
+  development data is unsupported; no migration is provided. Restore retains
+  newer same-payer accounting and requires complete wallet reconciliation; missing
+  history never implies zero usage. Custom storage adapters must persist the new
+  accounting field and transaction methods atomically.
 - **Breaking (Rust API):** `AllowanceAcceptance::new`,
   `AllowanceRejection::new`, `AllowanceEnd::withdrawal`, and
   `AllowanceEnd::accepted` now return `Result` and reject lifecycle messages
