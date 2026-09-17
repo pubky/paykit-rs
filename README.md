@@ -10,7 +10,7 @@
 Paykit helps apps discover where someone can receive a payment through their
 Pubky identity. As a meta payment protocol, it also provides a layer for
 payment-related metadata such as Payment Requests, Payment Proofs, receipts,
-and Receipt Access.
+Receipt Access, and Allowances.
 
 A payee can publish public payment details under their Pubky public key, or
 share a Private Payment List with another person over an Encrypted Link. Paykit
@@ -71,6 +71,12 @@ path domains.
 - **Payment Request**: a private protocol object where a payee asks a payer for
   one-time or recurring payment. Its lifecycle messages use Event Message
   semantics.
+- **Allowance**: shared, scoped permission from an Allower to an Allowee that
+  the Allower's wallet may use to handle qualifying Payment Requests
+  automatically. It is not a balance, payment, or wallet-local setting.
+- **Allower**: the party granting an Allowance and controlling the funds.
+- **Allowee**: the authenticated Payment Request sender whose qualifying
+  requests may use the Allowance.
 - **Payment Amount**: decimal `value` text plus an `asset`, used by Payment
   Requests and optional Receipt details.
 - **Payment Proof**: method-specific evidence for one concrete payment
@@ -155,6 +161,42 @@ that requires the payer to interact before a payment can be executed.
 A Payment Endpoint Payload may also contain a static receiving detail such as an
 on-chain address, reusable offer, bank account detail, payment tag, or similar
 handle.
+
+## Allowances
+
+Allowances add a consent lifecycle to ordinary Payment Requests without adding
+an Allowance-specific request or payment message. Either party may propose
+immutable terms on an exact Encrypted Link, the recipient may accept or reject,
+and a proposal sender may withdraw while either party may end accepted
+authority. The SDK/runtime is responsible for durably deriving these shared
+lifecycle views across restart, backup restore, Event ID replay, and Encrypted
+Link recovery.
+
+A one-time or Recurring Payment Request remains unchanged: it carries no
+Allowance ID and follows the normal acceptance, cancellation, Payment Proof,
+endpoint-resolution, and scheduling rules. At the first automatic-handling
+decision, a wallet may select exactly one matching accepted Allowance using
+local priority or explicit user choice. A payment cannot pool multiple
+Allowances. Without a selection, the ordinary manual path remains available.
+
+Automatic payment remains a wallet decision. The protocol requires a monetary
+ceiling or expiry in every Allowance. Temporary failures may defer handling;
+explicit manual-only decisions remain sticky. Recurring requests retain their
+selected Allowance unless the user authorizes a durable reassociation of future
+unpaid Billing Periods. Existing payment and reservation history survives that
+change, preventing duplicate payment across old and replacement Allowances.
+Payment Proofs may optionally identify the Allowance actually used for an
+execution. This is informational attribution; proofs do not update usage
+accounting. The optional field requires peers that support the coordinated
+pre-release wire extension.
+
+The specification assigns exact matching and limit math to stateless Library
+helpers and durable selection, occurrence exclusion, reservation accounting,
+and recovery to the SDK/runtime. Wallets retain priority rules, consent,
+scheduling, payment-method validation, execution, and outcome reconciliation.
+These are component requirements, not a claim that the protocol-only change
+implements execution support. See [the Allowances specification](specs/allowances.md)
+for the eligibility, durability, and recovery rules.
 
 ## Receipts
 
