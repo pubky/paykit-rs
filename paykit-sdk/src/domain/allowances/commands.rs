@@ -124,8 +124,9 @@ where
     let event_id = EventId::new_v4();
     storage
         .transaction(move |tx| {
-            // End is the fail-safe terminal action: it stays available on
-            // incomplete or invalid history and is blocked only by recovery.
+            // Invalid or unresolved history alone does not prevent End for an
+            // existing record. Proposal references, lifecycle, role, and link
+            // readiness still constrain the action.
             let record = require_actionable_record(
                 tx,
                 &counterparty,

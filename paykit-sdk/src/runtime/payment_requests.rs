@@ -445,6 +445,8 @@ where
     /// Acceptance. In that case, the caller must have durably recorded in its
     /// own wallet state that payment execution passed its irreversible boundary
     /// before observing cancellation. Paykit cannot derive that fact from events.
+    /// This is a caller-enforced precondition; the SDK does not inspect or verify
+    /// the wallet's durable execution evidence.
     /// Queueing the proof does not execute a payment or reopen the request.
     /// Use [`Self::submit_payment_proof_submission`] to report Allowance attribution.
     ///
@@ -483,9 +485,11 @@ where
     ///
     /// A canceled request requires a recorded Acceptance and caller evidence
     /// that execution crossed its irreversible boundary before cancellation was
-    /// observed. Queuing evidence never reopens the request. Session creation,
-    /// capability scope, key rotation, and settlement validation remain caller
-    /// responsibilities. The returned record describes the local outbound queue.
+    /// observed. This is a caller-enforced precondition; the SDK does not inspect
+    /// or verify the wallet's durable execution evidence. Queuing evidence never
+    /// reopens the request. Session creation, capability scope, key rotation, and
+    /// settlement validation remain caller responsibilities. The returned record
+    /// describes the local outbound queue.
     pub async fn submit_payment_proof_submission(
         &self,
         counterparty: PubkyPublicKey,
