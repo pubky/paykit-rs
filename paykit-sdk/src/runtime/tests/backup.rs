@@ -2,6 +2,7 @@ use super::*;
 
 fn empty_backup_state() -> SdkBackupState {
     SdkBackupState {
+        allowance_accounting: None,
         version: crate::SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: None,
@@ -38,6 +39,7 @@ async fn test_restore_backup_state_requires_active_identity() {
         .unwrap();
     let backup_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: crate::SDK_BACKUP_VERSION,
         local_receiver_path: receiver_path(),
         identity_state: Some(IdentityState {

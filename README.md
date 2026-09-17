@@ -190,13 +190,15 @@ execution. This is informational attribution; proofs do not update usage
 accounting. The optional field requires peers that support the coordinated
 pre-release wire extension.
 
-The specification assigns exact matching and limit math to stateless Library
-helpers and durable selection, occurrence exclusion, reservation accounting,
-and recovery to the SDK/runtime. Wallets retain priority rules, consent,
-scheduling, payment-method validation, execution, and outcome reconciliation.
-These are component requirements, not a claim that the protocol-only change
-implements execution support. See [the Allowances specification](specs/allowances.md)
-for the eligibility, durability, and recovery rules.
+The Library provides stateless matching and limit calculations. The SDK/runtime
+uses them for candidate evaluation, persists the wallet's selection, and
+coordinates payment admission, occurrence exclusion, usage reservations,
+outcome accounting, and recovery. Wallets retain priority rules, consent,
+scheduling, payment-method validation, signing, execution, settlement detection,
+and reconciliation against their external execution records. See
+[the SDK integration guide](paykit-sdk/README.md#allowance-integration) for the
+implemented flow and [the Allowances specification](specs/allowances.md) for the
+eligibility, durability, and recovery rules.
 
 ## Receipts
 
@@ -253,9 +255,11 @@ before executing a payment through their existing infrastructure.
 state such as endpoint sync, Encrypted Link snapshots, private stream intake,
 Private Payment Lists, Paykit Profiles, Paykit Blob helpers, read-only Pubky
 app profile/follows helpers, local Contact Records, contact payment resolution,
-Payment Requests, and Allowance lifecycle views. Payment execution, Allowance
-matching and usage, settlement detection, product UI, and platform session
-storage remain with the integrating application and its adapters.
+Payment Requests, Allowance lifecycle views, candidate evaluation, persisted
+selection, payment admission, usage accounting, and recovery. Wallet consent,
+priority rules, scheduling, signing, payment execution, settlement detection,
+external execution reconciliation, product UI, and platform session storage
+remain with the integrating application and its adapters.
 
 Since `0.1.0-rc55`, `PubkySessionBootstrap::republish_identity(public_key)`
 (`republishIdentity(publicKey)` in Swift and Kotlin) can rebroadcast an existing
