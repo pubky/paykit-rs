@@ -1,5 +1,20 @@
 # Releasing paykit-ffi
 
+## Prerequisites
+
+Use Rust 1.91.1 or newer with Cargo and rustup. Building all bindings requires
+macOS with Xcode and its iOS device/simulator SDKs selected for `xcrun` and
+`xcodebuild`, plus the Android SDK (API 34), Android NDK, and JDK 17. Configure
+`ANDROID_HOME`, `ANDROID_NDK_ROOT`, and `JAVA_HOME` for those installations. The
+build scripts install the required Rust targets and binding generators.
+
+Before releasing, check the remote tags and published releases and choose the
+next unused version. Update crate/dependency versions, `Cargo.lock`, the Android
+version, and the `Package.swift` release tag and checksum together for the same
+source revision. Upload the exact XCFramework zip whose checksum was committed;
+a new build requires a matching new artifact and checksum. Do not reuse an
+already published tag or replace its artifacts.
+
 ## 1. Build
 
 From `paykit-ffi/`:
