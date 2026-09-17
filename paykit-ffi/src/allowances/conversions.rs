@@ -297,5 +297,10 @@ fn parse_period_unit(value: &str) -> Result<AllowancePeriodUnit, PaykitFfiError>
 }
 
 pub(super) fn parse_allowance_id(value: String) -> Result<AllowanceId, PaykitFfiError> {
-    AllowanceId::new(value).map_err(|err| validation_error(err.to_string()))
+    let invalid = || validation_error("Allowance ID must be a canonical UUID-v4");
+    let id = AllowanceId::new(&value).map_err(|_| invalid())?;
+    if id.as_str() != value {
+        return Err(invalid());
+    }
+    Ok(id)
 }
