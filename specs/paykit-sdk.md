@@ -253,6 +253,21 @@ The Rust SDK storage model supports records for:
 - receipt records
 - recovery/fail-closed markers
 
+Allowance V1 requires the SDK storage model to retain:
+
+- lifecycle evidence in the private stream, outbound messages, and Event Message
+  dedupe indexes, from which Allowance lifecycle views are derived
+- Payment Request-to-Allowance associations and their selection revision history
+- semantic payment keys shared by manual and automatic execution, manual-only
+  and deferred decisions, usage reservations, and payment outcome history
+- evaluation-time watermarks and accounting recovery/fail-closed state
+
+Admission must check current lifecycle, association revision, occurrence exclusion,
+and capacity, then atomically persist its reservation and watermark. Outcome
+updates must be idempotent. These are SDK/runtime requirements under
+[Allowance V1](allowances.md#component-responsibilities); lifecycle views need not
+be stored separately from their durable evidence.
+
 The SDK should ship an in-memory storage implementation for tests and examples.
 Production apps should provide a durable implementation.
 
@@ -1155,6 +1170,11 @@ Backup should include SDK-managed state:
 - outbound queue
 - recovery markers
 
+For Allowance V1, backups must also retain lifecycle evidence together with
+association/decision history and selection revisions, semantic payment keys,
+usage reservations, outcome history, evaluation-time watermarks, and accounting
+recovery state.
+
 If SDK-managed backup or state blob data is lost, the SDK cannot safely
 reconstruct private runtime state from Pubky homeserver data alone. Public
 Payment Endpoints and Paykit Profiles can be rediscovered, but Encrypted Link
@@ -1163,6 +1183,12 @@ Receipt Access keys, outbound queues, local Contact Records, and local Payment
 Request/Receipt history are local SDK state. Without backup, recovery means
 fresh initialization, republishing public state, relinking peers, and receiving
 fresh private data from counterparties.
+
+Allowance lifecycle and accounting evidence is also private SDK-managed state.
+Relinking or receiving fresh lifecycle messages cannot restore missing selection
+or usage history. Allowance V1 requires wallet reconciliation of successful and
+unresolved payments before admission can resume; missing accounting must not be
+reconstructed as zero usage from lifecycle messages or Payment Proofs.
 
 Before explicit sign-out, an app that wants to restore the same user's private
 Paykit state later must keep a separate SDK backup. Sign-out clears the active
@@ -1191,6 +1217,10 @@ Restore flow:
 6. Do not execute automatic payments until private stream and request state are
    consistent.
 
+For Allowance V1, restored or recovery-incomplete execution state must remain
+ineligible until wallet reconciliation establishes that no later successful or
+unresolved payment is missing.
+
 Backup restore preserves private history and derived records. Valid restored
 Encrypted Link checkpoints are resumed; missing, malformed, mismatched, or
 otherwise unsafe checkpoints pause private automation until relink. Multi-app
@@ -1215,6 +1245,14 @@ and blob helpers, local Contact Records, Pubky profile/follows reads, contact
 payment resolution, linked peer setup, private stream receive, outbound private
 delivery, Private Payment Lists, Payment Requests, Receipts, and SDK
 backup/export/restore.
+
+Allowance V1 requires SDK API families for lifecycle proposal,
+inspection, acceptance, rejection and End; candidate evaluation and persisted
+selection; durable manual/automatic admission and outcome reporting; and
+selection/usage history, backup and reconciliation. The SDK coordinates this
+evidence while the wallet owns consent, candidate priority, local safeguards,
+execution and settlement validation. See
+[component responsibilities](allowances.md#component-responsibilities).
 
 `ReceiptDraftBuilder` is the ergonomic way to create `ReceiptDraft` values for
 SDK calls. It can generate a Receipt ID before `issue_receipt`, or leave it
@@ -1245,6 +1283,11 @@ Platform bindings should expose:
 - Receipt retrieval APIs
 - backup/export/restore APIs
 - structured reports and errors
+
+Allowance V1 also requires binding APIs for lifecycle operations, candidate
+evaluation and selection, durable admission and outcome reporting, history
+inspection, and accounting recovery. These surfaces follow the SDK
+responsibilities above; they do not move payment execution into the bindings.
 
 Bindings should not expose:
 
@@ -1305,12 +1348,15 @@ These are good candidates to move into Paykit SDK:
 - SDK-managed backup records
 - Receipt Access indexing and retrieval helpers
 - Payment Request lifecycle state
+- Allowance lifecycle derivation and durable selection/admission evidence
+- Allowance usage accounting, outcome history, watermarks, and recovery
 
 These should stay outside Paykit SDK:
 
 - payment-provider node/runtime state
 - receiving-detail generation internals
 - payment execution and settlement detection
+- Allowance consent, candidate priority, local safeguards, and payment scheduling
 - balances, fees, quotes, and route policy
 - product profile/contact UI
 - localized copy and navigation
