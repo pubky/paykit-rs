@@ -1,5 +1,6 @@
 #![doc = "UniFFI bindings for Paykit SDK."]
 
+mod allowance_accounting;
 mod allowances;
 mod config;
 mod conversions_common;
@@ -20,6 +21,7 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
+pub use allowance_accounting::*;
 pub use allowances::*;
 pub use config::*;
 pub use errors::PaykitFfiError;
