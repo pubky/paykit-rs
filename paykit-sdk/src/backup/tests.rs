@@ -3,7 +3,9 @@ use chrono::{TimeZone, Utc};
 use super::*;
 use crate::{
     domain::outbound_private::OutboundPrivateMessageStatus,
-    domain::private_stream::PrivateStreamParseStatus, storage::InMemoryStorage,
+    domain::private_stream::PrivateStreamParseStatus,
+    storage::InMemoryStorage,
+    test_utils::{allowance_event_json, ALLOWANCE_EVENT_FIXTURES},
 };
 
 fn timestamp() -> chrono::DateTime<Utc> {
@@ -76,6 +78,13 @@ fn payment_request_json(event_id: &str) -> String {
     format!(
         r#"{{"version":1,"kind":"paykit.payment_request","event_id":"{event_id}","payment_request_id":"550e8400-e29b-41d4-a716-446655440000","request":{{"amount":{{"value":"1","asset":"btc"}},"payment_reference":"invoice-2026-0001","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"metadata":{{}}}}}}"#
     )
+}
+
+fn allowance_event_jsons() -> Vec<(String, String)> {
+    ALLOWANCE_EVENT_FIXTURES
+        .into_iter()
+        .map(|(kind, event_id)| (kind.into(), allowance_event_json(kind, event_id)))
+        .collect()
 }
 
 fn private_payment_list_outbound(

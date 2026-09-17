@@ -37,6 +37,14 @@ pub enum PrivateMessageKind {
     PaymentRequestCancellation,
     /// Payment Proof Event Message (`paykit.payment_proof`).
     PaymentProof,
+    /// Allowance Proposal Event Message (`paykit.allowance_proposal`).
+    AllowanceProposal,
+    /// Allowance Acceptance Event Message (`paykit.allowance_acceptance`).
+    AllowanceAcceptance,
+    /// Allowance Rejection Event Message (`paykit.allowance_rejection`).
+    AllowanceRejection,
+    /// Allowance End Event Message (`paykit.allowance_end`).
+    AllowanceEnd,
 }
 
 impl PrivateMessageKind {
@@ -50,6 +58,10 @@ impl PrivateMessageKind {
             Self::PaymentRequestRejection => "paykit.payment_request_rejection",
             Self::PaymentRequestCancellation => "paykit.payment_request_cancellation",
             Self::PaymentProof => "paykit.payment_proof",
+            Self::AllowanceProposal => "paykit.allowance_proposal",
+            Self::AllowanceAcceptance => "paykit.allowance_acceptance",
+            Self::AllowanceRejection => "paykit.allowance_rejection",
+            Self::AllowanceEnd => "paykit.allowance_end",
         }
     }
 
@@ -63,6 +75,10 @@ impl PrivateMessageKind {
             "paykit.payment_request_rejection" => Some(Self::PaymentRequestRejection),
             "paykit.payment_request_cancellation" => Some(Self::PaymentRequestCancellation),
             "paykit.payment_proof" => Some(Self::PaymentProof),
+            "paykit.allowance_proposal" => Some(Self::AllowanceProposal),
+            "paykit.allowance_acceptance" => Some(Self::AllowanceAcceptance),
+            "paykit.allowance_rejection" => Some(Self::AllowanceRejection),
+            "paykit.allowance_end" => Some(Self::AllowanceEnd),
             _ => None,
         }
     }
@@ -466,6 +482,46 @@ mod tests {
         let payload = vec![b'x'; pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN];
         validate_private_application_message_size(&payload, "Payment Request")
             .expect("payload of exactly PUBKY_NOISE_MSG_LEN bytes should be accepted");
+    }
+
+    #[test]
+    fn test_payment_proof_allowance_id_counts_toward_send_size_limit() {
+        use crate::{
+            serialize_payment_request_event, AllowanceId, EventId, PaymentEndpointIdentifier,
+            PaymentProof, PaymentReference, PaymentRequestEvent, PaymentRequestId,
+        };
+
+        let mut proof = PaymentProof::new(
+            EventId::new_v4(),
+            PaymentRequestId::new_v4(),
+            PaymentReference::new("invoice-2026-0001").unwrap(),
+            None,
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            serde_json::Map::from_iter([("data".into(), serde_json::Value::from(""))]),
+        )
+        .with_allowance_id(AllowanceId::new_v4());
+        let serialize = |proof: &PaymentProof| {
+            serialize_payment_request_event(&PaymentRequestEvent::Proof(proof.clone())).unwrap()
+        };
+        let padding = pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN - serialize(&proof).len();
+        proof
+            .proof
+            .insert("data".into(), "x".repeat(padding).into());
+        let at_limit = serialize(&proof);
+        assert_eq!(
+            at_limit.len(),
+            pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN
+        );
+        validate_private_application_message_size(at_limit.as_bytes(), "Payment Proof").unwrap();
+
+        proof
+            .proof
+            .insert("data".into(), "x".repeat(padding + 1).into());
+        let oversized = serialize(&proof);
+        assert!(matches!(
+            validate_private_application_message_size(oversized.as_bytes(), "Payment Proof"),
+            Err(PaykitError::Validation(_))
+        ));
     }
 
     #[test]
