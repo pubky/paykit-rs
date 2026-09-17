@@ -388,3 +388,13 @@ private Paykit runtime state. Public Paykit data can be rediscovered from Pubky,
 but Encrypted Link snapshots, private stream history, Receipt Access keys,
 outbound queues, local Contact Records, and Payment Request/Allowance/Receipt
 history cannot be safely reconstructed from homeserver data alone.
+
+## Testing
+
+The SDK end-to-end tests start local Pubky testnets. Run Docker so the harness
+can start Postgres, or set `TEST_PUBKY_CONNECTION_STRING` to a compatible test
+Postgres instance before running the suite from the workspace root:
+
+```sh
+cargo test -p paykit-sdk --test testnet_e2e
+```
