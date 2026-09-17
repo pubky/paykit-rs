@@ -85,7 +85,7 @@ fn test_receipt_draft_builder_creates_retry_safe_draft() {
         draft.payment_endpoint_identifier.unwrap().as_str(),
         "btc-lightning-bolt11"
     );
-    assert_eq!(draft.amount.unwrap().asset, "btc");
+    assert_eq!(draft.amount.unwrap().asset(), "btc");
     assert_eq!(draft.metadata["settlement_id"], "abc-123");
 }
 
@@ -93,10 +93,9 @@ fn test_receipt_draft_builder_creates_retry_safe_draft() {
 fn test_receipt_draft_builder_requires_request_id_for_billing_period() {
     let result = ReceiptDraftBuilder::new("invoice-2026-0001")
         .unwrap()
-        .with_billing_period(paykit_lib::BillingPeriod {
-            starts_at: "2026-06-01T00:00:00Z".into(),
-            ends_at: "2026-07-01T00:00:00Z".into(),
-        })
+        .with_billing_period(
+            paykit_lib::BillingPeriod::new("2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z").unwrap(),
+        )
         .build();
 
     assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));

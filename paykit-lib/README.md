@@ -42,6 +42,10 @@ for (identifier, payload) in &payment_list.payment_endpoints {
 
 ## Core Types
 
+Payment Request domain values use validated construction and read-only accessors.
+See the [Rust migration guide](../docs/validated-payment-request-types.md) for
+replacing struct literals and field mutation.
+
 ### `PaymentEndpointIdentifier`
 
 Machine-readable identifier for a Payment Endpoint type (for example `"btc-bitcoin-p2tr"` or `"btc-lightning-bolt11"`).
