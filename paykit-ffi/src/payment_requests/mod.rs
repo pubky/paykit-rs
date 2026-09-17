@@ -1,6 +1,7 @@
 use std::{fmt, sync::Arc};
 
 use paykit_lib::PaymentReference;
+use paykit_sdk::PaymentProofSubmission;
 
 use crate::{
     errors::validation_error, json::FfiPrivateJsonObject,
@@ -12,10 +13,7 @@ mod conversions;
 #[cfg(test)]
 mod tests;
 
-use conversions::{
-    parse_payment_request_id, parse_public_key, payment_request_records_to_ffi,
-    ParsedPaymentProofSubmission,
-};
+use conversions::{parse_payment_request_id, parse_public_key, payment_request_records_to_ffi};
 
 /// Payment Reference text with redacted debug output.
 #[derive(uniffi::Object)]
@@ -175,6 +173,8 @@ pub struct FfiPaymentProofRecord {
     pub billing_period: Option<FfiBillingPeriod>,
     /// Payment Endpoint Identifier used for payment.
     pub payment_endpoint_identifier: String,
+    /// Optional canonical Allowance ID reported for this payment execution.
+    pub allowance_id: Option<String>,
     /// Method-specific proof object encoded as JSON.
     pub proof: Arc<FfiPrivateJsonObject>,
     /// Local record time for this proof as RFC3339 text.
@@ -231,14 +231,34 @@ pub struct FfiPaymentRequestRecord {
 }
 
 /// Method-specific Payment Proof submission data.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(uniffi::Record, Clone, PartialEq, Eq)]
 pub struct FfiPaymentProofSubmission {
     /// Billing Period for recurring Payment Requests.
     pub billing_period: Option<FfiBillingPeriod>,
     /// Payment Endpoint Identifier used for payment.
     pub payment_endpoint_identifier: String,
+    /// Canonical Allowance ID from the wallet's persisted payment association, when used.
+    /// This field reports usage; it does not authorize or account for payment.
+    pub allowance_id: Option<String>,
     /// Method-specific proof object encoded as JSON.
     pub proof: Arc<FfiPrivateJsonObject>,
+}
+
+impl fmt::Debug for FfiPaymentProofSubmission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FfiPaymentProofSubmission")
+            .field("billing_period", &self.billing_period)
+            .field(
+                "payment_endpoint_identifier",
+                &self.payment_endpoint_identifier,
+            )
+            .field(
+                "allowance_id",
+                &self.allowance_id.as_ref().map(|_| "<redacted>"),
+            )
+            .field("proof", &self.proof)
+            .finish()
+    }
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -397,15 +417,13 @@ impl FfiPaykitSdk {
         proof: FfiPaymentProofSubmission,
     ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
         let payment_request_id = parse_payment_request_id(payment_request_id)?;
-        let proof = ParsedPaymentProofSubmission::try_from(proof)?;
+        let proof = PaymentProofSubmission::try_from(proof)?;
         self.runtime
-            .submit_payment_proof(
+            .submit_payment_proof_submission(
                 parse_public_key(counterparty)?,
                 parse_receiver_path(counterparty_receiver_path)?,
                 &payment_request_id,
-                proof.billing_period,
-                proof.payment_endpoint_identifier,
-                proof.proof,
+                proof,
             )
             .await
             .map_err(Into::into)

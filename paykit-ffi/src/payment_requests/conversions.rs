@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use paykit_lib::{
-    BillingPeriod, PaymentAmount, PaymentEndpointIdentifier, PaymentReference, PaymentRequestTerms,
-    Recurrence, RecurrenceUnit,
+    AllowanceId, BillingPeriod, PaymentAmount, PaymentReference, PaymentRequestTerms, Recurrence,
+    RecurrenceUnit,
 };
 use paykit_sdk::{
-    AmountRecord, BillingPeriodRecord, PaymentProofRecord, PaymentRequestFilter,
-    PaymentRequestLifecycleState, PaymentRequestLocalRole, PaymentRequestRecord,
-    PaymentRequestRecurrenceRecord, PaymentRequestTermsRecord, PubkyPublicKey,
+    AmountRecord, BillingPeriodRecord, PaymentProofRecord, PaymentProofSubmission,
+    PaymentRequestFilter, PaymentRequestLifecycleState, PaymentRequestLocalRole,
+    PaymentRequestRecord, PaymentRequestRecurrenceRecord, PaymentRequestTermsRecord,
+    PubkyPublicKey,
 };
 
 use crate::{
@@ -221,6 +222,7 @@ impl TryFrom<PaymentProofRecord> for FfiPaymentProofRecord {
             )),
             billing_period: value.billing_period.map(Into::into),
             payment_endpoint_identifier: value.payment_endpoint_identifier,
+            allowance_id: value.allowance_id,
             proof: FfiPrivateJsonObject::from_json_map("Payment Proof proof", &value.proof)?,
             recorded_at: value.recorded_at.to_rfc3339(),
         })
@@ -262,13 +264,7 @@ impl TryFrom<PaymentRequestRecord> for FfiPaymentRequestRecord {
     }
 }
 
-pub(super) struct ParsedPaymentProofSubmission {
-    pub(super) billing_period: Option<BillingPeriod>,
-    pub(super) payment_endpoint_identifier: PaymentEndpointIdentifier,
-    pub(super) proof: serde_json::Map<String, serde_json::Value>,
-}
-
-impl TryFrom<FfiPaymentProofSubmission> for ParsedPaymentProofSubmission {
+impl TryFrom<FfiPaymentProofSubmission> for PaymentProofSubmission {
     type Error = PaykitFfiError;
 
     fn try_from(value: FfiPaymentProofSubmission) -> Result<Self, Self::Error> {
@@ -277,9 +273,22 @@ impl TryFrom<FfiPaymentProofSubmission> for ParsedPaymentProofSubmission {
             payment_endpoint_identifier: parse_endpoint_identifier(
                 value.payment_endpoint_identifier,
             )?,
+            allowance_id: value
+                .allowance_id
+                .map(parse_proof_allowance_id)
+                .transpose()?,
             proof: value.proof.parse_map("Payment Proof proof")?,
         })
     }
+}
+
+fn parse_proof_allowance_id(value: String) -> Result<AllowanceId, PaykitFfiError> {
+    let invalid = || validation_error("Payment Proof Allowance ID must be a canonical UUID-v4");
+    let id = AllowanceId::new(&value).map_err(|_| invalid())?;
+    if id.as_str() != value {
+        return Err(invalid());
+    }
+    Ok(id)
 }
 
 pub(super) fn payment_request_records_to_ffi(
