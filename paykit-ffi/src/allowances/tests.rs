@@ -306,11 +306,39 @@ fn test_allowance_enum_conversions_preserve_known_values_and_reject_unknown_inpu
 }
 
 #[test]
-fn test_allowance_id_rejects_invalid_platform_input() {
-    assert!(matches!(
-        super::conversions::parse_allowance_id("not-an-allowance-id".into()),
-        Err(PaykitFfiError::Protocol { code, .. }) if code == "validation"
-    ));
+fn test_allowance_id_preserves_canonical_platform_input() {
+    let parsed = super::conversions::parse_allowance_id(ALLOWANCE_ID.into()).unwrap();
+    assert_eq!(parsed.as_str(), ALLOWANCE_ID);
+}
+
+#[test]
+fn test_allowance_id_rejects_noncanonical_platform_input() {
+    for value in [
+        ALLOWANCE_ID.to_uppercase(),
+        ALLOWANCE_ID.replace('-', ""),
+        format!("{{{ALLOWANCE_ID}}}"),
+        format!("urn:uuid:{ALLOWANCE_ID}"),
+    ] {
+        assert_validation_context(
+            super::conversions::parse_allowance_id(value),
+            "Allowance ID must be a canonical UUID-v4",
+        );
+    }
+}
+
+#[test]
+fn test_allowance_id_rejects_invalid_platform_input_without_leaking_input() {
+    for value in [
+        "secret invalid allowance value".to_owned(),
+        ALLOWANCE_ID.replacen("4b0e", "1b0e", 1),
+        ALLOWANCE_ID.replacen("a8d4", "78d4", 1),
+        String::new(),
+    ] {
+        assert_validation_context(
+            super::conversions::parse_allowance_id(value),
+            "Allowance ID must be a canonical UUID-v4",
+        );
+    }
 }
 
 #[test]
