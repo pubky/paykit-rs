@@ -160,6 +160,7 @@ fn receipt_access_raw_with_context(
     (raw_json, location, key)
 }
 
+mod allowances;
 mod basic;
 mod counters;
 mod recovery;

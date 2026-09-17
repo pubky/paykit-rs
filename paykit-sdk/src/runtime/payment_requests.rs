@@ -262,20 +262,7 @@ where
         counterparty: &PubkyPublicKey,
         counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<()> {
-        let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.local_pubky_public_key.is_none() {
-            return Err(PaykitSdkError::Identity {
-                context: "local Pubky identity is not initialized".into(),
-                source: None,
-            });
-        }
-        if session_access.is_none() {
-            return Err(PaykitSdkError::Identity {
-                context: "no Pubky session available".into(),
-                source: None,
-            });
-        }
-
+        self.require_identity_and_session().await?;
         self.ensure_peer_allows_private_automation(counterparty, counterparty_receiver_path)
             .await?;
 
@@ -454,6 +441,15 @@ where
 
     /// Queue a Payment Proof for an accepted Payment Request and return local derived state.
     ///
+    /// A canceled request remains eligible only when its record retains a valid
+    /// Acceptance. In that case, the caller must have durably recorded in its
+    /// own wallet state that payment execution passed its irreversible boundary
+    /// before observing cancellation. Paykit cannot derive that fact from events.
+    /// This is a caller-enforced precondition; the SDK does not inspect or verify
+    /// the wallet's durable execution evidence.
+    /// Queueing the proof does not execute a payment or reopen the request.
+    /// Use [`Self::submit_payment_proof_submission`] to report Allowance attribution.
+    ///
     /// The returned record reflects the local outbound queue, not delivery or
     /// counterparty processing.
     pub async fn submit_payment_proof(
@@ -465,6 +461,42 @@ where
         payment_endpoint_identifier: PaymentEndpointIdentifier,
         proof: JsonMap<String, JsonValue>,
     ) -> Result<PaymentRequestRecord> {
+        self.submit_payment_proof_submission(
+            counterparty,
+            counterparty_receiver_path,
+            payment_request_id,
+            PaymentProofSubmission {
+                billing_period,
+                payment_endpoint_identifier,
+                proof,
+                allowance_id: None,
+            },
+        )
+        .await
+    }
+
+    /// Queue payment evidence with optional informational Allowance attribution.
+    ///
+    /// The caller supplies attribution from its durable payment association.
+    /// An unknown, ended, expired, or replaced Allowance may describe a historical
+    /// payment; the SDK does not infer authority or update usage from this claim.
+    /// Repeated or corrective proofs preserve evidence for the same occurrence
+    /// and do not imply another payment or settlement confirmation.
+    ///
+    /// A canceled request requires a recorded Acceptance and caller evidence
+    /// that execution crossed its irreversible boundary before cancellation was
+    /// observed. This is a caller-enforced precondition; the SDK does not inspect
+    /// or verify the wallet's durable execution evidence. Queuing evidence never
+    /// reopens the request. Session creation, capability scope, key rotation, and
+    /// settlement validation remain caller responsibilities. The returned record
+    /// describes the local outbound queue.
+    pub async fn submit_payment_proof_submission(
+        &self,
+        counterparty: PubkyPublicKey,
+        counterparty_receiver_path: PaykitReceiverPath,
+        payment_request_id: &PaymentRequestId,
+        submission: PaymentProofSubmission,
+    ) -> Result<PaymentRequestRecord> {
         let record = self
             .load_payment_request_record(
                 &counterparty,
@@ -475,24 +507,24 @@ where
         require_payer_role(&record, "submit Payment Proof")?;
         require_state(
             &record,
-            &[
-                PaymentRequestLifecycleState::Accepted,
-                PaymentRequestLifecycleState::ActiveRecurring,
-            ],
+            payment_proof_allowed_states(&record),
             "submit Payment Proof",
         )?;
         let request = request_from_record(&record).ok_or_else(|| PaykitSdkError::Protocol {
             context: "Payment Request terms are unavailable".into(),
             source: None,
         })?;
-        let event = PaymentProof::new(
+        let mut event = PaymentProof::new(
             EventId::new_v4(),
             payment_request_id.clone(),
             request.request.payment_reference.clone(),
-            billing_period,
-            payment_endpoint_identifier,
-            proof,
+            submission.billing_period,
+            submission.payment_endpoint_identifier,
+            submission.proof,
         );
+        if let Some(allowance_id) = submission.allowance_id {
+            event = event.with_allowance_id(allowance_id);
+        }
         event.validate_for_request(&request)?;
         self.enqueue_raw_payment_proof(
             counterparty.clone(),

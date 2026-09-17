@@ -439,7 +439,6 @@ impl SdkBackupState {
             &outbound_private_messages,
         )?;
         let private_stream_items = unique_private_stream_items(self.private_stream_items)?;
-        validate_private_stream_items(&private_stream_items)?;
         let event_dedup_records = keyed_by_tuple(
             self.event_dedup_records,
             |record| {
@@ -451,7 +450,6 @@ impl SdkBackupState {
             },
             "Event dedupe",
         )?;
-        validate_event_dedup_records(&event_dedup_records, &private_stream_items)?;
         let receipt_access_records = keyed_by_tuple(
             self.receipt_access_records,
             |record| {
@@ -463,12 +461,6 @@ impl SdkBackupState {
             },
             "Receipt Access",
         )?;
-        validate_receipt_access_records(&receipt_access_records, &private_stream_items)?;
-        validate_required_private_stream_indexes(
-            &private_stream_items,
-            &event_dedup_records,
-            &receipt_access_records,
-        )?;
         let receipt_records = keyed_by_tuple(
             self.receipt_records,
             |record| {
@@ -479,6 +471,14 @@ impl SdkBackupState {
                 )
             },
             "Receipt",
+        )?;
+        validate_private_stream_items(&private_stream_items)?;
+        validate_event_dedup_records(&event_dedup_records, &private_stream_items)?;
+        validate_receipt_access_records(&receipt_access_records, &private_stream_items)?;
+        validate_required_private_stream_indexes(
+            &private_stream_items,
+            &event_dedup_records,
+            &receipt_access_records,
         )?;
         let expected_receipt_recipient = identity_state
             .as_ref()

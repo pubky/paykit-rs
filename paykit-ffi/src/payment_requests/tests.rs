@@ -123,6 +123,7 @@ fn test_payment_request_record_conversion_redacts_references() {
                 ends_at: "2026-07-01T00:00:00Z".into(),
             }),
             payment_endpoint_identifier: "btc-lightning-bolt11".into(),
+            allowance_id: None,
             proof,
             recorded_at: Utc::now(),
         }],
