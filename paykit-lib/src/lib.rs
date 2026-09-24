@@ -62,7 +62,7 @@ pub use payment_request::{
     send_payment_request_rejection, serialize_payment_request_event, BillingPeriod, PaymentProof,
     PaymentRequest, PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
     PaymentRequestEventMessage, PaymentRequestId, PaymentRequestRejection, PaymentRequestTerms,
-    Recurrence, RecurrenceUnit,
+    PaymentRequestTermsBuilder, Recurrence, RecurrenceConfig, RecurrenceUnit,
 };
 #[doc(inline)]
 pub use private_payment_list::{

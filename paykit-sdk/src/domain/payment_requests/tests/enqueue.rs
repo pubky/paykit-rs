@@ -56,35 +56,3 @@ async fn test_enqueue_payment_request_acceptance_sets_kind() {
 
     assert_eq!(record.kind, "paykit.payment_request_acceptance");
 }
-
-#[tokio::test]
-async fn test_enqueue_payment_request_rejects_invalid_terms() {
-    let storage = InMemoryStorage::new();
-    let counterparty = counterparty();
-    let PaymentRequestEvent::Request(mut event) = parsed_event(request_raw(
-        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
-        "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
-        "invoice-2026-0001",
-        None,
-        None,
-    )) else {
-        panic!("expected request event");
-    };
-    event.request.accepted_payment_endpoint_identifiers.clear();
-
-    let err = enqueue_payment_request(
-        &storage,
-        counterparty.clone(),
-        receiver_path(),
-        &event,
-        timestamp(),
-    )
-    .await
-    .unwrap_err();
-    let queued = queued_outbound_private_messages(&storage, &counterparty, &receiver_path())
-        .await
-        .unwrap();
-
-    assert!(matches!(err, crate::PaykitSdkError::Protocol { .. }));
-    assert!(queued.is_empty());
-}

@@ -43,17 +43,16 @@ async fn accepted_request(
         .propose_payment_request(
             payer.public_key.clone(),
             payer.receiver_path.clone(),
-            PaymentRequestTerms {
-                amount: PaymentAmount::new("0.001", "btc").unwrap(),
-                payment_reference: PaymentReference::new("allowance-proof-invoice").unwrap(),
-                proposal_expires_at: None,
-                recurrence,
-                accepted_payment_endpoint_identifiers: vec![PaymentEndpointIdentifier::new(
-                    "btc-lightning-bolt11",
-                )
-                .unwrap()],
-                metadata: serde_json::Map::new(),
-            },
+            PaymentRequestTerms::builder(
+                PaymentAmount::new("0.001", "btc").unwrap(),
+                PaymentReference::new("allowance-proof-invoice").unwrap(),
+                vec![PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap()],
+            )
+            .proposal_expires_at(None)
+            .recurrence(recurrence)
+            .metadata(serde_json::Map::new())
+            .build()
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -197,24 +196,22 @@ async fn test_allowance_one_time_proof_attribution_survives_end_restore_and_corr
 async fn test_allowance_recurring_proofs_retain_billing_periods_after_restore() {
     let pair = linked_two_party().await;
     let allowance_id = accepted_allowance(&pair.alice, &pair.bob).await;
-    let first_period = BillingPeriod {
-        starts_at: "2026-06-01T00:00:00Z".into(),
-        ends_at: "2026-07-01T00:00:00Z".into(),
-    };
-    let second_period = BillingPeriod {
-        starts_at: first_period.ends_at.clone(),
-        ends_at: "2026-08-01T00:00:00Z".into(),
-    };
+    let first_period = BillingPeriod::new("2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z").unwrap();
+    let second_period =
+        BillingPeriod::new(first_period.ends_at().to_owned(), "2026-08-01T00:00:00Z").unwrap();
     let request_id = accepted_request(
         &pair.alice,
         &pair.bob,
-        Some(Recurrence {
-            every: 1,
-            unit: RecurrenceUnit::Month,
-            starts_at: first_period.starts_at.clone(),
-            anchor: first_period.starts_at.clone(),
-            ends_at: None,
-        }),
+        Some(
+            Recurrence::try_from(paykit_lib::RecurrenceConfig {
+                every: 1,
+                unit: RecurrenceUnit::Month,
+                starts_at: first_period.starts_at().to_owned(),
+                anchor: first_period.starts_at().to_owned(),
+                ends_at: None,
+            })
+            .unwrap(),
+        ),
     )
     .await;
 
@@ -275,7 +272,7 @@ async fn test_allowance_recurring_proofs_retain_billing_periods_after_restore() 
             .as_ref()
             .unwrap()
             .starts_at,
-        second_period.starts_at
+        second_period.starts_at()
     );
     assert_eq!(
         allowance(&restored_bob, &pair.alice, &allowance_id)

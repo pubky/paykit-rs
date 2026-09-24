@@ -40,15 +40,18 @@ fn test_payment_request_terms_parse_protocol_inputs() {
 
     let parsed = PaymentRequestTerms::try_from(terms).unwrap();
 
-    assert_eq!(parsed.amount.value, "25.50");
-    assert_eq!(parsed.payment_reference.as_str(), "invoice-1");
+    assert_eq!(parsed.amount().value(), "25.50");
+    assert_eq!(parsed.payment_reference().as_str(), "invoice-1");
     assert!(matches!(
-        parsed.recurrence.as_ref().map(|recurrence| recurrence.unit),
+        parsed
+            .recurrence()
+            .as_ref()
+            .map(|recurrence| recurrence.unit()),
         Some(RecurrenceUnit::Month)
     ));
     assert_eq!(
         parsed
-            .metadata
+            .metadata()
             .get("order")
             .and_then(serde_json::Value::as_str),
         Some("123")
@@ -231,4 +234,45 @@ fn test_payment_proof_record_preserves_absent_allowance_id() {
         .unwrap()
         .allowance_id
         .is_none());
+}
+
+#[test]
+fn test_billing_period_conversion_rejects_invalid_interval() {
+    for ends_at in ["invalid", "2026-06-01T00:00:00Z", "2026-05-01T00:00:00Z"] {
+        let result = paykit_lib::BillingPeriod::try_from(FfiBillingPeriod {
+            starts_at: "2026-06-01T00:00:00Z".into(),
+            ends_at: ends_at.into(),
+        });
+        assert!(
+            matches!(result, Err(PaykitFfiError::Protocol { code, .. }) if code == "validation")
+        );
+    }
+}
+
+#[test]
+fn test_recurrence_conversion_rejects_zero_interval() {
+    let result = paykit_lib::Recurrence::try_from(FfiPaymentRequestRecurrence {
+        every: 0,
+        unit: "month".into(),
+        starts_at: "2026-06-01T00:00:00Z".into(),
+        anchor: "2026-06-01T00:00:00Z".into(),
+        ends_at: None,
+    });
+    assert!(matches!(result, Err(PaykitFfiError::Protocol { code, .. }) if code == "validation"));
+}
+
+#[test]
+fn test_terms_conversion_rejects_empty_endpoint_list() {
+    let result = PaymentRequestTerms::try_from(FfiPaymentRequestTerms {
+        amount: FfiPaymentRequestAmount {
+            value: "1".into(),
+            asset: "btc".into(),
+        },
+        payment_reference: Arc::new(FfiPaymentReference::new("invoice-1".into()).unwrap()),
+        proposal_expires_at: None,
+        recurrence: None,
+        accepted_payment_endpoint_identifiers: Vec::new(),
+        metadata: Arc::new(FfiPrivateJsonObject::new("{}".into()).unwrap()),
+    });
+    assert!(matches!(result, Err(PaykitFfiError::Protocol { code, .. }) if code == "validation"));
 }

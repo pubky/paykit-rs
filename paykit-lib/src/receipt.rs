@@ -86,7 +86,7 @@ mod tests {
     }
 
     #[test]
-    fn test_encrypt_receipt_rejects_invalid_amount() {
+    fn test_decrypt_receipt_rejects_invalid_amount() {
         let receipt = Receipt {
             receipt_id: ReceiptId::new("450e8400-e29b-41d4-a716-446655440000").unwrap(),
             payment_reference: PaymentReference::new("invoice-2026-0001").unwrap(),
@@ -94,20 +94,23 @@ mod tests {
             billing_period: None,
             recipient_public_key: Keypair::random().public_key(),
             payment_endpoint_identifier: Some(PaymentEndpointIdentifier::new("lightning").unwrap()),
-            amount: Some(PaymentAmount {
-                value: "ten".to_string(),
-                asset: "sats".to_string(),
-            }),
+            amount: Some(PaymentAmount::new("1000", "sats").unwrap()),
             metadata: JsonMap::new(),
         };
 
-        let err = receipt
-            .encrypt(&receiver_path(), &ReceiptDecryptionKey::generate())
-            .unwrap_err();
-        assert!(
-            matches!(err, PaykitError::Validation(ref msg) if msg.contains("decimal string")),
-            "expected Receipt amount validation error, got: {err}"
+        // Invalid wire values must fail before becoming validated domain values.
+        let mut plaintext = serde_json::to_value(ReceiptWire::from(&receipt)).unwrap();
+        plaintext["amount"]["value"] = JsonValue::String("ten".into());
+        let location = ReceiptAccess::location(&receiver_path(), &receipt.receipt_id);
+        let key = ReceiptDecryptionKey::generate();
+        let encrypted = encrypt_receipt_plaintext_for_test_location(
+            &serde_json::to_vec(&plaintext).unwrap(),
+            &key,
+            &location,
         );
+        let err = decrypt_receipt(&encrypted, &key, &location).unwrap_err();
+        assert!(matches!(err, PaykitError::InvalidData { context, .. }
+            if context.contains("invalid Payment Amount")));
     }
 
     #[test]
@@ -166,10 +169,11 @@ mod tests {
         let receipt_id = ReceiptId::new("450e8400-e29b-41d4-a716-446655440000").unwrap();
         let payment_request_id =
             PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap();
-        let billing_period = BillingPeriod {
-            starts_at: "2026-06-01T00:00:00Z".to_string(),
-            ends_at: "2026-07-01T00:00:00Z".to_string(),
-        };
+        let billing_period = BillingPeriod::new(
+            "2026-06-01T00:00:00Z".to_string(),
+            "2026-07-01T00:00:00Z".to_string(),
+        )
+        .unwrap();
         let receipt = Receipt {
             receipt_id: receipt_id.clone(),
             payment_reference: PaymentReference::new("subscription-2026-0001").unwrap(),
