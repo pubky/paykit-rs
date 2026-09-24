@@ -421,6 +421,13 @@ Example Payment Endpoint Payload:
 }
 ```
 
+## Agent Skill
+
+[skills/paykit](skills/paykit/SKILL.md) provides integration guidance for coding
+agents, including SDK and mobile workflows, link recovery, and platform/API
+boundaries. Install that directory in your agent's skills directory and invoke
+`$paykit`. Keep it aligned with the SDK version used by your application.
+
 ## Development
 
 ```sh
