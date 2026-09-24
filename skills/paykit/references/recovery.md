@@ -45,7 +45,15 @@ error handling below at each awaited step; an error is not a reason to execute
 the remaining steps against a stale handle. This is one bounded cycle, not a
 claim that one pass completes communication. For pay-contact UX, prefer
 `prepare_and_resolve_private_contact_payment`, which already advances the link
-and processes available private work before resolving.
+and processes available private work before resolving. It can throw
+`RecoveryRequired` before returning a resolution if the handshake is still
+`Linking`. Check that peer's stored state in `linked_peers`; a pending handshake
+needs a later retry, not a reset or public fallback.
+
+For all-peer background work, use `receive_private_messages_from_linked_peers`
+and `process_pending_private_messages`. Both skip `Linking` peers, so enumerate
+them with `linked_peers` and call `ensure_link_with_peer` on later cycles too.
+Keep the per-peer marker observation above when marker policy is enabled.
 
 The app owns foreground/background scheduling and connectivity retries. Do not
 busy-loop until the peer responds, wait indefinitely inside a UI action, or
@@ -61,7 +69,7 @@ timeouts; a handshake step limit is not a network timeout.
 | Remote Receiver Marker missing | Resolve enrollment/discovery; do not treat a missing advertised key as permission to replace local state |
 | `Linking` with a persisted handshake | Continue SDK advancement on a later cycle; do not generate new keys |
 | Peer-operation lease conflict | Avoid overlapping workers and retry later; do not erase leases or snapshots to force progress |
-| SDK marks a peer `RecoveryRequired` | Use the SDK recovery/ensure flow and inspect marker errors; do not treat it as a transport-only retry |
+| Stored peer state is `RecoveryRequired` | Use the SDK recovery/ensure flow and inspect marker errors; the error variant alone does not distinguish this from a pending handshake |
 | Remote recovery marker observed while locally linked | Let SDK observation update state, then ensure/advance the link; do not keep using an old raw handle |
 | Storage conflict/failure or undecodable state | Do not overwrite with an empty state; retain evidence/state and resolve the storage failure |
 | Invalid event, conflicting Event ID, blocked peer, or policy/validation failure | Surface the failure; do not retry automatically as a new event or silently unblock |
@@ -72,8 +80,9 @@ causes to strings and expose only generic codes such as `receive_failed` or
 `queue_processing_failed`. Those codes do not distinguish transport from
 recovery/policy failures. Inspect persisted peer/queue state and use typed
 per-peer operations when needed; do not assume every batch failure is retryable.
-Recovery-required state can be persisted even if publishing its remote marker fails; inspect and
-retry that publication through SDK APIs rather than assuming the peer was notified.
+Recovery-required state can be persisted even if publishing its remote marker
+fails; inspect and retry that publication through SDK APIs rather than assuming
+the peer was notified.
 More generally, a failed call may already have persisted progress. Inspect the
 current SDK state instead of assuming the operation rolled back completely.
 

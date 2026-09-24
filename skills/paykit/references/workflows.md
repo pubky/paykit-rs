@@ -20,14 +20,16 @@ execution and order authorization, outside SDK calls.
    wallet reserves addresses/invoices. An empty private set clears it. Do not
    enable unlisted-peer cleanup on a partial set of updates.
 4. The payer invokes `prepare_and_resolve_private_contact_payment` and examines
-   `resolution.status`, `resolution.state`, and all preparation reports. No
-   endpoints while linking/recovering is not permission to construct a payment
-   from stale cached data. For a public flow, call `resolve_public_contact_payment`
-   separately under the product's explicit fallback/selection policy.
+   `resolution.status`, `resolution.state`, and preparation reports on success.
+   It can throw `RecoveryRequired` while the stored peer is still `Linking`;
+   preserve that handshake and retry later. Pending/recovering private state is
+   not permission to pay from stale data or silently fall back. For an explicit
+   public flow, call `resolve_public_contact_payment` separately.
 5. The wallet validates and authorizes execution of an adapter-built target.
-   If consuming a whole private list, persist its returned version before
-   submitting payment, scoped to SDK state plus counterparty key/path. Pass that
-   version back on the next resolution; merely displaying a list does not consume it.
+   Using any endpoint consumes the whole Private Payment List. Before submitting
+   payment, persist its returned version, scoped to SDK state plus counterparty
+   key/path. Keep it consumed while execution is pending or uncertain. Pass that
+   version on later resolutions; merely displaying a list does not consume it.
 6. Track actual payment outcome in the wallet. A lost response from the wallet
    payment operation requires wallet-specific reconciliation, not another payment
    because a Paykit message was retried. Continue SDK receive/outbound work and
