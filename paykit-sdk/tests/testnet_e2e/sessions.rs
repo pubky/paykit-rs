@@ -104,6 +104,10 @@ async fn test_pending_grant_auth_survives_secure_state_restore() {
 }
 
 #[tokio::test]
+#[allow(
+    deprecated,
+    reason = "Cookie sessions are fixtures for grant-only rejection checks"
+)]
 async fn test_grant_session_exports_restores_and_rejects_non_grant_session() {
     let testnet = build_testnet().await;
     let pubky = testnet.sdk().expect("testnet Pubky client");
