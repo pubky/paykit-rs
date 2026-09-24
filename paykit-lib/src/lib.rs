@@ -3,6 +3,7 @@
 
 mod app;
 mod app_registry;
+mod delivery_confirmation;
 mod encrypted_link;
 mod encrypted_link_recovery;
 mod error;
@@ -27,6 +28,10 @@ pub use app_registry::{
     PaykitApp, PaykitAppCapabilities, PaykitAppRegistry, INITIAL_PAYKIT_KEY_GENERATION,
     PAYKIT_APP_REGISTRY_MAX_APPS, PAYKIT_APP_REGISTRY_MAX_BYTES,
     PAYKIT_APP_REGISTRY_MAX_ENDPOINT_DEFAULTS,
+};
+#[doc(inline)]
+pub use delivery_confirmation::{
+    parse_delivery_confirmation_json, serialize_delivery_confirmation, DeliveryConfirmation,
 };
 #[doc(inline)]
 pub use encrypted_link::{

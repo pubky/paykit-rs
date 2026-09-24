@@ -91,7 +91,10 @@ async fn test_enqueue_payment_request_response_allows_only_first_app() {
     assert_eq!(
         queued_outbound_private_messages(&storage, &counterparty)
             .await
-            .unwrap(),
+            .unwrap()
+            .into_iter()
+            .filter(|message| !message.is_delivery_confirmation())
+            .collect::<Vec<_>>(),
         vec![first]
     );
 }
@@ -587,7 +590,9 @@ async fn test_enqueue_payment_request_allows_same_app_cancellation_after_accepta
         queued_outbound_private_messages(&storage, &counterparty)
             .await
             .unwrap()
-            .len(),
+            .iter()
+            .filter(|message| !message.is_delivery_confirmation())
+            .count(),
         2
     );
 }
@@ -716,7 +721,8 @@ async fn test_checked_payment_request_action_rejects_newer_inbound_cancellation(
     assert!(queued_outbound_private_messages(&storage, &counterparty)
         .await
         .unwrap()
-        .is_empty());
+        .iter()
+        .all(|message| message.is_delivery_confirmation()));
 }
 
 #[tokio::test]
