@@ -1,0 +1,4 @@
+interface:
+  display_name: "Paykit"
+  short_description: "Integrate Paykit with Rust, Swift, or Kotlin apps"
+  default_prompt: "Use $paykit to integrate Paykit using this app's SDK version and payment workflow."
