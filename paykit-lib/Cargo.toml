@@ -14,8 +14,9 @@ keywords = ["paykit", "payments", "routing", "pubky"]
 categories = ["network-programming", "finance"]
 
 [dependencies]
-anyhow = "1.0.102"
+anyhow = "1.0.103"
 base64 = "0.22"
+blake3 = "1"
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 chrono = { version = "0.4.44", default-features = false, features = ["std"] }
 pubky = "0.12.0"
@@ -33,3 +34,4 @@ proptest = "1"
 pubky-noise = { version = "=0.1.0-rc10", features = ["test-utils"] }
 pubky-testnet = { version = "0.12.0", features = ["docker-postgres"] }
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = "0.3"

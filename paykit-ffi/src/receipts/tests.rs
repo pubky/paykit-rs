@@ -71,7 +71,7 @@ fn test_receipt_draft_rejects_non_object_metadata() {
 fn test_receipt_issuance_view_redacts_reference() {
     let view = ReceiptIssuanceView {
         counterparty: public_key(),
-        counterparty_receiver_path: paykit_sdk::PaykitReceiverPath::new("bitkit/wallet").unwrap(),
+        app_id: paykit_sdk::PaykitAppId::new("bitkit").unwrap(),
         receipt_id: "550e8400-e29b-41d4-a716-446655440000".into(),
         receipt_access_event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
         payment_reference: "invoice secret".into(),
@@ -101,7 +101,7 @@ fn test_receipt_issuance_view_redacts_reference() {
 fn test_receipt_access_view_maps_status_and_period() {
     let view = ReceiptAccessView {
         counterparty: public_key(),
-        counterparty_receiver_path: paykit_sdk::PaykitReceiverPath::new("bitkit/wallet").unwrap(),
+        app_id: paykit_sdk::PaykitAppId::new("bitkit").unwrap(),
         event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
         receipt_id: "550e8400-e29b-41d4-a716-446655440000".into(),
         payment_reference: "invoice secret".into(),
@@ -132,7 +132,7 @@ fn test_receipt_record_serializes_metadata() {
 
     let record = ReceiptRecord {
         issuer: public_key(),
-        issuer_receiver_path: paykit_sdk::PaykitReceiverPath::new("bitkit/wallet").unwrap(),
+        app_id: paykit_sdk::PaykitAppId::new("bitkit").unwrap(),
         receipt_access_event_id: "650e8400-e29b-41d4-a716-446655440000".into(),
         receipt_access_key_hash: "hash".into(),
         receipt_id: "550e8400-e29b-41d4-a716-446655440000".into(),
@@ -146,9 +146,7 @@ fn test_receipt_record_serializes_metadata() {
             asset: "usd".into(),
         }),
         metadata,
-        location:
-            "/pub/paykit/v0/private/bitkit/wallet/receipts/550e8400-e29b-41d4-a716-446655440000"
-                .into(),
+        location: "/pub/paykit/v0/private/receipts/550e8400-e29b-41d4-a716-446655440000".into(),
         retrieved_at: Utc::now(),
     };
 

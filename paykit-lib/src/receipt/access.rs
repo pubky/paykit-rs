@@ -1,9 +1,8 @@
 use tracing::{debug, instrument};
 
 use crate::{
-    error::map_error,
-    pubky_routing::{receipt_path_prefix, PAYKIT_PRIVATE_PATH_PREFIX},
-    EncryptedLink, PaykitError, PaykitReceiverPath, PrivateMessageKind, PublicKey, Result,
+    error::map_error, EncryptedLink, PaykitAppId, PaykitError, PrivateMessageKind, PublicKey,
+    Result, PAYKIT_PRIVATE_PATH_PREFIX,
 };
 
 use super::{
@@ -12,28 +11,13 @@ use super::{
 };
 
 impl ReceiptAccess {
-    /// Return the canonical Receipt Location path for a receiver and Receipt ID.
-    pub fn location(receiver_path: &PaykitReceiverPath, receipt_id: &ReceiptId) -> String {
-        format!("{}/{receipt_id}", receipt_path_prefix(receiver_path))
+    /// Return the canonical Receipt Location path for a Receipt ID.
+    pub fn location_for(receipt_id: &ReceiptId) -> String {
+        format!("{PAYKIT_PRIVATE_PATH_PREFIX}/receipts/{receipt_id}")
     }
 
-    /// Return true when a Receipt Location points at the expected receiver
-    /// folder and Receipt ID.
-    pub fn location_matches_receiver_path(
-        location: &str,
-        receiver_path: &PaykitReceiverPath,
-        receipt_id: &ReceiptId,
-    ) -> bool {
-        location == Self::location(receiver_path, receipt_id)
-    }
-
-    /// Return true when this descriptor points at the expected receiver path.
-    pub fn has_location_for_receiver(&self, receiver_path: &PaykitReceiverPath) -> bool {
-        Self::location_matches_receiver_path(&self.location, receiver_path, &self.receipt_id)
-    }
-
-    /// Validate that this access descriptor points at a canonical
-    /// receiver-scoped location for its Receipt ID.
+    /// Validate that this access descriptor points at the canonical location for
+    /// its Receipt ID.
     ///
     /// This public validator is for caller-supplied values and returns
     /// [`PaykitError::Validation`] on mismatch. Wire parsing maps the same
@@ -75,26 +59,9 @@ impl ReceiptAccess {
     }
 
     fn has_canonical_location(&self) -> bool {
-        Self::location_matches_receipt_id(&self.location, &self.receipt_id)
+        let expected_location = Self::location_for(&self.receipt_id);
+        self.location == expected_location
     }
-
-    pub(crate) fn location_matches_receipt_id(location: &str, receipt_id: &ReceiptId) -> bool {
-        receiver_scoped_location_matches(location, receipt_id)
-    }
-}
-
-fn receiver_scoped_location_matches(location: &str, receipt_id: &ReceiptId) -> bool {
-    let private_prefix = format!("{PAYKIT_PRIVATE_PATH_PREFIX}/");
-    let Some(rest) = location.strip_prefix(&private_prefix) else {
-        return false;
-    };
-    let Some((receiver_path, receipt_segment)) = rest.split_once("/receipts/") else {
-        return false;
-    };
-    if receipt_segment != receipt_id.as_str() {
-        return false;
-    }
-    PaykitReceiverPath::new(receiver_path).is_ok()
 }
 
 /// Prepare a plaintext Receipt, Encrypted Receipt, and Receipt Access
@@ -103,18 +70,8 @@ fn receiver_scoped_location_matches(location: &str, receipt_id: &ReceiptId) -> b
 /// The returned [`PreparedReceipt`] contains the Receipt Decryption Key and
 /// must be handled as sensitive data.
 #[instrument(skip(link, draft))]
-pub fn prepare_receipt(
-    link: &EncryptedLink,
-    receiver_path: &PaykitReceiverPath,
-    draft: ReceiptDraft,
-) -> Result<PreparedReceipt> {
-    if receiver_path != link.local_receiver_path() {
-        return Err(PaykitError::Validation(format!(
-            "Receipt receiver path {receiver_path} does not match Encrypted Link local receiver {}",
-            link.local_receiver_path()
-        )));
-    }
-    prepare_receipt_for_recipient(link.recipient().clone(), receiver_path, draft)
+pub fn prepare_receipt(link: &EncryptedLink, draft: ReceiptDraft) -> Result<PreparedReceipt> {
+    prepare_receipt_for_recipient(link.recipient().clone(), draft)
 }
 
 /// Prepare a plaintext Receipt, Encrypted Receipt, and Receipt Access
@@ -125,18 +82,7 @@ pub fn prepare_receipt(
 #[instrument(skip(recipient_public_key, draft))]
 pub fn prepare_receipt_for_recipient(
     recipient_public_key: PublicKey,
-    receiver_path: &PaykitReceiverPath,
     draft: ReceiptDraft,
-) -> Result<PreparedReceipt> {
-    prepare_receipt_for_recipient_at_location(recipient_public_key, draft, |receipt_id| {
-        ReceiptAccess::location(receiver_path, receipt_id)
-    })
-}
-
-fn prepare_receipt_for_recipient_at_location(
-    recipient_public_key: PublicKey,
-    draft: ReceiptDraft,
-    location_for: impl FnOnce(&ReceiptId) -> String,
 ) -> Result<PreparedReceipt> {
     debug!("preparing encrypted receipt");
     draft.validate_request_context()?;
@@ -147,7 +93,7 @@ fn prepare_receipt_for_recipient_at_location(
     let payment_reference = draft.payment_reference;
     let payment_request_id = draft.payment_request_id;
     let billing_period = draft.billing_period;
-    let location = location_for(&receipt_id);
+    let location = ReceiptAccess::location_for(&receipt_id);
     let key = ReceiptDecryptionKey::generate();
     let receipt = Receipt {
         receipt_id: receipt_id.clone(),
@@ -160,7 +106,7 @@ fn prepare_receipt_for_recipient_at_location(
         metadata: draft.metadata,
     };
     let encrypted_receipt = receipt
-        .encrypt_for_location(&key, &location)
+        .encrypt(&key)
         .map_err(|err| map_error("prepare_receipt", err))?;
     let access = ReceiptAccess {
         version: 1,
@@ -207,11 +153,9 @@ pub async fn store_prepared_receipt(
 
 /// Build the transport error returned when storing a Prepared Receipt fails.
 ///
-/// SECURITY / REDACTION: `location` is the Receipt Location
-/// (`/pub/paykit/v0/private/.../receipts/{id}`), a PRIVATE storage path whose
-/// folder prefix is DH-derived per counterparty. This `context` can be rendered
-/// verbatim into a caller-facing error message (and, once wired, the FFI
-/// Kotlin/Swift exception), so the Receipt Location MUST NOT be embedded in it.
+/// SECURITY / REDACTION: `location` is the identity-wide Receipt Location
+/// (`/pub/paykit/v0/private/receipts/{id}`). It contains a Receipt ID and must
+/// not be embedded in caller-facing error text.
 /// The location is accepted here only to make the redaction explicit and
 /// testable; it is deliberately dropped, leaving a static, non-sensitive label.
 /// The concrete cause stays in `source`, which is not rendered across the FFI.
@@ -266,16 +210,14 @@ pub(super) fn validate_prepared_receipt(prepared: &PreparedReceipt) -> Result<()
 
 /// Send a prepared Receipt Access descriptor over an Encrypted Link.
 #[instrument(skip(link, access))]
-pub async fn send_receipt_access(link: &mut EncryptedLink, access: &ReceiptAccess) -> Result<()> {
+pub async fn send_receipt_access(
+    link: &mut EncryptedLink,
+    app_id: &PaykitAppId,
+    access: &ReceiptAccess,
+) -> Result<()> {
     debug!("sending Receipt Access message");
     access.validate()?;
-    if !access.has_location_for_receiver(link.local_receiver_path()) {
-        return Err(PaykitError::Validation(format!(
-            "Receipt Access location does not match Encrypted Link local receiver {}",
-            link.local_receiver_path()
-        )));
-    }
-    let json = serialize_receipt_access_json(access)
+    let json = serialize_receipt_access_json(app_id, access)
         .map_err(|err| map_error("send_receipt_access", err))?;
     link.send_receipt_access_message(json.as_bytes())
         .await

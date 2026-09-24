@@ -3,4 +3,8 @@ resolver = "2"
 members = ["paykit-lib", "paykit-ffi", "paykit-sdk"]
 
 [patch.crates-io]
+pubky = { git = "https://github.com/pubky/pubky-homeserver.git", rev = "f89c530861786be3ca332339bcd78d0e16b3c408" }
+pubky-common = { git = "https://github.com/pubky/pubky-homeserver.git", rev = "f89c530861786be3ca332339bcd78d0e16b3c408" }
+pubky-homeserver = { git = "https://github.com/pubky/pubky-homeserver.git", rev = "f89c530861786be3ca332339bcd78d0e16b3c408" }
+pubky-testnet = { git = "https://github.com/pubky/pubky-homeserver.git", rev = "f89c530861786be3ca332339bcd78d0e16b3c408" }
 rustls-platform-verifier-android = { path = "vendor/rustls-platform-verifier-android" }

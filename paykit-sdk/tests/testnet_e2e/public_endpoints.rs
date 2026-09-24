@@ -1,4 +1,7 @@
-use paykit_sdk::{load_public_endpoint_records, PaykitSdkError, PublicationStatus};
+use paykit_sdk::{
+    load_public_endpoint_records, PaykitAppId, PaykitSdkError,
+    PublicPaymentEndpointLoadFailureKind, PublicPaymentResolutionStatus, PublicationStatus,
+};
 
 use crate::harness::{build_testnet, public_receiving_detail, TestUser};
 
@@ -38,7 +41,7 @@ async fn test_sync_public_endpoints_publishes_and_removes_managed_endpoints() {
         .public_key
         .to_public_key()
         .expect("public key conversion should succeed");
-    let list = paykit_lib::get_payment_list(&storage, &payee, &user.receiver_path)
+    let list = paykit_lib::get_payment_list(&storage, &payee, &user.app_id)
         .await
         .expect("Payment List fetch should succeed");
     assert_eq!(
@@ -72,7 +75,7 @@ async fn test_sync_public_endpoints_publishes_and_removes_managed_endpoints() {
     assert_eq!(report.removed[0].status, PublicationStatus::Removed);
     assert!(report.failed.is_empty());
 
-    let list = paykit_lib::get_payment_list(&storage, &payee, &user.receiver_path)
+    let list = paykit_lib::get_payment_list(&storage, &payee, &user.app_id)
         .await
         .expect("Payment List fetch should succeed");
     assert_eq!(payload_of(&list, "btc-onchain"), None);
@@ -103,4 +106,126 @@ async fn test_sync_public_endpoints_after_sign_out_fails() {
         matches!(err, PaykitSdkError::Identity { .. }),
         "unexpected error: {err:?}"
     );
+}
+
+#[tokio::test]
+async fn test_public_resolution_isolates_one_app_with_malformed_endpoints() {
+    let testnet = build_testnet().await;
+    let user = TestUser::sign_up(&testnet).await;
+    user.adapter
+        .set_public_details(vec![public_receiving_detail(
+            "btc-lightning-bolt11",
+            "lnbc-test-invoice",
+        )]);
+    user.sdk
+        .sync_public_endpoints()
+        .await
+        .expect("valid endpoint sync should succeed");
+
+    let malformed_app_id = PaykitAppId::new("malformed-app").unwrap();
+    user.additional_app(&testnet, malformed_app_id.clone(), "Malformed App")
+        .await;
+    let invalid_identifier = "a".repeat(65);
+    user.access
+        .session
+        .storage()
+        .put(
+            format!(
+                "{}apps/{malformed_app_id}/endpoints/{invalid_identifier}",
+                paykit_lib::PAYKIT_PATH_PREFIX
+            ),
+            "malformed-list-entry",
+        )
+        .await
+        .expect("malformed endpoint fixture should be stored");
+
+    let resolution = user
+        .sdk
+        .resolve_public_contact_payment(user.public_key.clone(), None)
+        .await
+        .expect("a malformed sibling app must not hide valid endpoints");
+
+    assert_eq!(resolution.status, PublicPaymentResolutionStatus::Payable);
+    assert_eq!(resolution.payable_endpoints.len(), 1);
+    assert_eq!(resolution.failures.len(), 1);
+    assert_eq!(resolution.failures[0].app_id, malformed_app_id);
+    assert_eq!(
+        resolution.failures[0].kind,
+        PublicPaymentEndpointLoadFailureKind::InvalidData
+    );
+}
+
+#[tokio::test]
+async fn test_remove_paykit_app_removes_public_endpoints() {
+    let testnet = build_testnet().await;
+    let user = TestUser::sign_up(&testnet).await;
+    user.adapter
+        .set_public_details(vec![public_receiving_detail(
+            "btc-lightning-bolt11",
+            "lnbc-test-invoice",
+        )]);
+    user.sdk
+        .sync_public_endpoints()
+        .await
+        .expect("public endpoint sync should succeed");
+
+    let registry = user
+        .sdk
+        .remove_paykit_app()
+        .await
+        .expect("Paykit app removal should succeed");
+    assert!(!registry.apps().contains_key(&user.app_id));
+
+    let storage = user.access.outbox_client.public_storage();
+    let owner = user
+        .public_key
+        .to_public_key()
+        .expect("public key conversion should succeed");
+    let list = paykit_lib::get_payment_list(&storage, &owner, &user.app_id)
+        .await
+        .expect("Payment List fetch should succeed");
+    assert!(list.payment_endpoints.is_empty());
+}
+
+#[tokio::test]
+async fn test_remove_paykit_app_resumes_after_registry_entry_is_already_absent() {
+    let testnet = build_testnet().await;
+    let user = TestUser::sign_up(&testnet).await;
+    user.adapter
+        .set_public_details(vec![public_receiving_detail(
+            "btc-lightning-bolt11",
+            "lnbc-test-invoice",
+        )]);
+    user.sdk
+        .sync_public_endpoints()
+        .await
+        .expect("public endpoint sync should succeed");
+
+    let (mut registry, etag) = paykit_lib::get_paykit_app_registry_with_etag(
+        &user.access.outbox_client.public_storage(),
+        user.access.session.info().public_key(),
+    )
+    .await
+    .expect("App Registry fetch should succeed")
+    .expect("App Registry should exist");
+    registry.remove_app(&user.app_id);
+    paykit_lib::update_paykit_app_registry(&user.access.session, &registry, &etag)
+        .await
+        .expect("manual registry removal should succeed");
+
+    let removed = user
+        .sdk
+        .remove_paykit_app()
+        .await
+        .expect("cleanup should resume after registry removal");
+
+    assert!(!removed.apps().contains_key(&user.app_id));
+    let list = paykit_lib::get_payment_list(
+        &user.access.outbox_client.public_storage(),
+        user.access.session.info().public_key(),
+        &user.app_id,
+    )
+    .await
+    .expect("Payment List fetch should succeed");
+    assert!(list.payment_endpoints.is_empty());
 }

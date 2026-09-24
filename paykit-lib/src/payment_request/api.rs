@@ -1,6 +1,6 @@
 use tracing::instrument;
 
-use crate::{error::map_error, EncryptedLink, PrivateApplicationMessage, Result};
+use crate::{error::map_error, EncryptedLink, PaykitAppId, PrivateApplicationMessage, Result};
 
 use super::{
     types::{
@@ -8,7 +8,7 @@ use super::{
         PaymentRequestEvent, PaymentRequestEventMessage, PaymentRequestRejection,
     },
     wire::{
-        parse_acceptance_json, parse_cancellation_json, parse_event_header_ids,
+        parse_acceptance_json, parse_cancellation_json, parse_event_header,
         parse_payment_proof_json, parse_payment_request_json, parse_rejection_json,
         serialize_acceptance_json, serialize_cancellation_json, serialize_payment_proof_json,
         serialize_payment_request_json, serialize_rejection_json,
@@ -57,9 +57,10 @@ pub fn parse_payment_request_event_message(
 ) -> Option<PaymentRequestEventMessage> {
     let kind = message.known_kind()?;
     let event = parse_event(kind, &message.raw_json)?.map_err(|err| err.to_string());
-    let (event_id, payment_request_id) = parse_event_header_ids(&message.raw_json);
+    let (app_id, event_id, payment_request_id) = parse_event_header(&message.raw_json);
     Some(PaymentRequestEventMessage {
         kind,
+        app_id,
         event_id,
         payment_request_id,
         raw_json: message.raw_json.clone(),
@@ -68,13 +69,16 @@ pub fn parse_payment_request_event_message(
 }
 
 /// Serialize a Payment Request protocol Event Message to canonical JSON.
-pub fn serialize_payment_request_event(event: &PaymentRequestEvent) -> Result<String> {
+pub fn serialize_payment_request_event(
+    app_id: &PaykitAppId,
+    event: &PaymentRequestEvent,
+) -> Result<String> {
     match event {
-        PaymentRequestEvent::Request(event) => serialize_payment_request_json(event),
-        PaymentRequestEvent::Acceptance(event) => serialize_acceptance_json(event),
-        PaymentRequestEvent::Rejection(event) => serialize_rejection_json(event),
-        PaymentRequestEvent::Cancellation(event) => serialize_cancellation_json(event),
-        PaymentRequestEvent::Proof(event) => serialize_payment_proof_json(event),
+        PaymentRequestEvent::Request(event) => serialize_payment_request_json(app_id, event),
+        PaymentRequestEvent::Acceptance(event) => serialize_acceptance_json(app_id, event),
+        PaymentRequestEvent::Rejection(event) => serialize_rejection_json(app_id, event),
+        PaymentRequestEvent::Cancellation(event) => serialize_cancellation_json(app_id, event),
+        PaymentRequestEvent::Proof(event) => serialize_payment_proof_json(app_id, event),
     }
 }
 
@@ -83,8 +87,12 @@ pub fn serialize_payment_request_event(event: &PaymentRequestEvent) -> Result<St
 /// Payment Requests are payee-initiated; caller code must enforce the sender
 /// role.
 #[instrument(skip(link, event))]
-pub async fn send_payment_request(link: &mut EncryptedLink, event: &PaymentRequest) -> Result<()> {
-    let json = serialize_payment_request_json(event)
+pub async fn send_payment_request(
+    link: &mut EncryptedLink,
+    app_id: &PaykitAppId,
+    event: &PaymentRequest,
+) -> Result<()> {
+    let json = serialize_payment_request_json(app_id, event)
         .map_err(|err| map_error("send_payment_request", err))?;
     link.send_payment_request_message(json.as_bytes())
         .await
@@ -97,9 +105,10 @@ pub async fn send_payment_request(link: &mut EncryptedLink, event: &PaymentReque
 #[instrument(skip(link, event))]
 pub async fn send_payment_request_acceptance(
     link: &mut EncryptedLink,
+    app_id: &PaykitAppId,
     event: &PaymentRequestAcceptance,
 ) -> Result<()> {
-    let json = serialize_acceptance_json(event)
+    let json = serialize_acceptance_json(app_id, event)
         .map_err(|err| map_error("send_payment_request_acceptance", err))?;
     link.send_payment_request_acceptance_message(json.as_bytes())
         .await
@@ -112,9 +121,10 @@ pub async fn send_payment_request_acceptance(
 #[instrument(skip(link, event))]
 pub async fn send_payment_request_rejection(
     link: &mut EncryptedLink,
+    app_id: &PaykitAppId,
     event: &PaymentRequestRejection,
 ) -> Result<()> {
-    let json = serialize_rejection_json(event)
+    let json = serialize_rejection_json(app_id, event)
         .map_err(|err| map_error("send_payment_request_rejection", err))?;
     link.send_payment_request_rejection_message(json.as_bytes())
         .await
@@ -128,9 +138,10 @@ pub async fn send_payment_request_rejection(
 #[instrument(skip(link, event))]
 pub async fn send_payment_request_cancellation(
     link: &mut EncryptedLink,
+    app_id: &PaykitAppId,
     event: &PaymentRequestCancellation,
 ) -> Result<()> {
-    let json = serialize_cancellation_json(event)
+    let json = serialize_cancellation_json(app_id, event)
         .map_err(|err| map_error("send_payment_request_cancellation", err))?;
     link.send_payment_request_cancellation_message(json.as_bytes())
         .await
@@ -141,9 +152,13 @@ pub async fn send_payment_request_cancellation(
 ///
 /// Payment Proofs are payer-initiated; caller code must enforce the sender role.
 #[instrument(skip(link, event))]
-pub async fn send_payment_proof(link: &mut EncryptedLink, event: &PaymentProof) -> Result<()> {
-    let json =
-        serialize_payment_proof_json(event).map_err(|err| map_error("send_payment_proof", err))?;
+pub async fn send_payment_proof(
+    link: &mut EncryptedLink,
+    app_id: &PaykitAppId,
+    event: &PaymentProof,
+) -> Result<()> {
+    let json = serialize_payment_proof_json(app_id, event)
+        .map_err(|err| map_error("send_payment_proof", err))?;
     link.send_payment_proof_message(json.as_bytes())
         .await
         .map_err(|err| map_error("send_payment_proof", err))
@@ -152,6 +167,10 @@ pub async fn send_payment_proof(link: &mut EncryptedLink, event: &PaymentProof) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn app_id() -> PaykitAppId {
+        PaykitAppId::new("test-app").unwrap()
+    }
 
     // parse_event owns both routing and dispatch: non-request kinds must be
     // ignored (`None`), not parsed and not turned into an error. Returning
@@ -192,6 +211,7 @@ mod tests {
         PrivateApplicationMessage {
             version: Some(1),
             kind: Some(PrivateMessageKind::PaymentRequest.as_str().to_string()),
+            app_id: Some(app_id().as_str().to_string()),
             raw_json: raw_json.to_string(),
         }
     }
@@ -200,11 +220,12 @@ mod tests {
     // and parse it back through the public entry point, asserting structural
     // equality and the parsed header ids.
     fn assert_serialize_round_trip(event: PaymentRequestEvent) {
-        let serialized = serialize_payment_request_event(&event)
+        let serialized = serialize_payment_request_event(&app_id(), &event)
             .expect("construction-valid event must serialize");
         let message = PrivateApplicationMessage {
             version: Some(1),
             kind: Some(event.kind().as_str().to_string()),
+            app_id: Some(app_id().as_str().to_string()),
             raw_json: serialized,
         };
         let parsed = parse_payment_request_event_message(&message)
@@ -223,7 +244,7 @@ mod tests {
         assert_eq!(parsed.parsed_event(), Some(&event));
     }
 
-    // Mirror of `payment_request_event_parser_uses_raw_json_kind` in
+    // Mirror of `payment_request_event_parser_uses_raw_json_headers` in
     // `crate::tests::payment_request`, which pins a stale ReceiptAccess header
     // routing a payment-request raw payload. Here the header claims
     // `paykit.payment_request` while the raw JSON kind is
@@ -280,7 +301,7 @@ mod tests {
             request_id(),
             None,
         ));
-        let serialized = serialize_payment_request_event(&without_reason)
+        let serialized = serialize_payment_request_event(&app_id(), &without_reason)
             .expect("construction-valid event must serialize");
         assert!(
             !serialized.contains("\"reason\""),
@@ -304,7 +325,7 @@ mod tests {
             request_id(),
             None,
         ));
-        let serialized = serialize_payment_request_event(&without_reason)
+        let serialized = serialize_payment_request_event(&app_id(), &without_reason)
             .expect("construction-valid event must serialize");
         assert!(
             !serialized.contains("\"reason\""),

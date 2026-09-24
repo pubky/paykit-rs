@@ -1,4 +1,5 @@
 use super::*;
+use std::error::Error;
 
 #[test]
 fn test_paykit_not_found_maps_to_sdk_not_found() {
@@ -11,14 +12,7 @@ fn test_paykit_not_found_maps_to_sdk_not_found() {
 
 #[test]
 fn test_invalid_data_source_is_not_folded_into_protocol_string() {
-    // Regression guard: `Protocol.context` crosses the FFI boundary verbatim
-    // (generated Kotlin/Swift exception messages), while lib-level
-    // `InvalidData` sources carry raw parse/decode causes that can embed
-    // network data or decrypted plaintext. The conversion must keep only the
-    // curated static context label and drop the cause entirely:
-    // `PaykitSdkError` derives field-wise `Debug`, so a retained `source`
-    // would surface in `format!("{err:?}")` and structured Rust logs even
-    // though the FFI conversion never forwards it.
+    // Lib-level parse causes can embed network data or decrypted plaintext.
     let sentinel = "SENTINEL_RAW_PARSE_CAUSE";
     let err = PaykitSdkError::from(paykit_lib::PaykitError::InvalidData {
         context: "failed to parse receipt plaintext JSON".into(),
@@ -38,11 +32,29 @@ fn test_invalid_data_source_is_not_folded_into_protocol_string() {
     );
     assert!(
         source.is_none(),
-        "InvalidData source must be dropped; derived Debug would render it"
+        "InvalidData source must be dropped before it reaches SDK callers"
     );
     let rendered = format!("{err} / {err:?}");
     assert!(
         !rendered.contains(sentinel),
         "InvalidData source leaked into Display/Debug: {rendered}"
     );
+}
+
+#[test]
+fn test_debug_redacts_source_without_removing_error_chain() {
+    let sentinel = "SENTINEL_PRIVATE_SOURCE";
+    let err = PaykitSdkError::Storage {
+        context: "failed to commit SDK state".into(),
+        source: Some(anyhow::anyhow!(sentinel)),
+    };
+
+    assert_eq!(err.to_string(), "storage error: failed to commit SDK state");
+    assert_eq!(err.source().unwrap().to_string(), sentinel);
+
+    let debug = format!("{err:?}");
+    assert!(debug.contains("Storage"));
+    assert!(debug.contains("failed to commit SDK state"));
+    assert!(debug.contains("<redacted>"));
+    assert!(!debug.contains(sentinel));
 }
