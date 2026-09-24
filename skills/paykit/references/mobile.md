@@ -15,7 +15,7 @@ For custom chat bindings or an apparent gap in platform support, first read
 
 ```text
 config = defaultConfig("example-wallet/wallet")
-capabilities = requiredSessionCapabilities(config)
+sessionCapabilities = requiredSessionCapabilities(config)
 sdk = PaykitSdk.withPaymentAdapter(stateStore, sessionProvider, paymentAdapter, config)
 await sdk.initialize()
 status = await sdk.identityStatus() // optional until identity state exists
@@ -48,9 +48,12 @@ status = await sdk.identityStatus() // optional until identity state exists
 ## Publish Private Reservations
 
 On private-payment enrollment, explicitly call
-`publishPaykitReceiverMarker(capabilities)` to advertise this receiver's Noise
-public key. The remote receiver must publish its marker too. Before the first
-list sync, call `ensureLinkWithPeer(counterparty, counterpartyReceiverPath,
+`publishPaykitReceiverMarker(receiverCapabilities)` to advertise this receiver's
+Noise public key. `receiverCapabilities` is a `PaykitReceiverCapabilities` record,
+not the auth `sessionCapabilities` string. Set `privatePayments`,
+`paymentRequests`, `receipts`, and `outgoingPayments` true only for features the
+app actually supports. The remote receiver must publish its marker too. Before
+the first list sync, call `ensureLinkWithPeer(counterparty, counterpartyReceiverPath,
 maxAdvanceSteps)` and inspect the report. List sync requires a linked peer or a
 persisted, resumable handshake; it does not start the handshake itself.
 
@@ -76,10 +79,14 @@ receivers being retained; do not enable cleanup for a partial update. For
 `syncContactPrivatePaymentLists`, the keep set comes from saved contacts and
 their receiver paths. Removing a private list is not disconnecting its Noise link.
 
-`failedToQueue` means there is no queued update for that target. `failedToDeliver`
-reports send or cleanup failure after queueing; inspect its nested error and
+`failedToQueue` reports an error during queueing or clearing, not a rollback.
+An earlier list may remain pending, and the current update may already be saved
+before lease cleanup fails. Check persisted queue/reservation state before
+releasing or recreating reservations. `failedToDeliver` reports send or cleanup
+failure after queueing; inspect its nested error and
 continue durable work with `processPendingPrivateMessages` when appropriate.
-Queueing during a handshake does not guarantee immediate delivery.
+That worker skips `Linking` peers; advance their handshakes with
+`ensureLinkWithPeer` on later cycles before expecting delivery.
 
 ## Resolve a Payment
 
@@ -94,8 +101,15 @@ prepared = await sdk.prepareAndResolvePrivateContactPayment(
 resolution = prepared.resolution
 ```
 
-Use `resolution.status`, `resolution.state`, and `resolution.payableEndpoints`.
-Keep `resolution.privatePaymentListVersion` as the freshness token if consumed.
+This call can throw `RecoveryRequired` while the stored peer is still `Linking`.
+Check `linkedPeers()` for the exact counterparty/path; preserve a pending
+handshake and retry later, without resetting state or silently using public
+endpoints. See [Link Recovery](recovery.md) for other failures.
+
+On success, use `resolution.status`, `resolution.state`, and
+`resolution.payableEndpoints`. Using any endpoint consumes the entire list:
+persist `resolution.privatePaymentListVersion` before submitting payment and
+retain it while the payment is pending or uncertain.
 Retain the link/receive/outbound reports for diagnosing partial progress. This
 call never resolves public endpoints; a public flow uses
 `resolvePublicContactPayment(counterparty, counterpartyReceiverPath, amount)`.
@@ -107,9 +121,12 @@ payability and execution remain the payment adapter/application's responsibility
 ## Backups and Errors
 
 `SdkStateBlob` is live local persistence; `exportBackupString()` is a separate
-SDK backup. Preserve session/key material separately in secure storage. Restore
-SDK backups with `restoreBackupString` after restoring appropriate session access.
-Neither exporting a backup nor retaining the seed replaces live atomic storage.
+SDK backup containing secret-bearing snapshots, private messages, and Receipt
+Decryption Keys. The exported string is not encrypted; the app must encrypt it
+before storage or upload and never log it. Preserve session credentials and the
+receiver Noise secret separately in secure storage too. Restore SDK backups
+with `restoreBackupString` after restoring appropriate session access. Neither
+exporting a backup nor retaining the seed replaces live atomic storage.
 
 Compare `backupStateRevision()` before and after mutating workflows to schedule
 the app's backup, including when an operation throws after persisting progress.

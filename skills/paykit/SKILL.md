@@ -105,13 +105,19 @@ also makes a receiver with no public endpoints discoverable.
 - Persist SDK state atomically. Received messages, derived indexes, and the
   advanced Noise checkpoint must commit together. A seed or Pubky account alone
   cannot reconstruct private runtime state; implement SDK backup/export too.
-- Schedule `receive_private_messages` and `process_pending_private_messages`
-  according to app lifecycle and connectivity. A queued or locally `Sent`
-  message is not proof the peer received it. Retain durable work on errors;
-  do not recreate requests, reservations, or link secrets on each retry.
+  Backups contain private messages and recovery keys; encrypt them before
+  storage or upload and never log them.
+- For background work, use `receive_private_messages_from_linked_peers` and
+  `process_pending_private_messages`. Neither advances `Linking` peers; call
+  `ensure_link_with_peer` for those peers on later cycles. For one peer, pair
+  `receive_private_messages` with `process_outbound_private_messages`.
+  A queued or locally `Sent` message is not proof the peer received it. Retain
+  durable work and IDs on errors rather than recreating requests or link secrets.
 - Inspect workflow reports as well as thrown errors. Private resolution has
-  separate `status` and `state` fields; `RecoveryPending` is a link state, not
-  an instruction to erase local data or silently switch to public payment.
+  separate `status` and `state` fields. Preparation can throw `RecoveryRequired`
+  while the stored peer is still `Linking`; retry the pending handshake later.
+  Neither that error nor `RecoveryPending` means erase data or silently switch
+  to public payment. See [Link Recovery](references/recovery.md).
 - Keep protocol recovery separate from application history and payment execution.
   Read [Link Recovery](references/recovery.md) before adding reset or retry logic;
   a catch-all that deletes snapshots, queues, or history is not a recovery policy.
