@@ -1,5 +1,7 @@
 use std::{collections::HashSet, fmt, hash::Hash};
 
+use super::amounts::compare_decimals;
+
 use crate::{
     validation::{
         parse_utc_timestamp, validate_asset_text, validate_decimal_text, validate_uuid_v4,
@@ -894,31 +896,6 @@ fn validate_common_correlation(
         ));
     }
     Ok(())
-}
-
-fn compare_decimals(left: &str, right: &str) -> std::cmp::Ordering {
-    let (left_integer, left_fraction) = decimal_parts(left);
-    let (right_integer, right_fraction) = decimal_parts(right);
-    left_integer
-        .len()
-        .cmp(&right_integer.len())
-        .then_with(|| left_integer.cmp(right_integer))
-        .then_with(|| compare_fraction(left_fraction, right_fraction))
-}
-
-fn decimal_parts(value: &str) -> (&str, &str) {
-    let (integer, fraction) = value.split_once('.').unwrap_or((value, ""));
-    let integer = integer.trim_start_matches('0');
-    let integer = if integer.is_empty() { "0" } else { integer };
-    (integer, fraction.trim_end_matches('0'))
-}
-
-fn compare_fraction(left: &str, right: &str) -> std::cmp::Ordering {
-    let width = left.len().max(right.len());
-    left.bytes()
-        .chain(std::iter::repeat(b'0'))
-        .take(width)
-        .cmp(right.bytes().chain(std::iter::repeat(b'0')).take(width))
 }
 
 fn validate_time_window(active_from: Option<&str>, expires_at: Option<&str>) -> Result<()> {
