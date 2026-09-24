@@ -350,6 +350,8 @@ Sensitive fields include:
 - Payment Targets
 - Payment Endpoint Reservation IDs and attribution
 - payable endpoint ordering or provider metadata
+- Allowance Terms, including limits, time bounds, assets, and endpoint
+  allowlists
 
 If a platform wrapper must expose sensitive data for backup/export or storage
 callbacks, that type should be documented as sensitive and must redact default

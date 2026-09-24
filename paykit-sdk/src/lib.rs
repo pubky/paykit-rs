@@ -11,6 +11,8 @@ mod pubky_session;
 mod runtime;
 /// Durable storage traits and in-memory test storage.
 pub mod storage;
+#[cfg(test)]
+mod test_utils;
 
 #[doc(inline)]
 pub use backup::{export_backup_state, RestoreReport, SdkBackupState, SDK_BACKUP_VERSION};
@@ -25,6 +27,12 @@ pub use domain::adapters::{
     PrivatePaymentEndpointReservation, PrivatePaymentEndpointReservationCancellation,
     PrivatePaymentEndpointSelectionRequest, PrivateReceivingDetail, PubkySessionProvider,
     PublicPaymentEndpointCandidate, PublicPaymentEndpointSelectionRequest, PublicReceivingDetail,
+};
+#[doc(inline)]
+pub use domain::allowances::{
+    AllowanceAmountRangeRecord, AllowanceFilter, AllowanceHistoryStatus, AllowanceLifecycleState,
+    AllowanceLocalRole, AllowancePeriodLimitRecord, AllowancePeriodRecord, AllowanceRecord,
+    AllowanceTermsRecord,
 };
 #[doc(inline)]
 pub use domain::contacts::{
@@ -47,7 +55,7 @@ pub use domain::outbound_private::{
 };
 #[doc(inline)]
 pub use domain::payment_requests::{
-    PaymentProofRecord, PaymentRequestFilter, PaymentRequestLifecycleState,
+    PaymentProofRecord, PaymentProofSubmission, PaymentRequestFilter, PaymentRequestLifecycleState,
     PaymentRequestLocalRole, PaymentRequestRecord, PaymentRequestRecurrenceRecord,
     PaymentRequestTermsRecord,
 };

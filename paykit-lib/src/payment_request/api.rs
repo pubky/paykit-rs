@@ -43,7 +43,12 @@ fn parse_event(kind: PrivateMessageKind, raw: &str) -> Option<Result<PaymentRequ
         }
         // Non-request kinds are ignored, producing nothing derived from `raw`
         // (decrypted private payload), so there is no error context to leak.
-        PrivateMessageKind::PrivatePaymentList | PrivateMessageKind::ReceiptAccess => None,
+        PrivateMessageKind::PrivatePaymentList
+        | PrivateMessageKind::ReceiptAccess
+        | PrivateMessageKind::AllowanceProposal
+        | PrivateMessageKind::AllowanceAcceptance
+        | PrivateMessageKind::AllowanceRejection
+        | PrivateMessageKind::AllowanceEnd => None,
     }
 }
 
@@ -166,6 +171,10 @@ mod tests {
         for kind in [
             PrivateMessageKind::PrivatePaymentList,
             PrivateMessageKind::ReceiptAccess,
+            PrivateMessageKind::AllowanceProposal,
+            PrivateMessageKind::AllowanceAcceptance,
+            PrivateMessageKind::AllowanceRejection,
+            PrivateMessageKind::AllowanceEnd,
         ] {
             assert!(
                 parse_event(kind, raw).is_none(),

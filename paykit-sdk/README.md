@@ -60,8 +60,8 @@ Implemented in this Rust SDK crate:
   marker workflows
 - Private Payment List publication/cache and contact payment resolution
 - Payment Endpoint Reservations for contact-scoped receiving details
-- Payment Request lifecycle state, Receipt Access indexing, receipt issuance,
-  and receipt retrieval
+- Payment Request and Allowance lifecycle derivation, Receipt Access indexing,
+  receipt issuance, and receipt retrieval
 - Paykit-facing profile/contact helpers and SDK backup/restore
 
 Not implemented in this crate yet:
@@ -178,8 +178,11 @@ Common workflows:
   should come from receiver folders, Noise keys, and SDK state, not a different
   Pubky identity derivation label
 - call `receive_private_messages` before deriving Private Payment Lists,
-  Payment Requests, Receipt Access state, or resolving a private contact
-  payment when the freshest private endpoints matter
+  Payment Requests, Allowances, Receipt Access state, or resolving a private
+  contact payment when the freshest private endpoints matter
+- use `propose_allowance`, `accept_allowance`, `reject_allowance`, and
+  `end_allowance` for durable lifecycle intent; drain the normal outbound queue
+  and use `allowance_record` or `list_allowances` for derived views
 - call `resolve_private_contact_payment` for Private Payment List endpoints or
   `resolve_public_contact_payment` for public Payment Endpoints; each returns a
   source-specific result with ordered adapter-built `PaymentTarget` values;
@@ -205,6 +208,84 @@ Common workflows:
   SDK-managed identity-scoped state
 - export and persist an SDK backup before `sign_out` if the app wants that
   sign-out to be reversible for the same user
+
+## Allowance Integration
+
+An Allowance is shared consent for possible automatic handling; the SDK does
+not interpret it as payment authorization by itself. A typical lifecycle uses
+the same durable private queue as other Event Messages:
+
+```rust
+use paykit_lib::{AllowanceAmountRange, AllowanceId, AllowanceTerms};
+use paykit_sdk::{AllowanceFilter, AllowanceLocalRole};
+
+let terms = AllowanceTerms::builder("btc")
+    .per_payment_amount(AllowanceAmountRange::new("0.0001", "0.01")?)
+    .lifetime_amount_limit("0.10")
+    .build()?;
+let proposed = sdk
+    .propose_allowance(
+        counterparty.clone(),
+        counterparty_receiver_path.clone(),
+        AllowanceLocalRole::Allower,
+        terms,
+    )
+    .await?;
+let allowance_id = AllowanceId::new(&proposed.allowance_id)?;
+
+// Send queued events through process_outbound_private_messages. After the
+// peer receives the proposal, it calls accept_allowance or reject_allowance.
+// Either peer may later call end_allowance for accepted authority.
+let current = sdk
+    .allowance_record(&counterparty, &counterparty_receiver_path, &allowance_id)
+    .await?;
+let all = sdk.list_allowances(AllowanceFilter::default()).await?;
+```
+
+Ordinary one-time and Recurring Payment Requests carry no Allowance ID and keep
+the existing proposal, Acceptance, Cancellation, endpoint-resolution, and
+recurrence rules. Payment Proof may report the Allowance actually used through
+an optional `allowance_id`; it remains informational and never updates usage.
+The lifecycle APIs supply durable evidence, not a decision to pay.
+
+Before automatic work, an integrating wallet must satisfy these requirements:
+
+- automatic handling is locally enabled and wallet policy selects one matching
+  accepted Allowance on the exact Encrypted Link; that Allowance must cover the
+  entire payment without pooling capacity from other Allowances;
+- the selected association is durably recorded before side effects and survives
+  restart, replay, and changes to wallet priorities;
+- a temporary inability to pay can be deferred for policy-controlled
+  reconsideration under the same association; an explicit manual-only decision
+  is never cleared by background changes;
+- a Recurring Payment Request retains its association, with an explicit
+  user-authorized revision required to select replacement authority for future
+  unpaid Billing Periods; prior payments and reservations keep their original
+  attribution and accounting;
+- the same semantic payment key coordinates automatic and manual execution
+  across all Allowances, including successful and unresolved payments;
+- only committed automatic payments and unresolved automatic reservations
+  consume Allowance capacity; admission checks and reservations are atomic;
+- verified success commits a reservation, confirmed failure without settlement
+  releases it, and pending, unknown, or recovery-incomplete outcomes stay
+  reserved until reconciled;
+- every reconsideration repeats current lifecycle, time, capacity, endpoint,
+  and local safeguard checks; an accepted request never sends another
+  Acceptance merely because payment was deferred; and
+- explicit payment of an accepted-but-unpaid occurrence requires complete
+  payment and reservation evidence and coordination with automatic admission.
+
+The shared SDK evaluation and accounting work extends these lifecycle APIs in
+follow-on stacked PRs. Wallets retain consent, selection policy, scheduling,
+endpoint and transfer validation, signing, execution, and settlement decisions.
+
+During incomplete history or Encrypted Link recovery, automatic handling must
+fail closed. Recovery must retain associations, usage, unresolved reservations,
+and the evaluation-time watermark. Restoring an old but valid backup does not
+prove accounting freshness; reconcile it with authoritative wallet execution
+records before resuming automatic handling. Optional Payment Proofs cannot
+reconstruct complete spending history. See [Allowances](../specs/allowances.md)
+for the normative rules.
 
 ## Profile And Contact Namespace
 
@@ -305,5 +386,15 @@ pauses until relink.
 Losing SDK-managed backup or state blob data means losing access to local
 private Paykit runtime state. Public Paykit data can be rediscovered from Pubky,
 but Encrypted Link snapshots, private stream history, Receipt Access keys,
-outbound queues, local Contact Records, and Payment Request/Receipt history
-cannot be safely reconstructed from homeserver data alone.
+outbound queues, local Contact Records, and Payment Request/Allowance/Receipt
+history cannot be safely reconstructed from homeserver data alone.
+
+## Testing
+
+The SDK end-to-end tests start local Pubky testnets. Run Docker so the harness
+can start Postgres, or set `TEST_PUBKY_CONNECTION_STRING` to a compatible test
+Postgres instance before running the suite from the workspace root:
+
+```sh
+cargo test -p paykit-sdk --test testnet_e2e
+```

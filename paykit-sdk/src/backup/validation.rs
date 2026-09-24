@@ -1,4 +1,5 @@
 use super::*;
+use crate::domain::private_stream::require_valid_event_message;
 use chrono::{DateTime, Utc};
 
 pub(super) fn preserve_current_sign_out_generation(
@@ -1194,6 +1195,31 @@ pub(super) fn validate_required_private_stream_indexes(
             });
         }
     }
+    validate_receipt_access_authority(event_dedup_records, receipt_access_records)?;
+    Ok(())
+}
+
+fn validate_receipt_access_authority(
+    event_dedup_records: &HashMap<(PubkyPublicKey, PaykitReceiverPath, String), EventDedupRecord>,
+    receipt_access_records: &HashMap<
+        (PubkyPublicKey, PaykitReceiverPath, String),
+        ReceiptAccessRecord,
+    >,
+) -> Result<()> {
+    for (key, access) in receipt_access_records {
+        let is_authoritative = event_dedup_records
+            .get(key)
+            .is_some_and(|dedupe| dedupe.first_stream_item_id == access.stream_item_id);
+        if !is_authoritative {
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Receipt Access record '{}' is not the authoritative first Event carrier",
+                    access.event_id
+                ),
+                source: None,
+            });
+        }
+    }
     Ok(())
 }
 
@@ -1465,7 +1491,7 @@ fn validate_receipt_issuance_status(record: &ReceiptIssuanceRecord) -> Result<()
     Ok(())
 }
 
-fn private_message_header(
+pub(super) fn private_message_header(
     raw_json: &str,
 ) -> Result<(Option<u32>, Option<String>, Option<PrivateMessageKind>)> {
     let value = match serde_json::from_str::<serde_json::Value>(raw_json) {
@@ -1494,22 +1520,12 @@ fn validate_valid_private_stream_body(
             paykit_lib::parse_private_payment_list_json(&record.raw_json)?;
         }
         PrivateMessageKind::ReceiptAccess => {
-            let event = paykit_lib::parse_receipt_access_event_message(
-                &private_application_message(record, kind),
-            )
-            .ok_or_else(|| PaykitSdkError::Protocol {
-                context: format!(
-                    "private stream item {} Receipt Access payload does not match its kind",
-                    record.stream_item_id
-                ),
-                source: None,
-            })?;
-            if let Some(error) = event.validation_error() {
-                return Err(PaykitSdkError::Protocol {
-                    context: error.to_owned(),
-                    source: None,
-                });
-            }
+            let event = require_valid_event_message(
+                paykit_lib::parse_receipt_access_event_message(&private_application_message(
+                    record, kind,
+                )),
+                || kind_mismatch_context(record, "Receipt Access"),
+            )?;
             let Some(access) = event.parsed_access() else {
                 return Err(PaykitSdkError::Protocol {
                     context: format!(
@@ -1531,25 +1547,33 @@ fn validate_valid_private_stream_body(
         | PrivateMessageKind::PaymentRequestRejection
         | PrivateMessageKind::PaymentRequestCancellation
         | PrivateMessageKind::PaymentProof => {
-            let event = paykit_lib::parse_payment_request_event_message(
-                &private_application_message(record, kind),
-            )
-            .ok_or_else(|| PaykitSdkError::Protocol {
-                context: format!(
-                    "private stream item {} Payment Request payload does not match its kind",
-                    record.stream_item_id
-                ),
-                source: None,
-            })?;
-            if let Some(error) = event.validation_error() {
-                return Err(PaykitSdkError::Protocol {
-                    context: error.to_owned(),
-                    source: None,
-                });
-            }
+            require_valid_event_message(
+                paykit_lib::parse_payment_request_event_message(&private_application_message(
+                    record, kind,
+                )),
+                || kind_mismatch_context(record, "Payment Request"),
+            )?;
+        }
+        PrivateMessageKind::AllowanceProposal
+        | PrivateMessageKind::AllowanceAcceptance
+        | PrivateMessageKind::AllowanceRejection
+        | PrivateMessageKind::AllowanceEnd => {
+            require_valid_event_message(
+                paykit_lib::parse_allowance_event_message(&private_application_message(
+                    record, kind,
+                )),
+                || kind_mismatch_context(record, "Allowance"),
+            )?;
         }
     }
     Ok(())
+}
+
+fn kind_mismatch_context(record: &PrivateStreamItemRecord, family: &str) -> String {
+    format!(
+        "private stream item {} {family} payload does not match its kind",
+        record.stream_item_id
+    )
 }
 
 fn private_application_message(
@@ -1565,7 +1589,7 @@ fn private_application_message(
     }
 }
 
-fn private_application_message_from_raw(
+pub(super) fn private_application_message_from_raw(
     raw_json: String,
     parsed_version: Option<u32>,
     parsed_kind: Option<String>,

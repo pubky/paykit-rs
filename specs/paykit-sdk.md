@@ -105,8 +105,8 @@ The current Rust SDK implementation covers:
   retries, and recovery marker workflows
 - Private Payment List publication, caching, and contact payment resolution
 - Payment Endpoint Reservations for contact-scoped receiving details
-- Payment Request lifecycle state, Receipt Access indexing, receipt issuance,
-  and receipt retrieval
+- Payment Request and Allowance lifecycle state, Receipt Access indexing,
+  receipt issuance, and receipt retrieval
 - Paykit-facing profile/contact helpers
 - SDK backup/export/restore validation
 
@@ -131,6 +131,7 @@ paykit-sdk/
     pubky_session.rs
     domain/
       adapters/
+      allowances/
       contacts/
       endpoints/
       endpoint_reservations/
@@ -146,6 +147,7 @@ paykit-sdk/
     runtime/
       mod.rs
       backup.rs
+      allowances.rs
       contacts.rs
       encrypted_links.rs
       outbound_private.rs
@@ -665,6 +667,15 @@ Tracks Event Message idempotency:
 - conflict status
 
 Conflicting reused Event IDs must fail closed for the affected derived state.
+Recognized malformed Event Messages with a parseable Event ID also contribute
+dedupe evidence. This records ID usage, not successful protocol validation, and
+does not make a malformed message eligible for lifecycle or Receipt Access
+processing. Changing payload bytes requires a fresh Event ID. Backup restore
+validates current stream metadata and required indexes against the same rules
+as live intake; stale metadata or missing indexes are rejected without changing
+the destination state. Backups from unreleased development formats are not
+migrated. Raw unsupported messages retained in the current format remain
+available for audit and fail-closed Allowance correlation.
 
 ### PrivatePaymentListView
 

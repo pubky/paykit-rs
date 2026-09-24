@@ -4,20 +4,79 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use std::collections::{HashMap, HashSet};
+
 use crate::{
-    domain::receipts::ReceiptAccessRecord,
+    domain::{outbound_private::OutboundPrivateMessageStatus, receipts::ReceiptAccessRecord},
     storage::{
         require_peer_link_operation_lease, EncryptedLinkStateRecord, EventDedupRecord,
-        NewPrivateStreamItem, NewPrivateStreamItemDetails, PeerLinkOperationLease, StorageAdapter,
+        NewPrivateStreamItem, NewPrivateStreamItemDetails, OutboundPrivateMessageRecord,
+        PeerLinkOperationLease, StorageAdapter,
     },
-    PaykitReceiverPath, PubkyPublicKey, Result,
+    PaykitReceiverPath, PaykitSdkError, PubkyPublicKey, Result,
 };
 
 use paykit_lib::{
-    parse_payment_request_event_message, parse_private_payment_list_json,
-    parse_receipt_access_event_message, PrivateApplicationMessage, PrivateMessageKind,
-    ReceiptAccess,
+    parse_allowance_event_message, parse_payment_request_event_message,
+    parse_private_payment_list_json, parse_receipt_access_event_message, AllowanceEventMessage,
+    EventId, PaymentRequestEventMessage, PrivateApplicationMessage, PrivateMessageKind,
+    ReceiptAccess, ReceiptAccessEventMessage,
 };
+
+/// Read surface shared by every typed Event Message parser in `paykit-lib`.
+///
+/// Intake classification, outbound validation, and backup validation only
+/// need these three views, so each new Event Message family adds one `impl`
+/// here instead of a new arm at every site.
+pub(crate) trait ParsedEventMessage {
+    fn event_id(&self) -> Option<&EventId>;
+    fn is_valid(&self) -> bool;
+    fn validation_error(&self) -> Option<&str>;
+}
+
+macro_rules! impl_parsed_event_message {
+    ($($message:ty),* $(,)?) => {$(
+        impl ParsedEventMessage for $message {
+            fn event_id(&self) -> Option<&EventId> {
+                <$message>::event_id(self)
+            }
+
+            fn is_valid(&self) -> bool {
+                <$message>::is_valid(self)
+            }
+
+            fn validation_error(&self) -> Option<&str> {
+                <$message>::validation_error(self)
+            }
+        }
+    )*};
+}
+
+impl_parsed_event_message!(
+    ReceiptAccessEventMessage,
+    PaymentRequestEventMessage,
+    AllowanceEventMessage,
+);
+
+/// Require a parsed Event Message whose kind matched and that validated.
+///
+/// `mismatch_context` is only evaluated when the parser rejected the kind.
+pub(crate) fn require_valid_event_message<M: ParsedEventMessage>(
+    parsed: Option<M>,
+    mismatch_context: impl FnOnce() -> String,
+) -> Result<M> {
+    let message = parsed.ok_or_else(|| PaykitSdkError::Protocol {
+        context: mismatch_context(),
+        source: None,
+    })?;
+    if let Some(error) = message.validation_error() {
+        return Err(PaykitSdkError::Protocol {
+            context: error.to_owned(),
+            source: None,
+        });
+    }
+    Ok(message)
+}
 
 /// Parse status for one received Private Application Message.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,7 +271,7 @@ pub(crate) fn enforce_receipt_access_receiver_scope(
     classification.parse_error = Some(format!(
         "Receipt Access location does not match counterparty receiver {counterparty_receiver_path}"
     ));
-    classification.event = None;
+    // Reject Receipt Access authority while retaining Event ID conflict evidence.
     classification.receipt_access = None;
 }
 
@@ -263,58 +322,52 @@ pub(crate) fn classify_private_application_message(
         }
         PrivateMessageKind::ReceiptAccess => {
             let parsed = parse_receipt_access_event_message(message);
-            let event = parsed
-                .as_ref()
-                .and_then(|parsed| parsed.event_id())
-                .map(|event_id| PrivateStreamEventHeader {
-                    event_id: event_id.as_str().to_owned(),
-                    event_kind: kind.as_str().to_owned(),
-                });
-            PrivateStreamMessageClassification {
-                status: status_from_event_validity(
-                    parsed.as_ref().is_some_and(|parsed| parsed.is_valid()),
-                ),
-                parse_error: parsed
-                    .as_ref()
-                    .and_then(|parsed| parsed.validation_error())
-                    .map(str::to_owned),
-                event,
-                receipt_access: parsed.and_then(|parsed| parsed.parsed_access().cloned()),
-            }
+            let mut classification = classify_event_message(kind, parsed.as_ref());
+            classification.receipt_access =
+                parsed.and_then(|parsed| parsed.parsed_access().cloned());
+            classification
         }
         PrivateMessageKind::PaymentRequest
         | PrivateMessageKind::PaymentRequestAcceptance
         | PrivateMessageKind::PaymentRequestRejection
         | PrivateMessageKind::PaymentRequestCancellation
         | PrivateMessageKind::PaymentProof => {
-            let parsed = parse_payment_request_event_message(message);
-            let event = parsed
-                .as_ref()
-                .and_then(|parsed| parsed.event_id())
-                .map(|event_id| PrivateStreamEventHeader {
-                    event_id: event_id.as_str().to_owned(),
-                    event_kind: kind.as_str().to_owned(),
-                });
-            PrivateStreamMessageClassification {
-                status: status_from_event_validity(
-                    parsed.as_ref().is_some_and(|parsed| parsed.is_valid()),
-                ),
-                parse_error: parsed
-                    .as_ref()
-                    .and_then(|parsed| parsed.validation_error())
-                    .map(str::to_owned),
-                event,
-                receipt_access: None,
-            }
+            classify_event_message(kind, parse_payment_request_event_message(message).as_ref())
+        }
+        PrivateMessageKind::AllowanceProposal
+        | PrivateMessageKind::AllowanceAcceptance
+        | PrivateMessageKind::AllowanceRejection
+        | PrivateMessageKind::AllowanceEnd => {
+            classify_event_message(kind, parse_allowance_event_message(message).as_ref())
         }
     }
 }
 
-fn status_from_event_validity(is_valid: bool) -> PrivateStreamParseStatus {
-    if is_valid {
-        PrivateStreamParseStatus::Valid
-    } else {
-        PrivateStreamParseStatus::MalformedRecognized
+/// Classify one recognized Event Message kind from its typed parse result.
+///
+/// `None` means the parser rejected the kind it was handed, which is treated
+/// as a malformed recognized message with no header to dedupe on.
+fn classify_event_message<M: ParsedEventMessage>(
+    kind: PrivateMessageKind,
+    parsed: Option<&M>,
+) -> PrivateStreamMessageClassification {
+    let is_valid = parsed.is_some_and(ParsedEventMessage::is_valid);
+    PrivateStreamMessageClassification {
+        status: if is_valid {
+            PrivateStreamParseStatus::Valid
+        } else {
+            PrivateStreamParseStatus::MalformedRecognized
+        },
+        parse_error: parsed
+            .and_then(ParsedEventMessage::validation_error)
+            .map(str::to_owned),
+        event: parsed
+            .and_then(ParsedEventMessage::event_id)
+            .map(|event_id| PrivateStreamEventHeader {
+                event_id: event_id.as_str().to_owned(),
+                event_kind: kind.as_str().to_owned(),
+            }),
+        receipt_access: None,
     }
 }
 
@@ -379,6 +432,104 @@ fn update_event_dedupe(
 pub(crate) fn payload_hash(raw_json: &str) -> String {
     let digest = Sha256::digest(raw_json.as_bytes());
     format!("sha256:{digest:x}")
+}
+
+/// Return a canonical Event ID from a JSON carrier when one is present.
+pub(crate) fn canonical_event_id(raw_json: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(raw_json).ok()?;
+    let value = value.get("event_id")?.as_str()?;
+    EventId::new(value)
+        .ok()
+        .map(|event_id| event_id.as_str().to_owned())
+}
+
+/// Whether a recognized Private Message Kind uses Event Message semantics.
+///
+/// Keep this match exhaustive so adding a new recognized kind requires an
+/// explicit Event ID policy decision at compile time.
+pub(crate) fn is_event_message_kind(kind: &str) -> bool {
+    match PrivateMessageKind::parse(kind) {
+        None | Some(PrivateMessageKind::PrivatePaymentList) => false,
+        Some(
+            PrivateMessageKind::ReceiptAccess
+            | PrivateMessageKind::PaymentRequest
+            | PrivateMessageKind::PaymentRequestAcceptance
+            | PrivateMessageKind::PaymentRequestRejection
+            | PrivateMessageKind::PaymentRequestCancellation
+            | PrivateMessageKind::PaymentProof
+            | PrivateMessageKind::AllowanceProposal
+            | PrivateMessageKind::AllowanceAcceptance
+            | PrivateMessageKind::AllowanceRejection
+            | PrivateMessageKind::AllowanceEnd,
+        ) => true,
+    }
+}
+
+/// Whether a Private Message Kind carries an Allowance lifecycle event.
+pub(crate) fn is_allowance_kind(kind: &str) -> bool {
+    match PrivateMessageKind::parse(kind) {
+        None
+        | Some(
+            PrivateMessageKind::PrivatePaymentList
+            | PrivateMessageKind::ReceiptAccess
+            | PrivateMessageKind::PaymentRequest
+            | PrivateMessageKind::PaymentRequestAcceptance
+            | PrivateMessageKind::PaymentRequestRejection
+            | PrivateMessageKind::PaymentRequestCancellation
+            | PrivateMessageKind::PaymentProof,
+        ) => false,
+        Some(
+            PrivateMessageKind::AllowanceProposal
+            | PrivateMessageKind::AllowanceAcceptance
+            | PrivateMessageKind::AllowanceRejection
+            | PrivateMessageKind::AllowanceEnd,
+        ) => true,
+    }
+}
+
+/// Event IDs carried by the local outbound queue on one exact Encrypted Link.
+///
+/// Inbound Event IDs are indexed durably at intake; outbound ones are not, so
+/// every derivation that must detect Event ID reuse across the two sending
+/// directions folds the outbound queue through this one policy.
+#[derive(Default)]
+pub(crate) struct OutboundEventCarriers {
+    /// Every Event ID carried by a live outbound Event Message.
+    pub(crate) event_ids: HashSet<String>,
+    /// Event IDs reused by outbound Event Messages with different payloads.
+    pub(crate) conflicted_event_ids: HashSet<String>,
+}
+
+/// Fold one link's outbound queue into its Event ID carriers.
+///
+/// `Invalid` and `Superseded` records never advance the link, so they do not
+/// count as carriers.
+pub(crate) fn outbound_event_carriers(
+    outbound: &[OutboundPrivateMessageRecord],
+) -> OutboundEventCarriers {
+    let mut payloads_by_event_id = HashMap::<String, HashSet<&str>>::new();
+    for message in outbound {
+        if matches!(
+            message.status,
+            OutboundPrivateMessageStatus::Invalid | OutboundPrivateMessageStatus::Superseded
+        ) || !is_event_message_kind(&message.kind)
+        {
+            continue;
+        }
+        if let Some(event_id) = canonical_event_id(&message.raw_json) {
+            payloads_by_event_id
+                .entry(event_id)
+                .or_default()
+                .insert(&message.raw_json);
+        }
+    }
+    OutboundEventCarriers {
+        event_ids: payloads_by_event_id.keys().cloned().collect(),
+        conflicted_event_ids: payloads_by_event_id
+            .into_iter()
+            .filter_map(|(event_id, payloads)| (payloads.len() > 1).then_some(event_id))
+            .collect(),
+    }
 }
 
 #[cfg(test)]

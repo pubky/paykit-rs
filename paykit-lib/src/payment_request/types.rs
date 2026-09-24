@@ -4,7 +4,7 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::{
     validation::{parse_utc_timestamp, validate_uuid_v4},
-    EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
+    AllowanceId, EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
     PrivateMessageKind, Result,
 };
 
@@ -314,6 +314,8 @@ pub struct PaymentProof {
     pub billing_period: Option<BillingPeriod>,
     /// Payment Endpoint Identifier used for the payment execution.
     pub payment_endpoint_identifier: PaymentEndpointIdentifier,
+    /// Optional Allowance used for this payment, scoped to the exact Encrypted Link.
+    pub allowance_id: Option<AllowanceId>,
     /// Method-specific proof object.
     pub proof: JsonMap<String, JsonValue>,
 }
@@ -327,6 +329,7 @@ impl fmt::Debug for PaymentProof {
             .field("payment_request_id", &self.payment_request_id)
             .field("payment_reference", &"<redacted>")
             .field("billing_period", &self.billing_period)
+            .field("allowance_id", &self.allowance_id)
             .field(
                 "payment_endpoint_identifier",
                 &self.payment_endpoint_identifier,
@@ -357,8 +360,23 @@ impl PaymentProof {
             payment_reference,
             billing_period,
             payment_endpoint_identifier,
+            allowance_id: None,
             proof,
         }
+    }
+
+    /// Report the Allowance used for this payment execution.
+    ///
+    /// The caller must use its persisted payment association. This is reporting
+    /// only; it does not authorize payment, validate usage, or change accounting.
+    pub fn with_allowance_id(mut self, allowance_id: AllowanceId) -> Self {
+        self.allowance_id = Some(allowance_id);
+        self
+    }
+
+    /// Access the reported Allowance ID, when this payment used an Allowance.
+    pub fn allowance_id(&self) -> Option<&AllowanceId> {
+        self.allowance_id.as_ref()
     }
 
     /// Validate this proof against the immutable terms of a specific Payment Request.

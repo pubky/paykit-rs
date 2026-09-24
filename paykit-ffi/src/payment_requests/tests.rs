@@ -9,7 +9,9 @@ use paykit_sdk::{
 };
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
-use super::{conversions::ParsedPaymentProofSubmission, *};
+use super::*;
+
+const ALLOWANCE_ID: &str = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44";
 
 fn public_key() -> PubkyPublicKey {
     conversions::parse_public_key("8jsf5bm1ck3r7sn6pfx4q9mgqq5xn8fi6sizw6pxgjc8zs1bt4io".into())
@@ -123,6 +125,7 @@ fn test_payment_request_record_conversion_redacts_references() {
                 ends_at: "2026-07-01T00:00:00Z".into(),
             }),
             payment_endpoint_identifier: "btc-lightning-bolt11".into(),
+            allowance_id: Some(ALLOWANCE_ID.into()),
             proof,
             recorded_at: Utc::now(),
         }],
@@ -136,6 +139,10 @@ fn test_payment_request_record_conversion_redacts_references() {
     let ffi = FfiPaymentRequestRecord::try_from(record).unwrap();
 
     assert_eq!(ffi.state, FfiPaymentRequestLifecycleState::Accepted);
+    assert_eq!(
+        ffi.payment_proofs[0].allowance_id.as_deref(),
+        Some(ALLOWANCE_ID)
+    );
     assert_eq!(
         ffi.terms.as_ref().unwrap().payment_reference.export_text(),
         "invoice secret"
@@ -153,11 +160,75 @@ fn test_payment_proof_submission_rejects_non_object_proof() {
     let submission = FfiPaymentProofSubmission {
         billing_period: None,
         payment_endpoint_identifier: "btc-lightning-bolt11".into(),
+        allowance_id: None,
         proof: Arc::new(FfiPrivateJsonObject::from_unchecked_text("[]".into())),
     };
 
     assert!(matches!(
-        ParsedPaymentProofSubmission::try_from(submission),
+        PaymentProofSubmission::try_from(submission),
         Err(PaykitFfiError::Protocol { code, .. }) if code == "validation"
     ));
+}
+
+fn proof_submission(allowance_id: Option<String>) -> FfiPaymentProofSubmission {
+    FfiPaymentProofSubmission {
+        billing_period: None,
+        payment_endpoint_identifier: "btc-lightning-bolt11".into(),
+        allowance_id,
+        proof: Arc::new(FfiPrivateJsonObject::new("{}".into()).unwrap()),
+    }
+}
+
+#[test]
+fn test_payment_proof_submission_preserves_optional_allowance_id() {
+    for id in [None, Some(ALLOWANCE_ID.to_owned())] {
+        let parsed = PaymentProofSubmission::try_from(proof_submission(id.clone())).unwrap();
+        assert_eq!(
+            parsed.allowance_id.as_ref().map(|id| id.as_str()),
+            id.as_deref()
+        );
+    }
+}
+
+#[test]
+fn test_payment_proof_submission_rejects_invalid_allowance_id_without_leaking_input() {
+    for id in [
+        "secret invalid allowance value".to_owned(),
+        ALLOWANCE_ID.to_uppercase(),
+        ALLOWANCE_ID.replace('-', ""),
+        ALLOWANCE_ID.replacen("4b0e", "1b0e", 1),
+        String::new(),
+    ] {
+        let submission = proof_submission(Some(id.clone()));
+        if !id.is_empty() {
+            assert!(!format!("{submission:?}").contains(&id));
+        }
+        let Err(error) = PaymentProofSubmission::try_from(submission) else {
+            panic!("invalid Allowance ID must be rejected");
+        };
+        assert!(matches!(&error, PaykitFfiError::Protocol { code, .. } if code == "validation"));
+        if !id.is_empty() {
+            assert!(!format!("{error:?}").contains(&id));
+        }
+    }
+}
+
+#[test]
+fn test_payment_proof_record_preserves_absent_allowance_id() {
+    let record = PaymentProofRecord {
+        event_id: "750e8400-e29b-41d4-a716-446655440000".into(),
+        outbound_message_id: None,
+        outbound_status: None,
+        stream_item_id: Some(1),
+        payment_reference: "invoice-1".into(),
+        billing_period: None,
+        payment_endpoint_identifier: "btc-lightning-bolt11".into(),
+        allowance_id: None,
+        proof: JsonMap::new(),
+        recorded_at: Utc::now(),
+    };
+    assert!(FfiPaymentProofRecord::try_from(record)
+        .unwrap()
+        .allowance_id
+        .is_none());
 }
