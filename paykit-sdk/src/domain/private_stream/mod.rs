@@ -271,7 +271,7 @@ pub(crate) fn enforce_receipt_access_receiver_scope(
     classification.parse_error = Some(format!(
         "Receipt Access location does not match counterparty receiver {counterparty_receiver_path}"
     ));
-    classification.event = None;
+    // Reject Receipt Access authority while retaining Event ID conflict evidence.
     classification.receipt_access = None;
 }
 

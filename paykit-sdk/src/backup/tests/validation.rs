@@ -708,7 +708,7 @@ async fn test_restore_backup_state_rejects_overlapping_event_dedupe_membership()
 }
 
 #[tokio::test]
-async fn test_restore_backup_state_rejects_wrong_receiver_receipt_access_dedupe_index() {
+async fn test_restore_backup_state_accepts_wrong_receiver_receipt_access_dedupe_index() {
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let event_id = "650e8400-e29b-41d4-a716-446655440000";
@@ -747,7 +747,7 @@ async fn test_restore_backup_state_rejects_wrong_receiver_receipt_access_dedupe_
             known_paykit_kind: Some("paykit.receipt_access".into()),
             parse_status: PrivateStreamParseStatus::MalformedRecognized,
             parse_error: Some(
-                "Receipt Access location does not match counterparty receiver bitkit".into(),
+                "Receipt Access location does not match counterparty receiver bitkit/wallet".into(),
             ),
             received_at: timestamp(),
         }],
@@ -769,9 +769,21 @@ async fn test_restore_backup_state_rejects_wrong_receiver_receipt_access_dedupe_
         next_private_stream_item_id: 2,
     };
 
-    let result = restore_backup_state(&storage, backup).await;
+    restore_backup_state(&storage, backup.clone())
+        .await
+        .unwrap();
 
-    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
+    assert_eq!(
+        export_backup_state(&storage, receiver_path())
+            .await
+            .unwrap(),
+        backup
+    );
+    assert!(storage
+        .snapshot()
+        .unwrap()
+        .receipt_access_records
+        .is_empty());
 }
 
 #[tokio::test]

@@ -289,3 +289,101 @@ async fn test_restore_allowance_rejects_receipt_index_for_conflicting_event() {
 
     assert_rejected_without_destination_changes(backup, "authoritative").await;
 }
+
+async fn wrong_receiver_receipt_backup() -> SdkBackupState {
+    current_backup(
+        &public_key(),
+        vec![
+            allowance_event_json("paykit.allowance_proposal", SHARED_EVENT_ID),
+            crate::test_utils::receipt_access_json(SHARED_EVENT_ID, &other_receiver_path()),
+        ],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_restore_wrong_receiver_receipt_preserves_allowance_conflict() {
+    let backup = wrong_receiver_receipt_backup().await;
+    let counterparty = backup.private_stream_items[0].counterparty.clone();
+    let restored = InMemoryStorage::new();
+    restore_backup_state(&restored, backup.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        export_backup_state(&restored, receiver_path())
+            .await
+            .unwrap(),
+        backup
+    );
+    let record = allowance_record(
+        &restored,
+        &counterparty,
+        &receiver_path(),
+        &AllowanceId::new(ALLOWANCE_ID).unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(record.history_status, AllowanceHistoryStatus::Invalid);
+    assert_eq!(record.conflict_event_ids, [SHARED_EVENT_ID]);
+    assert!(restored
+        .snapshot()
+        .unwrap()
+        .receipt_access_records
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_restore_wrong_receiver_receipt_requires_dedupe_atomically() {
+    let mut backup = current_backup(
+        &public_key(),
+        vec![crate::test_utils::receipt_access_json(
+            SHARED_EVENT_ID,
+            &other_receiver_path(),
+        )],
+    )
+    .await;
+    backup.event_dedup_records.clear();
+    assert_rejected_without_destination_changes(backup, "missing required Event dedupe").await;
+}
+
+#[tokio::test]
+async fn test_restore_wrong_receiver_receipt_requires_conflict_membership_atomically() {
+    let mut backup = wrong_receiver_receipt_backup().await;
+    backup.event_dedup_records[0]
+        .conflicting_stream_item_ids
+        .clear();
+    assert_rejected_without_destination_changes(backup, "does not include private stream item")
+        .await;
+}
+
+#[tokio::test]
+async fn test_restore_wrong_receiver_receipt_rejects_access_index_atomically() {
+    let mut backup = current_backup(
+        &public_key(),
+        vec![crate::test_utils::receipt_access_json(
+            SHARED_EVENT_ID,
+            &other_receiver_path(),
+        )],
+    )
+    .await;
+    let item = &backup.private_stream_items[0];
+    let (version, kind, _) = private_message_header(&item.raw_json).unwrap();
+    let message = private_application_message_from_raw(item.raw_json.clone(), version, kind);
+    let parsed = paykit_lib::parse_receipt_access_event_message(&message).unwrap();
+    backup
+        .receipt_access_records
+        .push(ReceiptAccessRecord::from_access(
+            item.counterparty.clone(),
+            item.counterparty_receiver_path.clone(),
+            item.stream_item_id,
+            item.receive_batch_id,
+            item.received_at,
+            parsed.parsed_access().unwrap(),
+        ));
+    assert_rejected_without_destination_changes(
+        backup,
+        "location does not match counterparty receiver",
+    )
+    .await;
+}

@@ -1526,3 +1526,75 @@ fn test_allowance_record_debug_redacts_terms() {
     assert!(!debug.contains("private-asset-sentinel"));
     assert!(!debug.contains("private-limit-sentinel"));
 }
+
+#[tokio::test]
+async fn test_allowance_wrong_receiver_receipt_reuse_invalidates_history() {
+    // Cover both same-direction acceptance reuse and cross-direction proposal reuse,
+    // with the rejected receipt arriving before or after the Allowance evidence.
+    for reused_id in [PROPOSAL_ID, ACCEPTANCE_ID] {
+        for receipt_first in [false, true] {
+            let storage = InMemoryStorage::new();
+            let peer = counterparty();
+            let receipt = PrivateApplicationMessage {
+                version: Some(1),
+                kind: Some("paykit.receipt_access".into()),
+                raw_json: crate::test_utils::receipt_access_json(reused_id, &other_receiver_path()),
+            };
+            if receipt_first {
+                persist_private_stream_batch(
+                    &storage,
+                    peer.clone(),
+                    receiver_path(),
+                    vec![receipt.clone()],
+                    None,
+                    timestamp(),
+                )
+                .await
+                .unwrap();
+            }
+            queue_outbound(
+                &storage,
+                peer.clone(),
+                receiver_path(),
+                proposal(PROPOSAL_ID, AllowanceRole::Allower),
+                timestamp(),
+            )
+            .await;
+            persist_inbound(
+                &storage,
+                peer.clone(),
+                receiver_path(),
+                vec![acceptance(PROPOSAL_ID)],
+                timestamp(),
+            )
+            .await;
+            if !receipt_first {
+                let accepted = derived(&storage, &peer, &receiver_path()).await;
+                assert_eq!(accepted.state, AllowanceLifecycleState::Accepted);
+                assert_eq!(accepted.history_status, AllowanceHistoryStatus::Consistent);
+                persist_private_stream_batch(
+                    &storage,
+                    peer.clone(),
+                    receiver_path(),
+                    vec![receipt],
+                    None,
+                    timestamp(),
+                )
+                .await
+                .unwrap();
+            }
+            let record = derived(&storage, &peer, &receiver_path()).await;
+            assert_eq!(
+                record.history_status,
+                AllowanceHistoryStatus::Invalid,
+                "reused {reused_id}, receipt_first={receipt_first}"
+            );
+            assert!(record.conflict_event_ids.iter().any(|id| id == reused_id));
+            assert!(storage
+                .snapshot()
+                .unwrap()
+                .receipt_access_records
+                .is_empty());
+        }
+    }
+}

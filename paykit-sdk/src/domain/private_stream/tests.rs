@@ -368,6 +368,13 @@ async fn test_persist_private_stream_batch_skips_wrong_receiver_receipt_access_i
             .await
             .unwrap();
     assert!(records.is_empty());
+    let dedupe = snapshot.event_dedup_records.values().next().unwrap();
+    assert_eq!(dedupe.event_id, "650e8400-e29b-41d4-a716-446655440000");
+    assert_eq!(
+        dedupe.first_stream_item_id,
+        snapshot.private_stream_items[0].stream_item_id
+    );
+    assert!(dedupe.conflicting_stream_item_ids.is_empty());
 }
 
 #[tokio::test]
