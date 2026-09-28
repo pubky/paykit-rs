@@ -125,6 +125,7 @@ async fn persist_messages_at(
     .unwrap();
 }
 
+mod conversion_quotes;
 mod enqueue;
 mod outbound_records;
 mod proofs;

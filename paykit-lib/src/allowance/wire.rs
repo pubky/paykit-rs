@@ -346,6 +346,7 @@ pub(super) fn parse_allowance_json(
         | PrivateMessageKind::PaymentRequestAcceptance
         | PrivateMessageKind::PaymentRequestRejection
         | PrivateMessageKind::PaymentRequestCancellation
+        | PrivateMessageKind::PaymentConversionQuote
         | PrivateMessageKind::PaymentProof => return None,
     };
     // SECURITY / REDACTION: `json` is decrypted plaintext. Every structural or

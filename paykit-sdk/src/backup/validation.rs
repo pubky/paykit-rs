@@ -1546,6 +1546,7 @@ fn validate_valid_private_stream_body(
         | PrivateMessageKind::PaymentRequestAcceptance
         | PrivateMessageKind::PaymentRequestRejection
         | PrivateMessageKind::PaymentRequestCancellation
+        | PrivateMessageKind::PaymentConversionQuote
         | PrivateMessageKind::PaymentProof => {
             require_valid_event_message(
                 paykit_lib::parse_payment_request_event_message(&private_application_message(

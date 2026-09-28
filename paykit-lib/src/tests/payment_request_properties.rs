@@ -74,6 +74,7 @@ declare_private_message_kind_routing! {
     PaymentRequestRejection => true,
     PaymentRequestCancellation => true,
     PaymentProof => true,
+    PaymentConversionQuote => true,
     AllowanceProposal => false,
     AllowanceAcceptance => false,
     AllowanceRejection => false,

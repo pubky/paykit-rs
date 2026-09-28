@@ -330,6 +330,7 @@ pub(crate) fn classify_private_application_message(
         PrivateMessageKind::PaymentRequest
         | PrivateMessageKind::PaymentRequestAcceptance
         | PrivateMessageKind::PaymentRequestRejection
+        | PrivateMessageKind::PaymentConversionQuote
         | PrivateMessageKind::PaymentRequestCancellation
         | PrivateMessageKind::PaymentProof => {
             classify_event_message(kind, parse_payment_request_event_message(message).as_ref())
@@ -455,6 +456,7 @@ pub(crate) fn is_event_message_kind(kind: &str) -> bool {
             | PrivateMessageKind::PaymentRequest
             | PrivateMessageKind::PaymentRequestAcceptance
             | PrivateMessageKind::PaymentRequestRejection
+            | PrivateMessageKind::PaymentConversionQuote
             | PrivateMessageKind::PaymentRequestCancellation
             | PrivateMessageKind::PaymentProof
             | PrivateMessageKind::AllowanceProposal
@@ -475,6 +477,7 @@ pub(crate) fn is_allowance_kind(kind: &str) -> bool {
             | PrivateMessageKind::PaymentRequest
             | PrivateMessageKind::PaymentRequestAcceptance
             | PrivateMessageKind::PaymentRequestRejection
+            | PrivateMessageKind::PaymentConversionQuote
             | PrivateMessageKind::PaymentRequestCancellation
             | PrivateMessageKind::PaymentProof,
         ) => false,

@@ -66,12 +66,14 @@ private func compileAllowanceBindingsSurface(
         billingPeriod: nil,
         paymentEndpointIdentifier: "btc-lightning-bolt11",
         allowanceId: allowanceId,
+        conversionQuoteId: nil,
         proof: proof
     )
     let manualProof = PaymentProofSubmission(
         billingPeriod: nil,
         paymentEndpointIdentifier: "btc-lightning-bolt11",
         allowanceId: nil,
+        conversionQuoteId: nil,
         proof: proof
     )
     let requestWithProof = try await sdk.submitPaymentProof(

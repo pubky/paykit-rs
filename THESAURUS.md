@@ -346,6 +346,21 @@
 - **Synonyms to AVOID**: request expiry when it is ambiguous with recurrence end
 - **Related terms**: Payment Request, Recurrence
 
+### Conversion Rate
+- **Definition**: An exact decimal multiplier expressing payment Asset units per one requested Asset unit. A supplied rate fixes the price; an omitted asset in a supplied rates set has no fallback.
+- **NOT**: A market-rate feed, a payment authorization, or a global USD/USDT parity assumption.
+- **Related terms**: Payment Amount, Payment Conversion Quote
+
+### Payment Conversion Quote
+- **Definition**: A payee-issued Event Message offering immutable Conversion Rates for one accepted recurring Billing Period until a stated payment deadline. Its Event ID identifies it in a Payment Proof.
+- **NOT**: A replacement of request terms, Latest-State Message, fee quote or spending authorization.
+- **Related terms**: Recurring Payment Request, Billing Period, Conversion Rate, Payment Deadline
+
+### Payment Deadline
+- **Definition**: An inclusive deadline for actual payment, absolute for a one-time request or relative to a recurring Billing Period. Proof arrival time does not determine timeliness.
+- **NOT**: Proposal Expiry, recurrence end, or authority to reverse funds received after expiry.
+- **Related terms**: Payment Request, Payment Conversion Quote, Billing Period
+
 ### Payment Proof
 - **Definition**: Method-specific evidence for one concrete payment execution, correlated by Payment Request ID, Payment Reference, Payment Endpoint Identifier, and Billing Period when recurring, with optional informational Allowance ID attribution to the authority used for that execution.
 - **NOT**: A Paykit Receipt, Receipt Access, or proof that Paykit itself validates generically.

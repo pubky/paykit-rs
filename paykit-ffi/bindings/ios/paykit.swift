@@ -1719,6 +1719,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func publishPublicContact(publicKey: String, receiverPath: String) async throws  -> ContactRecord
 
     /**
+     * Issue rates for one accepted recurring Billing Period; does not authorize payment.
+     */
+    func quotePaymentRequest(counterparty: String, counterpartyReceiverPath: String, paymentRequestId: String, billingPeriod: BillingPeriod, rates: [ConversionRate], expiresAt: String) async throws  -> PaymentRequestRecord
+
+    /**
      * List Receipt Access across non-blocked counterparties, newest first.
      */
     func receiptAccess() async throws  -> [ReceiptAccessView]
@@ -3224,6 +3229,26 @@ open func publishPublicContact(publicKey: String, receiverPath: String)async thr
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeContactRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Issue rates for one accepted recurring Billing Period; does not authorize payment.
+     */
+open func quotePaymentRequest(counterparty: String, counterpartyReceiverPath: String, paymentRequestId: String, billingPeriod: BillingPeriod, rates: [ConversionRate], expiresAt: String)async throws  -> PaymentRequestRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_quote_payment_request(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterString.lower(paymentRequestId),FfiConverterTypeBillingPeriod_lower(billingPeriod),FfiConverterSequenceTypeConversionRate.lower(rates),FfiConverterString.lower(expiresAt)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaymentRequestRecord_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -8276,6 +8301,93 @@ public func FfiConverterTypeContactUpdate_lower(_ value: ContactUpdate) -> RustB
 
 
 /**
+ * Units of payment asset owed per requested asset unit.
+ */
+public struct ConversionRate {
+    /**
+     * Payment asset code.
+     */
+    public var asset: String
+    /**
+     * Positive decimal multiplier; never convert through floating point.
+     */
+    public var value: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Payment asset code.
+         */asset: String,
+        /**
+         * Positive decimal multiplier; never convert through floating point.
+         */value: String) {
+        self.asset = asset
+        self.value = value
+    }
+}
+
+#if compiler(>=6)
+extension ConversionRate: Sendable {}
+#endif
+
+
+extension ConversionRate: Equatable, Hashable {
+    public static func ==(lhs: ConversionRate, rhs: ConversionRate) -> Bool {
+        if lhs.asset != rhs.asset {
+            return false
+        }
+        if lhs.value != rhs.value {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(asset)
+        hasher.combine(value)
+    }
+}
+
+extension ConversionRate: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeConversionRate: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ConversionRate {
+        return
+            try ConversionRate(
+                asset: FfiConverterString.read(from: &buf),
+                value: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ConversionRate, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.asset, into: &buf)
+        FfiConverterString.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeConversionRate_lift(_ buf: RustBuffer) throws -> ConversionRate {
+    return try FfiConverterTypeConversionRate.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeConversionRate_lower(_ value: ConversionRate) -> RustBuffer {
+    return FfiConverterTypeConversionRate.lower(value)
+}
+
+
+/**
  * Counterparty plus the Paykit receiver path used for private workflows.
  */
 public struct CounterpartyReceiver {
@@ -10319,6 +10431,135 @@ public func FfiConverterTypePaymentAmountContext_lower(_ value: PaymentAmountCon
 
 
 /**
+ * Payee-issued quote retained for payment verification after expiry.
+ */
+public struct PaymentConversionQuoteRecord {
+    /**
+     * Quote identity (Event ID).
+     */
+    public var eventId: String
+    /**
+     * Period for which these rates were offered.
+     */
+    public var billingPeriod: BillingPeriod
+    /**
+     * Payment asset units per requested asset unit.
+     */
+    public var rates: [ConversionRate]
+    /**
+     * Inclusive actual-payment deadline, in RFC3339 UTC.
+     */
+    public var expiresAt: String
+    /**
+     * Local outbound status, when issued locally.
+     */
+    public var outboundStatus: OutboundPrivateMessageStatus?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Quote identity (Event ID).
+         */eventId: String,
+        /**
+         * Period for which these rates were offered.
+         */billingPeriod: BillingPeriod,
+        /**
+         * Payment asset units per requested asset unit.
+         */rates: [ConversionRate],
+        /**
+         * Inclusive actual-payment deadline, in RFC3339 UTC.
+         */expiresAt: String,
+        /**
+         * Local outbound status, when issued locally.
+         */outboundStatus: OutboundPrivateMessageStatus?) {
+        self.eventId = eventId
+        self.billingPeriod = billingPeriod
+        self.rates = rates
+        self.expiresAt = expiresAt
+        self.outboundStatus = outboundStatus
+    }
+}
+
+#if compiler(>=6)
+extension PaymentConversionQuoteRecord: Sendable {}
+#endif
+
+
+extension PaymentConversionQuoteRecord: Equatable, Hashable {
+    public static func ==(lhs: PaymentConversionQuoteRecord, rhs: PaymentConversionQuoteRecord) -> Bool {
+        if lhs.eventId != rhs.eventId {
+            return false
+        }
+        if lhs.billingPeriod != rhs.billingPeriod {
+            return false
+        }
+        if lhs.rates != rhs.rates {
+            return false
+        }
+        if lhs.expiresAt != rhs.expiresAt {
+            return false
+        }
+        if lhs.outboundStatus != rhs.outboundStatus {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(eventId)
+        hasher.combine(billingPeriod)
+        hasher.combine(rates)
+        hasher.combine(expiresAt)
+        hasher.combine(outboundStatus)
+    }
+}
+
+extension PaymentConversionQuoteRecord: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentConversionQuoteRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentConversionQuoteRecord {
+        return
+            try PaymentConversionQuoteRecord(
+                eventId: FfiConverterString.read(from: &buf),
+                billingPeriod: FfiConverterTypeBillingPeriod.read(from: &buf),
+                rates: FfiConverterSequenceTypeConversionRate.read(from: &buf),
+                expiresAt: FfiConverterString.read(from: &buf),
+                outboundStatus: FfiConverterOptionTypeOutboundPrivateMessageStatus.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PaymentConversionQuoteRecord, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.eventId, into: &buf)
+        FfiConverterTypeBillingPeriod.write(value.billingPeriod, into: &buf)
+        FfiConverterSequenceTypeConversionRate.write(value.rates, into: &buf)
+        FfiConverterString.write(value.expiresAt, into: &buf)
+        FfiConverterOptionTypeOutboundPrivateMessageStatus.write(value.outboundStatus, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentConversionQuoteRecord_lift(_ buf: RustBuffer) throws -> PaymentConversionQuoteRecord {
+    return try FfiConverterTypePaymentConversionQuoteRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentConversionQuoteRecord_lower(_ value: PaymentConversionQuoteRecord) -> RustBuffer {
+    return FfiConverterTypePaymentConversionQuoteRecord.lower(value)
+}
+
+
+/**
  * Payment Proof captured in a derived Payment Request record.
  */
 public struct PaymentProofRecord {
@@ -10354,6 +10595,10 @@ public struct PaymentProofRecord {
      * Optional canonical Allowance ID reported for this payment execution.
      */
     public var allowanceId: String?
+    /**
+     * Selected recurring quote Event ID.
+     */
+    public var conversionQuoteId: String?
     /**
      * Method-specific proof object encoded as JSON.
      */
@@ -10391,6 +10636,9 @@ public struct PaymentProofRecord {
          * Optional canonical Allowance ID reported for this payment execution.
          */allowanceId: String?,
         /**
+         * Selected recurring quote Event ID.
+         */conversionQuoteId: String?,
+        /**
          * Method-specific proof object encoded as JSON.
          */proof: PrivateJsonObject,
         /**
@@ -10404,6 +10652,7 @@ public struct PaymentProofRecord {
         self.billingPeriod = billingPeriod
         self.paymentEndpointIdentifier = paymentEndpointIdentifier
         self.allowanceId = allowanceId
+        self.conversionQuoteId = conversionQuoteId
         self.proof = proof
         self.recordedAt = recordedAt
     }
@@ -10430,6 +10679,7 @@ public struct FfiConverterTypePaymentProofRecord: FfiConverterRustBuffer {
                 billingPeriod: FfiConverterOptionTypeBillingPeriod.read(from: &buf),
                 paymentEndpointIdentifier: FfiConverterString.read(from: &buf),
                 allowanceId: FfiConverterOptionString.read(from: &buf),
+                conversionQuoteId: FfiConverterOptionString.read(from: &buf),
                 proof: FfiConverterTypePrivateJsonObject.read(from: &buf),
                 recordedAt: FfiConverterString.read(from: &buf)
         )
@@ -10444,6 +10694,7 @@ public struct FfiConverterTypePaymentProofRecord: FfiConverterRustBuffer {
         FfiConverterOptionTypeBillingPeriod.write(value.billingPeriod, into: &buf)
         FfiConverterString.write(value.paymentEndpointIdentifier, into: &buf)
         FfiConverterOptionString.write(value.allowanceId, into: &buf)
+        FfiConverterOptionString.write(value.conversionQuoteId, into: &buf)
         FfiConverterTypePrivateJsonObject.write(value.proof, into: &buf)
         FfiConverterString.write(value.recordedAt, into: &buf)
     }
@@ -10483,6 +10734,10 @@ public struct PaymentProofSubmission {
      */
     public var allowanceId: String?
     /**
+     * Selected recurring quote Event ID.
+     */
+    public var conversionQuoteId: String?
+    /**
      * Method-specific proof object encoded as JSON.
      */
     public var proof: PrivateJsonObject
@@ -10501,11 +10756,15 @@ public struct PaymentProofSubmission {
          * This field reports usage; it does not authorize or account for payment.
          */allowanceId: String?,
         /**
+         * Selected recurring quote Event ID.
+         */conversionQuoteId: String?,
+        /**
          * Method-specific proof object encoded as JSON.
          */proof: PrivateJsonObject) {
         self.billingPeriod = billingPeriod
         self.paymentEndpointIdentifier = paymentEndpointIdentifier
         self.allowanceId = allowanceId
+        self.conversionQuoteId = conversionQuoteId
         self.proof = proof
     }
 }
@@ -10526,6 +10785,7 @@ public struct FfiConverterTypePaymentProofSubmission: FfiConverterRustBuffer {
                 billingPeriod: FfiConverterOptionTypeBillingPeriod.read(from: &buf),
                 paymentEndpointIdentifier: FfiConverterString.read(from: &buf),
                 allowanceId: FfiConverterOptionString.read(from: &buf),
+                conversionQuoteId: FfiConverterOptionString.read(from: &buf),
                 proof: FfiConverterTypePrivateJsonObject.read(from: &buf)
         )
     }
@@ -10534,6 +10794,7 @@ public struct FfiConverterTypePaymentProofSubmission: FfiConverterRustBuffer {
         FfiConverterOptionTypeBillingPeriod.write(value.billingPeriod, into: &buf)
         FfiConverterString.write(value.paymentEndpointIdentifier, into: &buf)
         FfiConverterOptionString.write(value.allowanceId, into: &buf)
+        FfiConverterOptionString.write(value.conversionQuoteId, into: &buf)
         FfiConverterTypePrivateJsonObject.write(value.proof, into: &buf)
     }
 }
@@ -10853,6 +11114,10 @@ public struct PaymentRequestRecord {
      */
     public var canceledOutboundStatus: OutboundPrivateMessageStatus?
     /**
+     * Immutable conversion quotes, including expired historical quotes.
+     */
+    public var conversionQuotes: [PaymentConversionQuoteRecord]
+    /**
      * Payment Proof records in local record order.
      */
     public var paymentProofs: [PaymentProofRecord]
@@ -10929,6 +11194,9 @@ public struct PaymentRequestRecord {
          * Local outbound delivery status for a cancellation event.
          */canceledOutboundStatus: OutboundPrivateMessageStatus?,
         /**
+         * Immutable conversion quotes, including expired historical quotes.
+         */conversionQuotes: [PaymentConversionQuoteRecord],
+        /**
          * Payment Proof records in local record order.
          */paymentProofs: [PaymentProofRecord],
         /**
@@ -10962,6 +11230,7 @@ public struct PaymentRequestRecord {
         self.rejectedOutboundStatus = rejectedOutboundStatus
         self.canceledEventId = canceledEventId
         self.canceledOutboundStatus = canceledOutboundStatus
+        self.conversionQuotes = conversionQuotes
         self.paymentProofs = paymentProofs
         self.lastStreamItemId = lastStreamItemId
         self.lastOutboundMessageId = lastOutboundMessageId
@@ -11000,6 +11269,7 @@ public struct FfiConverterTypePaymentRequestRecord: FfiConverterRustBuffer {
                 rejectedOutboundStatus: FfiConverterOptionTypeOutboundPrivateMessageStatus.read(from: &buf),
                 canceledEventId: FfiConverterOptionString.read(from: &buf),
                 canceledOutboundStatus: FfiConverterOptionTypeOutboundPrivateMessageStatus.read(from: &buf),
+                conversionQuotes: FfiConverterSequenceTypePaymentConversionQuoteRecord.read(from: &buf),
                 paymentProofs: FfiConverterSequenceTypePaymentProofRecord.read(from: &buf),
                 lastStreamItemId: FfiConverterOptionUInt64.read(from: &buf),
                 lastOutboundMessageId: FfiConverterOptionUInt64.read(from: &buf),
@@ -11026,6 +11296,7 @@ public struct FfiConverterTypePaymentRequestRecord: FfiConverterRustBuffer {
         FfiConverterOptionTypeOutboundPrivateMessageStatus.write(value.rejectedOutboundStatus, into: &buf)
         FfiConverterOptionString.write(value.canceledEventId, into: &buf)
         FfiConverterOptionTypeOutboundPrivateMessageStatus.write(value.canceledOutboundStatus, into: &buf)
+        FfiConverterSequenceTypePaymentConversionQuoteRecord.write(value.conversionQuotes, into: &buf)
         FfiConverterSequenceTypePaymentProofRecord.write(value.paymentProofs, into: &buf)
         FfiConverterOptionUInt64.write(value.lastStreamItemId, into: &buf)
         FfiConverterOptionUInt64.write(value.lastOutboundMessageId, into: &buf)
@@ -11207,6 +11478,14 @@ public struct PaymentRequestTerms {
      */
     public var acceptedPaymentEndpointIdentifiers: [String]
     /**
+     * Optional immutable conversion policy.
+     */
+    public var conversion: PaymentConversion?
+    /**
+     * Optional actual-payment deadline.
+     */
+    public var paymentDeadline: PaymentDeadline?
+    /**
      * Application-specific metadata encoded as a JSON object.
      */
     public var metadata: PrivateJsonObject
@@ -11230,6 +11509,12 @@ public struct PaymentRequestTerms {
          * Accepted Payment Endpoint Identifier strings.
          */acceptedPaymentEndpointIdentifiers: [String],
         /**
+         * Optional immutable conversion policy.
+         */conversion: PaymentConversion?,
+        /**
+         * Optional actual-payment deadline.
+         */paymentDeadline: PaymentDeadline?,
+        /**
          * Application-specific metadata encoded as a JSON object.
          */metadata: PrivateJsonObject) {
         self.amount = amount
@@ -11237,6 +11522,8 @@ public struct PaymentRequestTerms {
         self.proposalExpiresAt = proposalExpiresAt
         self.recurrence = recurrence
         self.acceptedPaymentEndpointIdentifiers = acceptedPaymentEndpointIdentifiers
+        self.conversion = conversion
+        self.paymentDeadline = paymentDeadline
         self.metadata = metadata
     }
 }
@@ -11259,6 +11546,8 @@ public struct FfiConverterTypePaymentRequestTerms: FfiConverterRustBuffer {
                 proposalExpiresAt: FfiConverterOptionString.read(from: &buf),
                 recurrence: FfiConverterOptionTypePaymentRequestRecurrence.read(from: &buf),
                 acceptedPaymentEndpointIdentifiers: FfiConverterSequenceString.read(from: &buf),
+                conversion: FfiConverterOptionTypePaymentConversion.read(from: &buf),
+                paymentDeadline: FfiConverterOptionTypePaymentDeadline.read(from: &buf),
                 metadata: FfiConverterTypePrivateJsonObject.read(from: &buf)
         )
     }
@@ -11269,6 +11558,8 @@ public struct FfiConverterTypePaymentRequestTerms: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.proposalExpiresAt, into: &buf)
         FfiConverterOptionTypePaymentRequestRecurrence.write(value.recurrence, into: &buf)
         FfiConverterSequenceString.write(value.acceptedPaymentEndpointIdentifiers, into: &buf)
+        FfiConverterOptionTypePaymentConversion.write(value.conversion, into: &buf)
+        FfiConverterOptionTypePaymentDeadline.write(value.paymentDeadline, into: &buf)
         FfiConverterTypePrivateJsonObject.write(value.metadata, into: &buf)
     }
 }
@@ -16729,6 +17020,177 @@ extension OutboundPrivateMessageStatus: Codable {}
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * Conversion terms; absence leaves conversion to the wallets' policies.
+ */
+
+public enum PaymentConversion {
+
+    /**
+     * Immutable conversion rates, also fixed across recurring installments.
+     */
+    case fixed(rates: [ConversionRate]
+    )
+    /**
+     * Cross-asset recurring payments require a quote for their Billing Period.
+     */
+    case perPeriod
+}
+
+
+#if compiler(>=6)
+extension PaymentConversion: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentConversion: FfiConverterRustBuffer {
+    typealias SwiftType = PaymentConversion
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentConversion {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .fixed(rates: try FfiConverterSequenceTypeConversionRate.read(from: &buf)
+        )
+
+        case 2: return .perPeriod
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PaymentConversion, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .fixed(rates):
+            writeInt(&buf, Int32(1))
+            FfiConverterSequenceTypeConversionRate.write(rates, into: &buf)
+
+
+        case .perPeriod:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentConversion_lift(_ buf: RustBuffer) throws -> PaymentConversion {
+    return try FfiConverterTypePaymentConversion.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentConversion_lower(_ value: PaymentConversion) -> RustBuffer {
+    return FfiConverterTypePaymentConversion.lower(value)
+}
+
+
+extension PaymentConversion: Equatable, Hashable {}
+
+extension PaymentConversion: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Deadline for actual payment, independent of proposal acceptance expiry.
+ */
+
+public enum PaymentDeadline {
+
+    /**
+     * Absolute one-time deadline in RFC3339 UTC.
+     */
+    case at(timestamp: String
+    )
+    /**
+     * Recurring deadline in elapsed seconds after the Billing Period start.
+     */
+    case periodStart(seconds: UInt64
+    )
+}
+
+
+#if compiler(>=6)
+extension PaymentDeadline: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentDeadline: FfiConverterRustBuffer {
+    typealias SwiftType = PaymentDeadline
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentDeadline {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .at(timestamp: try FfiConverterString.read(from: &buf)
+        )
+
+        case 2: return .periodStart(seconds: try FfiConverterUInt64.read(from: &buf)
+        )
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PaymentDeadline, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .at(timestamp):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(timestamp, into: &buf)
+
+
+        case let .periodStart(seconds):
+            writeInt(&buf, Int32(2))
+            FfiConverterUInt64.write(seconds, into: &buf)
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentDeadline_lift(_ buf: RustBuffer) throws -> PaymentDeadline {
+    return try FfiConverterTypePaymentDeadline.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentDeadline_lower(_ value: PaymentDeadline) -> RustBuffer {
+    return FfiConverterTypePaymentDeadline.lower(value)
+}
+
+
+extension PaymentDeadline: Equatable, Hashable {}
+
+extension PaymentDeadline: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * SDK-derived Payment Request lifecycle state.
  */
 
@@ -19041,6 +19503,54 @@ fileprivate struct FfiConverterOptionTypeOutboundPrivateMessageStatus: FfiConver
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypePaymentConversion: FfiConverterRustBuffer {
+    typealias SwiftType = PaymentConversion?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePaymentConversion.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePaymentConversion.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypePaymentDeadline: FfiConverterRustBuffer {
+    typealias SwiftType = PaymentDeadline?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePaymentDeadline.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePaymentDeadline.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypePaymentRequestLocalRole: FfiConverterRustBuffer {
     typealias SwiftType = PaymentRequestLocalRole?
 
@@ -19214,6 +19724,31 @@ fileprivate struct FfiConverterSequenceTypeContactRecord: FfiConverterRustBuffer
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeConversionRate: FfiConverterRustBuffer {
+    typealias SwiftType = [ConversionRate]
+
+    public static func write(_ value: [ConversionRate], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeConversionRate.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ConversionRate] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ConversionRate]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeConversionRate.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeCounterpartyReceiver: FfiConverterRustBuffer {
     typealias SwiftType = [CounterpartyReceiver]
 
@@ -19356,6 +19891,31 @@ fileprivate struct FfiConverterSequenceTypeOutboundPrivateSendFailure: FfiConver
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeOutboundPrivateSendFailure.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePaymentConversionQuoteRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [PaymentConversionQuoteRecord]
+
+    public static func write(_ value: [PaymentConversionQuoteRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePaymentConversionQuoteRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PaymentConversionQuoteRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PaymentConversionQuoteRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePaymentConversionQuoteRecord.read(from: &buf))
         }
         return seq
     }
@@ -20111,6 +20671,18 @@ public func parsePubkyResource(uri: String)throws  -> PubkyResourceRef  {
 })
 }
 /**
+ * Resolve an actual-payment deadline for the selected Billing Period.
+ * The caller compares this with independently verified payment time.
+ */
+public func paymentDeadlineAt(deadline: PaymentDeadline, billingPeriod: BillingPeriod?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_func_payment_deadline_at(
+        FfiConverterTypePaymentDeadline_lower(deadline),
+        FfiConverterOptionTypeBillingPeriod.lower(billingPeriod),$0
+    )
+})
+}
+/**
  * Return the Pubky public key for a local secret key.
  */
 public func pubkyPublicKeyFromSecret(localSecretKey: PubkyLocalSecretKey)throws  -> String  {
@@ -20218,6 +20790,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_parse_pubky_resource() != 2298) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_payment_deadline_at() != 2507) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_pubky_public_key_from_secret() != 41462) {
@@ -20467,6 +21042,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_public_contact() != 54711) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_quote_payment_request() != 10496) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_receipt_access() != 27958) {

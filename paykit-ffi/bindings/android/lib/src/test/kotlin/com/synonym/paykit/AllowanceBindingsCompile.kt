@@ -47,12 +47,14 @@ internal suspend fun compileAllowanceBindingsSurface(
         billingPeriod = null,
         paymentEndpointIdentifier = "btc-lightning-bolt11",
         allowanceId = allowanceId,
+        conversionQuoteId = null,
         proof = proof,
     )
     val manualProof = PaymentProofSubmission(
         billingPeriod = null,
         paymentEndpointIdentifier = "btc-lightning-bolt11",
         allowanceId = null,
+        conversionQuoteId = null,
         proof = proof,
     )
     val requestWithProof = sdk.submitPaymentProof(

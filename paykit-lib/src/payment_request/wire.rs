@@ -1,3 +1,5 @@
+use super::{PaymentConversion, PaymentConversionQuote, PaymentDeadline};
+use crate::shared_wire::deserialize_optional_no_null;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -35,6 +37,18 @@ struct PaymentRequestTermsWire {
     proposal_expires_at: RequiredNullable<String>,
     recurrence: RequiredNullable<RecurrenceWire>,
     accepted_payment_endpoint_identifiers: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_no_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    conversion: Option<PaymentConversion>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_no_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    payment_deadline: Option<PaymentDeadline>,
     #[serde(default)]
     metadata: JsonMap<String, JsonValue>,
 }
@@ -75,6 +89,12 @@ struct PaymentProofWire {
     #[serde(default, deserialize_with = "deserialize_optional_string_no_null")]
     #[serde(skip_serializing_if = "Option::is_none")]
     allowance_id: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_no_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    conversion_quote_id: Option<String>,
     proof: JsonMap<String, JsonValue>,
 }
 
@@ -99,6 +119,8 @@ impl TryFrom<PaymentRequestTermsWire> for PaymentRequestTerms {
                 .map(Recurrence::try_from)
                 .transpose()?,
         )
+        .conversion(wire.conversion)
+        .payment_deadline(wire.payment_deadline)
         .metadata(wire.metadata)
         .build()
     }
@@ -116,6 +138,8 @@ impl From<&PaymentRequestTerms> for PaymentRequestTermsWire {
                 .iter()
                 .map(|identifier| identifier.as_str().to_string())
                 .collect(),
+            conversion: terms.conversion.clone(),
+            payment_deadline: terms.payment_deadline.clone(),
             metadata: terms.metadata.clone(),
         }
     }
@@ -261,6 +285,10 @@ impl From<&PaymentProof> for PaymentProofWire {
             ),
             payment_endpoint_identifier: event.payment_endpoint_identifier.as_str().to_string(),
             allowance_id: event.allowance_id().map(|id| id.as_str().to_owned()),
+            conversion_quote_id: event
+                .conversion_quote_id
+                .as_ref()
+                .map(|id| id.as_str().to_owned()),
             proof: event.proof.clone(),
         }
     }
@@ -293,6 +321,7 @@ impl TryFrom<PaymentProofWire> for PaymentProof {
                 wire.payment_endpoint_identifier,
             )?,
             allowance_id: wire.allowance_id.map(parse_allowance_id).transpose()?,
+            conversion_quote_id: wire.conversion_quote_id.map(EventId::new).transpose()?,
             proof: wire.proof,
         })
     }
@@ -483,6 +512,60 @@ fn parse_basic_event_json(json: &str, context: &'static str) -> Result<BasicEven
     // SECURITY / REDACTION: see `parse_payment_request_json`; these event
     // bodies are decrypted private-message plaintext.
     serde_json::from_str(json).map_err(|_| invalid_plaintext_json(context))
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConversionQuoteWire {
+    version: u8,
+    kind: String,
+    event_id: String,
+    payment_request_id: String,
+    billing_period: BillingPeriodWire,
+    rates: Vec<super::ConversionRate>,
+    expires_at: String,
+}
+
+pub(super) fn serialize_conversion_quote_json(event: &PaymentConversionQuote) -> Result<String> {
+    event.validate()?;
+    serde_json::to_string(&ConversionQuoteWire {
+        version: event.version,
+        kind: event.kind.as_str().to_owned(),
+        event_id: event.event_id.as_str().to_owned(),
+        payment_request_id: event.payment_request_id.as_str().to_owned(),
+        billing_period: BillingPeriodWire::from(&event.billing_period),
+        rates: event.rates.clone(),
+        expires_at: event.expires_at.clone(),
+    })
+    .map_err(|err| {
+        invalid_data(
+            "failed to serialize Payment Conversion Quote",
+            Some(err.into()),
+        )
+    })
+}
+
+pub(super) fn parse_conversion_quote_json(json: &str) -> Result<PaymentConversionQuote> {
+    let wire: ConversionQuoteWire = serde_json::from_str(json)
+        .map_err(|_| invalid_plaintext_json("failed to parse Payment Conversion Quote JSON"))?;
+    validate_wire_version_kind(
+        wire.version,
+        &wire.kind,
+        PrivateMessageKind::PaymentConversionQuote,
+        "Payment Conversion Quote",
+    )?;
+    let event = (|| {
+        let event = PaymentConversionQuote::new(
+            EventId::new(wire.event_id)?,
+            PaymentRequestId::new(wire.payment_request_id)?,
+            BillingPeriod::from(wire.billing_period),
+            wire.rates,
+            wire.expires_at,
+        );
+        event.validate()?;
+        Ok(event)
+    })();
+    event.map_err(|err| invalid_wire(err, "Payment Conversion Quote"))
 }
 
 #[cfg(test)]
@@ -1089,6 +1172,8 @@ mod tests {
             EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101").unwrap(),
             PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap(),
             PaymentRequestTerms {
+                conversion: None,
+                payment_deadline: None,
                 proposal_expires_at: Some("2026-06-01T00:00:00Z".to_string()),
                 recurrence: Some(
                     Recurrence::try_from(crate::RecurrenceConfig {

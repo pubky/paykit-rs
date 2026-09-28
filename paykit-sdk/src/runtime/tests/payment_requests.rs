@@ -739,6 +739,7 @@ async fn test_submit_payment_proof_submission_allows_corrective_proof_before_rea
             receiver_path(),
             &request_id,
             PaymentProofSubmission {
+                conversion_quote_id: None,
                 billing_period: None,
                 payment_endpoint_identifier: PaymentEndpointIdentifier::new("btc-lightning-bolt11")
                     .unwrap(),

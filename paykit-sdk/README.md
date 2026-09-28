@@ -209,6 +209,19 @@ Common workflows:
 - export and persist an SDK backup before `sign_out` if the app wants that
   sign-out to be reversible for the same user
 
+## Conversion Quotes
+
+Set optional `conversion` and `payment_deadline` fields on Payment Request terms.
+For `per_period` conversion, the payee calls `quote_payment_request` after
+acceptance. The request record retains `conversion_quotes`; a payer selects an
+unexpired quote, preserves its ID with the in-flight payment and submits
+`conversion_quote_id` with the Payment Proof. New quotes do not revoke earlier
+ones. Delayed proofs remain available for amount and payment-time validation.
+See [Payment conversion and deadlines](../specs/payment-conversion.md) for rate
+coverage, rounding, role and expiry rules. The SDK checks correlation, while the
+application verifies settlement and decides each installment's paid/underpaid/late
+status.
+
 ## Allowance Integration
 
 An Allowance is shared consent for possible automatic handling; the SDK does

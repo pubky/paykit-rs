@@ -1,4 +1,6 @@
 use super::*;
+use crate::domain::payment_requests::{enqueue_payment_request_event, validate_proof_conversion};
+use paykit_lib::{ConversionRate, PaymentConversionQuote, PaymentRequestEvent};
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
@@ -466,6 +468,7 @@ where
             counterparty_receiver_path,
             payment_request_id,
             PaymentProofSubmission {
+                conversion_quote_id: None,
                 billing_period,
                 payment_endpoint_identifier,
                 proof,
@@ -525,11 +528,83 @@ where
         if let Some(allowance_id) = submission.allowance_id {
             event = event.with_allowance_id(allowance_id);
         }
-        event.validate_for_request(&request)?;
+        event.conversion_quote_id = submission.conversion_quote_id;
+        validate_proof_conversion(&record, &event, &request)?;
         self.enqueue_raw_payment_proof(
             counterparty.clone(),
             counterparty_receiver_path.clone(),
             &event,
+        )
+        .await?;
+        self.load_payment_request_record(
+            &counterparty,
+            &counterparty_receiver_path,
+            payment_request_id,
+        )
+        .await
+    }
+
+    /// Issue immutable rates for an accepted recurring request.
+    /// Session access and role are checked before queueing; no payment is authorized.
+    pub async fn quote_payment_request(
+        &self,
+        counterparty: PubkyPublicKey,
+        counterparty_receiver_path: PaykitReceiverPath,
+        payment_request_id: &PaymentRequestId,
+        billing_period: BillingPeriod,
+        rates: Vec<ConversionRate>,
+        expires_at: String,
+    ) -> Result<PaymentRequestRecord> {
+        let record = self
+            .load_payment_request_record(
+                &counterparty,
+                &counterparty_receiver_path,
+                payment_request_id,
+            )
+            .await?;
+        if record.local_role != Some(PaymentRequestLocalRole::Payee) {
+            return Err(PaykitSdkError::Policy {
+                context: "only the payee can issue conversion quotes".into(),
+                source: None,
+            });
+        }
+        require_state(
+            &record,
+            &[PaymentRequestLifecycleState::ActiveRecurring],
+            "quote Payment Request",
+        )?;
+        let request = request_from_record(&record).ok_or_else(|| PaykitSdkError::Protocol {
+            context: "Payment Request terms are unavailable".into(),
+            source: None,
+        })?;
+        let quote = PaymentConversionQuote::new(
+            EventId::new_v4(),
+            payment_request_id.clone(),
+            billing_period,
+            rates,
+            expires_at,
+        );
+        quote.validate_for_request(&request)?;
+        let expiry = DateTime::parse_from_rfc3339(&quote.expires_at).map_err(|_| {
+            PaykitSdkError::Policy {
+                context: "invalid quote expiry".into(),
+                source: None,
+            }
+        })?;
+        if expiry <= self.clock.now() {
+            return Err(PaykitSdkError::Policy {
+                context: "cannot issue an expired conversion quote".into(),
+                source: None,
+            });
+        }
+        self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_path)
+            .await?;
+        enqueue_payment_request_event(
+            &self.storage,
+            counterparty.clone(),
+            counterparty_receiver_path.clone(),
+            &PaymentRequestEvent::ConversionQuote(quote),
+            self.clock.now(),
         )
         .await?;
         self.load_payment_request_record(
@@ -731,6 +806,7 @@ fn is_payment_request_kind(kind: Option<&str>) -> bool {
                 | PrivateMessageKind::PaymentRequestAcceptance
                 | PrivateMessageKind::PaymentRequestRejection
                 | PrivateMessageKind::PaymentRequestCancellation
+                | PrivateMessageKind::PaymentConversionQuote
                 | PrivateMessageKind::PaymentProof
         )
     )

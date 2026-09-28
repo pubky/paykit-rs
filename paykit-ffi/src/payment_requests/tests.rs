@@ -21,6 +21,8 @@ fn public_key() -> PubkyPublicKey {
 #[test]
 fn test_payment_request_terms_parse_protocol_inputs() {
     let terms = FfiPaymentRequestTerms {
+        conversion: None,
+        payment_deadline: None,
         amount: FfiPaymentRequestAmount {
             value: "25.50".into(),
             asset: "usd".into(),
@@ -91,6 +93,7 @@ fn test_payment_request_record_conversion_redacts_references() {
     proof.insert("preimage".into(), JsonValue::String("secret".into()));
 
     let record = PaymentRequestRecord {
+        conversion_quotes: Vec::new(),
         counterparty: public_key(),
         counterparty_receiver_path: paykit_sdk::PaykitReceiverPath::new("bitkit/wallet").unwrap(),
         payment_request_id: "550e8400-e29b-41d4-a716-446655440000".into(),
@@ -101,6 +104,8 @@ fn test_payment_request_record_conversion_redacts_references() {
         proposal_outbound_status: None,
         proposal_event_id: Some("650e8400-e29b-41d4-a716-446655440000".into()),
         terms: Some(PaymentRequestTermsRecord {
+            conversion: None,
+            payment_deadline: None,
             amount: AmountRecord {
                 value: "10".into(),
                 asset: "usd".into(),
@@ -118,6 +123,7 @@ fn test_payment_request_record_conversion_redacts_references() {
         canceled_event_id: None,
         canceled_outbound_status: None,
         payment_proofs: vec![PaymentProofRecord {
+            conversion_quote_id: None,
             event_id: "750e8400-e29b-41d4-a716-446655440000".into(),
             outbound_message_id: Some(9),
             outbound_status: Some(OutboundPrivateMessageStatus::Sent),
@@ -161,6 +167,7 @@ fn test_payment_request_record_conversion_redacts_references() {
 #[test]
 fn test_payment_proof_submission_rejects_non_object_proof() {
     let submission = FfiPaymentProofSubmission {
+        conversion_quote_id: None,
         billing_period: None,
         payment_endpoint_identifier: "btc-lightning-bolt11".into(),
         allowance_id: None,
@@ -175,6 +182,7 @@ fn test_payment_proof_submission_rejects_non_object_proof() {
 
 fn proof_submission(allowance_id: Option<String>) -> FfiPaymentProofSubmission {
     FfiPaymentProofSubmission {
+        conversion_quote_id: None,
         billing_period: None,
         payment_endpoint_identifier: "btc-lightning-bolt11".into(),
         allowance_id,
@@ -219,6 +227,7 @@ fn test_payment_proof_submission_rejects_invalid_allowance_id_without_leaking_in
 #[test]
 fn test_payment_proof_record_preserves_absent_allowance_id() {
     let record = PaymentProofRecord {
+        conversion_quote_id: None,
         event_id: "750e8400-e29b-41d4-a716-446655440000".into(),
         outbound_message_id: None,
         outbound_status: None,
@@ -271,8 +280,68 @@ fn test_terms_conversion_rejects_empty_endpoint_list() {
         payment_reference: Arc::new(FfiPaymentReference::new("invoice-1".into()).unwrap()),
         proposal_expires_at: None,
         recurrence: None,
+        conversion: None,
+        payment_deadline: None,
         accepted_payment_endpoint_identifiers: Vec::new(),
         metadata: Arc::new(FfiPrivateJsonObject::new("{}".into()).unwrap()),
     });
     assert!(matches!(result, Err(PaykitFfiError::Protocol { code, .. }) if code == "validation"));
+}
+
+#[test]
+fn test_conversion_terms_and_quote_selection_survive_bindings() {
+    let terms = FfiPaymentRequestTerms {
+        amount: FfiPaymentRequestAmount {
+            asset: "usd".into(),
+            value: "10".into(),
+        },
+        payment_reference: Arc::new(FfiPaymentReference::new("invoice-1".into()).unwrap()),
+        proposal_expires_at: None,
+        recurrence: None,
+        conversion: Some(FfiPaymentConversion::Fixed {
+            rates: vec![FfiConversionRate {
+                asset: "usdt".into(),
+                value: "1".into(),
+            }],
+        }),
+        payment_deadline: Some(FfiPaymentDeadline::At {
+            timestamp: "2026-10-01T12:00:00Z".into(),
+        }),
+        accepted_payment_endpoint_identifiers: vec!["usdt-arbitrum-address".into()],
+        metadata: Arc::new(FfiPrivateJsonObject::new("{}".into()).unwrap()),
+    };
+    let native = PaymentRequestTerms::try_from(terms).unwrap();
+    let restored =
+        FfiPaymentRequestTerms::try_from(PaymentRequestTermsRecord::from(&native)).unwrap();
+    assert_eq!(PaymentRequestTerms::try_from(restored).unwrap(), native);
+    for quote_id in [ALLOWANCE_ID, "not-a-uuid"] {
+        let submission = FfiPaymentProofSubmission {
+            billing_period: None,
+            payment_endpoint_identifier: "usdt-arbitrum-address".into(),
+            allowance_id: None,
+            conversion_quote_id: Some(quote_id.into()),
+            proof: Arc::new(FfiPrivateJsonObject::new("{}".into()).unwrap()),
+        };
+        let result = paykit_sdk::PaymentProofSubmission::try_from(submission);
+        if quote_id == ALLOWANCE_ID {
+            assert_eq!(
+                result.unwrap().conversion_quote_id.unwrap().as_str(),
+                quote_id
+            );
+        } else {
+            assert!(result.is_err());
+        }
+    }
+    assert_eq!(
+        payment_deadline_at(
+            FfiPaymentDeadline::PeriodStart { seconds: 86400 },
+            Some(FfiBillingPeriod {
+                starts_at: "2026-10-01T00:00:00Z".into(),
+                ends_at: "2026-11-01T00:00:00Z".into(),
+            })
+        )
+        .unwrap(),
+        "2026-10-02T00:00:00Z"
+    );
+    assert!(payment_deadline_at(FfiPaymentDeadline::PeriodStart { seconds: 86400 }, None).is_err());
 }

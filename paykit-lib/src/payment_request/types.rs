@@ -1,3 +1,4 @@
+use super::{PaymentConversion, PaymentConversionQuote, PaymentDeadline};
 use std::fmt;
 
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -136,6 +137,10 @@ pub struct PaymentRequestTerms {
     pub(super) recurrence: Option<Recurrence>,
     /// Accepted Payment Endpoint Identifiers.
     pub(super) accepted_payment_endpoint_identifiers: Vec<PaymentEndpointIdentifier>,
+    /// Optional conversion policy; absence leaves conversion to wallet policy.
+    pub(super) conversion: Option<PaymentConversion>,
+    /// Optional deadline for actual payment, independent of proposal acceptance.
+    pub(super) payment_deadline: Option<PaymentDeadline>,
     /// Application-specific JSON metadata.
     pub(super) metadata: JsonMap<String, JsonValue>,
 }
@@ -147,6 +152,8 @@ impl fmt::Debug for PaymentRequestTerms {
             .field("payment_reference", &"<redacted>")
             .field("proposal_expires_at", &self.proposal_expires_at)
             .field("recurrence", &self.recurrence)
+            .field("conversion", &self.conversion)
+            .field("payment_deadline", &self.payment_deadline)
             .field(
                 "accepted_payment_endpoint_identifiers",
                 &self.accepted_payment_endpoint_identifiers,
@@ -379,6 +386,8 @@ pub struct PaymentProof {
     pub(super) payment_endpoint_identifier: PaymentEndpointIdentifier,
     /// Optional Allowance used for this payment, scoped to the exact Encrypted Link.
     pub(super) allowance_id: Option<AllowanceId>,
+    /// Event ID of the selected recurring conversion quote, when required.
+    pub(super) conversion_quote_id: Option<EventId>,
     /// Method-specific proof object.
     pub(super) proof: JsonMap<String, JsonValue>,
 }
@@ -424,8 +433,15 @@ impl PaymentProof {
             billing_period,
             payment_endpoint_identifier,
             allowance_id: None,
+            conversion_quote_id: None,
             proof,
         }
+    }
+
+    /// Bind this proof to a previously issued recurring conversion quote.
+    pub fn with_conversion_quote_id(mut self, quote_id: EventId) -> Self {
+        self.conversion_quote_id = Some(quote_id);
+        self
     }
 
     /// Report the Allowance used for this payment execution.
@@ -445,9 +461,9 @@ impl PaymentProof {
     /// Validate this proof against the immutable terms of a specific Payment Request.
     ///
     /// Checks stateless correlation only: request ID, Payment Reference,
-    /// Billing Period presence/shape, and accepted endpoint identifier. Caller
-    /// state still owns lifecycle, role, dedupe, settlement, recurrence
-    /// eligibility, and FX or cross-asset policy.
+    /// Billing Period presence/shape, accepted endpoint and conversion selection.
+    /// Use `validate_conversion_quote` to also check a selected quote. Caller
+    /// state owns lifecycle, role, dedupe, settlement and recurrence eligibility.
     pub fn validate_for_request(&self, request: &PaymentRequest) -> Result<()> {
         if self.version != 1 || self.kind != PrivateMessageKind::PaymentProof {
             return Err(PaykitError::Validation(
@@ -480,6 +496,7 @@ impl PaymentProof {
                     .into(),
             ));
         }
+        self.validate_conversion(&request.request)?;
         match (&request.request.recurrence, &self.billing_period) {
             (None, Some(_)) => Err(PaykitError::Validation(
                 "Payment Proof billing_period must be null for one-time Payment Requests".into(),
@@ -509,6 +526,8 @@ pub enum PaymentRequestEvent {
     Rejection(PaymentRequestRejection),
     /// `paykit.payment_request_cancellation` event.
     Cancellation(PaymentRequestCancellation),
+    /// Payee-issued recurring conversion quote.
+    ConversionQuote(PaymentConversionQuote),
     /// `paykit.payment_proof` event.
     Proof(PaymentProof),
 }
@@ -532,6 +551,7 @@ impl PaymentRequestEvent {
             Self::Rejection(event) => event.kind,
             Self::Cancellation(event) => event.kind,
             Self::Proof(event) => event.kind,
+            Self::ConversionQuote(event) => event.kind,
         }
     }
 
@@ -543,6 +563,7 @@ impl PaymentRequestEvent {
             Self::Rejection(event) => &event.event_id,
             Self::Cancellation(event) => &event.event_id,
             Self::Proof(event) => &event.event_id,
+            Self::ConversionQuote(event) => &event.event_id,
         }
     }
 
@@ -554,6 +575,7 @@ impl PaymentRequestEvent {
             Self::Rejection(event) => &event.payment_request_id,
             Self::Cancellation(event) => &event.payment_request_id,
             Self::Proof(event) => &event.payment_request_id,
+            Self::ConversionQuote(event) => &event.payment_request_id,
         }
     }
 }
@@ -679,6 +701,7 @@ impl PaymentRequestTerms {
         if let Some(recurrence) = &self.recurrence {
             recurrence.validate()?;
         }
+        self.validate_conversion()?;
         if self.accepted_payment_endpoint_identifiers.is_empty() {
             return Err(PaykitError::Validation(
                 "accepted_payment_endpoint_identifiers must not be empty".into(),
@@ -972,6 +995,8 @@ mod tests {
 
     fn request_terms() -> PaymentRequestTerms {
         PaymentRequestTerms {
+            conversion: None,
+            payment_deadline: None,
             amount: PaymentAmount::new("0.001", "btc").unwrap(),
             payment_reference: PaymentReference::new("invoice-2026-0001").unwrap(),
             proposal_expires_at: Some("2026-06-01T00:00:00Z".to_string()),
@@ -1054,6 +1079,8 @@ mod tests {
             EventId::new_v4(),
             PaymentRequestId::new_v4(),
             PaymentRequestTerms {
+                conversion: None,
+                payment_deadline: None,
                 metadata: JsonMap::from_iter([(
                     "note".to_string(),
                     JsonValue::String("private request note".to_string()),
