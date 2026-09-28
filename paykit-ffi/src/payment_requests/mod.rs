@@ -105,7 +105,10 @@ impl fmt::Debug for FfiConversionRate {
 #[derive(uniffi::Enum, Clone, Debug)]
 pub enum FfiPaymentConversion {
     /// Immutable conversion rates, also fixed across recurring installments.
-    Fixed { rates: Vec<FfiConversionRate> },
+    Fixed {
+        /// Exact rates; omitted cross-asset currencies cannot be used.
+        rates: Vec<FfiConversionRate>,
+    },
     /// Cross-asset recurring payments require a quote for their Billing Period.
     PerPeriod,
 }
@@ -114,9 +117,15 @@ pub enum FfiPaymentConversion {
 #[derive(uniffi::Enum, Clone, Debug)]
 pub enum FfiPaymentDeadline {
     /// Absolute one-time deadline in RFC3339 UTC.
-    At { timestamp: String },
+    At {
+        /// RFC3339 UTC timestamp with uppercase T and Z.
+        timestamp: String,
+    },
     /// Recurring deadline in elapsed seconds after the Billing Period start.
-    PeriodStart { seconds: u64 },
+    PeriodStart {
+        /// Nonnegative elapsed seconds from each period start.
+        seconds: u64,
+    },
 }
 
 /// Payee-issued quote retained for payment verification after expiry.
@@ -128,6 +137,8 @@ pub struct FfiPaymentConversionQuoteRecord {
     pub billing_period: FfiBillingPeriod,
     /// Payment asset units per requested asset unit.
     pub rates: Vec<FfiConversionRate>,
+    /// Inclusive start of the payment validity interval, in RFC3339 UTC.
+    pub valid_from: String,
     /// Inclusive actual-payment deadline, in RFC3339 UTC.
     pub expires_at: String,
     /// Local outbound status, when issued locally.
@@ -204,7 +215,7 @@ pub struct FfiPaymentRequestFilter {
     pub states: Vec<FfiPaymentRequestLifecycleState>,
     /// Restrict results by whether the request has recurrence terms.
     pub recurring: Option<bool>,
-    /// Include only inbound Payment Requests received from counterparties.
+    /// Inspect inbound proposals only; use the full view for actionable state and quotes.
     pub received_only: bool,
 }
 
@@ -321,7 +332,8 @@ impl fmt::Debug for FfiPaymentProofSubmission {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
-    /// Return inbound Payment Requests received from one counterparty.
+    /// Inspect inbound proposals from one counterparty.
+    /// Quotes and actionable state require the full view, which includes outbound acceptance.
     pub async fn received_payment_requests_from(
         &self,
         counterparty: String,
@@ -388,6 +400,7 @@ impl FfiPaykitSdk {
     }
 
     /// Queue a new Payment Request proposal and return local derived state.
+    /// The caller must establish peer support before including conversion or payment deadlines.
     pub async fn propose_payment_request(
         &self,
         counterparty: String,
@@ -467,6 +480,7 @@ impl FfiPaykitSdk {
     }
 
     /// Issue rates for one accepted recurring Billing Period; does not authorize payment.
+    /// The caller establishes peer support and owns session creation, capability scope and key rotation.
     pub async fn quote_payment_request(
         &self,
         counterparty: String,

@@ -26,14 +26,17 @@ unknown fields and unknown policy types are invalid.
 A rate is **units of payment asset per one unit of requested asset**. For a
 request denominated in `usd`, a `btc` rate of `0.00001234` means 0.00001234 BTC per
 USD. Both wallets multiply the requested amount by that rate using exact decimal
-or integer arithmetic and round the result upward once to the payment asset's
+or integer arithmetic and round the result upward once to the selected payment endpoint's
 smallest supported unit. Network fees are additional; they are not deducted from
 the requested payment value. Rates must be positive decimal strings, without
-signs, exponents or grouping separators. Asset codes must be unique within the
+signs, exponents or grouping separators. The grammar is `[0-9]+(\.[0-9]*)?`
+or `\.[0-9]+`; leading and trailing zeroes are allowed. These are exact
+decimals, not floating-point values. Asset codes must be unique within the
 nonempty rates list. Rates need not sum to anything.
 
 Conversion-enabled requests use the asset-prefixed Payment Endpoint Identifier
-convention. A rate applies to all accepted endpoints whose first segment is that
+convention: three nonempty lowercase alphanumeric segments, separated by
+hyphens. The request asset must also be lowercase alphanumeric. A rate applies to all accepted endpoints whose first segment is that
 asset, including Bitcoin on-chain and Lightning endpoints. Asset spelling is
 case-sensitive. Rates must name an accepted asset different from the requested
 asset; same-asset payments have an implicit rate of exactly one.
@@ -50,7 +53,9 @@ payable under fixed terms. USD and USDT are distinct protocol assets. An
 application choosing parity must explicitly offer a `1` rate.
 
 For example, a `0.05 usd` request at `0.000012345 btc/usd` requires 62 satoshis
-(61.725 rounded upward). A `0.05 usd` request at `1 usdt/usd` requires exactly
+on Bitcoin on-chain (61.725 rounded upward), or 61,725 millisatoshis on a
+Lightning endpoint supporting millisatoshis. Both peers use the selected
+endpoint precision, not a common rounding unit for every BTC rail. A `0.05 usd` request at `1 usdt/usd` requires exactly
 50,000 atomic units when that token has six decimals. Token identity and precision
 come from the selected, validated endpoint, not its display symbol alone.
 
@@ -104,6 +109,7 @@ The payee can issue quotes after an opted-in recurring request has been accepted
   "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
   "billing_period": {"starts_at":"2026-10-01T00:00:00Z","ends_at":"2026-11-01T00:00:00Z"},
   "rates": [{"asset":"usdt","value":"1"},{"asset":"btc","value":"0.00001234"}],
+  "valid_from": "2026-10-01T00:00:00Z",
   "expires_at": "2026-10-02T00:00:00Z"
 }
 ```
@@ -111,11 +117,16 @@ The payee can issue quotes after an opted-in recurring request has been accepted
 The Event ID is the quote identifier; no second identity or revision counter is
 needed. A quote is an authenticated payee Event Message, scoped to the exact
 Encrypted Link and request. It has its own nonempty rates list and required
-expiry. The payer cannot issue it. A quote cannot change the requested amount,
+validity interval (`valid_from` through `expires_at`, inclusive). The SDK sets
+`valid_from` to its issuance clock rounded down to whole seconds, matching
+common chain timestamp precision. The payee must not backdate quotes to reprice
+existing payments. Wallets compare independently verified payment time against
+both bounds; selecting a later quote cannot satisfy an earlier underpayment.
+The payer cannot issue it. A quote cannot change the requested amount,
 asset, endpoints, recurrence or other immutable request terms.
 
 A newer quote never overwrites an older one. **Each issued quote remains usable
-until its own expiry**, subject to the request deadline and cancellation policy.
+from its validity start until its own expiry**, subject to the request deadline and cancellation policy.
 The payee commits to each price for that interval; applications should choose
 quote lifetimes accordingly. A wallet may choose a newer quote before approval,
 but cannot silently switch the approved amount or selected quote afterward.
@@ -131,7 +142,7 @@ period, not just the long-lived Payment Request ID.
 
 The SDK preserves all quotes and validates quote/proof correlation without
 rejecting evidence based on the current clock. Applications check actual amount,
-payment-time expiry, Billing Period eligibility and whether a transfer has already
+payment-time validity, Billing Period eligibility and whether a transfer has already
 been used. A single payment must not satisfy multiple requests or periods. Each
 installment has its own local payment status; proof submission does not settle the
 whole recurring request. A quote crossing a cancellation may remain historical
@@ -147,11 +158,24 @@ and period alongside their payment identity before execution, and retry evidence
 delivery independently of execution. Signing a post-execution ERC-20 proof must
 also survive interruption without causing a second payment.
 
+Conversion timestamps use four-digit years, uppercase `T` and `Z`, and optional
+fractional seconds; leap seconds are not supported. Equivalent Billing Period
+instants compare equal even when fractional-second spellings differ. Signed
+proof context keeps the timestamp strings carried by that proof verbatim.
+
 Existing messages with no conversion/deadline fields retain their meaning. Peers
-must support these fields and the new event before using them; implementations
+must support these fields and the new event before using them. This is a
+coordinated protocol revision; the caller must establish support through its
+application deployment or an explicitly agreed peer capability mechanism. The
+existing `payment_requests` receiver flag does not advertise this extension.
+The SDK does not discover extension support or negotiate a downgrade; implementations
 must not strip unknown terms to make a request appear payable. Closed-world
 parsing rejects unsupported terms. No on-chain execution, allowance accounting,
 market-rate provider, new database table or automatic-payment authority is added.
 
 All Event Messages must fit the existing encrypted message limit. Keep metadata
 and rate lists compact; oversized messages are rejected by the outbound queue.
+Before accepting a request or sending funds, wallets must also preflight the
+complete maximum-size Payment Proof for the chosen method, including the actual
+reference, period, optional IDs and JSON escaping. A request fitting in one
+message does not imply its proof will fit. See the ERC-20 profile's size rules.

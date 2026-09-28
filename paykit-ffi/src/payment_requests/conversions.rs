@@ -395,6 +395,7 @@ impl From<PaymentConversionQuoteRecord> for FfiPaymentConversionQuoteRecord {
             event_id: value.event_id,
             billing_period: value.billing_period.into(),
             rates: value.rates.into_iter().map(Into::into).collect(),
+            valid_from: value.valid_from,
             expires_at: value.expires_at,
             outbound_status: value.outbound_status.map(Into::into),
         }

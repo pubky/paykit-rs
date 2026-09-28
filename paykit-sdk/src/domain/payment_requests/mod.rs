@@ -23,7 +23,9 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use crate::{
     domain::outbound_private::enqueue_private_message,
     domain::outbound_private::OutboundPrivateMessageStatus,
-    domain::private_stream::{outbound_event_carriers, payload_hash, OutboundEventCarriers},
+    domain::private_stream::{
+        is_payment_request_kind, outbound_event_carriers, payload_hash, OutboundEventCarriers,
+    },
     domain::records::{AmountRecord, BillingPeriodRecord},
     storage::{
         EventDedupRecord, OutboundPrivateMessageRecord, PrivateStreamItemRecord, StorageAdapter,
@@ -35,8 +37,8 @@ mod derivation;
 
 use derivation::recurrence_unit_to_str;
 pub(crate) use derivation::{
-    payment_proof_allowed_states, payment_request_records, received_payment_request_records,
-    request_from_record, validate_proof_conversion,
+    payment_proof_allowed_states, payment_request_records, payment_request_records_in,
+    received_payment_request_records, request_from_record, validate_proof_conversion,
 };
 
 /// Local role for one Payment Request.
@@ -275,6 +277,7 @@ pub struct PaymentProofRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowance_id: Option<String>,
     /// Selected recurring conversion quote Event ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub conversion_quote_id: Option<String>,
     /// Method-specific proof object.
     pub proof: JsonMap<String, JsonValue>,
@@ -314,6 +317,8 @@ pub struct PaymentConversionQuoteRecord {
     pub billing_period: BillingPeriodRecord,
     /// Units of payment asset per one requested asset unit.
     pub rates: Vec<ConversionRate>,
+    /// Inclusive start of the payment validity interval, in RFC3339 UTC.
+    pub valid_from: String,
     /// Inclusive actual-payment deadline for this quote.
     pub expires_at: String,
     /// Local outbound delivery status, when issued locally.

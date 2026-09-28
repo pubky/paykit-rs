@@ -231,6 +231,16 @@ impl fmt::Debug for PaymentRequest {
 }
 
 impl PaymentRequest {
+    pub(super) fn validate(&self) -> Result<()> {
+        crate::validation::validate_outgoing_version_kind(
+            self.version,
+            self.kind,
+            PrivateMessageKind::PaymentRequest,
+            "Payment Request",
+        )?;
+        self.request.validate()
+    }
+
     /// Construct a Payment Request proposal using protocol version 1.
     pub fn new(
         event_id: EventId,
@@ -471,12 +481,7 @@ impl PaymentProof {
                 "Payment Proof must have version 1 and kind paykit.payment_proof".into(),
             ));
         }
-        if request.version != 1 || request.kind != PrivateMessageKind::PaymentRequest {
-            return Err(PaykitError::Validation(
-                "Payment Request must have version 1 and kind paykit.payment_request".into(),
-            ));
-        }
-        request.request.validate()?;
+        request.validate()?;
         if self.payment_request_id != request.payment_request_id {
             return Err(PaykitError::Validation(
                 "Payment Proof payment_request_id must match Payment Request".into(),

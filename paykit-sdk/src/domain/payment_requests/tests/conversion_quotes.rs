@@ -57,6 +57,7 @@ fn quote(id: &str, request: &PaymentRequest) -> PaymentConversionQuote {
             asset: "usdt".into(),
             value: "50000".into(),
         }],
+        "2026-06-01T00:00:00Z".into(),
         "2026-06-02T00:00:00Z".into(),
     )
 }
@@ -220,4 +221,197 @@ async fn test_conversion_proof_cannot_select_another_period_or_unknown_quote() {
         assert_eq!(record.state, PaymentRequestLifecycleState::InvalidConflict);
         assert!(record.payment_proofs.is_empty());
     }
+}
+
+#[tokio::test]
+async fn test_quote_delivery_recovery_preserves_prior_payment_evidence() {
+    let (storage, peer, request) = setup(PaymentRequestLocalRole::Payee).await;
+    let old = quote("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103", &request);
+    send(
+        &storage,
+        &peer,
+        PaymentRequestEvent::ConversionQuote(old.clone()),
+        true,
+    )
+    .await;
+    let proof = PaymentProof::new(
+        EventId::new_v4(),
+        request.payment_request_id.clone(),
+        request.request.payment_reference.clone(),
+        Some(old.billing_period.clone()),
+        PaymentEndpointIdentifier::new("usdt-arbitrum-address").unwrap(),
+        Default::default(),
+    )
+    .with_conversion_quote_id(old.event_id.clone());
+    send(&storage, &peer, PaymentRequestEvent::Proof(proof), false).await;
+    let before = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(before.payment_proofs.len(), 1);
+    let mut later = quote("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104", &request);
+    later.billing_period.starts_at = "2026-07-01T00:00:00Z".into();
+    later.billing_period.ends_at = "2026-08-01T00:00:00Z".into();
+    later.expires_at = "2026-07-02T00:00:00Z".into();
+    send(
+        &storage,
+        &peer,
+        PaymentRequestEvent::ConversionQuote(later),
+        true,
+    )
+    .await;
+    storage
+        .transaction(|tx| {
+            let mut outbound = tx
+                .outbound_private_messages(&peer, &receiver_path())
+                .last()
+                .unwrap()
+                .clone();
+            outbound.status = OutboundPrivateMessageStatus::RecoveryRequired;
+            outbound.last_error = Some("Encrypted Link recovery is required".into());
+            tx.save_outbound_private_message(outbound)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let after = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(after.state, PaymentRequestLifecycleState::ActiveRecurring);
+    assert_eq!(after.payment_proofs, before.payment_proofs);
+}
+
+#[tokio::test]
+async fn test_cancellation_delivery_recovery_preserves_prior_payment_evidence() {
+    for role in [
+        PaymentRequestLocalRole::Payee,
+        PaymentRequestLocalRole::Payer,
+    ] {
+        let storage = InMemoryStorage::new();
+        let peer = counterparty();
+        let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
+        let proof_id = "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103";
+        let events = [
+            (
+                PaymentRequestLocalRole::Payee,
+                request_raw(
+                    "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+                    request_id,
+                    "invoice",
+                    None,
+                    None,
+                ),
+            ),
+            (
+                PaymentRequestLocalRole::Payer,
+                acceptance_raw("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102", request_id),
+            ),
+            (
+                PaymentRequestLocalRole::Payer,
+                proof_raw(proof_id, request_id, "invoice"),
+            ),
+            (
+                PaymentRequestLocalRole::Payee,
+                cancellation_raw("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104", request_id),
+            ),
+        ];
+        for (index, (sender, raw)) in events.into_iter().enumerate() {
+            let at = timestamp() + ChronoDuration::minutes(index as i64);
+            if sender == role {
+                enqueue_untyped_private_message(&storage, peer.clone(), receiver_path(), raw, at)
+                    .await
+                    .unwrap();
+            } else {
+                persist_messages_at(&storage, peer.clone(), vec![raw], at).await;
+            }
+        }
+        // The payee's cancellation or payer's proof can require delivery recovery.
+        storage
+            .transaction(|tx| {
+                let mut outbound = tx
+                    .outbound_private_messages(&peer, &receiver_path())
+                    .last()
+                    .unwrap()
+                    .clone();
+                outbound.status = OutboundPrivateMessageStatus::RecoveryRequired;
+                outbound.last_error = Some("Encrypted Link recovery is required".into());
+                tx.save_outbound_private_message(outbound)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let record = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            record.state,
+            PaymentRequestLifecycleState::RecoveryRequired,
+            "{role:?}"
+        );
+        assert_eq!(record.payment_proofs.len(), 1, "{role:?}");
+        assert_eq!(record.payment_proofs[0].event_id, proof_id, "{role:?}");
+    }
+}
+
+#[tokio::test]
+async fn test_quote_admission_respects_acceptance_and_payee_cancellation() {
+    let (storage, peer, request) = setup(PaymentRequestLocalRole::Payee).await;
+    send(
+        &storage,
+        &peer,
+        parsed_event(cancellation_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d105",
+            request.payment_request_id.as_str(),
+        )),
+        true,
+    )
+    .await;
+    send(
+        &storage,
+        &peer,
+        PaymentRequestEvent::ConversionQuote(quote(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103",
+            &request,
+        )),
+        true,
+    )
+    .await;
+    let record = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(record.state, PaymentRequestLifecycleState::InvalidConflict);
+    assert!(record
+        .invalid_reason
+        .unwrap()
+        .contains("payee's cancellation"));
+    assert!(record.conversion_quotes.is_empty());
+
+    let (storage, peer, request) = setup(PaymentRequestLocalRole::Payer).await;
+    let raw = serialize_payment_request_event(&PaymentRequestEvent::ConversionQuote(quote(
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103",
+        &request,
+    )))
+    .unwrap();
+    persist_messages_at(
+        &storage,
+        peer.clone(),
+        vec![raw],
+        timestamp() - ChronoDuration::seconds(1),
+    )
+    .await;
+    let record = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(record.state, PaymentRequestLifecycleState::InvalidConflict);
+    assert!(record.invalid_reason.unwrap().contains("before acceptance"));
+    let inspection =
+        received_payment_request_records(&storage, &peer, &receiver_path(), timestamp())
+            .await
+            .unwrap()
+            .remove(0);
+    assert!(inspection.conversion_quotes.is_empty());
 }

@@ -467,6 +467,29 @@ pub(crate) fn is_event_message_kind(kind: &str) -> bool {
     }
 }
 
+/// Whether a recognized kind carries a Payment Request lifecycle event.
+pub(crate) fn is_payment_request_kind(kind: Option<&str>) -> bool {
+    match kind.and_then(PrivateMessageKind::parse) {
+        Some(
+            PrivateMessageKind::PaymentRequest
+            | PrivateMessageKind::PaymentRequestAcceptance
+            | PrivateMessageKind::PaymentRequestRejection
+            | PrivateMessageKind::PaymentRequestCancellation
+            | PrivateMessageKind::PaymentConversionQuote
+            | PrivateMessageKind::PaymentProof,
+        ) => true,
+        None
+        | Some(
+            PrivateMessageKind::PrivatePaymentList
+            | PrivateMessageKind::ReceiptAccess
+            | PrivateMessageKind::AllowanceProposal
+            | PrivateMessageKind::AllowanceAcceptance
+            | PrivateMessageKind::AllowanceRejection
+            | PrivateMessageKind::AllowanceEnd,
+        ) => false,
+    }
+}
+
 /// Whether a Private Message Kind carries an Allowance lifecycle event.
 pub(crate) fn is_allowance_kind(kind: &str) -> bool {
     match PrivateMessageKind::parse(kind) {

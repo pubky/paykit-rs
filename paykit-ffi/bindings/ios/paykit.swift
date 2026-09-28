@@ -1690,6 +1690,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Queue a new Payment Request proposal and return local derived state.
+     * The caller must establish peer support before including conversion or payment deadlines.
      */
     func proposePaymentRequest(counterparty: String, counterpartyReceiverPath: String, terms: PaymentRequestTerms) async throws  -> PaymentRequestRecord
 
@@ -1720,6 +1721,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Issue rates for one accepted recurring Billing Period; does not authorize payment.
+     * The caller establishes peer support and owns session creation, capability scope and key rotation.
      */
     func quotePaymentRequest(counterparty: String, counterpartyReceiverPath: String, paymentRequestId: String, billingPeriod: BillingPeriod, rates: [ConversionRate], expiresAt: String) async throws  -> PaymentRequestRecord
 
@@ -1769,7 +1771,8 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func receivePrivateMessagesFromLinkedPeers() async throws  -> [PrivateStreamCounterpartyIntakeReport]
 
     /**
-     * Return inbound Payment Requests received from one counterparty.
+     * Inspect inbound proposals from one counterparty.
+     * Quotes and actionable state require the full view, which includes outbound acceptance.
      */
     func receivedPaymentRequestsFrom(counterparty: String, counterpartyReceiverPath: String) async throws  -> [PaymentRequestRecord]
 
@@ -3115,6 +3118,7 @@ open func proposeAllowance(counterparty: String, counterpartyReceiverPath: Strin
 
     /**
      * Queue a new Payment Request proposal and return local derived state.
+     * The caller must establish peer support before including conversion or payment deadlines.
      */
 open func proposePaymentRequest(counterparty: String, counterpartyReceiverPath: String, terms: PaymentRequestTerms)async throws  -> PaymentRequestRecord  {
     return
@@ -3235,6 +3239,7 @@ open func publishPublicContact(publicKey: String, receiverPath: String)async thr
 
     /**
      * Issue rates for one accepted recurring Billing Period; does not authorize payment.
+     * The caller establishes peer support and owns session creation, capability scope and key rotation.
      */
 open func quotePaymentRequest(counterparty: String, counterpartyReceiverPath: String, paymentRequestId: String, billingPeriod: BillingPeriod, rates: [ConversionRate], expiresAt: String)async throws  -> PaymentRequestRecord  {
     return
@@ -3434,7 +3439,8 @@ open func receivePrivateMessagesFromLinkedPeers()async throws  -> [PrivateStream
 }
 
     /**
-     * Return inbound Payment Requests received from one counterparty.
+     * Inspect inbound proposals from one counterparty.
+     * Quotes and actionable state require the full view, which includes outbound acceptance.
      */
 open func receivedPaymentRequestsFrom(counterparty: String, counterpartyReceiverPath: String)async throws  -> [PaymentRequestRecord]  {
     return
@@ -10447,6 +10453,10 @@ public struct PaymentConversionQuoteRecord {
      */
     public var rates: [ConversionRate]
     /**
+     * Inclusive start of the payment validity interval, in RFC3339 UTC.
+     */
+    public var validFrom: String
+    /**
      * Inclusive actual-payment deadline, in RFC3339 UTC.
      */
     public var expiresAt: String
@@ -10468,6 +10478,9 @@ public struct PaymentConversionQuoteRecord {
          * Payment asset units per requested asset unit.
          */rates: [ConversionRate],
         /**
+         * Inclusive start of the payment validity interval, in RFC3339 UTC.
+         */validFrom: String,
+        /**
          * Inclusive actual-payment deadline, in RFC3339 UTC.
          */expiresAt: String,
         /**
@@ -10476,6 +10489,7 @@ public struct PaymentConversionQuoteRecord {
         self.eventId = eventId
         self.billingPeriod = billingPeriod
         self.rates = rates
+        self.validFrom = validFrom
         self.expiresAt = expiresAt
         self.outboundStatus = outboundStatus
     }
@@ -10497,6 +10511,9 @@ extension PaymentConversionQuoteRecord: Equatable, Hashable {
         if lhs.rates != rhs.rates {
             return false
         }
+        if lhs.validFrom != rhs.validFrom {
+            return false
+        }
         if lhs.expiresAt != rhs.expiresAt {
             return false
         }
@@ -10510,6 +10527,7 @@ extension PaymentConversionQuoteRecord: Equatable, Hashable {
         hasher.combine(eventId)
         hasher.combine(billingPeriod)
         hasher.combine(rates)
+        hasher.combine(validFrom)
         hasher.combine(expiresAt)
         hasher.combine(outboundStatus)
     }
@@ -10529,6 +10547,7 @@ public struct FfiConverterTypePaymentConversionQuoteRecord: FfiConverterRustBuff
                 eventId: FfiConverterString.read(from: &buf),
                 billingPeriod: FfiConverterTypeBillingPeriod.read(from: &buf),
                 rates: FfiConverterSequenceTypeConversionRate.read(from: &buf),
+                validFrom: FfiConverterString.read(from: &buf),
                 expiresAt: FfiConverterString.read(from: &buf),
                 outboundStatus: FfiConverterOptionTypeOutboundPrivateMessageStatus.read(from: &buf)
         )
@@ -10538,6 +10557,7 @@ public struct FfiConverterTypePaymentConversionQuoteRecord: FfiConverterRustBuff
         FfiConverterString.write(value.eventId, into: &buf)
         FfiConverterTypeBillingPeriod.write(value.billingPeriod, into: &buf)
         FfiConverterSequenceTypeConversionRate.write(value.rates, into: &buf)
+        FfiConverterString.write(value.validFrom, into: &buf)
         FfiConverterString.write(value.expiresAt, into: &buf)
         FfiConverterOptionTypeOutboundPrivateMessageStatus.write(value.outboundStatus, into: &buf)
     }
@@ -10927,7 +10947,7 @@ public struct PaymentRequestFilter {
      */
     public var recurring: Bool?
     /**
-     * Include only inbound Payment Requests received from counterparties.
+     * Inspect inbound proposals only; use the full view for actionable state and quotes.
      */
     public var receivedOnly: Bool
 
@@ -10950,7 +10970,7 @@ public struct PaymentRequestFilter {
          * Restrict results by whether the request has recurrence terms.
          */recurring: Bool?,
         /**
-         * Include only inbound Payment Requests received from counterparties.
+         * Inspect inbound proposals only; use the full view for actionable state and quotes.
          */receivedOnly: Bool) {
         self.counterparty = counterparty
         self.counterpartyReceiverPath = counterpartyReceiverPath
@@ -17028,7 +17048,10 @@ public enum PaymentConversion {
     /**
      * Immutable conversion rates, also fixed across recurring installments.
      */
-    case fixed(rates: [ConversionRate]
+    case fixed(
+        /**
+         * Exact rates; omitted cross-asset currencies cannot be used.
+         */rates: [ConversionRate]
     )
     /**
      * Cross-asset recurring payments require a quote for their Billing Period.
@@ -17112,12 +17135,18 @@ public enum PaymentDeadline {
     /**
      * Absolute one-time deadline in RFC3339 UTC.
      */
-    case at(timestamp: String
+    case at(
+        /**
+         * RFC3339 UTC timestamp with uppercase T and Z.
+         */timestamp: String
     )
     /**
      * Recurring deadline in elapsed seconds after the Billing Period start.
      */
-    case periodStart(seconds: UInt64
+    case periodStart(
+        /**
+         * Nonnegative elapsed seconds from each period start.
+         */seconds: UInt64
     )
 }
 
@@ -21026,7 +21055,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_allowance() != 8566) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_payment_request() != 35762) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_payment_request() != 31477) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_encrypted_link_recovery_marker() != 60401) {
@@ -21044,7 +21073,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_public_contact() != 54711) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_quote_payment_request() != 10496) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_quote_payment_request() != 10419) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_receipt_access() != 27958) {
@@ -21074,7 +21103,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_receive_private_messages_from_linked_peers() != 15229) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_received_payment_requests_from() != 14) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_received_payment_requests_from() != 16022) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_refresh_contact_paykit_profile() != 26474) {

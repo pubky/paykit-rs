@@ -745,6 +745,103 @@ fn validate_outbound_private_status(record: &OutboundPrivateMessageRecord) -> Re
     Ok(())
 }
 
+/// Refresh parser-derived fields while retaining raw evidence and existing index authority.
+/// Unknown messages can become recognized after an SDK update; they must then
+/// participate in Event ID conflict detection across all message families.
+pub(super) fn refresh_private_stream_classification(
+    records: &mut [PrivateStreamItemRecord],
+    dedupe: &mut HashMap<(PubkyPublicKey, PaykitReceiverPath, String), EventDedupRecord>,
+    receipts: &mut HashMap<(PubkyPublicKey, PaykitReceiverPath, String), ReceiptAccessRecord>,
+) -> Result<()> {
+    // A parser update never excuses corrupt references or changed raw payloads.
+    validate_event_dedup_records(dedupe, records)?;
+    records.sort_by_key(|record| record.stream_item_id);
+    for record in records.iter_mut() {
+        let (version, kind, known_kind) = private_message_header(&record.raw_json)?;
+        if record.parsed_version != version || record.parsed_kind != kind {
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "private stream item {} has inconsistent raw header metadata",
+                    record.stream_item_id
+                ),
+                source: None,
+            });
+        }
+        let mut classification = classify_private_application_message(
+            &private_application_message_from_raw(record.raw_json.clone(), version, kind),
+        );
+        enforce_receipt_access_receiver_scope(
+            &mut classification,
+            &record.counterparty_receiver_path,
+        );
+        let newly_recognized = record.known_paykit_kind.is_none() && known_kind.is_some();
+        let newly_valid = record.parse_status != PrivateStreamParseStatus::Valid
+            && classification.status == PrivateStreamParseStatus::Valid;
+        if let Some(event) = classification.event.as_ref() {
+            let key = (
+                record.counterparty.clone(),
+                record.counterparty_receiver_path.clone(),
+                event.event_id.clone(),
+            );
+            if newly_recognized {
+                let entry = dedupe
+                    .entry(key.clone())
+                    .or_insert_with(|| EventDedupRecord {
+                        counterparty: record.counterparty.clone(),
+                        counterparty_receiver_path: record.counterparty_receiver_path.clone(),
+                        event_id: event.event_id.clone(),
+                        event_kind: event.event_kind.clone(),
+                        payload_hash: payload_hash(&record.raw_json),
+                        first_stream_item_id: record.stream_item_id,
+                        duplicate_stream_item_ids: Vec::new(),
+                        conflicting_stream_item_ids: Vec::new(),
+                    });
+                if entry.first_stream_item_id != record.stream_item_id
+                    && !entry
+                        .duplicate_stream_item_ids
+                        .contains(&record.stream_item_id)
+                    && !entry
+                        .conflicting_stream_item_ids
+                        .contains(&record.stream_item_id)
+                {
+                    if entry.payload_hash == payload_hash(&record.raw_json) {
+                        entry.duplicate_stream_item_ids.push(record.stream_item_id);
+                    } else {
+                        entry
+                            .conflicting_stream_item_ids
+                            .push(record.stream_item_id);
+                    }
+                }
+            }
+            if newly_valid
+                && dedupe
+                    .get(&key)
+                    .is_some_and(|entry| entry.first_stream_item_id == record.stream_item_id)
+            {
+                if let Some(access) = classification.receipt_access.as_ref() {
+                    receipts.entry(key).or_insert_with(|| {
+                        ReceiptAccessRecord::from_access(
+                            record.counterparty.clone(),
+                            record.counterparty_receiver_path.clone(),
+                            record.stream_item_id,
+                            record.receive_batch_id,
+                            record.received_at,
+                            access,
+                        )
+                    });
+                }
+            }
+        }
+        record.known_paykit_kind = known_kind.map(|kind| kind.as_str().to_owned());
+        record.parse_status = classification.status;
+        record.parse_error = classification.parse_error;
+    }
+    validate_private_stream_items(records)?;
+    validate_event_dedup_records(dedupe, records)?;
+    validate_receipt_access_records(receipts, records)?;
+    validate_required_private_stream_indexes(records, dedupe, receipts)
+}
+
 pub(super) fn validate_private_stream_items(records: &[PrivateStreamItemRecord]) -> Result<()> {
     for record in records {
         let (parsed_version, parsed_kind, known_kind) = private_message_header(&record.raw_json)?;

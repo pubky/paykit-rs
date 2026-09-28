@@ -427,6 +427,8 @@ Metadata.
   so SDK/runtime code can persist the outbound payload before sending.
 - `PaymentProof::validate_for_request(request)`: validate stateless proof and
   request correlation fields.
+- `PaymentProof::validate_conversion_quote(request, quote)`: also validate the
+  selected quote's request, Billing Period and accepted payment asset.
 
 Payment Requests can carry exact conversion rates and payment deadlines. Recurring
 requests can opt into payee-issued quotes for individual Billing Periods. See

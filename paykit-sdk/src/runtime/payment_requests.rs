@@ -1,5 +1,6 @@
 use super::*;
-use crate::domain::payment_requests::{enqueue_payment_request_event, validate_proof_conversion};
+use crate::domain::payment_requests::validate_proof_conversion;
+use crate::domain::private_stream::is_payment_request_kind;
 use paykit_lib::{ConversionRate, PaymentConversionQuote, PaymentRequestEvent};
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
@@ -14,8 +15,9 @@ where
     /// This view is useful for inspecting proposals received from a
     /// counterparty. For normal app state, including responses to locally
     /// proposed requests, use [`Self::payment_requests_with`], which merges
-    /// inbound events with local outbound context. Malformed recognized Payment
-    /// Request events without a valid `payment_request_id` stay in the raw
+    /// inbound events with local outbound context. Quotes are omitted because
+    /// admission depends on the outbound acceptance history. Malformed recognized
+    /// Payment Request events without a valid `payment_request_id` stay in the raw
     /// private stream log and cannot be attached to a request-scoped record.
     pub async fn received_payment_requests_from(
         &self,
@@ -291,6 +293,9 @@ where
 
     /// Queue a new Payment Request proposal and return local derived state.
     ///
+    /// Before using conversion or payment deadlines, the caller must establish
+    /// that the counterparty supports those extensions; they are not negotiated here.
+    ///
     /// The returned record reflects the local outbound queue, not delivery or
     /// counterparty processing.
     pub async fn propose_payment_request(
@@ -332,7 +337,11 @@ where
                 payment_request_id,
             )
             .await?;
-        require_payer_role(&record, "accept Payment Request")?;
+        require_role(
+            &record,
+            PaymentRequestLocalRole::Payer,
+            "accept Payment Request",
+        )?;
         require_state(
             &record,
             &[PaymentRequestLifecycleState::Proposed],
@@ -371,7 +380,11 @@ where
                 payment_request_id,
             )
             .await?;
-        require_payer_role(&record, "reject Payment Request")?;
+        require_role(
+            &record,
+            PaymentRequestLocalRole::Payer,
+            "reject Payment Request",
+        )?;
         require_state(
             &record,
             &[
@@ -507,7 +520,11 @@ where
                 payment_request_id,
             )
             .await?;
-        require_payer_role(&record, "submit Payment Proof")?;
+        require_role(
+            &record,
+            PaymentRequestLocalRole::Payer,
+            "submit Payment Proof",
+        )?;
         require_state(
             &record,
             payment_proof_allowed_states(&record),
@@ -545,7 +562,8 @@ where
     }
 
     /// Issue immutable rates for an accepted recurring request.
-    /// Session access and role are checked before queueing; no payment is authorized.
+    /// Role and active request state are checked atomically with queueing; no payment is authorized.
+    /// The caller establishes peer support and owns Pubky session creation, capability scope and key rotation.
     pub async fn quote_payment_request(
         &self,
         counterparty: PubkyPublicKey,
@@ -555,58 +573,75 @@ where
         rates: Vec<ConversionRate>,
         expires_at: String,
     ) -> Result<PaymentRequestRecord> {
-        let record = self
-            .load_payment_request_record(
-                &counterparty,
-                &counterparty_receiver_path,
-                payment_request_id,
-            )
-            .await?;
-        if record.local_role != Some(PaymentRequestLocalRole::Payee) {
-            return Err(PaykitSdkError::Policy {
-                context: "only the payee can issue conversion quotes".into(),
-                source: None,
-            });
-        }
-        require_state(
-            &record,
-            &[PaymentRequestLifecycleState::ActiveRecurring],
-            "quote Payment Request",
-        )?;
-        let request = request_from_record(&record).ok_or_else(|| PaykitSdkError::Protocol {
-            context: "Payment Request terms are unavailable".into(),
-            source: None,
-        })?;
-        let quote = PaymentConversionQuote::new(
-            EventId::new_v4(),
-            payment_request_id.clone(),
-            billing_period,
-            rates,
-            expires_at,
-        );
-        quote.validate_for_request(&request)?;
-        let expiry = DateTime::parse_from_rfc3339(&quote.expires_at).map_err(|_| {
-            PaykitSdkError::Policy {
-                context: "invalid quote expiry".into(),
-                source: None,
-            }
-        })?;
-        if expiry <= self.clock.now() {
-            return Err(PaykitSdkError::Policy {
-                context: "cannot issue an expired conversion quote".into(),
-                source: None,
-            });
-        }
         self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_path)
             .await?;
-        enqueue_payment_request_event(
-            &self.storage,
-            counterparty.clone(),
-            counterparty_receiver_path.clone(),
-            &PaymentRequestEvent::ConversionQuote(quote),
-            self.clock.now(),
-        )
-        .await?;
+        let now = self.clock.now();
+        self.storage
+            .transaction(|tx| {
+                let record = crate::domain::payment_requests::payment_request_records_in(
+                    tx,
+                    &counterparty,
+                    &counterparty_receiver_path,
+                    now,
+                )?
+                .into_iter()
+                .find(|record| record.payment_request_id == payment_request_id.as_str())
+                .ok_or_else(|| PaykitSdkError::Policy {
+                    context: "Payment Request was not found".into(),
+                    source: None,
+                })?;
+                require_role(
+                    &record,
+                    PaymentRequestLocalRole::Payee,
+                    "quote Payment Request",
+                )?;
+                require_state(
+                    &record,
+                    &[PaymentRequestLifecycleState::ActiveRecurring],
+                    "quote Payment Request",
+                )?;
+                let request =
+                    request_from_record(&record).ok_or_else(|| PaykitSdkError::Protocol {
+                        context: "Payment Request terms are unavailable".into(),
+                        source: None,
+                    })?;
+                let expiry = DateTime::parse_from_rfc3339(&expires_at).map_err(|_| {
+                    PaykitSdkError::Policy {
+                        context: "invalid quote expiry".into(),
+                        source: None,
+                    }
+                })?;
+                if expiry < now {
+                    return Err(PaykitSdkError::Policy {
+                        context: "cannot issue an expired conversion quote".into(),
+                        source: None,
+                    });
+                }
+                let quote = PaymentConversionQuote::new(
+                    EventId::new_v4(),
+                    payment_request_id.clone(),
+                    billing_period,
+                    rates,
+                    now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    expires_at,
+                );
+                // Whole-second issuance matches the resolution of common payment timestamps.
+                quote.validate_for_request(&request)?;
+                let raw_json = paykit_lib::serialize_payment_request_event(
+                    &PaymentRequestEvent::ConversionQuote(quote),
+                )?;
+                let kind =
+                    crate::domain::outbound_private::validate_outbound_private_message(&raw_json)?;
+                tx.insert_outbound_private_message(crate::storage::NewOutboundPrivateMessage::new(
+                    counterparty.clone(),
+                    counterparty_receiver_path.clone(),
+                    kind,
+                    raw_json,
+                    now,
+                ));
+                Ok(())
+            })
+            .await?;
         self.load_payment_request_record(
             &counterparty,
             &counterparty_receiver_path,
@@ -769,12 +804,22 @@ where
     }
 }
 
-fn require_payer_role(record: &PaymentRequestRecord, action: &str) -> Result<()> {
-    if record.local_role == Some(PaymentRequestLocalRole::Payer) {
+fn require_role(
+    record: &PaymentRequestRecord,
+    role: PaymentRequestLocalRole,
+    action: &str,
+) -> Result<()> {
+    if record.local_role == Some(role) {
         Ok(())
     } else {
         Err(PaykitSdkError::Policy {
-            context: format!("cannot {action}: local identity is not the payer"),
+            context: format!(
+                "cannot {action}: local identity is not the {}",
+                match role {
+                    PaymentRequestLocalRole::Payer => "payer",
+                    PaymentRequestLocalRole::Payee => "payee",
+                }
+            ),
             source: None,
         })
     }
@@ -796,20 +841,6 @@ fn require_state(
             source: None,
         })
     }
-}
-
-fn is_payment_request_kind(kind: Option<&str>) -> bool {
-    matches!(
-        kind.and_then(PrivateMessageKind::parse),
-        Some(
-            PrivateMessageKind::PaymentRequest
-                | PrivateMessageKind::PaymentRequestAcceptance
-                | PrivateMessageKind::PaymentRequestRejection
-                | PrivateMessageKind::PaymentRequestCancellation
-                | PrivateMessageKind::PaymentConversionQuote
-                | PrivateMessageKind::PaymentProof
-        )
-    )
 }
 
 fn sort_payment_requests_newest_first(records: &mut [PaymentRequestRecord]) {

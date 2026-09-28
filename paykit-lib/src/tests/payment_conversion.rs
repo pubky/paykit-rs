@@ -52,7 +52,7 @@ fn parse(value: Value) -> PaymentRequestEventMessage {
 fn round_trip(event: PaymentRequestEvent) {
     let raw = serialize_payment_request_event(&event).unwrap();
     assert!(
-        raw.len() <= 1000,
+        raw.len() <= pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN,
         "representative event must fit one encrypted message"
     );
     assert_eq!(
@@ -88,6 +88,7 @@ fn test_payment_conversion_terms_and_quotes_round_trip() {
         request.payment_request_id.clone(),
         period(),
         vec![rate("usdt", "1"), rate("btc", "0.00001234")],
+        "2026-06-01T00:00:00Z".into(),
         "2026-06-02T00:00:00Z".into(),
     );
     quote.validate_for_request(&request).unwrap();
@@ -167,6 +168,7 @@ fn test_payment_conversion_quote_binds_request_period_and_selected_asset() {
         request.payment_request_id.clone(),
         period(),
         vec![rate("usdt", "1")],
+        "2026-06-01T00:00:00Z".into(),
         "2026-06-02T00:00:00Z".into(),
     );
     let proof =
@@ -191,6 +193,12 @@ fn test_payment_conversion_quote_binds_request_period_and_selected_asset() {
     assert!(proof
         .validate_conversion_quote(&request, Some(&quote))
         .is_err());
+    quote = original.clone();
+    quote.billing_period.starts_at = "2026-06-01T00:00:00.000Z".into();
+    quote.billing_period.ends_at = "2026-07-01T00:00:00.000000000Z".into();
+    proof
+        .validate_conversion_quote(&request, Some(&quote))
+        .unwrap();
     quote = original;
     quote.rates = vec![rate("btc", "0.00001")];
     assert!(proof
@@ -214,9 +222,18 @@ fn test_payment_deadlines_require_the_correct_request_shape() {
     };
     assert_eq!(absolute.at(None).unwrap(), "2026-06-02T00:00:00Z");
     assert!(absolute.at(Some(&period())).is_err());
-    let mut request = request(Some(PaymentConversion::PerPeriod {}));
+    let mut request = request(None);
+    request.request.payment_deadline = Some(absolute.clone());
+    assert!(
+        serialize_payment_request_event(&PaymentRequestEvent::Request(request.clone())).is_err()
+    );
     request.request.recurrence = None;
+    request.request.payment_deadline = Some(deadline);
+    assert!(
+        serialize_payment_request_event(&PaymentRequestEvent::Request(request.clone())).is_err()
+    );
     request.request.payment_deadline = Some(absolute);
+    request.request.conversion = Some(PaymentConversion::PerPeriod {});
     assert!(
         serialize_payment_request_event(&PaymentRequestEvent::Request(request.clone())).is_err()
     );
@@ -242,4 +259,54 @@ fn test_payment_conversion_wire_rejects_ambiguous_and_unknown_fields() {
         value_json["request"][field] = value;
         assert!(!parse(value_json).is_valid());
     }
+}
+
+#[test]
+fn test_conversion_quotes_require_a_portable_ordered_time_interval() {
+    let request = request(Some(PaymentConversion::PerPeriod {}));
+    let mut quote = PaymentConversionQuote::new(
+        EventId::new_v4(),
+        request.payment_request_id.clone(),
+        period(),
+        vec![rate("usdt", "1")],
+        "2026-06-01T00:00:00Z".into(),
+        "2026-06-01T00:00:00Z".into(),
+    );
+    quote.validate_for_request(&request).unwrap();
+    for invalid in [
+        "2026-06-02T00:00:00Z",
+        "2026-06-01 00:00:00Z",
+        "2026-06-01t00:00:00Z",
+        "2026-05-31T23:59:60Z",
+        "+11533-01-14T05:20:00Z",
+    ] {
+        quote.valid_from = invalid.into();
+        assert!(quote.validate_for_request(&request).is_err(), "{invalid}");
+    }
+    assert!(PaymentDeadline::PeriodStart {
+        seconds: 300_000_000_000
+    }
+    .at(Some(&period()))
+    .is_err());
+}
+
+#[test]
+fn test_conversion_requires_unambiguous_asset_and_endpoint_segments() {
+    for endpoint in [
+        "btc-",
+        "Btc.v2-x-y",
+        "usdc-e-arbitrum-address",
+        "btc--bolt11",
+    ] {
+        let mut request = request(Some(PaymentConversion::PerPeriod {}));
+        request.request.accepted_payment_endpoint_identifiers =
+            vec![PaymentEndpointIdentifier::new(endpoint).unwrap()];
+        assert!(
+            serialize_payment_request_event(&PaymentRequestEvent::Request(request)).is_err(),
+            "{endpoint}"
+        );
+    }
+    let mut request = request(Some(PaymentConversion::PerPeriod {}));
+    request.request.amount.asset = "usdc-e".into();
+    assert!(serialize_payment_request_event(&PaymentRequestEvent::Request(request)).is_err());
 }

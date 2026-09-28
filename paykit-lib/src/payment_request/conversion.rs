@@ -1,10 +1,13 @@
 use std::{collections::HashSet, fmt};
 
-use chrono::{DateTime, FixedOffset, SecondsFormat, TimeDelta};
+use chrono::{DateTime, Datelike, FixedOffset, SecondsFormat, TimeDelta};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    validation::{parse_utc_timestamp, validate_asset_text, validate_decimal_text},
+    validation::{
+        parse_utc_timestamp, validate_asset_text, validate_decimal_text,
+        validate_outgoing_version_kind,
+    },
     EventId, PaykitError, PaymentEndpointIdentifier, PrivateMessageKind, Result,
 };
 
@@ -59,20 +62,35 @@ pub enum PaymentDeadline {
 impl PaymentDeadline {
     /// Resolve a deadline. Callers verify actual payment time, not proof arrival time.
     pub fn at(&self, period: Option<&BillingPeriod>) -> Result<String> {
-        let deadline = match (self, period) {
-            (Self::At { timestamp }, None) => parse_utc_timestamp(timestamp, "payment deadline")?,
-            (Self::PeriodStart { seconds }, Some(period)) => {
-                period.validate()?;
-                deadline_after(&period.starts_at, *seconds)?
-            }
-            _ => {
-                return Err(PaykitError::Validation(
-                    "payment deadline must match request recurrence".into(),
-                ))
-            }
-        };
+        if let Some(period) = period {
+            period.validate()?;
+        }
+        let deadline = self.resolve(period.map(|period| period.starts_at.as_str()))?;
         Ok(deadline.to_rfc3339_opts(SecondsFormat::AutoSi, true))
     }
+
+    fn resolve(&self, period_start: Option<&str>) -> Result<DateTime<FixedOffset>> {
+        match (self, period_start) {
+            (Self::At { timestamp }, None) => conversion_timestamp(timestamp, "payment deadline"),
+            (Self::PeriodStart { seconds }, Some(start)) => deadline_after(start, *seconds),
+            _ => Err(PaykitError::Validation(
+                "payment deadline must match request recurrence".into(),
+            )),
+        }
+    }
+}
+
+fn conversion_timestamp(value: &str, field: &str) -> Result<DateTime<FixedOffset>> {
+    let parsed = parse_utc_timestamp(value, field)?;
+    if value.as_bytes().get(10) != Some(&b'T')
+        || !(0..=9999).contains(&parsed.year())
+        || parsed.timestamp_subsec_nanos() >= 1_000_000_000
+    {
+        return Err(PaykitError::Validation(format!(
+            "{field} must use a four-digit year, T separator and no leap second"
+        )));
+    }
+    Ok(parsed)
 }
 
 fn deadline_after(starts_at: &str, seconds: u64) -> Result<DateTime<FixedOffset>> {
@@ -80,8 +98,9 @@ fn deadline_after(starts_at: &str, seconds: u64) -> Result<DateTime<FixedOffset>
         .ok()
         .and_then(TimeDelta::try_seconds)
         .ok_or_else(|| PaykitError::Validation("payment deadline offset is too large".into()))?;
-    parse_utc_timestamp(starts_at, "period starts_at")?
+    conversion_timestamp(starts_at, "period starts_at")?
         .checked_add_signed(offset)
+        .filter(|deadline| (0..=9999).contains(&deadline.year()))
         .ok_or_else(|| PaykitError::Validation("payment deadline is out of range".into()))
 }
 
@@ -101,6 +120,8 @@ pub struct PaymentConversionQuote {
     pub billing_period: BillingPeriod,
     /// Payment asset units per one requested asset unit.
     pub rates: Vec<ConversionRate>,
+    /// Inclusive start of the payment validity interval, in RFC3339 UTC.
+    pub valid_from: String,
     /// Inclusive payment deadline for this quote, in RFC3339 UTC.
     pub expires_at: String,
 }
@@ -112,6 +133,7 @@ impl PaymentConversionQuote {
         payment_request_id: PaymentRequestId,
         billing_period: BillingPeriod,
         rates: Vec<ConversionRate>,
+        valid_from: String,
         expires_at: String,
     ) -> Self {
         Self {
@@ -121,31 +143,36 @@ impl PaymentConversionQuote {
             payment_request_id,
             billing_period,
             rates,
+            valid_from,
             expires_at,
         }
     }
 
     pub(super) fn validate(&self) -> Result<()> {
-        if self.version != 1 || self.kind != PrivateMessageKind::PaymentConversionQuote {
-            return Err(PaykitError::Validation(
-                "invalid Payment Conversion Quote header".into(),
-            ));
-        }
+        validate_outgoing_version_kind(
+            self.version,
+            self.kind,
+            PrivateMessageKind::PaymentConversionQuote,
+            "Payment Conversion Quote",
+        )?;
         self.billing_period.validate()?;
         validate_rates(&self.rates)?;
-        parse_utc_timestamp(&self.expires_at, "quote expires_at")?;
+        conversion_timestamp(&self.billing_period.starts_at, "period starts_at")?;
+        conversion_timestamp(&self.billing_period.ends_at, "period ends_at")?;
+        let start = conversion_timestamp(&self.valid_from, "quote valid_from")?;
+        let end = conversion_timestamp(&self.expires_at, "quote expires_at")?;
+        if start > end {
+            return Err(PaykitError::Validation(
+                "quote validity interval is reversed".into(),
+            ));
+        }
         Ok(())
     }
 
     /// Check immutable request association. Role, lifecycle and calendar eligibility belong to the caller.
     pub fn validate_for_request(&self, request: &PaymentRequest) -> Result<()> {
         self.validate()?;
-        if request.version != 1 || request.kind != PrivateMessageKind::PaymentRequest {
-            return Err(PaykitError::Validation(
-                "Payment Request must have version 1 and kind paykit.payment_request".into(),
-            ));
-        }
-        request.request.validate()?;
+        request.validate()?;
         if self.payment_request_id != request.payment_request_id
             || request.request.conversion != Some(PaymentConversion::PerPeriod {})
         {
@@ -193,21 +220,36 @@ fn validate_rate_assets(rates: &[ConversionRate], terms: &PaymentRequestTerms) -
 }
 
 fn endpoint_asset(identifier: &PaymentEndpointIdentifier) -> Result<&str> {
-    identifier
-        .as_str()
-        .split_once('-')
-        .map(|(asset, _)| asset)
-        .filter(|asset| !asset.is_empty())
-        .ok_or_else(|| {
-            PaykitError::Validation(
-                "conversion requires asset-prefixed endpoint identifiers".into(),
-            )
-        })
+    let mut segments = identifier.as_str().split('-');
+    let asset = segments.next().unwrap_or_default();
+    if valid_asset_segment(asset)
+        && segments.next().is_some_and(valid_asset_segment)
+        && segments.next().is_some_and(valid_asset_segment)
+        && segments.next().is_none()
+    {
+        Ok(asset)
+    } else {
+        Err(PaykitError::Validation(
+            "conversion requires asset-rail-format identifiers with lowercase alphanumeric segments".into(),
+        ))
+    }
+}
+
+fn valid_asset_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
 }
 
 impl PaymentRequestTerms {
     pub(super) fn validate_conversion(&self) -> Result<()> {
         if let Some(conversion) = &self.conversion {
+            if !valid_asset_segment(&self.amount.asset) {
+                return Err(PaykitError::Validation(
+                    "conversion requires a lowercase alphanumeric request asset".into(),
+                ));
+            }
             for id in &self.accepted_payment_endpoint_identifiers {
                 endpoint_asset(id)?;
             }
@@ -225,19 +267,11 @@ impl PaymentRequestTerms {
             }
         }
         if let Some(deadline) = &self.payment_deadline {
-            match (deadline, &self.recurrence) {
-                (PaymentDeadline::At { .. }, None) => {
-                    deadline.at(None)?;
-                }
-                (PaymentDeadline::PeriodStart { seconds }, Some(recurrence)) => {
-                    deadline_after(&recurrence.starts_at, *seconds)?;
-                }
-                _ => {
-                    return Err(PaykitError::Validation(
-                        "payment deadline must match request recurrence".into(),
-                    ))
-                }
-            }
+            deadline.resolve(
+                self.recurrence
+                    .as_ref()
+                    .map(|recurrence| recurrence.starts_at.as_str()),
+            )?;
         }
         Ok(())
     }
@@ -255,7 +289,24 @@ impl PaymentProof {
         match (&self.conversion_quote_id, quote) {
             (Some(id), Some(quote)) if *id == quote.event_id => {
                 quote.validate_for_request(request)?;
-                if self.billing_period.as_ref() != Some(&quote.billing_period) {
+                let same_period = self
+                    .billing_period
+                    .as_ref()
+                    .map(|period| -> Result<bool> {
+                        Ok(conversion_timestamp(&period.starts_at, "period starts_at")?
+                            == conversion_timestamp(
+                                &quote.billing_period.starts_at,
+                                "period starts_at",
+                            )?
+                            && conversion_timestamp(&period.ends_at, "period ends_at")?
+                                == conversion_timestamp(
+                                    &quote.billing_period.ends_at,
+                                    "period ends_at",
+                                )?)
+                    })
+                    .transpose()?
+                    .unwrap_or(false);
+                if !same_period {
                     return Err(PaykitError::Validation(
                         "proof and quote Billing Period must match".into(),
                     ));

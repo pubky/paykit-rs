@@ -499,3 +499,24 @@ pub fn private_receiving_detail(identifier: &str, payload: &str) -> PrivateRecei
         payload: payload.into(),
     }
 }
+
+pub async fn deliver(sender: &TestUser, receiver: &TestUser) {
+    let sent = sender
+        .sdk
+        .process_outbound_private_messages(
+            receiver.public_key.clone(),
+            receiver.receiver_path.clone(),
+        )
+        .await
+        .expect("processing the private outbound queue should succeed");
+    assert!(!sent.sent.is_empty());
+    assert!(sent.failed.is_empty());
+
+    let received = receiver
+        .sdk
+        .receive_private_messages(sender.public_key.clone(), sender.receiver_path.clone())
+        .await
+        .expect("receiving private messages should succeed");
+    assert!(!received.stream_item_ids.is_empty());
+    assert!(received.event_conflicts.is_empty());
+}

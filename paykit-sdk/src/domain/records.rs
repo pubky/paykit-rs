@@ -37,3 +37,12 @@ impl From<&paykit_lib::BillingPeriod> for BillingPeriodRecord {
         }
     }
 }
+
+impl From<&BillingPeriodRecord> for paykit_lib::BillingPeriod {
+    fn from(period: &BillingPeriodRecord) -> Self {
+        Self {
+            starts_at: period.starts_at.clone(),
+            ends_at: period.ends_at.clone(),
+        }
+    }
+}

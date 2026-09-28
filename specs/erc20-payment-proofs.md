@@ -21,13 +21,15 @@ and SDK do not implement an EVM client or a token/signature verifier.
 }
 ```
 
-`chain_id` is a positive base-10 uint256 string with no leading zeroes.
+`chain_id` is a positive base-10 uint256 string with no leading zeroes. It MUST
+equal the selected endpoint's chain ID, and the EIP-712 domain `chainId` MUST
+equal that same numeric value. Other EVM chains use their own chain ID.
 `transaction_hash` is a lowercase 0x-prefixed 32-byte hash.
-`receipt_log_index` is a nonnegative integer selecting the zero-based position
+`receipt_log_index` is a nonnegative uint256 integer selecting the zero-based position
 within that transaction receipt's **entire logs array**, not the block-global RPC
 `logIndex` and not an index among Transfer events only. This distinguishes batched
 payments and avoids tying payment identity to a block-global position that can
-change after a reorganization. The unique payment identity is the chain ID,
+change after a reorganization. The unique payment identity is the independently verified endpoint chain ID,
 transaction hash and receipt-relative log index. Signatures and request IDs are
 not part of the deduplication key.
 
@@ -37,7 +39,8 @@ endpoint and request. Token symbols never establish token identity.
 
 ## EIP-712 signature
 
-The domain is exactly:
+The domain name and version are fixed; `chainId` is the verified endpoint chain.
+For example, on Arbitrum One:
 
 ```json
 {"name":"Paykit ERC20 Payment","version":"1","chainId":42161}
@@ -91,7 +94,8 @@ A receiver must:
 
 1. Validate the authenticated payer, known request, accepted endpoint, Billing
    Period and selected quote under the ordinary Paykit rules. Resolve the expected
-   chain, token contract and receiving address from that endpoint.
+   chain, token contract and receiving address from that endpoint. Require the
+   payload chain ID and EIP-712 domain chain ID to equal that verified chain.
 2. Read the referenced transaction receipt from the expected chain. Verify its
    transaction hash, successful execution status, canonical block association and
    the application's confirmation policy. A missing or temporarily unavailable
@@ -104,7 +108,9 @@ A receiver must:
    signer. It must equal the Transfer event's sender, not the transaction envelope's
    sender: a bundler or relayer can be the latter.
 5. Verify actual amount using the agreed rate and rounding, and payment time using
-   the canonical block timestamp and the applicable request/quote deadlines. A
+   the canonical block timestamp and the applicable request deadline and quote
+   validity interval, including its start. A quote issued after payment cannot
+   retroactively establish sufficient payment. A
    valid signature alone proves neither settlement nor sufficient payment.
 6. Prevent the transfer identity from satisfying another request or Billing Period.
    Repeated proof delivery for the same association is idempotent. Handle chain
@@ -121,6 +127,22 @@ request attribution solely from a publicly visible transaction hash.
 
 Underpaid and late transfers remain real received funds. Their request status is
 an application concern; this profile does not prescribe dispute resolution.
+
+## Message size
+
+The complete outer Payment Proof must fit `PUBKY_NOISE_MSG_LEN` (currently 1000
+UTF-8 bytes), including JSON escaping. A maximum-length Payment Reference can
+make an otherwise valid proof too large. Requesters must budget for the chosen
+profile before offering it; payers must verify the exact serialized size before
+payment approval. Do not truncate or change an agreed reference after payment.
+
+The ERC-20 transaction hash (66 ASCII bytes) and signature (132 ASCII bytes)
+have fixed textual lengths. Preflight can use placeholders of those lengths,
+the selected chain ID, the actual request/period/optional IDs, and 78 decimal digits for
+the maximum uint256 receipt-log index (or a smaller bound guaranteed by the
+selected chain). Do not use a short
+example signature or omit optional IDs when measuring. No additional payment
+should be sent to recover from proof-delivery failure.
 
 ## References and vectors
 
