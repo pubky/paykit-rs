@@ -1,12 +1,24 @@
-//! Stateless Allowance lifecycle wire protocol.
+//! Stateless Allowance lifecycle wire protocol and common eligibility math.
 //!
 //! This module validates, parses, serializes, and sends Allowance Event
-//! Messages. It deliberately does not derive lifecycle state, match Payment
-//! Requests, read a clock, track usage, reserve capacity, or authorize payment.
+//! Messages and evaluates common rules against explicit caller-provided inputs.
+//! It does not derive lifecycle state, read a clock, persist usage, reserve
+//! capacity, select an Allowance, or authorize payment.
 
+mod amounts;
 mod api;
+mod evaluation;
+mod evaluation_types;
+mod periods;
 mod types;
 mod wire;
+
+pub use amounts::{add_decimal_amounts, compare_decimal_amounts};
+pub use evaluation::{check_allowance_time, evaluate_allowance, match_allowance_request};
+pub use evaluation_types::{
+    AllowanceEvaluation, AllowanceEvaluationBlock, AllowanceEvaluationInput, AllowanceUsageEntry,
+};
+pub use periods::{allowance_period_window, AllowancePeriodWindow};
 
 pub use api::{
     parse_allowance_event_message, send_allowance_acceptance, send_allowance_end,
@@ -17,6 +29,9 @@ pub use types::{
     AllowanceId, AllowancePeriod, AllowancePeriodKind, AllowancePeriodLimit, AllowancePeriodUnit,
     AllowanceProposal, AllowanceRejection, AllowanceRole, AllowanceTerms, AllowanceTermsBuilder,
 };
+
+#[cfg(test)]
+mod evaluation_tests;
 
 /// Shared fixtures for Allowance tests across this crate.
 #[cfg(test)]

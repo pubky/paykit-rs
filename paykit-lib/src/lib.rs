@@ -20,11 +20,14 @@ mod validation;
 
 #[doc(inline)]
 pub use allowance::{
-    parse_allowance_event_message, send_allowance_acceptance, send_allowance_end,
-    send_allowance_proposal, send_allowance_rejection, serialize_allowance_event,
-    AllowanceAcceptance, AllowanceAmountRange, AllowanceEnd, AllowanceEvent, AllowanceEventMessage,
-    AllowanceId, AllowancePeriod, AllowancePeriodKind, AllowancePeriodLimit, AllowancePeriodUnit,
-    AllowanceProposal, AllowanceRejection, AllowanceRole, AllowanceTerms, AllowanceTermsBuilder,
+    add_decimal_amounts, allowance_period_window, check_allowance_time, compare_decimal_amounts,
+    evaluate_allowance, match_allowance_request, parse_allowance_event_message,
+    send_allowance_acceptance, send_allowance_end, send_allowance_proposal,
+    send_allowance_rejection, serialize_allowance_event, AllowanceAcceptance, AllowanceAmountRange,
+    AllowanceEnd, AllowanceEvaluation, AllowanceEvaluationBlock, AllowanceEvaluationInput,
+    AllowanceEvent, AllowanceEventMessage, AllowanceId, AllowancePeriod, AllowancePeriodKind,
+    AllowancePeriodLimit, AllowancePeriodUnit, AllowancePeriodWindow, AllowanceProposal,
+    AllowanceRejection, AllowanceRole, AllowanceTerms, AllowanceTermsBuilder, AllowanceUsageEntry,
 };
 #[doc(inline)]
 pub use encrypted_link::{

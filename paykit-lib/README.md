@@ -357,7 +357,31 @@ An Allowance is private, scoped authority from an Allower for automatic handling
 - `parse_allowance_event_message(message: &PrivateApplicationMessage) -> Option<AllowanceEventMessage>` parses recognized events while preserving raw JSON and returning redacted structural failures.
 - `send_allowance_proposal`, `send_allowance_acceptance`, `send_allowance_rejection`, and `send_allowance_end` send typed events over an established Encrypted Link.
 
-Paykit Library does not derive Allowance lifecycle state, match Payment Requests, evaluate time periods, track usage, reserve capacity, select Payment Endpoints, or authorize payment. The caller/SDK must durably preserve both directions of the authenticated link history and enforce cross-kind Event ID dedupe. Session creation, capability scope, key rotation, Pubky client timeouts, and all wallet payment policy and execution remain caller responsibilities.
+`match_allowance_request` evaluates exact asset, inclusive amount range, and the
+allowed Payment Endpoint Identifier intersection. `check_allowance_time` checks
+the active window and watermark without evaluating capacity, for example before
+recurring Acceptance. `evaluate_allowance` additionally
+checks the active window, a caller-supplied trusted time and durable watermark,
+and every period/lifetime limit against complete committed automatic usage and
+unresolved reservations. `allowance_period_window` exposes UTC anchored or rolling
+boundaries, and `compare_decimal_amounts` / `add_decimal_amounts` provide exact
+decimal arithmetic without an asset precision limit. Inputs retain their original
+wire spelling; arithmetic results are numerically normalized.
+
+These functions are pure checks, not payment authorization. `AllowanceUsageEntry`
+represents one already-admitted automatic occurrence; each evaluation adds one
+candidate count and its complete requested amount. The SDK must establish that
+the history and watermark are current and complete, exclude released reservations
+and manual payments from usage, check lifecycle and exact party scope, deduplicate
+all payment paths, and atomically reserve capacity before execution. An empty
+usage slice is not evidence of an unused Allowance. Restoring an old snapshot does
+not establish accounting freshness. A successful evaluation changes no state.
+
+Paykit Library does not derive Allowance lifecycle state, persist usage, reserve
+capacity, select an Allowance or Payment Endpoint, or execute payment. The
+caller/SDK must durably preserve both directions of authenticated history and
+enforce cross-kind Event ID dedupe. Session creation, capability scope, key
+rotation, Pubky client timeouts, and wallet payment policy remain caller duties.
 
 #### Payment receipts
 
