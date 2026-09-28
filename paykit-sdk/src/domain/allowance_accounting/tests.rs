@@ -2,6 +2,8 @@ use super::*;
 use crate::{InMemoryStorage, StorageAdapter};
 use chrono::{Duration, TimeZone};
 
+mod recovery_merge;
+
 fn time() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 15, 12, 0, 0).unwrap()
 }

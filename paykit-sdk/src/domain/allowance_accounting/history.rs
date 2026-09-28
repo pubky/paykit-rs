@@ -209,6 +209,13 @@ fn merge(
                     existing.attempts.push(attempt);
                 }
             }
+            // Retained execution evidence supersedes temporary deferral, but
+            // never clears a sticky manual-only decision or a failed-only retry.
+            if occupied(existing)
+                && matches!(existing.disposition, PaymentDisposition::Deferred { .. })
+            {
+                existing.disposition = PaymentDisposition::Automatic;
+            }
         } else {
             destination.occurrences.push(incoming);
         }
