@@ -932,3 +932,5 @@ async fn test_accounting_successful_reconsideration_replaces_deferred_dispositio
         assert_eq!(fixture.state().history.occurrences[0].disposition, expected);
     }
 }
+
+mod lifecycle_restore;

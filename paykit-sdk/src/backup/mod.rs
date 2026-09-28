@@ -259,8 +259,9 @@ where
         .transaction(move |tx| {
             let stored_identity = tx.load_identity_state();
             let current_identity = trusted_identity.as_ref().or(stored_identity.as_ref());
+            let current_state = tx.export_storage_state();
             let current_next_peer_link_operation_lease_id =
-                tx.export_storage_state().next_peer_link_operation_lease_id;
+                current_state.next_peer_link_operation_lease_id;
             let (mut state, report) = backup.into_storage_state(
                 current_identity,
                 &local_receiver_path,
@@ -275,6 +276,10 @@ where
                     .as_ref()
                     .and_then(|i| i.local_pubky_public_key.as_ref())
             {
+                crate::domain::allowances::ensure_allowance_history_retained(
+                    &current_state,
+                    &state.state,
+                )?;
                 tx.allowance_accounting_state()
             } else {
                 None

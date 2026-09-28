@@ -15,6 +15,9 @@ use crate::{
 
 mod commands;
 mod derivation;
+mod restore;
+
+pub(crate) use restore::ensure_allowance_history_retained;
 
 pub(crate) use commands::{
     enqueue_allowance_end, enqueue_allowance_proposal, enqueue_allowance_response,
