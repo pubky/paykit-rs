@@ -935,4 +935,6 @@ async fn test_accounting_successful_reconsideration_replaces_deferred_dispositio
     }
 }
 
+mod reassociation;
+
 mod lifecycle_restore;

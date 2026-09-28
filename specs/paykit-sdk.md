@@ -1473,7 +1473,9 @@ verified failure before releasing or replacing its reservation.
 later full reconsideration. It cannot relabel unresolved execution as retryable.
 `mark_payment_manual_only` is sticky. Explicit future-only
 `authorize_allowance_reassociation` appends a user authorization and revision;
-old usage and attempts remain on the original Allowance, earlier occurrences and
+the accepted replacement need not be active yet. Authorization validates static
+matching and the current trusted-time watermark; admission and handoff still
+require current eligibility. Old usage and attempts remain on the original Allowance, earlier occurrences and
 other requests remain independent, and manual-only decisions survive. Background
 matching cannot change the persisted choice or provide this user authorization.
 

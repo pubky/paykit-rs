@@ -61,13 +61,22 @@ pub(super) fn static_check(
     time: DateTime<Utc>,
     previous: DateTime<Utc>,
 ) -> std::result::Result<Vec<paykit_lib::PaymentEndpointIdentifier>, AllowanceAccountingBlock> {
+    let terms = accepted_allowance_terms(tx, scope, id)?;
+    paykit_lib::check_allowance_time(&terms, time, previous).map_err(shared)?;
+    paykit_lib::match_allowance_request(&terms, request).map_err(shared)
+}
+
+fn accepted_allowance_terms(
+    tx: &dyn StorageTransaction,
+    scope: &PaymentAccountingScope,
+    id: &str,
+) -> std::result::Result<AllowanceTerms, AllowanceAccountingBlock> {
     let (record, terms) =
         allowance_terms(tx, scope, id).map_err(|_| AllowanceAccountingBlock::InvalidLifecycle)?;
     if !valid_allowance(&record) {
         return Err(AllowanceAccountingBlock::InvalidLifecycle);
     }
-    paykit_lib::check_allowance_time(&terms, time, previous).map_err(shared)?;
-    paykit_lib::match_allowance_request(&terms, request).map_err(shared)
+    Ok(terms)
 }
 
 pub(crate) fn select(
@@ -223,14 +232,14 @@ pub(crate) fn reassociate(
         }
         let terms =
             request_terms(&request).map_err(|_| AllowanceAccountingBlock::InvalidLifecycle)?;
-        static_check(
-            tx,
-            &scope,
-            input.allowance_id.as_str(),
-            &terms,
-            input.trusted_time,
-            previous,
-        )?;
+        if input.trusted_time < previous {
+            return Err(shared(paykit_lib::AllowanceEvaluationBlock::ClockRollback));
+        }
+        let replacement = accepted_allowance_terms(tx, &scope, input.allowance_id.as_str())?;
+        paykit_lib::match_allowance_request(&replacement, &terms).map_err(shared)?;
+        // Authorization records future authority, not permission to pay now.
+        // Keep the real authorization-time watermark; admission and handoff
+        // independently require an active Allowance at their trusted times.
         let association = state
             .history
             .associations

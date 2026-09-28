@@ -137,6 +137,8 @@ where
     /// The caller must obtain fresh user approval identifying the replacement
     /// Allowance and future boundary. History, unresolved attempts, and old usage
     /// stay attributed to their original authority. Background matching is not approval.
+    /// The accepted replacement may activate later. Current activation, expiry, and
+    /// capacity are checked when payment is admitted, not when scheduling the change.
     pub async fn authorize_allowance_reassociation(
         &self,
         scope: PaymentRequestScope,
