@@ -1,19 +1,14 @@
-use super::{
-    FfiConversionRate, FfiPaymentConversion, FfiPaymentConversionQuoteRecord, FfiPaymentDeadline,
-};
-use paykit_lib::{ConversionRate, EventId, PaymentConversion, PaymentDeadline};
-use paykit_sdk::PaymentConversionQuoteRecord;
 use std::sync::Arc;
 
 use paykit_lib::{
-    AllowanceId, BillingPeriod, PaymentAmount, PaymentReference, PaymentRequestTerms, Recurrence,
-    RecurrenceUnit,
+    AllowanceId, BillingPeriod, ConversionRate, EventId, PaymentAmount, PaymentConversion,
+    PaymentDeadline, PaymentReference, PaymentRequestTerms, Recurrence, RecurrenceUnit,
 };
 use paykit_sdk::{
-    AmountRecord, BillingPeriodRecord, PaymentProofRecord, PaymentProofSubmission,
-    PaymentRequestFilter, PaymentRequestLifecycleState, PaymentRequestLocalRole,
-    PaymentRequestRecord, PaymentRequestRecurrenceRecord, PaymentRequestTermsRecord,
-    PubkyPublicKey,
+    AmountRecord, BillingPeriodRecord, PaymentConversionQuoteRecord, PaymentProofRecord,
+    PaymentProofSubmission, PaymentRequestFilter, PaymentRequestLifecycleState,
+    PaymentRequestLocalRole, PaymentRequestRecord, PaymentRequestRecurrenceRecord,
+    PaymentRequestTermsRecord, PubkyPublicKey,
 };
 
 use crate::{
@@ -27,7 +22,8 @@ use crate::conversions_common::parse_endpoint_identifier;
 pub(super) use crate::conversions_common::parse_payment_request_id;
 
 use super::{
-    FfiBillingPeriod, FfiPaymentProofRecord, FfiPaymentProofSubmission, FfiPaymentReference,
+    FfiBillingPeriod, FfiConversionRate, FfiPaymentConversion, FfiPaymentConversionQuoteRecord,
+    FfiPaymentDeadline, FfiPaymentProofRecord, FfiPaymentProofSubmission, FfiPaymentReference,
     FfiPaymentRequestAmount, FfiPaymentRequestFilter, FfiPaymentRequestLifecycleState,
     FfiPaymentRequestLocalRole, FfiPaymentRequestRecord, FfiPaymentRequestRecurrence,
     FfiPaymentRequestTerms,
@@ -343,6 +339,7 @@ impl From<FfiConversionRate> for ConversionRate {
         }
     }
 }
+
 impl From<ConversionRate> for FfiConversionRate {
     fn from(value: ConversionRate) -> Self {
         Self {
@@ -351,6 +348,7 @@ impl From<ConversionRate> for FfiConversionRate {
         }
     }
 }
+
 impl From<FfiPaymentConversion> for PaymentConversion {
     fn from(value: FfiPaymentConversion) -> Self {
         match value {
@@ -361,6 +359,7 @@ impl From<FfiPaymentConversion> for PaymentConversion {
         }
     }
 }
+
 impl From<PaymentConversion> for FfiPaymentConversion {
     fn from(value: PaymentConversion) -> Self {
         match value {
@@ -371,6 +370,7 @@ impl From<PaymentConversion> for FfiPaymentConversion {
         }
     }
 }
+
 impl From<FfiPaymentDeadline> for PaymentDeadline {
     fn from(value: FfiPaymentDeadline) -> Self {
         match value {
@@ -379,6 +379,7 @@ impl From<FfiPaymentDeadline> for PaymentDeadline {
         }
     }
 }
+
 impl From<PaymentDeadline> for FfiPaymentDeadline {
     fn from(value: PaymentDeadline) -> Self {
         match value {
@@ -387,6 +388,7 @@ impl From<PaymentDeadline> for FfiPaymentDeadline {
         }
     }
 }
+
 impl From<PaymentConversionQuoteRecord> for FfiPaymentConversionQuoteRecord {
     fn from(value: PaymentConversionQuoteRecord) -> Self {
         Self {

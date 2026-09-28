@@ -12,12 +12,10 @@ use std::{
 use chrono::{DateTime, Utc};
 use paykit_lib::{
     parse_payment_request_event_message, serialize_payment_request_event, AllowanceId,
-    BillingPeriod, PaymentEndpointIdentifier, PaymentProof, PaymentRequest,
+    BillingPeriod, ConversionRate, EventId, PaymentConversion, PaymentConversionQuote,
+    PaymentDeadline, PaymentEndpointIdentifier, PaymentProof, PaymentRequest,
     PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
     PaymentRequestRejection, PrivateApplicationMessage,
-};
-use paykit_lib::{
-    ConversionRate, EventId, PaymentConversion, PaymentConversionQuote, PaymentDeadline,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};

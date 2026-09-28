@@ -1,8 +1,8 @@
-use super::wire::{parse_conversion_quote_json, serialize_conversion_quote_json};
-use super::PaymentConversionQuote;
 use tracing::instrument;
 
-use crate::{error::map_error, EncryptedLink, PrivateApplicationMessage, Result};
+use crate::{
+    error::map_error, EncryptedLink, PrivateApplicationMessage, PrivateMessageKind, Result,
+};
 
 use super::{
     types::{
@@ -10,14 +10,14 @@ use super::{
         PaymentRequestEvent, PaymentRequestEventMessage, PaymentRequestRejection,
     },
     wire::{
-        parse_acceptance_json, parse_cancellation_json, parse_event_header_ids,
-        parse_payment_proof_json, parse_payment_request_json, parse_rejection_json,
-        serialize_acceptance_json, serialize_cancellation_json, serialize_payment_proof_json,
+        parse_acceptance_json, parse_cancellation_json, parse_conversion_quote_json,
+        parse_event_header_ids, parse_payment_proof_json, parse_payment_request_json,
+        parse_rejection_json, serialize_acceptance_json, serialize_cancellation_json,
+        serialize_conversion_quote_json, serialize_payment_proof_json,
         serialize_payment_request_json, serialize_rejection_json,
     },
+    PaymentConversionQuote,
 };
-
-use crate::PrivateMessageKind;
 
 /// Parse `raw` as the Payment Request protocol event selected by `kind`, or
 /// return `None` when `kind` is not a Payment Request protocol event kind.
@@ -167,9 +167,11 @@ pub async fn send_payment_conversion_quote(
     link: &mut EncryptedLink,
     event: &PaymentConversionQuote,
 ) -> Result<()> {
-    let json = serialize_conversion_quote_json(event)?;
+    let json = serialize_conversion_quote_json(event)
+        .map_err(|err| map_error("send_payment_conversion_quote", err))?;
     link.send_payment_conversion_quote_message(json.as_bytes())
         .await
+        .map_err(|err| map_error("send_payment_conversion_quote", err))
 }
 
 #[cfg(test)]

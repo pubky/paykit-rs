@@ -1,4 +1,3 @@
-use super::{PaymentConversion, PaymentConversionQuote, PaymentDeadline};
 use std::fmt;
 
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -8,6 +7,8 @@ use crate::{
     AllowanceId, EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
     PrivateMessageKind, Result,
 };
+
+use super::{PaymentConversion, PaymentConversionQuote, PaymentDeadline};
 
 /// UUID-v4 identifier for one Payment Request.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

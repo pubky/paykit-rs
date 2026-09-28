@@ -1,10 +1,10 @@
-use super::{PaymentConversion, PaymentConversionQuote, PaymentDeadline};
-use crate::shared_wire::deserialize_optional_no_null;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::{
-    shared_wire::{BillingPeriodWire, PaymentAmountWire, RequiredNullable},
+    shared_wire::{
+        deserialize_optional_no_null, BillingPeriodWire, PaymentAmountWire, RequiredNullable,
+    },
     validation::{
         invalid_data, invalid_plaintext_json, invalid_wire, validate_outgoing_version_kind,
         validate_wire_version_kind,
@@ -13,10 +13,13 @@ use crate::{
     PrivateMessageKind, Result,
 };
 
-use super::types::{
-    BillingPeriod, PaymentProof, PaymentRequest, PaymentRequestAcceptance,
-    PaymentRequestCancellation, PaymentRequestId, PaymentRequestRejection, PaymentRequestTerms,
-    Recurrence, RecurrenceUnit,
+use super::{
+    types::{
+        BillingPeriod, PaymentProof, PaymentRequest, PaymentRequestAcceptance,
+        PaymentRequestCancellation, PaymentRequestId, PaymentRequestRejection, PaymentRequestTerms,
+        Recurrence, RecurrenceUnit,
+    },
+    PaymentConversion, PaymentConversionQuote, PaymentDeadline,
 };
 
 #[derive(Serialize, Deserialize)]

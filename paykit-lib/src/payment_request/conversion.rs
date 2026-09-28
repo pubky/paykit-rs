@@ -3,11 +3,12 @@ use std::{collections::HashSet, fmt};
 use chrono::{DateTime, FixedOffset, SecondsFormat, TimeDelta};
 use serde::{Deserialize, Serialize};
 
-use super::{BillingPeriod, PaymentProof, PaymentRequest, PaymentRequestId, PaymentRequestTerms};
 use crate::{
-    validation::parse_utc_timestamp, EventId, PaykitError, PaymentAmount,
-    PaymentEndpointIdentifier, PrivateMessageKind, Result,
+    validation::{parse_utc_timestamp, validate_asset_text, validate_decimal_text},
+    EventId, PaykitError, PaymentEndpointIdentifier, PrivateMessageKind, Result,
 };
+
+use super::{BillingPeriod, PaymentProof, PaymentRequest, PaymentRequestId, PaymentRequestTerms};
 
 /// Units of the payment asset owed per one unit of the requested asset.
 /// Values are positive decimal strings; implementations must not use floating point.
@@ -152,12 +153,11 @@ impl PaymentConversionQuote {
                 "quote requires its recurring per-period Payment Request".into(),
             ));
         }
-        validate_rates_for_request(&self.rates, &request.request)?;
-        Ok(())
+        validate_rate_assets(&self.rates, &request.request)
     }
 }
 
-pub(super) fn validate_rates(rates: &[ConversionRate]) -> Result<()> {
+fn validate_rates(rates: &[ConversionRate]) -> Result<()> {
     if rates.is_empty() {
         return Err(PaykitError::Validation(
             "conversion rates must not be empty".into(),
@@ -165,11 +165,8 @@ pub(super) fn validate_rates(rates: &[ConversionRate]) -> Result<()> {
     }
     let mut assets = HashSet::new();
     for rate in rates {
-        PaymentAmount {
-            asset: rate.asset.clone(),
-            value: rate.value.clone(),
-        }
-        .validate_with_label("conversion rate")?;
+        validate_decimal_text(&rate.value, "conversion rate.value")?;
+        validate_asset_text(&rate.asset, "conversion rate asset")?;
         if !rate.value.bytes().any(|b| matches!(b, b'1'..=b'9')) || !assets.insert(&rate.asset) {
             return Err(PaykitError::Validation(
                 "conversion rates must be positive and assets unique".into(),
@@ -179,8 +176,7 @@ pub(super) fn validate_rates(rates: &[ConversionRate]) -> Result<()> {
     Ok(())
 }
 
-fn validate_rates_for_request(rates: &[ConversionRate], terms: &PaymentRequestTerms) -> Result<()> {
-    validate_rates(rates)?;
+fn validate_rate_assets(rates: &[ConversionRate], terms: &PaymentRequestTerms) -> Result<()> {
     for rate in rates {
         if rate.asset == terms.amount.asset
             || !terms
@@ -196,7 +192,7 @@ fn validate_rates_for_request(rates: &[ConversionRate], terms: &PaymentRequestTe
     Ok(())
 }
 
-pub(super) fn endpoint_asset(identifier: &PaymentEndpointIdentifier) -> Result<&str> {
+fn endpoint_asset(identifier: &PaymentEndpointIdentifier) -> Result<&str> {
     identifier
         .as_str()
         .split_once('-')
@@ -216,7 +212,10 @@ impl PaymentRequestTerms {
                 endpoint_asset(id)?;
             }
             match conversion {
-                PaymentConversion::Fixed { rates } => validate_rates_for_request(rates, self)?,
+                PaymentConversion::Fixed { rates } => {
+                    validate_rates(rates)?;
+                    validate_rate_assets(rates, self)?;
+                }
                 PaymentConversion::PerPeriod {} if self.recurrence.is_none() => {
                     return Err(PaykitError::Validation(
                         "per-period conversion requires recurrence".into(),
