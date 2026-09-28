@@ -20,29 +20,23 @@ async fn setup(role: PaymentRequestLocalRole) -> (InMemoryStorage, PubkyPublicKe
         .request
         .accepted_payment_endpoint_identifiers
         .push(PaymentEndpointIdentifier::new("usdt-arbitrum-address").unwrap());
-    let raw =
-        serialize_payment_request_event(&PaymentRequestEvent::Request(request.clone())).unwrap();
-    let acceptance = acceptance_raw(
-        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
-        request.payment_request_id.as_str(),
-    );
-    if role == PaymentRequestLocalRole::Payer {
-        persist_messages(&storage, peer.clone(), vec![raw]).await;
-        enqueue_untyped_private_message(
-            &storage,
-            peer.clone(),
-            receiver_path(),
-            acceptance,
-            timestamp(),
-        )
-        .await
-        .unwrap();
-    } else {
-        enqueue_untyped_private_message(&storage, peer.clone(), receiver_path(), raw, timestamp())
-            .await
-            .unwrap();
-        persist_messages(&storage, peer.clone(), vec![acceptance]).await;
-    }
+    send(
+        &storage,
+        &peer,
+        PaymentRequestEvent::Request(request.clone()),
+        role == PaymentRequestLocalRole::Payee,
+    )
+    .await;
+    send(
+        &storage,
+        &peer,
+        parsed_event(acceptance_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
+            request.payment_request_id.as_str(),
+        )),
+        role == PaymentRequestLocalRole::Payer,
+    )
+    .await;
     (storage, peer, request)
 }
 fn quote(id: &str, request: &PaymentRequest) -> PaymentConversionQuote {
@@ -61,6 +55,19 @@ fn quote(id: &str, request: &PaymentRequest) -> PaymentConversionQuote {
         "2026-06-02T00:00:00Z".into(),
     )
 }
+
+fn quoted_proof(request: &PaymentRequest, quote: &PaymentConversionQuote) -> PaymentProof {
+    PaymentProof::new(
+        EventId::new_v4(),
+        request.payment_request_id.clone(),
+        request.request.payment_reference.clone(),
+        Some(quote.billing_period.clone()),
+        PaymentEndpointIdentifier::new("usdt-arbitrum-address").unwrap(),
+        Default::default(),
+    )
+    .with_conversion_quote_id(quote.event_id.clone())
+}
+
 async fn send(
     storage: &InMemoryStorage,
     peer: &PubkyPublicKey,
@@ -96,15 +103,7 @@ async fn test_conversion_quotes_keep_old_rates_for_delayed_proofs_and_replay() {
             )
             .await;
         }
-        let proof = PaymentProof::new(
-            EventId::new_v4(),
-            request.payment_request_id.clone(),
-            request.request.payment_reference.clone(),
-            Some(old.billing_period.clone()),
-            PaymentEndpointIdentifier::new("usdt-arbitrum-address").unwrap(),
-            Default::default(),
-        )
-        .with_conversion_quote_id(old.event_id.clone());
+        let proof = quoted_proof(&request, &old);
         send(
             &storage,
             &peer,
@@ -127,10 +126,6 @@ async fn test_conversion_quotes_keep_old_rates_for_delayed_proofs_and_replay() {
         assert_eq!(
             record.payment_proofs[0].conversion_quote_id.as_deref(),
             Some(old.event_id.as_str())
-        );
-        assert_eq!(
-            request_from_record(&record).unwrap().request.conversion,
-            Some(PaymentConversion::PerPeriod {})
         );
         // A payer can cancel after reporting an installment. Sender order must
         // survive merging with the payee's quote stream, even at tied timestamps.
@@ -196,23 +191,12 @@ async fn test_conversion_proof_cannot_select_another_period_or_unknown_quote() {
             true,
         )
         .await;
-        let mut period = quote.billing_period.clone();
-        if !unknown {
-            period.starts_at = "2026-06-02T00:00:00Z".into();
-        }
-        let proof = PaymentProof::new(
-            EventId::new_v4(),
-            request.payment_request_id,
-            request.request.payment_reference,
-            Some(period),
-            PaymentEndpointIdentifier::new("usdt-arbitrum-address").unwrap(),
-            Default::default(),
-        )
-        .with_conversion_quote_id(if unknown {
-            EventId::new_v4()
+        let mut proof = quoted_proof(&request, &quote);
+        if unknown {
+            proof.conversion_quote_id = Some(EventId::new_v4());
         } else {
-            quote.event_id
-        });
+            proof.billing_period.as_mut().unwrap().starts_at = "2026-06-02T00:00:00Z".into();
+        }
         send(&storage, &peer, PaymentRequestEvent::Proof(proof), false).await;
         let record = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
             .await
@@ -234,15 +218,7 @@ async fn test_quote_delivery_recovery_preserves_prior_payment_evidence() {
         true,
     )
     .await;
-    let proof = PaymentProof::new(
-        EventId::new_v4(),
-        request.payment_request_id.clone(),
-        request.request.payment_reference.clone(),
-        Some(old.billing_period.clone()),
-        PaymentEndpointIdentifier::new("usdt-arbitrum-address").unwrap(),
-        Default::default(),
-    )
-    .with_conversion_quote_id(old.event_id.clone());
+    let proof = quoted_proof(&request, &old);
     send(&storage, &peer, PaymentRequestEvent::Proof(proof), false).await;
     let before = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
         .await

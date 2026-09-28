@@ -314,24 +314,20 @@ fn test_conversion_terms_and_quote_selection_survive_bindings() {
     let restored =
         FfiPaymentRequestTerms::try_from(PaymentRequestTermsRecord::from(&native)).unwrap();
     assert_eq!(PaymentRequestTerms::try_from(restored).unwrap(), native);
-    for quote_id in [ALLOWANCE_ID, "not-a-uuid"] {
-        let submission = FfiPaymentProofSubmission {
-            billing_period: None,
-            payment_endpoint_identifier: "usdt-arbitrum-address".into(),
-            allowance_id: None,
-            conversion_quote_id: Some(quote_id.into()),
-            proof: Arc::new(FfiPrivateJsonObject::new("{}".into()).unwrap()),
-        };
-        let result = paykit_sdk::PaymentProofSubmission::try_from(submission);
-        if quote_id == ALLOWANCE_ID {
-            assert_eq!(
-                result.unwrap().conversion_quote_id.unwrap().as_str(),
-                quote_id
-            );
-        } else {
-            assert!(result.is_err());
-        }
-    }
+    let quote_id = "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103";
+    let mut submission = proof_submission(None);
+    submission.payment_endpoint_identifier = "usdt-arbitrum-address".into();
+    submission.conversion_quote_id = Some(quote_id.into());
+    assert_eq!(
+        paykit_sdk::PaymentProofSubmission::try_from(submission.clone())
+            .unwrap()
+            .conversion_quote_id
+            .unwrap()
+            .as_str(),
+        quote_id
+    );
+    submission.conversion_quote_id = Some("not-a-uuid".into());
+    assert!(paykit_sdk::PaymentProofSubmission::try_from(submission).is_err());
     assert_eq!(
         payment_deadline_at(
             FfiPaymentDeadline::PeriodStart { seconds: 86400 },
