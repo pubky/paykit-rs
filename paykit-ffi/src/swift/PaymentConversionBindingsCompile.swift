@@ -15,10 +15,13 @@ private func compilePaymentConversionBindingsSurface(
         paymentRequestId: requestId, billingPeriod: period, rates: rates, expiresAt: deadline
     )
     let quotes: [PaymentConversionQuoteRecord] = record.conversionQuotes
+    let proofBody = try PrivateJsonObject(
+        text: #"{"type":"erc20-transfer-eip712","receipt_log_index":"115792089237316195423570985008687907853269984665640564039457584007913129639935"}"#
+    )
     let proof = PaymentProofSubmission(
         billingPeriod: period, paymentEndpointIdentifier: "usdt-arbitrum-address",
         allowanceId: nil, conversionQuoteId: quotes.first?.eventId,
-        proof: try PrivateJsonObject(text: "{}")
+        proof: proofBody
     )
     _ = (fixed, recurring, proof)
 }

@@ -70,10 +70,11 @@ fn quote(id: &str, request: &PaymentRequest) -> PaymentConversionQuote {
         "2026-06-01T00:00:00Z".into(),
         "2026-06-02T00:00:00Z".into(),
     )
+    .unwrap()
 }
 
 fn quoted_proof(request: &PaymentRequest, quote: &PaymentConversionQuote) -> PaymentProof {
-    quoted_proof_for_period(request, quote, quote.billing_period.clone())
+    quoted_proof_for_period(request, quote, quote.billing_period().clone())
 }
 
 fn quoted_proof_for_period(
@@ -89,7 +90,7 @@ fn quoted_proof_for_period(
         PaymentEndpointIdentifier::new("usdt-arbitrum-address").unwrap(),
         Default::default(),
     )
-    .with_conversion_quote_id(quote.event_id.clone())
+    .with_conversion_quote_id(quote.event_id().clone())
 }
 
 async fn send(
@@ -126,8 +127,18 @@ async fn test_conversion_quotes_keep_old_rates_for_delayed_proofs_and_replay() {
     ] {
         let (storage, peer, request) = setup(role).await;
         let old = quote("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103", &request);
-        let mut new = quote("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104", &request);
-        new.rates[0].value = "60000".into();
+        let new = PaymentConversionQuote::new(
+            EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104").unwrap(),
+            request.payment_request_id().clone(),
+            old.billing_period().clone(),
+            vec![ConversionRate {
+                asset: "usdt".into(),
+                value: "60000".into(),
+            }],
+            old.valid_from().into(),
+            old.expires_at().into(),
+        )
+        .unwrap();
         for quote in [old.clone(), old.clone(), new] {
             send(
                 &storage,
@@ -156,10 +167,10 @@ async fn test_conversion_quotes_keep_old_rates_for_delayed_proofs_and_replay() {
             record.invalid_reason
         );
         assert_eq!(record.conversion_quotes.len(), 2);
-        assert_eq!(record.conversion_quotes[0].rates, old.rates);
+        assert_eq!(record.conversion_quotes[0].rates, old.rates());
         assert_eq!(
             record.payment_proofs[0].conversion_quote_id.as_deref(),
-            Some(old.event_id.as_str())
+            Some(old.event_id().as_str())
         );
         // A payer can cancel after reporting an installment. Sender order must
         // survive merging with the payee's quote stream, even at tied timestamps.
@@ -220,7 +231,7 @@ async fn test_conversion_quotes_ignore_cross_stream_clock_order() {
         assert_eq!(record.conversion_quotes.len(), 1, "{role:?}");
         assert_eq!(
             record.payment_proofs[0].conversion_quote_id.as_deref(),
-            Some(quote.event_id.as_str()),
+            Some(quote.event_id().as_str()),
             "{role:?}"
         );
     }
@@ -230,7 +241,7 @@ async fn test_conversion_quotes_ignore_cross_stream_clock_order() {
 async fn test_conversion_quote_rejects_payer_issuance_and_conflicting_identity() {
     for wrong_side in [true, false] {
         let (storage, peer, request) = setup(PaymentRequestLocalRole::Payer).await;
-        let mut quote = quote("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103", &request);
+        let quote = quote("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103", &request);
         send(
             &storage,
             &peer,
@@ -239,7 +250,18 @@ async fn test_conversion_quote_rejects_payer_issuance_and_conflicting_identity()
         )
         .await;
         if !wrong_side {
-            quote.rates[0].value = "60000".into();
+            let quote = PaymentConversionQuote::new(
+                quote.event_id().clone(),
+                request.payment_request_id().clone(),
+                quote.billing_period().clone(),
+                vec![ConversionRate {
+                    asset: "usdt".into(),
+                    value: "60000".into(),
+                }],
+                quote.valid_from().into(),
+                quote.expires_at().into(),
+            )
+            .unwrap();
             send(
                 &storage,
                 &peer,
@@ -305,10 +327,15 @@ async fn test_quote_delivery_recovery_preserves_prior_payment_evidence() {
         .unwrap()
         .remove(0);
     assert_eq!(before.payment_proofs.len(), 1);
-    let mut later = quote("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104", &request);
-    later.billing_period =
-        BillingPeriod::new("2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z").unwrap();
-    later.expires_at = "2026-07-02T00:00:00Z".into();
+    let later = PaymentConversionQuote::new(
+        EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104").unwrap(),
+        request.payment_request_id().clone(),
+        BillingPeriod::new("2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z").unwrap(),
+        old.rates().to_vec(),
+        old.valid_from().into(),
+        "2026-07-02T00:00:00Z".into(),
+    )
+    .unwrap();
     send(
         &storage,
         &peer,

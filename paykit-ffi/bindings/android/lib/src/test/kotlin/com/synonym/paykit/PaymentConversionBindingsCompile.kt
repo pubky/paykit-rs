@@ -15,9 +15,12 @@ internal suspend fun compilePaymentConversionBindingsSurface(
     val deadline = paymentDeadlineAt(PaymentDeadline.PeriodStart(86400UL), period)
     val record = sdk.quotePaymentRequest(counterparty, receiverPath, requestId, period, rates, deadline)
     val quotes: List<PaymentConversionQuoteRecord> = record.conversionQuotes
+    val proofBody = PrivateJsonObject(
+        text = """{"type":"erc20-transfer-eip712","receipt_log_index":"115792089237316195423570985008687907853269984665640564039457584007913129639935"}""",
+    )
     val proof = PaymentProofSubmission(
         billingPeriod = period, paymentEndpointIdentifier = "usdt-arbitrum-address",
         allowanceId = null, conversionQuoteId = quotes.firstOrNull()?.eventId,
-        proof = PrivateJsonObject(text = "{}"),
+        proof = proofBody,
     )
 }

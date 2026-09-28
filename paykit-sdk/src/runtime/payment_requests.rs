@@ -577,13 +577,42 @@ where
     ) -> Result<PaymentRequestRecord> {
         self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_path)
             .await?;
-        let now = self.clock.now();
+        self.enqueue_payment_conversion_quote(
+            &counterparty,
+            &counterparty_receiver_path,
+            payment_request_id,
+            billing_period,
+            rates,
+            expires_at,
+        )
+        .await?;
+        self.load_payment_request_record(
+            &counterparty,
+            &counterparty_receiver_path,
+            payment_request_id,
+        )
+        .await
+    }
+
+    pub(super) async fn enqueue_payment_conversion_quote(
+        &self,
+        counterparty: &PubkyPublicKey,
+        counterparty_receiver_path: &PaykitReceiverPath,
+        payment_request_id: &PaymentRequestId,
+        billing_period: BillingPeriod,
+        rates: Vec<ConversionRate>,
+        expires_at: String,
+    ) -> Result<()> {
+        let clock = self.clock.clone();
         self.storage
             .transaction(|tx| {
+                // Sample time only after the storage adapter has acquired its
+                // transaction fence so a waiting quote cannot be backdated.
+                let now = clock.now();
                 let record = crate::domain::payment_requests::payment_request_records_in(
                     tx,
-                    &counterparty,
-                    &counterparty_receiver_path,
+                    counterparty,
+                    counterparty_receiver_path,
                     now,
                 )?
                 .into_iter()
@@ -626,7 +655,7 @@ where
                     rates,
                     now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                     expires_at,
-                );
+                )?;
                 // Whole-second issuance matches the resolution of common payment timestamps.
                 quote.validate_for_request(&request)?;
                 let raw_json = paykit_lib::serialize_payment_request_event(
@@ -643,13 +672,7 @@ where
                 ));
                 Ok(())
             })
-            .await?;
-        self.load_payment_request_record(
-            &counterparty,
-            &counterparty_receiver_path,
-            payment_request_id,
-        )
-        .await
+            .await
     }
 
     async fn load_payment_request_record(

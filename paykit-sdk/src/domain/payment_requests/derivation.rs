@@ -1274,11 +1274,11 @@ fn quote_record(
     outbound_status: Option<OutboundPrivateMessageStatus>,
 ) -> PaymentConversionQuoteRecord {
     PaymentConversionQuoteRecord {
-        event_id: quote.event_id.as_str().to_owned(),
-        billing_period: BillingPeriodRecord::from(&quote.billing_period),
-        rates: quote.rates.clone(),
-        valid_from: quote.valid_from.clone(),
-        expires_at: quote.expires_at.clone(),
+        event_id: quote.event_id().as_str().to_owned(),
+        billing_period: BillingPeriodRecord::from(quote.billing_period()),
+        rates: quote.rates().to_vec(),
+        valid_from: quote.valid_from().to_owned(),
+        expires_at: quote.expires_at().to_owned(),
         outbound_status,
     }
 }
@@ -1297,14 +1297,14 @@ pub(crate) fn validate_proof_conversion(
                 .find(|quote| quote.event_id == id.as_str())
         })
         .map(|quote| {
-            Ok(PaymentConversionQuote::new(
+            PaymentConversionQuote::new(
                 EventId::new(&quote.event_id)?,
                 request.payment_request_id().clone(),
                 paykit_lib::BillingPeriod::try_from(&quote.billing_period)?,
                 quote.rates.clone(),
                 quote.valid_from.clone(),
                 quote.expires_at.clone(),
-            ))
+            )
         })
         .transpose()?;
     proof.validate_conversion_quote(request, quote.as_ref())

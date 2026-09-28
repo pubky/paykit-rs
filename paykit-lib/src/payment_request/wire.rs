@@ -5,10 +5,7 @@ use crate::{
     shared_wire::{
         deserialize_optional_no_null, BillingPeriodWire, PaymentAmountWire, RequiredNullable,
     },
-    validation::{
-        invalid_data, invalid_plaintext_json, invalid_wire, validate_outgoing_version_kind,
-        validate_wire_version_kind,
-    },
+    validation::{invalid_data, invalid_plaintext_json, invalid_wire, validate_wire_version_kind},
     AllowanceId, EventId, PaykitError, PaymentEndpointIdentifier, PaymentReference,
     PrivateMessageKind, Result,
 };
@@ -298,7 +295,7 @@ impl TryFrom<PaymentProofWire> for PaymentProof {
             .map(BillingPeriod::try_from)
             .transpose()?;
 
-        Ok(Self {
+        let event = Self {
             version: 1,
             kind: PrivateMessageKind::PaymentProof,
             event_id: EventId::new(wire.event_id)?,
@@ -311,7 +308,9 @@ impl TryFrom<PaymentProofWire> for PaymentProof {
             allowance_id: wire.allowance_id.map(parse_allowance_id).transpose()?,
             conversion_quote_id: wire.conversion_quote_id.map(EventId::new).transpose()?,
             proof: wire.proof,
-        })
+        };
+        event.validate()?;
+        Ok(event)
     }
 }
 
@@ -379,15 +378,7 @@ pub(super) fn serialize_cancellation_json(event: &PaymentRequestCancellation) ->
 }
 
 pub(super) fn serialize_payment_proof_json(event: &PaymentProof) -> Result<String> {
-    validate_outgoing_version_kind(
-        event.version,
-        event.kind,
-        PrivateMessageKind::PaymentProof,
-        "Payment Proof",
-    )?;
-    if let Some(period) = &event.billing_period {
-        period.validate()?;
-    }
+    event.validate()?;
     serde_json::to_string(&PaymentProofWire::from(event)).map_err(|err| {
         invalid_data(
             format!("failed to serialize Payment Proof JSON: {err}"),
@@ -512,14 +503,14 @@ struct ConversionQuoteWire {
 impl From<&PaymentConversionQuote> for ConversionQuoteWire {
     fn from(event: &PaymentConversionQuote) -> Self {
         Self {
-            version: event.version,
-            kind: event.kind.as_str().to_owned(),
-            event_id: event.event_id.as_str().to_owned(),
-            payment_request_id: event.payment_request_id.as_str().to_owned(),
-            billing_period: BillingPeriodWire::from(&event.billing_period),
-            rates: event.rates.clone(),
-            valid_from: event.valid_from.clone(),
-            expires_at: event.expires_at.clone(),
+            version: event.version(),
+            kind: event.kind().as_str().to_owned(),
+            event_id: event.event_id().as_str().to_owned(),
+            payment_request_id: event.payment_request_id().as_str().to_owned(),
+            billing_period: BillingPeriodWire::from(event.billing_period()),
+            rates: event.rates().to_vec(),
+            valid_from: event.valid_from().to_owned(),
+            expires_at: event.expires_at().to_owned(),
         }
     }
 }
@@ -534,16 +525,14 @@ impl TryFrom<ConversionQuoteWire> for PaymentConversionQuote {
             PrivateMessageKind::PaymentConversionQuote,
             "Payment Conversion Quote",
         )?;
-        let event = Self::new(
+        Self::new(
             EventId::new(wire.event_id)?,
             PaymentRequestId::new(wire.payment_request_id)?,
             BillingPeriod::try_from(wire.billing_period)?,
             wire.rates,
             wire.valid_from,
             wire.expires_at,
-        );
-        event.validate()?;
-        Ok(event)
+        )
     }
 }
 
@@ -591,6 +580,23 @@ mod tests {
             None,
             PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
             JsonMap::new(),
+        )
+    }
+
+    fn erc20_payment_proof(receipt_log_index: JsonValue) -> PaymentProof {
+        let mut proof = JsonMap::new();
+        proof.insert(
+            "type".into(),
+            JsonValue::String("erc20-transfer-eip712".into()),
+        );
+        proof.insert("receipt_log_index".into(), receipt_log_index);
+        PaymentProof::new(
+            EventId::new_v4(),
+            PaymentRequestId::new_v4(),
+            PaymentReference::new("invoice-2026-0001").unwrap(),
+            None,
+            PaymentEndpointIdentifier::new("usdt-arbitrum-address").unwrap(),
+            proof,
         )
     }
 
@@ -648,6 +654,54 @@ mod tests {
             parse_payment_proof_json(&duplicate),
             Err(PaykitError::InvalidData { .. })
         ));
+    }
+
+    #[test]
+    fn test_erc20_receipt_log_index_round_trips_uint256_max() {
+        let maximum =
+            "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+        let proof = erc20_payment_proof(JsonValue::String(maximum.into()));
+
+        let raw = serialize_payment_proof_json(&proof).unwrap();
+        let parsed = parse_payment_proof_json(&raw).unwrap();
+
+        assert_eq!(
+            parsed
+                .proof()
+                .get("receipt_log_index")
+                .and_then(JsonValue::as_str),
+            Some(maximum)
+        );
+        assert_eq!(parsed, proof);
+    }
+
+    #[test]
+    fn test_erc20_receipt_log_index_rejects_noncanonical_or_out_of_range_values() {
+        let valid = erc20_payment_proof(JsonValue::String("0".into()));
+        let raw = serialize_payment_proof_json(&valid).unwrap();
+        for invalid in [
+            JsonValue::from(0),
+            JsonValue::String(String::new()),
+            JsonValue::String("00".into()),
+            JsonValue::String("+1".into()),
+            JsonValue::String(
+                "115792089237316195423570985008687907853269984665640564039457584007913129639936"
+                    .into(),
+            ),
+        ] {
+            let proof = erc20_payment_proof(invalid.clone());
+            assert!(matches!(
+                serialize_payment_proof_json(&proof),
+                Err(PaykitError::Validation(_))
+            ));
+
+            let mut value: JsonValue = serde_json::from_str(&raw).unwrap();
+            value["proof"]["receipt_log_index"] = invalid;
+            assert!(matches!(
+                parse_payment_proof_json(&value.to_string()),
+                Err(PaykitError::InvalidData { .. })
+            ));
+        }
     }
 
     #[test]

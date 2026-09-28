@@ -52,13 +52,17 @@ continue. Use `.to_owned()`, `.to_vec()`, or `.clone()` explicitly when ownershi
 is needed. To change terms, build a new value rather than mutate an existing
 validated value.
 
-All five Payment Request event constructors set their own version and kind.
+All Payment Request event constructors set their own version and kind.
 Read headers with `version()` and `kind()`; callers cannot override them.
 `PaymentProof::new` keeps its existing six validated-component arguments, and
 `with_allowance_id` adds optional attribution. `validate_for_request` is still
 required for stateless correlation with a particular Request. Valid component
 types do not establish consent, lifecycle eligibility, recurrence membership,
 settlement, or permission to pay.
+
+`PaymentConversionQuote::new` validates the Billing Period, rates and validity
+interval before returning `Result`. Read its fields through accessors such as
+`event_id()`, `billing_period()`, `rates()` and `expires_at()`.
 
 SDK records and FFI input records are data records, not validated authority.
 Conversions from these records and from raw wire objects now use the validating

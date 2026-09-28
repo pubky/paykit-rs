@@ -469,6 +469,19 @@ impl PaymentProof {
         self.allowance_id.as_ref()
     }
 
+    pub(super) fn validate(&self) -> Result<()> {
+        crate::validation::validate_outgoing_version_kind(
+            self.version,
+            self.kind,
+            PrivateMessageKind::PaymentProof,
+            "Payment Proof",
+        )?;
+        if let Some(period) = &self.billing_period {
+            period.validate()?;
+        }
+        validate_method_specific_proof(&self.proof)
+    }
+
     /// Validate this proof against the immutable terms of a specific Payment Request.
     ///
     /// Checks stateless correlation only: request ID, Payment Reference,
@@ -476,11 +489,7 @@ impl PaymentProof {
     /// Use `validate_conversion_quote` to also check a selected quote. Caller
     /// state owns lifecycle, role, dedupe, settlement and recurrence eligibility.
     pub fn validate_for_request(&self, request: &PaymentRequest) -> Result<()> {
-        if self.version != 1 || self.kind != PrivateMessageKind::PaymentProof {
-            return Err(PaykitError::Validation(
-                "Payment Proof must have version 1 and kind paykit.payment_proof".into(),
-            ));
-        }
+        self.validate()?;
         request.validate()?;
         if self.payment_request_id != request.payment_request_id {
             return Err(PaykitError::Validation(
@@ -514,6 +523,38 @@ impl PaymentProof {
             (None, None) => Ok(()),
         }
     }
+}
+
+const ERC20_PAYMENT_PROOF_TYPE: &str = "erc20-transfer-eip712";
+const UINT256_MAX_DECIMAL: &str =
+    "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+
+fn validate_method_specific_proof(proof: &JsonMap<String, JsonValue>) -> Result<()> {
+    if proof.get("type").and_then(JsonValue::as_str) != Some(ERC20_PAYMENT_PROOF_TYPE) {
+        return Ok(());
+    }
+    let index = proof
+        .get("receipt_log_index")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| {
+            PaykitError::Validation(
+                "ERC-20 Payment Proof receipt_log_index must be a decimal string".into(),
+            )
+        })?;
+    let canonical = index == "0"
+        || (!index.is_empty()
+            && !index.starts_with('0')
+            && index.bytes().all(|byte| byte.is_ascii_digit()));
+    if !canonical
+        || index.len() > UINT256_MAX_DECIMAL.len()
+        || (index.len() == UINT256_MAX_DECIMAL.len() && index > UINT256_MAX_DECIMAL)
+    {
+        return Err(PaykitError::Validation(
+            "ERC-20 Payment Proof receipt_log_index must be a canonical uint256 decimal string"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// One recognized Payment Request protocol Event Message in FIFO receive order.
@@ -557,7 +598,7 @@ impl PaymentRequestEvent {
             Self::Rejection(event) => event.kind,
             Self::Cancellation(event) => event.kind,
             Self::Proof(event) => event.kind,
-            Self::ConversionQuote(event) => event.kind,
+            Self::ConversionQuote(event) => event.kind(),
         }
     }
 
@@ -569,7 +610,7 @@ impl PaymentRequestEvent {
             Self::Rejection(event) => &event.event_id,
             Self::Cancellation(event) => &event.event_id,
             Self::Proof(event) => &event.event_id,
-            Self::ConversionQuote(event) => &event.event_id,
+            Self::ConversionQuote(event) => event.event_id(),
         }
     }
 
@@ -581,7 +622,7 @@ impl PaymentRequestEvent {
             Self::Rejection(event) => &event.payment_request_id,
             Self::Cancellation(event) => &event.payment_request_id,
             Self::Proof(event) => &event.payment_request_id,
-            Self::ConversionQuote(event) => &event.payment_request_id,
+            Self::ConversionQuote(event) => event.payment_request_id(),
         }
     }
 }

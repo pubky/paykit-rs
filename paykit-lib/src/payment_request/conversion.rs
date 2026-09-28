@@ -106,28 +106,36 @@ fn deadline_after(starts_at: &str, seconds: u64) -> Result<DateTime<FixedOffset>
 
 /// Payee-issued rates for one recurring Billing Period.
 /// The Event ID is the quote identifier. New quotes never replace earlier quotes.
+///
+/// Fields cannot be mutated after validated construction.
+///
+/// ```compile_fail,E0616
+/// fn cannot_mutate(mut quote: paykit_lib::PaymentConversionQuote) {
+///     quote.expires_at = "invalid".into();
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaymentConversionQuote {
     /// Protocol message version.
-    pub version: u8,
+    version: u8,
     /// Private Message Kind.
-    pub kind: PrivateMessageKind,
+    kind: PrivateMessageKind,
     /// Immutable quote identity, reused when referring to this quote from a proof.
-    pub event_id: EventId,
+    event_id: EventId,
     /// Request whose denomination and accepted endpoints apply.
-    pub payment_request_id: PaymentRequestId,
+    payment_request_id: PaymentRequestId,
     /// Period these rates apply to; eligibility is checked by the wallet's recurrence policy.
-    pub billing_period: BillingPeriod,
+    billing_period: BillingPeriod,
     /// Payment asset units per one requested asset unit.
-    pub rates: Vec<ConversionRate>,
+    rates: Vec<ConversionRate>,
     /// Inclusive start of the payment validity interval, in RFC3339 UTC.
-    pub valid_from: String,
+    valid_from: String,
     /// Inclusive payment deadline for this quote, in RFC3339 UTC.
-    pub expires_at: String,
+    expires_at: String,
 }
 
 impl PaymentConversionQuote {
-    /// Construct a recurring quote. Serialization and request correlation validate its fields.
+    /// Construct and validate a recurring quote.
     pub fn new(
         event_id: EventId,
         payment_request_id: PaymentRequestId,
@@ -135,8 +143,8 @@ impl PaymentConversionQuote {
         rates: Vec<ConversionRate>,
         valid_from: String,
         expires_at: String,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let quote = Self {
             version: 1,
             kind: PrivateMessageKind::PaymentConversionQuote,
             event_id,
@@ -145,7 +153,49 @@ impl PaymentConversionQuote {
             rates,
             valid_from,
             expires_at,
-        }
+        };
+        quote.validate()?;
+        Ok(quote)
+    }
+
+    /// Return the protocol message version.
+    pub fn version(&self) -> u8 {
+        self.version
+    }
+
+    /// Return the Private Message Kind.
+    pub fn kind(&self) -> PrivateMessageKind {
+        self.kind
+    }
+
+    /// Access the immutable quote Event ID.
+    pub fn event_id(&self) -> &EventId {
+        &self.event_id
+    }
+
+    /// Access the associated Payment Request ID.
+    pub fn payment_request_id(&self) -> &PaymentRequestId {
+        &self.payment_request_id
+    }
+
+    /// Access the quoted Billing Period.
+    pub fn billing_period(&self) -> &BillingPeriod {
+        &self.billing_period
+    }
+
+    /// Access the immutable conversion rates.
+    pub fn rates(&self) -> &[ConversionRate] {
+        &self.rates
+    }
+
+    /// Access the inclusive start of the quote validity interval.
+    pub fn valid_from(&self) -> &str {
+        &self.valid_from
+    }
+
+    /// Access the inclusive end of the quote validity interval.
+    pub fn expires_at(&self) -> &str {
+        &self.expires_at
     }
 
     pub(super) fn validate(&self) -> Result<()> {
@@ -287,7 +337,7 @@ impl PaymentProof {
     ) -> Result<()> {
         self.validate_for_request(request)?;
         match (&self.conversion_quote_id, quote) {
-            (Some(id), Some(quote)) if *id == quote.event_id => {
+            (Some(id), Some(quote)) if id == quote.event_id() => {
                 quote.validate_for_request(request)?;
                 let same_period = self
                     .billing_period
@@ -295,12 +345,12 @@ impl PaymentProof {
                     .map(|period| -> Result<bool> {
                         Ok(conversion_timestamp(&period.starts_at, "period starts_at")?
                             == conversion_timestamp(
-                                &quote.billing_period.starts_at,
+                                quote.billing_period().starts_at(),
                                 "period starts_at",
                             )?
                             && conversion_timestamp(&period.ends_at, "period ends_at")?
                                 == conversion_timestamp(
-                                    &quote.billing_period.ends_at,
+                                    quote.billing_period().ends_at(),
                                     "period ends_at",
                                 )?)
                     })
@@ -311,7 +361,7 @@ impl PaymentProof {
                         "proof and quote Billing Period must match".into(),
                     ));
                 }
-                self.validate_rate_coverage(&request.request, &quote.rates)
+                self.validate_rate_coverage(&request.request, quote.rates())
             }
             (None, None) => Ok(()),
             _ => Err(PaykitError::Validation(

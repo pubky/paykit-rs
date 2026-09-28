@@ -341,3 +341,25 @@ fn test_conversion_terms_and_quote_selection_survive_bindings() {
     );
     assert!(payment_deadline_at(FfiPaymentDeadline::PeriodStart { seconds: 86400 }, None).is_err());
 }
+
+#[test]
+fn test_erc20_receipt_log_index_max_survives_ffi_submission_boundary() {
+    let maximum = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+    let mut submission = proof_submission(None);
+    submission.proof = Arc::new(
+        FfiPrivateJsonObject::new(format!(
+            r#"{{"type":"erc20-transfer-eip712","receipt_log_index":"{maximum}"}}"#
+        ))
+        .unwrap(),
+    );
+
+    let native = paykit_sdk::PaymentProofSubmission::try_from(submission).unwrap();
+
+    assert_eq!(
+        native
+            .proof
+            .get("receipt_log_index")
+            .and_then(serde_json::Value::as_str),
+        Some(maximum)
+    );
+}

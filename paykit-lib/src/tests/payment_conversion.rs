@@ -108,10 +108,11 @@ fn test_payment_conversion_terms_and_quotes_round_trip() {
         vec![rate("usdt", "1"), rate("btc", "0.00001234")],
         "2026-06-01T00:00:00Z".into(),
         "2026-06-02T00:00:00Z".into(),
-    );
+    )
+    .unwrap();
     quote.validate_for_request(&request).unwrap();
     let proof =
-        proof(&request, "usdt-arbitrum-address").with_conversion_quote_id(quote.event_id.clone());
+        proof(&request, "usdt-arbitrum-address").with_conversion_quote_id(quote.event_id().clone());
     proof
         .validate_conversion_quote(&request, Some(&quote))
         .unwrap();
@@ -189,45 +190,79 @@ fn test_payment_conversion_absence_and_missing_rate_have_distinct_meanings() {
 #[test]
 fn test_payment_conversion_quote_binds_request_period_and_selected_asset() {
     let request = request(Some(PaymentConversion::PerPeriod {}));
-    let mut quote = PaymentConversionQuote::new(
+    let quote = PaymentConversionQuote::new(
         EventId::new_v4(),
         request.payment_request_id().clone(),
         period(),
         vec![rate("usdt", "1")],
         "2026-06-01T00:00:00Z".into(),
         "2026-06-02T00:00:00Z".into(),
-    );
+    )
+    .unwrap();
     let proof =
-        proof(&request, "usdt-arbitrum-address").with_conversion_quote_id(quote.event_id.clone());
+        proof(&request, "usdt-arbitrum-address").with_conversion_quote_id(quote.event_id().clone());
     assert!(proof.validate_conversion_quote(&request, None).is_err());
     // Expiry is evaluated against verified payment time, never the time this proof is parsed.
     proof
         .validate_conversion_quote(&request, Some(&quote))
         .unwrap();
-    let original = quote.clone();
-    quote.event_id = EventId::new_v4();
+    let quote = PaymentConversionQuote::new(
+        EventId::new_v4(),
+        request.payment_request_id().clone(),
+        period(),
+        vec![rate("usdt", "1")],
+        "2026-06-01T00:00:00Z".into(),
+        "2026-06-02T00:00:00Z".into(),
+    )
+    .unwrap();
     assert!(proof
         .validate_conversion_quote(&request, Some(&quote))
         .is_err());
-    quote = original.clone();
-    quote.payment_request_id = PaymentRequestId::new_v4();
+    let quote = PaymentConversionQuote::new(
+        proof.conversion_quote_id().unwrap().clone(),
+        PaymentRequestId::new_v4(),
+        period(),
+        vec![rate("usdt", "1")],
+        "2026-06-01T00:00:00Z".into(),
+        "2026-06-02T00:00:00Z".into(),
+    )
+    .unwrap();
     assert!(proof
         .validate_conversion_quote(&request, Some(&quote))
         .is_err());
-    quote = original.clone();
-    quote.billing_period =
-        BillingPeriod::new("2026-06-02T00:00:00Z", "2026-07-01T00:00:00Z").unwrap();
+    let quote = PaymentConversionQuote::new(
+        proof.conversion_quote_id().unwrap().clone(),
+        request.payment_request_id().clone(),
+        BillingPeriod::new("2026-06-02T00:00:00Z", "2026-07-01T00:00:00Z").unwrap(),
+        vec![rate("usdt", "1")],
+        "2026-06-01T00:00:00Z".into(),
+        "2026-06-02T00:00:00Z".into(),
+    )
+    .unwrap();
     assert!(proof
         .validate_conversion_quote(&request, Some(&quote))
         .is_err());
-    quote = original.clone();
-    quote.billing_period =
-        BillingPeriod::new("2026-06-01T00:00:00.000Z", "2026-07-01T00:00:00.000000000Z").unwrap();
+    let quote = PaymentConversionQuote::new(
+        proof.conversion_quote_id().unwrap().clone(),
+        request.payment_request_id().clone(),
+        BillingPeriod::new("2026-06-01T00:00:00.000Z", "2026-07-01T00:00:00.000000000Z").unwrap(),
+        vec![rate("usdt", "1")],
+        "2026-06-01T00:00:00Z".into(),
+        "2026-06-02T00:00:00Z".into(),
+    )
+    .unwrap();
     proof
         .validate_conversion_quote(&request, Some(&quote))
         .unwrap();
-    quote = original;
-    quote.rates = vec![rate("btc", "0.00001")];
+    let quote = PaymentConversionQuote::new(
+        proof.conversion_quote_id().unwrap().clone(),
+        request.payment_request_id().clone(),
+        period(),
+        vec![rate("btc", "0.00001")],
+        "2026-06-01T00:00:00Z".into(),
+        "2026-06-02T00:00:00Z".into(),
+    )
+    .unwrap();
     assert!(proof
         .validate_conversion_quote(&request, Some(&quote))
         .is_err());
@@ -294,15 +329,17 @@ fn test_payment_conversion_wire_rejects_ambiguous_and_unknown_fields() {
 #[test]
 fn test_conversion_quotes_require_a_portable_ordered_time_interval() {
     let request = request(Some(PaymentConversion::PerPeriod {}));
-    let mut quote = PaymentConversionQuote::new(
+    PaymentConversionQuote::new(
         EventId::new_v4(),
         request.payment_request_id().clone(),
         period(),
         vec![rate("usdt", "1")],
         "2026-06-01T00:00:00Z".into(),
         "2026-06-01T00:00:00Z".into(),
-    );
-    quote.validate_for_request(&request).unwrap();
+    )
+    .unwrap()
+    .validate_for_request(&request)
+    .unwrap();
     for invalid in [
         "2026-06-02T00:00:00Z",
         "2026-06-01 00:00:00Z",
@@ -310,8 +347,18 @@ fn test_conversion_quotes_require_a_portable_ordered_time_interval() {
         "2026-05-31T23:59:60Z",
         "+11533-01-14T05:20:00Z",
     ] {
-        quote.valid_from = invalid.into();
-        assert!(quote.validate_for_request(&request).is_err(), "{invalid}");
+        assert!(
+            PaymentConversionQuote::new(
+                EventId::new_v4(),
+                request.payment_request_id().clone(),
+                period(),
+                vec![rate("usdt", "1")],
+                invalid.into(),
+                "2026-06-01T00:00:00Z".into(),
+            )
+            .is_err(),
+            "{invalid}"
+        );
     }
     assert!(PaymentDeadline::PeriodStart {
         seconds: 300_000_000_000

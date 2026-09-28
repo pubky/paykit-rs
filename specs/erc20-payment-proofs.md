@@ -16,7 +16,7 @@ and SDK do not implement an EVM client or a token/signature verifier.
   "type": "erc20-transfer-eip712",
   "chain_id": "42161",
   "transaction_hash": "0x1111111111111111111111111111111111111111111111111111111111111111",
-  "receipt_log_index": 0,
+  "receipt_log_index": "0",
   "signature": "0x<65-byte recoverable signature>"
 }
 ```
@@ -25,11 +25,17 @@ and SDK do not implement an EVM client or a token/signature verifier.
 equal the selected endpoint's chain ID, and the EIP-712 domain `chainId` MUST
 equal that same numeric value. Other EVM chains use their own chain ID.
 `transaction_hash` is a lowercase 0x-prefixed 32-byte hash.
-`receipt_log_index` is a nonnegative uint256 integer selecting the zero-based position
-within that transaction receipt's **entire logs array**, not the block-global RPC
-`logIndex` and not an index among Transfer events only. This distinguishes batched
-payments and avoids tying payment identity to a block-global position that can
-change after a reorganization. The unique payment identity is the independently verified endpoint chain ID,
+`receipt_log_index` is a canonical base-10 uint256 string selecting the zero-based
+position within that transaction receipt's **entire logs array**, not the
+block-global RPC `logIndex` and not an index among Transfer events only. The value
+MUST be `0` or start with a digit from `1` through `9`, MUST contain only ASCII
+digits, and MUST be no greater than
+`115792089237316195423570985008687907853269984665640564039457584007913129639935`
+(`2^256 - 1`). JSON numbers, signs, leading zeroes, whitespace and exponent notation
+MUST be rejected. Verifiers parse this string into the EIP-712 `uint256` value only
+after these checks. This distinguishes batched payments and avoids tying payment
+identity to a block-global position that can change after a reorganization. The
+unique payment identity is the independently verified endpoint chain ID,
 transaction hash and receipt-relative log index. Signatures and request IDs are
 not part of the deduplication key.
 
