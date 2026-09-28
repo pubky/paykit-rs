@@ -173,6 +173,26 @@ statuses still indicate whether a queued event has been sent.
 payer response. A required Paykit App constrains the payee endpoint, not the
 payer app that responds.
 
+### Allowances
+
+- `PaykitSdk.proposeAllowance`, `acceptAllowance`, `rejectAllowance`, and
+  `endAllowance` queue Allowance lifecycle events through the SDK outbound
+  stream.
+- `PaykitSdk.listAllowances` and `getAllowance` inspect SDK-derived Allowance
+  records without reimplementing lifecycle derivation on the platform.
+- `AllowanceTerms` and its nested range, period, and limit objects validate
+  immutable Allowance authority before proposal and expose private fields only
+  through explicit getters. Their Swift `description`/`debugDescription` is
+  routed to the redacted Rust formatting; the Kotlin wrappers expose no fields
+  through `toString()`.
+
+Allowance Terms and every value returned by their getters are sensitive private
+state. Do not include them in ordinary Swift/Kotlin logs, reflection output, or
+diagnostics. Returned records describe consent-message state and history health;
+they do not determine payment eligibility or authorize payment execution.
+Existing Swift `PaykitSdkProtocol` mocks and Kotlin `PaykitSdkInterface`
+implementations must add the six Allowance methods when adopting these bindings.
+
 ### Receipts
 
 - `generateReceiptId` — create a caller-stable Receipt ID for retry-safe
@@ -335,8 +355,8 @@ Apps that share one identity-wide Pubky state can instead construct the handle
 with `withPaymentAdapterAndPubkySharedState`. This mode does not use
 `SdkStateBlobStore` callbacks. It requires active session access with current
 Paykit identity key material for every operation. Independent runtimes use
-homeserver ETag preconditions, so stale writes fail instead of replacing newer
-state and the caller can retry the SDK operation.
+renewable homeserver write locks across each state transaction. A lock conflict
+can be retried by restarting the SDK operation with fresh state.
 
 Use `identityStatus` to gate product actions. `publicKey` identifies the last
 initialized identity when known. `SignedOut` means Pubky-backed workflows must

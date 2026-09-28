@@ -37,8 +37,18 @@ pub enum PrivateMessageKind {
     PaymentRequestRejection,
     /// Payment Request Cancellation Event Message (`paykit.payment_request_cancellation`).
     PaymentRequestCancellation,
+    /// Recurring Payment Conversion Quote Event Message (`paykit.payment_conversion_quote`).
+    PaymentConversionQuote,
     /// Payment Proof Event Message (`paykit.payment_proof`).
     PaymentProof,
+    /// Allowance Proposal Event Message (`paykit.allowance_proposal`).
+    AllowanceProposal,
+    /// Allowance Acceptance Event Message (`paykit.allowance_acceptance`).
+    AllowanceAcceptance,
+    /// Allowance Rejection Event Message (`paykit.allowance_rejection`).
+    AllowanceRejection,
+    /// Allowance End Event Message (`paykit.allowance_end`).
+    AllowanceEnd,
 }
 
 impl PrivateMessageKind {
@@ -52,6 +62,11 @@ impl PrivateMessageKind {
             Self::PaymentRequestRejection => "paykit.payment_request_rejection",
             Self::PaymentRequestCancellation => "paykit.payment_request_cancellation",
             Self::PaymentProof => "paykit.payment_proof",
+            Self::PaymentConversionQuote => "paykit.payment_conversion_quote",
+            Self::AllowanceProposal => "paykit.allowance_proposal",
+            Self::AllowanceAcceptance => "paykit.allowance_acceptance",
+            Self::AllowanceRejection => "paykit.allowance_rejection",
+            Self::AllowanceEnd => "paykit.allowance_end",
         }
     }
 
@@ -65,6 +80,11 @@ impl PrivateMessageKind {
             "paykit.payment_request_rejection" => Some(Self::PaymentRequestRejection),
             "paykit.payment_request_cancellation" => Some(Self::PaymentRequestCancellation),
             "paykit.payment_proof" => Some(Self::PaymentProof),
+            "paykit.payment_conversion_quote" => Some(Self::PaymentConversionQuote),
+            "paykit.allowance_proposal" => Some(Self::AllowanceProposal),
+            "paykit.allowance_acceptance" => Some(Self::AllowanceAcceptance),
+            "paykit.allowance_rejection" => Some(Self::AllowanceRejection),
+            "paykit.allowance_end" => Some(Self::AllowanceEnd),
             _ => None,
         }
     }

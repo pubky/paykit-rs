@@ -18,9 +18,11 @@ pub(crate) async fn received_payment_request_records<S>(
 where
     S: StorageAdapter,
 {
-    let (items, dedupe_records, execution_claims) = storage
+    let (items, dedupe_records, execution_claims, outbound_carriers) = storage
         .transaction(|tx| {
             let items = tx.private_stream_items(counterparty);
+            let outbound = tx.outbound_private_messages(counterparty);
+            let outbound_carriers = outbound_event_carriers(&outbound);
             let mut dedupe_records = HashMap::new();
             for item in &items {
                 let Some(message) = payment_request_message_from_item(item) else {
@@ -42,11 +44,16 @@ where
                 .into_iter()
                 .filter(|((claim_counterparty, _), _)| claim_counterparty == counterparty)
                 .collect::<HashMap<_, _>>();
-            Ok((items, dedupe_records, execution_claims))
+            Ok((items, dedupe_records, execution_claims, outbound_carriers))
         })
         .await?;
-    let mut records =
-        derive_received_payment_request_records(counterparty.clone(), items, dedupe_records, now)?;
+    let mut records = derive_received_payment_request_records(
+        counterparty.clone(),
+        items,
+        dedupe_records,
+        outbound_carriers,
+        now,
+    )?;
     apply_execution_claims(&mut records, &execution_claims);
     Ok(records)
 }
@@ -70,25 +77,27 @@ where
 }
 
 pub(crate) fn payment_request_records_from_transaction(
-    tx: &dyn StorageTransaction,
+    tx: &dyn crate::storage::StorageTransaction,
     counterparty: &PubkyPublicKey,
     now: DateTime<Utc>,
 ) -> Result<Vec<PaymentRequestRecord>> {
     let items = tx.private_stream_items(counterparty);
     let outbound = tx.outbound_private_messages(counterparty);
+    let outbound_carriers = outbound_event_carriers(&outbound);
+    let received_event_ids = items
+        .iter()
+        .filter_map(payment_request_message_from_item)
+        .filter_map(|message| parse_payment_request_event_message(&message))
+        .filter_map(|parsed| parsed.event_id().map(|id| id.as_str().to_owned()))
+        .collect::<HashSet<_>>();
     let mut dedupe_records = HashMap::new();
-    for item in &items {
-        let Some(message) = payment_request_message_from_item(item) else {
-            continue;
-        };
-        let Some(parsed) = parse_payment_request_event_message(&message) else {
-            continue;
-        };
-        let Some(event_id) = parsed.event_id() else {
-            continue;
-        };
-        if let Some(record) = tx.event_dedup_record(counterparty, event_id.as_str()) {
-            dedupe_records.insert(event_id.as_str().to_owned(), record);
+    for event_id in outbound_carriers
+        .event_ids
+        .iter()
+        .chain(&received_event_ids)
+    {
+        if let Some(record) = tx.event_dedup_record(counterparty, event_id) {
+            dedupe_records.insert(event_id.clone(), record);
         }
     }
     let mut records = derive_payment_request_records_from_parts(
@@ -123,6 +132,7 @@ fn derive_received_payment_request_records(
     counterparty: PubkyPublicKey,
     mut items: Vec<PrivateStreamItemRecord>,
     dedupe_records: HashMap<String, EventDedupRecord>,
+    outbound_carriers: OutboundEventCarriers,
     now: DateTime<Utc>,
 ) -> Result<Vec<PaymentRequestRecord>> {
     items.sort_by_key(|item| item.stream_item_id);
@@ -158,6 +168,13 @@ fn derive_received_payment_request_records(
                     }
                     continue;
                 }
+            }
+            if outbound_carriers.event_ids.contains(event_id) {
+                if let Some(payment_request_id) = payment_request_id {
+                    record_for(&mut records, &counterparty, payment_request_id)
+                        .mark_invalid(&item, "Event ID reused by another Event Message carrier");
+                }
+                continue;
             }
         }
 

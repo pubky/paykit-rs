@@ -148,6 +148,12 @@ fn debug_error_variant(
 
 impl From<paykit_lib::PaykitError> for PaykitSdkError {
     fn from(err: paykit_lib::PaykitError) -> Self {
+        if paykit_lib::is_write_conflict(&err) {
+            return Self::ConcurrentUpdate {
+                context: "Pubky resource is locked or changed; retry from current state".into(),
+                source: Some(err.into()),
+            };
+        }
         match err {
             paykit_lib::PaykitError::Transport { context, source } => Self::Transport {
                 context,

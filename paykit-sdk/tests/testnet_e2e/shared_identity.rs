@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use paykit_lib::{
     BillingPeriod, PaymentAmount, PaymentEndpointIdentifier, PaymentReference, PaymentRequestId,
-    PaymentRequestTerms, Recurrence, RecurrenceUnit,
+    PaymentRequestTerms, PaymentRequestTermsBuilder, Recurrence, RecurrenceConfig, RecurrenceUnit,
 };
 use paykit_sdk::{
     storage::StorageTransactionCallback, Clock, ContactUpdate, InMemoryStorage, LinkedPeerState,
@@ -336,8 +336,12 @@ async fn test_shared_apps_advance_one_handshake_without_diverging() {
     assert!(bitkit_advance.is_ok() || server_advance.is_ok());
     for result in [bitkit_advance, server_advance] {
         assert!(
-            result.is_ok() || matches!(result, Err(PaykitSdkError::Policy { .. })),
-            "concurrent handshake advancement should either advance or observe the peer lease"
+            result.is_ok()
+                || matches!(
+                    result,
+                    Err(PaykitSdkError::Policy { .. } | PaykitSdkError::ConcurrentUpdate { .. })
+                ),
+            "concurrent handshake advancement should advance or observe contention: {result:?}"
         );
     }
 
@@ -383,8 +387,12 @@ async fn test_shared_apps_observe_one_recovery_marker_without_diverging() {
     assert!(bitkit_observe.is_ok() || server_observe.is_ok());
     for result in [&bitkit_observe, &server_observe] {
         assert!(
-            result.is_ok() || matches!(result, Err(PaykitSdkError::Policy { .. })),
-            "concurrent recovery should either observe the marker or the peer lease"
+            result.is_ok()
+                || matches!(
+                    result,
+                    Err(PaykitSdkError::Policy { .. } | PaykitSdkError::ConcurrentUpdate { .. })
+                ),
+            "concurrent recovery should observe the marker or contention: {result:?}"
         );
     }
     let state = pair.bitkit.storage_state().await;
@@ -479,7 +487,7 @@ async fn test_paykit_identity_key_rotation_rekeys_shared_state_and_registry() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_pubky_shared_state_rejects_a_stale_writer() {
+async fn test_pubky_shared_state_rejects_a_competing_writer_until_lock_release() {
     let testnet = build_testnet().await;
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
@@ -499,48 +507,56 @@ async fn test_pubky_shared_state_rejects_a_stale_writer() {
         PaykitSdkConfig::new("bitkit").unwrap(),
     );
     sdk.initialize().await.unwrap();
-    let initialized_at = first
+    let initialized_at = second
         .transaction(|tx| Ok(tx.load_identity_state().unwrap().initialized_at))
         .await
         .unwrap();
 
-    let (loaded_tx, loaded_rx) = std::sync::mpsc::sync_channel(0);
-    let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(0);
-    let stale = first.clone();
-    let stale_write = std::thread::spawn(move || {
+    let (pause, loaded_rx, continue_tx) = TransactionPause::new();
+    let locked_storage = first.clone();
+    let locked_write = std::thread::spawn(move || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
-            .block_on(stale.transaction(move |tx| {
-                loaded_tx.send(()).unwrap();
-                continue_rx.recv().unwrap();
+            .block_on(locked_storage.transaction(move |tx| {
+                pause.wait()?;
                 let mut identity = tx.load_identity_state().unwrap();
                 identity.initialized_at += chrono::Duration::seconds(2);
                 tx.save_identity_state(identity);
                 Ok(())
             }))
     });
-    loaded_rx.recv().unwrap();
-    second
+    loaded_rx
+        .recv_timeout(TRANSACTION_PAUSE_TIMEOUT)
+        .expect("the writer should hold the shared-state lock");
+    let competing_callback_ran = AtomicBool::new(false);
+    let competing_write = second
         .transaction(|tx| {
+            competing_callback_ran.store(true, Ordering::SeqCst);
             let mut identity = tx.load_identity_state().unwrap();
             identity.initialized_at += chrono::Duration::seconds(1);
             tx.save_identity_state(identity);
             Ok(())
         })
+        .await;
+    continue_tx.try_send(()).unwrap();
+    locked_write
+        .join()
+        .unwrap()
+        .expect("the lock holder should commit its transaction");
+
+    let error = competing_write.expect_err("a competing writer must not acquire the held lock");
+    assert!(error.is_concurrent_update());
+    assert!(!competing_callback_ran.load(Ordering::SeqCst));
+
+    let reloaded_at = second
+        .transaction(|tx| Ok(tx.load_identity_state().unwrap().initialized_at))
         .await
-        .unwrap();
-    continue_tx.send(()).unwrap();
+        .expect("the competing storage instance should read the committed state after unlock");
+    assert_eq!(reloaded_at, initialized_at + chrono::Duration::seconds(2));
 
-    let error = stale_write.join().unwrap().unwrap_err();
-    assert!(matches!(
-        error,
-        PaykitSdkError::ConcurrentUpdate { context, .. }
-            if context.contains("changed during transaction")
-    ));
-
-    first
+    second
         .transaction(|tx| {
             let mut identity = tx.load_identity_state().unwrap();
             identity.initialized_at += chrono::Duration::seconds(3);
@@ -548,14 +564,14 @@ async fn test_pubky_shared_state_rejects_a_stale_writer() {
             Ok(())
         })
         .await
-        .expect("the stale storage instance should succeed after reloading and retrying");
-    let final_initialized_at = second
+        .expect("the competing writer should succeed after reloading and retrying");
+    let final_initialized_at = first
         .transaction(|tx| Ok(tx.load_identity_state().unwrap().initialized_at))
         .await
         .unwrap();
     assert_eq!(
         final_initialized_at,
-        initialized_at + chrono::Duration::seconds(4)
+        initialized_at + chrono::Duration::seconds(5)
     );
 }
 
@@ -628,31 +644,38 @@ async fn test_independent_grants_share_homeserver_noise_state_under_concurrency(
 
     let (bitkit_send_sdk, send_loaded, continue_send) = pair.bitkit.paused_sdk();
     let send_counterparty = pair.bob.public_key.clone();
-    let stale_send_sdk = bitkit_send_sdk.clone();
-    let stale_send = std::thread::spawn(move || {
+    let locked_send = std::thread::spawn(move || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
-            .block_on(stale_send_sdk.process_outbound_private_messages(send_counterparty))
+            .block_on(bitkit_send_sdk.process_outbound_private_messages(send_counterparty))
     });
     send_loaded
-        .recv()
-        .expect("the stale sender should load shared state");
-    let successful_send = pair
+        .recv_timeout(TRANSACTION_PAUSE_TIMEOUT)
+        .expect("the sender should hold the shared-state lock");
+    let competing_send = pair
+        .server
+        .sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await;
+    continue_send
+        .try_send(())
+        .expect("the sender holding the lock should resume");
+    let successful_send = locked_send
+        .join()
+        .unwrap()
+        .expect("the lock holder should commit both queued messages");
+    assert_eq!(successful_send.sent.len(), 2);
+    assert!(competing_send
+        .expect_err("the competing sender must not acquire the held lock")
+        .is_concurrent_update());
+    let retried_send = pair
         .server
         .sdk
         .process_outbound_private_messages(pair.bob.public_key.clone())
         .await
-        .expect("the concurrent sender should commit both queued messages");
-    assert_eq!(successful_send.sent.len(), 2);
-    continue_send
-        .send(())
-        .expect("the stale sender should resume");
-    let retried_send = stale_send
-        .join()
-        .unwrap()
-        .expect("the stale sender should reload shared state and retry internally");
+        .expect("the competing sender should reload the completed sends after unlock");
     assert!(retried_send.attempted.is_empty());
 
     let received_outbound = pair
@@ -695,31 +718,38 @@ async fn test_independent_grants_share_homeserver_noise_state_under_concurrency(
 
     let (bitkit_receive_sdk, receive_loaded, continue_receive) = pair.bitkit.paused_sdk();
     let receive_counterparty = pair.bob.public_key.clone();
-    let stale_receive_sdk = bitkit_receive_sdk.clone();
-    let stale_receive = std::thread::spawn(move || {
+    let locked_receive = std::thread::spawn(move || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
-            .block_on(stale_receive_sdk.receive_private_messages(receive_counterparty))
+            .block_on(bitkit_receive_sdk.receive_private_messages(receive_counterparty))
     });
     receive_loaded
-        .recv()
-        .expect("the stale receiver should load shared state");
-    let successful_receive = pair
+        .recv_timeout(TRANSACTION_PAUSE_TIMEOUT)
+        .expect("the receiver should hold the shared-state lock");
+    let competing_receive = pair
+        .server
+        .sdk
+        .receive_private_messages(pair.bob.public_key.clone())
+        .await;
+    continue_receive
+        .try_send(())
+        .expect("the receiver holding the lock should resume");
+    let successful_receive = locked_receive
+        .join()
+        .unwrap()
+        .expect("the lock holder should commit both inbound messages");
+    assert_eq!(successful_receive.stream_item_ids.len(), 2);
+    assert!(competing_receive
+        .expect_err("the competing receiver must not acquire the held lock")
+        .is_concurrent_update());
+    let retried_receive = pair
         .server
         .sdk
         .receive_private_messages(pair.bob.public_key.clone())
         .await
-        .expect("the concurrent receiver should commit both inbound messages");
-    assert_eq!(successful_receive.stream_item_ids.len(), 2);
-    continue_receive
-        .send(())
-        .expect("the stale receiver should resume");
-    let retried_receive = stale_receive
-        .join()
-        .unwrap()
-        .expect("the stale receiver should reload shared state and retry internally");
+        .expect("the competing receiver should reload the committed checkpoint after unlock");
     assert!(retried_receive.stream_item_ids.is_empty());
 
     let bitkit_state = pair.bitkit.storage_state().await;
@@ -803,41 +833,61 @@ async fn test_private_receive_survives_restart_after_checkpoint_commit() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_key_rotation_rejects_an_in_flight_old_key_writer() {
+async fn test_key_rotation_preserves_in_flight_write_and_rejects_old_key() {
     let pair = linked_homeserver_shared_pair().await;
     let (old_sdk, loaded, resume) = pair.server.paused_sdk();
     let contact = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    let stale_write = std::thread::spawn(move || {
+    let writing_sdk = old_sdk.clone();
+    let writing_contact = contact.clone();
+    let locked_write = std::thread::spawn(move || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
-            .block_on(old_sdk.save_contact(ContactUpdate {
-                public_key: contact,
-                label: Some("stale writer".into()),
+            .block_on(writing_sdk.save_contact(ContactUpdate {
+                public_key: writing_contact,
+                label: Some("committed before rotation".into()),
             }))
     });
     loaded
-        .recv()
-        .expect("the old-key writer should load shared state");
+        .recv_timeout(TRANSACTION_PAUSE_TIMEOUT)
+        .expect("the old-key writer should hold the shared-state lock");
 
     let replacement = pair
         .secret
         .derive_paykit_identity_secret_key(2)
         .expect("the replacement key should derive");
-    pair.bitkit
+    let competing_rotation = pair
+        .bitkit
+        .sdk
+        .rotate_paykit_identity_key(replacement.clone())
+        .await;
+    resume
+        .try_send(())
+        .expect("the old-key writer should finish before rotation");
+    let committed_contact = locked_write
+        .join()
+        .unwrap()
+        .expect("the lock holder should commit before rotation");
+    assert!(competing_rotation
+        .expect_err("key rotation must not acquire the writer's held lock")
+        .is_concurrent_update());
+
+    let registry = pair
+        .bitkit
         .sdk
         .rotate_paykit_identity_key(replacement.clone())
         .await
-        .expect("key rotation should commit");
-    resume
-        .send(())
-        .expect("the old-key writer should resume after rotation");
-    let stale_error = stale_write
-        .join()
-        .unwrap()
+        .expect("key rotation should reload and preserve the completed write");
+    assert_eq!(registry.key_generation(), 2);
+    let stale_error = old_sdk
+        .save_contact(ContactUpdate {
+            public_key: contact,
+            label: Some("stale writer".into()),
+        })
+        .await
         .expect_err("the old-key writer must not overwrite rotated state");
-    assert!(stale_error.is_concurrent_update());
+    assert!(matches!(stale_error, PaykitSdkError::Identity { .. }));
 
     let mut replacement_access = pair.bitkit.access.clone();
     replacement_access.paykit_identity_secret_key = Some(replacement);
@@ -850,7 +900,10 @@ async fn test_key_rotation_rejects_an_in_flight_old_key_writer() {
         PaykitSdkConfig::new(pair.bitkit.app_id.clone()).unwrap(),
     );
     replacement_sdk.initialize().await.unwrap();
-    assert!(replacement_sdk.contact_records().await.unwrap().is_empty());
+    assert_eq!(
+        replacement_sdk.contact_records().await.unwrap(),
+        vec![committed_contact]
+    );
 }
 
 #[tokio::test]
@@ -913,10 +966,12 @@ async fn test_homeserver_backed_apps_complete_private_payment_flow() {
         .iter()
         .any(|list| list.app_id == pair.server.app_id));
 
-    let mut terms = recurring_request_terms();
-    terms.required_app_id = Some(pair.bitkit.app_id.clone());
-    let payment_reference = terms.payment_reference.clone();
-    let amount = terms.amount.clone();
+    let terms = recurring_request_terms_builder()
+        .required_app_id(Some(pair.bitkit.app_id.clone()))
+        .build()
+        .unwrap();
+    let payment_reference = terms.payment_reference().clone();
+    let amount = terms.amount().clone();
     let request = pair
         .server
         .sdk
@@ -956,10 +1011,8 @@ async fn test_homeserver_backed_apps_complete_private_payment_flow() {
         .await
         .expect("the shared identity should receive the acceptance");
 
-    let billing_period = BillingPeriod {
-        starts_at: "2026-08-01T00:00:00Z".into(),
-        ends_at: "2026-09-01T00:00:00Z".into(),
-    };
+    let billing_period =
+        BillingPeriod::new("2026-08-01T00:00:00Z", "2026-09-01T00:00:00Z").unwrap();
     pair.bob
         .sdk
         .submit_payment_proof(
@@ -1381,17 +1434,46 @@ struct TransactionPause {
     resume: Receiver<()>,
 }
 
+const TRANSACTION_PAUSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+impl TransactionPause {
+    fn new() -> (Self, Receiver<()>, SyncSender<()>) {
+        let (loaded_tx, loaded_rx) = sync_channel(1);
+        let (resume_tx, resume_rx) = sync_channel(1);
+        (
+            Self {
+                loaded: loaded_tx,
+                resume: resume_rx,
+            },
+            loaded_rx,
+            resume_tx,
+        )
+    }
+
+    fn wait(self) -> PaykitResult<()> {
+        // An abandoned test must roll back and unlock, not panic inside the transaction.
+        self.loaded
+            .try_send(())
+            .map_err(|error| PaykitSdkError::Storage {
+                context: "shared-state transaction pause observer is unavailable".into(),
+                source: Some(error.into()),
+            })?;
+        self.resume
+            .recv_timeout(TRANSACTION_PAUSE_TIMEOUT)
+            .map_err(|error| PaykitSdkError::Storage {
+                context: "shared-state transaction was not resumed".into(),
+                source: Some(error.into()),
+            })
+    }
+}
+
 impl OneShotPausedStorage {
     fn new(inner: PubkySharedStateStorage) -> (Self, Receiver<()>, SyncSender<()>) {
-        let (loaded_tx, loaded_rx) = sync_channel(0);
-        let (resume_tx, resume_rx) = sync_channel(0);
+        let (pause, loaded_rx, resume_tx) = TransactionPause::new();
         (
             Self {
                 inner,
-                pause: Arc::new(Mutex::new(Some(TransactionPause {
-                    loaded: loaded_tx,
-                    resume: resume_rx,
-                }))),
+                pause: Arc::new(Mutex::new(Some(pause))),
             },
             loaded_rx,
             resume_tx,
@@ -1413,8 +1495,8 @@ impl StorageAdapter for OneShotPausedStorage {
                 if result.is_ok() && tx.export_storage_state() != before {
                     let pause = pause.lock().expect("pause lock poisoned").take();
                     if let Some(pause) = pause {
-                        pause.loaded.send(()).expect("test should await the load");
-                        pause.resume.recv().expect("test should resume the write");
+                        // The callback still holds the file lock; resuming allows commit and unlock.
+                        pause.wait()?;
                     }
                 }
                 result
@@ -1889,28 +1971,25 @@ async fn test_failed_app_removal_is_isolated_and_retryable() {
 }
 
 fn recurring_request_terms() -> PaymentRequestTerms {
+    recurring_request_terms_builder().build().unwrap()
+}
+
+fn recurring_request_terms_builder() -> PaymentRequestTermsBuilder {
     let starts_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
-    PaymentRequestTerms {
-        amount: PaymentAmount {
-            value: "0.001".into(),
-            asset: "btc".into(),
-        },
-        payment_reference: PaymentReference::new("shared-identity-subscription").unwrap(),
-        proposal_expires_at: None,
-        recurrence: Some(Recurrence {
-            every: 1,
-            unit: RecurrenceUnit::Month,
-            starts_at: starts_at.clone(),
-            anchor: starts_at,
-            ends_at: None,
-        }),
-        accepted_payment_endpoint_identifiers: vec![PaymentEndpointIdentifier::new(
-            "btc-lightning-bolt11",
-        )
-        .unwrap()],
-        required_app_id: None,
-        metadata: JsonMap::new(),
-    }
+    let recurrence = Recurrence::try_from(RecurrenceConfig {
+        every: 1,
+        unit: RecurrenceUnit::Month,
+        starts_at: starts_at.clone(),
+        anchor: starts_at,
+        ends_at: None,
+    })
+    .unwrap();
+    PaymentRequestTerms::builder(
+        PaymentAmount::new("0.001", "btc").unwrap(),
+        PaymentReference::new("shared-identity-subscription").unwrap(),
+        vec![PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap()],
+    )
+    .recurrence(Some(recurrence))
 }
 
 fn request_id(record: &paykit_sdk::PaymentRequestRecord) -> PaymentRequestId {

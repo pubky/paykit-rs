@@ -244,3 +244,55 @@ fn test_is_not_found_rejects_other_statuses_and_variants() {
     });
     assert!(!is_not_found(&validation_error));
 }
+
+#[test]
+fn test_payment_proof_allowance_id_counts_toward_send_size_limit() {
+    use crate::{
+        serialize_payment_request_event, AllowanceId, EventId, PaymentEndpointIdentifier,
+        PaymentProof, PaymentReference, PaymentRequestEvent, PaymentRequestId,
+    };
+
+    let proof = PaymentProof::new(
+        EventId::new_v4(),
+        PaymentRequestId::new_v4(),
+        PaymentReference::new("invoice-2026-0001").unwrap(),
+        None,
+        crate::PaykitAppId::new("bitkit").unwrap(),
+        PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+        serde_json::Map::from_iter([("data".into(), serde_json::Value::from(""))]),
+    )
+    .with_allowance_id(AllowanceId::new_v4());
+    let serialize = |proof: &PaymentProof| {
+        serialize_payment_request_event(
+            &crate::PaykitAppId::new("bitkit").unwrap(),
+            &PaymentRequestEvent::Proof(proof.clone()),
+        )
+        .unwrap()
+    };
+    let padding = pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN - serialize(&proof).len();
+    let padded = |count| {
+        PaymentProof::new(
+            proof.event_id().clone(),
+            proof.payment_request_id().clone(),
+            proof.payment_reference().clone(),
+            None,
+            crate::PaykitAppId::new("bitkit").unwrap(),
+            proof.payment_endpoint_identifier().clone(),
+            serde_json::Map::from_iter([("data".into(), "x".repeat(count).into())]),
+        )
+        .with_allowance_id(proof.allowance_id().unwrap().clone())
+    };
+    let at_limit_proof = padded(padding);
+    let at_limit = serialize(&at_limit_proof);
+    assert_eq!(
+        at_limit.len(),
+        pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN
+    );
+    validate_private_application_message_size(at_limit.as_bytes(), "Payment Proof").unwrap();
+
+    let oversized = serialize(&padded(padding + 1));
+    assert!(matches!(
+        validate_private_application_message_size(oversized.as_bytes(), "Payment Proof"),
+        Err(PaykitError::Validation(_))
+    ));
+}

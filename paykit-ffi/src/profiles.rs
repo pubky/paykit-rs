@@ -87,7 +87,7 @@ pub struct FfiPaykitProfileRecord {
     pub profile: FfiPaykitProfile,
     /// Pubky path used for the profile.
     pub path: String,
-    /// Strong ETag identifying the exact profile revision.
+    /// Content fingerprint identifying the exact profile revision.
     pub revision: String,
     /// Local observation/publication time as RFC3339 text.
     pub updated_at: String,

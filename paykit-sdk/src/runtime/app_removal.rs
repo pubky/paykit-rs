@@ -161,6 +161,11 @@ where
         PrivateMessageKind::PaymentRequestAcceptance,
         PrivateMessageKind::PaymentRequestRejection,
         PrivateMessageKind::PaymentRequestCancellation,
+        PrivateMessageKind::PaymentConversionQuote,
+        PrivateMessageKind::AllowanceProposal,
+        PrivateMessageKind::AllowanceAcceptance,
+        PrivateMessageKind::AllowanceRejection,
+        PrivateMessageKind::AllowanceEnd,
         PrivateMessageKind::PaymentProof,
     ];
     let mut request_blocked = disables_requests

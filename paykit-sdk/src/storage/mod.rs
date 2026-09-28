@@ -184,6 +184,8 @@ where
             Err(err)
                 if err.is_concurrent_update() && attempt + 1 < CONCURRENT_UPDATE_MAX_ATTEMPTS =>
             {
+                tokio::time::sleep(std::time::Duration::from_millis(25 * (attempt as u64 + 1)))
+                    .await;
                 continue;
             }
             result => return result,
@@ -568,6 +570,11 @@ pub(crate) fn require_paykit_app_capability(
         | paykit_lib::PrivateMessageKind::PaymentRequestAcceptance
         | paykit_lib::PrivateMessageKind::PaymentRequestRejection
         | paykit_lib::PrivateMessageKind::PaymentRequestCancellation
+        | paykit_lib::PrivateMessageKind::PaymentConversionQuote
+        | paykit_lib::PrivateMessageKind::AllowanceProposal
+        | paykit_lib::PrivateMessageKind::AllowanceAcceptance
+        | paykit_lib::PrivateMessageKind::AllowanceRejection
+        | paykit_lib::PrivateMessageKind::AllowanceEnd
         | paykit_lib::PrivateMessageKind::PaymentProof => {
             (capabilities.payment_requests, "payment_requests")
         }

@@ -2,19 +2,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::{
-    shared_wire::{BillingPeriodWire, PaymentAmountWire, RequiredNullable},
-    validation::{
-        invalid_data, invalid_plaintext_json, invalid_wire, validate_outgoing_version_kind,
-        validate_wire_version_kind,
+    shared_wire::{
+        deserialize_optional_no_null, BillingPeriodWire, PaymentAmountWire, RequiredNullable,
     },
-    EventId, PaykitAppId, PaykitError, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
+    validation::{invalid_data, invalid_plaintext_json, invalid_wire, validate_wire_version_kind},
+    AllowanceId, EventId, PaykitAppId, PaykitError, PaymentEndpointIdentifier, PaymentReference,
     PrivateMessageKind, Result,
 };
 
-use super::types::{
-    BillingPeriod, PaymentProof, PaymentRequest, PaymentRequestAcceptance,
-    PaymentRequestCancellation, PaymentRequestId, PaymentRequestRejection, PaymentRequestTerms,
-    Recurrence, RecurrenceUnit,
+use super::{
+    types::{
+        BillingPeriod, PaymentProof, PaymentRequest, PaymentRequestAcceptance,
+        PaymentRequestCancellation, PaymentRequestId, PaymentRequestRejection, PaymentRequestTerms,
+        Recurrence, RecurrenceUnit,
+    },
+    PaymentConversion, PaymentConversionQuote, PaymentDeadline,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -36,6 +38,18 @@ struct PaymentRequestTermsWire {
     recurrence: RequiredNullable<RecurrenceWire>,
     accepted_payment_endpoint_identifiers: Vec<String>,
     required_app_id: RequiredNullable<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_no_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    conversion: Option<PaymentConversion>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_no_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    payment_deadline: Option<PaymentDeadline>,
     #[serde(default)]
     metadata: JsonMap<String, JsonValue>,
 }
@@ -60,7 +74,7 @@ struct BasicEventWire {
     event_id: String,
     payment_request_id: String,
     #[serde(default)]
-    #[serde(deserialize_with = "deserialize_optional_string_no_null")]
+    #[serde(deserialize_with = "deserialize_optional_no_null")]
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
 }
@@ -77,6 +91,15 @@ struct PaymentProofWire {
     billing_period: RequiredNullable<BillingPeriodWire>,
     payment_app_id: String,
     payment_endpoint_identifier: String,
+    #[serde(default, deserialize_with = "deserialize_optional_no_null")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allowance_id: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_no_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    conversion_quote_id: Option<String>,
     proof: JsonMap<String, JsonValue>,
 }
 
@@ -89,25 +112,28 @@ impl TryFrom<PaymentRequestTermsWire> for PaymentRequestTerms {
             .into_iter()
             .map(PaymentEndpointIdentifier::new)
             .collect::<Result<Vec<_>>>()?;
-        let terms = Self {
-            amount: PaymentAmount::from(wire.amount),
-            payment_reference: PaymentReference::new(wire.payment_reference)?,
-            proposal_expires_at: wire.proposal_expires_at.into_inner(),
-            recurrence: wire
-                .recurrence
+        Self::builder(
+            wire.amount.try_into_with_label("Payment Request amount")?,
+            PaymentReference::new(wire.payment_reference)?,
+            accepted_payment_endpoint_identifiers,
+        )
+        .proposal_expires_at(wire.proposal_expires_at.into_inner())
+        .recurrence(
+            wire.recurrence
                 .into_inner()
                 .map(Recurrence::try_from)
                 .transpose()?,
-            accepted_payment_endpoint_identifiers,
-            required_app_id: wire
-                .required_app_id
+        )
+        .required_app_id(
+            wire.required_app_id
                 .into_inner()
                 .map(PaykitAppId::new)
                 .transpose()?,
-            metadata: wire.metadata,
-        };
-        terms.validate()?;
-        Ok(terms)
+        )
+        .conversion(wire.conversion)
+        .payment_deadline(wire.payment_deadline)
+        .metadata(wire.metadata)
+        .build()
     }
 }
 
@@ -129,6 +155,8 @@ impl From<&PaymentRequestTerms> for PaymentRequestTermsWire {
                     .as_ref()
                     .map(|app_id| app_id.as_str().to_owned()),
             ),
+            conversion: terms.conversion.clone(),
+            payment_deadline: terms.payment_deadline.clone(),
             metadata: terms.metadata.clone(),
         }
     }
@@ -138,15 +166,13 @@ impl TryFrom<RecurrenceWire> for Recurrence {
     type Error = PaykitError;
 
     fn try_from(wire: RecurrenceWire) -> Result<Self> {
-        let recurrence = Self {
+        Self::try_from(crate::RecurrenceConfig {
             every: wire.every,
             unit: RecurrenceUnit::parse(&wire.unit)?,
             starts_at: wire.starts_at,
             anchor: wire.anchor,
             ends_at: wire.ends_at.into_inner(),
-        };
-        recurrence.validate()?;
-        Ok(recurrence)
+        })
     }
 }
 
@@ -159,21 +185,6 @@ impl From<&Recurrence> for RecurrenceWire {
             anchor: recurrence.anchor.clone(),
             ends_at: RequiredNullable::from(recurrence.ends_at.clone()),
         }
-    }
-}
-
-fn deserialize_optional_string_no_null<'de, D>(
-    deserializer: D,
-) -> std::result::Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = JsonValue::deserialize(deserializer)?;
-    match value {
-        JsonValue::String(value) => Ok(Some(value)),
-        _ => Err(serde::de::Error::custom(
-            "reason must be a string when present",
-        )),
     }
 }
 
@@ -277,6 +288,11 @@ impl PaymentProofWire {
             ),
             payment_app_id: event.payment_app_id.as_str().to_owned(),
             payment_endpoint_identifier: event.payment_endpoint_identifier.as_str().to_string(),
+            allowance_id: event.allowance_id().map(|id| id.as_str().to_owned()),
+            conversion_quote_id: event
+                .conversion_quote_id
+                .as_ref()
+                .map(|id| id.as_str().to_owned()),
             proof: event.proof.clone(),
         }
     }
@@ -292,11 +308,13 @@ impl TryFrom<PaymentProofWire> for PaymentProof {
             PrivateMessageKind::PaymentProof,
             "Payment Request event",
         )?;
-        let billing_period = wire.billing_period.into_inner().map(BillingPeriod::from);
-        if let Some(period) = &billing_period {
-            period.validate()?;
-        }
-        Ok(Self {
+        let billing_period = wire
+            .billing_period
+            .into_inner()
+            .map(BillingPeriod::try_from)
+            .transpose()?;
+
+        let event = Self {
             version: 1,
             kind: PrivateMessageKind::PaymentProof,
             event_id: EventId::new(wire.event_id)?,
@@ -307,22 +325,30 @@ impl TryFrom<PaymentProofWire> for PaymentProof {
             payment_endpoint_identifier: PaymentEndpointIdentifier::new(
                 wire.payment_endpoint_identifier,
             )?,
+            allowance_id: wire.allowance_id.map(parse_allowance_id).transpose()?,
+            conversion_quote_id: wire.conversion_quote_id.map(EventId::new).transpose()?,
             proof: wire.proof,
-        })
+        };
+        event.validate()?;
+        Ok(event)
     }
+}
+
+fn parse_allowance_id(value: String) -> Result<AllowanceId> {
+    let id = AllowanceId::new(&value)?;
+    if id.as_str() != value {
+        return Err(PaykitError::Validation(
+            "Payment Proof allowance_id must use canonical UUID-v4 spelling".into(),
+        ));
+    }
+    Ok(id)
 }
 
 pub(super) fn serialize_payment_request_json(
     app_id: &PaykitAppId,
     event: &PaymentRequest,
 ) -> Result<String> {
-    validate_outgoing_version_kind(
-        event.version,
-        event.kind,
-        PrivateMessageKind::PaymentRequest,
-        "Payment Request",
-    )?;
-    event.request.validate()?;
+    event.validate()?;
     serde_json::to_string(&PaymentRequestWire::from_event(app_id, event)).map_err(|err| {
         invalid_data(
             format!("failed to serialize Payment Request JSON: {err}"),
@@ -387,15 +413,7 @@ pub(super) fn serialize_payment_proof_json(
     app_id: &PaykitAppId,
     event: &PaymentProof,
 ) -> Result<String> {
-    validate_outgoing_version_kind(
-        event.version,
-        event.kind,
-        PrivateMessageKind::PaymentProof,
-        "Payment Proof",
-    )?;
-    if let Some(period) = &event.billing_period {
-        period.validate()?;
-    }
+    event.validate()?;
     serde_json::to_string(&PaymentProofWire::from_event(app_id, event)).map_err(|err| {
         invalid_data(
             format!("failed to serialize Payment Proof JSON: {err}"),
@@ -524,5 +542,79 @@ fn parse_basic_event_json(json: &str, context: &'static str) -> Result<BasicEven
     // bodies are decrypted private-message plaintext.
     serde_json::from_str(json).map_err(|_| invalid_plaintext_json(context))
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConversionQuoteWire {
+    version: u8,
+    kind: String,
+    app_id: String,
+    event_id: String,
+    payment_request_id: String,
+    billing_period: BillingPeriodWire,
+    rates: Vec<super::ConversionRate>,
+    valid_from: String,
+    expires_at: String,
+}
+
+impl ConversionQuoteWire {
+    fn from_event(app_id: &PaykitAppId, event: &PaymentConversionQuote) -> Self {
+        Self {
+            version: event.version(),
+            kind: event.kind().as_str().to_owned(),
+            app_id: app_id.as_str().to_owned(),
+            event_id: event.event_id().as_str().to_owned(),
+            payment_request_id: event.payment_request_id().as_str().to_owned(),
+            billing_period: BillingPeriodWire::from(event.billing_period()),
+            rates: event.rates().to_vec(),
+            valid_from: event.valid_from().to_owned(),
+            expires_at: event.expires_at().to_owned(),
+        }
+    }
+}
+
+impl TryFrom<ConversionQuoteWire> for PaymentConversionQuote {
+    type Error = PaykitError;
+
+    fn try_from(wire: ConversionQuoteWire) -> Result<Self> {
+        validate_wire_version_kind(
+            wire.version,
+            &wire.kind,
+            PrivateMessageKind::PaymentConversionQuote,
+            "Payment Conversion Quote",
+        )?;
+        Self::new(
+            EventId::new(wire.event_id)?,
+            PaymentRequestId::new(wire.payment_request_id)?,
+            BillingPeriod::try_from(wire.billing_period)?,
+            wire.rates,
+            wire.valid_from,
+            wire.expires_at,
+        )
+    }
+}
+
+pub(super) fn serialize_conversion_quote_json(
+    app_id: &PaykitAppId,
+    event: &PaymentConversionQuote,
+) -> Result<String> {
+    event.validate()?;
+    serde_json::to_string(&ConversionQuoteWire::from_event(app_id, event)).map_err(|err| {
+        invalid_data(
+            "failed to serialize Payment Conversion Quote",
+            Some(err.into()),
+        )
+    })
+}
+
+pub(super) fn parse_conversion_quote_json(json: &str) -> Result<PaymentConversionQuote> {
+    // SECURITY / REDACTION: decrypted plaintext must not appear in serde error chains.
+    let wire: ConversionQuoteWire = serde_json::from_str(json)
+        .map_err(|_| invalid_plaintext_json("failed to parse Payment Conversion Quote JSON"))?;
+    validate_app_id(&wire.app_id, "Payment Conversion Quote")?;
+    PaymentConversionQuote::try_from(wire)
+        .map_err(|err| invalid_wire(err, "Payment Conversion Quote"))
+}
+
 #[cfg(test)]
 mod tests;

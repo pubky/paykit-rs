@@ -31,7 +31,7 @@ use crate::{
     },
     EventIdConflict, OutboundPrivateMessageStatus, PubkySessionAccess,
 };
-use paykit_lib::PrivateApplicationMessage;
+use paykit_lib::{PaymentRequestEvent, PrivateApplicationMessage};
 
 #[derive(Clone)]
 struct FixedClock;
@@ -633,6 +633,7 @@ async fn seed_private_capable_identity_and_handshake(
         .unwrap();
 }
 
+mod allowances;
 mod app_registry;
 mod backup;
 mod contacts;

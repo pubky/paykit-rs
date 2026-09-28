@@ -2,6 +2,25 @@ use super::*;
 use std::error::Error;
 
 #[test]
+fn test_pubky_lock_errors_map_to_concurrent_update() {
+    for (status, conflict) in [
+        (pubky::StatusCode::LOCKED, true),
+        (pubky::StatusCode::PRECONDITION_FAILED, true),
+        (pubky::StatusCode::FORBIDDEN, false),
+    ] {
+        let source = pubky::Error::Request(pubky::errors::RequestError::Server {
+            status,
+            message: "write rejected".into(),
+        });
+        let error = PaykitSdkError::from(paykit_lib::PaykitError::Transport {
+            context: "write Pubky resource".into(),
+            source: source.into(),
+        });
+        assert_eq!(error.is_concurrent_update(), conflict);
+    }
+}
+
+#[test]
 fn test_paykit_not_found_maps_to_sdk_not_found() {
     let err = PaykitSdkError::from(paykit_lib::PaykitError::NotFound("missing receipt".into()));
 

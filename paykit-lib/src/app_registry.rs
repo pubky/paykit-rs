@@ -454,25 +454,25 @@ pub async fn create_paykit_app_registry(
         .map_err(|err| map_error("create_paykit_app_registry", err))
 }
 
-/// Replace the identity-wide Paykit App Registry if its ETag still matches.
+/// Replace the identity-wide Paykit App Registry if its content still matches.
 ///
-/// `etag` must come from the same response as the registry being modified.
-/// A concurrent change fails with a Pubky `412 Precondition Failed` transport
-/// error so the caller can refetch, merge its mutation, and retry.
+/// `revision` must come from the same response as the registry being modified.
+/// The content is checked under a WebDAV lock. A concurrent change fails so
+/// the caller can refetch, merge its mutation, and retry.
 /// The caller remains responsible for Pubky session lifetime, capability scope,
 /// key rotation, and request timeout configuration.
 ///
 /// # Errors
 ///
 /// Returns [`PaykitError::Validation`] when the registry cannot be serialized
-/// and [`PaykitError::Transport`] when the ETag is stale or Pubky rejects the
+/// and [`PaykitError::Transport`] when the revision is stale or Pubky rejects the
 /// write.
 pub async fn update_paykit_app_registry(
     session: &pubky::PubkySession,
     registry: &PaykitAppRegistry,
-    etag: &str,
+    revision: &str,
 ) -> Result<()> {
-    pubky_routing::update_paykit_app_registry(session, registry, etag)
+    pubky_routing::update_paykit_app_registry(session, registry, revision)
         .await
         .map_err(|err| map_error("update_paykit_app_registry", err))
 }
@@ -496,22 +496,22 @@ pub async fn get_paykit_app_registry(
         .map_err(|err| map_error("get_paykit_app_registry", err))
 }
 
-/// Fetch the identity-wide Paykit App Registry and its strong ETag.
+/// Fetch the identity-wide Paykit App Registry and its content revision.
 ///
-/// The ETag belongs to the same response as the returned registry and can be
+/// The revision hashes the same bytes as the returned registry and can be
 /// passed to [`update_paykit_app_registry`].
 ///
 /// # Errors
 ///
-/// Returns [`PaykitError::InvalidData`] for malformed data or a missing strong
-/// ETag and [`PaykitError::Transport`] when Pubky storage cannot be read.
-pub async fn get_paykit_app_registry_with_etag(
+/// Returns [`PaykitError::InvalidData`] for malformed data and
+/// [`PaykitError::Transport`] when Pubky storage cannot be read.
+pub async fn get_paykit_app_registry_with_revision(
     storage: &pubky::PublicStorage,
     owner: &PublicKey,
 ) -> Result<Option<(PaykitAppRegistry, String)>> {
-    pubky_routing::fetch_paykit_app_registry_with_etag(storage, owner)
+    pubky_routing::fetch_paykit_app_registry_with_revision(storage, owner)
         .await
-        .map_err(|err| map_error("get_paykit_app_registry_with_etag", err))
+        .map_err(|err| map_error("get_paykit_app_registry_with_revision", err))
 }
 
 fn parse_remote_app_id(value: String) -> Result<PaykitAppId> {

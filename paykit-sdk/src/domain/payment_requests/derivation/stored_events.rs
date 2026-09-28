@@ -1,7 +1,11 @@
 use super::{
-    reducer::{apply_stored_event, mark_invalid_stored, proposal_expired, record_for},
+    reducer::{
+        apply_stored_event, mark_invalid_stored, outbound_status, proposal_expired, record_for,
+        validate_record_conversion,
+    },
     *,
 };
+use std::cmp::Ordering;
 
 #[derive(Clone)]
 pub(super) enum StoredPaymentRequestEvent {
@@ -16,6 +20,10 @@ pub(super) enum StoredPaymentRequestEvent {
 }
 
 impl StoredPaymentRequestEvent {
+    fn request_key(&self) -> &str {
+        self.event().payment_request_id().as_str()
+    }
+
     pub(super) fn record_time(&self) -> DateTime<Utc> {
         match self {
             Self::Received { item, .. } => item.received_at,
@@ -29,6 +37,7 @@ impl StoredPaymentRequestEvent {
             PaymentRequestEvent::Acceptance(_)
             | PaymentRequestEvent::Rejection(_)
             | PaymentRequestEvent::Cancellation(_)
+            | PaymentRequestEvent::ConversionQuote(_)
             | PaymentRequestEvent::Proof(_) => 1,
         }
     }
@@ -86,6 +95,7 @@ pub(crate) fn derive_payment_request_records_from_parts(
     dedupe_records: HashMap<String, EventDedupRecord>,
     now: DateTime<Utc>,
 ) -> Result<Vec<PaymentRequestRecord>> {
+    let outbound_carriers = outbound_event_carriers(&outbound);
     let mut records = HashMap::<String, PaymentRequestRecord>::new();
     let mut events = Vec::<StoredPaymentRequestEvent>::new();
     let mut pre_invalid_request_ids = HashSet::<String>::new();
@@ -137,6 +147,20 @@ pub(crate) fn derive_payment_request_records_from_parts(
                     continue;
                 }
             }
+            if outbound_carriers.event_ids.contains(event_id) {
+                if let Some(payment_request_id) = payment_request_id {
+                    tainted_event_seeds.push(TaintedEventSeed {
+                        event_id: event_id.to_owned(),
+                        payment_request_id: payment_request_id.clone(),
+                        payload_hash: payload_hash(&item.raw_json),
+                        source_rank: 0,
+                    });
+                    pre_invalid_request_ids.insert(payment_request_id.clone());
+                    record_for(&mut records, &counterparty, payment_request_id)
+                        .mark_invalid(&item, "Event ID reused by another Event Message carrier");
+                }
+                continue;
+            }
         }
 
         let Some(payment_request_id) = payment_request_id else {
@@ -184,7 +208,7 @@ pub(crate) fn derive_payment_request_records_from_parts(
         let Some(parsed) = parse_payment_request_event_message(&PrivateApplicationMessage {
             version: Some(1),
             kind: Some(message.kind.clone()),
-            app_id: app_id_from_raw_json(&message.raw_json),
+            app_id: Some(message.app_id.to_string()),
             raw_json: message.raw_json.clone(),
         }) else {
             continue;
@@ -196,18 +220,25 @@ pub(crate) fn derive_payment_request_records_from_parts(
             message,
             event: event.clone(),
         };
-        if dedupe_records
-            .get(event.event_id().as_str())
-            .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty())
+        if dedupe_records.contains_key(event.event_id().as_str())
+            || outbound_carriers
+                .conflicted_event_ids
+                .contains(event.event_id().as_str())
         {
-            let record = record_for(&mut records, &counterparty, stored.payment_request_id());
-            mark_invalid_stored(record, &stored, "Event ID reused with different payload");
+            let payment_request_id = stored.payment_request_id();
+            pre_invalid_request_ids.insert(payment_request_id.clone());
+            let record = record_for(&mut records, &counterparty, payment_request_id);
+            mark_invalid_stored(
+                record,
+                &stored,
+                "Event ID reused by another Event Message carrier",
+            );
             continue;
         }
         events.push(stored);
     }
 
-    events.sort_by(compare_stored_events_by_request);
+    events = order_stored_events(events);
     let tainted_events = events
         .iter()
         .filter(|event| pre_invalid_request_ids.contains(&event.payment_request_id()))
@@ -221,13 +252,31 @@ pub(crate) fn derive_payment_request_records_from_parts(
         tainted_events,
         tainted_event_seeds,
     );
-    for event in events {
-        let payment_request_id = event.payment_request_id();
-        let record = record_for(&mut records, &counterparty, payment_request_id);
-        apply_stored_event(record, &event);
+    let by_event_id: HashMap<_, _> = events
+        .iter()
+        .map(|event| (event.event().event_id().as_str(), event))
+        .collect();
+    let mut recovery_required = HashSet::new();
+    for event in &events {
+        if outbound_status(event) == Some(OutboundPrivateMessageStatus::RecoveryRequired)
+            && !matches!(event.event(), PaymentRequestEvent::ConversionQuote(_))
+        {
+            recovery_required.insert(event.request_key());
+        }
+        let record = record_for(&mut records, &counterparty, event.payment_request_id());
+        apply_stored_event(record, event, &by_event_id);
     }
 
     for record in records.values_mut() {
+        if record.state != PaymentRequestLifecycleState::InvalidConflict {
+            if let Err(err) = validate_record_conversion(record, &by_event_id) {
+                record.state = PaymentRequestLifecycleState::InvalidConflict;
+                record.invalid_reason = Some(err.to_string());
+            } else if recovery_required.contains(record.payment_request_id.as_str()) {
+                // Delivery recovery blocks new commands, not evidence already in the log.
+                record.state = PaymentRequestLifecycleState::RecoveryRequired;
+            }
+        }
         if record.state == PaymentRequestLifecycleState::Proposed && proposal_expired(record, now) {
             record.state = PaymentRequestLifecycleState::ProposalExpired;
         }
@@ -243,36 +292,6 @@ pub(crate) fn derive_payment_request_records_from_parts(
         ))
     });
     Ok(records)
-}
-
-fn compare_stored_events_by_request(
-    a: &StoredPaymentRequestEvent,
-    b: &StoredPaymentRequestEvent,
-) -> Ordering {
-    a.event()
-        .payment_request_id()
-        .as_str()
-        .cmp(b.event().payment_request_id().as_str())
-        .then_with(|| compare_stored_events(a, b))
-}
-
-fn compare_stored_events(a: &StoredPaymentRequestEvent, b: &StoredPaymentRequestEvent) -> Ordering {
-    if a.source_rank() == b.source_rank() {
-        return a
-            .source_order()
-            .cmp(&b.source_order())
-            .then_with(|| a.record_time().cmp(&b.record_time()));
-    }
-
-    let phase_order = a.phase_order().cmp(&b.phase_order());
-    if phase_order != Ordering::Equal {
-        return phase_order;
-    }
-
-    a.record_time()
-        .cmp(&b.record_time())
-        .then_with(|| a.source_rank().cmp(&b.source_rank()))
-        .then_with(|| a.source_order().cmp(&b.source_order()))
 }
 
 #[derive(Clone)]
@@ -387,7 +406,7 @@ pub(super) fn payment_request_message_from_item(
     item: &PrivateStreamItemRecord,
 ) -> Option<PrivateApplicationMessage> {
     let kind = item.known_paykit_kind.as_deref()?;
-    if !is_payment_request_kind(kind) {
+    if !is_payment_request_kind(Some(kind)) {
         return None;
     }
     Some(PrivateApplicationMessage {
@@ -400,21 +419,34 @@ pub(super) fn payment_request_message_from_item(
     })
 }
 
-fn app_id_from_raw_json(raw_json: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(raw_json)
-        .ok()?
-        .get("app_id")?
-        .as_str()
-        .map(str::to_owned)
-}
-
-fn is_payment_request_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "paykit.payment_request"
-            | "paykit.payment_request_acceptance"
-            | "paykit.payment_request_rejection"
-            | "paykit.payment_request_cancellation"
-            | "paykit.payment_proof"
-    )
+fn order_stored_events(events: Vec<StoredPaymentRequestEvent>) -> Vec<StoredPaymentRequestEvent> {
+    let (mut received, mut outbound): (Vec<_>, Vec<_>) = events
+        .into_iter()
+        .partition(|event| matches!(event, StoredPaymentRequestEvent::Received { .. }));
+    for stream in [&mut received, &mut outbound] {
+        stream.sort_by(|a, b| {
+            a.request_key()
+                .cmp(b.request_key())
+                .then_with(|| a.source_order().cmp(&b.source_order()))
+        });
+    }
+    let mut events = Vec::with_capacity(received.len() + outbound.len());
+    let mut received = received.into_iter().peekable();
+    let mut outbound = outbound.into_iter().peekable();
+    while let (Some(a), Some(b)) = (received.peek(), outbound.peek()) {
+        let order = a
+            .request_key()
+            .cmp(b.request_key())
+            .then_with(|| a.phase_order().cmp(&b.phase_order()))
+            .then_with(|| a.record_time().cmp(&b.record_time()));
+        let stream = if order != Ordering::Greater {
+            &mut received
+        } else {
+            &mut outbound
+        };
+        events.extend(stream.next());
+    }
+    events.extend(received);
+    events.extend(outbound);
+    events
 }

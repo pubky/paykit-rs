@@ -140,10 +140,10 @@ impl FfiPaykitSdk {
 
     /// Create an SDK runtime with encrypted identity-wide state stored in Pubky.
     ///
-    /// Every operation requires active session access with the matching local
-    /// identity secret and `required_session_capabilities()`. Homeserver ETag
-    /// preconditions reject stale writes from independent runtimes; callers may
-    /// retry the complete SDK operation after a shared-state conflict.
+    /// Every operation requires active session access with current Paykit identity
+    /// key material and `required_session_capabilities()`. Homeserver write locks
+    /// serialize shared-state transactions; callers may retry the complete SDK
+    /// operation after a lock conflict.
     #[uniffi::constructor]
     pub fn with_pubky_shared_state(
         session_provider: Arc<dyn FfiSdkPubkySessionProvider>,
@@ -159,8 +159,8 @@ impl FfiPaykitSdk {
     /// Create a Pubky shared-state runtime with explicit client configuration.
     ///
     /// Requires active session access with current Paykit identity key material
-    /// and `required_session_capabilities()`. Homeserver ETag preconditions
-    /// reject stale writes from independent runtimes.
+    /// and `required_session_capabilities()`. Homeserver write locks serialize
+    /// shared-state transactions across independent runtimes.
     #[uniffi::constructor]
     pub fn with_pubky_shared_state_and_client_config(
         session_provider: Arc<dyn FfiSdkPubkySessionProvider>,
@@ -178,8 +178,8 @@ impl FfiPaykitSdk {
     /// Create a Pubky shared-state runtime with payment adapter callbacks.
     ///
     /// Requires active session access with current Paykit identity key material
-    /// and `required_session_capabilities()`. Homeserver ETag preconditions
-    /// reject stale writes from independent runtimes.
+    /// and `required_session_capabilities()`. Homeserver write locks serialize
+    /// shared-state transactions across independent runtimes.
     #[uniffi::constructor]
     pub fn with_payment_adapter_and_pubky_shared_state(
         session_provider: Arc<dyn FfiSdkPubkySessionProvider>,
@@ -197,8 +197,8 @@ impl FfiPaykitSdk {
     /// Create a Pubky shared-state runtime with payment and client configuration.
     ///
     /// Requires active session access with current Paykit identity key material
-    /// and `required_session_capabilities()`. Homeserver ETag preconditions
-    /// reject stale writes from independent runtimes.
+    /// and `required_session_capabilities()`. Homeserver write locks serialize
+    /// shared-state transactions across independent runtimes.
     #[uniffi::constructor]
     pub fn with_payment_adapter_and_pubky_shared_state_and_client_config(
         session_provider: Arc<dyn FfiSdkPubkySessionProvider>,

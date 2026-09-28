@@ -1,6 +1,7 @@
 use std::{fmt, sync::Arc};
 
 use paykit_lib::PaymentReference;
+use paykit_sdk::PaymentProofSubmission;
 
 use crate::{
     errors::validation_error, json::FfiPrivateJsonObject,
@@ -11,10 +12,7 @@ mod conversions;
 #[cfg(test)]
 mod tests;
 
-use conversions::{
-    parse_payment_request_id, parse_public_key, payment_request_records_to_ffi,
-    ParsedPaymentProofSubmission,
-};
+use conversions::{parse_payment_request_id, parse_public_key, payment_request_records_to_ffi};
 
 /// Payment Reference text with redacted debug output.
 #[derive(uniffi::Object)]
@@ -87,6 +85,65 @@ pub struct FfiPaymentRequestRecurrence {
     pub ends_at: Option<String>,
 }
 
+/// Units of payment asset owed per requested asset unit.
+#[derive(uniffi::Record, Clone, PartialEq, Eq)]
+pub struct FfiConversionRate {
+    /// Payment asset code.
+    pub asset: String,
+    /// Positive decimal multiplier; never convert through floating point.
+    pub value: String,
+}
+
+impl fmt::Debug for FfiConversionRate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("FfiConversionRate(<redacted>)")
+    }
+}
+
+/// Conversion terms; absence leaves conversion to the wallets' policies.
+#[derive(uniffi::Enum, Clone, Debug)]
+pub enum FfiPaymentConversion {
+    /// Immutable conversion rates, also fixed across recurring installments.
+    Fixed {
+        /// Exact rates; omitted cross-asset currencies cannot be used.
+        rates: Vec<FfiConversionRate>,
+    },
+    /// Cross-asset recurring payments require a quote for their Billing Period.
+    PerPeriod,
+}
+
+/// Deadline for actual payment, independent of proposal acceptance expiry.
+#[derive(uniffi::Enum, Clone, Debug)]
+pub enum FfiPaymentDeadline {
+    /// Absolute one-time deadline in RFC3339 UTC.
+    At {
+        /// RFC3339 UTC timestamp with uppercase T and Z.
+        timestamp: String,
+    },
+    /// Recurring deadline in elapsed seconds after the Billing Period start.
+    PeriodStart {
+        /// Nonnegative elapsed seconds from each period start.
+        seconds: u64,
+    },
+}
+
+/// Payee-issued quote retained for payment verification after expiry.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiPaymentConversionQuoteRecord {
+    /// Quote identity (Event ID).
+    pub event_id: String,
+    /// Period for which these rates were offered.
+    pub billing_period: FfiBillingPeriod,
+    /// Payment asset units per requested asset unit.
+    pub rates: Vec<FfiConversionRate>,
+    /// Inclusive start of the payment validity interval, in RFC3339 UTC.
+    pub valid_from: String,
+    /// Inclusive actual-payment deadline, in RFC3339 UTC.
+    pub expires_at: String,
+    /// Local outbound status, when issued locally.
+    pub outbound_status: Option<FfiOutboundPrivateMessageStatus>,
+}
+
 /// Immutable terms for a Payment Request proposal.
 #[derive(uniffi::Record, Clone)]
 pub struct FfiPaymentRequestTerms {
@@ -102,6 +159,10 @@ pub struct FfiPaymentRequestTerms {
     pub accepted_payment_endpoint_identifiers: Vec<String>,
     /// Application that must handle this payment, when constrained.
     pub required_app_id: Option<String>,
+    /// Optional immutable conversion policy.
+    pub conversion: Option<FfiPaymentConversion>,
+    /// Optional actual-payment deadline.
+    pub payment_deadline: Option<FfiPaymentDeadline>,
     /// Application-specific metadata encoded as a JSON object.
     pub metadata: Arc<FfiPrivateJsonObject>,
 }
@@ -170,7 +231,7 @@ pub struct FfiPaymentRequestFilter {
     pub states: Vec<FfiPaymentRequestLifecycleState>,
     /// Restrict results by whether the request has recurrence terms.
     pub recurring: Option<bool>,
-    /// Include only inbound Payment Requests received from counterparties.
+    /// Inspect inbound proposals only; use the full view for actionable state and quotes.
     pub received_only: bool,
 }
 
@@ -193,6 +254,10 @@ pub struct FfiPaymentProofRecord {
     pub payment_app_id: String,
     /// Payment Endpoint Identifier used for payment.
     pub payment_endpoint_identifier: String,
+    /// Optional canonical Allowance ID reported for this payment execution.
+    pub allowance_id: Option<String>,
+    /// Selected recurring quote Event ID.
+    pub conversion_quote_id: Option<String>,
     /// Method-specific proof object encoded as JSON.
     pub proof: Arc<FfiPrivateJsonObject>,
     /// Local record time for this proof as RFC3339 text.
@@ -238,6 +303,8 @@ pub struct FfiPaymentRequestRecord {
     pub canceled_event_id: Option<String>,
     /// Local outbound delivery status for a cancellation event.
     pub canceled_outbound_status: Option<FfiOutboundPrivateMessageStatus>,
+    /// Immutable conversion quotes, including expired historical quotes.
+    pub conversion_quotes: Vec<FfiPaymentConversionQuoteRecord>,
     /// Payment Proof records in local record order.
     pub payment_proofs: Vec<FfiPaymentProofRecord>,
     /// Last inbound stream item applied to this record.
@@ -253,7 +320,7 @@ pub struct FfiPaymentRequestRecord {
 }
 
 /// Method-specific Payment Proof submission data.
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+#[derive(uniffi::Record, Clone, PartialEq, Eq)]
 pub struct FfiPaymentProofSubmission {
     /// Billing Period for recurring Payment Requests.
     pub billing_period: Option<FfiBillingPeriod>,
@@ -261,13 +328,36 @@ pub struct FfiPaymentProofSubmission {
     pub payment_app_id: String,
     /// Payment Endpoint Identifier used for payment.
     pub payment_endpoint_identifier: String,
+    /// Canonical Allowance ID from the wallet's persisted payment association, when used.
+    /// This field reports usage; it does not authorize or account for payment.
+    pub allowance_id: Option<String>,
+    /// Selected recurring quote Event ID.
+    pub conversion_quote_id: Option<String>,
     /// Method-specific proof object encoded as JSON.
     pub proof: Arc<FfiPrivateJsonObject>,
 }
 
+impl fmt::Debug for FfiPaymentProofSubmission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FfiPaymentProofSubmission")
+            .field("billing_period", &self.billing_period)
+            .field(
+                "payment_endpoint_identifier",
+                &self.payment_endpoint_identifier,
+            )
+            .field(
+                "allowance_id",
+                &self.allowance_id.as_ref().map(|_| "<redacted>"),
+            )
+            .field("proof", &self.proof)
+            .finish()
+    }
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
-    /// Return inbound Payment Requests received from one counterparty.
+    /// Inspect inbound proposals from one counterparty.
+    /// Quotes and actionable state require the full view, which includes outbound acceptance.
     pub async fn received_payment_requests_from(
         &self,
         counterparty: String,
@@ -329,6 +419,7 @@ impl FfiPaykitSdk {
     }
 
     /// Queue a new Payment Request proposal and return local derived state.
+    /// The caller must establish peer support before including conversion or payment deadlines.
     pub async fn propose_payment_request(
         &self,
         counterparty: String,
@@ -419,6 +510,29 @@ impl FfiPaykitSdk {
             .and_then(FfiPaymentRequestRecord::try_from)
     }
 
+    /// Issue rates for one accepted recurring Billing Period; does not authorize payment.
+    /// The caller establishes peer support and owns session creation, capability scope and key rotation.
+    pub async fn quote_payment_request(
+        &self,
+        counterparty: String,
+        payment_request_id: String,
+        billing_period: FfiBillingPeriod,
+        rates: Vec<FfiConversionRate>,
+        expires_at: String,
+    ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
+        self.runtime
+            .quote_payment_request(
+                parse_public_key(counterparty)?,
+                &parse_payment_request_id(payment_request_id)?,
+                billing_period.try_into()?,
+                rates.into_iter().map(Into::into).collect(),
+                expires_at,
+            )
+            .await
+            .map_err(Into::into)
+            .and_then(FfiPaymentRequestRecord::try_from)
+    }
+
     /// Queue a Payment Proof for an accepted Payment Request.
     pub async fn submit_payment_proof(
         &self,
@@ -427,18 +541,30 @@ impl FfiPaykitSdk {
         proof: FfiPaymentProofSubmission,
     ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
         let payment_request_id = parse_payment_request_id(payment_request_id)?;
-        let proof = ParsedPaymentProofSubmission::try_from(proof)?;
+        let proof = PaymentProofSubmission::try_from(proof)?;
         self.runtime
-            .submit_payment_proof(
+            .submit_payment_proof_submission(
                 parse_public_key(counterparty)?,
                 &payment_request_id,
-                proof.billing_period,
-                proof.payment_app_id,
-                proof.payment_endpoint_identifier,
-                proof.proof,
+                proof,
             )
             .await
             .map_err(Into::into)
             .and_then(FfiPaymentRequestRecord::try_from)
     }
+}
+
+/// Resolve an actual-payment deadline for the selected Billing Period.
+/// The caller compares this with independently verified payment time.
+#[uniffi::export]
+pub fn payment_deadline_at(
+    deadline: FfiPaymentDeadline,
+    billing_period: Option<FfiBillingPeriod>,
+) -> Result<String, PaykitFfiError> {
+    let deadline: paykit_lib::PaymentDeadline = deadline.into();
+    let period: Option<paykit_lib::BillingPeriod> =
+        billing_period.map(TryInto::try_into).transpose()?;
+    deadline
+        .at(period.as_ref())
+        .map_err(|err| validation_error(err.to_string()))
 }

@@ -136,6 +136,47 @@ async fn test_capability_downgrade_blocks_only_owned_active_work() {
 }
 
 #[tokio::test]
+async fn test_request_capability_downgrade_keeps_pending_allowance_end() {
+    let storage = registered_test_storage();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let event = paykit_lib::AllowanceEvent::End(
+        paykit_lib::AllowanceEnd::withdrawal(
+            paykit_lib::EventId::new_v4(),
+            paykit_lib::AllowanceId::new_v4(),
+            paykit_lib::EventId::new_v4(),
+        )
+        .unwrap(),
+    );
+    let raw_json = paykit_lib::serialize_allowance_event(&app_id(), &event).unwrap();
+    storage
+        .transaction(move |tx| {
+            tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                counterparty,
+                app_id(),
+                event.kind().as_str().into(),
+                raw_json,
+                FixedClock.now(),
+            ))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let previous = capabilities();
+    let mut next = previous;
+    next.payment_requests = false;
+    let error =
+        stage_app_capability_update(&storage, &app_id(), Some(previous), next, FixedClock.now())
+            .await
+            .unwrap_err();
+    assert!(matches!(error, PaykitSdkError::Policy { .. }));
+    assert_eq!(
+        storage.snapshot().unwrap().outbound_private_messages.len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn test_outgoing_payment_metadata_can_change_with_active_work() {
     let storage = registered_test_storage();
     let previous = capabilities();

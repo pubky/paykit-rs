@@ -22,31 +22,7 @@ where
                 Ok((peer_state, has_active_link))
             })
             .await?;
-        match peer_state {
-            Some(LinkedPeerState::Linked) if has_active_link => Ok(()),
-            Some(LinkedPeerState::Linking) => Err(PaykitSdkError::RecoveryRequired {
-                context: format!(
-                    "Encrypted Link Handshake is still in progress for counterparty {counterparty}"
-                ),
-                source: None,
-            }),
-            Some(LinkedPeerState::RecoveryRequired) => Err(PaykitSdkError::RecoveryRequired {
-                context: format!(
-                    "Encrypted Link recovery is required for counterparty {counterparty}"
-                ),
-                source: None,
-            }),
-            Some(LinkedPeerState::Blocked) => Err(PaykitSdkError::Policy {
-                context: format!("counterparty {counterparty} is blocked"),
-                source: None,
-            }),
-            _ => Err(PaykitSdkError::RecoveryRequired {
-                context: format!(
-                    "no active Encrypted Link snapshot for counterparty {counterparty}"
-                ),
-                source: None,
-            }),
-        }
+        require_private_automation_ready(peer_state, has_active_link, counterparty)
     }
 
     pub(super) async fn private_queue_readiness(
@@ -267,9 +243,9 @@ where
         let (session_access, _) = self.private_link_session_access().await?;
         drop(session_access);
         let lease = self.claim_peer_link_operation(&counterparty).await?;
-        let result = self
-            .advance_link_handshake_with_claim(counterparty, lease.clone())
-            .await;
+        // Keep the nested handshake future off the caller's stack.
+        let result =
+            Box::pin(self.advance_link_handshake_with_claim(counterparty, lease.clone())).await;
         self.finish_peer_link_operation(lease, result).await
     }
 

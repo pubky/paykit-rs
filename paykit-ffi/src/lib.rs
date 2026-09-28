@@ -12,6 +12,7 @@ macro_rules! impl_redacted_debug {
     };
 }
 
+mod allowances;
 mod app_registry;
 mod config;
 mod conversions_common;
@@ -32,6 +33,7 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
+pub use allowances::*;
 pub use app_registry::*;
 pub use config::*;
 pub use errors::PaykitFfiError;

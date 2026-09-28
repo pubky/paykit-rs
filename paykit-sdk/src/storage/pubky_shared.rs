@@ -46,15 +46,15 @@ struct RemoteStateSnapshot {
 
 struct EncryptedStateBlob {
     bytes: Vec<u8>,
-    etag: String,
+    revision: String,
 }
 
 /// Encrypted identity-wide SDK state stored in Pubky.
 ///
 /// Each transaction reads the latest complete state, applies one SDK storage
 /// transaction, and replaces the encrypted resource when state changed. One
-/// instance serializes its own operations, while homeserver-enforced ETag
-/// preconditions prevent independent instances from overwriting each other.
+/// instance serializes its own operations. Each transaction holds a renewed
+/// homeserver write lock from the initial read through publication.
 /// Encryption protects state contents and integrity, but not resource
 /// existence, size, update timing, or replay by the homeserver. After a write
 /// transport error, the adapter only reports success if it can read back the
@@ -138,7 +138,7 @@ impl PubkySharedStateStorage {
                 revision: None,
             });
         };
-        let revision = Some(encrypted.etag);
+        let revision = Some(encrypted.revision);
         let state = decrypt_state(access, &encrypted.bytes)?;
         Ok(RemoteStateSnapshot { state, revision })
     }
@@ -157,29 +157,18 @@ impl PubkySharedStateStorage {
     async fn commit_encrypted_state(
         &self,
         access: &PubkySessionAccess,
-        expected_revision: Option<String>,
+        lock: &pubky::StorageLock,
         encrypted: Vec<u8>,
     ) -> Result<()> {
         let attempted_revision = state_revision(&encrypted);
         let storage = access.session.storage();
-        let write_result = match expected_revision.as_deref() {
-            Some(etag) => {
-                storage
-                    .put_if_match(paykit_lib::PAYKIT_SHARED_STATE_PATH, encrypted, etag)
-                    .await
-            }
-            None => {
-                storage
-                    .put_if_absent(paykit_lib::PAYKIT_SHARED_STATE_PATH, encrypted)
-                    .await
-            }
-        };
+        let write_result = storage.put_locked(lock, encrypted).await;
 
         match write_result {
-            Ok(response) => self.record_revision(Some(response_etag(&response)?)),
+            Ok(_) => self.record_revision(Some(attempted_revision)),
             Err(write_error) if is_precondition_failed(&write_error) => {
                 Err(PaykitSdkError::ConcurrentUpdate {
-                    context: "Pubky shared state changed during transaction".into(),
+                    context: "Pubky shared-state lock expired during transaction".into(),
                     source: Some(write_error.into()),
                 })
             }
@@ -188,8 +177,8 @@ impl PubkySharedStateStorage {
                     .await
                     .ok()
                     .flatten()
-                    .filter(|stored| state_revision(&stored.bytes) == attempted_revision)
-                    .map(|stored| stored.etag);
+                    .filter(|stored| stored.revision == attempted_revision)
+                    .map(|stored| stored.revision);
                 match committed_revision {
                     Some(revision) => self.record_revision(Some(revision)),
                     None => Err(PaykitSdkError::Transport {
@@ -210,30 +199,39 @@ impl StorageAdapter for PubkySharedStateStorage {
     ) -> Result<Box<dyn Any + Send>> {
         let _guard = self.transaction_lock.lock().await;
         let access = self.load_access().await?;
-        let snapshot = self.load_remote_state(&access).await?;
-        if self.last_revision()?.is_some() && snapshot.revision.is_none() {
-            return Err(PaykitSdkError::Storage {
-                context: "previously observed Pubky shared state is missing".into(),
-                source: None,
-            });
-        }
-        self.record_revision(snapshot.revision.clone())?;
-        let initial_state = snapshot.state;
-        let (updated_state, result) = run_storage_state_transaction(initial_state.clone(), f)?;
+        let session = access.session.clone();
+        paykit_lib::with_write_lock(
+            &session,
+            paykit_lib::PAYKIT_SHARED_STATE_PATH,
+            |lock| async move {
+                let snapshot = self.load_remote_state(&access).await?;
+                if self.last_revision()?.is_some() && snapshot.revision.is_none() {
+                    return Err(PaykitSdkError::Storage {
+                        context: "previously observed Pubky shared state is missing".into(),
+                        source: None,
+                    });
+                }
+                self.record_revision(snapshot.revision.clone())?;
+                let initial_state = snapshot.state;
+                let (updated_state, result) =
+                    run_storage_state_transaction(initial_state.clone(), f)?;
 
-        if updated_state == initial_state {
-            return Ok(result);
-        }
-        drop(initial_state);
+                if updated_state == initial_state {
+                    return Ok(result);
+                }
+                drop(initial_state);
 
-        validate_storage_state(&updated_state).map_err(|_| PaykitSdkError::Storage {
-            context: "SDK state failed validation before Pubky storage write".into(),
-            source: None,
-        })?;
-        let encrypted = encrypt_state(&access, &updated_state)?;
-        self.commit_encrypted_state(&access, snapshot.revision, encrypted)
-            .await?;
-        Ok(result)
+                validate_storage_state(&updated_state).map_err(|_| PaykitSdkError::Storage {
+                    context: "SDK state failed validation before Pubky storage write".into(),
+                    source: None,
+                })?;
+                let encrypted = encrypt_state(&access, &updated_state)?;
+                self.commit_encrypted_state(&access, &lock, encrypted)
+                    .await?;
+                Ok(result)
+            },
+        )
+        .await
     }
 
     async fn rotate_paykit_identity_key_erased<'a>(
@@ -245,53 +243,61 @@ impl StorageAdapter for PubkySharedStateStorage {
         current_key.validate_successor(&replacement_key)?;
         let _guard = self.transaction_lock.lock().await;
         let access = self.load_session_access().await?;
-        let encrypted = load_encrypted_blob(&access).await?;
-        let revision = encrypted.as_ref().map(|blob| blob.etag.clone());
-        if self.last_revision()?.is_some() && revision.is_none() {
-            return Err(PaykitSdkError::Storage {
-                context: "previously observed Pubky shared state is missing".into(),
-                source: None,
-            });
-        }
-        self.record_revision(revision.clone())?;
+        let session = access.session.clone();
+        paykit_lib::with_write_lock(
+            &session,
+            paykit_lib::PAYKIT_SHARED_STATE_PATH,
+            |lock| async move {
+                let encrypted = load_encrypted_blob(&access).await?;
+                let revision = encrypted.as_ref().map(|blob| blob.revision.clone());
+                if self.last_revision()?.is_some() && revision.is_none() {
+                    return Err(PaykitSdkError::Storage {
+                        context: "previously observed Pubky shared state is missing".into(),
+                        source: None,
+                    });
+                }
+                self.record_revision(revision.clone())?;
 
-        let (initial_state, already_rotated) =
-            match encrypted.as_ref().map(|blob| blob.bytes.as_slice()) {
-                None => (StorageState::default(), false),
-                Some(encrypted) => match encrypted_state_key_generation(encrypted)? {
-                    generation if generation == current_key.key_generation() => (
-                        decrypt_state_with_key(&current_key, &access.public_key()?, encrypted)?,
-                        false,
-                    ),
-                    generation if generation == replacement_key.key_generation() => (
-                        decrypt_state_with_key(&replacement_key, &access.public_key()?, encrypted)?,
-                        true,
-                    ),
-                    generation => {
-                        return Err(PaykitSdkError::Identity {
-                            context: format!(
-                            "shared-state key generation {generation} cannot rotate from {} to {}",
-                            current_key.key_generation(),
-                            replacement_key.key_generation()
-                        ),
-                            source: None,
-                        });
-                    }
-                },
-            };
-        let (updated_state, result) = run_storage_state_transaction(
-            initial_state,
-            Box::new(move |tx| f(tx, already_rotated)),
-        )?;
-        validate_storage_state(&updated_state).map_err(|_| PaykitSdkError::Storage {
-            context: "SDK state failed validation before Paykit key rotation".into(),
-            source: None,
-        })?;
-        let encrypted =
-            encrypt_state_with_key(&replacement_key, &access.public_key()?, &updated_state)?;
-        self.commit_encrypted_state(&access, revision, encrypted)
-            .await?;
-        Ok(result)
+                let (initial_state, already_rotated) =
+                    match encrypted.as_ref().map(|blob| blob.bytes.as_slice()) {
+                        None => (StorageState::default(), false),
+                        Some(encrypted) => match encrypted_state_key_generation(encrypted)? {
+                            generation if generation == current_key.key_generation() => (
+                                decrypt_state_with_key(&current_key, &access.public_key()?, encrypted)?,
+                                false,
+                            ),
+                            generation if generation == replacement_key.key_generation() => (
+                                decrypt_state_with_key(&replacement_key, &access.public_key()?, encrypted)?,
+                                true,
+                            ),
+                            generation => {
+                                return Err(PaykitSdkError::Identity {
+                                    context: format!(
+                                        "shared-state key generation {generation} cannot rotate from {} to {}",
+                                        current_key.key_generation(),
+                                        replacement_key.key_generation()
+                                    ),
+                                    source: None,
+                                });
+                            }
+                        },
+                    };
+                let (updated_state, result) = run_storage_state_transaction(
+                    initial_state,
+                    Box::new(move |tx| f(tx, already_rotated)),
+                )?;
+                validate_storage_state(&updated_state).map_err(|_| PaykitSdkError::Storage {
+                    context: "SDK state failed validation before Paykit key rotation".into(),
+                    source: None,
+                })?;
+                let encrypted =
+                    encrypt_state_with_key(&replacement_key, &access.public_key()?, &updated_state)?;
+                self.commit_encrypted_state(&access, &lock, encrypted)
+                    .await?;
+                Ok(result)
+            },
+        )
+        .await
     }
 }
 
@@ -311,7 +317,6 @@ async fn load_encrypted_blob(access: &PubkySessionAccess) -> Result<Option<Encry
             });
         }
     };
-    let etag = response_etag(&response)?;
     if response
         .content_length()
         .is_some_and(|length| length > MAX_SHARED_STATE_BYTES as u64)
@@ -332,7 +337,8 @@ async fn load_encrypted_blob(access: &PubkySessionAccess) -> Result<Option<Encry
         }
         bytes.extend_from_slice(&chunk);
     }
-    Ok(Some(EncryptedStateBlob { bytes, etag }))
+    let revision = state_revision(&bytes);
+    Ok(Some(EncryptedStateBlob { bytes, revision }))
 }
 
 fn encrypt_state(access: &PubkySessionAccess, state: &StorageState) -> Result<Vec<u8>> {
@@ -485,7 +491,7 @@ fn validate_state_identity(public_key: &PubkyPublicKey, state: &StorageState) ->
 }
 
 fn state_revision(bytes: &[u8]) -> String {
-    format!("blake3:{}", blake3::hash(bytes).to_hex())
+    paykit_lib::content_revision(bytes)
 }
 
 fn shared_state_size_error() -> PaykitSdkError {
@@ -509,28 +515,6 @@ fn is_precondition_failed(err: &PubkyError) -> bool {
         PubkyError::Request(RequestError::Server { status, .. })
             if *status == StatusCode::PRECONDITION_FAILED
     )
-}
-
-fn response_etag(response: &reqwest::Response) -> Result<String> {
-    let etag = response
-        .headers()
-        .get("etag")
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| PaykitSdkError::Storage {
-            context: "Pubky shared-state response is missing an ETag".into(),
-            source: None,
-        })?;
-    if etag.starts_with("W/") {
-        return Err(PaykitSdkError::Storage {
-            context: "Pubky shared-state response returned a weak ETag".into(),
-            source: None,
-        });
-    }
-    Ok(etag
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .unwrap_or(etag)
-        .to_owned())
 }
 
 #[cfg(test)]

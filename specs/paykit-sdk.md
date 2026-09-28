@@ -30,7 +30,7 @@ current views are aggregated for payment resolution.
 
 The app or binding layer provides live Pubky session access. Handles for apps
 sharing an identity use the same encrypted Pubky-hosted SDK state. Homeserver
-ETag preconditions reject stale whole-state writes, and prepared Noise sends
+write locks serialize whole-state transactions, and prepared Noise sends
 couple exact ciphertext with the advanced Encrypted Link snapshot before
 publication.
 
@@ -66,10 +66,11 @@ The system should have three main layers:
 - Paykit Protocol / `paykit-lib`: stateless wire types, Pubky path helpers,
   Encrypted Link send/receive helpers, parsers, serializers, and structural
   validation.
-- Paykit SDK runtime: durable state, private stream routing, lifecycle
-  derivation, endpoint publication, contact payment resolution, retries,
-  recovery, Pubky session bootstrap/capability handling, Pubky-backed Paykit
-  profile/contact metadata, and app-facing APIs.
+- Paykit SDK runtime: durable state, private stream routing, Event ID dedupe,
+  Payment Request and Allowance lifecycle derivation, endpoint publication,
+  contact payment resolution, retries, recovery, Pubky session bootstrap and
+  capability handling, Pubky-backed Paykit profile/contact metadata, and
+  app-facing lifecycle/history views and APIs.
 - Payment adapter layer: receiving-detail generation, payable endpoint
   ordering, payment-target construction, method/provider state, and activity
   records.
@@ -96,10 +97,10 @@ The current Rust SDK implementation covers:
   retries, and recovery marker workflows
 - Private Payment List publication, caching, and contact payment resolution
 - Payment Endpoint Reservations for contact-scoped receiving details
-- Payment Request lifecycle state, Receipt Access indexing, receipt issuance,
-  and receipt retrieval
+- Payment Request and Allowance lifecycle state, Receipt Access indexing,
+  receipt issuance, and receipt retrieval
 - Paykit-facing profile/contact helpers
-- encrypted Pubky-hosted identity-wide SDK state with conditional updates
+- encrypted Pubky-hosted identity-wide SDK state with locked updates
 - crash-safe prepared Noise send and receive checkpointing
 - SDK backup/export/restore validation
 
@@ -124,6 +125,7 @@ paykit-sdk/
     pubky_session.rs
     domain/
       adapters/
+      allowances/
       contacts/
       endpoints/
       endpoint_reservations/
@@ -141,6 +143,7 @@ paykit-sdk/
       app_registry.rs
       app_removal.rs
       backup.rs
+      allowances.rs
       contacts.rs
       encrypted_links.rs
       outbound_private.rs
@@ -259,6 +262,21 @@ The Rust SDK storage model supports records for:
 - receipt records
 - recovery/fail-closed markers
 
+Allowance V1 requires the SDK storage model to retain:
+
+- lifecycle evidence in the private stream, outbound messages, and Event Message
+  dedupe indexes, from which Allowance lifecycle views are derived
+- Payment Request-to-Allowance associations and their selection revision history
+- semantic payment keys shared by manual and automatic execution, manual-only
+  and deferred decisions, usage reservations, and payment outcome history
+- evaluation-time watermarks and accounting recovery/fail-closed state
+
+Admission must check current lifecycle, association revision, occurrence exclusion,
+and capacity, then atomically persist its reservation and watermark. Outcome
+updates must be idempotent. These are SDK/runtime requirements under
+[Allowance V1](allowances.md#component-responsibilities); lifecycle views need not
+be stored separately from their durable evidence.
+
 The SDK ships in-memory storage for tests and examples and encrypted
 Pubky-hosted storage for serialized shared-identity runtimes. Custom adapters
 remain available for app-owned durable storage.
@@ -274,11 +292,11 @@ working memory.
 Encryption does not hide the resource's existence, size, or update timing, and
 does not by itself detect a homeserver replay of an older valid blob.
 
-Each transaction fetches and decrypts the latest blob, applies the existing
-`StorageTransaction`, validates and encrypts changed state, then replaces the
-resource with `If-Match` or creates it with `If-None-Match`. A stale writer gets
-a storage conflict instead of overwriting newer state and can retry the whole
-SDK operation. A storage instance also fails closed if a resource it previously
+Each transaction acquires a renewable WebDAV file lock, fetches and decrypts the
+latest blob, applies the existing `StorageTransaction`, validates and encrypts
+changed state, then writes with the lock token and releases the lock. A competing
+writer gets a storage conflict and can retry the whole SDK operation with fresh
+state. A storage instance also fails closed if a resource it previously
 observed disappears. After a write transport error, the adapter reads the
 resource again and reports success only when the exact encrypted bytes it
 attempted to store were committed.
@@ -429,8 +447,8 @@ The registry uses this closed-world JSON shape:
 App IDs are stable path-safe identifiers. Defaults may only refer to registered
 apps. Registries are limited to 64 KiB, 64 applications, and 256
 endpoint-specific defaults. Registry updates replace the complete document;
-the SDK uses homeserver ETag preconditions and bounded refetch/merge retries so
-one app cannot overwrite another app's newer registration.
+the SDK compares content revisions under a homeserver write lock and uses bounded
+refetch/merge retries so one app cannot overwrite another app's newer registration.
 
 `noise_public_key` may be omitted while only public-capable apps are
 registered. The first private-capable app initializes it from the current
@@ -686,6 +704,15 @@ Tracks Event Message idempotency:
 - conflict status
 
 Conflicting reused Event IDs must fail closed for the affected derived state.
+Recognized malformed Event Messages with a parseable Event ID also contribute
+dedupe evidence. This records ID usage, not successful protocol validation, and
+does not make a malformed message eligible for lifecycle or Receipt Access
+processing. Changing payload bytes requires a fresh Event ID. Backup restore
+validates current stream metadata and required indexes against the same rules
+as live intake; stale metadata or missing indexes are rejected without changing
+the destination state. Backups from unreleased development formats are not
+migrated. Raw unsupported messages retained in the current format remain
+available for audit and fail-closed Allowance correlation.
 
 ### PrivatePaymentListView
 
@@ -903,9 +930,10 @@ worker; durable writes still check the stored lease id so an earlier holder
 cannot commit after a newer lease has replaced it.
 
 The local lease does not make an already-started remote write safe if its
-holder is suspended past expiry. Homeserver conditional writes ensure the old
-holder cannot replace newer shared state, while prepared sends ensure a retry
-publishes the same ciphertext.
+holder is suspended past expiry. Homeserver write locks must fence writes through
+commit so an expired holder cannot replace newer shared state. Prepared sends
+ensure a retry publishes the same ciphertext. Complete, durable file publication
+is a separate homeserver requirement; locks do not provide storage crash safety.
 
 The Rust SDK implementation provides storage-backed per-peer leases for
 Encrypted Link work and per-App leases for public endpoint sync and App
@@ -1035,7 +1063,9 @@ Payment Requests, Payment Proofs, and Receipts.
 8. Return a receive report.
 
 Receive routing should extend the same raw stream log to Payment Requests,
-Payment Proofs, and any other Event Message kinds.
+Payment Proofs, Allowance lifecycle events, and any other Event Message kinds.
+Allowance lifecycle/history views derive from retained events on the exact
+Encrypted Link and preserve invalid or unresolved evidence for recovery.
 
 ### Resolve Public Payment
 
@@ -1157,14 +1187,22 @@ settlement confirmation.
 
 ### Record Payment Proof
 
-1. Load accepted Payment Request.
+1. Load a known Payment Request with a valid prior Acceptance and a lifecycle
+   state that permits a Payment Proof.
 2. Ask `PaymentAdapter` for execution result or caller-supplied proof data,
    including the App ID whose endpoint was paid.
 3. Validate stateless proof/request correlation through `paykit-lib`, including
    any required App ID from the request.
 4. Persist proof event before sending.
 5. Send Payment Proof.
-6. Update local state to `proof_submitted`.
+6. Derive local state from the retained lifecycle events: preserve `canceled`
+   after Cancellation, retain `active_recurring` for an ongoing Recurring Payment
+   Request, and use `proof_submitted` for a non-canceled one-time request.
+
+A proof after Cancellation may report only an execution the payer durably
+recorded as past its irreversible boundary before observing Cancellation. It
+does not reopen the request or authorize another payment. Apply the
+[Payment Proof validation rules](payment-requests.md#paykitpayment_proof).
 
 The SDK should not mark a payment as settled unless the payment adapter provides
 settlement confirmation.
@@ -1218,18 +1256,29 @@ Backup should include SDK-managed state:
 - outbound queue
 - recovery markers
 
+For Allowance V1, backups must also retain lifecycle evidence together with
+association/decision history and selection revisions, semantic payment keys,
+usage reservations, outcome history, evaluation-time watermarks, and accounting
+recovery state.
+
 If the authoritative SDK state and every backup copy are lost, the SDK cannot
 safely reconstruct private runtime state from encrypted message slots alone.
 Public Payment Endpoints and Paykit Profiles can be rediscovered, but Encrypted
 Link snapshots/counters, private stream history, Event Message dedupe records,
 Receipt Access keys, outbound queues, Contact Records, and Payment
-Request/Receipt history require the durable shared state. Recovery without it
+Request/Allowance/Receipt history require the durable shared state. Recovery without it
 means fresh initialization, republishing public state, relinking peers, and
 receiving fresh private data from counterparties.
 
 Backup export is an optional portable snapshot of the same logical SDK state.
 It is not the live cross-app synchronization mechanism, and sign-out does not
 delete either the shared state or caller-managed backup copies.
+
+Allowance lifecycle and accounting evidence is also private SDK-managed state.
+Relinking or receiving fresh lifecycle messages cannot restore missing selection
+or usage history. Allowance V1 requires wallet reconciliation of successful and
+unresolved payments before admission can resume; missing accounting must not be
+reconstructed as zero usage from lifecycle messages or Payment Proofs.
 
 Backup should not include:
 
@@ -1254,10 +1303,14 @@ Restore flow:
 7. Republish participating App Registry entries before those apps create new
    app-attributed work.
 
+For Allowance V1, restored or recovery-incomplete execution state must remain
+ineligible until wallet reconciliation establishes that no later successful or
+unresolved payment is missing.
+
 Backup restore preserves private history and derived records. Valid restored
 Encrypted Link checkpoints are resumed; missing, malformed, mismatched, or
 otherwise unsafe checkpoints pause private automation until relink. Concurrent
-multi-app updates use homeserver-enforced conditional writes and crash-safe
+multi-app updates use homeserver-enforced write locks and crash-safe
 prepared Noise operations.
 
 ## Public SDK API Shape
@@ -1277,6 +1330,14 @@ bootstrap, public endpoint sync, profile and blob helpers, Contact Records,
 Pubky profile/follows reads, contact payment resolution, linked peer setup,
 private stream receive, outbound private delivery, Private Payment Lists,
 Payment Requests, Receipts, and SDK backup/export/restore.
+
+Allowance V1 requires SDK API families for lifecycle proposal,
+inspection, acceptance, rejection and End; candidate evaluation and persisted
+selection; durable manual/automatic admission and outcome reporting; and
+selection/usage history, backup and reconciliation. The SDK coordinates this
+evidence while the wallet owns consent, candidate priority, local safeguards,
+execution and settlement validation. See
+[component responsibilities](allowances.md#component-responsibilities).
 
 `ReceiptDraftBuilder` is the ergonomic way to create `ReceiptDraft` values for
 SDK calls. It can generate a Receipt ID before `issue_receipt`, or leave it
@@ -1307,6 +1368,11 @@ Platform bindings should expose:
 - Receipt retrieval APIs
 - backup/export/restore APIs
 - structured reports and errors
+
+Allowance V1 also requires binding APIs for lifecycle operations, candidate
+evaluation and selection, durable admission and outcome reporting, history
+inspection, and accounting recovery. These surfaces follow the SDK
+responsibilities above; they do not move payment execution into the bindings.
 
 Bindings should not expose:
 
@@ -1367,12 +1433,15 @@ These are good candidates to move into Paykit SDK:
 - SDK-managed backup records
 - Receipt Access indexing and retrieval helpers
 - Payment Request lifecycle state
+- Allowance lifecycle derivation and durable selection/admission evidence
+- Allowance usage accounting, outcome history, watermarks, and recovery
 
 These should stay outside Paykit SDK:
 
 - payment-provider node/runtime state
 - receiving-detail generation internals
 - payment execution and settlement detection
+- Allowance consent, candidate priority, local safeguards, and payment scheduling
 - balances, fees, quotes, and route policy
 - product profile/contact UI
 - localized copy and navigation

@@ -572,9 +572,9 @@ where
         let owner = session_info.public_key();
         for attempt in 0..APP_REGISTRY_UPDATE_MAX_ATTEMPTS {
             let snapshot =
-                paykit_lib::get_paykit_app_registry_with_etag(&public_storage, owner).await?;
-            let (mut registry, etag) = match snapshot {
-                Some((registry, etag)) => (registry, Some(etag)),
+                paykit_lib::get_paykit_app_registry_with_revision(&public_storage, owner).await?;
+            let (mut registry, revision) = match snapshot {
+                Some((registry, revision)) => (registry, Some(revision)),
                 None if create_if_missing => (
                     paykit_lib::PaykitAppRegistry::new(self.local_noise_public_key(session_access)),
                     None,
@@ -594,12 +594,12 @@ where
             if registry == unchanged {
                 return Ok(registry);
             }
-            let write = match etag {
-                Some(etag) => {
+            let write = match revision {
+                Some(revision) => {
                     paykit_lib::update_paykit_app_registry(
                         &session_access.session,
                         &registry,
-                        &etag,
+                        &revision,
                     )
                     .await
                 }
@@ -610,12 +610,14 @@ where
             match write {
                 Ok(()) => return Ok(registry),
                 Err(err)
-                    if is_app_registry_precondition_failed(&err)
+                    if paykit_lib::is_write_conflict(&err)
                         && attempt + 1 < APP_REGISTRY_UPDATE_MAX_ATTEMPTS =>
                 {
+                    tokio::time::sleep(std::time::Duration::from_millis(25 * (attempt as u64 + 1)))
+                        .await;
                     continue;
                 }
-                Err(err) if is_app_registry_precondition_failed(&err) => {
+                Err(err) if paykit_lib::is_write_conflict(&err) => {
                     return Err(PaykitSdkError::ConcurrentUpdate {
                         context: format!(
                             "Paykit App Registry remained busy after {APP_REGISTRY_UPDATE_MAX_ATTEMPTS} update attempts"
@@ -659,16 +661,4 @@ where
         }
         Ok(())
     }
-}
-
-fn is_app_registry_precondition_failed(err: &paykit_lib::PaykitError) -> bool {
-    matches!(
-        err,
-        paykit_lib::PaykitError::Transport { source, .. }
-            if matches!(
-                source.downcast_ref::<PubkyError>(),
-                Some(PubkyError::Request(RequestError::Server { status, .. }))
-                    if *status == StatusCode::PRECONDITION_FAILED
-            )
-    )
 }

@@ -1,0 +1,154 @@
+//! Exchange conversion terms and evidence over real Encrypted Links; no payments are executed.
+use crate::harness::{deliver, linked_two_party};
+use chrono::{Duration, SecondsFormat, Utc};
+use paykit_lib::{
+    BillingPeriod, ConversionRate, EventId, PaymentAmount, PaymentConversion,
+    PaymentEndpointIdentifier, PaymentReference, PaymentRequestId, PaymentRequestTerms, Recurrence,
+    RecurrenceConfig, RecurrenceUnit,
+};
+use paykit_sdk::{PaykitSdkError, PaymentProofSubmission, PaymentRequestLifecycleState};
+
+#[tokio::test]
+async fn test_recurring_quote_issuance_and_proof_delivery() {
+    let pair = linked_two_party().await;
+    let payer = &pair.alice;
+    let payee = &pair.bob;
+    let now = Utc::now();
+    let text = |value: chrono::DateTime<Utc>| value.to_rfc3339_opts(SecondsFormat::AutoSi, true);
+    let period = BillingPeriod::new(text(now), text(now + Duration::days(30))).unwrap();
+    let recurrence = Recurrence::try_from(RecurrenceConfig {
+        every: 1,
+        unit: RecurrenceUnit::Month,
+        starts_at: period.starts_at().to_owned(),
+        anchor: period.starts_at().to_owned(),
+        ends_at: None,
+    })
+    .unwrap();
+    let request = payee
+        .sdk
+        .propose_payment_request(
+            payer.public_key.clone(),
+            PaymentRequestTerms::builder(
+                PaymentAmount::new("10", "usd").unwrap(),
+                PaymentReference::new("monthly-membership").unwrap(),
+                vec![PaymentEndpointIdentifier::new("usdt-arbitrum-address").unwrap()],
+            )
+            .recurrence(Some(recurrence))
+            .conversion(Some(PaymentConversion::PerPeriod {}))
+            .build()
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let id = PaymentRequestId::new(request.payment_request_id).unwrap();
+    deliver(payee, payer).await;
+    payer
+        .sdk
+        .claim_payment_request_for_execution(payee.public_key.clone(), &id)
+        .await
+        .unwrap();
+    payer
+        .sdk
+        .accept_payment_request(payee.public_key.clone(), &id)
+        .await
+        .unwrap();
+    deliver(payer, payee).await;
+    let rates = vec![ConversionRate {
+        asset: "usdt".into(),
+        value: "1".into(),
+    }];
+    let expires = text(now + Duration::hours(1));
+    let wrong_role = payer
+        .sdk
+        .quote_payment_request(
+            payee.public_key.clone(),
+            &id,
+            period.clone(),
+            rates.clone(),
+            expires.clone(),
+        )
+        .await;
+    assert!(matches!(wrong_role, Err(PaykitSdkError::Policy { .. })));
+    assert!(payee
+        .sdk
+        .quote_payment_request(
+            payer.public_key.clone(),
+            &id,
+            period.clone(),
+            rates.clone(),
+            text(now - Duration::seconds(1))
+        )
+        .await
+        .is_err());
+    let issued = payee
+        .sdk
+        .quote_payment_request(
+            payer.public_key.clone(),
+            &id,
+            period.clone(),
+            rates.clone(),
+            expires.clone(),
+        )
+        .await
+        .unwrap();
+    let quote = &issued.conversion_quotes[0];
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(&quote.valid_from).unwrap()
+            >= now - Duration::seconds(1)
+    );
+    deliver(payee, payer).await;
+    let submitted = payer
+        .sdk
+        .submit_payment_proof_submission(
+            payee.public_key.clone(),
+            &id,
+            PaymentProofSubmission {
+                payment_app_id: payee.app_id.clone(),
+
+                billing_period: Some(period.clone()),
+                payment_endpoint_identifier: PaymentEndpointIdentifier::new(
+                    "usdt-arbitrum-address",
+                )
+                .unwrap(),
+                conversion_quote_id: Some(EventId::new(&quote.event_id).unwrap()),
+                allowance_id: None,
+                proof: serde_json::json!({"test_evidence":"quoted-payment"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            },
+        )
+        .await
+        .unwrap();
+    deliver(payer, payee).await;
+    let received = payee
+        .sdk
+        .payment_requests_with(&payer.public_key)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        received.state,
+        PaymentRequestLifecycleState::ActiveRecurring
+    );
+    assert_eq!(
+        received.payment_proofs[0].event_id,
+        submitted.payment_proofs[0].event_id
+    );
+    assert_eq!(
+        received.payment_proofs[0].conversion_quote_id.as_deref(),
+        Some(quote.event_id.as_str())
+    );
+    payee
+        .sdk
+        .cancel_payment_request(payer.public_key.clone(), &id, None)
+        .await
+        .unwrap();
+    assert!(matches!(
+        payee
+            .sdk
+            .quote_payment_request(payer.public_key.clone(), &id, period, rates, expires)
+            .await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
+}

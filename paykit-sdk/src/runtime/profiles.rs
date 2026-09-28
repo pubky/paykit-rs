@@ -29,39 +29,15 @@ where
             source: None,
         })?;
         let path = PAYKIT_PROFILE_PATH;
-        let write = match expected_revision.as_deref() {
-            Some(revision) => {
-                session_access
-                    .session
-                    .storage()
-                    .put_if_match(path, json, revision)
-                    .await
-            }
-            None => {
-                session_access
-                    .session
-                    .storage()
-                    .put_if_absent(path, json)
-                    .await
-            }
-        };
-        let response = match write {
-            Ok(response) => response,
-            Err(err) if is_pubky_precondition_failed(&err) => {
-                return Err(PaykitSdkError::ConcurrentUpdate {
-                    context: "Paykit profile changed; reload it before saving again".into(),
-                    source: Some(err.into()),
-                });
-            }
-            Err(err) => return Err(map_pubky_transport_error("publish Paykit profile", err)),
-        };
-        let revision = pubky::ResourceStats::from_headers(response.headers())
-            .etag
-            .filter(|etag| !etag.starts_with("W/\"") && !etag.is_empty())
-            .ok_or_else(|| PaykitSdkError::Transport {
-                context: "publish Paykit profile: response is missing a strong ETag".into(),
-                source: None,
-            })?;
+        let revision = paykit_lib::content_revision(json.as_bytes());
+        paykit_lib::put_resource_if_revision(
+            &session_access.session,
+            path,
+            json.into_bytes(),
+            expected_revision.as_deref(),
+            MAX_PUBLIC_PROFILE_BYTES,
+        )
+        .await?;
         Ok(PaykitProfileRecord {
             public_key: session_access.public_key()?,
             profile,
@@ -111,33 +87,14 @@ where
             .load_session_access_for_initialized_identity("delete Paykit profile")
             .await?;
         let path = PAYKIT_PROFILE_PATH;
-        let result = session_access
-            .session
-            .storage()
-            .delete_if_match(path, &expected_revision)
-            .await;
-        match result {
-            Ok(_) => Ok(()),
-            Err(err) if is_pubky_precondition_failed(&err) => {
-                let current = fetch_public_text_with_revision(
-                    &session_access.outbox_client.public_storage(),
-                    &session_access.public_key()?,
-                    path,
-                    "fetch profile after conditional delete",
-                    MAX_PUBLIC_PROFILE_BYTES,
-                )
-                .await?;
-                if current.is_none() {
-                    Ok(())
-                } else {
-                    Err(PaykitSdkError::ConcurrentUpdate {
-                        context: "Paykit profile changed; reload it before deleting".into(),
-                        source: Some(err.into()),
-                    })
-                }
-            }
-            Err(err) => Err(map_pubky_transport_error("delete Paykit profile", err)),
-        }
+        paykit_lib::delete_resource_if_revision(
+            &session_access.session,
+            path,
+            &expected_revision,
+            MAX_PUBLIC_PROFILE_BYTES,
+        )
+        .await
+        .map_err(Into::into)
     }
 
     /// Publish a public blob under the identity-wide Paykit blob prefix.

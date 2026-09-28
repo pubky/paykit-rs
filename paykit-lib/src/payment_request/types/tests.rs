@@ -6,10 +6,9 @@ fn app_id() -> crate::PaykitAppId {
 
 fn request_terms() -> PaymentRequestTerms {
     PaymentRequestTerms {
-        amount: PaymentAmount {
-            value: "0.001".to_string(),
-            asset: "btc".to_string(),
-        },
+        conversion: None,
+        payment_deadline: None,
+        amount: PaymentAmount::new("0.001", "btc").unwrap(),
         payment_reference: PaymentReference::new("invoice-2026-0001").unwrap(),
         proposal_expires_at: Some("2026-06-01T00:00:00Z".to_string()),
         recurrence: None,
@@ -90,6 +89,8 @@ fn payment_request_event_debug_redacts_private_payloads() {
         EventId::new_v4(),
         PaymentRequestId::new_v4(),
         PaymentRequestTerms {
+            conversion: None,
+            payment_deadline: None,
             metadata: JsonMap::from_iter([(
                 "note".to_string(),
                 JsonValue::String("private request note".to_string()),

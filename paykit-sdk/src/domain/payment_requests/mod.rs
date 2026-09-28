@@ -4,27 +4,29 @@
 //! SDK state.
 
 use std::{
-    cmp::{Ordering, Reverse},
+    cmp::Reverse,
     collections::{HashMap, HashSet},
     fmt,
 };
 
 use chrono::{DateTime, Utc};
 use paykit_lib::{
-    parse_payment_request_event_message, serialize_payment_request_event, PaymentRequest,
-    PaymentRequestEvent, PrivateApplicationMessage, PrivateMessageKind,
+    parse_payment_request_event_message, serialize_payment_request_event, AllowanceId,
+    BillingPeriod, ConversionRate, EventId, PaymentConversion, PaymentConversionQuote,
+    PaymentDeadline, PaymentEndpointIdentifier, PaymentProof, PaymentRequest, PaymentRequestEvent,
+    PrivateApplicationMessage, PrivateMessageKind,
 };
 #[cfg(test)]
-use paykit_lib::{
-    PaymentProof, PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestRejection,
-};
+use paykit_lib::{PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestRejection};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::{
     domain::outbound_private::enqueue_private_message,
     domain::outbound_private::OutboundPrivateMessageStatus,
-    domain::private_stream::payload_hash,
+    domain::private_stream::{
+        is_payment_request_kind, outbound_event_carriers, payload_hash, OutboundEventCarriers,
+    },
     domain::records::{AmountRecord, BillingPeriodRecord},
     storage::{
         require_paykit_app_capability, EventDedupRecord, NewOutboundPrivateMessage,
@@ -42,8 +44,9 @@ pub(crate) use derivation::derive_payment_request_records_from_parts;
 
 use derivation::recurrence_unit_to_str;
 pub(crate) use derivation::{
-    payment_request_records, payment_request_records_from_transaction,
-    received_payment_request_records, request_from_record,
+    payment_proof_allowed_states, payment_request_records,
+    payment_request_records_from_transaction, received_payment_request_records,
+    request_from_record, validate_proof_conversion,
 };
 
 /// Local role for one Payment Request.
@@ -160,6 +163,10 @@ pub struct PaymentRequestTermsRecord {
     pub accepted_payment_endpoint_identifiers: Vec<String>,
     /// Payee application whose Payment Endpoint must be paid, when constrained.
     pub required_app_id: Option<paykit_lib::PaykitAppId>,
+    /// Optional conversion policy copied from immutable terms.
+    pub conversion: Option<PaymentConversion>,
+    /// Actual-payment deadline, independent of proposal acceptance.
+    pub payment_deadline: Option<PaymentDeadline>,
     /// Application-specific metadata.
     pub metadata: JsonMap<String, JsonValue>,
 }
@@ -187,26 +194,69 @@ impl fmt::Debug for PaymentRequestTermsRecord {
 impl From<&paykit_lib::PaymentRequestTerms> for PaymentRequestTermsRecord {
     fn from(terms: &paykit_lib::PaymentRequestTerms) -> Self {
         Self {
-            amount: AmountRecord::from(&terms.amount),
-            payment_reference: terms.payment_reference.as_str().to_owned(),
-            proposal_expires_at: terms.proposal_expires_at.clone(),
-            recurrence: terms.recurrence.as_ref().map(|recurrence| {
+            amount: AmountRecord::from(terms.amount()),
+            payment_reference: terms.payment_reference().as_str().to_owned(),
+            proposal_expires_at: terms.proposal_expires_at().clone(),
+            recurrence: terms.recurrence().as_ref().map(|recurrence| {
                 PaymentRequestRecurrenceRecord {
-                    every: recurrence.every,
-                    unit: recurrence_unit_to_str(recurrence.unit).to_owned(),
-                    starts_at: recurrence.starts_at.clone(),
-                    anchor: recurrence.anchor.clone(),
-                    ends_at: recurrence.ends_at.clone(),
+                    every: recurrence.every(),
+                    unit: recurrence_unit_to_str(recurrence.unit()).to_owned(),
+                    starts_at: recurrence.starts_at().to_owned(),
+                    anchor: recurrence.anchor().to_owned(),
+                    ends_at: recurrence.ends_at().to_owned(),
                 }
             }),
             accepted_payment_endpoint_identifiers: terms
-                .accepted_payment_endpoint_identifiers
+                .accepted_payment_endpoint_identifiers()
                 .iter()
                 .map(|identifier| identifier.as_str().to_owned())
                 .collect(),
-            required_app_id: terms.required_app_id.clone(),
-            metadata: terms.metadata.clone(),
+            required_app_id: terms.required_app_id().cloned(),
+            conversion: terms.conversion().cloned(),
+            payment_deadline: terms.payment_deadline().cloned(),
+            metadata: terms.metadata().clone(),
         }
+    }
+}
+
+/// Caller-supplied evidence for one Payment Proof.
+///
+/// This input reports a payment; it does not authorize or execute one. The
+/// caller owns settlement validation and must derive any Allowance attribution
+/// from its durable payment association, not the currently matching Allowance.
+#[derive(Clone, PartialEq)]
+pub struct PaymentProofSubmission {
+    /// Required for recurring requests and absent for one-time requests.
+    pub billing_period: Option<BillingPeriod>,
+    /// Payee App whose endpoint was used for this payment execution.
+    pub payment_app_id: paykit_lib::PaykitAppId,
+    /// Payment Endpoint Identifier used by this payment execution.
+    pub payment_endpoint_identifier: PaymentEndpointIdentifier,
+    /// Selected recurring conversion quote Event ID.
+    pub conversion_quote_id: Option<EventId>,
+    /// Method-specific evidence; Paykit does not verify its settlement claims.
+    pub proof: JsonMap<String, JsonValue>,
+    /// Optional report of the Allowance consumed by this payment.
+    ///
+    /// Absence means no attribution was supplied. This field never changes
+    /// Allowance authority, reservations, or usage accounting.
+    pub allowance_id: Option<AllowanceId>,
+}
+
+impl fmt::Debug for PaymentProofSubmission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PaymentProofSubmission")
+            .field("billing_period", &self.billing_period)
+            .field(
+                "payment_endpoint_identifier",
+                &self.payment_endpoint_identifier,
+            )
+            .field("allowance_id", &self.allowance_id)
+            .field(
+                "proof",
+                &format_args!("<redacted:{} fields>", self.proof.len()),
+            )
+            .finish()
     }
 }
 
@@ -229,6 +279,15 @@ pub struct PaymentProofRecord {
     pub payment_app_id: paykit_lib::PaykitAppId,
     /// Payment Endpoint Identifier used for payment.
     pub payment_endpoint_identifier: String,
+    /// Informational Allowance attribution copied from the proof, when supplied.
+    ///
+    /// Unknown or ended Allowances remain reportable historical claims. This
+    /// value does not prove settlement or change Allowance authority or usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowance_id: Option<String>,
+    /// Selected recurring conversion quote Event ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversion_quote_id: Option<String>,
     /// Method-specific proof object.
     pub proof: JsonMap<String, JsonValue>,
     /// Local record time for this proof.
@@ -245,6 +304,7 @@ impl fmt::Debug for PaymentProofRecord {
             .field("payment_reference", &"<redacted>")
             .field("billing_period", &self.billing_period)
             .field("payment_app_id", &self.payment_app_id)
+            .field("allowance_id", &self.allowance_id)
             .field(
                 "payment_endpoint_identifier",
                 &self.payment_endpoint_identifier,
@@ -256,6 +316,23 @@ impl fmt::Debug for PaymentProofRecord {
             .field("recorded_at", &self.recorded_at)
             .finish()
     }
+}
+
+/// Immutable payee quote retained alongside the request's event history.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PaymentConversionQuoteRecord {
+    /// Quote identity (the quote Event ID).
+    pub event_id: String,
+    /// Billing Period to which these rates apply.
+    pub billing_period: BillingPeriodRecord,
+    /// Units of payment asset per one requested asset unit.
+    pub rates: Vec<ConversionRate>,
+    /// Inclusive start of the payment validity interval, in RFC3339 UTC.
+    pub valid_from: String,
+    /// Inclusive actual-payment deadline for this quote.
+    pub expires_at: String,
+    /// Local outbound delivery status, when issued locally.
+    pub outbound_status: Option<OutboundPrivateMessageStatus>,
 }
 
 /// SDK-derived Payment Request lifecycle record.
@@ -297,6 +374,8 @@ pub struct PaymentRequestRecord {
     pub canceled_event_id: Option<String>,
     /// Local outbound delivery status for a cancellation event.
     pub canceled_outbound_status: Option<OutboundPrivateMessageStatus>,
+    /// All validated quotes, including expired quotes needed for delayed payment evidence.
+    pub conversion_quotes: Vec<PaymentConversionQuoteRecord>,
     /// Payment Proof records in local record order.
     pub payment_proofs: Vec<PaymentProofRecord>,
     /// Last inbound stream item applied to this record.
@@ -334,6 +413,7 @@ impl fmt::Debug for PaymentRequestRecord {
             .field("rejected_outbound_status", &self.rejected_outbound_status)
             .field("canceled_event_id", &self.canceled_event_id)
             .field("canceled_outbound_status", &self.canceled_outbound_status)
+            .field("conversion_quote_count", &self.conversion_quotes.len())
             .field("payment_proof_count", &self.payment_proofs.len())
             .field("last_stream_item_id", &self.last_stream_item_id)
             .field("last_outbound_message_id", &self.last_outbound_message_id)
@@ -365,6 +445,7 @@ impl PaymentRequestRecord {
             rejected_outbound_status: None,
             canceled_event_id: None,
             canceled_outbound_status: None,
+            conversion_quotes: Vec::new(),
             payment_proofs: Vec::new(),
             last_stream_item_id: None,
             last_outbound_message_id: None,
@@ -505,7 +586,7 @@ where
         PaymentRequestEvent::Rejection(_) => PrivateMessageKind::PaymentRequestRejection,
         PaymentRequestEvent::Cancellation(_) => PrivateMessageKind::PaymentRequestCancellation,
         PaymentRequestEvent::Proof(_) => PrivateMessageKind::PaymentProof,
-        PaymentRequestEvent::Request(_) => {
+        PaymentRequestEvent::Request(_) | PaymentRequestEvent::ConversionQuote(_) => {
             return Err(PaykitSdkError::Protocol {
                 context: "checked Payment Request action cannot queue a proposal".into(),
                 source: None,
@@ -817,26 +898,29 @@ fn require_current_payment_request_action(
             require_local_payer(&record, "submit Payment Proof")?;
             require_request_state(
                 &record,
-                &[
-                    PaymentRequestLifecycleState::Accepted,
-                    PaymentRequestLifecycleState::ActiveRecurring,
-                ],
+                payment_proof_allowed_states(&record),
                 "submit Payment Proof",
             )?;
-            require_execution_claim_owner(
-                tx,
-                counterparty,
-                payment_request_id.as_str(),
-                app_id,
-                "submit Payment Proof",
-            )?;
+            let historical_evidence = record.payer_app_id.as_ref() == Some(app_id)
+                && matches!(record.state, PaymentRequestLifecycleState::Canceled | PaymentRequestLifecycleState::ProofSubmitted);
+            if !historical_evidence {
+                require_execution_claim_owner(
+                    tx,
+                    counterparty,
+                    payment_request_id.as_str(),
+                    app_id,
+                    "submit Payment Proof",
+                )?;
+            }
             require_origin_app_authorized(tx, counterparty, &record, "submit Payment Proof")?;
             let request = request_from_record(&record).ok_or_else(|| PaykitSdkError::Protocol {
                 context: "Payment Request terms are unavailable".into(),
                 source: None,
             })?;
-            proof.validate_for_request(&request)?;
-            require_unpaid_billing_period(&record, proof)?;
+            validate_proof_conversion(&record, proof, &request)?;
+            if record.payer_app_id.as_ref() != Some(app_id) {
+                require_unpaid_billing_period(&record, proof)?;
+            }
             Ok(record
                 .terms
                 .as_ref()
@@ -951,11 +1035,11 @@ fn require_unpaid_billing_period(
         existing
             .billing_period
             .as_ref()
-            .map(|period| (&period.starts_at, &period.ends_at))
+            .map(|period| (period.starts_at.as_str(), period.ends_at.as_str()))
             == proof
-                .billing_period
+                .billing_period()
                 .as_ref()
-                .map(|period| (&period.starts_at, &period.ends_at))
+                .map(|period| (period.starts_at(), period.ends_at()))
     });
     if duplicate {
         Err(PaykitSdkError::Policy {

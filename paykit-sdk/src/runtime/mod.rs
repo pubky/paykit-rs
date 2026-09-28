@@ -7,10 +7,10 @@ use std::{
 
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use paykit_lib::{
-    BillingPeriod, EncryptedLinkRecoveryMarker, EventId, PaymentEndpointIdentifier, PaymentProof,
-    PaymentRequest, PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
-    PaymentRequestId, PaymentRequestRejection, PaymentRequestTerms, PrivateMessageKind,
-    ReceiptDraft,
+    AllowanceId, AllowanceTerms, BillingPeriod, EncryptedLinkRecoveryMarker, EventId,
+    PaymentEndpointIdentifier, PaymentProof, PaymentRequest, PaymentRequestAcceptance,
+    PaymentRequestCancellation, PaymentRequestId, PaymentRequestRejection, PaymentRequestTerms,
+    PrivateMessageKind, ReceiptDraft,
 };
 use pubky::{errors::RequestError, Error as PubkyError, StatusCode};
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -26,6 +26,12 @@ use crate::{
         SdkBackupState,
     },
     config::{EndpointManagementScope, PaykitSdkConfig, PublicContactSharingPolicy},
+    domain::allowances::{
+        allowance_record as derive_allowance_record, allowance_records as derive_allowance_records,
+        allowance_scopes, enqueue_allowance_end, enqueue_allowance_proposal,
+        enqueue_allowance_response, sort_allowances_newest_first, AllowanceFilter,
+        AllowanceLocalRole, AllowanceRecord, AllowanceResponse,
+    },
     domain::contacts::{
         parse_profile_json, parse_pubky_profile_json, paykit_blob_path,
         paykit_blob_path_from_uri_or_path, paykit_blob_uri, profile_json,
@@ -49,9 +55,10 @@ use crate::{
         default_linked_peer, load_encrypted_link_state,
         mark_recovery_required_for_marker_in_transaction, mark_recovery_required_in_transaction,
         mark_recovery_required_with_lease, requeue_recovery_required_outbound_messages,
-        save_link_handshake_state_if_generation_with_lease, save_link_handshake_state_with_lease,
-        save_linked_peer_link_state_if_generation_with_lease, save_linked_peer_state_with_lease,
-        EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport, LinkedPeerState,
+        require_private_automation_ready, save_link_handshake_state_if_generation_with_lease,
+        save_link_handshake_state_with_lease, save_linked_peer_link_state_if_generation_with_lease,
+        save_linked_peer_state_with_lease, EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport,
+        LinkedPeerState,
     },
     domain::outbound_private::{
         claim_next_outbound_private_message_with_peer_lease, mark_outbound_failed,
@@ -63,13 +70,13 @@ use crate::{
     },
     domain::payment_requests::{
         claim_payment_request_execution, enqueue_checked_payment_request_action,
-        enqueue_payment_request as enqueue_payment_request_message,
+        enqueue_payment_request as enqueue_payment_request_message, payment_proof_allowed_states,
         payment_request_record_blocks_app_removal,
         payment_request_records as derive_payment_request_records,
         received_payment_request_records as derive_received_payment_request_records,
-        release_payment_request_execution_claim, request_from_record, PaymentRequestFilter,
-        PaymentRequestLifecycleState, PaymentRequestLocalRole, PaymentRequestRecord,
-        PaymentRequestTermsRecord,
+        release_payment_request_execution_claim, request_from_record, PaymentProofSubmission,
+        PaymentRequestFilter, PaymentRequestLifecycleState, PaymentRequestLocalRole,
+        PaymentRequestRecord, PaymentRequestTermsRecord,
     },
     domain::payment_resolution::{
         PreparedPrivateContactPayment, PrivateContactPaymentResolution,
@@ -125,6 +132,7 @@ const OUTBOUND_PRIVATE_RETRY_BACKOFF: std::time::Duration = std::time::Duration:
 const RESERVATION_CANCELLATION_CLAIM_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(60);
 
+mod allowances;
 mod app_registry;
 mod app_removal;
 mod backup;
@@ -281,6 +289,9 @@ where
     pub async fn initialize(&self) -> Result<IdentityStatus> {
         let _identity_guard = self.claim_identity_operation("initialize")?;
         let (session, state) = self.load_session_access_and_refresh_identity().await?;
+        self.storage
+            .transaction(crate::backup::refresh_stored_message_classification)
+            .await?;
         let live_session_available = session.is_some();
         let required_capabilities = PAYKIT_SESSION_CAPABILITIES;
         let private_link_capable = session
@@ -563,16 +574,10 @@ async fn fetch_public_text_with_revision(
     let addr = public_resource_uri(public_key, path);
     match storage.get(addr).await {
         Ok(resp) => {
-            let revision = pubky::ResourceStats::from_headers(resp.headers())
-                .etag
-                .filter(|etag| !etag.starts_with("W/\"") && !etag.is_empty());
             let Some(bytes) = read_public_response(resp, max_bytes, context).await? else {
                 return Ok(None);
             };
-            let revision = revision.ok_or_else(|| PaykitSdkError::Transport {
-                context: format!("{context}: response is missing a strong ETag"),
-                source: None,
-            })?;
+            let revision = paykit_lib::content_revision(&bytes);
             let text = String::from_utf8(bytes).map_err(|_| PaykitSdkError::Protocol {
                 context: format!("{context}: response is not valid UTF-8"),
                 source: None,
@@ -781,14 +786,6 @@ fn is_pubky_not_found(err: &PubkyError) -> bool {
         err,
         PubkyError::Request(RequestError::Server { status, .. })
             if *status == StatusCode::NOT_FOUND || *status == StatusCode::GONE
-    )
-}
-
-fn is_pubky_precondition_failed(err: &PubkyError) -> bool {
-    matches!(
-        err,
-        PubkyError::Request(RequestError::Server { status, .. })
-            if *status == StatusCode::PRECONDITION_FAILED
     )
 }
 

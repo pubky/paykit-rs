@@ -14,6 +14,102 @@ fn app_capabilities() -> PaykitAppCapabilities {
 }
 
 #[tokio::test]
+async fn test_write_lock_is_renewed_and_released_after_failure() {
+    let setup = TestSetup::new().await;
+    let path = format!("{PAYKIT_PATH_PREFIX}lock-test.json");
+    let storage = setup.session.storage();
+    let error = with_write_lock(&setup.session, &path, |lock| async move {
+        tokio::time::sleep(lock.timeout() + std::time::Duration::from_secs(1)).await;
+        let conflict = storage.lock(lock.path(), lock.timeout()).await.unwrap_err();
+        assert!(matches!(conflict,
+            pubky::Error::Request(pubky::errors::RequestError::Server { status, .. })
+                if status == pubky::StatusCode::LOCKED
+        ));
+        storage.put_locked(&lock, "renewed").await.unwrap();
+        Err::<(), _>(PaykitError::Validation("operation failed".into()))
+    })
+    .await
+    .unwrap_err();
+    assert!(matches!(error, PaykitError::Validation(_)));
+    let lock = setup
+        .session
+        .storage()
+        .lock(&path, std::time::Duration::from_secs(30))
+        .await
+        .unwrap();
+    let stored = setup
+        .session
+        .storage()
+        .get(&path)
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(stored, "renewed");
+    setup.session.storage().unlock(&lock).await.unwrap();
+    setup.raw_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_renewal_loss_after_commit_is_not_a_retryable_conflict() {
+    let setup = TestSetup::new().await;
+    let path = format!("{PAYKIT_PATH_PREFIX}uncertain-write.json");
+    let storage = setup.session.storage();
+    let error = with_write_lock(&setup.session, &path, |lock| async move {
+        storage.put_locked(&lock, "committed").await.unwrap();
+        // Model ownership lost while the committed write's response is unresolved.
+        storage.unlock(&lock).await.unwrap();
+        std::future::pending::<Result<()>>().await
+    })
+    .await
+    .unwrap_err();
+    assert!(!is_write_conflict(&error));
+    assert!(matches!(error, PaykitError::Transport { .. }));
+    let stored = setup
+        .session
+        .storage()
+        .get(&path)
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(stored, "committed");
+    setup.raw_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_cancelled_write_does_not_unlock_an_unfinished_operation() {
+    let setup = TestSetup::new().await;
+    let path = format!("{PAYKIT_PATH_PREFIX}cancelled-write.json");
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let lock = {
+        let operation = with_write_lock(&setup.session, &path, |lock| async {
+            started_tx.send(lock).unwrap();
+            std::future::pending::<Result<()>>().await
+        });
+        tokio::pin!(operation);
+        tokio::select! {
+            result = &mut operation => panic!("operation must remain pending: {result:?}"),
+            lock = started_rx => lock.unwrap(),
+        }
+    };
+    let conflict = setup
+        .session
+        .storage()
+        .lock(&path, lock.timeout())
+        .await
+        .unwrap_err();
+    assert!(matches!(conflict,
+        pubky::Error::Request(pubky::errors::RequestError::Server { status, .. })
+            if status == pubky::StatusCode::LOCKED
+    ));
+    setup.session.storage().unlock(&lock).await.unwrap();
+    setup.raw_session.signout().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_app_registry_round_trips_through_public_storage() {
     let setup = TestSetup::new().await;
     let mut registry = PaykitAppRegistry::new(Some(Keypair::random().public_key()));
@@ -30,7 +126,7 @@ async fn test_app_registry_round_trips_through_public_storage() {
     let fetched = get_paykit_app_registry(&setup.public_storage, &setup.public_key)
         .await
         .unwrap();
-    let versioned = get_paykit_app_registry_with_etag(&setup.public_storage, &setup.public_key)
+    let versioned = get_paykit_app_registry_with_revision(&setup.public_storage, &setup.public_key)
         .await
         .unwrap()
         .unwrap();
@@ -42,7 +138,7 @@ async fn test_app_registry_round_trips_through_public_storage() {
 }
 
 #[tokio::test]
-async fn test_app_registry_rejects_stale_etag_update() {
+async fn test_app_registry_rejects_stale_revision_update() {
     let setup = TestSetup::new().await;
     let mut registry = PaykitAppRegistry::new(Some(Keypair::random().public_key()));
     registry
@@ -55,8 +151,8 @@ async fn test_app_registry_rejects_stale_etag_update() {
         .await
         .unwrap();
 
-    let (mut first_update, etag) =
-        get_paykit_app_registry_with_etag(&setup.public_storage, &setup.public_key)
+    let (mut first_update, revision) =
+        get_paykit_app_registry_with_revision(&setup.public_storage, &setup.public_key)
             .await
             .unwrap()
             .unwrap();
@@ -74,23 +170,13 @@ async fn test_app_registry_rejects_stale_etag_update() {
         )
         .unwrap();
 
-    update_paykit_app_registry(&setup.session, &first_update, &etag)
+    update_paykit_app_registry(&setup.session, &first_update, &revision)
         .await
         .unwrap();
-    let error = update_paykit_app_registry(&setup.session, &stale_update, &etag)
+    let error = update_paykit_app_registry(&setup.session, &stale_update, &revision)
         .await
         .unwrap_err();
-    assert!(matches!(
-        error,
-        PaykitError::Transport { source, .. }
-            if matches!(
-                source.downcast_ref::<pubky::Error>(),
-                Some(pubky::Error::Request(pubky::errors::RequestError::Server {
-                    status,
-                    ..
-                })) if *status == pubky::StatusCode::PRECONDITION_FAILED
-            )
-    ));
+    assert!(pubky_routing::is_write_conflict(&error));
 
     let stored = get_paykit_app_registry(&setup.public_storage, &setup.public_key)
         .await
@@ -198,17 +284,7 @@ async fn test_endpoint_conditional_updates_reject_stale_revisions() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(
-        stale_delete,
-        PaykitError::Transport { source, .. }
-            if matches!(
-                source.downcast_ref::<pubky::Error>(),
-                Some(pubky::Error::Request(pubky::errors::RequestError::Server {
-                    status,
-                    ..
-                })) if *status == pubky::StatusCode::PRECONDITION_FAILED
-            )
-    ));
+    assert!(pubky_routing::is_write_conflict(&stale_delete));
 
     let (payload, current_revision) = get_payment_endpoint_with_revision(
         &setup.public_storage,

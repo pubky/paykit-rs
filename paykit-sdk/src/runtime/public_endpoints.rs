@@ -335,7 +335,7 @@ where
                 .await
             }
         };
-        write.map_err(map_endpoint_conditional_error)
+        write.map_err(Into::into)
     }
 
     pub(super) async fn remove_public_endpoint_if_current(
@@ -377,7 +377,7 @@ where
         .await
         {
             Ok(()) => Ok(()),
-            Err(err) if paykit_error_is_precondition_failed(&err) => {
+            Err(err) if paykit_lib::is_write_conflict(&err) => {
                 if paykit_lib::get_payment_endpoint_with_revision(
                     &public_storage,
                     owner,
@@ -389,31 +389,10 @@ where
                 {
                     Ok(())
                 } else {
-                    Err(map_endpoint_conditional_error(err))
+                    Err(err.into())
                 }
             }
             Err(err) => Err(err.into()),
         }
     }
-}
-
-fn map_endpoint_conditional_error(error: paykit_lib::PaykitError) -> PaykitSdkError {
-    if paykit_error_is_precondition_failed(&error) {
-        PaykitSdkError::ConcurrentUpdate {
-            context: "public Payment Endpoint changed during synchronization".into(),
-            source: Some(error.into()),
-        }
-    } else {
-        error.into()
-    }
-}
-
-fn paykit_error_is_precondition_failed(error: &paykit_lib::PaykitError) -> bool {
-    matches!(
-        error,
-        paykit_lib::PaykitError::Transport { source, .. }
-            if source
-                .downcast_ref::<PubkyError>()
-                .is_some_and(is_pubky_precondition_failed)
-    )
 }

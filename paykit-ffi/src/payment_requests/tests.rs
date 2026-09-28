@@ -9,7 +9,9 @@ use paykit_sdk::{
 };
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
-use super::{conversions::ParsedPaymentProofSubmission, *};
+use super::*;
+
+const ALLOWANCE_ID: &str = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44";
 
 fn public_key() -> PubkyPublicKey {
     conversions::parse_public_key("8jsf5bm1ck3r7sn6pfx4q9mgqq5xn8fi6sizw6pxgjc8zs1bt4io".into())
@@ -19,6 +21,8 @@ fn public_key() -> PubkyPublicKey {
 #[test]
 fn test_payment_request_terms_parse_protocol_inputs() {
     let terms = FfiPaymentRequestTerms {
+        conversion: None,
+        payment_deadline: None,
         amount: FfiPaymentRequestAmount {
             value: "25.50".into(),
             asset: "usd".into(),
@@ -39,15 +43,18 @@ fn test_payment_request_terms_parse_protocol_inputs() {
 
     let parsed = PaymentRequestTerms::try_from(terms).unwrap();
 
-    assert_eq!(parsed.amount.value, "25.50");
-    assert_eq!(parsed.payment_reference.as_str(), "invoice-1");
+    assert_eq!(parsed.amount().value(), "25.50");
+    assert_eq!(parsed.payment_reference().as_str(), "invoice-1");
     assert!(matches!(
-        parsed.recurrence.as_ref().map(|recurrence| recurrence.unit),
+        parsed
+            .recurrence()
+            .as_ref()
+            .map(|recurrence| recurrence.unit()),
         Some(RecurrenceUnit::Month)
     ));
     assert_eq!(
         parsed
-            .metadata
+            .metadata()
             .get("order")
             .and_then(serde_json::Value::as_str),
         Some("123")
@@ -86,6 +93,7 @@ fn test_payment_request_record_conversion_redacts_references() {
     proof.insert("preimage".into(), JsonValue::String("secret".into()));
 
     let record = PaymentRequestRecord {
+        conversion_quotes: Vec::new(),
         counterparty: public_key(),
         payment_request_id: "550e8400-e29b-41d4-a716-446655440000".into(),
         local_role: Some(PaymentRequestLocalRole::Payer),
@@ -98,6 +106,8 @@ fn test_payment_request_record_conversion_redacts_references() {
         payer_app_id: Some(paykit_sdk::PaykitAppId::new("wallet").unwrap()),
         execution_claim_app_id: Some(paykit_sdk::PaykitAppId::new("wallet").unwrap()),
         terms: Some(PaymentRequestTermsRecord {
+            conversion: None,
+            payment_deadline: None,
             amount: AmountRecord {
                 value: "10".into(),
                 asset: "usd".into(),
@@ -116,6 +126,7 @@ fn test_payment_request_record_conversion_redacts_references() {
         canceled_event_id: None,
         canceled_outbound_status: None,
         payment_proofs: vec![PaymentProofRecord {
+            conversion_quote_id: None,
             event_id: "750e8400-e29b-41d4-a716-446655440000".into(),
             outbound_message_id: Some(9),
             outbound_status: Some(OutboundPrivateMessageStatus::Sent),
@@ -127,6 +138,7 @@ fn test_payment_request_record_conversion_redacts_references() {
             }),
             payment_app_id: paykit_sdk::PaykitAppId::new("bitkit").unwrap(),
             payment_endpoint_identifier: "btc-lightning-bolt11".into(),
+            allowance_id: Some(ALLOWANCE_ID.into()),
             proof,
             recorded_at: Utc::now(),
         }],
@@ -144,6 +156,10 @@ fn test_payment_request_record_conversion_redacts_references() {
     assert_eq!(ffi.execution_claim_app_id.as_deref(), Some("wallet"));
     assert_eq!(ffi.proposal_app_id.as_deref(), Some("bitkit"));
     assert_eq!(
+        ffi.payment_proofs[0].allowance_id.as_deref(),
+        Some(ALLOWANCE_ID)
+    );
+    assert_eq!(
         ffi.terms.as_ref().unwrap().payment_reference.export_text(),
         "invoice secret"
     );
@@ -158,14 +174,207 @@ fn test_payment_request_record_conversion_redacts_references() {
 #[test]
 fn test_payment_proof_submission_rejects_non_object_proof() {
     let submission = FfiPaymentProofSubmission {
+        conversion_quote_id: None,
         billing_period: None,
         payment_app_id: "bitkit".into(),
         payment_endpoint_identifier: "btc-lightning-bolt11".into(),
+        allowance_id: None,
         proof: Arc::new(FfiPrivateJsonObject::from_unchecked_text("[]".into())),
     };
 
     assert!(matches!(
-        ParsedPaymentProofSubmission::try_from(submission),
+        PaymentProofSubmission::try_from(submission),
         Err(PaykitFfiError::Protocol { code, .. }) if code == "validation"
     ));
+}
+
+fn proof_submission(allowance_id: Option<String>) -> FfiPaymentProofSubmission {
+    FfiPaymentProofSubmission {
+        payment_app_id: "bitkit".into(),
+
+        conversion_quote_id: None,
+        billing_period: None,
+        payment_endpoint_identifier: "btc-lightning-bolt11".into(),
+        allowance_id,
+        proof: Arc::new(FfiPrivateJsonObject::new("{}".into()).unwrap()),
+    }
+}
+
+#[test]
+fn test_payment_proof_submission_preserves_optional_allowance_id() {
+    for id in [None, Some(ALLOWANCE_ID.to_owned())] {
+        let parsed = PaymentProofSubmission::try_from(proof_submission(id.clone())).unwrap();
+        assert_eq!(
+            parsed.allowance_id.as_ref().map(|id| id.as_str()),
+            id.as_deref()
+        );
+    }
+}
+
+#[test]
+fn test_payment_proof_submission_rejects_invalid_allowance_id_without_leaking_input() {
+    for id in [
+        "secret invalid allowance value".to_owned(),
+        ALLOWANCE_ID.to_uppercase(),
+        ALLOWANCE_ID.replace('-', ""),
+        ALLOWANCE_ID.replacen("4b0e", "1b0e", 1),
+        String::new(),
+    ] {
+        let submission = proof_submission(Some(id.clone()));
+        if !id.is_empty() {
+            assert!(!format!("{submission:?}").contains(&id));
+        }
+        let Err(error) = PaymentProofSubmission::try_from(submission) else {
+            panic!("invalid Allowance ID must be rejected");
+        };
+        assert!(matches!(&error, PaykitFfiError::Protocol { code, .. } if code == "validation"));
+        if !id.is_empty() {
+            assert!(!format!("{error:?}").contains(&id));
+        }
+    }
+}
+
+#[test]
+fn test_payment_proof_record_preserves_absent_allowance_id() {
+    let record = PaymentProofRecord {
+        payment_app_id: paykit_lib::PaykitAppId::new("bitkit").unwrap(),
+        conversion_quote_id: None,
+        event_id: "750e8400-e29b-41d4-a716-446655440000".into(),
+        outbound_message_id: None,
+        outbound_status: None,
+        stream_item_id: Some(1),
+        payment_reference: "invoice-1".into(),
+        billing_period: None,
+        payment_endpoint_identifier: "btc-lightning-bolt11".into(),
+        allowance_id: None,
+        proof: JsonMap::new(),
+        recorded_at: Utc::now(),
+    };
+    assert!(FfiPaymentProofRecord::try_from(record)
+        .unwrap()
+        .allowance_id
+        .is_none());
+}
+
+#[test]
+fn test_billing_period_conversion_rejects_invalid_interval() {
+    for ends_at in ["invalid", "2026-06-01T00:00:00Z", "2026-05-01T00:00:00Z"] {
+        let result = paykit_lib::BillingPeriod::try_from(FfiBillingPeriod {
+            starts_at: "2026-06-01T00:00:00Z".into(),
+            ends_at: ends_at.into(),
+        });
+        assert!(
+            matches!(result, Err(PaykitFfiError::Protocol { code, .. }) if code == "validation")
+        );
+    }
+}
+
+#[test]
+fn test_recurrence_conversion_rejects_zero_interval() {
+    let result = paykit_lib::Recurrence::try_from(FfiPaymentRequestRecurrence {
+        every: 0,
+        unit: "month".into(),
+        starts_at: "2026-06-01T00:00:00Z".into(),
+        anchor: "2026-06-01T00:00:00Z".into(),
+        ends_at: None,
+    });
+    assert!(matches!(result, Err(PaykitFfiError::Protocol { code, .. }) if code == "validation"));
+}
+
+#[test]
+fn test_terms_conversion_rejects_empty_endpoint_list() {
+    let result = PaymentRequestTerms::try_from(FfiPaymentRequestTerms {
+        required_app_id: None,
+
+        amount: FfiPaymentRequestAmount {
+            value: "1".into(),
+            asset: "btc".into(),
+        },
+        payment_reference: Arc::new(FfiPaymentReference::new("invoice-1".into()).unwrap()),
+        proposal_expires_at: None,
+        recurrence: None,
+        conversion: None,
+        payment_deadline: None,
+        accepted_payment_endpoint_identifiers: Vec::new(),
+        metadata: Arc::new(FfiPrivateJsonObject::new("{}".into()).unwrap()),
+    });
+    assert!(matches!(result, Err(PaykitFfiError::Protocol { code, .. }) if code == "validation"));
+}
+
+#[test]
+fn test_conversion_terms_and_quote_selection_survive_bindings() {
+    let terms = FfiPaymentRequestTerms {
+        required_app_id: None,
+
+        amount: FfiPaymentRequestAmount {
+            asset: "usd".into(),
+            value: "10".into(),
+        },
+        payment_reference: Arc::new(FfiPaymentReference::new("invoice-1".into()).unwrap()),
+        proposal_expires_at: None,
+        recurrence: None,
+        conversion: Some(FfiPaymentConversion::Fixed {
+            rates: vec![FfiConversionRate {
+                asset: "usdt".into(),
+                value: "1".into(),
+            }],
+        }),
+        payment_deadline: Some(FfiPaymentDeadline::At {
+            timestamp: "2026-10-01T12:00:00Z".into(),
+        }),
+        accepted_payment_endpoint_identifiers: vec!["usdt-arbitrum-address".into()],
+        metadata: Arc::new(FfiPrivateJsonObject::new("{}".into()).unwrap()),
+    };
+    let native = PaymentRequestTerms::try_from(terms).unwrap();
+    let restored =
+        FfiPaymentRequestTerms::try_from(PaymentRequestTermsRecord::from(&native)).unwrap();
+    assert_eq!(PaymentRequestTerms::try_from(restored).unwrap(), native);
+    let quote_id = "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103";
+    let mut submission = proof_submission(None);
+    submission.payment_endpoint_identifier = "usdt-arbitrum-address".into();
+    submission.conversion_quote_id = Some(quote_id.into());
+    assert_eq!(
+        paykit_sdk::PaymentProofSubmission::try_from(submission.clone())
+            .unwrap()
+            .conversion_quote_id
+            .unwrap()
+            .as_str(),
+        quote_id
+    );
+    submission.conversion_quote_id = Some("not-a-uuid".into());
+    assert!(paykit_sdk::PaymentProofSubmission::try_from(submission).is_err());
+    assert_eq!(
+        payment_deadline_at(
+            FfiPaymentDeadline::PeriodStart { seconds: 86400 },
+            Some(FfiBillingPeriod {
+                starts_at: "2026-10-01T00:00:00Z".into(),
+                ends_at: "2026-11-01T00:00:00Z".into(),
+            })
+        )
+        .unwrap(),
+        "2026-10-02T00:00:00Z"
+    );
+    assert!(payment_deadline_at(FfiPaymentDeadline::PeriodStart { seconds: 86400 }, None).is_err());
+}
+
+#[test]
+fn test_erc20_receipt_log_index_max_survives_ffi_submission_boundary() {
+    let maximum = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+    let mut submission = proof_submission(None);
+    submission.proof = Arc::new(
+        FfiPrivateJsonObject::new(format!(
+            r#"{{"type":"erc20-transfer-eip712","receipt_log_index":"{maximum}"}}"#
+        ))
+        .unwrap(),
+    );
+
+    let native = paykit_sdk::PaymentProofSubmission::try_from(submission).unwrap();
+
+    assert_eq!(
+        native
+            .proof
+            .get("receipt_log_index")
+            .and_then(serde_json::Value::as_str),
+        Some(maximum)
+    );
 }

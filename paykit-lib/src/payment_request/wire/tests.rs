@@ -1,4 +1,5 @@
 use super::*;
+use crate::PaymentAmount;
 
 fn app_id() -> PaykitAppId {
     PaykitAppId::new("test-app").unwrap()
@@ -27,21 +28,16 @@ fn test_private_event_parse_errors_redact_plaintext() {
 }
 
 fn request_terms() -> PaymentRequestTerms {
-    PaymentRequestTerms {
-        amount: PaymentAmount {
-            value: "0.001".to_string(),
-            asset: "btc".to_string(),
-        },
-        payment_reference: PaymentReference::new("invoice-2026-0001").unwrap(),
-        proposal_expires_at: Some("2026-06-01T00:00:00Z".to_string()),
-        recurrence: None,
-        accepted_payment_endpoint_identifiers: vec![PaymentEndpointIdentifier::new(
-            "btc-lightning-bolt11",
-        )
-        .unwrap()],
-        required_app_id: None,
-        metadata: JsonMap::new(),
-    }
+    PaymentRequestTerms::builder(
+        PaymentAmount::new("0.001".to_string(), "btc".to_string()).unwrap(),
+        PaymentReference::new("invoice-2026-0001").unwrap(),
+        vec![PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap()],
+    )
+    .proposal_expires_at(Some("2026-06-01T00:00:00Z".to_string()))
+    .recurrence(None)
+    .metadata(JsonMap::new())
+    .build()
+    .unwrap()
 }
 
 #[test]
@@ -361,6 +357,8 @@ fn payment_request_rejects_invalid_recurrence_window_order() {
 }
 
 fn recurrence_with_ends_at(ends_at: &str) -> Recurrence {
+    // Internal fixture intentionally bypasses construction to test the
+    // defensive serialization boundary against invalid domain state.
     Recurrence {
         every: 1,
         unit: RecurrenceUnit::Month,
@@ -587,14 +585,19 @@ fn test_payment_request_round_trips_fully_valid_recurrence() {
         EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101").unwrap(),
         PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap(),
         PaymentRequestTerms {
+            conversion: None,
+            payment_deadline: None,
             proposal_expires_at: Some("2026-06-01T00:00:00Z".to_string()),
-            recurrence: Some(Recurrence {
-                every: 3,
-                unit: RecurrenceUnit::Week,
-                starts_at: "2026-06-01T00:00:00Z".to_string(),
-                anchor: "2026-06-01T00:00:00Z".to_string(),
-                ends_at: Some("2026-12-01T00:00:00Z".to_string()),
-            }),
+            recurrence: Some(
+                Recurrence::try_from(crate::RecurrenceConfig {
+                    every: 3,
+                    unit: RecurrenceUnit::Week,
+                    starts_at: "2026-06-01T00:00:00Z".to_string(),
+                    anchor: "2026-06-01T00:00:00Z".to_string(),
+                    ends_at: Some("2026-12-01T00:00:00Z".to_string()),
+                })
+                .unwrap(),
+            ),
             ..request_terms()
         },
     );
@@ -602,4 +605,147 @@ fn test_payment_request_round_trips_fully_valid_recurrence() {
     let json = serialize_payment_request_json(&app_id(), &event).unwrap();
     let parsed = parse_payment_request_json(&json).unwrap();
     assert_eq!(parsed, event);
+}
+
+fn payment_proof() -> PaymentProof {
+    PaymentProof::new(
+        EventId::new_v4(),
+        PaymentRequestId::new_v4(),
+        PaymentReference::new("invoice-2026-0001").unwrap(),
+        None,
+        crate::PaykitAppId::new("bitkit").unwrap(),
+        PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+        JsonMap::new(),
+    )
+}
+
+fn erc20_payment_proof(receipt_log_index: JsonValue) -> PaymentProof {
+    let mut proof = JsonMap::new();
+    proof.insert(
+        "type".into(),
+        JsonValue::String("erc20-transfer-eip712".into()),
+    );
+    proof.insert("receipt_log_index".into(), receipt_log_index);
+    PaymentProof::new(
+        EventId::new_v4(),
+        PaymentRequestId::new_v4(),
+        PaymentReference::new("invoice-2026-0001").unwrap(),
+        None,
+        crate::PaykitAppId::new("bitkit").unwrap(),
+        PaymentEndpointIdentifier::new("usdt-arbitrum-address").unwrap(),
+        proof,
+    )
+}
+
+#[test]
+fn test_payment_proof_round_trips_optional_allowance_id() {
+    let proof = payment_proof();
+    let raw =
+        serialize_payment_proof_json(&crate::PaykitAppId::new("bitkit").unwrap(), &proof).unwrap();
+    assert!(!raw.contains("allowance_id"));
+    assert_eq!(parse_payment_proof_json(&raw).unwrap(), proof);
+
+    let allowance_id = AllowanceId::new_v4();
+    let proof = proof.with_allowance_id(allowance_id.clone());
+    let raw =
+        serialize_payment_proof_json(&crate::PaykitAppId::new("bitkit").unwrap(), &proof).unwrap();
+    let parsed = parse_payment_proof_json(&raw).unwrap();
+    assert_eq!(parsed.allowance_id(), Some(&allowance_id));
+    assert_eq!(parsed, proof);
+}
+
+#[test]
+fn test_payment_proof_rejects_noncanonical_allowance_ids_and_null() {
+    let raw = serialize_payment_proof_json(
+        &crate::PaykitAppId::new("bitkit").unwrap(),
+        &payment_proof(),
+    )
+    .unwrap();
+    let mut value: JsonValue = serde_json::from_str(&raw).unwrap();
+    for id in [
+        JsonValue::Null,
+        JsonValue::from(1),
+        JsonValue::from("not-a-uuid"),
+        JsonValue::from("B7F9C2A1-6D43-4B0E-A8D4-0FE2C712AB44"),
+        JsonValue::from("b7f9c2a16d434b0ea8d40fe2c712ab44"),
+        JsonValue::from("b7f9c2a1-6d43-1b0e-a8d4-0fe2c712ab44"),
+    ] {
+        value["allowance_id"] = id;
+        let raw = value.to_string();
+        assert!(matches!(
+            parse_payment_proof_json(&raw),
+            Err(PaykitError::InvalidData { .. })
+        ));
+        let message = crate::PrivateApplicationMessage {
+            app_id: Some("bitkit".into()),
+
+            version: Some(1),
+            kind: Some("paykit.payment_proof".into()),
+            raw_json: raw.clone(),
+        };
+        let parsed = crate::parse_payment_request_event_message(&message).unwrap();
+        assert!(!parsed.is_valid());
+        assert_eq!(parsed.raw_json, raw);
+    }
+}
+
+#[test]
+fn test_payment_proof_rejects_duplicate_allowance_id() {
+    let id = AllowanceId::new_v4();
+    let proof = payment_proof().with_allowance_id(id.clone());
+    let raw =
+        serialize_payment_proof_json(&crate::PaykitAppId::new("bitkit").unwrap(), &proof).unwrap();
+    let duplicate = raw.replacen('{', &format!("{{\"allowance_id\":\"{id}\","), 1);
+    assert!(matches!(
+        parse_payment_proof_json(&duplicate),
+        Err(PaykitError::InvalidData { .. })
+    ));
+}
+
+#[test]
+fn test_erc20_receipt_log_index_round_trips_uint256_max() {
+    let maximum = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+    let proof = erc20_payment_proof(JsonValue::String(maximum.into()));
+
+    let raw =
+        serialize_payment_proof_json(&crate::PaykitAppId::new("bitkit").unwrap(), &proof).unwrap();
+    let parsed = parse_payment_proof_json(&raw).unwrap();
+
+    assert_eq!(
+        parsed
+            .proof()
+            .get("receipt_log_index")
+            .and_then(JsonValue::as_str),
+        Some(maximum)
+    );
+    assert_eq!(parsed, proof);
+}
+
+#[test]
+fn test_erc20_receipt_log_index_rejects_noncanonical_or_out_of_range_values() {
+    let valid = erc20_payment_proof(JsonValue::String("0".into()));
+    let raw =
+        serialize_payment_proof_json(&crate::PaykitAppId::new("bitkit").unwrap(), &valid).unwrap();
+    for invalid in [
+        JsonValue::from(0),
+        JsonValue::String(String::new()),
+        JsonValue::String("00".into()),
+        JsonValue::String("+1".into()),
+        JsonValue::String(
+            "115792089237316195423570985008687907853269984665640564039457584007913129639936".into(),
+        ),
+    ] {
+        let proof = erc20_payment_proof(invalid.clone());
+        assert!(matches!(
+            serialize_payment_proof_json(&crate::PaykitAppId::new("bitkit").unwrap(), &proof),
+            Err(PaykitError::Validation(_))
+        ));
+
+        let mut value: JsonValue = serde_json::from_str(&raw).unwrap();
+        value["proof"]["receipt_log_index"] = invalid;
+        assert!(matches!(
+            parse_payment_proof_json(&value.to_string()),
+            Err(PaykitError::InvalidData { .. })
+        ));
+    }
 }

@@ -31,6 +31,10 @@ fn payment_request_terms(
     accepted_identifiers: &[&str],
 ) -> PaymentRequestTermsRecord {
     PaymentRequestTermsRecord {
+        payment_deadline: None,
+
+        conversion: None,
+
         amount: crate::AmountRecord {
             value: "0.001".into(),
             asset: "btc".into(),

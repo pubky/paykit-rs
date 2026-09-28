@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::domain::private_stream::require_valid_event_message;
 
 pub(in crate::backup) fn validate_private_stream_items(
     records: &[PrivateStreamItemRecord],
@@ -297,6 +298,7 @@ pub(in crate::backup) fn validate_required_private_stream_indexes(
             });
         }
     }
+    validate_receipt_access_authority(event_dedup_records, receipt_access_records)?;
     Ok(())
 }
 
@@ -361,44 +363,36 @@ fn validate_valid_private_stream_body(
             paykit_lib::parse_private_payment_list_json(&record.raw_json)?;
         }
         PrivateMessageKind::ReceiptAccess => {
-            let event = paykit_lib::parse_receipt_access_event_message(
-                &private_application_message(record, kind),
-            )
-            .ok_or_else(|| PaykitSdkError::Protocol {
-                context: format!(
-                    "private stream item {} Receipt Access payload does not match its kind",
-                    record.stream_item_id
-                ),
-                source: None,
-            })?;
-            if let Some(error) = event.validation_error() {
-                return Err(PaykitSdkError::Protocol {
-                    context: error.to_owned(),
-                    source: None,
-                });
-            }
+            require_valid_event_message(
+                paykit_lib::parse_receipt_access_event_message(&private_application_message(
+                    record, kind,
+                )),
+                || kind_mismatch_context(record, "Receipt Access"),
+            )?;
         }
         PrivateMessageKind::PaymentRequest
         | PrivateMessageKind::PaymentRequestAcceptance
         | PrivateMessageKind::PaymentRequestRejection
         | PrivateMessageKind::PaymentRequestCancellation
+        | PrivateMessageKind::PaymentConversionQuote
         | PrivateMessageKind::PaymentProof => {
-            let event = paykit_lib::parse_payment_request_event_message(
-                &private_application_message(record, kind),
-            )
-            .ok_or_else(|| PaykitSdkError::Protocol {
-                context: format!(
-                    "private stream item {} Payment Request payload does not match its kind",
-                    record.stream_item_id
-                ),
-                source: None,
-            })?;
-            if let Some(error) = event.validation_error() {
-                return Err(PaykitSdkError::Protocol {
-                    context: error.to_owned(),
-                    source: None,
-                });
-            }
+            require_valid_event_message(
+                paykit_lib::parse_payment_request_event_message(&private_application_message(
+                    record, kind,
+                )),
+                || kind_mismatch_context(record, "Payment Request"),
+            )?;
+        }
+        PrivateMessageKind::AllowanceProposal
+        | PrivateMessageKind::AllowanceAcceptance
+        | PrivateMessageKind::AllowanceRejection
+        | PrivateMessageKind::AllowanceEnd => {
+            require_valid_event_message(
+                paykit_lib::parse_allowance_event_message(&private_application_message(
+                    record, kind,
+                )),
+                || kind_mismatch_context(record, "Allowance"),
+            )?;
         }
     }
     Ok(())
@@ -437,4 +431,127 @@ pub(in crate::backup) fn app_id_from_raw_json(raw_json: &str) -> Option<String> 
         .get("app_id")?
         .as_str()
         .map(str::to_owned)
+}
+
+/// Refresh parser-derived fields while retaining raw evidence and existing index authority.
+/// Unknown messages can become recognized after an SDK update; they must then
+/// participate in Event ID conflict detection across all message families.
+pub(in crate::backup) fn refresh_private_stream_classification(
+    records: &mut [PrivateStreamItemRecord],
+    dedupe: &mut HashMap<(PubkyPublicKey, String), EventDedupRecord>,
+    receipts: &mut HashMap<(PubkyPublicKey, String), ReceiptAccessRecord>,
+) -> Result<()> {
+    // A parser update never excuses corrupt references or changed raw payloads.
+    validate_event_dedup_records(dedupe, records)?;
+    records.sort_by_key(|record| record.stream_item_id);
+    for record in records.iter_mut() {
+        let (version, kind, app_id, known_kind) = private_message_header(&record.raw_json);
+        if record.parsed_version != version
+            || record.parsed_kind != kind
+            || record.parsed_app_id != app_id
+        {
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "private stream item {} has inconsistent raw header metadata",
+                    record.stream_item_id
+                ),
+                source: None,
+            });
+        }
+        let classification = classify_private_application_message(
+            &private_application_message_from_raw(record.raw_json.clone(), version, kind),
+        );
+        let newly_recognized = record.known_paykit_kind.is_none() && known_kind.is_some();
+        let newly_valid = record.parse_status != PrivateStreamParseStatus::Valid
+            && classification.status == PrivateStreamParseStatus::Valid;
+        if let Some(event) = classification.event.as_ref() {
+            let key = (record.counterparty.clone(), event.event_id.clone());
+            if newly_recognized {
+                let entry = dedupe
+                    .entry(key.clone())
+                    .or_insert_with(|| EventDedupRecord {
+                        counterparty: record.counterparty.clone(),
+                        event_id: event.event_id.clone(),
+                        event_kind: event.event_kind.clone(),
+                        payload_hash: payload_hash(&record.raw_json),
+                        first_stream_item_id: record.stream_item_id,
+                        duplicate_stream_item_ids: Vec::new(),
+                        conflicting_stream_item_ids: Vec::new(),
+                    });
+                if entry.first_stream_item_id != record.stream_item_id
+                    && !entry
+                        .duplicate_stream_item_ids
+                        .contains(&record.stream_item_id)
+                    && !entry
+                        .conflicting_stream_item_ids
+                        .contains(&record.stream_item_id)
+                {
+                    if entry.payload_hash == payload_hash(&record.raw_json) {
+                        entry.duplicate_stream_item_ids.push(record.stream_item_id);
+                    } else {
+                        entry
+                            .conflicting_stream_item_ids
+                            .push(record.stream_item_id);
+                    }
+                }
+            }
+            if newly_valid
+                && dedupe
+                    .get(&key)
+                    .is_some_and(|entry| entry.first_stream_item_id == record.stream_item_id)
+            {
+                if let Some(access) = classification.receipt_access.as_ref() {
+                    receipts.entry(key).or_insert_with(|| {
+                        ReceiptAccessRecord::from_access(
+                            record.counterparty.clone(),
+                            classification
+                                .app_id
+                                .clone()
+                                .expect("valid Receipt Access has App attribution"),
+                            false,
+                            record.stream_item_id,
+                            record.receive_batch_id,
+                            record.received_at,
+                            access,
+                        )
+                    });
+                }
+            }
+        }
+        record.known_paykit_kind = known_kind.map(|kind| kind.as_str().to_owned());
+        record.parse_status = classification.status;
+        record.parse_error = classification.parse_error;
+    }
+    validate_private_stream_items(records)?;
+    validate_event_dedup_records(dedupe, records)?;
+    validate_receipt_access_records(receipts, records)?;
+    validate_required_private_stream_indexes(records, dedupe, receipts)
+}
+
+fn validate_receipt_access_authority(
+    event_dedup_records: &HashMap<(PubkyPublicKey, String), EventDedupRecord>,
+    receipt_access_records: &HashMap<(PubkyPublicKey, String), ReceiptAccessRecord>,
+) -> Result<()> {
+    for (key, access) in receipt_access_records {
+        let is_authoritative = event_dedup_records
+            .get(key)
+            .is_some_and(|dedupe| dedupe.first_stream_item_id == access.stream_item_id);
+        if !is_authoritative {
+            return Err(PaykitSdkError::Protocol {
+                context: format!(
+                    "Receipt Access record '{}' is not the authoritative first Event carrier",
+                    access.event_id
+                ),
+                source: None,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn kind_mismatch_context(record: &PrivateStreamItemRecord, family: &str) -> String {
+    format!(
+        "private stream item {} {family} payload does not match its kind",
+        record.stream_item_id
+    )
 }

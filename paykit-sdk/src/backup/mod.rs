@@ -174,6 +174,20 @@ pub struct RestoreReport {
     pub recovery_required_peers: Vec<PubkyPublicKey>,
 }
 
+/// Refresh derived message classifications without restoring or resetting transport state.
+pub(crate) fn refresh_stored_message_classification(
+    tx: &mut dyn crate::storage::StorageTransaction,
+) -> Result<()> {
+    let mut state = tx.export_storage_state();
+    refresh_private_stream_classification(
+        &mut state.private_stream_items,
+        &mut state.event_dedup_records,
+        &mut state.receipt_access_records,
+    )?;
+    tx.replace_storage_state(ValidatedStorageState::new(state));
+    Ok(())
+}
+
 /// Export SDK-managed state from storage.
 pub async fn export_backup_state<S>(storage: &S) -> Result<SdkBackupState>
 where
@@ -460,29 +474,26 @@ impl SdkBackupState {
             },
             "Payment Request execution claim",
         )?;
-        let private_stream_items = unique_private_stream_items(self.private_stream_items)?;
-        validate_private_stream_items(&private_stream_items)?;
-        let event_dedup_records = keyed_by_tuple(
+        let mut private_stream_items = unique_private_stream_items(self.private_stream_items)?;
+        let mut event_dedup_records = keyed_by_tuple(
             self.event_dedup_records,
             |record| (record.counterparty.clone(), record.event_id.clone()),
             "Event dedupe",
         )?;
-        validate_event_dedup_records(&event_dedup_records, &private_stream_items)?;
-        let receipt_access_records = keyed_by_tuple(
+        let mut receipt_access_records = keyed_by_tuple(
             self.receipt_access_records,
             |record| (record.counterparty.clone(), record.event_id.clone()),
             "Receipt Access",
-        )?;
-        validate_receipt_access_records(&receipt_access_records, &private_stream_items)?;
-        validate_required_private_stream_indexes(
-            &private_stream_items,
-            &event_dedup_records,
-            &receipt_access_records,
         )?;
         let receipt_records = keyed_by_tuple(
             self.receipt_records,
             |record| (record.issuer.clone(), record.receipt_id.clone()),
             "Receipt",
+        )?;
+        refresh_private_stream_classification(
+            &mut private_stream_items,
+            &mut event_dedup_records,
+            &mut receipt_access_records,
         )?;
         let expected_receipt_recipient = identity_state
             .as_ref()

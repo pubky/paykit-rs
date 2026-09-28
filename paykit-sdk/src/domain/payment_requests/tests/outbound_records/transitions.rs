@@ -169,7 +169,7 @@ async fn test_payment_request_records_apply_proposal_before_cross_source_accepta
 }
 
 #[tokio::test]
-async fn test_payment_request_records_flag_later_acceptance_after_local_cancellation() {
+async fn test_payment_request_records_retain_crossing_acceptance_after_local_cancellation() {
     let storage = registered_storage();
     let counterparty = counterparty();
     let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
@@ -221,14 +221,9 @@ async fn test_payment_request_records_flag_later_acceptance_after_local_cancella
         .await
         .unwrap();
 
-    assert_eq!(
-        records[0].state,
-        PaymentRequestLifecycleState::InvalidConflict
-    );
-    assert!(records[0]
-        .invalid_reason
-        .as_ref()
-        .is_some_and(|reason| reason.contains("acceptance arrived after transition")));
+    assert_eq!(records[0].state, PaymentRequestLifecycleState::Canceled);
+    assert!(records[0].invalid_reason.is_none());
+    assert!(records[0].accepted_event_id.is_some());
 }
 
 #[tokio::test]

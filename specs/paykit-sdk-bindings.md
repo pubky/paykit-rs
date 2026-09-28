@@ -99,8 +99,8 @@ handling.
 Bindings also expose constructors backed by `PubkySharedStateStorage`. This
 stores the same logical state as one encrypted Pubky resource and does not
 require platform state-blob callbacks. Independent concurrent writers use
-homeserver ETag preconditions; stale operations fail without overwriting newer
-state and can be retried.
+renewable homeserver write locks; lock conflicts can be retried by restarting
+the SDK operation with fresh state.
 
 Each SDK storage transaction should load the current blob, mutate the full
 logical state in Rust, then save the replacement with the loaded revision. If
@@ -297,7 +297,7 @@ misleading known platform value.
 
 This applies especially to:
 
-- Payment Request lifecycle actions and events
+- Payment Request and Allowance lifecycle actions and events
 - payment resolution results
 - payable endpoint ordering results
 - Receipt retrieval status
@@ -366,6 +366,8 @@ Sensitive fields include:
 - Payment Targets
 - Payment Endpoint Reservation IDs and attribution
 - payable endpoint ordering or provider metadata
+- Allowance Terms, including limits, time bounds, assets, and endpoint
+  allowlists
 
 If a platform wrapper must expose sensitive data for backup/export or storage
 callbacks, that type should be documented as sensitive and must redact default
@@ -417,6 +419,7 @@ Bindings should expose high-level workflows before low-level records:
   a public-only result
 - queue and list Payment Requests
 - submit Payment Proofs with caller-supplied proof data
+- propose, inspect, accept, reject, and end Allowances
 - retrieve Receipts
 - export and restore SDK-managed backup state, including text-form wrappers
 

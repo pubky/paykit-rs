@@ -457,16 +457,28 @@ where
         tx: &dyn crate::storage::StorageTransaction,
         access: &ReceiptAccessRecord,
     ) -> bool {
-        tx.event_dedup_record(&access.counterparty, &access.event_id)
-            .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty())
+        Self::receipt_event_is_conflicted(tx, &access.counterparty, &access.event_id)
     }
 
     fn receipt_record_access_event_is_conflicted(
         tx: &dyn crate::storage::StorageTransaction,
         record: &ReceiptRecord,
     ) -> bool {
-        tx.event_dedup_record(&record.issuer, &record.receipt_access_event_id)
+        Self::receipt_event_is_conflicted(tx, &record.issuer, &record.receipt_access_event_id)
+    }
+
+    fn receipt_event_is_conflicted(
+        tx: &dyn crate::storage::StorageTransaction,
+        counterparty: &PubkyPublicKey,
+        event_id: &str,
+    ) -> bool {
+        tx.event_dedup_record(counterparty, event_id)
             .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty())
+            || crate::domain::private_stream::outbound_event_carriers(
+                &tx.outbound_private_messages(counterparty),
+            )
+            .event_ids
+            .contains(event_id)
     }
 
     fn receipt_record_access_is_usable(

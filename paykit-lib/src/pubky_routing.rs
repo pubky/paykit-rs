@@ -18,6 +18,16 @@ use crate::{
     PaymentList, Result, PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES, PAYMENT_LIST_MAX_ENDPOINTS,
 };
 
+mod locks;
+pub use locks::{
+    delete_resource_if_revision, is_write_conflict, put_resource_if_revision, with_write_lock,
+};
+
+/// Content fingerprint used to detect an application-level stale edit.
+pub fn content_revision(bytes: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(bytes).to_hex())
+}
+
 /// Conventional prefix for public Paykit data hosted on Pubky storage.
 ///
 pub const PAYKIT_PATH_PREFIX: &str = "/pub/paykit/v0/";
@@ -127,17 +137,21 @@ pub async fn upsert_payment_endpoint(
     validate_payment_endpoint_payload(payload)?;
     let path = payment_endpoint_path(app_id, identifier);
     debug!(path = %path, "writing payment endpoint to Pubky storage");
-    session
-        .storage()
-        .put(path, payload.as_str().to_string())
-        .await
-        .map_err(|err| {
-            log_payment_endpoint_storage_failure("put", &err);
-            PaykitError::Transport {
-                context: "put endpoint".into(),
-                source: err.into(),
-            }
-        })?;
+    with_write_lock(session, &path, |lock| async move {
+        session
+            .storage()
+            .put_locked(&lock, payload.as_str().to_string())
+            .await
+            .map_err(|err| {
+                log_payment_endpoint_storage_failure("put", &err);
+                PaykitError::Transport {
+                    context: "put endpoint".into(),
+                    source: err.into(),
+                }
+            })
+            .map(|_| ())
+    })
+    .await?;
     debug!("payment endpoint stored successfully");
     Ok(())
 }
@@ -150,14 +164,14 @@ pub async fn create_payment_endpoint(
 ) -> Result<()> {
     validate_payment_endpoint_payload(payload)?;
     let path = payment_endpoint_path(app_id, identifier);
-    session
-        .storage()
-        .put_if_absent(path, payload.as_str().to_string())
-        .await
-        .map_err(|err| PaykitError::Transport {
-            context: "create endpoint".into(),
-            source: err.into(),
-        })?;
+    put_resource_if_revision(
+        session,
+        &path,
+        payload.as_str().as_bytes().to_vec(),
+        None,
+        PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES,
+    )
+    .await?;
     Ok(())
 }
 
@@ -170,14 +184,14 @@ pub async fn update_payment_endpoint(
 ) -> Result<()> {
     validate_payment_endpoint_payload(payload)?;
     let path = payment_endpoint_path(app_id, identifier);
-    session
-        .storage()
-        .put_if_match(path, payload.as_str().to_string(), revision)
-        .await
-        .map_err(|err| PaykitError::Transport {
-            context: "update endpoint".into(),
-            source: err.into(),
-        })?;
+    put_resource_if_revision(
+        session,
+        &path,
+        payload.as_str().as_bytes().to_vec(),
+        Some(revision),
+        PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES,
+    )
+    .await?;
     Ok(())
 }
 
@@ -190,19 +204,23 @@ pub async fn delete_payment_endpoint(
 ) -> Result<()> {
     let path = payment_endpoint_path(app_id, identifier);
     debug!(path = %path, "deleting payment endpoint from Pubky storage");
-    match session.storage().delete(path).await {
-        Ok(_) => {}
-        Err(err) if is_not_found(&err) => {
-            debug!("payment endpoint already absent");
+    with_write_lock(session, &path, |lock| async move {
+        match session.storage().delete_locked(&lock).await {
+            Ok(_) => {}
+            Err(err) if is_not_found(&err) => {
+                debug!("payment endpoint already absent");
+            }
+            Err(err) => {
+                log_payment_endpoint_storage_failure("delete", &err);
+                return Err(PaykitError::Transport {
+                    context: "delete endpoint".into(),
+                    source: err.into(),
+                });
+            }
         }
-        Err(err) => {
-            log_payment_endpoint_storage_failure("delete", &err);
-            return Err(PaykitError::Transport {
-                context: "delete endpoint".into(),
-                source: err.into(),
-            });
-        }
-    }
+        Ok::<_, PaykitError>(())
+    })
+    .await?;
     debug!("payment endpoint removed successfully");
     Ok(())
 }
@@ -214,14 +232,8 @@ pub async fn delete_payment_endpoint_if_revision(
     revision: &str,
 ) -> Result<()> {
     let path = payment_endpoint_path(app_id, identifier);
-    session
-        .storage()
-        .delete_if_match(path, revision)
-        .await
-        .map_err(|err| PaykitError::Transport {
-            context: "delete endpoint".into(),
-            source: err.into(),
-        })?;
+    delete_resource_if_revision(session, &path, revision, PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES)
+        .await?;
     Ok(())
 }
 
@@ -368,7 +380,7 @@ pub async fn fetch_payment_endpoint_with_revision(
     identifier: &PaymentEndpointIdentifier,
 ) -> Result<Option<(Option<PaymentEndpointPayload>, String)>> {
     let addr = format!("{payee}{}", payment_endpoint_path(app_id, identifier));
-    let mut response = match storage.get(&addr).await {
+    let response = match storage.get(&addr).await {
         Ok(response) => response,
         Err(err) if is_not_found(&err) => return Ok(None),
         Err(err) => {
@@ -378,20 +390,20 @@ pub async fn fetch_payment_endpoint_with_revision(
             });
         }
     };
-    let revision = pubky::ResourceStats::from_headers(response.headers())
-        .etag
-        .filter(|etag| !etag.starts_with("W/\"") && !etag.is_empty())
-        .ok_or_else(|| PaykitError::InvalidData {
-            context: "Payment Endpoint response is missing a strong ETag".into(),
-            source: None,
-        })?;
-    let payload = read_text_response(
-        &mut response,
+    let bytes = read_bounded_body(
+        response,
+        PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES,
         "fetch endpoint",
-        Some(PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES),
     )
-    .await?
-    .map(PaymentEndpointPayload::new);
+    .await?;
+    let revision = content_revision(&bytes);
+    let payload = String::from_utf8(bytes)
+        .map_err(|err| invalid_data("Payment Endpoint is not UTF-8", Some(err.into())))?;
+    let payload = if payload.is_empty() {
+        None
+    } else {
+        Some(PaymentEndpointPayload::new(payload))
+    };
     Ok(Some((payload, revision)))
 }
 
@@ -416,14 +428,14 @@ pub async fn create_paykit_app_registry(
     registry: &PaykitAppRegistry,
 ) -> Result<()> {
     let body = serialize_paykit_app_registry(registry)?;
-    session
-        .storage()
-        .put_if_absent(PAYKIT_APP_REGISTRY_PATH, body)
-        .await
-        .map_err(|err| PaykitError::Transport {
-            context: "create Paykit App Registry".into(),
-            source: err.into(),
-        })?;
+    put_resource_if_revision(
+        session,
+        PAYKIT_APP_REGISTRY_PATH,
+        body.into_bytes(),
+        None,
+        crate::PAYKIT_APP_REGISTRY_MAX_BYTES,
+    )
+    .await?;
     Ok(())
 }
 
@@ -431,17 +443,17 @@ pub async fn create_paykit_app_registry(
 pub async fn update_paykit_app_registry(
     session: &PubkySession,
     registry: &PaykitAppRegistry,
-    etag: &str,
+    revision: &str,
 ) -> Result<()> {
     let body = serialize_paykit_app_registry(registry)?;
-    session
-        .storage()
-        .put_if_match(PAYKIT_APP_REGISTRY_PATH, body, etag)
-        .await
-        .map_err(|err| PaykitError::Transport {
-            context: "update Paykit App Registry".into(),
-            source: err.into(),
-        })?;
+    put_resource_if_revision(
+        session,
+        PAYKIT_APP_REGISTRY_PATH,
+        body.into_bytes(),
+        Some(revision),
+        crate::PAYKIT_APP_REGISTRY_MAX_BYTES,
+    )
+    .await?;
     Ok(())
 }
 
@@ -462,13 +474,13 @@ pub async fn fetch_paykit_app_registry(
     .transpose()
 }
 
-/// Fetches and parses the identity-wide Paykit App Registry with its ETag.
-pub async fn fetch_paykit_app_registry_with_etag(
+/// Fetches and parses the identity-wide Paykit App Registry with its content revision.
+pub async fn fetch_paykit_app_registry_with_revision(
     storage: &PublicStorage,
     owner: &PublicKey,
 ) -> Result<Option<(PaykitAppRegistry, String)>> {
     let addr = format!("{owner}{PAYKIT_APP_REGISTRY_PATH}");
-    let mut response = match storage.get(&addr).await {
+    let response = match storage.get(&addr).await {
         Ok(response) => response,
         Err(err) if is_not_found(&err) => return Ok(None),
         Err(err) => {
@@ -478,24 +490,16 @@ pub async fn fetch_paykit_app_registry_with_etag(
             });
         }
     };
-    let etag = pubky::ResourceStats::from_headers(response.headers())
-        .etag
-        .filter(|etag| !etag.starts_with("W/\""))
-        .ok_or_else(|| PaykitError::InvalidData {
-            context: "Paykit App Registry response is missing a strong ETag".into(),
-            source: None,
-        })?;
-    let body = read_text_response(
-        &mut response,
+    let bytes = read_bounded_body(
+        response,
+        crate::PAYKIT_APP_REGISTRY_MAX_BYTES,
         "fetch Paykit App Registry",
-        Some(crate::PAYKIT_APP_REGISTRY_MAX_BYTES),
     )
-    .await?
-    .ok_or_else(|| PaykitError::InvalidData {
-        context: "Paykit App Registry is empty".into(),
-        source: None,
-    })?;
-    Ok(Some((parse_paykit_app_registry_json(&body)?, etag)))
+    .await?;
+    let revision = content_revision(&bytes);
+    let body = String::from_utf8(bytes)
+        .map_err(|err| invalid_data("Paykit App Registry is not UTF-8", Some(err.into())))?;
+    Ok(Some((parse_paykit_app_registry_json(&body)?, revision)))
 }
 
 #[instrument(skip(storage, addr, label), fields(operation = %label))]

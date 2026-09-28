@@ -201,7 +201,7 @@ async fn test_remove_paykit_app_resumes_after_registry_entry_is_already_absent()
         .await
         .expect("public endpoint sync should succeed");
 
-    let (mut registry, etag) = paykit_lib::get_paykit_app_registry_with_etag(
+    let (mut registry, revision) = paykit_lib::get_paykit_app_registry_with_revision(
         &user.access.outbox_client.public_storage(),
         user.access.session.info().public_key(),
     )
@@ -209,7 +209,7 @@ async fn test_remove_paykit_app_resumes_after_registry_entry_is_already_absent()
     .expect("App Registry fetch should succeed")
     .expect("App Registry should exist");
     registry.remove_app(&user.app_id);
-    paykit_lib::update_paykit_app_registry(&user.access.session, &registry, &etag)
+    paykit_lib::update_paykit_app_registry(&user.access.session, &registry, &revision)
         .await
         .expect("manual registry removal should succeed");
 

@@ -1,6 +1,6 @@
 # Paykit Library
 
-Stateless Rust crate that implements Paykit Library functionality on [Pubky](https://pubky.org/). It provides helpers for **public** Payment Endpoints (stored as plaintext files on the homeserver), Private Payment Lists, Payment Requests, Encrypted Links, and Receipts, while delegating Pubky authentication and session management to callers.
+Stateless Rust crate that implements Paykit Library functionality on [Pubky](https://pubky.org/). It provides helpers for **public** Payment Endpoints (stored as plaintext files on the homeserver), Private Payment Lists, Payment Requests, Allowances, Encrypted Links, and Receipts, while delegating Pubky authentication and session management to callers.
 
 Pubky is the only supported network/storage backend for this crate, and Pubky dependencies are unconditional.
 
@@ -11,7 +11,7 @@ Add `paykit-lib` to your `Cargo.toml`.
 ```toml
 [dependencies]
 paykit-lib = { version = "x.x.x" }
-pubky = "0.12.0"
+pubky = "0.14.0"
 ```
 
 Minimal example — store and retrieve a public Payment Endpoint:
@@ -41,6 +41,10 @@ for (identifier, payload) in &payment_list.payment_endpoints {
 ```
 
 ## Core Types
+
+Payment Request domain values use validated construction and read-only accessors.
+See the [Rust migration guide](../docs/validated-payment-request-types.md) for
+replacing struct literals and field mutation.
 
 ### `PaymentEndpointIdentifier`
 
@@ -127,7 +131,7 @@ Private Payment Lists use Latest-State Message semantics per Paykit App at the
 SDK/runtime layer: if one app queues several list messages, its latest valid
 list supersedes its older list messages without replacing lists from other
 apps. Malformed newer list messages do not supersede the latest valid state.
-Receipt Access and Payment Request messages use Event Message
+Receipt Access, Allowance, and Payment Request messages use Event Message
 semantics, so SDK/runtime code must preserve every valid message in send order.
 
 The `payment_endpoints` field is a `HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>`.
@@ -377,12 +381,48 @@ An accepted Recurring Payment Request is the protocol object behind a product Su
   Sends method-specific proof data for one concrete payment execution. The requested amount is inherited from immutable Payment Request terms and is not repeated in the generic Payment Proof. The opaque `proof` object is method-specific and has no required generic discriminator. The `payment_reference` must be copied from the accepted Payment Request; recurring proofs include a `BillingPeriod`.
 - `PaymentProof::validate_for_request(&request) -> Result<()>`
   Validates stateless proof/request correlation fields: matching Payment Request ID and Payment Reference, one-time vs recurring Billing Period presence, Billing Period shape when present, and accepted Payment Endpoint Identifier. Caller-managed application or wallet state must still decide whether the request is known, accepted, proposal-expired before acceptance, rejected, cancelled, already processed or settled, whether the sender role is allowed for the message kind, or whether a recurring Billing Period is eligible under the request recurrence.
+- `PaymentProof::validate_conversion_quote(&request, quote) -> Result<()>`
+  Also validates a selected quote's request, Billing Period and accepted payment asset. Wallets still verify the actual payment amount and time against the accepted terms and quote.
 
-Payment Request and Receipt Access messages use Event Message semantics. Use `EncryptedLink::receive_private_application_messages`, persist the returned raw stream messages, then parse/reroute them with stateless parsers such as `parse_payment_request_event_message`, `parse_receipt_access_event_message`, and `parse_private_payment_list_json`.
+Payment Request, Allowance, and Receipt Access messages use Event Message semantics. Use `EncryptedLink::receive_private_application_messages`, persist the returned raw stream messages, then parse/reroute them with stateless parsers such as `parse_payment_request_event_message`, `parse_allowance_event_message`, `parse_receipt_access_event_message`, and `parse_private_payment_list_json`.
 
 Paykit Library is stateless and does not persist Event Message history. Callers that derive state or trigger side effects must persist the raw JSON payload, parsed `kind` when available, parse result, and parsed IDs when available from event wrappers such as `PaymentRequestEventMessage` or `ReceiptAccessEventMessage`, detect conflicting reused Event IDs or conflicting repeated `payment_request_id` terms, and apply lifecycle rules such as proof-after-rejection/cancellation before acting.
 
 Callers that persist Encrypted Link snapshots should treat the snapshot as the local read checkpoint. Persist received Event Messages and dedupe state before replacing the stored snapshot with a snapshot whose read counter has advanced past those messages. If events are persisted but the snapshot is not, replay is expected; Event Messages should be deduped by `event_id`, while Receipt Access can also be reconciled by Receipt ID and caller receipt state.
+
+#### Allowance exchange
+
+An Allowance is private, scoped authority from an Allower for automatic handling of compatible Payment Requests sent by an Allowee. The four V1 kinds are proposal, acceptance, rejection, and End Event Messages. `AllowanceTermsBuilder` constructs immutable terms, while `AllowanceAcceptance::validate_for_proposal`, `AllowanceRejection::validate_for_proposal`, and the two `AllowanceEnd` validation helpers check authenticated party roles and causal references without storing lifecycle state.
+
+- `serialize_allowance_event(event: &AllowanceEvent) -> Result<String>` serializes closed V1 JSON and enforces the 1000-byte whole-message limit.
+- `parse_allowance_event_message(message: &PrivateApplicationMessage) -> Option<AllowanceEventMessage>` parses recognized events while preserving raw JSON and returning redacted structural failures.
+- `send_allowance_proposal`, `send_allowance_acceptance`, `send_allowance_rejection`, and `send_allowance_end` send typed events over an established Encrypted Link.
+
+`match_allowance_request` evaluates exact asset, inclusive amount range, and the
+allowed Payment Endpoint Identifier intersection. `check_allowance_time` checks
+the active window and watermark without evaluating capacity, for example before
+recurring Acceptance. `evaluate_allowance` additionally
+checks the active window, a caller-supplied trusted time and durable watermark,
+and every period/lifetime limit against complete committed automatic usage and
+unresolved reservations. `allowance_period_window` exposes UTC anchored or rolling
+boundaries, and `compare_decimal_amounts` / `add_decimal_amounts` provide exact
+decimal arithmetic without an asset precision limit. Inputs retain their original
+wire spelling; arithmetic results are numerically normalized.
+
+These functions are pure checks, not payment authorization. `AllowanceUsageEntry`
+represents one already-admitted automatic occurrence; each evaluation adds one
+candidate count and its complete requested amount. The SDK must establish that
+the history and watermark are current and complete, exclude released reservations
+and manual payments from usage, check lifecycle and exact party scope, deduplicate
+all payment paths, and atomically reserve capacity before execution. An empty
+usage slice is not evidence of an unused Allowance. Restoring an old snapshot does
+not establish accounting freshness. A successful evaluation changes no state.
+
+Paykit Library does not derive Allowance lifecycle state, persist usage, reserve
+capacity, select an Allowance or Payment Endpoint, or execute payment. The
+caller/SDK must durably preserve both directions of authenticated history and
+enforce cross-kind Event ID dedupe. Session creation, capability scope, key
+rotation, Pubky client timeouts, and wallet payment policy remain caller duties.
 
 #### Payment receipts
 
@@ -555,6 +595,7 @@ The crate exports:
 - `EncryptedLink`, `EncryptedLinkHandshake`, `HandshakeProgress`, `EncryptedLinkSnapshot`, `EncryptedLinkHandshakeSnapshot`, `PrivateApplicationMessage`, and `PrivateMessageKind` for Encrypted Link types.
 - `initiate_encrypted_link`, `accept_encrypted_link`, `advance_handshake`, `close_encrypted_link`, `EncryptedLink::receive_private_application_messages`, `set_private_payment_list`, and `parse_private_payment_list_json` for Encrypted Link and Private Payment List operations.
 - `PaymentAmount`, `PaymentRequest`, `PaymentRequestEvent`, `PaymentRequestEventMessage`, `PaymentRequestAcceptance`, `PaymentRequestRejection`, `PaymentRequestCancellation`, `PaymentProof`, `send_payment_request`, `serialize_payment_request_event`, `parse_payment_request_event_message`, and proof validation helpers for Payment Request exchange.
+- `AllowanceId`, `AllowanceTerms`, `AllowanceEvent`, `AllowanceEventMessage`, the four typed Allowance lifecycle events, `serialize_allowance_event`, `parse_allowance_event_message`, and typed send helpers for stateless Allowance exchange.
 - `ReceiptId`, `ReceiptDraft`, `Receipt`, `PreparedReceipt`, `ReceiptAccess`, `ReceiptAccessEventMessage`, `ReceiptDecryptionKey`, `prepare_receipt`, `store_prepared_receipt`, `send_receipt_access`, `parse_receipt_access_event_message`, `parse_receipt_access_json`, `decrypt_receipt`, and `ENCRYPTED_RECEIPT_MAX_BYTES` for Encrypted Receipt issuance, access delivery, decryption, and encrypted-document sizing.
 - `restore_encrypted_link`, `restore_encrypted_link_from_config`, `restore_encrypted_link_handshake`, `restore_encrypted_link_handshake_from_config` for session resumption after app restart or in-process recovery.
 - `DEFAULT_MAX_RECOVERY_ATTEMPTS`, `DEFAULT_MAX_SEND_RETRIES` for configurable retry/recovery limits.

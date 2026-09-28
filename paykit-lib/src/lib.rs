@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+mod allowance;
 mod app;
 mod app_registry;
 mod encrypted_link;
@@ -19,10 +20,21 @@ mod shared_wire;
 mod validation;
 
 #[doc(inline)]
+pub use allowance::{
+    add_decimal_amounts, allowance_period_window, check_allowance_time, compare_decimal_amounts,
+    evaluate_allowance, match_allowance_request, parse_allowance_event_message,
+    send_allowance_acceptance, send_allowance_end, send_allowance_proposal,
+    send_allowance_rejection, serialize_allowance_event, AllowanceAcceptance, AllowanceAmountRange,
+    AllowanceEnd, AllowanceEvaluation, AllowanceEvaluationBlock, AllowanceEvaluationInput,
+    AllowanceEvent, AllowanceEventMessage, AllowanceId, AllowancePeriod, AllowancePeriodKind,
+    AllowancePeriodLimit, AllowancePeriodUnit, AllowancePeriodWindow, AllowanceProposal,
+    AllowanceRejection, AllowanceRole, AllowanceTerms, AllowanceTermsBuilder, AllowanceUsageEntry,
+};
+#[doc(inline)]
 pub use app::PaykitAppId;
 #[doc(inline)]
 pub use app_registry::{
-    create_paykit_app_registry, get_paykit_app_registry, get_paykit_app_registry_with_etag,
+    create_paykit_app_registry, get_paykit_app_registry, get_paykit_app_registry_with_revision,
     parse_paykit_app_registry_json, serialize_paykit_app_registry, update_paykit_app_registry,
     PaykitApp, PaykitAppCapabilities, PaykitAppRegistry, INITIAL_PAYKIT_KEY_GENERATION,
     PAYKIT_APP_REGISTRY_MAX_APPS, PAYKIT_APP_REGISTRY_MAX_BYTES,
@@ -66,12 +78,13 @@ pub use payment_endpoint::{
 pub use payment_reference::{PaymentReference, PAYMENT_REFERENCE_MAX_LEN};
 #[doc(inline)]
 pub use payment_request::{
-    parse_payment_request_event_message, send_payment_proof, send_payment_request,
-    send_payment_request_acceptance, send_payment_request_cancellation,
-    send_payment_request_rejection, serialize_payment_request_event, BillingPeriod, PaymentProof,
-    PaymentRequest, PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
+    parse_payment_request_event_message, send_payment_conversion_quote, send_payment_proof,
+    send_payment_request, send_payment_request_acceptance, send_payment_request_cancellation,
+    send_payment_request_rejection, serialize_payment_request_event, BillingPeriod, ConversionRate,
+    PaymentConversion, PaymentConversionQuote, PaymentDeadline, PaymentProof, PaymentRequest,
+    PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
     PaymentRequestEventMessage, PaymentRequestId, PaymentRequestRejection, PaymentRequestTerms,
-    Recurrence, RecurrenceUnit,
+    PaymentRequestTermsBuilder, Recurrence, RecurrenceConfig, RecurrenceUnit,
 };
 #[doc(inline)]
 pub use private_payment_list::{
@@ -83,8 +96,9 @@ pub use pubky::PublicKey;
 pub use pubky_noise;
 #[doc(inline)]
 pub use pubky_routing::{
-    PAYKIT_APP_REGISTRY_PATH, PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX, PAYKIT_PATH_PREFIX,
-    PAYKIT_PRIVATE_PATH_PREFIX, PAYKIT_SHARED_STATE_PATH,
+    content_revision, delete_resource_if_revision, is_write_conflict, put_resource_if_revision,
+    with_write_lock, PAYKIT_APP_REGISTRY_PATH, PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX,
+    PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX, PAYKIT_SHARED_STATE_PATH,
 };
 #[doc(inline)]
 pub use receipt::{

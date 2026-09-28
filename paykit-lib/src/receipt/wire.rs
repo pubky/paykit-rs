@@ -7,9 +7,8 @@ use crate::{
         invalid_data, invalid_plaintext_json, validate_wire_version_kind,
         validate_wire_version_kind_str,
     },
-    BillingPeriod, EventId, PaykitAppId, PaykitError, PaymentAmount, PaymentEndpointIdentifier,
-    PaymentReference, PaymentRequestId, PrivateApplicationMessage, PrivateMessageKind, PublicKey,
-    Result,
+    EventId, PaykitAppId, PaykitError, PaymentEndpointIdentifier, PaymentReference,
+    PaymentRequestId, PrivateApplicationMessage, PrivateMessageKind, PublicKey, Result,
 };
 
 use super::{Receipt, ReceiptAccess, ReceiptAccessEventMessage, ReceiptDecryptionKey, ReceiptId};
@@ -113,15 +112,15 @@ impl TryFrom<ReceiptWire> for Receipt {
                 context: "Receipt contains invalid Payment Request ID".into(),
                 source: Some(err.into()),
             })?;
-        let billing_period = wire.billing_period.map(BillingPeriod::from);
-        if let Some(period) = &billing_period {
-            period
-                .validate_with_label("Receipt Billing Period")
-                .map_err(|err| PaykitError::InvalidData {
-                    context: "Receipt contains invalid Billing Period".into(),
-                    source: Some(err.into()),
-                })?;
-        }
+        let billing_period = wire
+            .billing_period
+            .map(|wire| wire.try_into_with_label("Receipt Billing Period"))
+            .transpose()
+            .map_err(|err| PaykitError::InvalidData {
+                context: "Receipt contains invalid Billing Period".into(),
+                source: Some(err.into()),
+            })?;
+
         // The parse error's Debug output can echo the offending decrypted field
         // value; keep the context static and leave the detail in `source`,
         // which stays local.
@@ -138,15 +137,15 @@ impl TryFrom<ReceiptWire> for Receipt {
                 context: "Receipt contains invalid Payment Endpoint Identifier".into(),
                 source: Some(err.into()),
             })?;
-        let amount = wire.amount.map(PaymentAmount::from);
-        if let Some(amount) = &amount {
-            amount
-                .validate_with_label("Receipt amount")
-                .map_err(|err| PaykitError::InvalidData {
-                    context: "Receipt contains invalid Payment Amount".into(),
-                    source: Some(err.into()),
-                })?;
-        }
+        let amount = wire
+            .amount
+            .map(|wire| wire.try_into_with_label("Receipt amount"))
+            .transpose()
+            .map_err(|err| PaykitError::InvalidData {
+                context: "Receipt contains invalid Payment Amount".into(),
+                source: Some(err.into()),
+            })?;
+
         let receipt = Self {
             receipt_id,
             payment_reference,
@@ -224,15 +223,15 @@ impl TryFrom<ReceiptAccessWire> for ReceiptAccess {
                 context: "Receipt Access contains invalid Payment Request ID".into(),
                 source: Some(err.into()),
             })?;
-        let billing_period = wire.billing_period.map(BillingPeriod::from);
-        if let Some(period) = &billing_period {
-            period
-                .validate_with_label("Receipt Access Billing Period")
-                .map_err(|err| PaykitError::InvalidData {
-                    context: "Receipt Access contains invalid Billing Period".into(),
-                    source: Some(err.into()),
-                })?;
-        }
+        let billing_period = wire
+            .billing_period
+            .map(|wire| wire.try_into_with_label("Receipt Access Billing Period"))
+            .transpose()
+            .map_err(|err| PaykitError::InvalidData {
+                context: "Receipt Access contains invalid Billing Period".into(),
+                source: Some(err.into()),
+            })?;
+
         let access = Self {
             version: 1,
             kind: PrivateMessageKind::ReceiptAccess,

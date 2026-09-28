@@ -9,5 +9,7 @@ pub(crate) use collection::{
     received_payment_request_records,
 };
 pub(super) use reducer::recurrence_unit_to_str;
-pub(crate) use reducer::request_from_record;
+pub(crate) use reducer::{
+    payment_proof_allowed_states, request_from_record, validate_proof_conversion,
+};
 pub(crate) use stored_events::derive_payment_request_records_from_parts;

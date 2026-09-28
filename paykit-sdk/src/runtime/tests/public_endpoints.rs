@@ -48,6 +48,10 @@ fn test_app_removal_does_not_claim_unanswered_identity_request() {
         PaymentRequestLifecycleState::Proposed,
     );
     request.terms = Some(PaymentRequestTermsRecord {
+        payment_deadline: None,
+
+        conversion: None,
+
         amount: crate::AmountRecord {
             value: "0.001".into(),
             asset: "btc".into(),
@@ -583,6 +587,8 @@ fn payment_request_removal_record(
     state: PaymentRequestLifecycleState,
 ) -> PaymentRequestRecord {
     PaymentRequestRecord {
+        conversion_quotes: Vec::new(),
+
         counterparty: PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()),
         payment_request_id: "550e8400-e29b-41d4-a716-446655440000".into(),
         local_role: Some(local_role),

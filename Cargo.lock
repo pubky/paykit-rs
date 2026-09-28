@@ -1281,6 +1281,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dav-server-opendalfs"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3854e79b351f12bbeab0c53e72e88fcf5cebc07683014de572eed2144369bf4"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "dav-server",
+ "futures",
+ "opendal",
+]
+
+[[package]]
 name = "defmt"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1385,9 +1398,9 @@ dependencies = [
 
 [[package]]
 name = "dirs"
-version = "6.0.0"
+version = "7.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3e8aa94d75141228480295a7d0e7feb620b1a5ad9f12bc40be62411e38cce4e"
+checksum = "8d57d423b3c82e89b9a24ca3091fee61f456a26edbd28d26c65906f4bc1dcd8f"
 dependencies = [
  "dirs-sys",
 ]
@@ -1564,17 +1577,6 @@ checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
 dependencies = [
  "concurrent-queue",
  "parking",
- "pin-project-lite",
-]
-
-[[package]]
-name = "eventsource-stream"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74fef4569247a5f429d9156b9d0a2599914385dd189c539334c625d8099d90ab"
-dependencies = [
- "futures-core",
- "nom",
  "pin-project-lite",
 ]
 
@@ -3413,7 +3415,7 @@ dependencies = [
 
 [[package]]
 name = "paykit-ffi"
-version = "0.1.0-rc55"
+version = "0.1.0-rc57"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -3443,7 +3445,7 @@ dependencies = [
 
 [[package]]
 name = "paykit-lib"
-version = "0.1.0-rc55"
+version = "0.1.0-rc57"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3467,7 +3469,7 @@ dependencies = [
 
 [[package]]
 name = "paykit-sdk"
-version = "0.1.0-rc55"
+version = "0.1.0-rc57"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3908,13 +3910,13 @@ checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 
 [[package]]
 name = "pubky"
-version = "0.12.0"
-source = "git+https://github.com/pubky/pubky-homeserver.git?rev=f89c530861786be3ca332339bcd78d0e16b3c408#f89c530861786be3ca332339bcd78d0e16b3c408"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2099d521cacff9a1bf2ad48978d4601608d80860d7b08f7ecb0ced98bb63b628"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
  "cookie",
- "eventsource-stream",
  "flume 0.12.0",
  "futures-lite",
  "futures-util",
@@ -3928,6 +3930,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sse-core",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3939,8 +3942,9 @@ dependencies = [
 
 [[package]]
 name = "pubky-common"
-version = "0.12.0"
-source = "git+https://github.com/pubky/pubky-homeserver.git?rev=f89c530861786be3ca332339bcd78d0e16b3c408#f89c530861786be3ca332339bcd78d0e16b3c408"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9b32c46e101fa9b94fcb3f3baa5751d3f696b3823508697a4f407281cbe9c4c"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -3960,8 +3964,9 @@ dependencies = [
 
 [[package]]
 name = "pubky-homeserver"
-version = "0.12.0"
-source = "git+https://github.com/pubky/pubky-homeserver.git?rev=f89c530861786be3ca332339bcd78d0e16b3c408#f89c530861786be3ca332339bcd78d0e16b3c408"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "589e60c62bb93c146f3e9a6db24869de853c7097e9b0a6d5021f3922c6ef8a2e"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3977,6 +3982,7 @@ dependencies = [
  "clap",
  "dashmap",
  "dav-server",
+ "dav-server-opendalfs",
  "dirs",
  "dyn-clone",
  "fast-glob",
@@ -4022,9 +4028,8 @@ dependencies = [
 
 [[package]]
 name = "pubky-noise"
-version = "0.1.0-rc10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "737010af535691288c4aa05b17048190d0d5dd4eb048430982253a81fd03637f"
+version = "0.1.0-rc11"
+source = "git+https://github.com/pubky/pubky-noise.git?rev=5b25205311d919e602ada22c84e28045105a35d7#5b25205311d919e602ada22c84e28045105a35d7"
 dependencies = [
  "chacha20poly1305",
  "curve25519-dalek 5.0.0",
@@ -4039,8 +4044,9 @@ dependencies = [
 
 [[package]]
 name = "pubky-testnet"
-version = "0.12.0"
-source = "git+https://github.com/pubky/pubky-homeserver.git?rev=f89c530861786be3ca332339bcd78d0e16b3c408#f89c530861786be3ca332339bcd78d0e16b3c408"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b91bf40a96d6444da350dd4afc6e0af9d9ea86eae306a561ff8aeab2470b330"
 dependencies = [
  "anyhow",
  "clap",
@@ -4080,7 +4086,8 @@ dependencies = [
 [[package]]
 name = "pubky_test_utils"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-homeserver.git?rev=f89c530861786be3ca332339bcd78d0e16b3c408#f89c530861786be3ca332339bcd78d0e16b3c408"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3cbd737dac148da5c734b4abd7f34d4cf64dfc4441cc253dfc05acedb203d7e5"
 dependencies = [
  "pubky_test_utils_drop_db_helper",
  "pubky_test_utils_macro",
@@ -4089,7 +4096,8 @@ dependencies = [
 [[package]]
 name = "pubky_test_utils_drop_db_helper"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-homeserver.git?rev=f89c530861786be3ca332339bcd78d0e16b3c408#f89c530861786be3ca332339bcd78d0e16b3c408"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b556c3800e017f2229115713ba1a0d05796ec0724185c6ad7f865eee9b030d2"
 dependencies = [
  "sqlx",
 ]
@@ -4097,7 +4105,8 @@ dependencies = [
 [[package]]
 name = "pubky_test_utils_macro"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-homeserver.git?rev=f89c530861786be3ca332339bcd78d0e16b3c408#f89c530861786be3ca332339bcd78d0e16b3c408"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1714113e8be46e6fe799d6997a22b3beaa1efcde6d9e24527795fbeec5a81bb7"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -5416,6 +5425,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sse-core"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28f4c044039e70ba5724b7e9dacf9fb610394773d15df2bb629170ca30391c88"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "memchr",
+ "pin-project-lite",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6553,7 +6575,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
