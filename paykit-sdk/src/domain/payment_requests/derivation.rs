@@ -727,7 +727,7 @@ fn apply_event(
                 );
                 return;
             }
-            record.canceled_event_id = Some(cancellation.event_id.as_str().to_owned());
+            record.canceled_event_id = Some(cancellation.event_id().as_str().to_owned());
             record.state = PaymentRequestLifecycleState::Canceled;
             record.touch(item);
         }
@@ -769,8 +769,8 @@ fn apply_request(
     record.local_role = Some(PaymentRequestLocalRole::Payer);
     record.state = PaymentRequestLifecycleState::Proposed;
     record.proposal_stream_item_id = Some(item.stream_item_id);
-    record.proposal_event_id = Some(request.event_id.as_str().to_owned());
-    record.terms = Some(PaymentRequestTermsRecord::from(&request.request));
+    record.proposal_event_id = Some(request.event_id().as_str().to_owned());
+    record.terms = Some(PaymentRequestTermsRecord::from(request.request()));
     record.touch(item);
 }
 
@@ -824,7 +824,7 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
                 );
                 return;
             }
-            record.accepted_event_id = Some(acceptance.event_id.as_str().to_owned());
+            record.accepted_event_id = Some(acceptance.event_id().as_str().to_owned());
             record.accepted_outbound_status = outbound_status(stored);
             if !crosses_payee_cancellation {
                 record.state = accepted_state(record);
@@ -863,7 +863,7 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
                 );
                 return;
             }
-            record.rejected_event_id = Some(rejection.event_id.as_str().to_owned());
+            record.rejected_event_id = Some(rejection.event_id().as_str().to_owned());
             record.rejected_outbound_status = outbound_status(stored);
             if !crosses_payee_cancellation {
                 record.state = PaymentRequestLifecycleState::Rejected;
@@ -895,7 +895,7 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
                 );
                 return;
             }
-            record.canceled_event_id = Some(cancellation.event_id.as_str().to_owned());
+            record.canceled_event_id = Some(cancellation.event_id().as_str().to_owned());
             record.canceled_outbound_status = outbound_status(stored);
             record.state = PaymentRequestLifecycleState::Canceled;
             touch_stored(record, stored);
@@ -923,7 +923,7 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
                 return;
             }
             record.payment_proofs.push(PaymentProofRecord {
-                event_id: proof.event_id.as_str().to_owned(),
+                event_id: proof.event_id().as_str().to_owned(),
                 outbound_message_id: match stored {
                     StoredPaymentRequestEvent::Outbound { message, .. } => {
                         Some(message.outbound_message_id)
@@ -935,16 +935,22 @@ fn apply_stored_event(record: &mut PaymentRequestRecord, stored: &StoredPaymentR
                     StoredPaymentRequestEvent::Received { item, .. } => Some(item.stream_item_id),
                     StoredPaymentRequestEvent::Outbound { .. } => None,
                 },
-                payment_reference: proof.payment_reference.as_str().to_owned(),
-                billing_period: proof.billing_period.as_ref().map(BillingPeriodRecord::from),
-                payment_endpoint_identifier: proof.payment_endpoint_identifier.as_str().to_owned(),
+                payment_reference: proof.payment_reference().as_str().to_owned(),
+                billing_period: proof
+                    .billing_period()
+                    .as_ref()
+                    .map(BillingPeriodRecord::from),
+                payment_endpoint_identifier: proof
+                    .payment_endpoint_identifier()
+                    .as_str()
+                    .to_owned(),
                 allowance_id: proof.allowance_id().map(|id| id.as_str().to_owned()),
-                proof: proof.proof.clone(),
+                proof: proof.proof().clone(),
                 recorded_at: stored.record_time(),
             });
             record.state = if follows_cancellation {
                 PaymentRequestLifecycleState::Canceled
-            } else if request.request.recurrence.is_some() {
+            } else if request.request().recurrence().is_some() {
                 PaymentRequestLifecycleState::ActiveRecurring
             } else {
                 PaymentRequestLifecycleState::ProofSubmitted
@@ -987,8 +993,8 @@ fn apply_stored_request(
             record.proposal_outbound_status = Some(message.status.clone());
         }
     }
-    record.proposal_event_id = Some(request.event_id.as_str().to_owned());
-    record.terms = Some(PaymentRequestTermsRecord::from(&request.request));
+    record.proposal_event_id = Some(request.event_id().as_str().to_owned());
+    record.terms = Some(PaymentRequestTermsRecord::from(request.request()));
     touch_stored(record, stored);
 }
 
@@ -1107,36 +1113,37 @@ pub(crate) fn request_from_record(record: &PaymentRequestRecord) -> Option<Payme
     let terms = record.terms.as_ref()?;
     let proposal_event_id = record.proposal_event_id.as_ref()?;
     let recurrence = if let Some(recurrence) = &terms.recurrence {
-        Some(paykit_lib::Recurrence {
-            every: recurrence.every,
-            unit: parse_recurrence_unit(&recurrence.unit)?,
-            starts_at: recurrence.starts_at.clone(),
-            anchor: recurrence.anchor.clone(),
-            ends_at: recurrence.ends_at.clone(),
-        })
+        Some(
+            paykit_lib::Recurrence::try_from(paykit_lib::RecurrenceConfig {
+                every: recurrence.every,
+                unit: parse_recurrence_unit(&recurrence.unit)?,
+                starts_at: recurrence.starts_at.clone(),
+                anchor: recurrence.anchor.clone(),
+                ends_at: recurrence.ends_at.clone(),
+            })
+            .ok()?,
+        )
     } else {
         None
     };
     Some(PaymentRequest::new(
         paykit_lib::EventId::new(proposal_event_id).ok()?,
         paykit_lib::PaymentRequestId::new(record.payment_request_id.clone()).ok()?,
-        paykit_lib::PaymentRequestTerms {
-            amount: paykit_lib::PaymentAmount::new(
-                terms.amount.value.clone(),
-                terms.amount.asset.clone(),
-            )
-            .ok()?,
-            payment_reference: paykit_lib::PaymentReference::new(terms.payment_reference.clone())
+        paykit_lib::PaymentRequestTerms::builder(
+            paykit_lib::PaymentAmount::new(terms.amount.value.clone(), terms.amount.asset.clone())
                 .ok()?,
-            proposal_expires_at: terms.proposal_expires_at.clone(),
-            recurrence,
-            accepted_payment_endpoint_identifiers: terms
+            paykit_lib::PaymentReference::new(terms.payment_reference.clone()).ok()?,
+            terms
                 .accepted_payment_endpoint_identifiers
                 .iter()
                 .map(|identifier| paykit_lib::PaymentEndpointIdentifier::new(identifier).ok())
                 .collect::<Option<Vec<_>>>()?,
-            metadata: terms.metadata.clone(),
-        },
+        )
+        .proposal_expires_at(terms.proposal_expires_at.clone())
+        .recurrence(recurrence)
+        .metadata(terms.metadata.clone())
+        .build()
+        .ok()?,
     ))
 }
 

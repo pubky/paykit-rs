@@ -10,5 +10,6 @@ pub use api::{
 pub use types::{
     BillingPeriod, PaymentProof, PaymentRequest, PaymentRequestAcceptance,
     PaymentRequestCancellation, PaymentRequestEvent, PaymentRequestEventMessage, PaymentRequestId,
-    PaymentRequestRejection, PaymentRequestTerms, Recurrence, RecurrenceUnit,
+    PaymentRequestRejection, PaymentRequestTerms, PaymentRequestTermsBuilder, Recurrence,
+    RecurrenceConfig, RecurrenceUnit,
 };

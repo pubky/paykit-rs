@@ -491,7 +491,7 @@ mod tests {
             PaymentProof, PaymentReference, PaymentRequestEvent, PaymentRequestId,
         };
 
-        let mut proof = PaymentProof::new(
+        let proof = PaymentProof::new(
             EventId::new_v4(),
             PaymentRequestId::new_v4(),
             PaymentReference::new("invoice-2026-0001").unwrap(),
@@ -504,20 +504,26 @@ mod tests {
             serialize_payment_request_event(&PaymentRequestEvent::Proof(proof.clone())).unwrap()
         };
         let padding = pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN - serialize(&proof).len();
-        proof
-            .proof
-            .insert("data".into(), "x".repeat(padding).into());
-        let at_limit = serialize(&proof);
+        let padded = |count| {
+            PaymentProof::new(
+                proof.event_id().clone(),
+                proof.payment_request_id().clone(),
+                proof.payment_reference().clone(),
+                None,
+                proof.payment_endpoint_identifier().clone(),
+                serde_json::Map::from_iter([("data".into(), "x".repeat(count).into())]),
+            )
+            .with_allowance_id(proof.allowance_id().unwrap().clone())
+        };
+        let at_limit_proof = padded(padding);
+        let at_limit = serialize(&at_limit_proof);
         assert_eq!(
             at_limit.len(),
             pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN
         );
         validate_private_application_message_size(at_limit.as_bytes(), "Payment Proof").unwrap();
 
-        proof
-            .proof
-            .insert("data".into(), "x".repeat(padding + 1).into());
-        let oversized = serialize(&proof);
+        let oversized = serialize(&padded(padding + 1));
         assert!(matches!(
             validate_private_application_message_size(oversized.as_bytes(), "Payment Proof"),
             Err(PaykitError::Validation(_))

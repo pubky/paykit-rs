@@ -298,7 +298,7 @@ where
         terms: PaymentRequestTerms,
     ) -> Result<PaymentRequestRecord> {
         let event = PaymentRequest::new(EventId::new_v4(), PaymentRequestId::new_v4(), terms);
-        let payment_request_id = event.payment_request_id.clone();
+        let payment_request_id = event.payment_request_id().clone();
         self.enqueue_raw_payment_request(
             counterparty.clone(),
             counterparty_receiver_path.clone(),
@@ -517,7 +517,7 @@ where
         let mut event = PaymentProof::new(
             EventId::new_v4(),
             payment_request_id.clone(),
-            request.request.payment_reference.clone(),
+            request.request().payment_reference().clone(),
             submission.billing_period,
             submission.payment_endpoint_identifier,
             submission.proof,

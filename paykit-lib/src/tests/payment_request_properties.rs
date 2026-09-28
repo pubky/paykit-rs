@@ -137,7 +137,7 @@ fn payment_request_id() -> impl Strategy<Value = PaymentRequestId> {
 /// alphanumeric codes; the validator also accepts other non-control assets.
 fn payment_amount() -> impl Strategy<Value = PaymentAmount> {
     ("[0-9]{1,12}(\\.[0-9]{1,8})?", "[a-zA-Z0-9]{1,10}")
-        .prop_map(|(value, asset)| PaymentAmount { value, asset })
+        .prop_map(|(value, asset)| PaymentAmount::new(value, asset).unwrap())
 }
 
 /// Build a valid `PaymentReference`.
@@ -205,12 +205,15 @@ fn recurrence() -> impl Strategy<Value = Recurrence> {
         recurrence_window(),
         utc_timestamp(),
     )
-        .prop_map(|(every, unit, (starts_at, ends_at), anchor)| Recurrence {
-            every,
-            unit,
-            starts_at,
-            anchor,
-            ends_at,
+        .prop_map(|(every, unit, (starts_at, ends_at), anchor)| {
+            Recurrence::try_from(crate::RecurrenceConfig {
+                every,
+                unit,
+                starts_at,
+                anchor,
+                ends_at,
+            })
+            .unwrap()
         })
 }
 
@@ -240,14 +243,12 @@ fn payment_request_terms() -> impl Strategy<Value = PaymentRequestTerms> {
     )
         .prop_map(
             |(amount, payment_reference, proposal_expires_at, recurrence, ids, metadata)| {
-                PaymentRequestTerms {
-                    amount,
-                    payment_reference,
-                    proposal_expires_at,
-                    recurrence,
-                    accepted_payment_endpoint_identifiers: ids,
-                    metadata,
-                }
+                PaymentRequestTerms::builder(amount, payment_reference, ids)
+                    .proposal_expires_at(proposal_expires_at)
+                    .recurrence(recurrence)
+                    .metadata(metadata)
+                    .build()
+                    .unwrap()
             },
         )
 }
@@ -259,9 +260,12 @@ fn payment_request() -> impl Strategy<Value = PaymentRequest> {
 
 /// Build a valid `BillingPeriod` whose `ends_at` is strictly after `starts_at`.
 fn billing_period() -> impl Strategy<Value = BillingPeriod> {
-    (2000u32..2050, 1u32..=12, 1u32..=28).prop_map(|(y, mo, d)| BillingPeriod {
-        starts_at: format!("{y:04}-{mo:02}-{d:02}T00:00:00Z"),
-        ends_at: format!("{:04}-{mo:02}-{d:02}T00:00:00Z", y + 1),
+    (2000u32..2050, 1u32..=12, 1u32..=28).prop_map(|(y, mo, d)| {
+        BillingPeriod::new(
+            format!("{y:04}-{mo:02}-{d:02}T00:00:00Z"),
+            format!("{:04}-{mo:02}-{d:02}T00:00:00Z", y + 1),
+        )
+        .unwrap()
     })
 }
 

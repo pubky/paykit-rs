@@ -446,10 +446,7 @@ mod tests {
             payment_endpoint_identifier: Some(
                 PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
             ),
-            amount: Some(PaymentAmount {
-                value: "0.001".to_string(),
-                asset: "btc".to_string(),
-            }),
+            amount: Some(PaymentAmount::new("0.001".to_string(), "btc".to_string()).unwrap()),
             metadata: JsonMap::from_iter([(
                 "note".to_string(),
                 JsonValue::String("private receipt note".to_string()),

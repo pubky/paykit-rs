@@ -7,7 +7,7 @@ use crate::{
         invalid_data, invalid_plaintext_json, invalid_wire, validate_outgoing_version_kind,
         validate_wire_version_kind,
     },
-    AllowanceId, EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
+    AllowanceId, EventId, PaykitError, PaymentEndpointIdentifier, PaymentReference,
     PrivateMessageKind, Result,
 };
 
@@ -87,20 +87,20 @@ impl TryFrom<PaymentRequestTermsWire> for PaymentRequestTerms {
             .into_iter()
             .map(PaymentEndpointIdentifier::new)
             .collect::<Result<Vec<_>>>()?;
-        let terms = Self {
-            amount: PaymentAmount::from(wire.amount),
-            payment_reference: PaymentReference::new(wire.payment_reference)?,
-            proposal_expires_at: wire.proposal_expires_at.into_inner(),
-            recurrence: wire
-                .recurrence
+        Self::builder(
+            wire.amount.try_into_with_label("Payment Request amount")?,
+            PaymentReference::new(wire.payment_reference)?,
+            accepted_payment_endpoint_identifiers,
+        )
+        .proposal_expires_at(wire.proposal_expires_at.into_inner())
+        .recurrence(
+            wire.recurrence
                 .into_inner()
                 .map(Recurrence::try_from)
                 .transpose()?,
-            accepted_payment_endpoint_identifiers,
-            metadata: wire.metadata,
-        };
-        terms.validate()?;
-        Ok(terms)
+        )
+        .metadata(wire.metadata)
+        .build()
     }
 }
 
@@ -125,15 +125,13 @@ impl TryFrom<RecurrenceWire> for Recurrence {
     type Error = PaykitError;
 
     fn try_from(wire: RecurrenceWire) -> Result<Self> {
-        let recurrence = Self {
+        Self::try_from(crate::RecurrenceConfig {
             every: wire.every,
             unit: RecurrenceUnit::parse(&wire.unit)?,
             starts_at: wire.starts_at,
             anchor: wire.anchor,
             ends_at: wire.ends_at.into_inner(),
-        };
-        recurrence.validate()?;
-        Ok(recurrence)
+        })
     }
 }
 
@@ -278,10 +276,12 @@ impl TryFrom<PaymentProofWire> for PaymentProof {
             PrivateMessageKind::PaymentProof,
             "Payment Request event",
         )?;
-        let billing_period = wire.billing_period.into_inner().map(BillingPeriod::from);
-        if let Some(period) = &billing_period {
-            period.validate()?;
-        }
+        let billing_period = wire
+            .billing_period
+            .into_inner()
+            .map(BillingPeriod::try_from)
+            .transpose()?;
+
         Ok(Self {
             version: 1,
             kind: PrivateMessageKind::PaymentProof,
@@ -488,22 +488,19 @@ fn parse_basic_event_json(json: &str, context: &'static str) -> Result<BasicEven
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PaymentAmount;
 
     fn request_terms() -> PaymentRequestTerms {
-        PaymentRequestTerms {
-            amount: PaymentAmount {
-                value: "0.001".to_string(),
-                asset: "btc".to_string(),
-            },
-            payment_reference: PaymentReference::new("invoice-2026-0001").unwrap(),
-            proposal_expires_at: Some("2026-06-01T00:00:00Z".to_string()),
-            recurrence: None,
-            accepted_payment_endpoint_identifiers: vec![PaymentEndpointIdentifier::new(
-                "btc-lightning-bolt11",
-            )
-            .unwrap()],
-            metadata: JsonMap::new(),
-        }
+        PaymentRequestTerms::builder(
+            PaymentAmount::new("0.001".to_string(), "btc".to_string()).unwrap(),
+            PaymentReference::new("invoice-2026-0001").unwrap(),
+            vec![PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap()],
+        )
+        .proposal_expires_at(Some("2026-06-01T00:00:00Z".to_string()))
+        .recurrence(None)
+        .metadata(JsonMap::new())
+        .build()
+        .unwrap()
     }
 
     fn payment_proof() -> PaymentProof {
@@ -870,6 +867,8 @@ mod tests {
     }
 
     fn recurrence_with_ends_at(ends_at: &str) -> Recurrence {
+        // Internal fixture intentionally bypasses construction to test the
+        // defensive serialization boundary against invalid domain state.
         Recurrence {
             every: 1,
             unit: RecurrenceUnit::Month,
@@ -1091,13 +1090,16 @@ mod tests {
             PaymentRequestId::new("b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33").unwrap(),
             PaymentRequestTerms {
                 proposal_expires_at: Some("2026-06-01T00:00:00Z".to_string()),
-                recurrence: Some(Recurrence {
-                    every: 3,
-                    unit: RecurrenceUnit::Week,
-                    starts_at: "2026-06-01T00:00:00Z".to_string(),
-                    anchor: "2026-06-01T00:00:00Z".to_string(),
-                    ends_at: Some("2026-12-01T00:00:00Z".to_string()),
-                }),
+                recurrence: Some(
+                    Recurrence::try_from(crate::RecurrenceConfig {
+                        every: 3,
+                        unit: RecurrenceUnit::Week,
+                        starts_at: "2026-06-01T00:00:00Z".to_string(),
+                        anchor: "2026-06-01T00:00:00Z".to_string(),
+                        ends_at: Some("2026-12-01T00:00:00Z".to_string()),
+                    })
+                    .unwrap(),
+                ),
                 ..request_terms()
             },
         );
