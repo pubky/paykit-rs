@@ -75,8 +75,10 @@ where
 
     /// Atomically persist selection and queue ordinary Payment Request Acceptance.
     ///
-    /// Recurring Acceptance consumes no amount or count. Every actual occurrence
-    /// still requires reservation and a fresh handoff check before execution.
+    /// One-time Acceptance checks current capacity; insufficient capacity leaves
+    /// the request proposed. Recurring Acceptance defers capacity checks until due.
+    /// Neither reserves or consumes usage. Every actual occurrence still requires
+    /// atomic reservation and a fresh handoff check before execution.
     pub async fn accept_payment_request_automatically(
         &self,
         scope: PaymentRequestScope,

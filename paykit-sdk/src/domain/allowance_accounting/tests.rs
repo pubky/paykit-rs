@@ -501,7 +501,6 @@ async fn test_accounting_actual_decimal_equivalence_uses_shared_math() {
 #[tokio::test]
 async fn test_accounting_reservation_consumes_capacity_across_distinct_requests() {
     let fixture = Fixture::new().await;
-    attempt(fixture.reserve().await);
     let mut second = fixture.occurrence.clone();
     second.request.payment_request_id = paykit_lib::PaymentRequestId::new_v4();
     let snapshot = fixture.storage.snapshot().unwrap();
@@ -541,6 +540,8 @@ async fn test_accounting_reservation_consumes_capacity_across_distinct_requests(
         .await
         .unwrap()
         .unwrap();
+    // Both preflights passed before either payment reserved the shared capacity.
+    attempt(fixture.reserve().await);
     let decision = fixture
         .storage
         .transaction(|tx| {
@@ -938,3 +939,5 @@ async fn test_accounting_successful_reconsideration_replaces_deferred_dispositio
 mod reassociation;
 
 mod lifecycle_restore;
+
+mod acceptance_capacity;

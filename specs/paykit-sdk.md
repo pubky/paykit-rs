@@ -1440,8 +1440,11 @@ Payment Proofs and Receipts never construct, commit, or release this accounting.
 `evaluate_allowance_candidates` returns advisory static/time/lifecycle results.
 `select_allowance` persists exactly one choice. The atomic
 `accept_payment_request_automatically` operation persists that choice and queues
-ordinary Acceptance after current wallet preflight checks. Acceptance consumes
-no capacity. Existing manual Acceptance, Rejection, and Cancellation operations
+ordinary Acceptance after current wallet preflight checks. For one-time requests,
+current shared capacity is checked before queuing Acceptance; insufficient
+capacity leaves the request proposed with its ordinary manual response flow.
+Recurring Acceptance defers capacity checks until a payment is due. Acceptance
+consumes no capacity, and reservation always rechecks it atomically. Existing manual Acceptance, Rejection, and Cancellation operations
 serialize with the same ledger and recheck current request state before queuing.
 A manual response excludes conflicting automatic handling; it can revoke an
 unissued preparation but never releases a Submitted or Unknown attempt.

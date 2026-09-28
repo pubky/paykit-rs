@@ -157,6 +157,22 @@ fn select_checked(
         {
             return Err(AllowanceAccountingBlock::WalletChecksFailed);
         }
+        if terms.recurrence().is_none() {
+            let allowance = accepted_allowance_terms(tx, scope, input.allowance_id.as_str())?;
+            let usage = execution::allowance_usage(state, scope, input.allowance_id.as_str())
+                .map_err(|_| AllowanceAccountingBlock::ReconciliationRequired)?;
+            // Preflight preserves the proposed/manual response path when current
+            // capacity is insufficient. It grants no reservation: admission must
+            // atomically recheck usage before any payment can proceed.
+            paykit_lib::evaluate_allowance(&paykit_lib::AllowanceEvaluationInput {
+                terms: &allowance,
+                request: &terms,
+                trusted_time: input.trusted_time,
+                watermark: previous,
+                usage: &usage,
+            })
+            .map_err(shared)?;
+        }
     }
     if state.history.occurrences.iter().any(|o| {
         o.key.request == *scope

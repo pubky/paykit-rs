@@ -35,6 +35,39 @@ fn occurrence_matches(
     }
 }
 
+pub(super) fn allowance_usage(
+    state: &AllowanceAccountingState,
+    scope: &PaymentAccountingScope,
+    allowance_id: &str,
+) -> Result<Vec<paykit_lib::AllowanceUsageEntry>> {
+    // Both preflight and admission count committed payments and unresolved
+    // reservations in the exact authenticated scope. Acceptance adds no usage.
+    state
+        .history
+        .occurrences
+        .iter()
+        .filter(|occurrence| {
+            occurrence.key.request.local_public_key == scope.local_public_key
+                && occurrence.key.request.local_receiver_path == scope.local_receiver_path
+                && occurrence.key.request.counterparty == scope.counterparty
+                && occurrence.key.request.counterparty_receiver_path
+                    == scope.counterparty_receiver_path
+        })
+        .flat_map(|occurrence| &occurrence.attempts)
+        .filter(|attempt| {
+            attempt.mode == PaymentExecutionMode::Automatic
+                && attempt.allowance_id.as_deref() == Some(allowance_id)
+                && attempt.status != PaymentExecutionStatus::Failed
+        })
+        .map(|attempt| {
+            validation::amount(&attempt.amount).and_then(|amount| {
+                paykit_lib::AllowanceUsageEntry::new(amount, attempt.admitted_at)
+                    .map_err(|_| protocol("Invalid accounting usage"))
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn reserve(
     tx: &mut dyn StorageTransaction,
     local: &PaykitReceiverPath,
@@ -115,31 +148,7 @@ fn reserve_checked(
         if !valid_allowance(&allowance) {
             return blocked(AllowanceAccountingBlock::InvalidLifecycle);
         }
-        let usage = state
-            .history
-            .occurrences
-            .iter()
-            .filter(|o| {
-                o.key.request.local_public_key == key.request.local_public_key
-                    && o.key.request.local_receiver_path == key.request.local_receiver_path
-                    && o.key.request.counterparty == key.request.counterparty
-                    && o.key.request.counterparty_receiver_path
-                        == key.request.counterparty_receiver_path
-            })
-            .flat_map(|o| &o.attempts)
-            .filter(|a| {
-                a.mode == PaymentExecutionMode::Automatic
-                    && a.allowance_id.as_deref() == Some(selected.allowance_id.as_str())
-                    && a.status != PaymentExecutionStatus::Failed
-            })
-            .map(|a| {
-                validation::amount(&a.amount).and_then(|amount| {
-                    paykit_lib::AllowanceUsageEntry::new(amount, a.admitted_at)
-                        .map_err(|_| protocol("Invalid accounting usage"))
-                })
-            })
-            .collect::<Result<Vec<_>>>();
-        let Ok(usage) = usage else {
+        let Ok(usage) = allowance_usage(state, &key.request, &selected.allowance_id) else {
             return blocked(AllowanceAccountingBlock::ReconciliationRequired);
         };
         match paykit_lib::evaluate_allowance(&paykit_lib::AllowanceEvaluationInput {
