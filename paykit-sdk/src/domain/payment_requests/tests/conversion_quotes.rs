@@ -1,10 +1,8 @@
 use super::*;
-use paykit_lib::PaymentConversion;
+use paykit_lib::{PaymentConversion, PaymentRequestTerms};
 
-async fn setup(role: PaymentRequestLocalRole) -> (InMemoryStorage, PubkyPublicKey, PaymentRequest) {
-    let storage = InMemoryStorage::new();
-    let peer = counterparty();
-    let PaymentRequestEvent::Request(mut request) = parsed_event(request_raw(
+fn recurring_request() -> PaymentRequest {
+    let PaymentRequestEvent::Request(request) = parsed_event(request_raw(
         "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
         "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
         "monthly",
@@ -15,11 +13,32 @@ async fn setup(role: PaymentRequestLocalRole) -> (InMemoryStorage, PubkyPublicKe
     )) else {
         panic!()
     };
-    request.request.conversion = Some(PaymentConversion::PerPeriod {});
-    request
-        .request
-        .accepted_payment_endpoint_identifiers
-        .push(PaymentEndpointIdentifier::new("usdt-arbitrum-address").unwrap());
+    let base_terms = request.request();
+    let mut endpoints = base_terms.accepted_payment_endpoint_identifiers().to_vec();
+    endpoints.push(PaymentEndpointIdentifier::new("usdt-arbitrum-address").unwrap());
+    let terms = PaymentRequestTerms::builder(
+        base_terms.amount().clone(),
+        base_terms.payment_reference().clone(),
+        endpoints,
+    )
+    .proposal_expires_at(base_terms.proposal_expires_at().clone())
+    .recurrence(base_terms.recurrence().clone())
+    .conversion(Some(PaymentConversion::PerPeriod {}))
+    .payment_deadline(base_terms.payment_deadline().cloned())
+    .metadata(base_terms.metadata().clone())
+    .build()
+    .unwrap();
+    PaymentRequest::new(
+        request.event_id().clone(),
+        request.payment_request_id().clone(),
+        terms,
+    )
+}
+
+async fn setup(role: PaymentRequestLocalRole) -> (InMemoryStorage, PubkyPublicKey, PaymentRequest) {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    let request = recurring_request();
     send(
         &storage,
         &peer,
@@ -32,7 +51,7 @@ async fn setup(role: PaymentRequestLocalRole) -> (InMemoryStorage, PubkyPublicKe
         &peer,
         parsed_event(acceptance_raw(
             "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
-            request.payment_request_id.as_str(),
+            request.payment_request_id().as_str(),
         )),
         role == PaymentRequestLocalRole::Payer,
     )
@@ -42,11 +61,8 @@ async fn setup(role: PaymentRequestLocalRole) -> (InMemoryStorage, PubkyPublicKe
 fn quote(id: &str, request: &PaymentRequest) -> PaymentConversionQuote {
     PaymentConversionQuote::new(
         EventId::new(id).unwrap(),
-        request.payment_request_id.clone(),
-        BillingPeriod {
-            starts_at: "2026-06-01T00:00:00Z".into(),
-            ends_at: "2026-07-01T00:00:00Z".into(),
-        },
+        request.payment_request_id().clone(),
+        BillingPeriod::new("2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z").unwrap(),
         vec![ConversionRate {
             asset: "usdt".into(),
             value: "50000".into(),
@@ -57,11 +73,19 @@ fn quote(id: &str, request: &PaymentRequest) -> PaymentConversionQuote {
 }
 
 fn quoted_proof(request: &PaymentRequest, quote: &PaymentConversionQuote) -> PaymentProof {
+    quoted_proof_for_period(request, quote, quote.billing_period.clone())
+}
+
+fn quoted_proof_for_period(
+    request: &PaymentRequest,
+    quote: &PaymentConversionQuote,
+    billing_period: BillingPeriod,
+) -> PaymentProof {
     PaymentProof::new(
         EventId::new_v4(),
-        request.payment_request_id.clone(),
-        request.request.payment_reference.clone(),
-        Some(quote.billing_period.clone()),
+        request.payment_request_id().clone(),
+        request.request().payment_reference().clone(),
+        Some(billing_period),
         PaymentEndpointIdentifier::new("usdt-arbitrum-address").unwrap(),
         Default::default(),
     )
@@ -74,13 +98,23 @@ async fn send(
     event: PaymentRequestEvent,
     outbound: bool,
 ) {
+    send_at(storage, peer, event, outbound, timestamp()).await;
+}
+
+async fn send_at(
+    storage: &InMemoryStorage,
+    peer: &PubkyPublicKey,
+    event: PaymentRequestEvent,
+    outbound: bool,
+    recorded_at: DateTime<Utc>,
+) {
     let raw = serialize_payment_request_event(&event).unwrap();
     if outbound {
-        enqueue_untyped_private_message(storage, peer.clone(), receiver_path(), raw, timestamp())
+        enqueue_untyped_private_message(storage, peer.clone(), receiver_path(), raw, recorded_at)
             .await
             .unwrap();
     } else {
-        persist_messages(storage, peer.clone(), vec![raw]).await;
+        persist_messages_at(storage, peer.clone(), vec![raw], recorded_at).await;
     }
 }
 
@@ -134,7 +168,7 @@ async fn test_conversion_quotes_keep_old_rates_for_delayed_proofs_and_replay() {
             &peer,
             parsed_event(cancellation_raw(
                 "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d105",
-                request.payment_request_id.as_str(),
+                request.payment_request_id().as_str(),
             )),
             role == PaymentRequestLocalRole::Payer,
         )
@@ -146,6 +180,49 @@ async fn test_conversion_quotes_keep_old_rates_for_delayed_proofs_and_replay() {
         assert_eq!(canceled.state, PaymentRequestLifecycleState::Canceled);
         assert_eq!(canceled.conversion_quotes.len(), 2);
         assert_eq!(canceled.payment_proofs.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn test_conversion_quotes_ignore_cross_stream_clock_order() {
+    for role in [
+        PaymentRequestLocalRole::Payer,
+        PaymentRequestLocalRole::Payee,
+    ] {
+        let (storage, peer, request) = setup(role).await;
+        let quote = quote("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103", &request);
+        send_at(
+            &storage,
+            &peer,
+            PaymentRequestEvent::ConversionQuote(quote.clone()),
+            role == PaymentRequestLocalRole::Payee,
+            timestamp() - ChronoDuration::seconds(1),
+        )
+        .await;
+        send(
+            &storage,
+            &peer,
+            PaymentRequestEvent::Proof(quoted_proof(&request, &quote)),
+            role == PaymentRequestLocalRole::Payer,
+        )
+        .await;
+
+        let record = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            record.state,
+            PaymentRequestLifecycleState::ActiveRecurring,
+            "{role:?}: {:?}",
+            record.invalid_reason
+        );
+        assert_eq!(record.conversion_quotes.len(), 1, "{role:?}");
+        assert_eq!(
+            record.payment_proofs[0].conversion_quote_id.as_deref(),
+            Some(quote.event_id.as_str()),
+            "{role:?}"
+        );
     }
 }
 
@@ -191,12 +268,15 @@ async fn test_conversion_proof_cannot_select_another_period_or_unknown_quote() {
             true,
         )
         .await;
-        let mut proof = quoted_proof(&request, &quote);
-        if unknown {
-            proof.conversion_quote_id = Some(EventId::new_v4());
+        let proof = if unknown {
+            quoted_proof(&request, &quote).with_conversion_quote_id(EventId::new_v4())
         } else {
-            proof.billing_period.as_mut().unwrap().starts_at = "2026-06-02T00:00:00Z".into();
-        }
+            quoted_proof_for_period(
+                &request,
+                &quote,
+                BillingPeriod::new("2026-06-02T00:00:00Z", "2026-07-01T00:00:00Z").unwrap(),
+            )
+        };
         send(&storage, &peer, PaymentRequestEvent::Proof(proof), false).await;
         let record = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
             .await
@@ -226,8 +306,8 @@ async fn test_quote_delivery_recovery_preserves_prior_payment_evidence() {
         .remove(0);
     assert_eq!(before.payment_proofs.len(), 1);
     let mut later = quote("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104", &request);
-    later.billing_period.starts_at = "2026-07-01T00:00:00Z".into();
-    later.billing_period.ends_at = "2026-08-01T00:00:00Z".into();
+    later.billing_period =
+        BillingPeriod::new("2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z").unwrap();
     later.expires_at = "2026-07-02T00:00:00Z".into();
     send(
         &storage,
@@ -332,14 +412,14 @@ async fn test_cancellation_delivery_recovery_preserves_prior_payment_evidence() 
 }
 
 #[tokio::test]
-async fn test_quote_admission_respects_acceptance_and_payee_cancellation() {
+async fn test_conversion_quote_rejects_payee_cancellation() {
     let (storage, peer, request) = setup(PaymentRequestLocalRole::Payee).await;
     send(
         &storage,
         &peer,
         parsed_event(cancellation_raw(
             "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d105",
-            request.payment_request_id.as_str(),
+            request.payment_request_id().as_str(),
         )),
         true,
     )
@@ -364,18 +444,28 @@ async fn test_quote_admission_respects_acceptance_and_payee_cancellation() {
         .unwrap()
         .contains("payee's cancellation"));
     assert!(record.conversion_quotes.is_empty());
+}
 
-    let (storage, peer, request) = setup(PaymentRequestLocalRole::Payer).await;
-    let raw = serialize_payment_request_event(&PaymentRequestEvent::ConversionQuote(quote(
-        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103",
-        &request,
-    )))
-    .unwrap();
-    persist_messages_at(
+#[tokio::test]
+async fn test_conversion_quote_requires_acceptance() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    let request = recurring_request();
+    send(
         &storage,
-        peer.clone(),
-        vec![raw],
-        timestamp() - ChronoDuration::seconds(1),
+        &peer,
+        PaymentRequestEvent::Request(request.clone()),
+        false,
+    )
+    .await;
+    send(
+        &storage,
+        &peer,
+        PaymentRequestEvent::ConversionQuote(quote(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103",
+            &request,
+        )),
+        false,
     )
     .await;
     let record = payment_request_records(&storage, &peer, &receiver_path(), timestamp())

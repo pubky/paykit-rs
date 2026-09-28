@@ -545,7 +545,9 @@ where
         if let Some(allowance_id) = submission.allowance_id {
             event = event.with_allowance_id(allowance_id);
         }
-        event.conversion_quote_id = submission.conversion_quote_id;
+        if let Some(conversion_quote_id) = submission.conversion_quote_id {
+            event = event.with_conversion_quote_id(conversion_quote_id);
+        }
         validate_proof_conversion(&record, &event, &request)?;
         self.enqueue_raw_payment_proof(
             counterparty.clone(),

@@ -958,10 +958,7 @@ async fn test_quote_payment_request_requires_private_send_readiness() {
             PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()),
             receiver_path(),
             &PaymentRequestId::new_v4(),
-            paykit_lib::BillingPeriod {
-                starts_at: "2026-06-01T00:00:00Z".into(),
-                ends_at: "2026-07-01T00:00:00Z".into(),
-            },
+            paykit_lib::BillingPeriod::new("2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z").unwrap(),
             vec![paykit_lib::ConversionRate {
                 asset: "usdt".into(),
                 value: "1".into(),

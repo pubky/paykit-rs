@@ -4,7 +4,7 @@ use chrono::{Duration, SecondsFormat, Utc};
 use paykit_lib::{
     BillingPeriod, ConversionRate, EventId, PaymentAmount, PaymentConversion,
     PaymentEndpointIdentifier, PaymentReference, PaymentRequestId, PaymentRequestTerms, Recurrence,
-    RecurrenceUnit,
+    RecurrenceConfig, RecurrenceUnit,
 };
 use paykit_sdk::{PaykitSdkError, PaymentProofSubmission, PaymentRequestLifecycleState};
 
@@ -15,34 +15,29 @@ async fn test_recurring_quote_issuance_and_proof_delivery() {
     let payee = &pair.bob;
     let now = Utc::now();
     let text = |value: chrono::DateTime<Utc>| value.to_rfc3339_opts(SecondsFormat::AutoSi, true);
-    let period = BillingPeriod {
-        starts_at: text(now),
-        ends_at: text(now + Duration::days(30)),
-    };
+    let period = BillingPeriod::new(text(now), text(now + Duration::days(30))).unwrap();
+    let recurrence = Recurrence::try_from(RecurrenceConfig {
+        every: 1,
+        unit: RecurrenceUnit::Month,
+        starts_at: period.starts_at().to_owned(),
+        anchor: period.starts_at().to_owned(),
+        ends_at: None,
+    })
+    .unwrap();
     let request = payee
         .sdk
         .propose_payment_request(
             payer.public_key.clone(),
             payer.receiver_path.clone(),
-            PaymentRequestTerms {
-                amount: PaymentAmount::new("10", "usd").unwrap(),
-                payment_reference: PaymentReference::new("monthly-membership").unwrap(),
-                proposal_expires_at: None,
-                recurrence: Some(Recurrence {
-                    every: 1,
-                    unit: RecurrenceUnit::Month,
-                    starts_at: period.starts_at.clone(),
-                    anchor: period.starts_at.clone(),
-                    ends_at: None,
-                }),
-                accepted_payment_endpoint_identifiers: vec![PaymentEndpointIdentifier::new(
-                    "usdt-arbitrum-address",
-                )
-                .unwrap()],
-                conversion: Some(PaymentConversion::PerPeriod {}),
-                payment_deadline: None,
-                metadata: Default::default(),
-            },
+            PaymentRequestTerms::builder(
+                PaymentAmount::new("10", "usd").unwrap(),
+                PaymentReference::new("monthly-membership").unwrap(),
+                vec![PaymentEndpointIdentifier::new("usdt-arbitrum-address").unwrap()],
+            )
+            .recurrence(Some(recurrence))
+            .conversion(Some(PaymentConversion::PerPeriod {}))
+            .build()
+            .unwrap(),
         )
         .await
         .unwrap();

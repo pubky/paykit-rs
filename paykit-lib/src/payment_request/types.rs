@@ -761,6 +761,14 @@ impl PaymentRequestTerms {
     pub fn accepted_payment_endpoint_identifiers(&self) -> &[PaymentEndpointIdentifier] {
         &self.accepted_payment_endpoint_identifiers
     }
+    /// Access the optional conversion policy.
+    pub fn conversion(&self) -> Option<&PaymentConversion> {
+        self.conversion.as_ref()
+    }
+    /// Access the optional payment deadline.
+    pub fn payment_deadline(&self) -> Option<&PaymentDeadline> {
+        self.payment_deadline.as_ref()
+    }
     /// Access the metadata.
     pub fn metadata(&self) -> &JsonMap<String, JsonValue> {
         &self.metadata
@@ -895,6 +903,10 @@ impl PaymentProof {
     pub fn payment_endpoint_identifier(&self) -> &PaymentEndpointIdentifier {
         &self.payment_endpoint_identifier
     }
+    /// Access the selected recurring conversion quote, when required.
+    pub fn conversion_quote_id(&self) -> Option<&EventId> {
+        self.conversion_quote_id.as_ref()
+    }
     /// Access the proof.
     pub fn proof(&self) -> &JsonMap<String, JsonValue> {
         &self.proof
@@ -967,6 +979,8 @@ impl PaymentRequestTerms {
             accepted_payment_endpoint_identifiers,
             proposal_expires_at: None,
             recurrence: None,
+            conversion: None,
+            payment_deadline: None,
             metadata: JsonMap::new(),
         })
     }
@@ -981,6 +995,16 @@ impl PaymentRequestTermsBuilder {
     /// Set a validated recurrence, or `None` for a one-time request.
     pub fn recurrence(mut self, value: Option<Recurrence>) -> Self {
         self.0.recurrence = value;
+        self
+    }
+    /// Set the optional conversion policy.
+    pub fn conversion(mut self, value: Option<PaymentConversion>) -> Self {
+        self.0.conversion = value;
+        self
+    }
+    /// Set the optional payment deadline.
+    pub fn payment_deadline(mut self, value: Option<PaymentDeadline>) -> Self {
+        self.0.payment_deadline = value;
         self
     }
     /// Set application-specific metadata without interpreting its contents.

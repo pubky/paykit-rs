@@ -8,38 +8,56 @@ fn rate(asset: &str, value: &str) -> ConversionRate {
     }
 }
 fn period() -> BillingPeriod {
-    BillingPeriod {
-        starts_at: "2026-06-01T00:00:00Z".into(),
-        ends_at: "2026-07-01T00:00:00Z".into(),
-    }
+    BillingPeriod::new("2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z").unwrap()
 }
-fn request(conversion: Option<PaymentConversion>) -> PaymentRequest {
-    PaymentRequest::new(
+fn recurrence() -> Recurrence {
+    Recurrence::try_from(RecurrenceConfig {
+        every: 1,
+        unit: RecurrenceUnit::Month,
+        starts_at: "2026-06-01T00:00:00Z".into(),
+        anchor: "2026-06-01T00:00:00Z".into(),
+        ends_at: None,
+    })
+    .unwrap()
+}
+fn request_with(
+    conversion: Option<PaymentConversion>,
+    recurrence: Option<Recurrence>,
+    payment_deadline: Option<PaymentDeadline>,
+    asset: &str,
+    endpoints: &[&str],
+) -> Result<PaymentRequest> {
+    let terms = PaymentRequestTerms::builder(
+        PaymentAmount::new("10", asset)?,
+        PaymentReference::new("monthly-membership")?,
+        endpoints
+            .iter()
+            .map(|id| PaymentEndpointIdentifier::new(*id))
+            .collect::<Result<Vec<_>>>()?,
+    )
+    .recurrence(recurrence)
+    .conversion(conversion)
+    .payment_deadline(payment_deadline)
+    .build()?;
+    Ok(PaymentRequest::new(
         EventId::new_v4(),
         PaymentRequestId::new_v4(),
-        PaymentRequestTerms {
-            amount: PaymentAmount::new("10", "usd").unwrap(),
-            payment_reference: PaymentReference::new("monthly-membership").unwrap(),
-            proposal_expires_at: None,
-            recurrence: Some(Recurrence {
-                every: 1,
-                unit: RecurrenceUnit::Month,
-                starts_at: period().starts_at.clone(),
-                anchor: period().starts_at.clone(),
-                ends_at: None,
-            }),
-            accepted_payment_endpoint_identifiers: [
-                "usd-bank-account",
-                "usdt-arbitrum-address",
-                "btc-lightning-bolt11",
-            ]
-            .map(|id| PaymentEndpointIdentifier::new(id).unwrap())
-            .to_vec(),
-            conversion,
-            payment_deadline: Some(PaymentDeadline::PeriodStart { seconds: 86400 }),
-            metadata: Default::default(),
-        },
+        terms,
+    ))
+}
+fn request(conversion: Option<PaymentConversion>) -> PaymentRequest {
+    request_with(
+        conversion,
+        Some(recurrence()),
+        Some(PaymentDeadline::PeriodStart { seconds: 86400 }),
+        "usd",
+        &[
+            "usd-bank-account",
+            "usdt-arbitrum-address",
+            "btc-lightning-bolt11",
+        ],
     )
+    .unwrap()
 }
 fn parse(value: Value) -> PaymentRequestEventMessage {
     parse_payment_request_event_message(&PrivateApplicationMessage {
@@ -63,8 +81,8 @@ fn round_trip(event: PaymentRequestEvent) {
 fn proof(request: &PaymentRequest, asset: &str) -> PaymentProof {
     PaymentProof::new(
         EventId::new_v4(),
-        request.payment_request_id.clone(),
-        request.request.payment_reference.clone(),
+        request.payment_request_id().clone(),
+        request.request().payment_reference().clone(),
         Some(period()),
         PaymentEndpointIdentifier::new(asset).unwrap(),
         Default::default(),
@@ -85,7 +103,7 @@ fn test_payment_conversion_terms_and_quotes_round_trip() {
     let request = request(Some(PaymentConversion::PerPeriod {}));
     let quote = PaymentConversionQuote::new(
         EventId::new_v4(),
-        request.payment_request_id.clone(),
+        request.payment_request_id().clone(),
         period(),
         vec![rate("usdt", "1"), rate("btc", "0.00001234")],
         "2026-06-01T00:00:00Z".into(),
@@ -104,14 +122,16 @@ fn test_payment_conversion_terms_and_quotes_round_trip() {
 #[test]
 fn test_payment_conversion_rates_are_positive_unique_and_exact() {
     for value in ["0", "0.000", "-1", "1e-6", "NaN", "1,000", ""] {
-        assert!(
-            serialize_payment_request_event(&PaymentRequestEvent::Request(request(Some(
-                PaymentConversion::Fixed {
-                    rates: vec![rate("usdt", value)],
-                }
-            ))))
-            .is_err()
-        );
+        assert!(request_with(
+            Some(PaymentConversion::Fixed {
+                rates: vec![rate("usdt", value)],
+            }),
+            Some(recurrence()),
+            Some(PaymentDeadline::PeriodStart { seconds: 86400 }),
+            "usd",
+            &["usd-bank-account", "usdt-arbitrum-address"],
+        )
+        .is_err());
     }
     for rates in [
         vec![],
@@ -119,12 +139,18 @@ fn test_payment_conversion_rates_are_positive_unique_and_exact() {
         vec![rate("usd", "1")],
         vec![rate("eth", "1")],
     ] {
-        assert!(
-            serialize_payment_request_event(&PaymentRequestEvent::Request(request(Some(
-                PaymentConversion::Fixed { rates }
-            ))))
-            .is_err()
-        );
+        assert!(request_with(
+            Some(PaymentConversion::Fixed { rates }),
+            Some(recurrence()),
+            Some(PaymentDeadline::PeriodStart { seconds: 86400 }),
+            "usd",
+            &[
+                "usd-bank-account",
+                "usdt-arbitrum-address",
+                "btc-lightning-bolt11"
+            ],
+        )
+        .is_err());
     }
     round_trip(PaymentRequestEvent::Request(request(Some(
         PaymentConversion::Fixed {
@@ -135,28 +161,28 @@ fn test_payment_conversion_rates_are_positive_unique_and_exact() {
 
 #[test]
 fn test_payment_conversion_absence_and_missing_rate_have_distinct_meanings() {
-    let mut request = request(None);
-    proof(&request, "btc-lightning-bolt11")
-        .validate_for_request(&request)
+    let without_conversion = request(None);
+    proof(&without_conversion, "btc-lightning-bolt11")
+        .validate_for_request(&without_conversion)
         .unwrap();
-    request.request.conversion = Some(PaymentConversion::Fixed {
+    let fixed = request(Some(PaymentConversion::Fixed {
         rates: vec![rate("usdt", "1")],
-    });
-    assert!(proof(&request, "btc-lightning-bolt11")
-        .validate_for_request(&request)
+    }));
+    assert!(proof(&fixed, "btc-lightning-bolt11")
+        .validate_for_request(&fixed)
         .is_err());
-    proof(&request, "usdt-arbitrum-address")
-        .validate_for_request(&request)
+    proof(&fixed, "usdt-arbitrum-address")
+        .validate_for_request(&fixed)
         .unwrap();
-    proof(&request, "usd-bank-account")
-        .validate_for_request(&request)
+    proof(&fixed, "usd-bank-account")
+        .validate_for_request(&fixed)
         .unwrap();
-    request.request.conversion = Some(PaymentConversion::PerPeriod {});
-    assert!(proof(&request, "usdt-arbitrum-address")
-        .validate_for_request(&request)
+    let per_period = request(Some(PaymentConversion::PerPeriod {}));
+    assert!(proof(&per_period, "usdt-arbitrum-address")
+        .validate_for_request(&per_period)
         .is_err());
-    proof(&request, "usd-bank-account")
-        .validate_for_request(&request)
+    proof(&per_period, "usd-bank-account")
+        .validate_for_request(&per_period)
         .unwrap();
 }
 
@@ -165,7 +191,7 @@ fn test_payment_conversion_quote_binds_request_period_and_selected_asset() {
     let request = request(Some(PaymentConversion::PerPeriod {}));
     let mut quote = PaymentConversionQuote::new(
         EventId::new_v4(),
-        request.payment_request_id.clone(),
+        request.payment_request_id().clone(),
         period(),
         vec![rate("usdt", "1")],
         "2026-06-01T00:00:00Z".into(),
@@ -189,13 +215,14 @@ fn test_payment_conversion_quote_binds_request_period_and_selected_asset() {
         .validate_conversion_quote(&request, Some(&quote))
         .is_err());
     quote = original.clone();
-    quote.billing_period.starts_at = "2026-06-02T00:00:00Z".into();
+    quote.billing_period =
+        BillingPeriod::new("2026-06-02T00:00:00Z", "2026-07-01T00:00:00Z").unwrap();
     assert!(proof
         .validate_conversion_quote(&request, Some(&quote))
         .is_err());
     quote = original.clone();
-    quote.billing_period.starts_at = "2026-06-01T00:00:00.000Z".into();
-    quote.billing_period.ends_at = "2026-07-01T00:00:00.000000000Z".into();
+    quote.billing_period =
+        BillingPeriod::new("2026-06-01T00:00:00.000Z", "2026-07-01T00:00:00.000000000Z").unwrap();
     proof
         .validate_conversion_quote(&request, Some(&quote))
         .unwrap();
@@ -222,23 +249,26 @@ fn test_payment_deadlines_require_the_correct_request_shape() {
     };
     assert_eq!(absolute.at(None).unwrap(), "2026-06-02T00:00:00Z");
     assert!(absolute.at(Some(&period())).is_err());
-    let mut request = request(None);
-    request.request.payment_deadline = Some(absolute.clone());
-    assert!(
-        serialize_payment_request_event(&PaymentRequestEvent::Request(request.clone())).is_err()
-    );
-    request.request.recurrence = None;
-    request.request.payment_deadline = Some(deadline);
-    assert!(
-        serialize_payment_request_event(&PaymentRequestEvent::Request(request.clone())).is_err()
-    );
-    request.request.payment_deadline = Some(absolute);
-    request.request.conversion = Some(PaymentConversion::PerPeriod {});
-    assert!(
-        serialize_payment_request_event(&PaymentRequestEvent::Request(request.clone())).is_err()
-    );
-    request.request.conversion = None;
-    round_trip(PaymentRequestEvent::Request(request));
+    assert!(request_with(
+        None,
+        Some(recurrence()),
+        Some(absolute.clone()),
+        "usd",
+        &["usd-bank-account"],
+    )
+    .is_err());
+    assert!(request_with(None, None, Some(deadline), "usd", &["usd-bank-account"],).is_err());
+    assert!(request_with(
+        Some(PaymentConversion::PerPeriod {}),
+        None,
+        Some(absolute.clone()),
+        "usd",
+        &["usd-bank-account"],
+    )
+    .is_err());
+    round_trip(PaymentRequestEvent::Request(
+        request_with(None, None, Some(absolute), "usd", &["usd-bank-account"]).unwrap(),
+    ));
 }
 
 #[test]
@@ -266,7 +296,7 @@ fn test_conversion_quotes_require_a_portable_ordered_time_interval() {
     let request = request(Some(PaymentConversion::PerPeriod {}));
     let mut quote = PaymentConversionQuote::new(
         EventId::new_v4(),
-        request.payment_request_id.clone(),
+        request.payment_request_id().clone(),
         period(),
         vec![rate("usdt", "1")],
         "2026-06-01T00:00:00Z".into(),
@@ -298,15 +328,24 @@ fn test_conversion_requires_unambiguous_asset_and_endpoint_segments() {
         "usdc-e-arbitrum-address",
         "btc--bolt11",
     ] {
-        let mut request = request(Some(PaymentConversion::PerPeriod {}));
-        request.request.accepted_payment_endpoint_identifiers =
-            vec![PaymentEndpointIdentifier::new(endpoint).unwrap()];
         assert!(
-            serialize_payment_request_event(&PaymentRequestEvent::Request(request)).is_err(),
+            request_with(
+                Some(PaymentConversion::PerPeriod {}),
+                Some(recurrence()),
+                Some(PaymentDeadline::PeriodStart { seconds: 86400 }),
+                "usd",
+                &[endpoint],
+            )
+            .is_err(),
             "{endpoint}"
         );
     }
-    let mut request = request(Some(PaymentConversion::PerPeriod {}));
-    request.request.amount.asset = "usdc-e".into();
-    assert!(serialize_payment_request_event(&PaymentRequestEvent::Request(request)).is_err());
+    assert!(request_with(
+        Some(PaymentConversion::PerPeriod {}),
+        Some(recurrence()),
+        Some(PaymentDeadline::PeriodStart { seconds: 86400 }),
+        "usdc-e",
+        &["usdt-arbitrum-address"],
+    )
+    .is_err());
 }

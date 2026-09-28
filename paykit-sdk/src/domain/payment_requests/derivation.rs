@@ -968,8 +968,7 @@ fn apply_stored_event(
                 return;
             };
             let quote = proof
-                .conversion_quote_id
-                .as_ref()
+                .conversion_quote_id()
                 .and_then(|id| events.get(id.as_str()))
                 .and_then(|event| match event.event() {
                     PaymentRequestEvent::ConversionQuote(quote) => Some(quote),
@@ -1257,17 +1256,12 @@ fn validate_record_conversion(
         .as_deref()
         .and_then(|id| events.get(id));
     for quote in &record.conversion_quotes {
-        let Some(acceptance) = acceptance.filter(|_| record.rejected_event_id.is_none()) else {
-            return Err(paykit_lib::PaykitError::Validation(
-                "conversion quote arrived before acceptance".into(),
-            ));
-        };
-        let stored = events[quote.event_id.as_str()];
-        if stored.record_time() < acceptance.record_time() {
+        if acceptance.is_none() || record.rejected_event_id.is_some() {
             return Err(paykit_lib::PaykitError::Validation(
                 "conversion quote arrived before acceptance".into(),
             ));
         }
+        let stored = events[quote.event_id.as_str()];
         if let PaymentRequestEvent::ConversionQuote(quote) = stored.event() {
             quote.validate_for_request(&request)?;
         }
@@ -1295,8 +1289,7 @@ pub(crate) fn validate_proof_conversion(
     request: &PaymentRequest,
 ) -> paykit_lib::Result<()> {
     let quote = proof
-        .conversion_quote_id
-        .as_ref()
+        .conversion_quote_id()
         .and_then(|id| {
             record
                 .conversion_quotes
@@ -1306,8 +1299,8 @@ pub(crate) fn validate_proof_conversion(
         .map(|quote| {
             Ok(PaymentConversionQuote::new(
                 EventId::new(&quote.event_id)?,
-                request.payment_request_id.clone(),
-                (&quote.billing_period).into(),
+                request.payment_request_id().clone(),
+                paykit_lib::BillingPeriod::try_from(&quote.billing_period)?,
                 quote.rates.clone(),
                 quote.valid_from.clone(),
                 quote.expires_at.clone(),

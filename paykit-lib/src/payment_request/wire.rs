@@ -537,7 +537,7 @@ impl TryFrom<ConversionQuoteWire> for PaymentConversionQuote {
         let event = Self::new(
             EventId::new(wire.event_id)?,
             PaymentRequestId::new(wire.payment_request_id)?,
-            BillingPeriod::from(wire.billing_period),
+            BillingPeriod::try_from(wire.billing_period)?,
             wire.rates,
             wire.valid_from,
             wire.expires_at,

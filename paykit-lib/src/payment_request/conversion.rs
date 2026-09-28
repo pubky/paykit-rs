@@ -205,7 +205,7 @@ fn validate_rates(rates: &[ConversionRate]) -> Result<()> {
 
 fn validate_rate_assets(rates: &[ConversionRate], terms: &PaymentRequestTerms) -> Result<()> {
     for rate in rates {
-        if rate.asset == terms.amount.asset
+        if rate.asset == terms.amount.asset()
             || !terms
                 .accepted_payment_endpoint_identifiers
                 .iter()
@@ -245,7 +245,7 @@ fn valid_asset_segment(value: &str) -> bool {
 impl PaymentRequestTerms {
     pub(super) fn validate_conversion(&self) -> Result<()> {
         if let Some(conversion) = &self.conversion {
-            if !valid_asset_segment(&self.amount.asset) {
+            if !valid_asset_segment(self.amount.asset()) {
                 return Err(PaykitError::Validation(
                     "conversion requires a lowercase alphanumeric request asset".into(),
                 ));
@@ -331,7 +331,7 @@ impl PaymentProof {
                 self.validate_rate_coverage(terms, rates)
             }
             Some(PaymentConversion::PerPeriod {}) => {
-                if endpoint_asset(&self.payment_endpoint_identifier)? != terms.amount.asset
+                if endpoint_asset(&self.payment_endpoint_identifier)? != terms.amount.asset()
                     && self.conversion_quote_id.is_none()
                 {
                     return Err(PaykitError::Validation(
@@ -353,7 +353,7 @@ impl PaymentProof {
         rates: &[ConversionRate],
     ) -> Result<()> {
         let asset = endpoint_asset(&self.payment_endpoint_identifier)?;
-        if asset == terms.amount.asset || rates.iter().any(|rate| rate.asset == asset) {
+        if asset == terms.amount.asset() || rates.iter().any(|rate| rate.asset == asset) {
             Ok(())
         } else {
             Err(PaykitError::Validation(
