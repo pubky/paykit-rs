@@ -269,6 +269,7 @@ async fn test_payment_proof_record_omits_absent_attribution_and_redacts_submissi
         proof
     );
     let submission = PaymentProofSubmission {
+        conversion_quote_id: None,
         billing_period: None,
         payment_endpoint_identifier: PaymentEndpointIdentifier::new("btc-lightning-bolt11")
             .unwrap(),

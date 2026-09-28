@@ -5,7 +5,7 @@ use paykit_sdk::{
 };
 
 use crate::harness::{
-    drive_recovery_to_linked, linked_two_party,
+    deliver, drive_recovery_to_linked, linked_two_party,
     wait_until_marker_is_newer_than_observer_checkpoint, TestUser,
 };
 
@@ -17,27 +17,6 @@ fn terms() -> AllowanceTerms {
         .lifetime_amount_limit("0.10")
         .build()
         .unwrap()
-}
-
-async fn deliver(sender: &TestUser, receiver: &TestUser) {
-    let sent = sender
-        .sdk
-        .process_outbound_private_messages(
-            receiver.public_key.clone(),
-            receiver.receiver_path.clone(),
-        )
-        .await
-        .expect("processing the Allowance outbound queue should succeed");
-    assert!(!sent.sent.is_empty());
-    assert!(sent.failed.is_empty());
-
-    let received = receiver
-        .sdk
-        .receive_private_messages(sender.public_key.clone(), sender.receiver_path.clone())
-        .await
-        .expect("receiving Allowance messages should succeed");
-    assert!(!received.stream_item_ids.is_empty());
-    assert!(received.event_conflicts.is_empty());
 }
 
 async fn allowance(

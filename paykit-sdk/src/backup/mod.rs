@@ -196,7 +196,21 @@ impl ValidatedStorageState {
     }
 }
 
-/// Export SDK-managed state from storage.
+/// Refresh derived message classifications without restoring or resetting transport state.
+pub(crate) fn refresh_stored_message_classification(
+    tx: &mut dyn crate::storage::StorageTransaction,
+) -> Result<()> {
+    let mut state = tx.export_storage_state();
+    refresh_private_stream_classification(
+        &mut state.private_stream_items,
+        &mut state.event_dedup_records,
+        &mut state.receipt_access_records,
+    )?;
+    tx.replace_storage_state(ValidatedStorageState::new(state));
+    Ok(())
+}
+
+/// Export SDK-managed state without changing transport or payment state.
 pub async fn export_backup_state<S>(
     storage: &S,
     local_receiver_path: PaykitReceiverPath,
@@ -438,8 +452,8 @@ impl SdkBackupState {
             &payment_endpoint_reservations,
             &outbound_private_messages,
         )?;
-        let private_stream_items = unique_private_stream_items(self.private_stream_items)?;
-        let event_dedup_records = keyed_by_tuple(
+        let mut private_stream_items = unique_private_stream_items(self.private_stream_items)?;
+        let mut event_dedup_records = keyed_by_tuple(
             self.event_dedup_records,
             |record| {
                 (
@@ -450,7 +464,7 @@ impl SdkBackupState {
             },
             "Event dedupe",
         )?;
-        let receipt_access_records = keyed_by_tuple(
+        let mut receipt_access_records = keyed_by_tuple(
             self.receipt_access_records,
             |record| {
                 (
@@ -472,13 +486,10 @@ impl SdkBackupState {
             },
             "Receipt",
         )?;
-        validate_private_stream_items(&private_stream_items)?;
-        validate_event_dedup_records(&event_dedup_records, &private_stream_items)?;
-        validate_receipt_access_records(&receipt_access_records, &private_stream_items)?;
-        validate_required_private_stream_indexes(
-            &private_stream_items,
-            &event_dedup_records,
-            &receipt_access_records,
+        refresh_private_stream_classification(
+            &mut private_stream_items,
+            &mut event_dedup_records,
+            &mut receipt_access_records,
         )?;
         let expected_receipt_recipient = identity_state
             .as_ref()

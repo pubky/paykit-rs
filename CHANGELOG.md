@@ -9,6 +9,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Added
 
+- Payment Request conversion terms, actual-payment deadlines, recurring payee
+  quotes with inclusive validity intervals, and quote selection on Payment Proofs.
+  Rust, Swift and Kotlin expose the terms and immutable quote history.
+- An ERC-20 signed payment proof profile and interoperability vectors.
+
 - Added the V1 Allowance lifecycle across the Rust library, SDK runtime, and
   Swift/Kotlin bindings, including durable derivation, backup/restore, Event
   ID replay handling, and Encrypted Link recovery behavior.
@@ -29,6 +34,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   Reporting does not authorize payment, prove settlement, or change usage.
 
 ### Changed
+
+- **Protocol/API:** conversion/deadline terms and the
+  `paykit.payment_conversion_quote` event require support from both peers.
+  Callers must establish that support before opting in; the existing broad
+  receiver capabilities do not negotiate this extension. Old strict parsers
+  reject these terms. Request/proof initializers and event matches must be
+  updated with matching native bindings. No development-format migration is added.
+- Startup and backup restore refresh derived inbound parser metadata and add
+  newly recognized Event IDs to conflict detection while preserving raw evidence,
+  receipt history and transport state. Delivery recovery no longer hides earlier
+  Payment Proofs during request derivation.
 
 - **Breaking (Rust API):** `AllowanceAcceptance::new`,
   `AllowanceRejection::new`, `AllowanceEnd::withdrawal`, and

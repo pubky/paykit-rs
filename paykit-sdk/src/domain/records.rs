@@ -37,3 +37,11 @@ impl From<&paykit_lib::BillingPeriod> for BillingPeriodRecord {
         }
     }
 }
+
+impl TryFrom<&BillingPeriodRecord> for paykit_lib::BillingPeriod {
+    type Error = paykit_lib::PaykitError;
+
+    fn try_from(period: &BillingPeriodRecord) -> Result<Self, Self::Error> {
+        Self::new(period.starts_at.clone(), period.ends_at.clone())
+    }
+}

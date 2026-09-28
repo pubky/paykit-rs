@@ -35,6 +35,8 @@ pub enum PrivateMessageKind {
     PaymentRequestRejection,
     /// Payment Request Cancellation Event Message (`paykit.payment_request_cancellation`).
     PaymentRequestCancellation,
+    /// Recurring Payment Conversion Quote Event Message (`paykit.payment_conversion_quote`).
+    PaymentConversionQuote,
     /// Payment Proof Event Message (`paykit.payment_proof`).
     PaymentProof,
     /// Allowance Proposal Event Message (`paykit.allowance_proposal`).
@@ -58,6 +60,7 @@ impl PrivateMessageKind {
             Self::PaymentRequestRejection => "paykit.payment_request_rejection",
             Self::PaymentRequestCancellation => "paykit.payment_request_cancellation",
             Self::PaymentProof => "paykit.payment_proof",
+            Self::PaymentConversionQuote => "paykit.payment_conversion_quote",
             Self::AllowanceProposal => "paykit.allowance_proposal",
             Self::AllowanceAcceptance => "paykit.allowance_acceptance",
             Self::AllowanceRejection => "paykit.allowance_rejection",
@@ -75,6 +78,7 @@ impl PrivateMessageKind {
             "paykit.payment_request_rejection" => Some(Self::PaymentRequestRejection),
             "paykit.payment_request_cancellation" => Some(Self::PaymentRequestCancellation),
             "paykit.payment_proof" => Some(Self::PaymentProof),
+            "paykit.payment_conversion_quote" => Some(Self::PaymentConversionQuote),
             "paykit.allowance_proposal" => Some(Self::AllowanceProposal),
             "paykit.allowance_acceptance" => Some(Self::AllowanceAcceptance),
             "paykit.allowance_rejection" => Some(Self::AllowanceRejection),

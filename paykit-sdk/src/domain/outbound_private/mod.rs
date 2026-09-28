@@ -376,6 +376,7 @@ fn validate_outbound_private_message_body(kind: PrivateMessageKind, raw_json: &s
         | PrivateMessageKind::PaymentRequestAcceptance
         | PrivateMessageKind::PaymentRequestRejection
         | PrivateMessageKind::PaymentRequestCancellation
+        | PrivateMessageKind::PaymentConversionQuote
         | PrivateMessageKind::PaymentProof => {
             let message = private_application_message(kind, raw_json);
             require_valid_event_message(

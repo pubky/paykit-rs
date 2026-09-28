@@ -205,6 +205,14 @@ impl EncryptedLink {
             .await
     }
 
+    pub(crate) async fn send_payment_conversion_quote_message(
+        &mut self,
+        plaintext: &[u8],
+    ) -> Result<()> {
+        self.send_private_application_message_with_context(plaintext, "Payment Conversion Quote")
+            .await
+    }
+
     pub(crate) async fn send_allowance_message(&mut self, plaintext: &[u8]) -> Result<()> {
         self.send_private_application_message_with_context(plaintext, "Allowance Event Message")
             .await

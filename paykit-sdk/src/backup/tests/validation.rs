@@ -507,7 +507,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_metadata() {
 }
 
 #[tokio::test]
-async fn test_restore_backup_state_rejects_stale_private_stream_parse_status() {
+async fn test_restore_backup_state_refreshes_cached_parse_results() {
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
@@ -544,9 +544,13 @@ async fn test_restore_backup_state_rejects_stale_private_stream_parse_status() {
         next_private_stream_item_id: 2,
     };
 
-    let result = restore_backup_state(&storage, backup).await;
-
-    assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
+    restore_backup_state(&storage, backup).await.unwrap();
+    let restored = storage.snapshot().unwrap();
+    assert_eq!(
+        restored.private_stream_items[0].parse_status,
+        PrivateStreamParseStatus::Valid
+    );
+    assert!(restored.private_stream_items[0].parse_error.is_none());
 }
 
 #[tokio::test]

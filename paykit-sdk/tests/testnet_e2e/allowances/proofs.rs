@@ -73,6 +73,7 @@ fn submission(
     evidence: &str,
 ) -> PaymentProofSubmission {
     PaymentProofSubmission {
+        conversion_quote_id: None,
         allowance_id: Some(allowance_id.clone()),
         billing_period: period,
         payment_endpoint_identifier: PaymentEndpointIdentifier::new("btc-lightning-bolt11")

@@ -273,6 +273,9 @@ where
     pub async fn initialize(&self) -> Result<InitializationReport> {
         let _identity_guard = self.claim_identity_operation("initialize")?;
         let (session, state) = self.load_session_access_and_refresh_identity().await?;
+        self.storage
+            .transaction(crate::backup::refresh_stored_message_classification)
+            .await?;
         let live_session_available = session.is_some();
 
         Ok(InitializationReport {

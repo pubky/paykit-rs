@@ -342,6 +342,8 @@ An accepted Recurring Payment Request is the protocol object behind a product Su
   Sends method-specific proof data for one concrete payment execution. The requested amount is inherited from immutable Payment Request terms and is not repeated in the generic Payment Proof. The opaque `proof` object is method-specific and has no required generic discriminator in Paykit v0.2. The `payment_reference` must be copied from the accepted Payment Request; recurring proofs include a `BillingPeriod`.
 - `PaymentProof::validate_for_request(&request) -> Result<()>`
   Validates stateless proof/request correlation fields: matching Payment Request ID and Payment Reference, one-time vs recurring Billing Period presence, Billing Period shape when present, and accepted Payment Endpoint Identifier. Caller-managed application or wallet state must still decide whether the request is known, accepted, proposal-expired before acceptance, rejected, cancelled, already processed or settled, whether the sender role is allowed for the message kind, or whether a recurring Billing Period is eligible under the request recurrence.
+- `PaymentProof::validate_conversion_quote(&request, quote) -> Result<()>`
+  Also validates a selected quote's request, Billing Period and accepted payment asset. Wallets still verify the actual payment amount and time against the accepted terms and quote.
 
 Payment Request, Allowance, and Receipt Access messages use Event Message semantics. Use `EncryptedLink::receive_private_application_messages`, persist the returned raw stream messages, then parse/reroute them with stateless parsers such as `parse_payment_request_event_message`, `parse_allowance_event_message`, `parse_receipt_access_event_message`, and `parse_private_payment_list_json`.
 

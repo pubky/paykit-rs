@@ -8,7 +8,7 @@ Supersedes: `paykit-subscriptions-v0.1.md`
 
 Define the minimal Paykit protocol messages needed for a payee to ask a payer for payment over an Encrypted Link.
 
-Payment Requests are Paykit communication objects. They coordinate request, acceptance, rejection, cancellation, and optional proof messages. Paykit does not execute payments, schedule recurring jobs, manage wallet state, or validate payment-method-specific proofs.
+Payment Requests are Paykit communication objects. They coordinate request, acceptance, rejection, cancellation, conversion quotes, and optional proof messages. Paykit does not execute payments, schedule recurring jobs, manage wallet state, or validate payment-method-specific proofs.
 
 ## Scope
 
@@ -19,7 +19,7 @@ This spec defines:
 - identifiers and references used to correlate messages
 - request terms
 - one-time and recurring request shape
-- acceptance, rejection, cancellation, and proof messages
+- acceptance, rejection, cancellation, conversion quote, and proof messages
 - structural validation rules
 - minimum event handling expectations
 
@@ -50,6 +50,7 @@ In v0.2, Payment Requests are payee-initiated:
 - `paykit.payment_request_acceptance` MUST be sent by the payer.
 - `paykit.payment_request_rejection` MUST be sent by the payer.
 - `paykit.payment_proof` MUST be sent by the payer.
+- `paykit.payment_conversion_quote` MUST be sent by the payee.
 - `paykit.payment_request_cancellation` MAY be sent by either payer or payee.
 - Existing `paykit.receipt_access` messages MAY be sent by the payee to share an optional Paykit Receipt after payment.
 
@@ -193,10 +194,7 @@ Rules:
 - `amount.asset` is case-sensitive. When using the recommended Payment Endpoint
   Identifier convention, it SHOULD use the same lowercase asset string as the
   accepted endpoint identifier asset segment.
-- Paykit v0.2 does not define FX, conversion, display-currency, or cross-asset
-  payment semantics. When using the recommended Payment Endpoint Identifier
-  convention, implementations SHOULD choose accepted endpoints whose asset
-  segment matches `amount.asset`.
+- Optional `conversion` and `payment_deadline` terms follow [Payment conversion and deadlines](payment-conversion.md). Without conversion terms, cross-asset policy remains with the applications.
 - `payment_reference` is required and MUST follow Payment Reference rules.
 - `proposal_expires_at` is required and MUST be either `null` or an RFC3339 UTC timestamp using the `Z` suffix.
 - `proposal_expires_at` is a proposal actionability deadline evaluated against
@@ -426,6 +424,10 @@ Validation rules:
   cancellation.
 - `reason` is optional and SHOULD be omitted when absent. If present, it MUST be a string; `null` is invalid.
 
+## paykit.payment_conversion_quote
+
+A payee-issued Event Message supplies immutable rates for one accepted recurring Billing Period. Its Event ID is the quote identifier. New quotes preserve earlier quotes; see [Payment conversion and deadlines](payment-conversion.md) for wire shape, role, expiry and proof-correlation rules.
+
 ## paykit.payment_proof
 
 Carries method-specific evidence for one payment execution.
@@ -487,6 +489,7 @@ Validation rules:
 - Manual payments MUST omit `allowance_id`. Automatic attribution MUST come
   from the payer's retained execution/reservation history, including when the
   Allowance has since ended, expired, or been replaced for future periods.
+- Optional `conversion_quote_id` selects the immutable recurring quote used for payment; [conversion rules](payment-conversion.md) define when it is required.
 - `proof` MUST be a JSON object. Its internal fields are method-specific and are
   not interpreted by Paykit v0.2.
 
@@ -617,9 +620,11 @@ Implementations MAY allow public reusable endpoint details by local policy, but 
 
 The `payment_reference` comes from the accepted Payment Request, not from the selected Payment Endpoint publication or Private Payment List.
 
-Paykit v0.2 does not define FX, conversion, or cross-asset payment semantics. Implementations SHOULD choose endpoints whose Payment Endpoint Identifier asset segment matches `amount.asset` when using the recommended identifier convention. If an implementation accepts a different asset through local wallet or payment-processor policy, conversion and settlement semantics are outside Paykit.
+For agreed cross-asset prices, use [Payment conversion and deadlines](payment-conversion.md). With no conversion terms, applications own cross-asset policy and may decline conversion. Same-asset payment needs no rate.
 
 Payment-method-specific code is responsible for deciding whether selected endpoint details are reusable or payment-specific. If the selected endpoint details are single-use, expired, already consumed, or otherwise stale, the payer MUST NOT execute until fresh usable details are available.
+
+The [ERC-20 Payment Proof profile](erc20-payment-proofs.md) defines interoperable request-bound evidence for direct token transfers. Generic Paykit code does not verify on-chain settlement.
 
 ## Receipts for Payment Requests
 

@@ -8,6 +8,7 @@ mod harness;
 
 mod allowances;
 mod encrypted_links;
+mod payment_conversion;
 mod private_lists;
 mod profiles;
 mod public_endpoints;

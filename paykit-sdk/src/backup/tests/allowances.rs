@@ -113,7 +113,7 @@ async fn test_restore_allowance_current_format_roundtrips_without_reclassificati
 }
 
 #[tokio::test]
-async fn test_restore_allowance_rejects_stale_unknown_kind_metadata_atomically() {
+async fn test_restore_reclassifies_unknown_events_and_rebuilds_indexes() {
     let mut backup = current_backup(
         &public_key(),
         vec![allowance_event_json(
@@ -127,7 +127,17 @@ async fn test_restore_allowance_rejects_stale_unknown_kind_metadata_atomically()
     item.parse_status = PrivateStreamParseStatus::UnknownKind;
     item.parse_error = None;
 
-    assert_rejected_without_destination_changes(backup, "stale known kind metadata").await;
+    backup.event_dedup_records.clear();
+    let raw = backup.private_stream_items[0].raw_json.clone();
+    let storage = InMemoryStorage::new();
+    restore_backup_state(&storage, backup).await.unwrap();
+    let restored = storage.snapshot().unwrap();
+    assert_eq!(restored.private_stream_items[0].raw_json, raw);
+    assert_eq!(
+        restored.private_stream_items[0].parse_status,
+        PrivateStreamParseStatus::Valid
+    );
+    assert_eq!(restored.event_dedup_records.len(), 1);
 }
 
 #[tokio::test]
@@ -386,4 +396,46 @@ async fn test_restore_wrong_receiver_receipt_rejects_access_index_atomically() {
         "location does not match counterparty receiver",
     )
     .await;
+}
+
+#[tokio::test]
+async fn test_classification_refresh_preserves_receipt_evidence_and_cross_kind_conflicts() {
+    let peer = public_key();
+    let receipt = crate::test_utils::receipt_access_json(SHARED_EVENT_ID, &receiver_path());
+    let raw = allowance_event_json("paykit.allowance_proposal", SHARED_EVENT_ID);
+    let original = current_backup(&peer, vec![receipt, raw.clone(), raw]).await;
+    let mut backup = original.clone();
+    for item in &mut backup.private_stream_items[1..] {
+        item.known_paykit_kind = None;
+        item.parse_status = PrivateStreamParseStatus::UnknownKind;
+        item.parse_error = None;
+    }
+    backup.event_dedup_records[0]
+        .conflicting_stream_item_ids
+        .clear();
+    let restored = InMemoryStorage::new();
+    restore_backup_state(&restored, backup.clone())
+        .await
+        .unwrap();
+    let actual = export_backup_state(&restored, receiver_path())
+        .await
+        .unwrap();
+    assert_eq!(actual, original);
+
+    // Startup uses the same refresh without applying restore's transport recovery policy.
+    let mut state = restored.snapshot().unwrap();
+    state.private_stream_items = backup.private_stream_items;
+    state
+        .event_dedup_records
+        .values_mut()
+        .for_each(|record| record.conflicting_stream_item_ids.clear());
+    let (refreshed, _) = crate::storage::run_storage_state_transaction(
+        state,
+        Box::new(|tx| {
+            refresh_stored_message_classification(tx)?;
+            Ok(Box::new(()))
+        }),
+    )
+    .unwrap();
+    assert_eq!(refreshed, restored.snapshot().unwrap());
 }

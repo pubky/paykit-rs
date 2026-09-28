@@ -422,10 +422,19 @@ Metadata.
   payment.
 - `parse_payment_request_event_message(message)`: parse a raw Private
   Application Message as a Payment Request event when applicable.
+- `send_payment_conversion_quote(link, quote)`: send immutable recurring rates.
 - `serialize_payment_request_event(event)`: serialize a Payment Request event
   so SDK/runtime code can persist the outbound payload before sending.
 - `PaymentProof::validate_for_request(request)`: validate stateless proof and
   request correlation fields.
+- `PaymentProof::validate_conversion_quote(request, quote)`: also validate the
+  selected quote's request, Billing Period and accepted payment asset.
+
+Payment Requests can carry exact conversion rates and payment deadlines. Recurring
+requests can opt into payee-issued quotes for individual Billing Periods. See
+[Payment conversion and deadlines](specs/payment-conversion.md) and the
+[ERC-20 proof profile](specs/erc20-payment-proofs.md). These are communication
+terms; wallets remain responsible for payment execution and verification.
 
 ### Allowances
 
