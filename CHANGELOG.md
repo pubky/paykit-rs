@@ -7,8 +7,71 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+
+- Payment Request conversion terms, actual-payment deadlines, recurring payee
+  quotes with inclusive validity intervals, and quote selection on Payment Proofs.
+  Rust, Swift and Kotlin expose the terms and immutable quote history.
+- An ERC-20 signed payment proof profile and interoperability vectors.
+
+- Added the V1 Allowance lifecycle across the Rust library, SDK runtime, and
+  Swift/Kotlin bindings, including durable derivation, backup/restore, Event
+  ID replay handling, and Encrypted Link recovery behavior.
+- Added the Private Message Kinds `paykit.allowance_proposal`,
+  `paykit.allowance_acceptance`, `paykit.allowance_rejection`, and
+  `paykit.allowance_end` (Event Message semantics). `paykit-sdk` exposes
+  `list_allowances`, `allowance_record`, `propose_allowance`,
+  `accept_allowance`, `reject_allowance`, and `end_allowance`; the FFI, Swift,
+  and Kotlin bindings expose the same surface with `get_allowance` in place of
+  `allowance_record`, plus the Allowance record, terms, and state types
+  documented in `specs/allowances.md`.
+- Documented wallet integration requirements for using accepted Allowances
+  with ordinary one-time and Recurring Payment Requests.
+- Added optional `allowance_id` reporting to Payment Proofs and their SDK and
+  binding records. Rust callers can use `PaymentProof::with_allowance_id` or
+  `PaymentProofSubmission` with `submit_payment_proof_submission`; the existing
+  SDK `submit_payment_proof` method remains available without attribution.
+  Reporting does not authorize payment, prove settlement, or change usage.
+
 ### Changed
-- Upgrade Pubky to 0.12 and Pubky Noise to 0.1.0-rc10. Encrypted Link transport packets authenticate the message length and padding while retaining the 1000-byte application payload limit. The transport format is incompatible with earlier Noise releases; communicating peers must upgrade together.
+
+- Upgrade Pubky to 0.12 and Pubky Noise to 0.1.0-rc10. Encrypted Link
+  transport packets authenticate the message length and padding while retaining
+  the 1000-byte application payload limit. The transport format is incompatible
+  with earlier Noise releases; communicating peers must upgrade together.
+- **Protocol/API:** conversion/deadline terms and the
+  `paykit.payment_conversion_quote` event require support from both peers.
+  Callers must establish that support before opting in; the existing broad
+  receiver capabilities do not negotiate this extension. Old strict parsers
+  reject these terms. Request/proof initializers and event matches must be
+  updated with matching native bindings. No development-format migration is added.
+- Startup and backup restore refresh derived inbound parser metadata and add
+  newly recognized Event IDs to conflict detection while preserving raw evidence,
+  receipt history and transport state. Delivery recovery no longer hides earlier
+  Payment Proofs during request derivation.
+
+- **Breaking (Rust API):** `AllowanceAcceptance::new`,
+  `AllowanceRejection::new`, `AllowanceEnd::withdrawal`, and
+  `AllowanceEnd::accepted` now return `Result` and reject lifecycle messages
+  that reuse their causal Event IDs.
+- **Wire compatibility:** Payment Proofs carrying `allowance_id` are rejected
+  by older closed-world readers. This is a coordinated pre-release schema
+  revision, not a backward-compatible extension. The field is omitted when
+  attribution is absent; explicit `null` is invalid on the wire.
+- **Breaking (record construction):** Rust `PaymentProof` and SDK
+  `PaymentProofRecord` literals, plus Swift/Kotlin proof submission and result
+  records, include optional Allowance attribution.
+- Removed backup migration for unreleased Allowance development formats.
+  Restore rejects stale stream metadata and missing indexes without replacing
+  existing state; current-format raw unsupported evidence remains retained.
+
+### Fixed
+
+- Retained repeated and corrective one-time Payment Proofs after `ProofSubmitted`
+  when their Acceptance is present. A repeated proof does not represent another
+  payment, and reuse of an Event ID with changed bytes still fails closed.
+- Kept the first crossing Payment Request Acceptance after payee cancellation;
+  a second Acceptance now invalidates history without replacing the first.
 
 ## [0.1.0-rc54] - 2026-09-14
 
@@ -22,6 +85,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Changed
 - Make `PrivateStreamIntakeReport.receive_batch_id` optional because an empty receive no longer allocates a batch.
+
 
 ## [0.1.0-rc52] - 2026-09-10
 

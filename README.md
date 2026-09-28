@@ -10,7 +10,7 @@
 Paykit helps apps discover where someone can receive a payment through their
 Pubky identity. As a meta payment protocol, it also provides a layer for
 payment-related metadata such as Payment Requests, Payment Proofs, receipts,
-and Receipt Access.
+Receipt Access, and Allowances.
 
 A payee can publish public payment details under their Pubky public key, or
 share a Private Payment List with another person over an Encrypted Link. Paykit
@@ -71,6 +71,12 @@ path domains.
 - **Payment Request**: a private protocol object where a payee asks a payer for
   one-time or recurring payment. Its lifecycle messages use Event Message
   semantics.
+- **Allowance**: shared, scoped permission from an Allower to an Allowee that
+  the Allower's wallet may use to handle qualifying Payment Requests
+  automatically. It is not a balance, payment, or wallet-local setting.
+- **Allower**: the party granting an Allowance and controlling the funds.
+- **Allowee**: the authenticated Payment Request sender whose qualifying
+  requests may use the Allowance.
 - **Payment Amount**: decimal `value` text plus an `asset`, used by Payment
   Requests and optional Receipt details.
 - **Payment Proof**: method-specific evidence for one concrete payment
@@ -156,6 +162,42 @@ A Payment Endpoint Payload may also contain a static receiving detail such as an
 on-chain address, reusable offer, bank account detail, payment tag, or similar
 handle.
 
+## Allowances
+
+Allowances add a consent lifecycle to ordinary Payment Requests without adding
+an Allowance-specific request or payment message. Either party may propose
+immutable terms on an exact Encrypted Link, the recipient may accept or reject,
+and a proposal sender may withdraw while either party may end accepted
+authority. The SDK/runtime is responsible for durably deriving these shared
+lifecycle views across restart, backup restore, Event ID replay, and Encrypted
+Link recovery.
+
+A one-time or Recurring Payment Request remains unchanged: it carries no
+Allowance ID and follows the normal acceptance, cancellation, Payment Proof,
+endpoint-resolution, and scheduling rules. At the first automatic-handling
+decision, a wallet may select exactly one matching accepted Allowance using
+local priority or explicit user choice. A payment cannot pool multiple
+Allowances. Without a selection, the ordinary manual path remains available.
+
+Automatic payment remains a wallet decision. The protocol requires a monetary
+ceiling or expiry in every Allowance. Temporary failures may defer handling;
+explicit manual-only decisions remain sticky. Recurring requests retain their
+selected Allowance unless the user authorizes a durable reassociation of future
+unpaid Billing Periods. Existing payment and reservation history survives that
+change, preventing duplicate payment across old and replacement Allowances.
+Payment Proofs may optionally identify the Allowance actually used for an
+execution. This is informational attribution; proofs do not update usage
+accounting. The optional field requires peers that support the coordinated
+pre-release wire extension.
+
+The specification assigns exact matching and limit math to stateless Library
+helpers and durable selection, occurrence exclusion, reservation accounting,
+and recovery to the SDK/runtime. Wallets retain priority rules, consent,
+scheduling, payment-method validation, execution, and outcome reconciliation.
+These are component requirements, not a claim that the protocol-only change
+implements execution support. See [the Allowances specification](specs/allowances.md)
+for the eligibility, durability, and recovery rules.
+
 ## Receipts
 
 Paykit receipts are encrypted before storage. The plaintext Receipt is created
@@ -210,9 +252,10 @@ before executing a payment through their existing infrastructure.
 `paykit-sdk` is the Rust runtime layer for SDK-managed local
 state such as endpoint sync, Encrypted Link snapshots, private stream intake,
 Private Payment Lists, Paykit Profiles, Paykit Blob helpers, read-only Pubky
-app profile/follows helpers, local Contact Records, and contact payment resolution. Payment
-execution, settlement detection, product UI, and platform session storage
-remain with the integrating application and its adapters.
+app profile/follows helpers, local Contact Records, contact payment resolution,
+Payment Requests, and Allowance lifecycle views. Payment execution, Allowance
+matching and usage, settlement detection, product UI, and platform session
+storage remain with the integrating application and its adapters.
 
 Since `0.1.0-rc55`, `PubkySessionBootstrap::republish_identity(public_key)`
 (`republishIdentity(publicKey)` in Swift and Kotlin) can rebroadcast an existing
@@ -379,10 +422,39 @@ Metadata.
   payment.
 - `parse_payment_request_event_message(message)`: parse a raw Private
   Application Message as a Payment Request event when applicable.
+- `send_payment_conversion_quote(link, quote)`: send immutable recurring rates.
 - `serialize_payment_request_event(event)`: serialize a Payment Request event
   so SDK/runtime code can persist the outbound payload before sending.
 - `PaymentProof::validate_for_request(request)`: validate stateless proof and
   request correlation fields.
+- `PaymentProof::validate_conversion_quote(request, quote)`: also validate the
+  selected quote's request, Billing Period and accepted payment asset.
+
+Payment Requests can carry exact conversion rates and payment deadlines. Recurring
+requests can opt into payee-issued quotes for individual Billing Periods. See
+[Payment conversion and deadlines](specs/payment-conversion.md) and the
+[ERC-20 proof profile](specs/erc20-payment-proofs.md). These are communication
+terms; wallets remain responsible for payment execution and verification.
+
+### Allowances
+
+- `AllowanceTerms::builder(asset)`: construct validated immutable Allowance
+  Terms.
+- `AllowanceProposal`, `AllowanceAcceptance`, `AllowanceRejection`, and
+  `AllowanceEnd`: typed lifecycle messages carried by `AllowanceEvent`.
+- `parse_allowance_event_message(message)`: parse a raw Private Application
+  Message when its kind is recognized as an Allowance event. Malformed
+  recognized messages retain their raw payload and validation result.
+- `serialize_allowance_event(event)`: serialize an Allowance event for durable
+  outbound storage before sending.
+- `send_allowance_proposal(link, proposal)` /
+  `send_allowance_acceptance(link, acceptance)` /
+  `send_allowance_rejection(link, rejection)` /
+  `send_allowance_end(link, end)`: send typed lifecycle events over the exact
+  authenticated Encrypted Link.
+
+These `paykit-lib` helpers are stateless. Use the SDK for durable lifecycle
+views and commands; the wallet owns automatic payment decisions and execution.
 
 ### Receipts
 

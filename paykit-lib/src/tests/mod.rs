@@ -5,8 +5,10 @@ use pubky::{ClientId, Pubky, PubkySession, PublicKey};
 use pubky_testnet::{docker_postgres::DockerPostgres, pubky::Keypair, EphemeralTestnet};
 use tokio::sync::{Mutex as TokioMutex, OnceCell};
 
+mod allowance;
 mod encrypted_link;
 mod event_id;
+mod payment_conversion;
 mod payment_endpoint;
 mod payment_request;
 mod payment_request_properties;
@@ -305,3 +307,5 @@ async fn receive_payment_request_events_for_test(
         .filter_map(parse_payment_request_event_message)
         .collect()
 }
+
+mod validated_payment_request_types;

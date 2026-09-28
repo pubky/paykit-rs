@@ -29,8 +29,8 @@ fn receipt_access_json(access: &ReceiptAccess) -> String {
         object.insert(
             "billing_period".to_string(),
             serde_json::json!({
-                "starts_at": period.starts_at,
-                "ends_at": period.ends_at,
+                "starts_at": period.starts_at(),
+                "ends_at": period.ends_at(),
             }),
         );
     }

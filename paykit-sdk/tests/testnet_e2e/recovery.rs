@@ -1,12 +1,9 @@
-use chrono::Utc;
-use paykit_sdk::{
-    LinkedPeerState, PaykitReceiverPath, PaykitSdkError, PrivatePaymentListReservationUpdate,
-    PubkyPublicKey, StorageAdapter,
-};
+use paykit_sdk::{LinkedPeerState, PaykitSdkError, PrivatePaymentListReservationUpdate};
 use std::time::{Duration, Instant};
 
 use crate::harness::{
-    drive_link_to_linked, linked_two_party, private_receiving_detail, two_party, TestUser,
+    drive_link_to_linked, linked_two_party, private_receiving_detail, two_party,
+    wait_until_marker_is_newer_than_observer_checkpoint,
 };
 
 #[tokio::test]
@@ -192,45 +189,6 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
         republished.cleared[0].outbound_message_id,
         sent.cleared[0].outbound_message_id
     );
-}
-
-async fn wait_until_marker_is_newer_than_observer_checkpoint(
-    observer: &TestUser,
-    counterparty: &PubkyPublicKey,
-    counterparty_receiver_path: &PaykitReceiverPath,
-) {
-    let cutoff = observer
-        .storage
-        .transaction({
-            let counterparty = counterparty.clone();
-            let counterparty_receiver_path = counterparty_receiver_path.clone();
-            move |tx| {
-                let link_checkpoint = tx
-                    .encrypted_link_state(&counterparty, &counterparty_receiver_path)
-                    .and_then(|state| {
-                        (state.link_snapshot.is_some() || state.handshake_snapshot.is_some())
-                            .then_some(state.checkpointed_at)
-                    });
-                let receive_checkpoint = tx
-                    .linked_peer(&counterparty, &counterparty_receiver_path)
-                    .and_then(|peer| peer.last_private_receive_at);
-                Ok(link_checkpoint.max(receive_checkpoint))
-            }
-        })
-        .await
-        .expect("observer checkpoint lookup should succeed");
-
-    let Some(cutoff) = cutoff else {
-        return;
-    };
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Utc::now().timestamp() <= cutoff.timestamp() {
-        assert!(
-            Instant::now() < deadline,
-            "test clock did not advance past observer checkpoint"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
 }
 
 #[tokio::test]

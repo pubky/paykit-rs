@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use paykit_lib::{
-    BillingPeriod, PaymentAmount, PaymentEndpointIdentifier, PaymentReference, PaymentRequestTerms,
-    Recurrence, RecurrenceUnit,
+    AllowanceId, BillingPeriod, ConversionRate, EventId, PaymentAmount, PaymentConversion,
+    PaymentDeadline, PaymentReference, PaymentRequestTerms, Recurrence, RecurrenceUnit,
 };
 use paykit_sdk::{
-    AmountRecord, BillingPeriodRecord, PaymentProofRecord, PaymentRequestFilter,
-    PaymentRequestLifecycleState, PaymentRequestLocalRole, PaymentRequestRecord,
-    PaymentRequestRecurrenceRecord, PaymentRequestTermsRecord, PubkyPublicKey,
+    AmountRecord, BillingPeriodRecord, PaymentConversionQuoteRecord, PaymentProofRecord,
+    PaymentProofSubmission, PaymentRequestFilter, PaymentRequestLifecycleState,
+    PaymentRequestLocalRole, PaymentRequestRecord, PaymentRequestRecurrenceRecord,
+    PaymentRequestTermsRecord, PubkyPublicKey,
 };
 
 use crate::{
@@ -21,7 +22,8 @@ use crate::conversions_common::parse_endpoint_identifier;
 pub(super) use crate::conversions_common::parse_payment_request_id;
 
 use super::{
-    FfiBillingPeriod, FfiPaymentProofRecord, FfiPaymentProofSubmission, FfiPaymentReference,
+    FfiBillingPeriod, FfiConversionRate, FfiPaymentConversion, FfiPaymentConversionQuoteRecord,
+    FfiPaymentDeadline, FfiPaymentProofRecord, FfiPaymentProofSubmission, FfiPaymentReference,
     FfiPaymentRequestAmount, FfiPaymentRequestFilter, FfiPaymentRequestLifecycleState,
     FfiPaymentRequestLocalRole, FfiPaymentRequestRecord, FfiPaymentRequestRecurrence,
     FfiPaymentRequestTerms,
@@ -133,10 +135,7 @@ impl TryFrom<FfiBillingPeriod> for BillingPeriod {
     type Error = PaykitFfiError;
 
     fn try_from(value: FfiBillingPeriod) -> Result<Self, Self::Error> {
-        Ok(Self {
-            starts_at: value.starts_at,
-            ends_at: value.ends_at,
-        })
+        Self::new(value.starts_at, value.ends_at).map_err(|err| validation_error(err.to_string()))
     }
 }
 
@@ -156,13 +155,14 @@ impl TryFrom<FfiPaymentRequestRecurrence> for Recurrence {
     type Error = PaykitFfiError;
 
     fn try_from(value: FfiPaymentRequestRecurrence) -> Result<Self, Self::Error> {
-        Ok(Self {
+        Self::try_from(paykit_lib::RecurrenceConfig {
             every: value.every,
             unit: parse_recurrence_unit(&value.unit)?,
             starts_at: value.starts_at,
             anchor: value.anchor,
             ends_at: value.ends_at,
         })
+        .map_err(|err| validation_error(err.to_string()))
     }
 }
 
@@ -170,20 +170,24 @@ impl TryFrom<FfiPaymentRequestTerms> for PaymentRequestTerms {
     type Error = PaykitFfiError;
 
     fn try_from(value: FfiPaymentRequestTerms) -> Result<Self, Self::Error> {
-        Ok(Self {
-            amount: PaymentAmount::new(value.amount.value, value.amount.asset)
+        Self::builder(
+            PaymentAmount::new(value.amount.value, value.amount.asset)
                 .map_err(|err| validation_error(err.to_string()))?,
-            payment_reference: PaymentReference::new(value.payment_reference.export_text())
+            PaymentReference::new(value.payment_reference.export_text())
                 .map_err(|err| validation_error(err.to_string()))?,
-            proposal_expires_at: value.proposal_expires_at,
-            recurrence: value.recurrence.map(TryInto::try_into).transpose()?,
-            accepted_payment_endpoint_identifiers: value
+            value
                 .accepted_payment_endpoint_identifiers
                 .into_iter()
                 .map(parse_endpoint_identifier)
                 .collect::<Result<Vec<_>, _>>()?,
-            metadata: value.metadata.parse_map("Payment Request metadata")?,
-        })
+        )
+        .proposal_expires_at(value.proposal_expires_at)
+        .recurrence(value.recurrence.map(TryInto::try_into).transpose()?)
+        .conversion(value.conversion.map(Into::into))
+        .payment_deadline(value.payment_deadline.map(Into::into))
+        .metadata(value.metadata.parse_map("Payment Request metadata")?)
+        .build()
+        .map_err(|err| validation_error(err.to_string()))
     }
 }
 
@@ -199,6 +203,8 @@ impl TryFrom<PaymentRequestTermsRecord> for FfiPaymentRequestTerms {
             proposal_expires_at: value.proposal_expires_at,
             recurrence: value.recurrence.map(Into::into),
             accepted_payment_endpoint_identifiers: value.accepted_payment_endpoint_identifiers,
+            conversion: value.conversion.map(Into::into),
+            payment_deadline: value.payment_deadline.map(Into::into),
             metadata: FfiPrivateJsonObject::from_json_map(
                 "Payment Request metadata",
                 &value.metadata,
@@ -221,6 +227,8 @@ impl TryFrom<PaymentProofRecord> for FfiPaymentProofRecord {
             )),
             billing_period: value.billing_period.map(Into::into),
             payment_endpoint_identifier: value.payment_endpoint_identifier,
+            allowance_id: value.allowance_id,
+            conversion_quote_id: value.conversion_quote_id,
             proof: FfiPrivateJsonObject::from_json_map("Payment Proof proof", &value.proof)?,
             recorded_at: value.recorded_at.to_rfc3339(),
         })
@@ -248,6 +256,11 @@ impl TryFrom<PaymentRequestRecord> for FfiPaymentRequestRecord {
             rejected_outbound_status: value.rejected_outbound_status.map(Into::into),
             canceled_event_id: value.canceled_event_id,
             canceled_outbound_status: value.canceled_outbound_status.map(Into::into),
+            conversion_quotes: value
+                .conversion_quotes
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             payment_proofs: value
                 .payment_proofs
                 .into_iter()
@@ -262,13 +275,7 @@ impl TryFrom<PaymentRequestRecord> for FfiPaymentRequestRecord {
     }
 }
 
-pub(super) struct ParsedPaymentProofSubmission {
-    pub(super) billing_period: Option<BillingPeriod>,
-    pub(super) payment_endpoint_identifier: PaymentEndpointIdentifier,
-    pub(super) proof: serde_json::Map<String, serde_json::Value>,
-}
-
-impl TryFrom<FfiPaymentProofSubmission> for ParsedPaymentProofSubmission {
+impl TryFrom<FfiPaymentProofSubmission> for PaymentProofSubmission {
     type Error = PaykitFfiError;
 
     fn try_from(value: FfiPaymentProofSubmission) -> Result<Self, Self::Error> {
@@ -277,9 +284,27 @@ impl TryFrom<FfiPaymentProofSubmission> for ParsedPaymentProofSubmission {
             payment_endpoint_identifier: parse_endpoint_identifier(
                 value.payment_endpoint_identifier,
             )?,
+            allowance_id: value
+                .allowance_id
+                .map(parse_proof_allowance_id)
+                .transpose()?,
+            conversion_quote_id: value
+                .conversion_quote_id
+                .map(EventId::new)
+                .transpose()
+                .map_err(|_| validation_error("invalid conversion quote Event ID"))?,
             proof: value.proof.parse_map("Payment Proof proof")?,
         })
     }
+}
+
+fn parse_proof_allowance_id(value: String) -> Result<AllowanceId, PaykitFfiError> {
+    let invalid = || validation_error("Payment Proof Allowance ID must be a canonical UUID-v4");
+    let id = AllowanceId::new(&value).map_err(|_| invalid())?;
+    if id.as_str() != value {
+        return Err(invalid());
+    }
+    Ok(id)
 }
 
 pub(super) fn payment_request_records_to_ffi(
@@ -303,5 +328,76 @@ fn parse_recurrence_unit(value: &str) -> Result<RecurrenceUnit, PaykitFfiError> 
         _ => Err(validation_error(format!(
             "unsupported Recurrence unit '{value}'"
         ))),
+    }
+}
+
+impl From<FfiConversionRate> for ConversionRate {
+    fn from(value: FfiConversionRate) -> Self {
+        Self {
+            asset: value.asset,
+            value: value.value,
+        }
+    }
+}
+
+impl From<ConversionRate> for FfiConversionRate {
+    fn from(value: ConversionRate) -> Self {
+        Self {
+            asset: value.asset,
+            value: value.value,
+        }
+    }
+}
+
+impl From<FfiPaymentConversion> for PaymentConversion {
+    fn from(value: FfiPaymentConversion) -> Self {
+        match value {
+            FfiPaymentConversion::Fixed { rates } => Self::Fixed {
+                rates: rates.into_iter().map(Into::into).collect(),
+            },
+            FfiPaymentConversion::PerPeriod => Self::PerPeriod {},
+        }
+    }
+}
+
+impl From<PaymentConversion> for FfiPaymentConversion {
+    fn from(value: PaymentConversion) -> Self {
+        match value {
+            PaymentConversion::Fixed { rates } => Self::Fixed {
+                rates: rates.into_iter().map(Into::into).collect(),
+            },
+            PaymentConversion::PerPeriod {} => Self::PerPeriod,
+        }
+    }
+}
+
+impl From<FfiPaymentDeadline> for PaymentDeadline {
+    fn from(value: FfiPaymentDeadline) -> Self {
+        match value {
+            FfiPaymentDeadline::At { timestamp } => Self::At { timestamp },
+            FfiPaymentDeadline::PeriodStart { seconds } => Self::PeriodStart { seconds },
+        }
+    }
+}
+
+impl From<PaymentDeadline> for FfiPaymentDeadline {
+    fn from(value: PaymentDeadline) -> Self {
+        match value {
+            PaymentDeadline::At { timestamp } => Self::At { timestamp },
+            PaymentDeadline::PeriodStart { seconds } => Self::PeriodStart { seconds },
+        }
+    }
+}
+
+impl From<PaymentConversionQuoteRecord> for FfiPaymentConversionQuoteRecord {
+    fn from(value: PaymentConversionQuoteRecord) -> Self {
+        Self {
+            event_id: value.event_id,
+            billing_period: value.billing_period.into(),
+            rates: value.rates.into_iter().map(Into::into).collect(),
+            valid_from: value.valid_from,
+            expires_at: value.expires_at,
+            outbound_status: value.outbound_status.map(Into::into),
+        }
     }
 }

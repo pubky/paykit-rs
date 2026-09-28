@@ -1,4 +1,7 @@
-use crate::{PaykitError, Result};
+use crate::{
+    validation::{validate_asset_text, validate_decimal_text},
+    Result,
+};
 
 /// Amount of value in a payment flow, expressed as decimal text plus asset.
 ///
@@ -10,72 +13,55 @@ use crate::{PaykitError, Result};
 /// non-empty and contain no control characters. Beyond these checks, Paykit
 /// defines no range, precision, scale, normalization, or asset-registry policy.
 ///
-/// [`PaymentAmount::new`] validates only during construction. Direct struct
-/// construction and later field mutation are unchecked.
+/// Fields are private so validation survives construction and cloning.
+///
+/// ```compile_fail,E0616
+/// let mut amount = paykit_lib::PaymentAmount::new("1", "btc").unwrap();
+/// amount.value = "invalid".into();
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaymentAmount {
-    /// Decimal string, such as `10.00`. Mutation is not revalidated.
-    pub value: String,
-    /// Asset code or unit, such as `usd`, `btc`, or `usdt`. Mutation is not revalidated.
-    pub asset: String,
+    /// Decimal string, such as `10.00`.
+    value: String,
+    /// Asset code or unit, such as `usd`, `btc`, or `usdt`.
+    asset: String,
 }
 
 impl PaymentAmount {
+    /// Access the preserved decimal spelling.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+    /// Access the exact asset text.
+    pub fn asset(&self) -> &str {
+        &self.asset
+    }
+
     /// Create a Payment Amount after validating its value and asset fields.
     pub fn new(value: impl Into<String>, asset: impl Into<String>) -> Result<Self> {
-        let amount = Self {
-            value: value.into(),
-            asset: asset.into(),
-        };
-        amount.validate_with_label("Payment Amount")?;
+        Self::new_with_label(value.into(), asset.into(), "Payment Amount")
+    }
+
+    pub(crate) fn new_with_label(
+        value: String,
+        asset: String,
+        label: &'static str,
+    ) -> Result<Self> {
+        let amount = Self { value, asset };
+        amount.validate_with_label(label)?;
         Ok(amount)
     }
 
     pub(crate) fn validate_with_label(&self, label: &'static str) -> Result<()> {
-        validate_decimal(&self.value, label)?;
-        validate_text(&self.asset, "asset")
+        validate_decimal_text(&self.value, format_args!("{label}.value"))?;
+        validate_asset_text(&self.asset, "Payment Amount asset")
     }
-}
-
-fn validate_decimal(value: &str, label: &'static str) -> Result<()> {
-    let mut seen_dot = false;
-    let mut seen_digit = false;
-    for ch in value.chars() {
-        if ch == '.' && !seen_dot {
-            seen_dot = true;
-        } else if ch.is_ascii_digit() {
-            seen_digit = true;
-        } else {
-            return Err(PaykitError::Validation(format!(
-                "{label}.value must be a decimal string"
-            )));
-        }
-    }
-    if !seen_digit {
-        return Err(PaykitError::Validation(format!(
-            "{label}.value must contain at least one digit"
-        )));
-    }
-    Ok(())
-}
-
-fn validate_text(value: &str, field: &'static str) -> Result<()> {
-    if value.is_empty() {
-        return Err(PaykitError::Validation(format!(
-            "Payment Amount {field} must not be empty"
-        )));
-    }
-    if value.chars().any(char::is_control) {
-        return Err(PaykitError::Validation(format!(
-            "Payment Amount {field} must not contain control characters"
-        )));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PaykitError;
 
     #[test]
     fn payment_amount_accepts_decimal_value_and_asset() {

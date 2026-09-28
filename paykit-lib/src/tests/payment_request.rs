@@ -27,20 +27,16 @@ fn request_id() -> PaymentRequestId {
 }
 
 fn payment_request_terms() -> PaymentRequestTerms {
-    PaymentRequestTerms {
-        amount: PaymentAmount {
-            value: "0.001".to_string(),
-            asset: "btc".to_string(),
-        },
-        payment_reference: PaymentReference::new("invoice-2026-0001").unwrap(),
-        proposal_expires_at: Some("2026-06-01T00:00:00Z".to_string()),
-        recurrence: None,
-        accepted_payment_endpoint_identifiers: vec![PaymentEndpointIdentifier::new(
-            "btc-lightning-bolt11",
-        )
-        .unwrap()],
-        metadata: object(json!({"label": "test invoice"})),
-    }
+    PaymentRequestTerms::builder(
+        PaymentAmount::new("0.001".to_string(), "btc".to_string()).unwrap(),
+        PaymentReference::new("invoice-2026-0001").unwrap(),
+        vec![PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap()],
+    )
+    .proposal_expires_at(Some("2026-06-01T00:00:00Z".to_string()))
+    .recurrence(None)
+    .metadata(object(json!({"label": "test invoice"})))
+    .build()
+    .unwrap()
 }
 
 fn payment_request() -> PaymentRequest {
@@ -52,15 +48,26 @@ fn payment_request() -> PaymentRequest {
 }
 
 fn recurring_payment_request() -> PaymentRequest {
-    let mut terms = payment_request_terms();
-    terms.payment_reference = PaymentReference::new("subscription-2026-0001").unwrap();
-    terms.recurrence = Some(Recurrence {
-        every: 1,
-        unit: RecurrenceUnit::Month,
-        starts_at: "2026-06-01T00:00:00Z".to_string(),
-        anchor: "2026-06-01T00:00:00Z".to_string(),
-        ends_at: Some("2026-12-01T00:00:00Z".to_string()),
-    });
+    let original = payment_request_terms();
+    let terms = PaymentRequestTerms::builder(
+        original.amount().clone(),
+        PaymentReference::new("subscription-2026-0001").unwrap(),
+        original.accepted_payment_endpoint_identifiers().to_vec(),
+    )
+    .proposal_expires_at(original.proposal_expires_at().clone())
+    .metadata(original.metadata().clone())
+    .recurrence(Some(
+        Recurrence::try_from(crate::RecurrenceConfig {
+            every: 1,
+            unit: RecurrenceUnit::Month,
+            starts_at: "2026-06-01T00:00:00Z".to_string(),
+            anchor: "2026-06-01T00:00:00Z".to_string(),
+            ends_at: Some("2026-12-01T00:00:00Z".to_string()),
+        })
+        .unwrap(),
+    ))
+    .build()
+    .unwrap();
     PaymentRequest::new(
         EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d106").unwrap(),
         request_id(),
@@ -87,10 +94,13 @@ fn recurring_payment_proof() -> PaymentProof {
         EventId::new("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d107").unwrap(),
         request_id(),
         PaymentReference::new("subscription-2026-0001").unwrap(),
-        Some(BillingPeriod {
-            starts_at: "2026-06-01T00:00:00Z".to_string(),
-            ends_at: "2026-07-01T00:00:00Z".to_string(),
-        }),
+        Some(
+            BillingPeriod::new(
+                "2026-06-01T00:00:00Z".to_string(),
+                "2026-07-01T00:00:00Z".to_string(),
+            )
+            .unwrap(),
+        ),
         PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
         object(json!({
             "type": "bitcoin-bolt11-preimage",
@@ -192,12 +202,12 @@ async fn payment_request_events_are_global_fifo() {
     assert!(events[4]
         .raw_json
         .contains("\"kind\":\"paykit.payment_request_cancellation\""));
-    assert_eq!(events[0].event_id(), Some(&request.event_id));
+    assert_eq!(events[0].event_id(), Some(request.event_id()));
     assert_eq!(
         events[3].payment_request_id(),
-        Some(&proof.payment_request_id)
+        Some(proof.payment_request_id())
     );
-    assert_eq!(proof.payment_reference.as_str(), "invoice-2026-0001");
+    assert_eq!(proof.payment_reference().as_str(), "invoice-2026-0001");
 
     setup.sender_session.signout().await.unwrap();
     setup.receiver_session.signout().await.unwrap();
@@ -238,7 +248,7 @@ fn payment_request_event_serialization_supports_outbound_idempotency() {
     let parsed = parse_payment_request_raw(PrivateMessageKind::PaymentRequest, &serialized);
 
     assert_eq!(parsed.parsed_event(), Some(&event));
-    assert_eq!(parsed.event_id(), Some(&request.event_id));
+    assert_eq!(parsed.event_id(), Some(request.event_id()));
     assert!(serialized.contains("\"proposal_expires_at\""));
 }
 
@@ -271,8 +281,8 @@ fn payment_request_events_return_malformed_recognized_events_for_persistence() {
     let acceptance_raw = json!({
         "version": 1,
         "kind": "paykit.payment_request_acceptance",
-        "event_id": acceptance.event_id.as_str(),
-        "payment_request_id": acceptance.payment_request_id.as_str(),
+        "event_id": acceptance.event_id().as_str(),
+        "payment_request_id": acceptance.payment_request_id().as_str(),
     })
     .to_string();
     let acceptance_event = parse_payment_request_raw(
@@ -420,9 +430,9 @@ async fn recurring_payment_request_and_proof_with_billing_period_round_trip() {
     );
     assert_eq!(
         proof
-            .billing_period
+            .billing_period()
             .as_ref()
-            .map(|period| (period.starts_at.as_str(), period.ends_at.as_str())),
+            .map(|period| (period.starts_at(), period.ends_at())),
         Some(("2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z"))
     );
 

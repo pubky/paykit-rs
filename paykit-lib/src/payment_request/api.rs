@@ -1,6 +1,8 @@
 use tracing::instrument;
 
-use crate::{error::map_error, EncryptedLink, PrivateApplicationMessage, Result};
+use crate::{
+    error::map_error, EncryptedLink, PrivateApplicationMessage, PrivateMessageKind, Result,
+};
 
 use super::{
     types::{
@@ -8,14 +10,14 @@ use super::{
         PaymentRequestEvent, PaymentRequestEventMessage, PaymentRequestRejection,
     },
     wire::{
-        parse_acceptance_json, parse_cancellation_json, parse_event_header_ids,
-        parse_payment_proof_json, parse_payment_request_json, parse_rejection_json,
-        serialize_acceptance_json, serialize_cancellation_json, serialize_payment_proof_json,
+        parse_acceptance_json, parse_cancellation_json, parse_conversion_quote_json,
+        parse_event_header_ids, parse_payment_proof_json, parse_payment_request_json,
+        parse_rejection_json, serialize_acceptance_json, serialize_cancellation_json,
+        serialize_conversion_quote_json, serialize_payment_proof_json,
         serialize_payment_request_json, serialize_rejection_json,
     },
+    PaymentConversionQuote,
 };
-
-use crate::PrivateMessageKind;
 
 /// Parse `raw` as the Payment Request protocol event selected by `kind`, or
 /// return `None` when `kind` is not a Payment Request protocol event kind.
@@ -38,12 +40,20 @@ fn parse_event(kind: PrivateMessageKind, raw: &str) -> Option<Result<PaymentRequ
         PrivateMessageKind::PaymentRequestCancellation => {
             Some(parse_cancellation_json(raw).map(PaymentRequestEvent::Cancellation))
         }
+        PrivateMessageKind::PaymentConversionQuote => {
+            Some(parse_conversion_quote_json(raw).map(PaymentRequestEvent::ConversionQuote))
+        }
         PrivateMessageKind::PaymentProof => {
             Some(parse_payment_proof_json(raw).map(PaymentRequestEvent::Proof))
         }
         // Non-request kinds are ignored, producing nothing derived from `raw`
         // (decrypted private payload), so there is no error context to leak.
-        PrivateMessageKind::PrivatePaymentList | PrivateMessageKind::ReceiptAccess => None,
+        PrivateMessageKind::PrivatePaymentList
+        | PrivateMessageKind::ReceiptAccess
+        | PrivateMessageKind::AllowanceProposal
+        | PrivateMessageKind::AllowanceAcceptance
+        | PrivateMessageKind::AllowanceRejection
+        | PrivateMessageKind::AllowanceEnd => None,
     }
 }
 
@@ -75,6 +85,7 @@ pub fn serialize_payment_request_event(event: &PaymentRequestEvent) -> Result<St
         PaymentRequestEvent::Rejection(event) => serialize_rejection_json(event),
         PaymentRequestEvent::Cancellation(event) => serialize_cancellation_json(event),
         PaymentRequestEvent::Proof(event) => serialize_payment_proof_json(event),
+        PaymentRequestEvent::ConversionQuote(event) => serialize_conversion_quote_json(event),
     }
 }
 
@@ -149,6 +160,20 @@ pub async fn send_payment_proof(link: &mut EncryptedLink, event: &PaymentProof) 
         .map_err(|err| map_error("send_payment_proof", err))
 }
 
+/// Send payee-issued rates for one recurring Billing Period.
+/// The caller owns role, session capabilities, key rotation and recurrence eligibility.
+#[instrument(skip(link, event))]
+pub async fn send_payment_conversion_quote(
+    link: &mut EncryptedLink,
+    event: &PaymentConversionQuote,
+) -> Result<()> {
+    let json = serialize_conversion_quote_json(event)
+        .map_err(|err| map_error("send_payment_conversion_quote", err))?;
+    link.send_payment_conversion_quote_message(json.as_bytes())
+        .await
+        .map_err(|err| map_error("send_payment_conversion_quote", err))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,6 +191,10 @@ mod tests {
         for kind in [
             PrivateMessageKind::PrivatePaymentList,
             PrivateMessageKind::ReceiptAccess,
+            PrivateMessageKind::AllowanceProposal,
+            PrivateMessageKind::AllowanceAcceptance,
+            PrivateMessageKind::AllowanceRejection,
+            PrivateMessageKind::AllowanceEnd,
         ] {
             assert!(
                 parse_event(kind, raw).is_none(),

@@ -14,8 +14,8 @@ pub struct AmountRecord {
 impl From<&paykit_lib::PaymentAmount> for AmountRecord {
     fn from(amount: &paykit_lib::PaymentAmount) -> Self {
         Self {
-            value: amount.value.clone(),
-            asset: amount.asset.clone(),
+            value: amount.value().to_owned(),
+            asset: amount.asset().to_owned(),
         }
     }
 }
@@ -32,8 +32,16 @@ pub struct BillingPeriodRecord {
 impl From<&paykit_lib::BillingPeriod> for BillingPeriodRecord {
     fn from(period: &paykit_lib::BillingPeriod) -> Self {
         Self {
-            starts_at: period.starts_at.clone(),
-            ends_at: period.ends_at.clone(),
+            starts_at: period.starts_at().to_owned(),
+            ends_at: period.ends_at().to_owned(),
         }
+    }
+}
+
+impl TryFrom<&BillingPeriodRecord> for paykit_lib::BillingPeriod {
+    type Error = paykit_lib::PaykitError;
+
+    fn try_from(period: &BillingPeriodRecord) -> Result<Self, Self::Error> {
+        Self::new(period.starts_at.clone(), period.ends_at.clone())
     }
 }

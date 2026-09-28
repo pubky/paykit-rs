@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![deny(rustdoc::broken_intra_doc_links)]
 
+mod allowance;
 mod encrypted_link;
 mod encrypted_link_recovery;
 mod error;
@@ -17,6 +18,17 @@ mod receiver_marker;
 mod shared_wire;
 mod validation;
 
+#[doc(inline)]
+pub use allowance::{
+    add_decimal_amounts, allowance_period_window, check_allowance_time, compare_decimal_amounts,
+    evaluate_allowance, match_allowance_request, parse_allowance_event_message,
+    send_allowance_acceptance, send_allowance_end, send_allowance_proposal,
+    send_allowance_rejection, serialize_allowance_event, AllowanceAcceptance, AllowanceAmountRange,
+    AllowanceEnd, AllowanceEvaluation, AllowanceEvaluationBlock, AllowanceEvaluationInput,
+    AllowanceEvent, AllowanceEventMessage, AllowanceId, AllowancePeriod, AllowancePeriodKind,
+    AllowancePeriodLimit, AllowancePeriodUnit, AllowancePeriodWindow, AllowanceProposal,
+    AllowanceRejection, AllowanceRole, AllowanceTerms, AllowanceTermsBuilder, AllowanceUsageEntry,
+};
 #[doc(inline)]
 pub use encrypted_link::{
     accept_encrypted_link, advance_handshake, clear_encrypted_link_outbox, close_encrypted_link,
@@ -48,12 +60,13 @@ pub use payment_endpoint::{
 pub use payment_reference::{PaymentReference, PAYMENT_REFERENCE_MAX_LEN};
 #[doc(inline)]
 pub use payment_request::{
-    parse_payment_request_event_message, send_payment_proof, send_payment_request,
-    send_payment_request_acceptance, send_payment_request_cancellation,
-    send_payment_request_rejection, serialize_payment_request_event, BillingPeriod, PaymentProof,
-    PaymentRequest, PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
+    parse_payment_request_event_message, send_payment_conversion_quote, send_payment_proof,
+    send_payment_request, send_payment_request_acceptance, send_payment_request_cancellation,
+    send_payment_request_rejection, serialize_payment_request_event, BillingPeriod, ConversionRate,
+    PaymentConversion, PaymentConversionQuote, PaymentDeadline, PaymentProof, PaymentRequest,
+    PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
     PaymentRequestEventMessage, PaymentRequestId, PaymentRequestRejection, PaymentRequestTerms,
-    Recurrence, RecurrenceUnit,
+    PaymentRequestTermsBuilder, Recurrence, RecurrenceConfig, RecurrenceUnit,
 };
 #[doc(inline)]
 pub use private_payment_list::{

@@ -4,9 +4,11 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::{
     validation::{parse_utc_timestamp, validate_uuid_v4},
-    EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
+    AllowanceId, EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
     PrivateMessageKind, Result,
 };
+
+use super::{PaymentConversion, PaymentConversionQuote, PaymentDeadline};
 
 /// UUID-v4 identifier for one Payment Request.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -91,37 +93,57 @@ impl RecurrenceUnit {
 }
 
 /// Schedule object for a recurring Payment Request.
+///
+/// Fields cannot be mutated after validated construction.
+///
+/// ```compile_fail,E0616
+/// fn cannot_mutate(mut value: paykit_lib::Recurrence) {
+///     value.every = 0;
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Recurrence {
     /// Positive interval count.
-    pub every: u32,
+    pub(super) every: u32,
     /// Recurrence unit.
-    pub unit: RecurrenceUnit,
+    pub(super) unit: RecurrenceUnit,
     /// RFC3339 UTC timestamp using `Z`.
-    pub starts_at: String,
+    pub(super) starts_at: String,
     /// RFC3339 UTC timestamp using `Z`.
-    pub anchor: String,
+    pub(super) anchor: String,
     /// Optional RFC3339 UTC timestamp using `Z`, after `starts_at` when
     /// present.
-    pub ends_at: Option<String>,
+    pub(super) ends_at: Option<String>,
 }
 
 /// Payment Request terms set by the payee.
+///
+/// Fields cannot be mutated after validated construction.
+///
+/// ```compile_fail,E0616
+/// fn cannot_mutate(mut value: paykit_lib::PaymentRequestTerms) {
+///     value.accepted_payment_endpoint_identifiers = Vec::new();
+/// }
+/// ```
 #[derive(Clone, PartialEq)]
 pub struct PaymentRequestTerms {
     /// Requested amount.
-    pub amount: PaymentAmount,
+    pub(super) amount: PaymentAmount,
     /// Payee-provided correlation value copied into Payment Proof messages.
-    pub payment_reference: PaymentReference,
+    pub(super) payment_reference: PaymentReference,
     /// Proposal expiry before acceptance. `None` means no protocol-level
     /// proposal expiry.
-    pub proposal_expires_at: Option<String>,
+    pub(super) proposal_expires_at: Option<String>,
     /// Optional recurrence. `None` means one-time request.
-    pub recurrence: Option<Recurrence>,
+    pub(super) recurrence: Option<Recurrence>,
     /// Accepted Payment Endpoint Identifiers.
-    pub accepted_payment_endpoint_identifiers: Vec<PaymentEndpointIdentifier>,
+    pub(super) accepted_payment_endpoint_identifiers: Vec<PaymentEndpointIdentifier>,
+    /// Optional conversion policy; absence leaves conversion to wallet policy.
+    pub(super) conversion: Option<PaymentConversion>,
+    /// Optional deadline for actual payment, independent of proposal acceptance.
+    pub(super) payment_deadline: Option<PaymentDeadline>,
     /// Application-specific JSON metadata.
-    pub metadata: JsonMap<String, JsonValue>,
+    pub(super) metadata: JsonMap<String, JsonValue>,
 }
 
 impl fmt::Debug for PaymentRequestTerms {
@@ -131,6 +153,8 @@ impl fmt::Debug for PaymentRequestTerms {
             .field("payment_reference", &"<redacted>")
             .field("proposal_expires_at", &self.proposal_expires_at)
             .field("recurrence", &self.recurrence)
+            .field("conversion", &self.conversion)
+            .field("payment_deadline", &self.payment_deadline)
             .field(
                 "accepted_payment_endpoint_identifiers",
                 &self.accepted_payment_endpoint_identifiers,
@@ -147,36 +171,51 @@ impl fmt::Debug for PaymentRequestTerms {
 ///
 /// # Validation
 ///
-/// `BillingPeriod` has no public validating constructor or standalone validator.
-/// Direct struct construction and later field mutation are unchecked. Payment
-/// Proof serialization and parsing, and Receipt preparation and parsing, require
+/// [`BillingPeriod::new`] validates the interval before construction. Payment
+/// Proof and Receipt parsers use the same rules, which require
 /// `starts_at` and `ends_at` to be RFC3339 timestamps with a `Z` suffix and
 /// `ends_at` to be strictly later than `starts_at`.
 ///
-/// [`serialize_receipt_access_json`](crate::serialize_receipt_access_json) does
-/// not validate these fields. Callers must first use
-/// [`ReceiptAccess::validate`](crate::ReceiptAccess::validate).
+/// Receipt Access still requires [`ReceiptAccess::validate`](crate::ReceiptAccess::validate)
+/// for its request context. A valid interval alone does not establish the
+/// associated Payment Request ID.
+///
+/// Fields cannot be mutated after validated construction.
+///
+/// ```compile_fail,E0616
+/// fn cannot_mutate(mut value: paykit_lib::BillingPeriod) {
+///     value.ends_at = "invalid".into();
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BillingPeriod {
     /// RFC3339 UTC timestamp using `Z`.
-    pub starts_at: String,
+    pub(super) starts_at: String,
     /// RFC3339 UTC timestamp using `Z`, after `starts_at`.
-    pub ends_at: String,
+    pub(super) ends_at: String,
 }
 
 /// `paykit.payment_request` Event Message.
+///
+/// Fields cannot be mutated after validated construction.
+///
+/// ```compile_fail,E0616
+/// fn cannot_mutate(mut value: paykit_lib::PaymentRequest) {
+///     value.version = 0;
+/// }
+/// ```
 #[derive(Clone, PartialEq)]
 pub struct PaymentRequest {
     /// Message version. Currently always `1`.
-    pub version: u8,
+    pub(super) version: u8,
     /// Private message kind. Currently [`PrivateMessageKind::PaymentRequest`].
-    pub kind: PrivateMessageKind,
+    pub(super) kind: PrivateMessageKind,
     /// Event ID for idempotent processing.
-    pub event_id: EventId,
+    pub(super) event_id: EventId,
     /// Stable Payment Request ID.
-    pub payment_request_id: PaymentRequestId,
+    pub(super) payment_request_id: PaymentRequestId,
     /// Immutable request terms.
-    pub request: PaymentRequestTerms,
+    pub(super) request: PaymentRequestTerms,
 }
 
 impl fmt::Debug for PaymentRequest {
@@ -192,6 +231,16 @@ impl fmt::Debug for PaymentRequest {
 }
 
 impl PaymentRequest {
+    pub(super) fn validate(&self) -> Result<()> {
+        crate::validation::validate_outgoing_version_kind(
+            self.version,
+            self.kind,
+            PrivateMessageKind::PaymentRequest,
+            "Payment Request",
+        )?;
+        self.request.validate()
+    }
+
     /// Construct a Payment Request proposal using protocol version 1.
     pub fn new(
         event_id: EventId,
@@ -209,16 +258,24 @@ impl PaymentRequest {
 }
 
 /// `paykit.payment_request_acceptance` Event Message.
+///
+/// Fields cannot be mutated after validated construction.
+///
+/// ```compile_fail,E0616
+/// fn cannot_mutate(mut value: paykit_lib::PaymentRequestAcceptance) {
+///     value.kind = paykit_lib::PrivateMessageKind::PaymentProof;
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaymentRequestAcceptance {
     /// Message version. Currently always `1`.
-    pub version: u8,
+    pub(super) version: u8,
     /// Private message kind. Currently [`PrivateMessageKind::PaymentRequestAcceptance`].
-    pub kind: PrivateMessageKind,
+    pub(super) kind: PrivateMessageKind,
     /// Event ID for idempotent processing.
-    pub event_id: EventId,
+    pub(super) event_id: EventId,
     /// Stable Payment Request ID.
-    pub payment_request_id: PaymentRequestId,
+    pub(super) payment_request_id: PaymentRequestId,
 }
 
 impl PaymentRequestAcceptance {
@@ -234,18 +291,26 @@ impl PaymentRequestAcceptance {
 }
 
 /// `paykit.payment_request_rejection` Event Message.
+///
+/// Fields cannot be mutated after validated construction.
+///
+/// ```compile_fail,E0616
+/// fn cannot_mutate(mut value: paykit_lib::PaymentRequestRejection) {
+///     value.version = 0;
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaymentRequestRejection {
     /// Message version. Currently always `1`.
-    pub version: u8,
+    pub(super) version: u8,
     /// Private message kind. Currently [`PrivateMessageKind::PaymentRequestRejection`].
-    pub kind: PrivateMessageKind,
+    pub(super) kind: PrivateMessageKind,
     /// Event ID for idempotent processing.
-    pub event_id: EventId,
+    pub(super) event_id: EventId,
     /// Stable Payment Request ID.
-    pub payment_request_id: PaymentRequestId,
+    pub(super) payment_request_id: PaymentRequestId,
     /// Optional informational reason.
-    pub reason: Option<String>,
+    pub(super) reason: Option<String>,
 }
 
 impl PaymentRequestRejection {
@@ -266,18 +331,26 @@ impl PaymentRequestRejection {
 }
 
 /// `paykit.payment_request_cancellation` Event Message.
+///
+/// Fields cannot be mutated after validated construction.
+///
+/// ```compile_fail,E0616
+/// fn cannot_mutate(mut value: paykit_lib::PaymentRequestCancellation) {
+///     value.version = 0;
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaymentRequestCancellation {
     /// Message version. Currently always `1`.
-    pub version: u8,
+    pub(super) version: u8,
     /// Private message kind. Currently [`PrivateMessageKind::PaymentRequestCancellation`].
-    pub kind: PrivateMessageKind,
+    pub(super) kind: PrivateMessageKind,
     /// Event ID for idempotent processing.
-    pub event_id: EventId,
+    pub(super) event_id: EventId,
     /// Stable Payment Request ID.
-    pub payment_request_id: PaymentRequestId,
+    pub(super) payment_request_id: PaymentRequestId,
     /// Optional informational reason.
-    pub reason: Option<String>,
+    pub(super) reason: Option<String>,
 }
 
 impl PaymentRequestCancellation {
@@ -298,24 +371,36 @@ impl PaymentRequestCancellation {
 }
 
 /// `paykit.payment_proof` Event Message.
+///
+/// Fields cannot be mutated after validated construction.
+///
+/// ```compile_fail,E0616
+/// fn cannot_mutate(mut value: paykit_lib::PaymentProof) {
+///     value.kind = paykit_lib::PrivateMessageKind::PaymentRequest;
+/// }
+/// ```
 #[derive(Clone, PartialEq)]
 pub struct PaymentProof {
     /// Message version. Currently always `1`.
-    pub version: u8,
+    pub(super) version: u8,
     /// Private message kind. Currently [`PrivateMessageKind::PaymentProof`].
-    pub kind: PrivateMessageKind,
+    pub(super) kind: PrivateMessageKind,
     /// Event ID for idempotent processing.
-    pub event_id: EventId,
+    pub(super) event_id: EventId,
     /// Stable Payment Request ID.
-    pub payment_request_id: PaymentRequestId,
+    pub(super) payment_request_id: PaymentRequestId,
     /// Payment Reference copied from the accepted Payment Request.
-    pub payment_reference: PaymentReference,
+    pub(super) payment_reference: PaymentReference,
     /// Billing period. Required for recurring requests, `None` for one-time requests.
-    pub billing_period: Option<BillingPeriod>,
+    pub(super) billing_period: Option<BillingPeriod>,
     /// Payment Endpoint Identifier used for the payment execution.
-    pub payment_endpoint_identifier: PaymentEndpointIdentifier,
+    pub(super) payment_endpoint_identifier: PaymentEndpointIdentifier,
+    /// Optional Allowance used for this payment, scoped to the exact Encrypted Link.
+    pub(super) allowance_id: Option<AllowanceId>,
+    /// Event ID of the selected recurring conversion quote, when required.
+    pub(super) conversion_quote_id: Option<EventId>,
     /// Method-specific proof object.
-    pub proof: JsonMap<String, JsonValue>,
+    pub(super) proof: JsonMap<String, JsonValue>,
 }
 
 impl fmt::Debug for PaymentProof {
@@ -327,6 +412,7 @@ impl fmt::Debug for PaymentProof {
             .field("payment_request_id", &self.payment_request_id)
             .field("payment_reference", &"<redacted>")
             .field("billing_period", &self.billing_period)
+            .field("allowance_id", &self.allowance_id)
             .field(
                 "payment_endpoint_identifier",
                 &self.payment_endpoint_identifier,
@@ -357,28 +443,54 @@ impl PaymentProof {
             payment_reference,
             billing_period,
             payment_endpoint_identifier,
+            allowance_id: None,
+            conversion_quote_id: None,
             proof,
         }
+    }
+
+    /// Bind this proof to a previously issued recurring conversion quote.
+    pub fn with_conversion_quote_id(mut self, quote_id: EventId) -> Self {
+        self.conversion_quote_id = Some(quote_id);
+        self
+    }
+
+    /// Report the Allowance used for this payment execution.
+    ///
+    /// The caller must use its persisted payment association. This is reporting
+    /// only; it does not authorize payment, validate usage, or change accounting.
+    pub fn with_allowance_id(mut self, allowance_id: AllowanceId) -> Self {
+        self.allowance_id = Some(allowance_id);
+        self
+    }
+
+    /// Access the reported Allowance ID, when this payment used an Allowance.
+    pub fn allowance_id(&self) -> Option<&AllowanceId> {
+        self.allowance_id.as_ref()
+    }
+
+    pub(super) fn validate(&self) -> Result<()> {
+        crate::validation::validate_outgoing_version_kind(
+            self.version,
+            self.kind,
+            PrivateMessageKind::PaymentProof,
+            "Payment Proof",
+        )?;
+        if let Some(period) = &self.billing_period {
+            period.validate()?;
+        }
+        validate_method_specific_proof(&self.proof)
     }
 
     /// Validate this proof against the immutable terms of a specific Payment Request.
     ///
     /// Checks stateless correlation only: request ID, Payment Reference,
-    /// Billing Period presence/shape, and accepted endpoint identifier. Caller
-    /// state still owns lifecycle, role, dedupe, settlement, recurrence
-    /// eligibility, and FX or cross-asset policy.
+    /// Billing Period presence/shape, accepted endpoint and conversion selection.
+    /// Use `validate_conversion_quote` to also check a selected quote. Caller
+    /// state owns lifecycle, role, dedupe, settlement and recurrence eligibility.
     pub fn validate_for_request(&self, request: &PaymentRequest) -> Result<()> {
-        if self.version != 1 || self.kind != PrivateMessageKind::PaymentProof {
-            return Err(PaykitError::Validation(
-                "Payment Proof must have version 1 and kind paykit.payment_proof".into(),
-            ));
-        }
-        if request.version != 1 || request.kind != PrivateMessageKind::PaymentRequest {
-            return Err(PaykitError::Validation(
-                "Payment Request must have version 1 and kind paykit.payment_request".into(),
-            ));
-        }
-        request.request.validate()?;
+        self.validate()?;
+        request.validate()?;
         if self.payment_request_id != request.payment_request_id {
             return Err(PaykitError::Validation(
                 "Payment Proof payment_request_id must match Payment Request".into(),
@@ -399,6 +511,7 @@ impl PaymentProof {
                     .into(),
             ));
         }
+        self.validate_conversion(&request.request)?;
         match (&request.request.recurrence, &self.billing_period) {
             (None, Some(_)) => Err(PaykitError::Validation(
                 "Payment Proof billing_period must be null for one-time Payment Requests".into(),
@@ -410,6 +523,38 @@ impl PaymentProof {
             (None, None) => Ok(()),
         }
     }
+}
+
+const ERC20_PAYMENT_PROOF_TYPE: &str = "erc20-transfer-eip712";
+const UINT256_MAX_DECIMAL: &str =
+    "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+
+fn validate_method_specific_proof(proof: &JsonMap<String, JsonValue>) -> Result<()> {
+    if proof.get("type").and_then(JsonValue::as_str) != Some(ERC20_PAYMENT_PROOF_TYPE) {
+        return Ok(());
+    }
+    let index = proof
+        .get("receipt_log_index")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| {
+            PaykitError::Validation(
+                "ERC-20 Payment Proof receipt_log_index must be a decimal string".into(),
+            )
+        })?;
+    let canonical = index == "0"
+        || (!index.is_empty()
+            && !index.starts_with('0')
+            && index.bytes().all(|byte| byte.is_ascii_digit()));
+    if !canonical
+        || index.len() > UINT256_MAX_DECIMAL.len()
+        || (index.len() == UINT256_MAX_DECIMAL.len() && index > UINT256_MAX_DECIMAL)
+    {
+        return Err(PaykitError::Validation(
+            "ERC-20 Payment Proof receipt_log_index must be a canonical uint256 decimal string"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// One recognized Payment Request protocol Event Message in FIFO receive order.
@@ -428,6 +573,8 @@ pub enum PaymentRequestEvent {
     Rejection(PaymentRequestRejection),
     /// `paykit.payment_request_cancellation` event.
     Cancellation(PaymentRequestCancellation),
+    /// Payee-issued recurring conversion quote.
+    ConversionQuote(PaymentConversionQuote),
     /// `paykit.payment_proof` event.
     Proof(PaymentProof),
 }
@@ -451,6 +598,7 @@ impl PaymentRequestEvent {
             Self::Rejection(event) => event.kind,
             Self::Cancellation(event) => event.kind,
             Self::Proof(event) => event.kind,
+            Self::ConversionQuote(event) => event.kind(),
         }
     }
 
@@ -462,6 +610,7 @@ impl PaymentRequestEvent {
             Self::Rejection(event) => &event.event_id,
             Self::Cancellation(event) => &event.event_id,
             Self::Proof(event) => &event.event_id,
+            Self::ConversionQuote(event) => event.event_id(),
         }
     }
 
@@ -473,6 +622,7 @@ impl PaymentRequestEvent {
             Self::Rejection(event) => &event.payment_request_id,
             Self::Cancellation(event) => &event.payment_request_id,
             Self::Proof(event) => &event.payment_request_id,
+            Self::ConversionQuote(event) => event.payment_request_id(),
         }
     }
 }
@@ -590,7 +740,7 @@ impl BillingPeriod {
 }
 
 impl PaymentRequestTerms {
-    pub(super) fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         self.amount.validate_with_label("Payment Request amount")?;
         if let Some(proposal_expires_at) = &self.proposal_expires_at {
             parse_utc_timestamp(proposal_expires_at, "Payment Request proposal_expires_at")?;
@@ -598,6 +748,7 @@ impl PaymentRequestTerms {
         if let Some(recurrence) = &self.recurrence {
             recurrence.validate()?;
         }
+        self.validate_conversion()?;
         if self.accepted_payment_endpoint_identifiers.is_empty() {
             return Err(PaykitError::Validation(
                 "accepted_payment_endpoint_identifiers must not be empty".into(),
@@ -607,16 +758,317 @@ impl PaymentRequestTerms {
     }
 }
 
+impl Recurrence {
+    /// Access the every.
+    pub fn every(&self) -> u32 {
+        self.every
+    }
+    /// Access the unit.
+    pub fn unit(&self) -> RecurrenceUnit {
+        self.unit
+    }
+    /// Access the preserved UTC start timestamp.
+    pub fn starts_at(&self) -> &str {
+        &self.starts_at
+    }
+    /// Access the anchor.
+    pub fn anchor(&self) -> &str {
+        &self.anchor
+    }
+    /// Access the end timestamp.
+    pub fn ends_at(&self) -> &Option<String> {
+        &self.ends_at
+    }
+}
+
+impl PaymentRequestTerms {
+    /// Access the amount.
+    pub fn amount(&self) -> &PaymentAmount {
+        &self.amount
+    }
+    /// Access the Payment Reference.
+    pub fn payment_reference(&self) -> &PaymentReference {
+        &self.payment_reference
+    }
+    /// Access the optional proposal expiry timestamp.
+    pub fn proposal_expires_at(&self) -> &Option<String> {
+        &self.proposal_expires_at
+    }
+    /// Access the recurrence.
+    pub fn recurrence(&self) -> &Option<Recurrence> {
+        &self.recurrence
+    }
+    /// Access the accepted Payment Endpoint Identifiers.
+    pub fn accepted_payment_endpoint_identifiers(&self) -> &[PaymentEndpointIdentifier] {
+        &self.accepted_payment_endpoint_identifiers
+    }
+    /// Access the optional conversion policy.
+    pub fn conversion(&self) -> Option<&PaymentConversion> {
+        self.conversion.as_ref()
+    }
+    /// Access the optional payment deadline.
+    pub fn payment_deadline(&self) -> Option<&PaymentDeadline> {
+        self.payment_deadline.as_ref()
+    }
+    /// Access the metadata.
+    pub fn metadata(&self) -> &JsonMap<String, JsonValue> {
+        &self.metadata
+    }
+}
+
+impl BillingPeriod {
+    /// Access the preserved UTC start timestamp.
+    pub fn starts_at(&self) -> &str {
+        &self.starts_at
+    }
+    /// Access the end timestamp.
+    pub fn ends_at(&self) -> &str {
+        &self.ends_at
+    }
+}
+
+impl PaymentRequest {
+    /// Access the version.
+    pub fn version(&self) -> u8 {
+        self.version
+    }
+    /// Access the kind.
+    pub fn kind(&self) -> PrivateMessageKind {
+        self.kind
+    }
+    /// Access the Event ID.
+    pub fn event_id(&self) -> &EventId {
+        &self.event_id
+    }
+    /// Access the Payment Request ID.
+    pub fn payment_request_id(&self) -> &PaymentRequestId {
+        &self.payment_request_id
+    }
+    /// Access the immutable request terms.
+    pub fn request(&self) -> &PaymentRequestTerms {
+        &self.request
+    }
+}
+
+impl PaymentRequestAcceptance {
+    /// Access the version.
+    pub fn version(&self) -> u8 {
+        self.version
+    }
+    /// Access the kind.
+    pub fn kind(&self) -> PrivateMessageKind {
+        self.kind
+    }
+    /// Access the Event ID.
+    pub fn event_id(&self) -> &EventId {
+        &self.event_id
+    }
+    /// Access the Payment Request ID.
+    pub fn payment_request_id(&self) -> &PaymentRequestId {
+        &self.payment_request_id
+    }
+}
+
+impl PaymentRequestRejection {
+    /// Access the version.
+    pub fn version(&self) -> u8 {
+        self.version
+    }
+    /// Access the kind.
+    pub fn kind(&self) -> PrivateMessageKind {
+        self.kind
+    }
+    /// Access the Event ID.
+    pub fn event_id(&self) -> &EventId {
+        &self.event_id
+    }
+    /// Access the Payment Request ID.
+    pub fn payment_request_id(&self) -> &PaymentRequestId {
+        &self.payment_request_id
+    }
+    /// Access the reason.
+    pub fn reason(&self) -> &Option<String> {
+        &self.reason
+    }
+}
+
+impl PaymentRequestCancellation {
+    /// Access the version.
+    pub fn version(&self) -> u8 {
+        self.version
+    }
+    /// Access the kind.
+    pub fn kind(&self) -> PrivateMessageKind {
+        self.kind
+    }
+    /// Access the Event ID.
+    pub fn event_id(&self) -> &EventId {
+        &self.event_id
+    }
+    /// Access the Payment Request ID.
+    pub fn payment_request_id(&self) -> &PaymentRequestId {
+        &self.payment_request_id
+    }
+    /// Access the reason.
+    pub fn reason(&self) -> &Option<String> {
+        &self.reason
+    }
+}
+
+impl PaymentProof {
+    /// Access the version.
+    pub fn version(&self) -> u8 {
+        self.version
+    }
+    /// Access the kind.
+    pub fn kind(&self) -> PrivateMessageKind {
+        self.kind
+    }
+    /// Access the Event ID.
+    pub fn event_id(&self) -> &EventId {
+        &self.event_id
+    }
+    /// Access the Payment Request ID.
+    pub fn payment_request_id(&self) -> &PaymentRequestId {
+        &self.payment_request_id
+    }
+    /// Access the Payment Reference.
+    pub fn payment_reference(&self) -> &PaymentReference {
+        &self.payment_reference
+    }
+    /// Access the optional Billing Period.
+    pub fn billing_period(&self) -> &Option<BillingPeriod> {
+        &self.billing_period
+    }
+    /// Access the Payment Endpoint Identifier.
+    pub fn payment_endpoint_identifier(&self) -> &PaymentEndpointIdentifier {
+        &self.payment_endpoint_identifier
+    }
+    /// Access the selected recurring conversion quote, when required.
+    pub fn conversion_quote_id(&self) -> Option<&EventId> {
+        self.conversion_quote_id.as_ref()
+    }
+    /// Access the proof.
+    pub fn proof(&self) -> &JsonMap<String, JsonValue> {
+        &self.proof
+    }
+}
+
+/// Unvalidated input for a recurring Payment Request schedule.
+///
+/// Convert with [`Recurrence::try_from`] to validate the complete schedule.
+#[derive(Clone, Debug)]
+pub struct RecurrenceConfig {
+    /// Positive interval count.
+    pub every: u32,
+    /// Calendar or fixed-duration recurrence unit.
+    pub unit: RecurrenceUnit,
+    /// First UTC instant, using the `Z` suffix.
+    pub starts_at: String,
+    /// UTC schedule anchor; it need not precede the start.
+    pub anchor: String,
+    /// Optional exclusive end, strictly after the start.
+    pub ends_at: Option<String>,
+}
+
+impl TryFrom<RecurrenceConfig> for Recurrence {
+    type Error = PaykitError;
+    fn try_from(value: RecurrenceConfig) -> Result<Self> {
+        let recurrence = Self {
+            every: value.every,
+            unit: value.unit,
+            starts_at: value.starts_at,
+            anchor: value.anchor,
+            ends_at: value.ends_at,
+        };
+        recurrence.validate()?;
+        Ok(recurrence)
+    }
+}
+
+impl BillingPeriod {
+    /// Construct an ordered Billing Period with RFC3339 UTC `Z` timestamps.
+    ///
+    /// This validates the interval shape, not membership in a Recurrence.
+    pub fn new(starts_at: impl Into<String>, ends_at: impl Into<String>) -> Result<Self> {
+        Self::new_with_label(starts_at.into(), ends_at.into(), "Billing Period")
+    }
+
+    pub(crate) fn new_with_label(starts_at: String, ends_at: String, label: &str) -> Result<Self> {
+        let period = Self { starts_at, ends_at };
+        period.validate_with_label(label)?;
+        Ok(period)
+    }
+}
+
+/// Unvalidated builder for immutable Payment Request terms.
+#[derive(Clone)]
+pub struct PaymentRequestTermsBuilder(PaymentRequestTerms);
+
+impl PaymentRequestTerms {
+    /// Start constructing terms with their required amount, reference, and endpoints.
+    ///
+    /// Call [`PaymentRequestTermsBuilder::build`] to validate the complete terms.
+    pub fn builder(
+        amount: PaymentAmount,
+        payment_reference: PaymentReference,
+        accepted_payment_endpoint_identifiers: Vec<PaymentEndpointIdentifier>,
+    ) -> PaymentRequestTermsBuilder {
+        PaymentRequestTermsBuilder(Self {
+            amount,
+            payment_reference,
+            accepted_payment_endpoint_identifiers,
+            proposal_expires_at: None,
+            recurrence: None,
+            conversion: None,
+            payment_deadline: None,
+            metadata: JsonMap::new(),
+        })
+    }
+}
+
+impl PaymentRequestTermsBuilder {
+    /// Set the optional proposal expiry; past timestamps remain valid history.
+    pub fn proposal_expires_at(mut self, value: Option<String>) -> Self {
+        self.0.proposal_expires_at = value;
+        self
+    }
+    /// Set a validated recurrence, or `None` for a one-time request.
+    pub fn recurrence(mut self, value: Option<Recurrence>) -> Self {
+        self.0.recurrence = value;
+        self
+    }
+    /// Set the optional conversion policy.
+    pub fn conversion(mut self, value: Option<PaymentConversion>) -> Self {
+        self.0.conversion = value;
+        self
+    }
+    /// Set the optional payment deadline.
+    pub fn payment_deadline(mut self, value: Option<PaymentDeadline>) -> Self {
+        self.0.payment_deadline = value;
+        self
+    }
+    /// Set application-specific metadata without interpreting its contents.
+    pub fn metadata(mut self, value: JsonMap<String, JsonValue>) -> Self {
+        self.0.metadata = value;
+        self
+    }
+    /// Validate the complete terms, including the non-empty endpoint list.
+    pub fn build(self) -> Result<PaymentRequestTerms> {
+        self.0.validate()?;
+        Ok(self.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn request_terms() -> PaymentRequestTerms {
         PaymentRequestTerms {
-            amount: PaymentAmount {
-                value: "0.001".to_string(),
-                asset: "btc".to_string(),
-            },
+            conversion: None,
+            payment_deadline: None,
+            amount: PaymentAmount::new("0.001", "btc").unwrap(),
             payment_reference: PaymentReference::new("invoice-2026-0001").unwrap(),
             proposal_expires_at: Some("2026-06-01T00:00:00Z".to_string()),
             recurrence: None,
@@ -698,6 +1150,8 @@ mod tests {
             EventId::new_v4(),
             PaymentRequestId::new_v4(),
             PaymentRequestTerms {
+                conversion: None,
+                payment_deadline: None,
                 metadata: JsonMap::from_iter([(
                     "note".to_string(),
                     JsonValue::String("private request note".to_string()),

@@ -522,9 +522,882 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 /**
+ * Inclusive per-payment amount range for Allowance Terms.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+public protocol AllowanceAmountRangeProtocol: AnyObject, Sendable {
+
+    /**
+     * Return the maximum decimal wire spelling.
+     */
+    func maximum()  -> String
+
+    /**
+     * Return the minimum decimal wire spelling.
+     */
+    func minimum()  -> String
+
+}
+/**
+ * Inclusive per-payment amount range for Allowance Terms.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+open class AllowanceAmountRange: AllowanceAmountRangeProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffiallowanceamountrange(self.pointer, $0) }
+    }
+    /**
+     * Validate and create an inclusive per-payment amount range.
+     */
+public convenience init(minimum: String, maximum: String)throws  {
+    let pointer =
+        try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_constructor_ffiallowanceamountrange_new(
+        FfiConverterString.lower(minimum),
+        FfiConverterString.lower(maximum),$0
+    )
+}
+    self.init(unsafeFromRawPointer: pointer)
+}
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffiallowanceamountrange(pointer, $0) }
+    }
+
+
+
+
+    /**
+     * Return the maximum decimal wire spelling.
+     */
+open func maximum() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceamountrange_maximum(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return the minimum decimal wire spelling.
+     */
+open func minimum() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceamountrange_minimum(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    open var debugDescription: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceamountrange_uniffi_trait_debug(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+    open var description: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceamountrange_uniffi_trait_display(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+
+}
+extension AllowanceAmountRange: CustomDebugStringConvertible {}
+extension AllowanceAmountRange: CustomStringConvertible {}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowanceAmountRange: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = AllowanceAmountRange
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> AllowanceAmountRange {
+        return AllowanceAmountRange(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: AllowanceAmountRange) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowanceAmountRange {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: AllowanceAmountRange, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceAmountRange_lift(_ pointer: UnsafeMutableRawPointer) throws -> AllowanceAmountRange {
+    return try FfiConverterTypeAllowanceAmountRange.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceAmountRange_lower(_ value: AllowanceAmountRange) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeAllowanceAmountRange.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Anchored or rolling period for an Allowance usage limit.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+public protocol AllowancePeriodProtocol: AnyObject, Sendable {
+
+    /**
+     * Return the UTC anchor for an anchored period.
+     */
+    func anchor()  -> String?
+
+    /**
+     * Return the positive interval multiplier.
+     */
+    func every()  -> UInt64
+
+    /**
+     * Return the canonical period kind: `anchored` or `rolling`.
+     */
+    func kind()  -> String
+
+    /**
+     * Return the canonical singular interval unit.
+     */
+    func unit()  -> String
+
+}
+/**
+ * Anchored or rolling period for an Allowance usage limit.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+open class AllowancePeriod: AllowancePeriodProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffiallowanceperiod(self.pointer, $0) }
+    }
+    /**
+     * Validate and create an anchored or rolling Allowance period.
+     */
+public convenience init(kind: String, every: UInt64, unit: String, anchor: String?)throws  {
+    let pointer =
+        try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_constructor_ffiallowanceperiod_new(
+        FfiConverterString.lower(kind),
+        FfiConverterUInt64.lower(every),
+        FfiConverterString.lower(unit),
+        FfiConverterOptionString.lower(anchor),$0
+    )
+}
+    self.init(unsafeFromRawPointer: pointer)
+}
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffiallowanceperiod(pointer, $0) }
+    }
+
+
+
+
+    /**
+     * Return the UTC anchor for an anchored period.
+     */
+open func anchor() -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiod_anchor(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return the positive interval multiplier.
+     */
+open func every() -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiod_every(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return the canonical period kind: `anchored` or `rolling`.
+     */
+open func kind() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiod_kind(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return the canonical singular interval unit.
+     */
+open func unit() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiod_unit(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    open var debugDescription: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiod_uniffi_trait_debug(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+    open var description: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiod_uniffi_trait_display(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+
+}
+extension AllowancePeriod: CustomDebugStringConvertible {}
+extension AllowancePeriod: CustomStringConvertible {}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowancePeriod: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = AllowancePeriod
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> AllowancePeriod {
+        return AllowancePeriod(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: AllowancePeriod) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowancePeriod {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: AllowancePeriod, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowancePeriod_lift(_ pointer: UnsafeMutableRawPointer) throws -> AllowancePeriod {
+    return try FfiConverterTypeAllowancePeriod.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowancePeriod_lower(_ value: AllowancePeriod) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeAllowancePeriod.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Amount and/or payment-count ceiling applied over one Allowance period.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+public protocol AllowancePeriodLimitProtocol: AnyObject, Sendable {
+
+    /**
+     * Return the optional amount ceiling decimal spelling.
+     */
+    func amountLimit()  -> String?
+
+    /**
+     * Return the optional payment-count ceiling.
+     */
+    func paymentCountLimit()  -> UInt64?
+
+    /**
+     * Return the period over which the ceilings apply.
+     */
+    func period()  -> AllowancePeriod
+
+}
+/**
+ * Amount and/or payment-count ceiling applied over one Allowance period.
+ *
+ * The object and values returned by its getters are sensitive. Its exported
+ * default string and debug output are redacted.
+ */
+open class AllowancePeriodLimit: AllowancePeriodLimitProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffiallowanceperiodlimit(self.pointer, $0) }
+    }
+    /**
+     * Validate and create an Allowance period limit.
+     */
+public convenience init(amountLimit: String?, paymentCountLimit: UInt64?, period: AllowancePeriod)throws  {
+    let pointer =
+        try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_constructor_ffiallowanceperiodlimit_new(
+        FfiConverterOptionString.lower(amountLimit),
+        FfiConverterOptionUInt64.lower(paymentCountLimit),
+        FfiConverterTypeAllowancePeriod_lower(period),$0
+    )
+}
+    self.init(unsafeFromRawPointer: pointer)
+}
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffiallowanceperiodlimit(pointer, $0) }
+    }
+
+
+
+
+    /**
+     * Return the optional amount ceiling decimal spelling.
+     */
+open func amountLimit() -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiodlimit_amount_limit(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return the optional payment-count ceiling.
+     */
+open func paymentCountLimit() -> UInt64?  {
+    return try!  FfiConverterOptionUInt64.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiodlimit_payment_count_limit(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return the period over which the ceilings apply.
+     */
+open func period() -> AllowancePeriod  {
+    return try!  FfiConverterTypeAllowancePeriod_lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiodlimit_period(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    open var debugDescription: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiodlimit_uniffi_trait_debug(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+    open var description: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceperiodlimit_uniffi_trait_display(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+
+}
+extension AllowancePeriodLimit: CustomDebugStringConvertible {}
+extension AllowancePeriodLimit: CustomStringConvertible {}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowancePeriodLimit: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = AllowancePeriodLimit
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> AllowancePeriodLimit {
+        return AllowancePeriodLimit(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: AllowancePeriodLimit) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowancePeriodLimit {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: AllowancePeriodLimit, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowancePeriodLimit_lift(_ pointer: UnsafeMutableRawPointer) throws -> AllowancePeriodLimit {
+    return try FfiConverterTypeAllowancePeriodLimit.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowancePeriodLimit_lower(_ value: AllowancePeriodLimit) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeAllowancePeriodLimit.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Immutable private Allowance Terms with redacted default formatting.
+ *
+ * Applications must treat the object and every value returned by its getters
+ * as sensitive. Do not include them in ordinary platform logs or diagnostics.
+ */
+public protocol AllowanceTermsProtocol: AnyObject, Sendable {
+
+    /**
+     * Return the optional inclusive first eligible instant.
+     */
+    func activeFrom()  -> String?
+
+    /**
+     * Return the optional exact Payment Endpoint Identifier allowlist.
+     */
+    func allowedPaymentEndpointIdentifiers()  -> [String]?
+
+    /**
+     * Return the exact, case-sensitive asset.
+     */
+    func asset()  -> String
+
+    /**
+     * Return the optional exclusive first ineligible instant.
+     */
+    func expiresAt()  -> String?
+
+    /**
+     * Return the optional lifetime amount ceiling decimal spelling.
+     */
+    func lifetimeAmountLimit()  -> String?
+
+    /**
+     * Return the optional inclusive per-payment amount range.
+     */
+    func perPaymentAmount()  -> AllowanceAmountRange?
+
+    /**
+     * Return every independently applicable period limit.
+     */
+    func periodLimits()  -> [AllowancePeriodLimit]
+
+}
+/**
+ * Immutable private Allowance Terms with redacted default formatting.
+ *
+ * Applications must treat the object and every value returned by its getters
+ * as sensitive. Do not include them in ordinary platform logs or diagnostics.
+ */
+open class AllowanceTerms: AllowanceTermsProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffiallowanceterms(self.pointer, $0) }
+    }
+    /**
+     * Validate and create immutable Allowance Terms.
+     */
+public convenience init(asset: String, perPaymentAmount: AllowanceAmountRange?, periodLimits: [AllowancePeriodLimit], lifetimeAmountLimit: String?, activeFrom: String?, expiresAt: String?, allowedPaymentEndpointIdentifiers: [String]?)throws  {
+    let pointer =
+        try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_constructor_ffiallowanceterms_new(
+        FfiConverterString.lower(asset),
+        FfiConverterOptionTypeAllowanceAmountRange.lower(perPaymentAmount),
+        FfiConverterSequenceTypeAllowancePeriodLimit.lower(periodLimits),
+        FfiConverterOptionString.lower(lifetimeAmountLimit),
+        FfiConverterOptionString.lower(activeFrom),
+        FfiConverterOptionString.lower(expiresAt),
+        FfiConverterOptionSequenceString.lower(allowedPaymentEndpointIdentifiers),$0
+    )
+}
+    self.init(unsafeFromRawPointer: pointer)
+}
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffiallowanceterms(pointer, $0) }
+    }
+
+
+
+
+    /**
+     * Return the optional inclusive first eligible instant.
+     */
+open func activeFrom() -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceterms_active_from(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return the optional exact Payment Endpoint Identifier allowlist.
+     */
+open func allowedPaymentEndpointIdentifiers() -> [String]?  {
+    return try!  FfiConverterOptionSequenceString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceterms_allowed_payment_endpoint_identifiers(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return the exact, case-sensitive asset.
+     */
+open func asset() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceterms_asset(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return the optional exclusive first ineligible instant.
+     */
+open func expiresAt() -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceterms_expires_at(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return the optional lifetime amount ceiling decimal spelling.
+     */
+open func lifetimeAmountLimit() -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceterms_lifetime_amount_limit(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return the optional inclusive per-payment amount range.
+     */
+open func perPaymentAmount() -> AllowanceAmountRange?  {
+    return try!  FfiConverterOptionTypeAllowanceAmountRange.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceterms_per_payment_amount(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Return every independently applicable period limit.
+     */
+open func periodLimits() -> [AllowancePeriodLimit]  {
+    return try!  FfiConverterSequenceTypeAllowancePeriodLimit.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceterms_period_limits(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    open var debugDescription: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceterms_uniffi_trait_debug(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+    open var description: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_paykit_fn_method_ffiallowanceterms_uniffi_trait_display(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+
+}
+extension AllowanceTerms: CustomDebugStringConvertible {}
+extension AllowanceTerms: CustomStringConvertible {}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowanceTerms: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = AllowanceTerms
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> AllowanceTerms {
+        return AllowanceTerms(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: AllowanceTerms) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowanceTerms {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: AllowanceTerms, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceTerms_lift(_ pointer: UnsafeMutableRawPointer) throws -> AllowanceTerms {
+    return try FfiConverterTypeAllowanceTerms.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceTerms_lower(_ value: AllowanceTerms) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeAllowanceTerms.lower(value)
+}
+
+
+
+
+
+
+/**
  * Stateful Paykit SDK runtime handle.
  */
 public protocol PaykitSdkProtocol: AnyObject, Sendable {
+
+    /**
+     * Queue acceptance for a received Allowance proposal.
+     */
+    func acceptAllowance(counterparty: String, counterpartyReceiverPath: String, allowanceId: String) async throws  -> AllowanceRecord
 
     /**
      * Start an Encrypted Link Handshake as the responder.
@@ -621,6 +1494,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func encryptedLinkRecoveryMarkerStatus(counterparty: String, counterpartyReceiverPath: String) async throws  -> EncryptedLinkRecoveryMarkerReport?
 
     /**
+     * Queue a proposal withdrawal or unilateral End for accepted authority.
+     */
+    func endAllowance(counterparty: String, counterpartyReceiverPath: String, allowanceId: String) async throws  -> AllowanceRecord
+
+    /**
      * Queue the current complete Private Payment List for one counterparty receiver.
      */
     func enqueuePrivatePaymentList(counterparty: String, counterpartyReceiverPath: String) async throws  -> QueuedPrivateMessage
@@ -698,6 +1576,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func forgetSessionAccess() async throws  -> IdentityStatus
 
     /**
+     * Return one Allowance from one exact authenticated Encrypted Link.
+     */
+    func getAllowance(counterparty: String, counterpartyReceiverPath: String, allowanceId: String) async throws  -> AllowanceRecord?
+
+    /**
      * Return current identity status, when initialized.
      */
     func identityStatus() async throws  -> IdentityStatus?
@@ -731,6 +1614,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * List locally tracked Linked Peer records.
      */
     func linkedPeers() async throws  -> [LinkedPeerRecord]
+
+    /**
+     * Return Allowances matching a local SDK filter, newest first by local record time (presentation order only).
+     */
+    func listAllowances(filter: AllowanceFilter) async throws  -> [AllowanceRecord]
 
     /**
      * Return Payment Requests matching a local SDK filter.
@@ -796,7 +1684,13 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func processReceiptIssuance(counterparty: String, counterpartyReceiverPath: String, receiptId: String) async throws  -> ReceiptIssuanceView
 
     /**
+     * Queue a new Allowance proposal and return local derived state.
+     */
+    func proposeAllowance(counterparty: String, counterpartyReceiverPath: String, localRole: AllowanceLocalRole, terms: AllowanceTerms) async throws  -> AllowanceRecord
+
+    /**
      * Queue a new Payment Request proposal and return local derived state.
+     * The caller must establish peer support before including conversion or payment deadlines.
      */
     func proposePaymentRequest(counterparty: String, counterpartyReceiverPath: String, terms: PaymentRequestTerms) async throws  -> PaymentRequestRecord
 
@@ -824,6 +1718,12 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Publish a public Contact Marker for a local Contact Record.
      */
     func publishPublicContact(publicKey: String, receiverPath: String) async throws  -> ContactRecord
+
+    /**
+     * Issue rates for one accepted recurring Billing Period; does not authorize payment.
+     * The caller establishes peer support and owns session creation, capability scope and key rotation.
+     */
+    func quotePaymentRequest(counterparty: String, counterpartyReceiverPath: String, paymentRequestId: String, billingPeriod: BillingPeriod, rates: [ConversionRate], expiresAt: String) async throws  -> PaymentRequestRecord
 
     /**
      * List Receipt Access across non-blocked counterparties, newest first.
@@ -871,7 +1771,8 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func receivePrivateMessagesFromLinkedPeers() async throws  -> [PrivateStreamCounterpartyIntakeReport]
 
     /**
-     * Return inbound Payment Requests received from one counterparty.
+     * Inspect inbound proposals from one counterparty.
+     * Quotes and actionable state require the full view, which includes outbound acceptance.
      */
     func receivedPaymentRequestsFrom(counterparty: String, counterpartyReceiverPath: String) async throws  -> [PaymentRequestRecord]
 
@@ -879,6 +1780,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Refresh the cached Paykit Profile for a local Contact Record.
      */
     func refreshContactPaykitProfile(publicKey: String, receiverPath: String) async throws  -> ContactRecord?
+
+    /**
+     * Queue rejection for a received Allowance proposal.
+     */
+    func rejectAllowance(counterparty: String, counterpartyReceiverPath: String, allowanceId: String) async throws  -> AllowanceRecord
 
     /**
      * Queue rejection for a received Payment Request and return local derived state.
@@ -1115,6 +2021,26 @@ public static func withPubkyClientConfig(stateStore: SdkStateBlobStore, sessionP
 }
 
 
+
+    /**
+     * Queue acceptance for a received Allowance proposal.
+     */
+open func acceptAllowance(counterparty: String, counterpartyReceiverPath: String, allowanceId: String)async throws  -> AllowanceRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_accept_allowance(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterString.lower(allowanceId)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAllowanceRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
 
     /**
      * Start an Encrypted Link Handshake as the responder.
@@ -1471,6 +2397,26 @@ open func encryptedLinkRecoveryMarkerStatus(counterparty: String, counterpartyRe
 }
 
     /**
+     * Queue a proposal withdrawal or unilateral End for accepted authority.
+     */
+open func endAllowance(counterparty: String, counterpartyReceiverPath: String, allowanceId: String)async throws  -> AllowanceRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_end_allowance(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterString.lower(allowanceId)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAllowanceRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
      * Queue the current complete Private Payment List for one counterparty receiver.
      */
 open func enqueuePrivatePaymentList(counterparty: String, counterpartyReceiverPath: String)async throws  -> QueuedPrivateMessage  {
@@ -1728,6 +2674,26 @@ open func forgetSessionAccess()async throws  -> IdentityStatus  {
 }
 
     /**
+     * Return one Allowance from one exact authenticated Encrypted Link.
+     */
+open func getAllowance(counterparty: String, counterpartyReceiverPath: String, allowanceId: String)async throws  -> AllowanceRecord?  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_get_allowance(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterString.lower(allowanceId)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeAllowanceRecord.lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
      * Return current identity status, when initialized.
      */
 open func identityStatus()async throws  -> IdentityStatus?  {
@@ -1863,6 +2829,26 @@ open func linkedPeers()async throws  -> [LinkedPeerRecord]  {
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterSequenceTypeLinkedPeerRecord.lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Return Allowances matching a local SDK filter, newest first by local record time (presentation order only).
+     */
+open func listAllowances(filter: AllowanceFilter)async throws  -> [AllowanceRecord]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_list_allowances(
+                    self.uniffiClonePointer(),
+                    FfiConverterTypeAllowanceFilter_lower(filter)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeAllowanceRecord.lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -2111,7 +3097,28 @@ open func processReceiptIssuance(counterparty: String, counterpartyReceiverPath:
 }
 
     /**
+     * Queue a new Allowance proposal and return local derived state.
+     */
+open func proposeAllowance(counterparty: String, counterpartyReceiverPath: String, localRole: AllowanceLocalRole, terms: AllowanceTerms)async throws  -> AllowanceRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_propose_allowance(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterTypeAllowanceLocalRole_lower(localRole),FfiConverterTypeAllowanceTerms_lower(terms)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAllowanceRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
      * Queue a new Payment Request proposal and return local derived state.
+     * The caller must establish peer support before including conversion or payment deadlines.
      */
 open func proposePaymentRequest(counterparty: String, counterpartyReceiverPath: String, terms: PaymentRequestTerms)async throws  -> PaymentRequestRecord  {
     return
@@ -2226,6 +3233,27 @@ open func publishPublicContact(publicKey: String, receiverPath: String)async thr
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeContactRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Issue rates for one accepted recurring Billing Period; does not authorize payment.
+     * The caller establishes peer support and owns session creation, capability scope and key rotation.
+     */
+open func quotePaymentRequest(counterparty: String, counterpartyReceiverPath: String, paymentRequestId: String, billingPeriod: BillingPeriod, rates: [ConversionRate], expiresAt: String)async throws  -> PaymentRequestRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_quote_payment_request(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterString.lower(paymentRequestId),FfiConverterTypeBillingPeriod_lower(billingPeriod),FfiConverterSequenceTypeConversionRate.lower(rates),FfiConverterString.lower(expiresAt)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaymentRequestRecord_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -2411,7 +3439,8 @@ open func receivePrivateMessagesFromLinkedPeers()async throws  -> [PrivateStream
 }
 
     /**
-     * Return inbound Payment Requests received from one counterparty.
+     * Inspect inbound proposals from one counterparty.
+     * Quotes and actionable state require the full view, which includes outbound acceptance.
      */
 open func receivedPaymentRequestsFrom(counterparty: String, counterpartyReceiverPath: String)async throws  -> [PaymentRequestRecord]  {
     return
@@ -2446,6 +3475,26 @@ open func refreshContactPaykitProfile(publicKey: String, receiverPath: String)as
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionTypeContactRecord.lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Queue rejection for a received Allowance proposal.
+     */
+open func rejectAllowance(counterparty: String, counterpartyReceiverPath: String, allowanceId: String)async throws  -> AllowanceRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_reject_allowance(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(counterpartyReceiverPath),FfiConverterString.lower(allowanceId)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAllowanceRecord_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -6284,6 +7333,408 @@ public func FfiConverterTypeSdkStateBlobStore_lower(_ value: SdkStateBlobStore) 
 
 
 /**
+ * Filter for listing SDK-derived Allowances.
+ */
+public struct AllowanceFilter {
+    /**
+     * Restrict results to one counterparty.
+     */
+    public var counterparty: String?
+    /**
+     * Restrict results to one counterparty receiver/runtime folder.
+     */
+    public var counterpartyReceiverPath: String?
+    /**
+     * Restrict results to one local Allowance role.
+     */
+    public var localRole: AllowanceLocalRole?
+    /**
+     * Restrict results to lifecycle states. Empty means all states.
+     */
+    public var states: [AllowanceLifecycleState]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Restrict results to one counterparty.
+         */counterparty: String?,
+        /**
+         * Restrict results to one counterparty receiver/runtime folder.
+         */counterpartyReceiverPath: String?,
+        /**
+         * Restrict results to one local Allowance role.
+         */localRole: AllowanceLocalRole?,
+        /**
+         * Restrict results to lifecycle states. Empty means all states.
+         */states: [AllowanceLifecycleState]) {
+        self.counterparty = counterparty
+        self.counterpartyReceiverPath = counterpartyReceiverPath
+        self.localRole = localRole
+        self.states = states
+    }
+}
+
+#if compiler(>=6)
+extension AllowanceFilter: Sendable {}
+#endif
+
+
+extension AllowanceFilter: Equatable, Hashable {
+    public static func ==(lhs: AllowanceFilter, rhs: AllowanceFilter) -> Bool {
+        if lhs.counterparty != rhs.counterparty {
+            return false
+        }
+        if lhs.counterpartyReceiverPath != rhs.counterpartyReceiverPath {
+            return false
+        }
+        if lhs.localRole != rhs.localRole {
+            return false
+        }
+        if lhs.states != rhs.states {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(counterparty)
+        hasher.combine(counterpartyReceiverPath)
+        hasher.combine(localRole)
+        hasher.combine(states)
+    }
+}
+
+extension AllowanceFilter: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowanceFilter: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowanceFilter {
+        return
+            try AllowanceFilter(
+                counterparty: FfiConverterOptionString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterOptionString.read(from: &buf),
+                localRole: FfiConverterOptionTypeAllowanceLocalRole.read(from: &buf),
+                states: FfiConverterSequenceTypeAllowanceLifecycleState.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AllowanceFilter, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.counterparty, into: &buf)
+        FfiConverterOptionString.write(value.counterpartyReceiverPath, into: &buf)
+        FfiConverterOptionTypeAllowanceLocalRole.write(value.localRole, into: &buf)
+        FfiConverterSequenceTypeAllowanceLifecycleState.write(value.states, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceFilter_lift(_ buf: RustBuffer) throws -> AllowanceFilter {
+    return try FfiConverterTypeAllowanceFilter.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceFilter_lower(_ value: AllowanceFilter) -> RustBuffer {
+    return FfiConverterTypeAllowanceFilter.lower(value)
+}
+
+
+/**
+ * SDK-derived record for one Allowance on one exact Encrypted Link.
+ */
+public struct AllowanceRecord {
+    /**
+     * Counterparty associated with the authenticated private history.
+     */
+    public var counterparty: String
+    /**
+     * Counterparty receiver/runtime folder associated with the history.
+     */
+    public var counterpartyReceiverPath: String
+    /**
+     * Stable Allowance ID.
+     */
+    public var allowanceId: String
+    /**
+     * Local role derived from the authenticated proposal source.
+     */
+    public var localRole: AllowanceLocalRole?
+    /**
+     * Derived consent lifecycle state.
+     */
+    public var state: AllowanceLifecycleState
+    /**
+     * Health of the evidence used for derivation.
+     */
+    public var historyStatus: AllowanceHistoryStatus
+    /**
+     * Proposal Event ID.
+     */
+    public var proposalEventId: String?
+    /**
+     * Immutable private proposed terms.
+     */
+    public var terms: AllowanceTerms?
+    /**
+     * Inbound stream item carrying the proposal, when received.
+     */
+    public var proposalStreamItemId: UInt64?
+    /**
+     * Outbound message carrying the proposal, when locally queued.
+     */
+    public var proposalOutboundMessageId: UInt64?
+    /**
+     * Local delivery status of an outbound proposal.
+     */
+    public var proposalOutboundStatus: OutboundPrivateMessageStatus?
+    /**
+     * Controlling Acceptance Event ID.
+     */
+    public var acceptanceEventId: String?
+    /**
+     * Local delivery status of an outbound acceptance.
+     */
+    public var acceptanceOutboundStatus: OutboundPrivateMessageStatus?
+    /**
+     * Controlling Rejection Event ID.
+     */
+    public var rejectionEventId: String?
+    /**
+     * Local delivery status of an outbound rejection.
+     */
+    public var rejectionOutboundStatus: OutboundPrivateMessageStatus?
+    /**
+     * Valid End Event ID retained by the SDK.
+     */
+    public var endEventId: String?
+    /**
+     * Local delivery status of an outbound End.
+     */
+    public var endOutboundStatus: OutboundPrivateMessageStatus?
+    /**
+     * Causal Event IDs not yet present in durable history.
+     */
+    public var pendingCausalEventIds: [String]
+    /**
+     * Event IDs whose reuse or proposal collision taints this Allowance.
+     */
+    public var conflictEventIds: [String]
+    /**
+     * Last inbound stream item associated with this Allowance.
+     */
+    public var lastStreamItemId: UInt64?
+    /**
+     * Last outbound message associated with this Allowance.
+     */
+    public var lastOutboundMessageId: UInt64?
+    /**
+     * Delivery status of the last associated outbound message.
+     */
+    public var lastOutboundStatus: OutboundPrivateMessageStatus?
+    /**
+     * Latest local record time as RFC3339 text, used only for presentation ordering.
+     */
+    public var lastEventAt: String?
+    /**
+     * Redaction-safe SDK reason for invalid history, when available.
+     */
+    public var invalidReason: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Counterparty associated with the authenticated private history.
+         */counterparty: String,
+        /**
+         * Counterparty receiver/runtime folder associated with the history.
+         */counterpartyReceiverPath: String,
+        /**
+         * Stable Allowance ID.
+         */allowanceId: String,
+        /**
+         * Local role derived from the authenticated proposal source.
+         */localRole: AllowanceLocalRole?,
+        /**
+         * Derived consent lifecycle state.
+         */state: AllowanceLifecycleState,
+        /**
+         * Health of the evidence used for derivation.
+         */historyStatus: AllowanceHistoryStatus,
+        /**
+         * Proposal Event ID.
+         */proposalEventId: String?,
+        /**
+         * Immutable private proposed terms.
+         */terms: AllowanceTerms?,
+        /**
+         * Inbound stream item carrying the proposal, when received.
+         */proposalStreamItemId: UInt64?,
+        /**
+         * Outbound message carrying the proposal, when locally queued.
+         */proposalOutboundMessageId: UInt64?,
+        /**
+         * Local delivery status of an outbound proposal.
+         */proposalOutboundStatus: OutboundPrivateMessageStatus?,
+        /**
+         * Controlling Acceptance Event ID.
+         */acceptanceEventId: String?,
+        /**
+         * Local delivery status of an outbound acceptance.
+         */acceptanceOutboundStatus: OutboundPrivateMessageStatus?,
+        /**
+         * Controlling Rejection Event ID.
+         */rejectionEventId: String?,
+        /**
+         * Local delivery status of an outbound rejection.
+         */rejectionOutboundStatus: OutboundPrivateMessageStatus?,
+        /**
+         * Valid End Event ID retained by the SDK.
+         */endEventId: String?,
+        /**
+         * Local delivery status of an outbound End.
+         */endOutboundStatus: OutboundPrivateMessageStatus?,
+        /**
+         * Causal Event IDs not yet present in durable history.
+         */pendingCausalEventIds: [String],
+        /**
+         * Event IDs whose reuse or proposal collision taints this Allowance.
+         */conflictEventIds: [String],
+        /**
+         * Last inbound stream item associated with this Allowance.
+         */lastStreamItemId: UInt64?,
+        /**
+         * Last outbound message associated with this Allowance.
+         */lastOutboundMessageId: UInt64?,
+        /**
+         * Delivery status of the last associated outbound message.
+         */lastOutboundStatus: OutboundPrivateMessageStatus?,
+        /**
+         * Latest local record time as RFC3339 text, used only for presentation ordering.
+         */lastEventAt: String?,
+        /**
+         * Redaction-safe SDK reason for invalid history, when available.
+         */invalidReason: String?) {
+        self.counterparty = counterparty
+        self.counterpartyReceiverPath = counterpartyReceiverPath
+        self.allowanceId = allowanceId
+        self.localRole = localRole
+        self.state = state
+        self.historyStatus = historyStatus
+        self.proposalEventId = proposalEventId
+        self.terms = terms
+        self.proposalStreamItemId = proposalStreamItemId
+        self.proposalOutboundMessageId = proposalOutboundMessageId
+        self.proposalOutboundStatus = proposalOutboundStatus
+        self.acceptanceEventId = acceptanceEventId
+        self.acceptanceOutboundStatus = acceptanceOutboundStatus
+        self.rejectionEventId = rejectionEventId
+        self.rejectionOutboundStatus = rejectionOutboundStatus
+        self.endEventId = endEventId
+        self.endOutboundStatus = endOutboundStatus
+        self.pendingCausalEventIds = pendingCausalEventIds
+        self.conflictEventIds = conflictEventIds
+        self.lastStreamItemId = lastStreamItemId
+        self.lastOutboundMessageId = lastOutboundMessageId
+        self.lastOutboundStatus = lastOutboundStatus
+        self.lastEventAt = lastEventAt
+        self.invalidReason = invalidReason
+    }
+}
+
+#if compiler(>=6)
+extension AllowanceRecord: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowanceRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowanceRecord {
+        return
+            try AllowanceRecord(
+                counterparty: FfiConverterString.read(from: &buf),
+                counterpartyReceiverPath: FfiConverterString.read(from: &buf),
+                allowanceId: FfiConverterString.read(from: &buf),
+                localRole: FfiConverterOptionTypeAllowanceLocalRole.read(from: &buf),
+                state: FfiConverterTypeAllowanceLifecycleState.read(from: &buf),
+                historyStatus: FfiConverterTypeAllowanceHistoryStatus.read(from: &buf),
+                proposalEventId: FfiConverterOptionString.read(from: &buf),
+                terms: FfiConverterOptionTypeAllowanceTerms.read(from: &buf),
+                proposalStreamItemId: FfiConverterOptionUInt64.read(from: &buf),
+                proposalOutboundMessageId: FfiConverterOptionUInt64.read(from: &buf),
+                proposalOutboundStatus: FfiConverterOptionTypeOutboundPrivateMessageStatus.read(from: &buf),
+                acceptanceEventId: FfiConverterOptionString.read(from: &buf),
+                acceptanceOutboundStatus: FfiConverterOptionTypeOutboundPrivateMessageStatus.read(from: &buf),
+                rejectionEventId: FfiConverterOptionString.read(from: &buf),
+                rejectionOutboundStatus: FfiConverterOptionTypeOutboundPrivateMessageStatus.read(from: &buf),
+                endEventId: FfiConverterOptionString.read(from: &buf),
+                endOutboundStatus: FfiConverterOptionTypeOutboundPrivateMessageStatus.read(from: &buf),
+                pendingCausalEventIds: FfiConverterSequenceString.read(from: &buf),
+                conflictEventIds: FfiConverterSequenceString.read(from: &buf),
+                lastStreamItemId: FfiConverterOptionUInt64.read(from: &buf),
+                lastOutboundMessageId: FfiConverterOptionUInt64.read(from: &buf),
+                lastOutboundStatus: FfiConverterOptionTypeOutboundPrivateMessageStatus.read(from: &buf),
+                lastEventAt: FfiConverterOptionString.read(from: &buf),
+                invalidReason: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AllowanceRecord, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.counterparty, into: &buf)
+        FfiConverterString.write(value.counterpartyReceiverPath, into: &buf)
+        FfiConverterString.write(value.allowanceId, into: &buf)
+        FfiConverterOptionTypeAllowanceLocalRole.write(value.localRole, into: &buf)
+        FfiConverterTypeAllowanceLifecycleState.write(value.state, into: &buf)
+        FfiConverterTypeAllowanceHistoryStatus.write(value.historyStatus, into: &buf)
+        FfiConverterOptionString.write(value.proposalEventId, into: &buf)
+        FfiConverterOptionTypeAllowanceTerms.write(value.terms, into: &buf)
+        FfiConverterOptionUInt64.write(value.proposalStreamItemId, into: &buf)
+        FfiConverterOptionUInt64.write(value.proposalOutboundMessageId, into: &buf)
+        FfiConverterOptionTypeOutboundPrivateMessageStatus.write(value.proposalOutboundStatus, into: &buf)
+        FfiConverterOptionString.write(value.acceptanceEventId, into: &buf)
+        FfiConverterOptionTypeOutboundPrivateMessageStatus.write(value.acceptanceOutboundStatus, into: &buf)
+        FfiConverterOptionString.write(value.rejectionEventId, into: &buf)
+        FfiConverterOptionTypeOutboundPrivateMessageStatus.write(value.rejectionOutboundStatus, into: &buf)
+        FfiConverterOptionString.write(value.endEventId, into: &buf)
+        FfiConverterOptionTypeOutboundPrivateMessageStatus.write(value.endOutboundStatus, into: &buf)
+        FfiConverterSequenceString.write(value.pendingCausalEventIds, into: &buf)
+        FfiConverterSequenceString.write(value.conflictEventIds, into: &buf)
+        FfiConverterOptionUInt64.write(value.lastStreamItemId, into: &buf)
+        FfiConverterOptionUInt64.write(value.lastOutboundMessageId, into: &buf)
+        FfiConverterOptionTypeOutboundPrivateMessageStatus.write(value.lastOutboundStatus, into: &buf)
+        FfiConverterOptionString.write(value.lastEventAt, into: &buf)
+        FfiConverterOptionString.write(value.invalidReason, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceRecord_lift(_ buf: RustBuffer) throws -> AllowanceRecord {
+    return try FfiConverterTypeAllowanceRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceRecord_lower(_ value: AllowanceRecord) -> RustBuffer {
+    return FfiConverterTypeAllowanceRecord.lower(value)
+}
+
+
+/**
  * Time interval a recurring Payment Proof applies to.
  */
 public struct BillingPeriod {
@@ -6852,6 +8303,93 @@ public func FfiConverterTypeContactUpdate_lift(_ buf: RustBuffer) throws -> Cont
 #endif
 public func FfiConverterTypeContactUpdate_lower(_ value: ContactUpdate) -> RustBuffer {
     return FfiConverterTypeContactUpdate.lower(value)
+}
+
+
+/**
+ * Units of payment asset owed per requested asset unit.
+ */
+public struct ConversionRate {
+    /**
+     * Payment asset code.
+     */
+    public var asset: String
+    /**
+     * Positive decimal multiplier; never convert through floating point.
+     */
+    public var value: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Payment asset code.
+         */asset: String,
+        /**
+         * Positive decimal multiplier; never convert through floating point.
+         */value: String) {
+        self.asset = asset
+        self.value = value
+    }
+}
+
+#if compiler(>=6)
+extension ConversionRate: Sendable {}
+#endif
+
+
+extension ConversionRate: Equatable, Hashable {
+    public static func ==(lhs: ConversionRate, rhs: ConversionRate) -> Bool {
+        if lhs.asset != rhs.asset {
+            return false
+        }
+        if lhs.value != rhs.value {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(asset)
+        hasher.combine(value)
+    }
+}
+
+extension ConversionRate: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeConversionRate: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ConversionRate {
+        return
+            try ConversionRate(
+                asset: FfiConverterString.read(from: &buf),
+                value: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ConversionRate, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.asset, into: &buf)
+        FfiConverterString.write(value.value, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeConversionRate_lift(_ buf: RustBuffer) throws -> ConversionRate {
+    return try FfiConverterTypeConversionRate.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeConversionRate_lower(_ value: ConversionRate) -> RustBuffer {
+    return FfiConverterTypeConversionRate.lower(value)
 }
 
 
@@ -8899,6 +10437,149 @@ public func FfiConverterTypePaymentAmountContext_lower(_ value: PaymentAmountCon
 
 
 /**
+ * Payee-issued quote retained for payment verification after expiry.
+ */
+public struct PaymentConversionQuoteRecord {
+    /**
+     * Quote identity (Event ID).
+     */
+    public var eventId: String
+    /**
+     * Period for which these rates were offered.
+     */
+    public var billingPeriod: BillingPeriod
+    /**
+     * Payment asset units per requested asset unit.
+     */
+    public var rates: [ConversionRate]
+    /**
+     * Inclusive start of the payment validity interval, in RFC3339 UTC.
+     */
+    public var validFrom: String
+    /**
+     * Inclusive actual-payment deadline, in RFC3339 UTC.
+     */
+    public var expiresAt: String
+    /**
+     * Local outbound status, when issued locally.
+     */
+    public var outboundStatus: OutboundPrivateMessageStatus?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Quote identity (Event ID).
+         */eventId: String,
+        /**
+         * Period for which these rates were offered.
+         */billingPeriod: BillingPeriod,
+        /**
+         * Payment asset units per requested asset unit.
+         */rates: [ConversionRate],
+        /**
+         * Inclusive start of the payment validity interval, in RFC3339 UTC.
+         */validFrom: String,
+        /**
+         * Inclusive actual-payment deadline, in RFC3339 UTC.
+         */expiresAt: String,
+        /**
+         * Local outbound status, when issued locally.
+         */outboundStatus: OutboundPrivateMessageStatus?) {
+        self.eventId = eventId
+        self.billingPeriod = billingPeriod
+        self.rates = rates
+        self.validFrom = validFrom
+        self.expiresAt = expiresAt
+        self.outboundStatus = outboundStatus
+    }
+}
+
+#if compiler(>=6)
+extension PaymentConversionQuoteRecord: Sendable {}
+#endif
+
+
+extension PaymentConversionQuoteRecord: Equatable, Hashable {
+    public static func ==(lhs: PaymentConversionQuoteRecord, rhs: PaymentConversionQuoteRecord) -> Bool {
+        if lhs.eventId != rhs.eventId {
+            return false
+        }
+        if lhs.billingPeriod != rhs.billingPeriod {
+            return false
+        }
+        if lhs.rates != rhs.rates {
+            return false
+        }
+        if lhs.validFrom != rhs.validFrom {
+            return false
+        }
+        if lhs.expiresAt != rhs.expiresAt {
+            return false
+        }
+        if lhs.outboundStatus != rhs.outboundStatus {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(eventId)
+        hasher.combine(billingPeriod)
+        hasher.combine(rates)
+        hasher.combine(validFrom)
+        hasher.combine(expiresAt)
+        hasher.combine(outboundStatus)
+    }
+}
+
+extension PaymentConversionQuoteRecord: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentConversionQuoteRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentConversionQuoteRecord {
+        return
+            try PaymentConversionQuoteRecord(
+                eventId: FfiConverterString.read(from: &buf),
+                billingPeriod: FfiConverterTypeBillingPeriod.read(from: &buf),
+                rates: FfiConverterSequenceTypeConversionRate.read(from: &buf),
+                validFrom: FfiConverterString.read(from: &buf),
+                expiresAt: FfiConverterString.read(from: &buf),
+                outboundStatus: FfiConverterOptionTypeOutboundPrivateMessageStatus.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PaymentConversionQuoteRecord, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.eventId, into: &buf)
+        FfiConverterTypeBillingPeriod.write(value.billingPeriod, into: &buf)
+        FfiConverterSequenceTypeConversionRate.write(value.rates, into: &buf)
+        FfiConverterString.write(value.validFrom, into: &buf)
+        FfiConverterString.write(value.expiresAt, into: &buf)
+        FfiConverterOptionTypeOutboundPrivateMessageStatus.write(value.outboundStatus, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentConversionQuoteRecord_lift(_ buf: RustBuffer) throws -> PaymentConversionQuoteRecord {
+    return try FfiConverterTypePaymentConversionQuoteRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentConversionQuoteRecord_lower(_ value: PaymentConversionQuoteRecord) -> RustBuffer {
+    return FfiConverterTypePaymentConversionQuoteRecord.lower(value)
+}
+
+
+/**
  * Payment Proof captured in a derived Payment Request record.
  */
 public struct PaymentProofRecord {
@@ -8930,6 +10611,14 @@ public struct PaymentProofRecord {
      * Payment Endpoint Identifier used for payment.
      */
     public var paymentEndpointIdentifier: String
+    /**
+     * Optional canonical Allowance ID reported for this payment execution.
+     */
+    public var allowanceId: String?
+    /**
+     * Selected recurring quote Event ID.
+     */
+    public var conversionQuoteId: String?
     /**
      * Method-specific proof object encoded as JSON.
      */
@@ -8964,6 +10653,12 @@ public struct PaymentProofRecord {
          * Payment Endpoint Identifier used for payment.
          */paymentEndpointIdentifier: String,
         /**
+         * Optional canonical Allowance ID reported for this payment execution.
+         */allowanceId: String?,
+        /**
+         * Selected recurring quote Event ID.
+         */conversionQuoteId: String?,
+        /**
          * Method-specific proof object encoded as JSON.
          */proof: PrivateJsonObject,
         /**
@@ -8976,6 +10671,8 @@ public struct PaymentProofRecord {
         self.paymentReference = paymentReference
         self.billingPeriod = billingPeriod
         self.paymentEndpointIdentifier = paymentEndpointIdentifier
+        self.allowanceId = allowanceId
+        self.conversionQuoteId = conversionQuoteId
         self.proof = proof
         self.recordedAt = recordedAt
     }
@@ -9001,6 +10698,8 @@ public struct FfiConverterTypePaymentProofRecord: FfiConverterRustBuffer {
                 paymentReference: FfiConverterTypePaymentReference.read(from: &buf),
                 billingPeriod: FfiConverterOptionTypeBillingPeriod.read(from: &buf),
                 paymentEndpointIdentifier: FfiConverterString.read(from: &buf),
+                allowanceId: FfiConverterOptionString.read(from: &buf),
+                conversionQuoteId: FfiConverterOptionString.read(from: &buf),
                 proof: FfiConverterTypePrivateJsonObject.read(from: &buf),
                 recordedAt: FfiConverterString.read(from: &buf)
         )
@@ -9014,6 +10713,8 @@ public struct FfiConverterTypePaymentProofRecord: FfiConverterRustBuffer {
         FfiConverterTypePaymentReference.write(value.paymentReference, into: &buf)
         FfiConverterOptionTypeBillingPeriod.write(value.billingPeriod, into: &buf)
         FfiConverterString.write(value.paymentEndpointIdentifier, into: &buf)
+        FfiConverterOptionString.write(value.allowanceId, into: &buf)
+        FfiConverterOptionString.write(value.conversionQuoteId, into: &buf)
         FfiConverterTypePrivateJsonObject.write(value.proof, into: &buf)
         FfiConverterString.write(value.recordedAt, into: &buf)
     }
@@ -9048,6 +10749,15 @@ public struct PaymentProofSubmission {
      */
     public var paymentEndpointIdentifier: String
     /**
+     * Canonical Allowance ID from the wallet's persisted payment association, when used.
+     * This field reports usage; it does not authorize or account for payment.
+     */
+    public var allowanceId: String?
+    /**
+     * Selected recurring quote Event ID.
+     */
+    public var conversionQuoteId: String?
+    /**
      * Method-specific proof object encoded as JSON.
      */
     public var proof: PrivateJsonObject
@@ -9062,10 +10772,19 @@ public struct PaymentProofSubmission {
          * Payment Endpoint Identifier used for payment.
          */paymentEndpointIdentifier: String,
         /**
+         * Canonical Allowance ID from the wallet's persisted payment association, when used.
+         * This field reports usage; it does not authorize or account for payment.
+         */allowanceId: String?,
+        /**
+         * Selected recurring quote Event ID.
+         */conversionQuoteId: String?,
+        /**
          * Method-specific proof object encoded as JSON.
          */proof: PrivateJsonObject) {
         self.billingPeriod = billingPeriod
         self.paymentEndpointIdentifier = paymentEndpointIdentifier
+        self.allowanceId = allowanceId
+        self.conversionQuoteId = conversionQuoteId
         self.proof = proof
     }
 }
@@ -9085,6 +10804,8 @@ public struct FfiConverterTypePaymentProofSubmission: FfiConverterRustBuffer {
             try PaymentProofSubmission(
                 billingPeriod: FfiConverterOptionTypeBillingPeriod.read(from: &buf),
                 paymentEndpointIdentifier: FfiConverterString.read(from: &buf),
+                allowanceId: FfiConverterOptionString.read(from: &buf),
+                conversionQuoteId: FfiConverterOptionString.read(from: &buf),
                 proof: FfiConverterTypePrivateJsonObject.read(from: &buf)
         )
     }
@@ -9092,6 +10813,8 @@ public struct FfiConverterTypePaymentProofSubmission: FfiConverterRustBuffer {
     public static func write(_ value: PaymentProofSubmission, into buf: inout [UInt8]) {
         FfiConverterOptionTypeBillingPeriod.write(value.billingPeriod, into: &buf)
         FfiConverterString.write(value.paymentEndpointIdentifier, into: &buf)
+        FfiConverterOptionString.write(value.allowanceId, into: &buf)
+        FfiConverterOptionString.write(value.conversionQuoteId, into: &buf)
         FfiConverterTypePrivateJsonObject.write(value.proof, into: &buf)
     }
 }
@@ -9224,7 +10947,7 @@ public struct PaymentRequestFilter {
      */
     public var recurring: Bool?
     /**
-     * Include only inbound Payment Requests received from counterparties.
+     * Inspect inbound proposals only; use the full view for actionable state and quotes.
      */
     public var receivedOnly: Bool
 
@@ -9247,7 +10970,7 @@ public struct PaymentRequestFilter {
          * Restrict results by whether the request has recurrence terms.
          */recurring: Bool?,
         /**
-         * Include only inbound Payment Requests received from counterparties.
+         * Inspect inbound proposals only; use the full view for actionable state and quotes.
          */receivedOnly: Bool) {
         self.counterparty = counterparty
         self.counterpartyReceiverPath = counterpartyReceiverPath
@@ -9411,6 +11134,10 @@ public struct PaymentRequestRecord {
      */
     public var canceledOutboundStatus: OutboundPrivateMessageStatus?
     /**
+     * Immutable conversion quotes, including expired historical quotes.
+     */
+    public var conversionQuotes: [PaymentConversionQuoteRecord]
+    /**
      * Payment Proof records in local record order.
      */
     public var paymentProofs: [PaymentProofRecord]
@@ -9487,6 +11214,9 @@ public struct PaymentRequestRecord {
          * Local outbound delivery status for a cancellation event.
          */canceledOutboundStatus: OutboundPrivateMessageStatus?,
         /**
+         * Immutable conversion quotes, including expired historical quotes.
+         */conversionQuotes: [PaymentConversionQuoteRecord],
+        /**
          * Payment Proof records in local record order.
          */paymentProofs: [PaymentProofRecord],
         /**
@@ -9520,6 +11250,7 @@ public struct PaymentRequestRecord {
         self.rejectedOutboundStatus = rejectedOutboundStatus
         self.canceledEventId = canceledEventId
         self.canceledOutboundStatus = canceledOutboundStatus
+        self.conversionQuotes = conversionQuotes
         self.paymentProofs = paymentProofs
         self.lastStreamItemId = lastStreamItemId
         self.lastOutboundMessageId = lastOutboundMessageId
@@ -9558,6 +11289,7 @@ public struct FfiConverterTypePaymentRequestRecord: FfiConverterRustBuffer {
                 rejectedOutboundStatus: FfiConverterOptionTypeOutboundPrivateMessageStatus.read(from: &buf),
                 canceledEventId: FfiConverterOptionString.read(from: &buf),
                 canceledOutboundStatus: FfiConverterOptionTypeOutboundPrivateMessageStatus.read(from: &buf),
+                conversionQuotes: FfiConverterSequenceTypePaymentConversionQuoteRecord.read(from: &buf),
                 paymentProofs: FfiConverterSequenceTypePaymentProofRecord.read(from: &buf),
                 lastStreamItemId: FfiConverterOptionUInt64.read(from: &buf),
                 lastOutboundMessageId: FfiConverterOptionUInt64.read(from: &buf),
@@ -9584,6 +11316,7 @@ public struct FfiConverterTypePaymentRequestRecord: FfiConverterRustBuffer {
         FfiConverterOptionTypeOutboundPrivateMessageStatus.write(value.rejectedOutboundStatus, into: &buf)
         FfiConverterOptionString.write(value.canceledEventId, into: &buf)
         FfiConverterOptionTypeOutboundPrivateMessageStatus.write(value.canceledOutboundStatus, into: &buf)
+        FfiConverterSequenceTypePaymentConversionQuoteRecord.write(value.conversionQuotes, into: &buf)
         FfiConverterSequenceTypePaymentProofRecord.write(value.paymentProofs, into: &buf)
         FfiConverterOptionUInt64.write(value.lastStreamItemId, into: &buf)
         FfiConverterOptionUInt64.write(value.lastOutboundMessageId, into: &buf)
@@ -9765,6 +11498,14 @@ public struct PaymentRequestTerms {
      */
     public var acceptedPaymentEndpointIdentifiers: [String]
     /**
+     * Optional immutable conversion policy.
+     */
+    public var conversion: PaymentConversion?
+    /**
+     * Optional actual-payment deadline.
+     */
+    public var paymentDeadline: PaymentDeadline?
+    /**
      * Application-specific metadata encoded as a JSON object.
      */
     public var metadata: PrivateJsonObject
@@ -9788,6 +11529,12 @@ public struct PaymentRequestTerms {
          * Accepted Payment Endpoint Identifier strings.
          */acceptedPaymentEndpointIdentifiers: [String],
         /**
+         * Optional immutable conversion policy.
+         */conversion: PaymentConversion?,
+        /**
+         * Optional actual-payment deadline.
+         */paymentDeadline: PaymentDeadline?,
+        /**
          * Application-specific metadata encoded as a JSON object.
          */metadata: PrivateJsonObject) {
         self.amount = amount
@@ -9795,6 +11542,8 @@ public struct PaymentRequestTerms {
         self.proposalExpiresAt = proposalExpiresAt
         self.recurrence = recurrence
         self.acceptedPaymentEndpointIdentifiers = acceptedPaymentEndpointIdentifiers
+        self.conversion = conversion
+        self.paymentDeadline = paymentDeadline
         self.metadata = metadata
     }
 }
@@ -9817,6 +11566,8 @@ public struct FfiConverterTypePaymentRequestTerms: FfiConverterRustBuffer {
                 proposalExpiresAt: FfiConverterOptionString.read(from: &buf),
                 recurrence: FfiConverterOptionTypePaymentRequestRecurrence.read(from: &buf),
                 acceptedPaymentEndpointIdentifiers: FfiConverterSequenceString.read(from: &buf),
+                conversion: FfiConverterOptionTypePaymentConversion.read(from: &buf),
+                paymentDeadline: FfiConverterOptionTypePaymentDeadline.read(from: &buf),
                 metadata: FfiConverterTypePrivateJsonObject.read(from: &buf)
         )
     }
@@ -9827,6 +11578,8 @@ public struct FfiConverterTypePaymentRequestTerms: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.proposalExpiresAt, into: &buf)
         FfiConverterOptionTypePaymentRequestRecurrence.write(value.recurrence, into: &buf)
         FfiConverterSequenceString.write(value.acceptedPaymentEndpointIdentifiers, into: &buf)
+        FfiConverterOptionTypePaymentConversion.write(value.conversion, into: &buf)
+        FfiConverterOptionTypePaymentDeadline.write(value.paymentDeadline, into: &buf)
         FfiConverterTypePrivateJsonObject.write(value.metadata, into: &buf)
     }
 }
@@ -14338,6 +16091,329 @@ public func FfiConverterTypeSdkStateBlobSnapshot_lower(_ value: SdkStateBlobSnap
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * Health of the durable history used to derive one Allowance.
+ */
+
+public enum AllowanceHistoryStatus {
+
+    /**
+     * All retained evidence is valid and causally resolved.
+     */
+    case consistent
+    /**
+     * A valid event references evidence that has not been loaded yet.
+     */
+    case unresolvedReferences
+    /**
+     * Malformed, conflicting, or protocol-invalid evidence is present.
+     */
+    case invalid
+    /**
+     * The exact Encrypted Link needs recovery before safe use.
+     */
+    case recoveryRequired
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    case unknown
+}
+
+
+#if compiler(>=6)
+extension AllowanceHistoryStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowanceHistoryStatus: FfiConverterRustBuffer {
+    typealias SwiftType = AllowanceHistoryStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowanceHistoryStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .consistent
+
+        case 2: return .unresolvedReferences
+
+        case 3: return .invalid
+
+        case 4: return .recoveryRequired
+
+        case 5: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AllowanceHistoryStatus, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .consistent:
+            writeInt(&buf, Int32(1))
+
+
+        case .unresolvedReferences:
+            writeInt(&buf, Int32(2))
+
+
+        case .invalid:
+            writeInt(&buf, Int32(3))
+
+
+        case .recoveryRequired:
+            writeInt(&buf, Int32(4))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(5))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceHistoryStatus_lift(_ buf: RustBuffer) throws -> AllowanceHistoryStatus {
+    return try FfiConverterTypeAllowanceHistoryStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceHistoryStatus_lower(_ value: AllowanceHistoryStatus) -> RustBuffer {
+    return FfiConverterTypeAllowanceHistoryStatus.lower(value)
+}
+
+
+extension AllowanceHistoryStatus: Equatable, Hashable {}
+
+extension AllowanceHistoryStatus: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * SDK-derived Allowance consent lifecycle state.
+ */
+
+public enum AllowanceLifecycleState {
+
+    /**
+     * One proposal is known and has no controlling response.
+     */
+    case proposed
+    /**
+     * The proposal recipient accepted the immutable terms.
+     */
+    case accepted
+    /**
+     * The proposal recipient rejected the proposal.
+     */
+    case rejected
+    /**
+     * A valid unilateral End is present.
+     */
+    case ended
+    /**
+     * Multiple distinct proposals reused the same Allowance ID.
+     */
+    case conflicted
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    case unknown
+}
+
+
+#if compiler(>=6)
+extension AllowanceLifecycleState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowanceLifecycleState: FfiConverterRustBuffer {
+    typealias SwiftType = AllowanceLifecycleState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowanceLifecycleState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .proposed
+
+        case 2: return .accepted
+
+        case 3: return .rejected
+
+        case 4: return .ended
+
+        case 5: return .conflicted
+
+        case 6: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AllowanceLifecycleState, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .proposed:
+            writeInt(&buf, Int32(1))
+
+
+        case .accepted:
+            writeInt(&buf, Int32(2))
+
+
+        case .rejected:
+            writeInt(&buf, Int32(3))
+
+
+        case .ended:
+            writeInt(&buf, Int32(4))
+
+
+        case .conflicted:
+            writeInt(&buf, Int32(5))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(6))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceLifecycleState_lift(_ buf: RustBuffer) throws -> AllowanceLifecycleState {
+    return try FfiConverterTypeAllowanceLifecycleState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceLifecycleState_lower(_ value: AllowanceLifecycleState) -> RustBuffer {
+    return FfiConverterTypeAllowanceLifecycleState.lower(value)
+}
+
+
+extension AllowanceLifecycleState: Equatable, Hashable {}
+
+extension AllowanceLifecycleState: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Local party role for one Allowance.
+ */
+
+public enum AllowanceLocalRole {
+
+    /**
+     * Local identity grants authority and remains the Payer.
+     */
+    case allower
+    /**
+     * Local identity may send qualifying Payment Requests.
+     */
+    case allowee
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    case unknown
+}
+
+
+#if compiler(>=6)
+extension AllowanceLocalRole: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAllowanceLocalRole: FfiConverterRustBuffer {
+    typealias SwiftType = AllowanceLocalRole
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AllowanceLocalRole {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .allower
+
+        case 2: return .allowee
+
+        case 3: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: AllowanceLocalRole, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .allower:
+            writeInt(&buf, Int32(1))
+
+
+        case .allowee:
+            writeInt(&buf, Int32(2))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceLocalRole_lift(_ buf: RustBuffer) throws -> AllowanceLocalRole {
+    return try FfiConverterTypeAllowanceLocalRole.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAllowanceLocalRole_lower(_ value: AllowanceLocalRole) -> RustBuffer {
+    return FfiConverterTypeAllowanceLocalRole.lower(value)
+}
+
+
+extension AllowanceLocalRole: Equatable, Hashable {}
+
+extension AllowanceLocalRole: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * Source used for a resolved contact profile.
  */
 
@@ -14955,6 +17031,186 @@ public func FfiConverterTypeOutboundPrivateMessageStatus_lower(_ value: Outbound
 extension OutboundPrivateMessageStatus: Equatable, Hashable {}
 
 extension OutboundPrivateMessageStatus: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Conversion terms; absence leaves conversion to the wallets' policies.
+ */
+
+public enum PaymentConversion {
+
+    /**
+     * Immutable conversion rates, also fixed across recurring installments.
+     */
+    case fixed(
+        /**
+         * Exact rates; omitted cross-asset currencies cannot be used.
+         */rates: [ConversionRate]
+    )
+    /**
+     * Cross-asset recurring payments require a quote for their Billing Period.
+     */
+    case perPeriod
+}
+
+
+#if compiler(>=6)
+extension PaymentConversion: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentConversion: FfiConverterRustBuffer {
+    typealias SwiftType = PaymentConversion
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentConversion {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .fixed(rates: try FfiConverterSequenceTypeConversionRate.read(from: &buf)
+        )
+
+        case 2: return .perPeriod
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PaymentConversion, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .fixed(rates):
+            writeInt(&buf, Int32(1))
+            FfiConverterSequenceTypeConversionRate.write(rates, into: &buf)
+
+
+        case .perPeriod:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentConversion_lift(_ buf: RustBuffer) throws -> PaymentConversion {
+    return try FfiConverterTypePaymentConversion.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentConversion_lower(_ value: PaymentConversion) -> RustBuffer {
+    return FfiConverterTypePaymentConversion.lower(value)
+}
+
+
+extension PaymentConversion: Equatable, Hashable {}
+
+extension PaymentConversion: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Deadline for actual payment, independent of proposal acceptance expiry.
+ */
+
+public enum PaymentDeadline {
+
+    /**
+     * Absolute one-time deadline in RFC3339 UTC.
+     */
+    case at(
+        /**
+         * RFC3339 UTC timestamp with uppercase T and Z.
+         */timestamp: String
+    )
+    /**
+     * Recurring deadline in elapsed seconds after the Billing Period start.
+     */
+    case periodStart(
+        /**
+         * Nonnegative elapsed seconds from each period start.
+         */seconds: UInt64
+    )
+}
+
+
+#if compiler(>=6)
+extension PaymentDeadline: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentDeadline: FfiConverterRustBuffer {
+    typealias SwiftType = PaymentDeadline
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentDeadline {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .at(timestamp: try FfiConverterString.read(from: &buf)
+        )
+
+        case 2: return .periodStart(seconds: try FfiConverterUInt64.read(from: &buf)
+        )
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PaymentDeadline, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .at(timestamp):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(timestamp, into: &buf)
+
+
+        case let .periodStart(seconds):
+            writeInt(&buf, Int32(2))
+            FfiConverterUInt64.write(seconds, into: &buf)
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentDeadline_lift(_ buf: RustBuffer) throws -> PaymentDeadline {
+    return try FfiConverterTypePaymentDeadline.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentDeadline_lower(_ value: PaymentDeadline) -> RustBuffer {
+    return FfiConverterTypePaymentDeadline.lower(value)
+}
+
+
+extension PaymentDeadline: Equatable, Hashable {}
+
+extension PaymentDeadline: Codable {}
 
 
 
@@ -16604,6 +18860,54 @@ fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeAllowanceAmountRange: FfiConverterRustBuffer {
+    typealias SwiftType = AllowanceAmountRange?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeAllowanceAmountRange.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeAllowanceAmountRange.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeAllowanceTerms: FfiConverterRustBuffer {
+    typealias SwiftType = AllowanceTerms?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeAllowanceTerms.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeAllowanceTerms.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypePrivateOperationError: FfiConverterRustBuffer {
     typealias SwiftType = PrivateOperationError?
 
@@ -16668,6 +18972,30 @@ fileprivate struct FfiConverterOptionTypePubkySessionAccess: FfiConverterRustBuf
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypePubkySessionAccess.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeAllowanceRecord: FfiConverterRustBuffer {
+    typealias SwiftType = AllowanceRecord?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeAllowanceRecord.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeAllowanceRecord.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -17132,6 +19460,30 @@ fileprivate struct FfiConverterOptionTypeSdkStateBlobSnapshot: FfiConverterRustB
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeAllowanceLocalRole: FfiConverterRustBuffer {
+    typealias SwiftType = AllowanceLocalRole?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeAllowanceLocalRole.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeAllowanceLocalRole.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeEncryptedLinkHandshakeRole: FfiConverterRustBuffer {
     typealias SwiftType = EncryptedLinkHandshakeRole?
 
@@ -17180,6 +19532,54 @@ fileprivate struct FfiConverterOptionTypeOutboundPrivateMessageStatus: FfiConver
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypePaymentConversion: FfiConverterRustBuffer {
+    typealias SwiftType = PaymentConversion?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePaymentConversion.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePaymentConversion.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypePaymentDeadline: FfiConverterRustBuffer {
+    typealias SwiftType = PaymentDeadline?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePaymentDeadline.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePaymentDeadline.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypePaymentRequestLocalRole: FfiConverterRustBuffer {
     typealias SwiftType = PaymentRequestLocalRole?
 
@@ -17196,6 +19596,30 @@ fileprivate struct FfiConverterOptionTypePaymentRequestLocalRole: FfiConverterRu
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypePaymentRequestLocalRole.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterSequenceString.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterSequenceString.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -17254,6 +19678,56 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeAllowancePeriodLimit: FfiConverterRustBuffer {
+    typealias SwiftType = [AllowancePeriodLimit]
+
+    public static func write(_ value: [AllowancePeriodLimit], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAllowancePeriodLimit.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AllowancePeriodLimit] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AllowancePeriodLimit]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAllowancePeriodLimit.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeAllowanceRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [AllowanceRecord]
+
+    public static func write(_ value: [AllowanceRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAllowanceRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AllowanceRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AllowanceRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAllowanceRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeContactRecord: FfiConverterRustBuffer {
     typealias SwiftType = [ContactRecord]
 
@@ -17271,6 +19745,31 @@ fileprivate struct FfiConverterSequenceTypeContactRecord: FfiConverterRustBuffer
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeContactRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeConversionRate: FfiConverterRustBuffer {
+    typealias SwiftType = [ConversionRate]
+
+    public static func write(_ value: [ConversionRate], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeConversionRate.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ConversionRate] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ConversionRate]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeConversionRate.read(from: &buf))
         }
         return seq
     }
@@ -17421,6 +19920,31 @@ fileprivate struct FfiConverterSequenceTypeOutboundPrivateSendFailure: FfiConver
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeOutboundPrivateSendFailure.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePaymentConversionQuoteRecord: FfiConverterRustBuffer {
+    typealias SwiftType = [PaymentConversionQuoteRecord]
+
+    public static func write(_ value: [PaymentConversionQuoteRecord], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePaymentConversionQuoteRecord.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PaymentConversionQuoteRecord] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PaymentConversionQuoteRecord]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePaymentConversionQuoteRecord.read(from: &buf))
         }
         return seq
     }
@@ -17979,6 +20503,31 @@ fileprivate struct FfiConverterSequenceTypeRestoreRecoveryRequiredPeer: FfiConve
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeAllowanceLifecycleState: FfiConverterRustBuffer {
+    typealias SwiftType = [AllowanceLifecycleState]
+
+    public static func write(_ value: [AllowanceLifecycleState], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAllowanceLifecycleState.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AllowanceLifecycleState] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AllowanceLifecycleState]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAllowanceLifecycleState.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypePaymentRequestLifecycleState: FfiConverterRustBuffer {
     typealias SwiftType = [PaymentRequestLifecycleState]
 
@@ -18151,6 +20700,18 @@ public func parsePubkyResource(uri: String)throws  -> PubkyResourceRef  {
 })
 }
 /**
+ * Resolve an actual-payment deadline for the selected Billing Period.
+ * The caller compares this with independently verified payment time.
+ */
+public func paymentDeadlineAt(deadline: PaymentDeadline, billingPeriod: BillingPeriod?)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_func_payment_deadline_at(
+        FfiConverterTypePaymentDeadline_lower(deadline),
+        FfiConverterOptionTypeBillingPeriod.lower(billingPeriod),$0
+    )
+})
+}
+/**
  * Return the Pubky public key for a local secret key.
  */
 public func pubkyPublicKeyFromSecret(localSecretKey: PubkyLocalSecretKey)throws  -> String  {
@@ -18260,6 +20821,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_parse_pubky_resource() != 2298) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_func_payment_deadline_at() != 2507) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_func_pubky_public_key_from_secret() != 41462) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18279,6 +20843,57 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_resolve_pubky_url() != 12085) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceamountrange_maximum() != 52035) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceamountrange_minimum() != 15472) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceperiod_anchor() != 30631) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceperiod_every() != 60037) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceperiod_kind() != 12042) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceperiod_unit() != 49664) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceperiodlimit_amount_limit() != 22492) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceperiodlimit_payment_count_limit() != 8509) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceperiodlimit_period() != 36301) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceterms_active_from() != 56693) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceterms_allowed_payment_endpoint_identifiers() != 63441) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceterms_asset() != 61516) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceterms_expires_at() != 42679) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceterms_lifetime_amount_limit() != 50133) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceterms_per_payment_amount() != 32791) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffiallowanceterms_period_limits() != 38146) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_allowance() != 19038) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_link_with_peer() != 24950) {
@@ -18335,6 +20950,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_encrypted_link_recovery_marker_status() != 64910) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_end_allowance() != 27377) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_enqueue_private_payment_list() != 16764) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18371,6 +20989,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_forget_session_access() != 58467) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_get_allowance() != 44953) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_identity_status() != 8559) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18390,6 +21011,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_linked_peers() != 57246) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_list_allowances() != 36022) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_list_payment_requests() != 43354) {
@@ -18428,7 +21052,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_process_receipt_issuance() != 18672) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_payment_request() != 35762) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_allowance() != 8566) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_payment_request() != 31477) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_encrypted_link_recovery_marker() != 60401) {
@@ -18444,6 +21071,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_public_contact() != 54711) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_quote_payment_request() != 10419) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_receipt_access() != 27958) {
@@ -18473,10 +21103,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_receive_private_messages_from_linked_peers() != 15229) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_received_payment_requests_from() != 14) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_received_payment_requests_from() != 16022) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_refresh_contact_paykit_profile() != 26474) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_reject_allowance() != 56162) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_reject_payment_request() != 14619) {
@@ -18678,6 +21311,18 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffisdkstateblobstore_save_state_blob_atomically() != 4172) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_constructor_ffiallowanceamountrange_new() != 19415) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_constructor_ffiallowanceperiod_new() != 5577) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_constructor_ffiallowanceperiodlimit_new() != 24867) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_constructor_ffiallowanceterms_new() != 52414) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffipaykitsdk_new() != 15447) {
