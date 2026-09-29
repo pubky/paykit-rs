@@ -9,6 +9,7 @@ use crate::harness::{
     wait_until_marker_is_newer_than_observer_checkpoint, TestUser,
 };
 
+mod accounting;
 mod cancellation_restore;
 mod proofs;
 
