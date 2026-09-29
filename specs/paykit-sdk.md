@@ -297,9 +297,21 @@ latest blob, applies the existing `StorageTransaction`, validates and encrypts
 changed state, then writes with the lock token and releases the lock. A competing
 writer gets a storage conflict and can retry the whole SDK operation with fresh
 state. A storage instance also fails closed if a resource it previously
-observed disappears. After a write transport error, the adapter reads the
-resource again and reports success only when the exact encrypted bytes it
-attempted to store were committed.
+observed disappears.
+
+Before each state PUT, the adapter publishes an empty, uniquely named marker
+under `/pub/paykit/v0/shared-state-writes/`. A confirmed PUT or definitive lock
+rejection removes its marker; uncertain writes and cancellation leave it.
+Marker cleanup failure does not undo a confirmed commit. A transaction finding
+pending markers holds and renews the state lock for five minutes, removes the
+observed markers, then loads fresh state. Read-only transactions and key rotation
+use the same barrier. Cancelling the wait leaves the markers for the next caller.
+
+This cooldown is a best-effort mitigation for Pubky 0.14's missing commit-time
+lock enforcement, not a production concurrency guarantee. A write delayed beyond
+the cooldown can still overwrite newer state; a successful readback does not end
+uncertainty.
+Normal writes add marker publication and cleanup requests but no timed delay.
 
 ### PubkySessionProvider
 

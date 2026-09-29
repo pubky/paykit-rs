@@ -749,13 +749,14 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<PeerLinkOperationLease> {
-        let now = self.clock.now();
         let lease_timeout = ChronoDuration::from_std(PEER_LINK_OPERATION_LEASE_TIMEOUT)
             .expect("fixed peer link lease timeout must fit chrono duration");
-        let expires_at = now + lease_timeout;
         self.retry_storage_transaction(|| {
             let counterparty = counterparty.clone();
-            move |tx| tx.claim_peer_link_operation(&counterparty, now, expires_at)
+            move |tx| {
+                let now = self.clock.now();
+                tx.claim_peer_link_operation(&counterparty, now, now + lease_timeout)
+            }
         })
         .await?
         .ok_or_else(|| PaykitSdkError::Policy {

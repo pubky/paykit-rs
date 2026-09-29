@@ -350,6 +350,13 @@ and publish complete files durably. Locks alone do not provide storage crash saf
 
 Pubky 0.14 checks lock ownership when a write starts, not at commit. Production
 multi-app use requires homeserver commit-time fencing of expired lock holders.
+For testing, shared-state writes publish a unique pending marker before their
+PUT and remove it after a confirmed result. An unconfirmed write leaves its
+marker; the next transaction waits five minutes under a renewed lock, then
+reloads state. Cancellation leaves the marker and restarts the wait on the next
+attempt. The cooldown adds no timed delay to
+normal successful writes, but cannot rule out a write completing after five
+minutes and does not replace the homeserver fix.
 
 `sign_out` validates the active identity, revokes this application's Pubky
 grant, and clears its local session access. It does not clear the identity's

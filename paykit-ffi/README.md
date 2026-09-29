@@ -357,6 +357,11 @@ with `withPaymentAdapterAndPubkySharedState`. This mode does not use
 Paykit identity key material for every operation. Independent runtimes use
 renewable homeserver write locks across each state transaction. A lock conflict
 can be retried by restarting the SDK operation with fresh state.
+An unconfirmed state write leaves a homeserver marker. The next operation waits
+five minutes under a renewed lock before reloading state; cancelling restarts
+that wait on the next attempt.
+This is a best-effort testing mitigation, not a replacement for homeserver
+commit-time lock enforcement. Normal successful writes have no cooldown.
 
 Use `identityStatus` to gate product actions. `publicKey` identifies the last
 initialized identity when known. `SignedOut` means Pubky-backed workflows must

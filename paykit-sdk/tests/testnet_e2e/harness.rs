@@ -20,7 +20,9 @@ use paykit_sdk::{
     PublicPaymentEndpointSelectionRequest, PublicReceivingDetail, Result, StorageAdapter,
     PAYKIT_SESSION_CAPABILITIES,
 };
-use pubky_testnet::{docker_postgres::DockerPostgres, pubky::Keypair, EphemeralTestnet};
+use pubky_testnet::{
+    docker_postgres::DockerPostgres, pubky::Keypair, pubky_homeserver::ConfigToml, EphemeralTestnet,
+};
 use tokio::sync::{oneshot, Mutex as TokioMutex, OnceCell, Semaphore, SemaphorePermit};
 
 const TEST_CLIENT_ID: &str = "paykit-sdk.test";
@@ -53,6 +55,16 @@ async fn shared_postgres() -> &'static DockerPostgres {
 }
 
 pub async fn build_testnet() -> TestnetInstance {
+    build_testnet_with_config(ConfigToml::minimal_test_config()).await
+}
+
+pub async fn build_testnet_with_admin() -> TestnetInstance {
+    let mut config = ConfigToml::minimal_test_config();
+    config.admin.enabled = true;
+    build_testnet_with_config(config).await
+}
+
+async fn build_testnet_with_config(config: ConfigToml) -> TestnetInstance {
     let permit = TESTNET_CONCURRENCY
         .acquire()
         .await
@@ -70,7 +82,12 @@ pub async fn build_testnet() -> TestnetInstance {
     };
 
     TestnetInstance {
-        inner: builder.with_http_relay().build().await.unwrap(),
+        inner: builder
+            .config(config)
+            .with_http_relay()
+            .build()
+            .await
+            .unwrap(),
         _permit: permit,
     }
 }

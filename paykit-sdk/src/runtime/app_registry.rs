@@ -45,10 +45,8 @@ where
         &self,
         allow_unpublished: bool,
     ) -> Result<PaykitAppOperationLease> {
-        let now = self.clock.now();
         let timeout = ChronoDuration::from_std(PAYKIT_APP_OPERATION_LEASE_TIMEOUT)
             .expect("fixed Paykit App operation lease timeout must fit chrono duration");
-        let expires_at = now + timeout;
         let app_id = self.config.app_id.clone();
         self.retry_storage_transaction(|| {
             let app_id = app_id.clone();
@@ -64,7 +62,8 @@ where
                         source: None,
                     });
                 }
-                tx.claim_paykit_app_operation(&app_id, now, expires_at)
+                let now = self.clock.now();
+                tx.claim_paykit_app_operation(&app_id, now, now + timeout)
             }
         })
         .await?

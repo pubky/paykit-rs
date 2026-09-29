@@ -77,6 +77,57 @@ impl Clock for MutableClock {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_operation_leases_start_when_storage_callback_runs() {
+    let peer = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    for counterparty in [Some(peer), None] {
+        let (storage, entered) = TransactionGateStorage::new(registered_test_storage());
+        let initial = FixedClock.now();
+        let clock = MutableClock::new(initial);
+        let sdk = Arc::new(PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::new("bitkit").unwrap(),
+            clock.clone(),
+        ));
+        let task = tokio::spawn({
+            let sdk = Arc::clone(&sdk);
+            let counterparty = counterparty.clone();
+            async move {
+                if let Some(counterparty) = counterparty {
+                    let lease = sdk.claim_peer_link_operation(&counterparty).await.unwrap();
+                    (lease.claimed_at, lease.expires_at)
+                } else {
+                    let lease = sdk.claim_paykit_app_operation().await.unwrap();
+                    (lease.claimed_at, lease.expires_at)
+                }
+            }
+        });
+        let entered_result = entered.recv_timeout(std::time::Duration::from_secs(2));
+        let resumed_at = initial + ChronoDuration::minutes(5);
+        clock.set(resumed_at);
+        storage.release();
+        entered_result.expect("lease claim must wait at the storage fence");
+
+        let (claimed_at, expires_at) = task.await.unwrap();
+        assert_eq!(claimed_at, resumed_at);
+        assert_eq!(expires_at, resumed_at + ChronoDuration::seconds(60));
+
+        let competing_claim = if let Some(counterparty) = counterparty {
+            sdk.claim_peer_link_operation(&counterparty)
+                .await
+                .map(|_| ())
+        } else {
+            sdk.claim_paykit_app_operation().await.map(|_| ())
+        };
+        assert!(matches!(
+            competing_claim,
+            Err(PaykitSdkError::Policy { .. })
+        ));
+    }
+}
+
 #[tokio::test]
 async fn test_payment_requests_with_allows_public_only_identity() {
     let storage = registered_test_storage();

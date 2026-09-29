@@ -51,6 +51,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Use renewable WebDAV write locks for encrypted shared-state transactions and
   App Registry, profile, and Payment Endpoint updates. Stale-edit checks compare
   resource contents under the lock instead of relying on ETags.
+- Unconfirmed shared-state writes leave pending markers and trigger a five-minute
+  cooldown before the next state read. This reduces late-write risk but does not
+  replace homeserver commit-time lock enforcement.
 - **Protocol/API:** conversion/deadline terms and the
   `paykit.payment_conversion_quote` event require support from both peers.
   Callers must establish that support before opting in; the existing broad

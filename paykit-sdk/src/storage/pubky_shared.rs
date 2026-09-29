@@ -1,4 +1,4 @@
-use std::{any::Any, sync::Arc};
+use std::{any::Any, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use chacha20poly1305::{
@@ -21,6 +21,7 @@ use crate::{
 
 const SHARED_STATE_ENVELOPE_VERSION: u32 = 1;
 const MAX_SHARED_STATE_BYTES: usize = 64 * 1024 * 1024;
+const UNCERTAIN_WRITE_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Serialize)]
 struct EncryptedStateEnvelopeRef<'a> {
@@ -56,9 +57,10 @@ struct EncryptedStateBlob {
 /// instance serializes its own operations. Each transaction holds a renewed
 /// homeserver write lock from the initial read through publication.
 /// Encryption protects state contents and integrity, but not resource
-/// existence, size, update timing, or replay by the homeserver. After a write
-/// transport error, the adapter only reports success if it can read back the
-/// exact encrypted revision it attempted to store.
+/// existence, size, update timing, or replay by the homeserver. Unconfirmed
+/// writes leave a remote marker; the next transaction waits five minutes under
+/// its renewed lock before reading state. This is a best-effort delay, not a
+/// substitute for homeserver enforcement of lock ownership at publication.
 #[derive(Clone)]
 pub struct PubkySharedStateStorage {
     session_provider: Arc<dyn PubkySessionProvider>,
@@ -162,31 +164,37 @@ impl PubkySharedStateStorage {
     ) -> Result<()> {
         let attempted_revision = state_revision(&encrypted);
         let storage = access.session.storage();
+        // Each encrypted attempt has a fresh nonce. A distinct marker prevents
+        // delayed cleanup of one write from clearing another write's marker.
+        let pending_path = format!(
+            "{}{}",
+            paykit_lib::PAYKIT_SHARED_STATE_WRITE_PATH_PREFIX,
+            blake3::hash(&encrypted).to_hex(),
+        );
+        storage
+            .put(&pending_path, Vec::new())
+            .await
+            .map_err(|error| shared_write_error("mark pending Pubky shared-state write", error))?;
         let write_result = storage.put_locked(lock, encrypted).await;
 
         match write_result {
-            Ok(_) => self.record_revision(Some(attempted_revision)),
+            Ok(_) => {
+                // Cleanup failure must not turn a confirmed commit into a
+                // failed transaction. The leftover marker causes a cooldown.
+                let _ = remove_pending_write(&storage, &pending_path).await;
+                self.record_revision(Some(attempted_revision))
+            }
             Err(write_error) if is_precondition_failed(&write_error) => {
+                let _ = remove_pending_write(&storage, &pending_path).await;
                 Err(PaykitSdkError::ConcurrentUpdate {
                     context: "Pubky shared-state lock expired during transaction".into(),
                     source: Some(write_error.into()),
                 })
             }
-            Err(write_error) => {
-                let committed_revision = load_encrypted_blob(access)
-                    .await
-                    .ok()
-                    .flatten()
-                    .filter(|stored| stored.revision == attempted_revision)
-                    .map(|stored| stored.revision);
-                match committed_revision {
-                    Some(revision) => self.record_revision(Some(revision)),
-                    None => Err(PaykitSdkError::Transport {
-                        context: "write encrypted Pubky shared state could not be confirmed".into(),
-                        source: Some(write_error.into()),
-                    }),
-                }
-            }
+            Err(write_error) => Err(shared_write_error(
+                "write encrypted Pubky shared state could not be confirmed",
+                write_error,
+            )),
         }
     }
 }
@@ -204,6 +212,7 @@ impl StorageAdapter for PubkySharedStateStorage {
             &session,
             paykit_lib::PAYKIT_SHARED_STATE_PATH,
             |lock| async move {
+                wait_for_pending_writes(&access.session).await?;
                 let snapshot = self.load_remote_state(&access).await?;
                 if self.last_revision()?.is_some() && snapshot.revision.is_none() {
                     return Err(PaykitSdkError::Storage {
@@ -248,6 +257,7 @@ impl StorageAdapter for PubkySharedStateStorage {
             &session,
             paykit_lib::PAYKIT_SHARED_STATE_PATH,
             |lock| async move {
+                wait_for_pending_writes(&access.session).await?;
                 let encrypted = load_encrypted_blob(&access).await?;
                 let revision = encrypted.as_ref().map(|blob| blob.revision.clone());
                 if self.last_revision()?.is_some() && revision.is_none() {
@@ -298,6 +308,76 @@ impl StorageAdapter for PubkySharedStateStorage {
             },
         )
         .await
+    }
+}
+
+async fn wait_for_pending_writes(session: &pubky::PubkySession) -> Result<()> {
+    let storage = session.storage();
+    let mut waited = false;
+    loop {
+        let pending = match storage
+            .list(paykit_lib::PAYKIT_SHARED_STATE_WRITE_PATH_PREFIX)
+            .map_err(|error| shared_write_error("list pending Pubky shared-state writes", error))?
+            .shallow(true)
+            .limit(100)
+            .send()
+            .await
+        {
+            Ok(pending) => pending,
+            Err(error) if is_not_found(&error) => return Ok(()),
+            Err(error) => {
+                return Err(shared_write_error(
+                    "list pending Pubky shared-state writes",
+                    error,
+                ));
+            }
+        };
+        if pending.is_empty() {
+            return Ok(());
+        }
+        for entry in &pending {
+            let suffix = entry
+                .path
+                .as_str()
+                .strip_prefix(paykit_lib::PAYKIT_SHARED_STATE_WRITE_PATH_PREFIX);
+            if entry.owner != session.public_key()
+                || !suffix.is_some_and(|id| {
+                    id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            {
+                return Err(PaykitSdkError::Storage {
+                    context: "invalid pending Pubky shared-state write path".into(),
+                    source: None,
+                });
+            }
+        }
+        if !waited {
+            // Keep the state lock throughout the wait. Cancellation leaves the
+            // markers intact so the next app waits afresh, without clock skew.
+            tokio::time::sleep(UNCERTAIN_WRITE_COOLDOWN).await;
+            waited = true;
+        }
+        for entry in pending {
+            remove_pending_write(&storage, entry.path.as_str()).await?;
+        }
+    }
+}
+
+async fn remove_pending_write(storage: &pubky::SessionStorage, path: &str) -> Result<()> {
+    match storage.delete(path).await {
+        Ok(_) => Ok(()),
+        Err(error) if is_not_found(&error) => Ok(()),
+        Err(error) => Err(shared_write_error(
+            "remove pending Pubky shared-state write",
+            error,
+        )),
+    }
+}
+
+fn shared_write_error(context: &str, error: PubkyError) -> PaykitSdkError {
+    PaykitSdkError::Transport {
+        context: context.into(),
+        source: Some(error.into()),
     }
 }
 

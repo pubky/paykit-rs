@@ -99,6 +99,7 @@ pub use pubky_routing::{
     content_revision, delete_resource_if_revision, is_write_conflict, put_resource_if_revision,
     with_write_lock, PAYKIT_APP_REGISTRY_PATH, PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX,
     PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX, PAYKIT_SHARED_STATE_PATH,
+    PAYKIT_SHARED_STATE_WRITE_PATH_PREFIX,
 };
 #[doc(inline)]
 pub use receipt::{
