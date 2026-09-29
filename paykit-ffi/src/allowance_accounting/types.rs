@@ -116,7 +116,8 @@ pub struct FfiPaymentAttemptRecord {
     pub allowance_id: Option<String>,
     /// Association revision used at admission.
     pub association_revision: Option<u64>,
-    /// Exact requested amount; excludes fees and refunds.
+    /// Requested amount for automatic execution; verified actual amount for manual execution.
+    /// Excludes fees and refunds, and cannot change between reservation and handoff.
     pub amount: Arc<FfiAccountingAmount>,
     /// Original trusted admission time.
     pub admitted_at: String,
@@ -262,6 +263,9 @@ pub struct FfiPaymentExecutionChecks {
     /// Endpoint details are current, usable, and unconsumed.
     pub endpoint_current: bool,
     /// Local enablement and every private safeguard passed.
+    /// Manual cross-asset execution also attests wallet validation of conversion
+    /// policy, required quote, endpoint precision, rounding, and payment deadlines.
+    /// The wallet must persist its selected quote separately before execution.
     pub local_enabled: bool,
     /// Wallet scheduler verified this recurring interval; true for one-time payments.
     pub recurrence_eligible: bool,

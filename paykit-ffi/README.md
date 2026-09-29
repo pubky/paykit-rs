@@ -230,6 +230,13 @@ same handoff/outcome flow, and the same semantic occurrence key. It consumes no
 Allowance capacity but cannot duplicate an unresolved or successful automatic
 payment. Calls directly to a separate wallet executor would bypass this guarantee.
 
+Manual converted payments retain the wallet-verified actual amount. Before
+reservation and handoff, `localEnabled` must attest that the wallet checked
+conversion policy, any required quote, endpoint precision, rounding, and payment
+deadlines. The wallet must retain its selected quote separately. Handoff must
+use the reserved asset and amount. Automatic Allowance payments still require
+the exact requested asset and amount.
+
 For an explicit user-approved replacement on a recurring request, call
 `authorizeAllowanceReassociation` with the expected revision, a future Billing
 Period boundary, and the stable UUID-v4 authorization reference. Future occurrences
@@ -249,6 +256,10 @@ is provided. Decode failure never falls back to empty state. The platform
 `saveStateBlobAtomically` callback must durably save the whole blob and enforce
 its expected revision before acknowledging success.
 Preserve opaque blobs with caller-managed encryption in storage and backups.
+
+Restore rejects backups that would discard retained Allowance or Payment Request
+lifecycle evidence, including Cancellation and Event ID conflicts. Rejection
+leaves current state unchanged.
 
 After restore or private-state loss, accounting remains blocked until complete
 wallet reconciliation. A stale but internally valid backup can omit later spend:
