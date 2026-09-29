@@ -46,6 +46,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Changed
 
+- Upgrade Pubky to 0.12 and Pubky Noise to 0.1.0-rc10. Encrypted Link
+  transport packets authenticate the message length and padding while retaining
+  the 1000-byte application payload limit. The transport format is incompatible
+  with earlier Noise releases; communicating peers must upgrade together.
 - **Protocol/API:** conversion/deadline terms and the
   `paykit.payment_conversion_quote` event require support from both peers.
   Callers must establish that support before opting in; the existing broad
