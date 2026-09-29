@@ -729,7 +729,7 @@ pub(crate) fn requeue_recovery_required_outbound_messages(
         message.last_error = None;
         tx.save_outbound_private_message(message)?;
     }
-    Ok(())
+    crate::domain::payment_requests::release_resolved_payment_execution_claims(tx, now)
 }
 
 /// Load the durable Encrypted Link state for a counterparty.

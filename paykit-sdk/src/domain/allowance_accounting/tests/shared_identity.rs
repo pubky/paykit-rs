@@ -414,3 +414,162 @@ async fn test_conflicting_proposal_preserves_unresolved_claim_through_restore() 
     foreign_payer.identity_state.as_mut().unwrap().public_key = Some(public_key());
     assert!(crate::validate_storage_state(&foreign_payer).is_err());
 }
+
+#[tokio::test]
+async fn test_requeue_canceled_request_releases_only_resolved_accounting_claims() {
+    use crate::OutboundPrivateMessageStatus::{Failed, Pending};
+
+    for (delivery, restored) in [(Pending, false), (Failed, false), (Pending, true)] {
+        assert_requeue_canceled_request_claims(delivery, restored).await;
+    }
+}
+
+async fn assert_requeue_canceled_request_claims(
+    delivery: crate::OutboundPrivateMessageStatus,
+    restored: bool,
+) {
+    use crate::OutboundPrivateMessageStatus::{Pending, Sent};
+
+    for outcome in [PaymentOutcome::Failed, PaymentOutcome::Unknown] {
+        let resolved = outcome == PaymentOutcome::Failed;
+        let mut fixture = Fixture::new().await;
+        let prepared = attempt(fixture.reserve().await);
+        let submitted = fixture
+            .storage
+            .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id.clone(), checks()))
+            .await
+            .unwrap();
+        assert_eq!(attempt(submitted).status, PaymentExecutionStatus::Submitted);
+        let peer = fixture.occurrence.request.counterparty.clone();
+        let cancellation = paykit_lib::PaymentRequestEvent::Cancellation(
+            paykit_lib::PaymentRequestCancellation::new(
+                paykit_lib::EventId::new_v4(),
+                fixture.occurrence.request.payment_request_id.clone(),
+                None,
+            ),
+        );
+        crate::domain::payment_requests::enqueue_checked_payment_request_action(
+            &fixture.storage,
+            peer.clone(),
+            &app_id(),
+            &cancellation,
+            time(),
+        )
+        .await
+        .unwrap();
+        fixture
+            .storage
+            .transaction(|tx| {
+                for mut message in tx.outbound_private_messages(&peer) {
+                    if delivery != Pending {
+                        message.attempt_count = 1;
+                        message.last_attempt_at = Some(time());
+                        message = if delivery == Sent {
+                            crate::domain::outbound_private::mark_outbound_sent(message, time())
+                        } else {
+                            crate::domain::outbound_private::mark_outbound_failed(
+                                message,
+                                "publication failed".into(),
+                                time(),
+                            )
+                        };
+                    }
+                    tx.save_outbound_private_message(message)?;
+                }
+                assert_eq!(
+                    request(tx, &scope(tx, &fixture.occurrence.request)?, time())?.state,
+                    crate::PaymentRequestLifecycleState::Canceled
+                );
+                crate::domain::linked_peers::mark_recovery_required_in_transaction(
+                    tx,
+                    &peer,
+                    time(),
+                )?;
+                crate::validate_storage_state(&tx.export_storage_state())
+            })
+            .await
+            .unwrap();
+
+        if restored {
+            let capabilities = fixture
+                .storage
+                .transaction(|tx| Ok(tx.paykit_app_capabilities(&app_id()).unwrap()))
+                .await
+                .unwrap();
+            let backup = crate::export_backup_state(&fixture.storage).await.unwrap();
+            fixture.storage = InMemoryStorage::new();
+            crate::backup::restore_backup_state(&fixture.storage, backup)
+                .await
+                .unwrap();
+            assert!(fixture.state().requires_reconciliation);
+            fixture
+                .storage
+                .transaction(|tx| {
+                    tx.save_paykit_app_capabilities(&app_id(), capabilities);
+                    tx.activate_paykit_app(&app_id());
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        let report = PaymentOutcomeReport {
+            attempt_id: prepared.attempt_id,
+            outcome,
+        };
+        fixture
+            .storage
+            .transaction(|tx| {
+                if restored {
+                    let revision = load(tx)?.revision;
+                    reconcile(
+                        tx,
+                        AllowanceAccountingReconciliation {
+                            expected_revision: Some(revision),
+                            history: Default::default(),
+                            outcomes: vec![report],
+                            trusted_time: time(),
+                        },
+                    )?;
+                } else {
+                    report_outcome(tx, report)?;
+                }
+                assert_eq!(
+                    request(tx, &scope(tx, &fixture.occurrence.request)?, time())?.state,
+                    crate::PaymentRequestLifecycleState::RecoveryRequired
+                );
+                crate::validate_storage_state(&tx.export_storage_state())
+            })
+            .await
+            .unwrap();
+        let before = fixture.storage.snapshot().unwrap();
+        assert_eq!(before.payment_request_execution_claims.len(), 1);
+
+        fixture
+            .storage
+            .transaction(|tx| {
+                crate::domain::linked_peers::requeue_recovery_required_outbound_messages(
+                    tx,
+                    &peer,
+                    time(),
+                )?;
+                assert_eq!(
+                    request(tx, &scope(tx, &fixture.occurrence.request)?, time())?.state,
+                    crate::PaymentRequestLifecycleState::Canceled
+                );
+                crate::validate_storage_state(&tx.export_storage_state())
+            })
+            .await
+            .unwrap();
+        let after = fixture.storage.snapshot().unwrap();
+        assert_eq!(after.allowance_accounting, before.allowance_accounting);
+        assert_eq!(after.private_stream_items, before.private_stream_items);
+        if resolved {
+            assert!(after.payment_request_execution_claims.is_empty());
+        } else {
+            assert_eq!(
+                after.payment_request_execution_claims,
+                before.payment_request_execution_claims
+            );
+        }
+    }
+}
