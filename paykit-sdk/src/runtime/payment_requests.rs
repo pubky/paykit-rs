@@ -798,27 +798,34 @@ where
             .transaction(move |tx| {
                 super::allowance_accounting::ensure_accounting_identity(tx, &identity)?;
                 if validate_current_state {
-                    let record =
-                        crate::domain::payment_requests::payment_request_records_in_transaction(
-                            tx,
-                            &counterparty,
-                            &counterparty_receiver_path,
-                            now,
-                        )?
-                        .into_iter()
-                        .find(|r| r.payment_request_id == event.payment_request_id().as_str())
-                        .ok_or_else(|| PaykitSdkError::Policy {
-                            context: "Payment Request changed before manual response".into(),
-                            source: None,
-                        })?;
+                    let record = crate::domain::payment_requests::payment_request_records_in(
+                        tx,
+                        &counterparty,
+                        &counterparty_receiver_path,
+                        now,
+                    )?
+                    .into_iter()
+                    .find(|r| r.payment_request_id == event.payment_request_id().as_str())
+                    .ok_or_else(|| PaykitSdkError::Policy {
+                        context: "Payment Request changed before manual response".into(),
+                        source: None,
+                    })?;
                     use PaymentRequestLifecycleState as State;
                     match &event {
                         paykit_lib::PaymentRequestEvent::Acceptance(_) => {
-                            require_payer_role(&record, "accept Payment Request")?;
+                            require_role(
+                                &record,
+                                PaymentRequestLocalRole::Payer,
+                                "accept Payment Request",
+                            )?;
                             require_state(&record, &[State::Proposed], "accept Payment Request")?;
                         }
                         paykit_lib::PaymentRequestEvent::Rejection(_) => {
-                            require_payer_role(&record, "reject Payment Request")?;
+                            require_role(
+                                &record,
+                                PaymentRequestLocalRole::Payer,
+                                "reject Payment Request",
+                            )?;
                             require_state(
                                 &record,
                                 &[State::Proposed, State::ProposalExpired],
