@@ -15,13 +15,17 @@ use crate::{
 
 mod commands;
 mod derivation;
+mod restore;
+
+pub(crate) use restore::ensure_payment_lifecycle_history_retained;
 
 pub(crate) use commands::{
     enqueue_allowance_end, enqueue_allowance_proposal, enqueue_allowance_response,
     AllowanceResponse,
 };
 pub(crate) use derivation::{
-    allowance_record, allowance_records, allowance_scopes, sort_allowances_newest_first,
+    allowance_record, allowance_records, allowance_records_in_transaction, allowance_scopes,
+    sort_allowances_newest_first,
 };
 
 /// Local party role for one Allowance.

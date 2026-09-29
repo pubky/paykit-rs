@@ -439,3 +439,5 @@ async fn test_classification_refresh_preserves_receipt_evidence_and_cross_kind_c
     .unwrap();
     assert_eq!(refreshed, restored.snapshot().unwrap());
 }
+
+mod restore_history;

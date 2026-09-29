@@ -64,6 +64,12 @@ struct StorageStateTransaction {
 }
 
 impl StorageTransaction for StorageStateTransaction {
+    fn allowance_accounting_state(&self) -> Option<crate::AllowanceAccountingState> {
+        self.state.allowance_accounting.clone()
+    }
+    fn save_allowance_accounting_state(&mut self, state: crate::AllowanceAccountingState) {
+        self.state.allowance_accounting = Some(state);
+    }
     fn export_storage_state(&self) -> StorageState {
         self.state.clone()
     }
@@ -82,11 +88,15 @@ impl StorageTransaction for StorageStateTransaction {
 
     fn clear_identity_scoped_state(&mut self) {
         self.clear_private_identity_scoped_state();
+        self.state.allowance_accounting = None;
         self.state.contact_records.clear();
         self.state.public_endpoint_records.clear();
     }
 
     fn clear_private_identity_scoped_state(&mut self) {
+        if let Some(state) = self.state.allowance_accounting.as_mut() {
+            crate::domain::allowance_accounting::invalidate_accounting(state);
+        }
         self.state.linked_peers.clear();
         self.state.encrypted_link_states.clear();
         self.state.peer_link_operation_leases.clear();

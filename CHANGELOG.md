@@ -13,6 +13,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   quotes with inclusive validity intervals, and quote selection on Payment Proofs.
   Rust, Swift and Kotlin expose the terms and immutable quote history.
 - An ERC-20 signed payment proof profile and interoperability vectors.
+- Added durable SDK Allowance selection, automatic Acceptance, future recurring
+  reassociation, manual-only and deferred decisions, atomic payment reservations,
+  fresh execution handoff checks, and explicit wallet outcome/reconciliation APIs.
+  Manual and automatic payments share scoped occurrence exclusion. Payment Proofs
+  never count as usage or settlement evidence.
 
 - Added the V1 Allowance lifecycle across the Rust library, SDK runtime, and
   Swift/Kotlin bindings, including durable derivation, backup/restore, Event
@@ -45,6 +50,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   newly recognized Event IDs to conflict detection while preserving raw evidence,
   receipt history and transport state. Delivery recovery no longer hides earlier
   Payment Proofs during request derivation.
+- **Breaking (storage):** SDK backup schema and both platform storage envelopes
+  are version 2. Restore retains newer same-payer accounting and requires complete
+  wallet reconciliation; missing history never implies zero usage. Custom storage
+  adapters must persist the new accounting field and transaction methods atomically.
 
 - **Breaking (Rust API):** `AllowanceAcceptance::new`,
   `AllowanceRejection::new`, `AllowanceEnd::withdrawal`, and
@@ -62,6 +71,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   existing state; current-format raw unsupported evidence remains retained.
 
 ### Fixed
+
+- Reject backup restores that would discard retained Payment Request lifecycle
+  or conflict evidence, so received Cancellation cannot be undone by restoring
+  an older backup and reconciling unchanged payment history.
 
 - Retained repeated and corrective one-time Payment Proofs after `ProofSubmitted`
   when their Acceptance is present. A repeated proof does not represent another

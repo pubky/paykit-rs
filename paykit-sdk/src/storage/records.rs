@@ -578,6 +578,8 @@ pub struct EventDedupRecord {
 /// Logical SDK storage state used by snapshots, tests, and backup/restore.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageState {
+    /// Durable payment accounting; absence requires complete wallet reconciliation.
+    pub allowance_accounting: Option<crate::AllowanceAccountingState>,
     /// Current identity state.
     pub identity_state: Option<IdentityState>,
     /// Linked Peer records by counterparty and receiver path.

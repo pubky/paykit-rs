@@ -13,10 +13,11 @@ use chrono::{DateTime, Utc};
 use paykit_lib::{
     parse_payment_request_event_message, serialize_payment_request_event, AllowanceId,
     BillingPeriod, ConversionRate, EventId, PaymentConversion, PaymentConversionQuote,
-    PaymentDeadline, PaymentEndpointIdentifier, PaymentProof, PaymentRequest,
-    PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
-    PaymentRequestRejection, PrivateApplicationMessage,
+    PaymentDeadline, PaymentEndpointIdentifier, PaymentProof, PaymentRequest, PaymentRequestEvent,
+    PrivateApplicationMessage,
 };
+#[cfg(test)]
+use paykit_lib::{PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestRejection};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -520,6 +521,7 @@ where
 }
 
 /// Queue a raw Payment Request acceptance for outbound delivery.
+#[cfg(test)]
 pub(crate) async fn enqueue_payment_request_acceptance<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
@@ -542,6 +544,7 @@ where
 }
 
 /// Queue a raw Payment Request rejection for outbound delivery.
+#[cfg(test)]
 pub(crate) async fn enqueue_payment_request_rejection<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
@@ -564,6 +567,7 @@ where
 }
 
 /// Queue a raw Payment Request cancellation for outbound delivery.
+#[cfg(test)]
 pub(crate) async fn enqueue_payment_request_cancellation<S>(
     storage: &S,
     counterparty: PubkyPublicKey,

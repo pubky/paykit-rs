@@ -13,6 +13,9 @@ where
     }
 
     /// Restore SDK-managed backup state.
+    ///
+    /// Rejects backups that would discard retained Allowance or Payment Request
+    /// lifecycle or conflict evidence for the same payer. A rejected restore changes no state.
     pub async fn restore_backup_state(&self, backup: SdkBackupState) -> Result<RestoreReport> {
         let _identity_guard = self.claim_identity_operation("restore backup")?;
         let mut trusted_identity = None;
