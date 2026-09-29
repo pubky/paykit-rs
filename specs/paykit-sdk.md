@@ -1485,10 +1485,12 @@ matching cannot change the persisted choice or provide this user authorization.
 The unreleased SDK backup schema and both platform storage envelopes remain
 version 1 and may evolve directly during development. Previous development data
 is unsupported; no migration is provided.
-Restore rejects a backup that would discard or change retained Allowance
-lifecycle or conflict evidence for the same payer and Receiver scope. Rejection
+Restore rejects a backup that would discard or change retained Allowance or
+Payment Request lifecycle or conflict evidence for the same payer and Receiver scope. Rejection
 leaves all current state unchanged; use a backup retaining that history.
-Payment-history reconciliation cannot restore forgotten lifecycle authority.
+This includes Payment Request Cancellation, malformed lifecycle messages, and
+Event ID conflicts with other message kinds. Payment-history reconciliation
+cannot restore forgotten lifecycle authority or make a canceled request payable.
 Restore preserves newer destination accounting evidence for the same actual payer identity,
 merges histories conservatively, invalidates prepared handoffs, and blocks new
 admission until complete wallet reconciliation. Receiver Noise key rotation

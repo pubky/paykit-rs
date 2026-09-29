@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use super::derivation::canonical_allowance_id;
 use crate::{
-    domain::private_stream::{canonical_event_id, is_allowance_kind},
+    domain::private_stream::{canonical_event_id, is_allowance_kind, is_payment_request_kind},
     storage::StorageState,
     OutboundPrivateMessageStatus, PaykitReceiverPath, PaykitSdkError, PubkyPublicKey, Result,
 };
@@ -18,8 +18,11 @@ struct Evidence<'a> {
 }
 
 impl Evidence<'_> {
-    fn is_allowance(&self) -> bool {
-        self.kind.is_some_and(is_allowance_kind) || canonical_allowance_id(self.raw).is_some()
+    fn is_payment_lifecycle(&self) -> bool {
+        self.kind.is_some_and(is_allowance_kind)
+            || is_payment_request_kind(self.kind)
+            || canonical_allowance_id(self.raw).is_some()
+            || carries_payment_request_id(self.raw)
     }
 
     fn event_key(&self) -> Option<(&PubkyPublicKey, &PaykitReceiverPath, String)> {
@@ -28,10 +31,12 @@ impl Evidence<'_> {
 }
 
 // Restore must not roll back known authority or conflict evidence for the same
-// payer. Keep direction, local FIFO position and exact bytes: those determine
+// payer. Payment Request Cancellation and malformed/conflicting events can
+// revoke payment eligibility even when wallet accounting has not changed.
+// Keep direction, local FIFO position and exact bytes: those determine
 // lifecycle causality and Event ID conflicts. Do not splice newer queues into
 // old Noise checkpoints. Reject the entire restore before replacing any state.
-pub(crate) fn ensure_allowance_history_retained(
+pub(crate) fn ensure_payment_lifecycle_history_retained(
     current: &StorageState,
     restored: &StorageState,
 ) -> Result<()> {
@@ -40,21 +45,33 @@ pub(crate) fn ensure_allowance_history_retained(
     let event_ids = current
         .iter()
         .chain(&restored)
-        .filter(|item| item.is_allowance())
+        .filter(|item| item.is_payment_lifecycle())
         .filter_map(Evidence::event_key)
         .collect::<HashSet<_>>();
     let restored_items = restored.iter().collect::<HashSet<_>>();
     for item in &current {
-        let relevant =
-            item.is_allowance() || item.event_key().is_some_and(|key| event_ids.contains(&key));
+        let relevant = item.is_payment_lifecycle()
+            || item.event_key().is_some_and(|key| event_ids.contains(&key));
         if relevant && !restored_items.contains(item) {
             return Err(PaykitSdkError::Protocol {
-                context: "Backup would discard retained Allowance history".into(),
+                context: "Backup would discard retained Allowance or Payment Request history"
+                    .into(),
                 source: None,
             });
         }
     }
     Ok(())
+}
+
+// Unknown-version carriers can still identify a request and conflict with its
+// lifecycle. Retain them without requiring a successfully parsed event.
+fn carries_payment_request_id(raw: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| {
+            paykit_lib::PaymentRequestId::new(value.get("payment_request_id")?.as_str()?).ok()
+        })
+        .is_some()
 }
 
 fn evidence(state: &StorageState) -> Vec<Evidence<'_>> {

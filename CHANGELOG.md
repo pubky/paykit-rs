@@ -72,6 +72,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Fixed
 
+- Reject backup restores that would discard retained Payment Request lifecycle
+  or conflict evidence, so received Cancellation cannot be undone by restoring
+  an older backup and reconciling unchanged payment history.
+
 - Retained repeated and corrective one-time Payment Proofs after `ProofSubmitted`
   when their Acceptance is present. A repeated proof does not represent another
   payment, and reuse of an Event ID with changed bytes still fails closed.

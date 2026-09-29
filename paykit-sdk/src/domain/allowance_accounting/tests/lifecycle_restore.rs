@@ -70,7 +70,7 @@ async fn test_accounting_restore_cannot_erase_end_or_reauthorize_payment() {
             .unwrap_err();
         assert!(error
             .to_string()
-            .contains("discard retained Allowance history"));
+            .contains("discard retained Allowance or Payment Request history"));
         assert_eq!(fixture.storage.snapshot().unwrap(), before);
         let revision = fixture.state().revision;
         fixture

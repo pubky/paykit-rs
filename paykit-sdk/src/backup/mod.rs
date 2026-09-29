@@ -276,7 +276,7 @@ where
                     .as_ref()
                     .and_then(|i| i.local_pubky_public_key.as_ref())
             {
-                crate::domain::allowances::ensure_allowance_history_retained(
+                crate::domain::allowances::ensure_payment_lifecycle_history_retained(
                     &current_state,
                     &state.state,
                 )?;
