@@ -54,6 +54,8 @@ pub const SDK_BACKUP_VERSION: u32 = 1;
 /// Decryption Keys. Store and transport it with caller-managed encryption.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SdkBackupState {
+    /// Complete durable wallet accounting; restore always requires reconciliation.
+    pub allowance_accounting: Option<crate::AllowanceAccountingState>,
     /// Backup schema version.
     pub version: u32,
     /// Current identity state.
@@ -276,7 +278,28 @@ where
                 current_next_peer_link_operation_lease_id,
                 current_next_paykit_app_operation_lease_id,
             )?;
-            tx.replace_storage_state(state);
+            let mut state = state.into_storage_state();
+            let current_accounting = if stored_identity.as_ref().and_then(|i| i.public_key.as_ref())
+                == state
+                    .identity_state
+                    .as_ref()
+                    .and_then(|i| i.public_key.as_ref())
+            {
+                crate::domain::allowances::ensure_payment_lifecycle_history_retained(
+                    &current_state,
+                    &state,
+                )?;
+                tx.allowance_accounting_state()
+            } else {
+                None
+            };
+            state.allowance_accounting =
+                crate::domain::allowance_accounting::merge_restored_accounting(
+                    current_accounting,
+                    state.allowance_accounting,
+                )?;
+            validation::validate_storage_state(&state)?;
+            tx.replace_storage_state(ValidatedStorageState::new(state));
             Ok(report)
         })
         .await
@@ -388,6 +411,7 @@ impl SdkBackupState {
 
         Self {
             version: SDK_BACKUP_VERSION,
+            allowance_accounting: state.allowance_accounting,
             identity_state: state.identity_state,
             linked_peers,
             contact_records,
@@ -563,6 +587,7 @@ impl SdkBackupState {
         };
 
         let state = StorageState {
+            allowance_accounting: self.allowance_accounting,
             identity_state,
             linked_peers,
             contact_records,
@@ -635,7 +660,8 @@ impl SdkBackupState {
             .and_then(|state| state.public_key.as_ref())
     }
     pub(crate) fn has_identity_scoped_state(&self) -> bool {
-        !self.linked_peers.is_empty()
+        self.allowance_accounting.is_some()
+            || !self.linked_peers.is_empty()
             || !self.contact_records.is_empty()
             || !self.retired_paykit_apps.is_empty()
             || !self.public_endpoint_records.is_empty()
@@ -650,7 +676,8 @@ impl SdkBackupState {
     }
 
     pub(crate) fn has_private_state(&self) -> bool {
-        !self.linked_peers.is_empty()
+        self.allowance_accounting.is_some()
+            || !self.linked_peers.is_empty()
             || !self.retired_paykit_apps.is_empty()
             || !self.payment_endpoint_reservations.is_empty()
             || !self.encrypted_link_states.is_empty()

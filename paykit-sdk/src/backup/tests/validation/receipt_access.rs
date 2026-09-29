@@ -19,6 +19,7 @@ async fn test_restore_backup_state_rejects_receipt_access_context_mismatch() {
         &period,
     );
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
@@ -97,6 +98,7 @@ async fn test_restore_backup_state_rejects_receipt_access_location_mismatch() {
     );
     let raw_json = raw_json.replace(&original_location, &wrong_location);
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
@@ -172,6 +174,7 @@ async fn test_restore_backup_state_rejects_inconsistent_receipt_access_status() 
         &period,
     );
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),

@@ -1510,3 +1510,91 @@ Platform tests:
   identity-wide shared-state resource.
 - Revocable Pubky credentials and secure Paykit key distribution across
   authorized applications and devices.
+
+## Durable Allowance payment accounting
+
+The runtime exposes one wallet-coordinated ledger through
+`allowance_accounting_state` and `reconcile_allowance_accounting`. A missing
+ledger does not mean zero usage: both automatic and manual admission require
+explicit complete wallet reconciliation first. The wallet must reconcile its
+external execution/idempotency records and every payment path. Empty recovered
+history attests no prior payments when initializing; it never clears existing
+evidence. Only explicit outcome reports resolve already retained uncertainty.
+Payment Proofs and Receipts never construct, commit, or release this accounting.
+
+`evaluate_allowance_candidates` returns advisory static/time/lifecycle results.
+`select_allowance` persists exactly one choice. The atomic
+`accept_payment_request_automatically` operation persists that choice and queues
+ordinary Acceptance after current wallet preflight checks. For one-time requests,
+current shared capacity is checked before queuing Acceptance; insufficient
+capacity leaves the request proposed with its ordinary manual response flow.
+Recurring Acceptance defers capacity checks until a payment is due. Acceptance
+consumes no capacity, and reservation always rechecks it atomically. Existing
+manual Acceptance, Rejection, and Cancellation operations
+serialize with the same ledger and recheck current request state before queuing.
+Automatic Acceptance requires the current app's execution claim, as manual
+Acceptance does.
+A manual response excludes conflicting automatic handling; it can revoke an
+unissued preparation but never releases a Submitted or Unknown attempt.
+
+`reserve_automatic_payment` and `reserve_manual_payment` share one transaction
+key: actual local Pubky key, counterparty Pubky key, canonical Payment Request ID,
+and normalized UTC Billing Period instants when recurring. App ID and Allowance
+ID are excluded from this key. Automatic reservation reruns shared exact decimal,
+period, lifetime, and trusted-time checks using
+complete successful and unresolved automatic usage. Manual payments consume no
+Allowance capacity but exclude automatic payment of the same occurrence.
+Automatic execution requires the actual asset and amount to equal the requested
+Payment Amount. Manual cross-asset execution relies on `local_enabled` attesting
+the wallet's independent validation of conversion policy, required quote,
+endpoint precision, upward rounding, and payment deadlines. The wallet retains
+its selected quote separately. Same-asset manual payments still require the
+requested amount. Manual attempts retain the verified actual Payment Amount;
+handoff must use that same asset and numerically equal amount. Reconciliation
+must preserve this actual amount as immutable execution evidence.
+The trusted-time watermark advances even when evaluation is blocked.
+
+A Ready reservation has status Prepared and grants no execution authority.
+Immediately before execution the wallet calls `begin_payment_execution` with
+fresh endpoint, actual amount, scheduling, local enablement, and private checks.
+Only Ready with status Submitted authorizes a wallet handoff. The SDK rechecks
+current lifecycle and the effective association revision in that transaction.
+Reservation and handoff require the current app's execution claim and outgoing
+payment capability. An unresolved attempt prevents releasing that claim.
+The wallet must use the returned attempt ID for external idempotency. All apps
+coordinate admission through the same identity-wide ledger. SDK storage and
+external settlement cannot commit atomically: a crash after handoff issuance requires external
+reconciliation, never a second execution or timeout-based release. The wallet
+reports definitive pre-settlement failure, verified success, or Unknown through
+`record_payment_outcome`; verified success cannot be undone by refunds or replay.
+When a pre-handoff check blocks, the wallet must abort execution and report
+verified failure before releasing or replacing its reservation.
+
+`defer_payment_occurrence` records a temporary endpoint or policy failure for
+later full reconsideration. It cannot relabel unresolved execution as retryable.
+`mark_payment_manual_only` is sticky. Explicit future-only
+`authorize_allowance_reassociation` appends a user authorization and revision;
+the accepted replacement need not be active yet. Authorization validates static
+matching and the current trusted-time watermark; admission and handoff still
+require current eligibility. Old usage and attempts remain on the original
+Allowance, earlier occurrences and other requests remain independent, and
+manual-only decisions survive. Background
+matching cannot change the persisted choice or provide this user authorization.
+
+The unreleased SDK backup schema and both platform storage envelopes remain
+version 1 and may evolve directly during development. Previous development data
+is unsupported; no migration is provided.
+Restore rejects a backup that would discard or change retained Allowance or
+Payment Request lifecycle or conflict evidence for the same payer identity. Rejection
+leaves all current state unchanged; use a backup retaining that history.
+This includes Payment Request Cancellation, malformed lifecycle messages, and
+Event ID conflicts with other message kinds. Payment-history reconciliation
+cannot restore forgotten lifecycle authority or make a canceled request payable.
+Restore requires an empty destination, apart from initialized identity metadata;
+it never replaces live shared state. Restored accounting invalidates prepared
+handoffs and blocks new admission until complete wallet reconciliation. Paykit key rotation retains
+payment history and imposes the same recovery block. Sign-out and local session
+clearing leave the shared ledger intact. Switching identities accesses that
+identity's separate state; missing history requires complete wallet
+reconciliation before further admission. Restored identifiers must have canonical
+lowercase UUID-v4 spelling, and malformed or inconsistent accounting fails closed.

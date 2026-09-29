@@ -33,11 +33,16 @@ fn test_app_removal_blocks_owned_payer_and_payee_subscriptions() {
     assert!(payment_request_record_blocks_app_removal(&payee, &app_id));
     assert!(payment_request_record_blocks_app_removal(&payer, &app_id));
 
-    payer.state = PaymentRequestLifecycleState::ProofSubmitted;
-    assert!(!payment_request_record_blocks_app_removal(&payer, &app_id));
-
-    payer.state = PaymentRequestLifecycleState::Canceled;
-    assert!(!payment_request_record_blocks_app_removal(&payer, &app_id));
+    for state in [
+        PaymentRequestLifecycleState::ProofSubmitted,
+        PaymentRequestLifecycleState::Canceled,
+    ] {
+        payer.state = state;
+        payer.execution_claim_app_id = Some(app_id.clone());
+        assert!(payment_request_record_blocks_app_removal(&payer, &app_id));
+        payer.execution_claim_app_id = None;
+        assert!(!payment_request_record_blocks_app_removal(&payer, &app_id));
+    }
 }
 
 #[test]

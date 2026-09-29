@@ -23,7 +23,13 @@ fn app_id() -> paykit_lib::PaykitAppId {
 }
 
 fn registered_storage() -> InMemoryStorage {
-    InMemoryStorage::with_registered_apps([app_id()])
+    let storage = InMemoryStorage::with_registered_apps([app_id()]);
+    let mut state = storage.snapshot().unwrap();
+    state.identity_state = Some(crate::IdentityState {
+        public_key: Some(counterparty()),
+        initialized_at: timestamp(),
+    });
+    InMemoryStorage::from_state(state)
 }
 
 fn payment_request_capabilities() -> paykit_lib::PaykitAppCapabilities {

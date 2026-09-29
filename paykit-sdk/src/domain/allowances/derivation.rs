@@ -204,11 +204,16 @@ where
     S: StorageAdapter,
 {
     storage
-        .transaction(|tx| {
-            let history = AllowanceLinkHistory::load(tx, counterparty);
-            Ok(derive_records(&history, None))
-        })
+        .transaction(|tx| Ok(allowance_records_in_transaction(tx, counterparty)))
         .await
+}
+
+pub(crate) fn allowance_records_in_transaction(
+    tx: &dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+) -> Vec<AllowanceRecord> {
+    let history = AllowanceLinkHistory::load(tx, counterparty);
+    derive_records(&history, None)
 }
 
 /// Derive one Allowance by exact link scope and Allowance ID.

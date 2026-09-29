@@ -132,6 +132,7 @@ const OUTBOUND_PRIVATE_RETRY_BACKOFF: std::time::Duration = std::time::Duration:
 const RESERVATION_CANCELLATION_CLAIM_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(60);
 
+mod allowance_accounting;
 mod allowances;
 mod app_registry;
 mod app_removal;

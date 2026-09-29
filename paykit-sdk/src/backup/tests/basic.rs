@@ -202,6 +202,7 @@ async fn test_restore_backup_state_marks_missing_link_checkpoint_recovery_requir
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: vec![LinkedPeerRecord {
@@ -374,6 +375,7 @@ async fn test_restore_backup_state_rejects_inconsistent_contact_marker_state() {
     let mut contact = contact_record(contact_public_key);
     contact.public_contact_published_at = Some(timestamp());
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(local_public_key)),
         linked_peers: Vec::new(),
@@ -411,6 +413,7 @@ async fn test_restore_backup_state_rejects_dual_contact_marker_timestamps() {
     contact.public_contact_marker_status = crate::PublicationStatus::Failed;
     contact.public_contact_last_error = Some("failed".into());
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(local_public_key)),
         linked_peers: Vec::new(),
@@ -445,6 +448,7 @@ async fn test_restore_backup_state_accepts_pending_contact_marker_removal() {
         .mark_public_contact_published(timestamp())
         .mark_public_contact_removal_pending(timestamp());
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(local_public_key)),
         linked_peers: Vec::new(),
@@ -492,6 +496,7 @@ async fn test_restore_backup_state_rejects_active_peer_work() {
         .await
         .unwrap();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: None,
         linked_peers: Vec::new(),
@@ -541,6 +546,7 @@ async fn test_failed_restore_does_not_bind_empty_storage_to_identity() {
     let storage = InMemoryStorage::new();
     let trusted_identity = identity(public_key());
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION + 1,
         identity_state: trusted_identity.clone().into(),
         linked_peers: Vec::new(),
@@ -588,6 +594,7 @@ async fn test_restore_backup_state_rejects_overwriting_existing_shared_state() {
         .unwrap();
     let before = storage.snapshot().unwrap();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(local_public_key)),
         linked_peers: Vec::new(),

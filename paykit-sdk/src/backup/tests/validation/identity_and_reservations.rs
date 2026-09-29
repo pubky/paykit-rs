@@ -11,6 +11,7 @@ async fn test_restore_backup_state_rejects_wrong_identity() {
         .unwrap();
 
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(backup_public_key)),
         linked_peers: Vec::new(),
@@ -47,6 +48,7 @@ async fn test_restore_backup_state_rejects_trusted_identity_switch() {
         .unwrap();
     let trusted_identity = identity(backup_public_key.clone());
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(backup_public_key.clone())),
         linked_peers: Vec::new(),
@@ -85,6 +87,7 @@ async fn test_restore_backup_state_rejects_orphan_endpoint_reservation() {
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
@@ -126,6 +129,7 @@ async fn test_restore_backup_state_rejects_invalid_endpoint_reservation_id() {
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
@@ -171,6 +175,7 @@ async fn test_restore_backup_state_rejects_mismatched_endpoint_reservation_paylo
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),

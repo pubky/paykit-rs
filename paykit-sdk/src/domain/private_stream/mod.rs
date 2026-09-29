@@ -309,6 +309,10 @@ where
                             | PaymentRequestLifecycleState::Rejected
                             | PaymentRequestLifecycleState::ProofSubmitted
                             | PaymentRequestLifecycleState::InvalidConflict
+                    ) && !crate::domain::payment_requests::request_has_unresolved_payment(
+                        tx,
+                        &counterparty,
+                        &record.payment_request_id,
                     ) {
                         tx.remove_payment_request_execution_claim(
                             &counterparty,

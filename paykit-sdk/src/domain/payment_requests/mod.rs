@@ -487,6 +487,10 @@ pub(crate) fn payment_request_record_blocks_app_removal(
     record: &PaymentRequestRecord,
     app_id: &paykit_lib::PaykitAppId,
 ) -> bool {
+    // Terminal protocol events do not release a claim while wallet execution is unresolved.
+    if record.execution_claim_app_id.as_ref() == Some(app_id) {
+        return true;
+    }
     let owned = match record.local_role {
         Some(PaymentRequestLocalRole::Payee) => record.proposal_app_id.as_ref() == Some(app_id),
         Some(PaymentRequestLocalRole::Payer) => {
@@ -581,6 +585,29 @@ pub(crate) async fn enqueue_checked_payment_request_action<S>(
 where
     S: StorageAdapter,
 {
+    enqueue_checked_payment_request_action_with_identity(
+        storage,
+        counterparty,
+        app_id,
+        event,
+        now,
+        None,
+    )
+    .await
+}
+
+/// Queue a manual action while retaining the runtime's captured payer identity.
+pub(crate) async fn enqueue_checked_payment_request_action_with_identity<S>(
+    storage: &S,
+    counterparty: PubkyPublicKey,
+    app_id: &paykit_lib::PaykitAppId,
+    event: &PaymentRequestEvent,
+    now: DateTime<Utc>,
+    expected_identity: Option<crate::IdentityState>,
+) -> Result<OutboundPrivateMessageRecord>
+where
+    S: StorageAdapter,
+{
     let kind = match event {
         PaymentRequestEvent::Acceptance(_) => PrivateMessageKind::PaymentRequestAcceptance,
         PaymentRequestEvent::Rejection(_) => PrivateMessageKind::PaymentRequestRejection,
@@ -603,7 +630,17 @@ where
                 let app_id = app_id.clone();
                 let event = event.clone();
                 let raw_json = raw_json.clone();
+                let expected_identity = expected_identity.clone();
                 move |tx| {
+                    if expected_identity
+                        .as_ref()
+                        .is_some_and(|expected| tx.load_identity_state().as_ref() != Some(expected))
+                    {
+                        return Err(PaykitSdkError::Policy {
+                            context: "Payment accounting identity changed during operation".into(),
+                            source: None,
+                        });
+                    }
                     require_paykit_app_capability(tx, &app_id, PrivateMessageKind::PaymentRequest)?;
                     let release_execution_claim = require_current_payment_request_action(
                         tx,
@@ -612,6 +649,15 @@ where
                         &event,
                         now,
                     )?;
+                    if !matches!(event, PaymentRequestEvent::Proof(_)) {
+                        crate::domain::allowance_accounting::manual_response(
+                            tx,
+                            crate::PaymentRequestScope {
+                                counterparty: counterparty.clone(),
+                                payment_request_id: event.payment_request_id().clone(),
+                            },
+                        )?;
+                    }
                     let outbound =
                         tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                             counterparty.clone(),
@@ -620,7 +666,13 @@ where
                             raw_json,
                             now,
                         ))?;
-                    if release_execution_claim {
+                    if release_execution_claim
+                        && !request_has_unresolved_payment(
+                            tx,
+                            &counterparty,
+                            event.payment_request_id().as_str(),
+                        )
+                    {
                         tx.remove_payment_request_execution_claim(
                             &counterparty,
                             event.payment_request_id().as_str(),
@@ -713,6 +765,12 @@ where
                             });
                         }
                     } else {
+                        if request_has_unresolved_payment(tx, &counterparty, &payment_request_id) {
+                            return Err(PaykitSdkError::Policy {
+                                context: "cannot claim Payment Request with unresolved payment accounting".into(),
+                                source: None,
+                            });
+                        }
                         tx.save_payment_request_execution_claim(PaymentRequestExecutionClaim {
                             counterparty: counterparty.clone(),
                             payment_request_id: payment_request_id.clone(),
@@ -769,6 +827,12 @@ where
                         source: None,
                     })?;
                     require_local_payer(&record, "release Payment Request execution claim")?;
+                    if request_has_unresolved_payment(tx, &counterparty, &payment_request_id) {
+                        return Err(PaykitSdkError::Policy {
+                            context: "cannot release Payment Request execution claim with unresolved payment accounting".into(),
+                            source: None,
+                        });
+                    }
                     require_execution_claim_release_state(
                         &record,
                         "release Payment Request execution claim",
@@ -808,7 +872,7 @@ where
     unreachable!("bounded Payment Request claim release loop always returns")
 }
 
-fn require_current_payment_request_action(
+pub(crate) fn require_current_payment_request_action(
     tx: &dyn StorageTransaction,
     counterparty: &PubkyPublicKey,
     app_id: &paykit_lib::PaykitAppId,
@@ -1005,6 +1069,78 @@ fn require_execution_claim_release_state(
         return Ok(());
     }
     require_execution_claim_state(record, action)
+}
+
+pub(crate) fn require_payment_execution_authority(
+    tx: &dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    app_id: &paykit_lib::PaykitAppId,
+    record: &PaymentRequestRecord,
+) -> Result<()> {
+    require_paykit_app_capability(tx, app_id, PrivateMessageKind::PaymentRequest)?;
+    require_outgoing_payment_app(tx, app_id, "execute Payment Request")?;
+    require_origin_app_authorized(tx, counterparty, record, "execute Payment Request")?;
+    require_execution_claim_owner(
+        tx,
+        counterparty,
+        &record.payment_request_id,
+        app_id,
+        "execute Payment Request",
+    )
+}
+
+pub(crate) fn request_has_unresolved_payment(
+    tx: &dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    payment_request_id: &str,
+) -> bool {
+    tx.allowance_accounting_state().is_some_and(|state| {
+        state.history.occurrences.iter().any(|occurrence| {
+            occurrence.key.request.counterparty == *counterparty
+                && occurrence.key.request.payment_request_id == payment_request_id
+                && occurrence.attempts.iter().any(|attempt| {
+                    matches!(
+                        attempt.status,
+                        crate::PaymentExecutionStatus::Prepared
+                            | crate::PaymentExecutionStatus::Submitted
+                            | crate::PaymentExecutionStatus::Unknown
+                    )
+                })
+        })
+    })
+}
+
+/// Terminal protocol actions retain their execution claim until wallet outcomes are resolved.
+pub(crate) fn release_resolved_payment_execution_claims(
+    tx: &mut dyn StorageTransaction,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    for claim in tx
+        .export_storage_state()
+        .payment_request_execution_claims
+        .into_values()
+    {
+        if request_has_unresolved_payment(tx, &claim.counterparty, &claim.payment_request_id) {
+            continue;
+        }
+        let records = payment_request_records_from_transaction(tx, &claim.counterparty, now)?;
+        if records.iter().any(|record| {
+            record.payment_request_id == claim.payment_request_id
+                && matches!(
+                    record.state,
+                    PaymentRequestLifecycleState::Canceled
+                        | PaymentRequestLifecycleState::Rejected
+                        | PaymentRequestLifecycleState::ProofSubmitted
+                        | PaymentRequestLifecycleState::InvalidConflict
+                )
+        }) {
+            tx.remove_payment_request_execution_claim(
+                &claim.counterparty,
+                &claim.payment_request_id,
+            );
+        }
+    }
+    Ok(())
 }
 
 fn require_execution_claim_owner(

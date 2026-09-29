@@ -8,7 +8,7 @@ if [ "$#" -eq 0 ]; then
 fi
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-PAYKIT_REDACTED_TYPES=$(tr '\n' ' ' < "$SCRIPT_DIR/redacted_binding_records.txt")
+PAYKIT_REDACTED_TYPES=$(tr '\n' ' ' < "$SCRIPT_DIR/redacted_binding_types.txt")
 export PAYKIT_REDACTED_TYPES
 
 perl -0pi -e '
@@ -30,5 +30,8 @@ perl -0pi -e '
         my $override = "    override fun toString(): kotlin.String = \"${type}(<redacted>)\"\n\n";
         s/\Q$override\E//g;
         s/(public data class \Q$type\E \(.*?\n\)[^{\n]*\{\n)(.*?)(    public companion object)/$1$2$override$3/gs;
+        my $sealed_override = "    final override fun toString(): kotlin.String = \"${type}(<redacted>)\"\n\n";
+        s/\Q$sealed_override\E//g;
+        s/(public sealed class \Q$type\E \{\n)/$1$sealed_override/g;
     }
 ' "$@"

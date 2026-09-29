@@ -46,7 +46,7 @@ while IFS= read -r type; do
     [ -n "$type" ] || continue
     grep -Fq "extension $type: CustomStringConvertible, CustomDebugStringConvertible" \
         "$IOS_BINDINGS_DIR/PaykitRedaction.swift"
-done < ./redacted_binding_records.txt
+done < ./redacted_binding_types.txt
 
 echo "Handling modulemap file..."
 if [ -f "$IOS_BINDINGS_DIR/paykitFFI.modulemap" ]; then

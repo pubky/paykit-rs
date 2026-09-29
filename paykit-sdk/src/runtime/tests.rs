@@ -633,6 +633,7 @@ async fn seed_private_capable_identity_and_handshake(
         .unwrap();
 }
 
+mod allowance_accounting;
 mod allowances;
 mod app_registry;
 mod backup;

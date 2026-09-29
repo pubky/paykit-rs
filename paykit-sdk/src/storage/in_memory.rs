@@ -99,6 +99,12 @@ struct StorageStateTransaction {
 }
 
 impl StorageTransaction for StorageStateTransaction {
+    fn allowance_accounting_state(&self) -> Option<crate::AllowanceAccountingState> {
+        self.state.allowance_accounting.clone()
+    }
+    fn save_allowance_accounting_state(&mut self, state: crate::AllowanceAccountingState) {
+        self.state.allowance_accounting = Some(state);
+    }
     fn export_storage_state(&self) -> StorageState {
         self.state.clone()
     }

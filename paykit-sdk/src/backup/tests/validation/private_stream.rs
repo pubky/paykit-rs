@@ -5,6 +5,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_metadata() {
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
@@ -49,6 +50,7 @@ async fn test_restore_backup_state_refreshes_stale_private_stream_parse_status()
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
@@ -111,6 +113,7 @@ async fn test_restore_backup_state_rejects_stale_private_stream_parse_error() {
         "/pub/paykit/v0/private/receipts/not-the-receipt-id",
     );
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
@@ -154,6 +157,7 @@ async fn test_restore_backup_state_rejects_stale_dedupe_event_header() {
     let counterparty = public_key();
     let raw_json = payment_request_json("650e8400-e29b-41d4-a716-446655440000");
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
@@ -205,6 +209,7 @@ async fn test_restore_backup_state_rejects_overlapping_event_dedupe_membership()
     let counterparty = public_key();
     let raw_json = payment_request_json("650e8400-e29b-41d4-a716-446655440000");
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
@@ -272,6 +277,7 @@ async fn test_restore_backup_state_rejects_tampered_invalid_receipt_dedupe_hash(
     );
     let raw_json = raw_json.replace(&original_location, &wrong_location);
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
@@ -337,6 +343,7 @@ async fn test_restore_backup_state_accepts_cross_kind_event_id_conflict() {
         &period,
     );
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
@@ -401,6 +408,7 @@ async fn test_restore_backup_state_rejects_missing_event_dedupe_index() {
     let counterparty = public_key();
     let raw_json = payment_request_json("650e8400-e29b-41d4-a716-446655440000");
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
@@ -455,6 +463,7 @@ async fn test_restore_backup_state_rejects_missing_receipt_access_index() {
         &period,
     );
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
@@ -537,6 +546,7 @@ async fn test_restore_backup_state_refreshes_cached_parse_results() {
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         retired_paykit_apps: Vec::new(),
         payment_request_execution_claims: Vec::new(),
@@ -602,6 +612,7 @@ async fn test_restore_backup_state_accepts_invalid_location_receipt_access_dedup
     );
     let raw_json = raw_json.replace(&original_location, &wrong_location);
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         retired_paykit_apps: Vec::new(),
         payment_request_execution_claims: Vec::new(),

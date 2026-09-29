@@ -44,6 +44,7 @@ fn contact_record(public_key: PubkyPublicKey) -> ContactRecord {
 
 fn empty_backup(identity_state: IdentityState) -> SdkBackupState {
     SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity_state),
         linked_peers: Vec::new(),
@@ -107,6 +108,7 @@ async fn assert_restore_rejects_outbound_record(record: OutboundPrivateMessageRe
     let counterparty = record.counterparty.clone();
     let next_id = record.outbound_message_id.saturating_add(1);
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty)),
         linked_peers: Vec::new(),

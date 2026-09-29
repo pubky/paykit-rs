@@ -359,7 +359,8 @@ where
     /// Releasing does not reject the request and makes it actionable to other
     /// compatible local Paykit Apps again. The request's endpoint constraints
     /// remain unchanged. One-time requests cannot be released after proof;
-    /// recurring requests retain completed billing-period proofs.
+    /// recurring requests retain completed billing-period proofs. Prepared,
+    /// Submitted, or Unknown accounting attempts must be reconciled before release.
     pub async fn release_payment_request_execution_claim(
         &self,
         counterparty: PubkyPublicKey,
@@ -377,16 +378,17 @@ where
 
     /// Queue acceptance for a claimed received Payment Request.
     ///
-    /// The current App must claim the request first. Success queues acceptance
-    /// before returning; only then may the integrating application execute
-    /// payment. The execution claim remains until proof, cancellation, or an
-    /// explicit release.
+    /// The current App must claim the request first. Success only queues acceptance;
+    /// accounting callers must still reserve payment and obtain a fresh handoff.
+    /// The execution claim remains until proof, cancellation, or an explicit release,
+    /// and longer while payment accounting has unresolved attempts.
     /// The returned record does not imply delivery or counterparty processing.
     pub async fn accept_payment_request(
         &self,
         counterparty: PubkyPublicKey,
         payment_request_id: &PaymentRequestId,
     ) -> Result<PaymentRequestRecord> {
+        let (_, expected_identity) = self.load_session_access_and_refresh_identity().await?;
         let record = self
             .load_payment_request_record(&counterparty, payment_request_id)
             .await?;
@@ -410,6 +412,7 @@ where
         self.enqueue_raw_payment_request_response(
             counterparty.clone(),
             &PaymentRequestEvent::Acceptance(event),
+            Some(expected_identity),
         )
         .await?;
         self.load_payment_request_record(&counterparty, payment_request_id)
@@ -426,6 +429,7 @@ where
         payment_request_id: &PaymentRequestId,
         reason: Option<String>,
     ) -> Result<PaymentRequestRecord> {
+        let (_, expected_identity) = self.load_session_access_and_refresh_identity().await?;
         let record = self
             .load_payment_request_record(&counterparty, payment_request_id)
             .await?;
@@ -453,6 +457,7 @@ where
         self.enqueue_raw_payment_request_response(
             counterparty.clone(),
             &PaymentRequestEvent::Rejection(event),
+            Some(expected_identity),
         )
         .await?;
         self.load_payment_request_record(&counterparty, payment_request_id)
@@ -469,6 +474,7 @@ where
         payment_request_id: &PaymentRequestId,
         reason: Option<String>,
     ) -> Result<PaymentRequestRecord> {
+        let (_, expected_identity) = self.load_session_access_and_refresh_identity().await?;
         let record = self
             .load_payment_request_record(&counterparty, payment_request_id)
             .await?;
@@ -500,8 +506,12 @@ where
         }
         let event =
             PaymentRequestCancellation::new(EventId::new_v4(), payment_request_id.clone(), reason);
-        self.enqueue_raw_payment_request_cancellation(counterparty.clone(), &event)
-            .await?;
+        self.enqueue_raw_payment_request_response(
+            counterparty.clone(),
+            &PaymentRequestEvent::Cancellation(event),
+            Some(expected_identity),
+        )
+        .await?;
         self.load_payment_request_record(&counterparty, payment_request_id)
             .await
     }
@@ -813,18 +823,19 @@ where
         &self,
         counterparty: PubkyPublicKey,
         event: &PaymentRequestEvent,
+        expected_identity: Option<IdentityState>,
     ) -> Result<OutboundPrivateMessageRecord> {
-        self.ensure_private_outbound_ready(&counterparty).await?;
-        enqueue_checked_payment_request_action(
+        let _session = self.ensure_private_outbound_ready(&counterparty).await?;
+        crate::domain::payment_requests::enqueue_checked_payment_request_action_with_identity(
             &self.storage,
             counterparty,
             &self.config.app_id,
             event,
             self.clock.now(),
+            expected_identity,
         )
         .await
     }
-
     #[cfg(test)]
     pub(crate) async fn enqueue_raw_payment_request_acceptance(
         &self,
@@ -834,22 +845,7 @@ where
         self.enqueue_raw_payment_request_response(
             counterparty,
             &PaymentRequestEvent::Acceptance(event.clone()),
-        )
-        .await
-    }
-
-    pub(crate) async fn enqueue_raw_payment_request_cancellation(
-        &self,
-        counterparty: PubkyPublicKey,
-        event: &PaymentRequestCancellation,
-    ) -> Result<OutboundPrivateMessageRecord> {
-        self.ensure_private_outbound_ready(&counterparty).await?;
-        enqueue_checked_payment_request_action(
-            &self.storage,
-            counterparty,
-            &self.config.app_id,
-            &PaymentRequestEvent::Cancellation(event.clone()),
-            self.clock.now(),
+            None,
         )
         .await
     }

@@ -22,7 +22,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   quotes with inclusive validity intervals, and quote selection on Payment Proofs.
   Rust, Swift and Kotlin expose the terms and immutable quote history.
 - An ERC-20 signed payment proof profile and interoperability vectors.
-
+- Added shared Allowance request matching, exact decimal arithmetic, anchored
+  and rolling period calculations, and amount/count/lifetime limit evaluation.
+- Added durable SDK Allowance selection, automatic Acceptance, deferred and
+  manual-only decisions, user-authorized future Billing Period reassociation,
+  atomic manual/automatic payment exclusion, reservations, fresh execution
+  handoff checks, outcome accounting, and trusted-time watermarks. Swift and
+  Kotlin expose the same accounting APIs. Wallets retain consent, scheduling,
+  endpoint verification, external payment idempotency, execution, and settlement
+  responsibility.
+- Added complete accounting backup/recovery with explicit wallet reconciliation.
+  Missing or restored accounting blocks new admissions; known committed usage
+  and unresolved attempts are retained, and Payment Proofs never rebuild usage.
 - Added the V1 Allowance lifecycle across the Rust library, SDK runtime, and
   Swift/Kotlin bindings, including durable derivation, backup/restore, Event
   ID replay handling, and Encrypted Link recovery behavior.
@@ -64,7 +75,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   newly recognized Event IDs to conflict detection while preserving raw evidence,
   receipt history and transport state. Delivery recovery no longer hides earlier
   Payment Proofs during request derivation.
-
+- **Storage:** The unreleased SDK backup schema and both platform storage
+  envelopes remain version 1 and may evolve directly during development. Previous
+  development data is unsupported; no migration is provided. Restore cannot
+  replace live shared state and requires complete wallet reconciliation; missing
+  history never implies zero usage. Custom storage adapters must persist the new
+  accounting field and transaction methods atomically.
 - **Breaking (Rust API):** `AllowanceAcceptance::new`,
   `AllowanceRejection::new`, `AllowanceEnd::withdrawal`, and
   `AllowanceEnd::accepted` now return `Result` and reject lifecycle messages
@@ -73,14 +89,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   by older closed-world readers. This is a coordinated pre-release schema
   revision, not a backward-compatible extension. The field is omitted when
   attribution is absent; explicit `null` is invalid on the wire.
-- **Breaking (record construction):** Rust `PaymentProof` and SDK
-  `PaymentProofRecord` literals, plus Swift/Kotlin proof submission and result
-  records, include optional Allowance attribution.
+- **Breaking (Rust API):** Payment Amount, Billing Period, Recurrence, Payment
+  Request terms, and all Payment Request event values use validated constructors,
+  builders, and read-only accessors in place of public fields and struct literals.
+  See the Payment Request API migration guide in `paykit-lib`.
+- **Breaking (record construction):** SDK `PaymentProofRecord` literals and
+  Swift/Kotlin proof submission and result records include optional Allowance
+  attribution.
 - Removed backup migration for unreleased Allowance development formats.
   Restore rejects stale stream metadata and missing indexes without replacing
   existing state; current-format raw unsupported evidence remains retained.
 
 ### Fixed
+
+- Reject backup restores that would discard retained Payment Request lifecycle
+  or conflict evidence, so received Cancellation cannot be undone by restoring
+  an older backup and reconciling unchanged payment history.
 
 - Retained repeated and corrective one-time Payment Proofs after `ProofSubmitted`
   when their Acceptance is present. A repeated proof does not represent another

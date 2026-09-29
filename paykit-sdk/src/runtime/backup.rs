@@ -13,6 +13,10 @@ where
     }
 
     /// Restore SDK-managed backup state.
+    ///
+    /// Restores only into an empty or matching identity-only state backing.
+    /// Accounting always requires reconciliation after restore. Retained Allowance
+    /// and Payment Request evidence cannot be discarded; rejection changes no state.
     pub async fn restore_backup_state(&self, backup: SdkBackupState) -> Result<RestoreReport> {
         let _identity_guard = self.claim_identity_operation("restore backup")?;
         let mut trusted_identity = None;

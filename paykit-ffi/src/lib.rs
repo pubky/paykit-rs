@@ -12,6 +12,7 @@ macro_rules! impl_redacted_debug {
     };
 }
 
+mod allowance_accounting;
 mod allowances;
 mod app_registry;
 mod config;
@@ -33,6 +34,7 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
+pub use allowance_accounting::*;
 pub use allowances::*;
 pub use app_registry::*;
 pub use config::*;

@@ -385,3 +385,4 @@ fn invalid_location_receipt_json() -> String {
     value["location"] = serde_json::json!("/pub/paykit/v0/receipts/wrong");
     serde_json::to_string(&value).unwrap()
 }
+mod restore_history;

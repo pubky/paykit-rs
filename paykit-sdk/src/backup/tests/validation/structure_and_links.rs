@@ -6,6 +6,7 @@ async fn test_restore_backup_state_rejects_duplicate_retired_apps() {
     let storage = InMemoryStorage::new();
     let app_id = paykit_lib::PaykitAppId::new("removed-app").unwrap();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(public_key())),
         linked_peers: Vec::new(),
@@ -37,6 +38,7 @@ async fn test_restore_backup_state_rejects_deliverable_retired_app_message() {
     let counterparty = public_key();
     let app_id = app_id();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
@@ -71,6 +73,7 @@ async fn test_restore_backup_state_rejects_malformed_link_snapshot() {
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: Vec::new(),
@@ -306,6 +309,7 @@ async fn test_restore_backup_state_rejects_local_recovery_marker_without_created
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: vec![LinkedPeerRecord {
@@ -347,6 +351,7 @@ async fn test_restore_backup_state_rejects_invalid_remote_recovery_attempt_id() 
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),
         linked_peers: vec![LinkedPeerRecord {
@@ -387,6 +392,7 @@ async fn test_restore_backup_state_rejects_invalid_remote_recovery_attempt_id() 
 async fn test_restore_backup_state_rejects_records_without_identity() {
     let storage = InMemoryStorage::new();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: None,
         linked_peers: Vec::new(),

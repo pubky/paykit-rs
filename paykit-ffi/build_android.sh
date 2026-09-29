@@ -269,7 +269,7 @@ find "$TMP_DIR" -name "*.kt" -exec mv {} "$BASE_DIR/" \;
 while IFS= read -r type; do
     [ -n "$type" ] || continue
     grep -Fq "override fun toString(): kotlin.String = \"$type(<redacted>)\"" "$BASE_DIR/paykit.common.kt"
-done < ./redacted_binding_records.txt
+done < ./redacted_binding_types.txt
 
 echo "Normalizing generated Kotlin whitespace..."
 find "$BASE_DIR" -name "*.kt" -exec perl -0pi -e 's/[ \t]+(?=\n)//g; s/[ \t]+\z//; s/\n+\z/\n/; $_ .= "\n" unless /\n\z/' {} \;

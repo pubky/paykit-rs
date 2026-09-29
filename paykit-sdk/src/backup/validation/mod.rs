@@ -15,6 +15,15 @@ use super::*;
 /// Validate a decoded live SDK storage snapshot without repairing it.
 pub fn validate_storage_state(state: &StorageState) -> Result<()> {
     validate_live_identity(state)?;
+    if let Some(accounting) = &state.allowance_accounting {
+        crate::domain::allowance_accounting::validate_accounting(accounting)?;
+        let identity = state
+            .identity_state
+            .as_ref()
+            .and_then(|identity| identity.public_key.as_ref())
+            .ok_or_else(|| invalid_live_state("Accounting requires a payer identity"))?;
+        crate::domain::allowance_accounting::payer_scope(accounting, identity)?;
+    }
     validate_live_record_keys(state)?;
     validate_live_app_state(state)?;
     validate_live_link_state(state)?;
@@ -111,18 +120,42 @@ fn validate_payment_request_execution_claims(state: &StorageState) -> Result<()>
             .ok_or_else(|| {
                 invalid_live_state("Payment Request execution claim has no matching request")
             })?;
-        if record.local_role != Some(PaymentRequestLocalRole::Payer) {
+        let unresolved_payment = state
+            .allowance_accounting
+            .as_ref()
+            .is_some_and(|accounting| {
+                accounting.history.occurrences.iter().any(|occurrence| {
+                    occurrence.key.request.counterparty == claim.counterparty
+                        && occurrence.key.request.payment_request_id == claim.payment_request_id
+                        && occurrence.attempts.iter().any(|attempt| {
+                            matches!(
+                                attempt.status,
+                                crate::PaymentExecutionStatus::Prepared
+                                    | crate::PaymentExecutionStatus::Submitted
+                                    | crate::PaymentExecutionStatus::Unknown
+                            )
+                        })
+                })
+            });
+        // Conflicting proposals can erase the derived role. Retain only claims backed by
+        // unresolved accounting for the validated payer identity; this grants no execution.
+        let unresolved_conflict = record.local_role.is_none()
+            && record.state == PaymentRequestLifecycleState::InvalidConflict
+            && unresolved_payment;
+        if record.local_role != Some(PaymentRequestLocalRole::Payer) && !unresolved_conflict {
             return Err(invalid_live_state(
                 "Payment Request execution claim belongs to the non-payer side",
             ));
         }
-        if !matches!(
-            record.state,
-            PaymentRequestLifecycleState::Proposed
-                | PaymentRequestLifecycleState::Accepted
-                | PaymentRequestLifecycleState::ActiveRecurring
-                | PaymentRequestLifecycleState::RecoveryRequired
-        ) {
+        if !unresolved_payment
+            && !matches!(
+                record.state,
+                PaymentRequestLifecycleState::Proposed
+                    | PaymentRequestLifecycleState::Accepted
+                    | PaymentRequestLifecycleState::ActiveRecurring
+                    | PaymentRequestLifecycleState::RecoveryRequired
+            )
+        {
             return Err(invalid_live_state(
                 "Payment Request execution claim has no unresolved payment work",
             ));
@@ -146,7 +179,8 @@ fn validate_live_identity(state: &StorageState) -> Result<()> {
 }
 
 fn has_identity_scoped_live_state(state: &StorageState) -> bool {
-    !state.linked_peers.is_empty()
+    state.allowance_accounting.is_some()
+        || !state.linked_peers.is_empty()
         || !state.contact_records.is_empty()
         || !state.authorized_paykit_apps.is_empty()
         || !state.registered_paykit_apps.is_empty()

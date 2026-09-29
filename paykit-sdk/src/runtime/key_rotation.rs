@@ -159,6 +159,11 @@ pub(super) fn rotate_private_state(
         });
     }
 
+    // Key rotation revokes prepared handoffs, but unresolved usage remains held
+    // until the wallet reconciles external execution evidence.
+    if let Some(accounting) = state.allowance_accounting.as_mut() {
+        crate::domain::allowance_accounting::invalidate_accounting(accounting);
+    }
     state.encrypted_link_states.clear();
     state.peer_link_operation_leases.clear();
     for peer in state.linked_peers.values_mut() {

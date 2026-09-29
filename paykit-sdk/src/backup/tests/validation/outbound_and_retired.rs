@@ -10,6 +10,7 @@ async fn test_restore_backup_state_preserves_invalid_outbound_audit_record() {
     invalid.status = OutboundPrivateMessageStatus::Invalid;
     invalid.last_error = Some("invalid private message JSON".into());
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty)),
         linked_peers: Vec::new(),
@@ -51,6 +52,7 @@ async fn test_restore_backup_state_preserves_recovery_required_outbound_audit_re
     recovery_required.status = OutboundPrivateMessageStatus::RecoveryRequired;
     recovery_required.last_error = Some("Encrypted Link recovery is required".into());
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty)),
         linked_peers: Vec::new(),
@@ -90,6 +92,7 @@ async fn test_restore_rejects_retired_app_recovery_required_message() {
     message.status = OutboundPrivateMessageStatus::RecoveryRequired;
     message.last_error = Some("Encrypted Link recovery is required".into());
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty)),
         linked_peers: Vec::new(),
@@ -125,6 +128,7 @@ async fn test_restore_rejects_retired_app_shared_private_payment_list() {
     message.last_attempt_at = Some(timestamp());
     message.sent_at = Some(timestamp());
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty)),
         linked_peers: Vec::new(),
@@ -162,6 +166,7 @@ async fn test_restore_rejects_retired_app_active_payment_request() {
     message.last_attempt_at = Some(timestamp());
     message.sent_at = Some(timestamp());
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty)),
         linked_peers: Vec::new(),
@@ -211,6 +216,7 @@ async fn test_restore_rejects_retired_app_incomplete_receipt_issuance() {
         ReceiptIssuanceRecord::from_prepared(counterparty, app_id(), prepared, timestamp())
             .unwrap();
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(local_public_key)),
         linked_peers: Vec::new(),
@@ -253,6 +259,7 @@ async fn test_restore_backup_state_marks_sending_outbound_recovery_required() {
         ciphertext: vec![0; pubky_noise::snow_crypto::PUBKY_NOISE_TRANSPORT_PACKET_LEN],
     });
     let backup = SdkBackupState {
+        allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty)),
         linked_peers: Vec::new(),

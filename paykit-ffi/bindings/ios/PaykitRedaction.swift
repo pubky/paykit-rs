@@ -142,3 +142,98 @@ extension ResolvedPublicPaymentEndpoint: CustomStringConvertible, CustomDebugStr
     public var description: String { "ResolvedPublicPaymentEndpoint(<redacted>)" }
     public var debugDescription: String { description }
 }
+
+extension PaymentRequestScope: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PaymentRequestScope(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PaymentOccurrence: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PaymentOccurrence(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PaymentAccountingScope: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PaymentAccountingScope(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension AccountingBillingPeriod: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "AccountingBillingPeriod(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PaymentOccurrenceKey: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PaymentOccurrenceKey(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PaymentAttemptRecord: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PaymentAttemptRecord(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PaymentOccurrenceRecord: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PaymentOccurrenceRecord(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension AllowanceAssociationRevision: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "AllowanceAssociationRevision(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension AllowanceAssociationRecord: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "AllowanceAssociationRecord(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension AllowanceWatermarkRecord: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "AllowanceWatermarkRecord(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension AllowanceAccountingHistory: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "AllowanceAccountingHistory(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension AllowanceAccountingState: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "AllowanceAccountingState(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension AllowanceSelectionInput: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "AllowanceSelectionInput(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension AllowanceReassociationInput: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "AllowanceReassociationInput(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PaymentExecutionChecks: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PaymentExecutionChecks(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension AllowanceCandidate: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "AllowanceCandidate(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PaymentOutcomeReport: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PaymentOutcomeReport(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension AllowanceAccountingReconciliation: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "AllowanceAccountingReconciliation(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PaymentDisposition: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PaymentDisposition(<redacted>)" }
+    public var debugDescription: String { description }
+}
