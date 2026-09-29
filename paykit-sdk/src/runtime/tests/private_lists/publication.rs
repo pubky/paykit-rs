@@ -1,5 +1,29 @@
 use super::*;
 
+#[test]
+fn test_private_payment_list_delivery_futures_stay_stack_bounded() {
+    let sdk = PaykitSdk::with_clock(
+        InMemoryStorage::new(),
+        TestPubkySessionProvider { session: None },
+        PrivateListPaymentAdapter,
+        PaykitSdkConfig::new("bitkit").unwrap(),
+        FixedClock,
+    );
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let sync = sdk.sync_private_payment_lists_with_reservations_and_process_outbound(
+        vec![PrivatePaymentListReservationUpdate {
+            counterparty: counterparty.clone(),
+            reservations: Vec::new(),
+        }],
+        false,
+    );
+    let clear = sdk.clear_private_payment_list_and_process_outbound(counterparty);
+
+    const MAX_INLINE_FUTURE_SIZE: usize = 16 * 1024;
+    assert!(std::mem::size_of_val(&sync) <= MAX_INLINE_FUTURE_SIZE);
+    assert!(std::mem::size_of_val(&clear) <= MAX_INLINE_FUTURE_SIZE);
+}
+
 #[tokio::test]
 async fn test_enqueue_private_payment_list_requires_live_session_for_stored_link() {
     let storage = registered_test_storage();

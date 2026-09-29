@@ -204,14 +204,16 @@ where
         &self,
         counterparty: PubkyPublicKey,
     ) -> Result<PrivatePaymentListDeliveryReport> {
-        self.sync_private_payment_lists_with_reservations(
+        // Keep the composed queue-and-send operation out of the caller's
+        // inline async state so driving it does not require a large stack.
+        Box::pin(self.sync_private_payment_lists_with_reservations(
             vec![PrivatePaymentListReservationUpdate {
                 counterparty,
                 reservations: Vec::new(),
             }],
             false,
             false,
-        )
+        ))
         .await
     }
 
@@ -347,11 +349,13 @@ where
         updates: Vec<PrivatePaymentListReservationUpdate>,
         clear_unlisted_linked_peers: bool,
     ) -> Result<PrivatePaymentListDeliveryReport> {
-        self.sync_private_payment_lists_with_reservations(
+        // Keep the composed queue-and-send operation out of the caller's
+        // inline async state so driving it does not require a large stack.
+        Box::pin(self.sync_private_payment_lists_with_reservations(
             updates,
             clear_unlisted_linked_peers,
             true,
-        )
+        ))
         .await
     }
 
