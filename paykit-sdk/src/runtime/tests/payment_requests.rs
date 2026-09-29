@@ -1,6 +1,59 @@
 use super::*;
 use std::time::Duration;
 
+#[tokio::test]
+async fn test_unavailable_registry_does_not_hide_other_payment_requests() {
+    let storage = registered_test_storage();
+    storage
+        .transaction(|tx| {
+            tx.save_identity_state(IdentityState {
+                public_key: Some(PubkyPublicKey::from_public_key(
+                    &pubky::Keypair::random().public_key(),
+                )),
+                initialized_at: FixedClock.now(),
+            });
+            Ok(())
+        })
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        persist_private_stream_batch(
+            &storage,
+            counterparty.clone(),
+            vec![payment_request_message(
+                "650e8400-e29b-41d4-a716-446655440000",
+                "550e8400-e29b-41d4-a716-446655440000",
+                None,
+            )],
+            None,
+            FixedClock.now(),
+        )
+        .await
+        .unwrap();
+        authorize_payment_request_app(&storage, counterparty, "bitkit").await;
+    }
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        FailingPublicStorageProvider {
+            successful_loads: 1.into(),
+        },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+
+    assert_eq!(sdk.payment_requests().await.unwrap().len(), 2);
+    assert_eq!(
+        sdk.actionable_received_payment_requests()
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(sdk.payment_requests().await.unwrap().len(), 2);
+}
+
 #[derive(Clone)]
 struct TransactionGateStorage {
     inner: InMemoryStorage,

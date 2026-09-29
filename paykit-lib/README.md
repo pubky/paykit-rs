@@ -174,7 +174,7 @@ All public APIs return `paykit_lib::Result<T>`, which is an alias for `std::resu
 - **Public Payment Endpoints** use concrete Pubky SDK handles. Writes take `&pubky::PubkySession`; reads take `&pubky::PublicStorage`.
 - **Private Payment Lists** use `pubky-noise`'s `PubkyNoiseEncryptor` for Noise-encrypted messaging, which handles both encryption and homeserver I/O through Pubky. Private Payment List functions accept an `EncryptedLink` established via an Encrypted Link Handshake.
 - Paykit stays stateless. Session creation, capability scoping, key rotation, account recovery, and client timeout configuration remain caller responsibilities.
-- Public payment paths are centralized by `PAYKIT_PATH_PREFIX` (`/pub/paykit/v0`). Private Paykit message paths use `PAYKIT_PRIVATE_PATH_PREFIX` (`/pub/paykit/v0/private`) as the base for pubky-noise path derivation.
+- Public payment paths are centralized by `PAYKIT_PATH_PREFIX` (`/pub/paykit/v0/`, including the trailing slash). Private Paykit message paths use `PAYKIT_PRIVATE_PATH_PREFIX` (`/pub/paykit/v0/private`) as the base for pubky-noise path derivation.
 
 ## Timeout Handling
 

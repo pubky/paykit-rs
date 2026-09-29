@@ -152,24 +152,24 @@ pub(in crate::backup) fn clear_recovery_required_link_snapshots(
     }
 }
 
-pub(in crate::backup) fn mark_restored_sending_outbound_recovery_required(
+pub(in crate::backup) fn mark_restored_outbound_recovery_required(
     records: &mut [OutboundPrivateMessageRecord],
     recovery_required_peers: &[PubkyPublicKey],
+    key_changed: bool,
 ) {
     let recovery_required_peers = recovery_required_peers
         .iter()
         .cloned()
         .collect::<HashSet<_>>();
     for record in records.iter_mut() {
-        if record.status == OutboundPrivateMessageStatus::Sending
-            && recovery_required_peers.contains(&record.counterparty)
+        if (outbound_status_requires_link(&record.status) || record.prepared_send.is_some())
+            && (key_changed || recovery_required_peers.contains(&record.counterparty))
         {
             record.status = OutboundPrivateMessageStatus::RecoveryRequired;
             record.updated_at = record
                 .updated_at
                 .max(record.last_attempt_at.unwrap_or(record.created_at));
-            record.last_error =
-                Some("restored sending message requires Encrypted Link recovery".into());
+            record.last_error = Some("restored message requires Encrypted Link recovery".into());
             record.prepared_send = None;
         }
     }

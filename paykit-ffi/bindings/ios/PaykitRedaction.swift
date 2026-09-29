@@ -8,6 +8,11 @@ extension ContactUpdate: CustomStringConvertible, CustomDebugStringConvertible {
     public var debugDescription: String { description }
 }
 
+extension ConversionRate: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "ConversionRate(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
 extension PaymentAmountContext: CustomStringConvertible, CustomDebugStringConvertible {
     public var description: String { "PaymentAmountContext(<redacted>)" }
     public var debugDescription: String { description }
@@ -15,6 +20,11 @@ extension PaymentAmountContext: CustomStringConvertible, CustomDebugStringConver
 
 extension PaymentRequestTerms: CustomStringConvertible, CustomDebugStringConvertible {
     public var description: String { "PaymentRequestTerms(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PaymentProofSubmission: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PaymentProofSubmission(<redacted>)" }
     public var debugDescription: String { description }
 }
 

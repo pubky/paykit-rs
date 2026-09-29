@@ -52,6 +52,56 @@ async fn test_write_lock_is_renewed_and_released_after_failure() {
 }
 
 #[tokio::test]
+async fn test_write_lock_waits_for_another_writer_before_running_operation() {
+    let setup = TestSetup::new().await;
+    let path = format!("{PAYKIT_PATH_PREFIX}contended.json");
+    let storage = setup.session.storage();
+    let lock = storage
+        .lock(&path, std::time::Duration::from_secs(60))
+        .await
+        .unwrap();
+    let waiting_storage = &storage;
+    let operation = with_write_lock(&setup.session, &path, |lock| async move {
+        waiting_storage
+            .put_locked(&lock, "next writer")
+            .await
+            .unwrap();
+        Ok::<_, PaykitError>(())
+    });
+    tokio::pin!(operation);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut operation)
+            .await
+            .is_err()
+    );
+    storage.unlock(&lock).await.unwrap();
+    operation.await.unwrap();
+    assert_eq!(
+        storage.get(&path).await.unwrap().text().await.unwrap(),
+        "next writer"
+    );
+}
+
+#[tokio::test]
+async fn test_empty_registry_is_invalid_for_both_read_apis() {
+    let setup = TestSetup::new().await;
+    setup
+        .session
+        .storage()
+        .put(PAYKIT_APP_REGISTRY_PATH, Vec::new())
+        .await
+        .unwrap();
+    assert!(matches!(
+        get_paykit_app_registry(&setup.public_storage, &setup.public_key).await,
+        Err(PaykitError::InvalidData { .. })
+    ));
+    assert!(matches!(
+        get_paykit_app_registry_with_revision(&setup.public_storage, &setup.public_key).await,
+        Err(PaykitError::InvalidData { .. })
+    ));
+}
+
+#[tokio::test]
 async fn test_renewal_loss_after_commit_is_not_a_retryable_conflict() {
     let setup = TestSetup::new().await;
     let path = format!("{PAYKIT_PATH_PREFIX}uncertain-write.json");

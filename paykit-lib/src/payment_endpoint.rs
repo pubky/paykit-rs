@@ -182,6 +182,8 @@ pub async fn set_payment_endpoint(
 }
 
 /// Creates a public Payment Endpoint only when it is currently absent.
+///
+/// Session creation, capability scope, and key rotation remain the caller's responsibility.
 pub async fn create_payment_endpoint(
     session: &pubky::PubkySession,
     app_id: &PaykitAppId,
@@ -194,6 +196,8 @@ pub async fn create_payment_endpoint(
 }
 
 /// Replaces a public Payment Endpoint only at the supplied strong revision.
+///
+/// Session creation, capability scope, and key rotation remain the caller's responsibility.
 pub async fn update_payment_endpoint(
     session: &pubky::PubkySession,
     app_id: &PaykitAppId,
@@ -226,6 +230,8 @@ pub async fn remove_payment_endpoint(
 }
 
 /// Removes a public Payment Endpoint only at the supplied strong revision.
+///
+/// Session creation, capability scope, and key rotation remain the caller's responsibility.
 pub async fn remove_payment_endpoint_if_revision(
     session: &pubky::PubkySession,
     app_id: &PaykitAppId,

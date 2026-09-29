@@ -946,13 +946,21 @@ pub(crate) fn require_current_payment_request_action(
             )?;
             if record.local_role == Some(PaymentRequestLocalRole::Payer) {
                 require_origin_app_authorized(tx, counterparty, &record, "cancel Payment Request")?;
-                require_execution_claim_owner(
-                    tx,
-                    counterparty,
-                    payment_request_id.as_str(),
-                    app_id,
-                    "cancel Payment Request",
-                )?;
+                let completed_execution = record.state == PaymentRequestLifecycleState::ProofSubmitted
+                    && record.payer_app_id.as_ref() == Some(app_id)
+                    && tx
+                        .payment_request_execution_claim(counterparty, payment_request_id.as_str())
+                        .is_none()
+                    && !request_has_unresolved_payment(tx, counterparty, payment_request_id.as_str());
+                if !completed_execution {
+                    require_execution_claim_owner(
+                        tx,
+                        counterparty,
+                        payment_request_id.as_str(),
+                        app_id,
+                        "cancel Payment Request",
+                    )?;
+                }
             } else {
                 require_local_action_app(&record, app_id, "cancel Payment Request")?;
             }

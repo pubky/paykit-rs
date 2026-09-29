@@ -234,6 +234,7 @@ where
     }
 
     /// List indexed Receipt Access records for one counterparty.
+    /// Previously authorized records remain available when its registry is unavailable.
     pub async fn receipt_access_records(
         &self,
         counterparty: &PubkyPublicKey,
@@ -243,7 +244,11 @@ where
             return Ok(Vec::new());
         }
         self.ensure_peer_not_blocked(counterparty).await?;
-        let authorized_app_ids = self.authorized_receipt_apps_for_peer(counterparty).await?;
+        let authorized_app_ids = match self.authorized_receipt_apps_for_peer(counterparty).await {
+            Ok(authorized) => authorized,
+            Err(PaykitSdkError::Transport { .. } | PaykitSdkError::Protocol { .. }) => None,
+            Err(err) => return Err(err),
+        };
         self.persist_receipt_app_authorization(counterparty, authorized_app_ids.as_deref())
             .await?;
         self.storage
@@ -275,6 +280,7 @@ where
     }
 
     /// List Receipt Access across non-blocked counterparties, newest first.
+    /// Unavailable registries do not hide previously authorized records.
     pub async fn receipt_access(&self) -> Result<Vec<ReceiptAccessView>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         if identity.public_key.is_none() {
@@ -293,7 +299,11 @@ where
             .await?;
         let mut authorized_by_counterparty = HashMap::new();
         for counterparty in counterparties {
-            let authorized = self.authorized_receipt_apps_for_peer(&counterparty).await?;
+            let authorized = match self.authorized_receipt_apps_for_peer(&counterparty).await {
+                Ok(authorized) => authorized,
+                Err(PaykitSdkError::Transport { .. } | PaykitSdkError::Protocol { .. }) => None,
+                Err(err) => return Err(err),
+            };
             self.persist_receipt_app_authorization(&counterparty, authorized.as_deref())
                 .await?;
             authorized_by_counterparty.insert(counterparty, authorized);

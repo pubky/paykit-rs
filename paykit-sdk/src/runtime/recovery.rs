@@ -181,24 +181,33 @@ where
         counterparty: &PubkyPublicKey,
         lease: &PeerLinkOperationLease,
         force_new_attempt: bool,
+        session_access: Option<&PubkySessionAccess>,
     ) {
-        let (session_access, ..) = match self.private_link_session_access().await {
-            Ok(value) => value,
-            Err(err) => {
-                let _ = self
-                    .save_local_recovery_marker_last_error(
-                        counterparty,
-                        lease,
-                        Some(recovery_marker_error_text(&err)),
-                    )
-                    .await;
-                return;
-            }
+        // Reuse guarded access: a queued rotation writer prevents recursive reads.
+        let loaded_access;
+        let session_access = match session_access {
+            Some(access) => access,
+            None => match self.private_link_session_access().await {
+                Ok((access, ..)) => {
+                    loaded_access = access;
+                    &loaded_access
+                }
+                Err(err) => {
+                    let _ = self
+                        .save_local_recovery_marker_last_error(
+                            counterparty,
+                            lease,
+                            Some(recovery_marker_error_text(&err)),
+                        )
+                        .await;
+                    return;
+                }
+            },
         };
         if let Err(err) = self
             .publish_local_recovery_marker_with_session(
                 counterparty,
-                &session_access,
+                session_access,
                 lease,
                 force_new_attempt,
             )
@@ -532,21 +541,9 @@ where
         &self,
         counterparty: &PubkyPublicKey,
         lease: &PeerLinkOperationLease,
+        session_access: &PubkySessionAccess,
     ) -> Result<()> {
-        let (session_access, secret_key) = match self.private_link_session_access().await {
-            Ok(value) => value,
-            Err(err) => {
-                if self.has_local_recovery_marker(counterparty, lease).await? {
-                    self.save_local_recovery_marker_last_error(
-                        counterparty,
-                        lease,
-                        Some(recovery_marker_error_text(&err)),
-                    )
-                    .await?;
-                }
-                return Ok(());
-            }
-        };
+        let secret_key = session_access.paykit_noise_secret_key()?;
         let has_local_marker = self.has_local_recovery_marker(counterparty, lease).await?;
         if !has_local_marker {
             return Ok(());

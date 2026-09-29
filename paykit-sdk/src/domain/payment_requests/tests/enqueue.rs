@@ -230,7 +230,7 @@ async fn test_open_accepted_request_can_be_canceled_after_execution_handoff() {
 }
 
 #[tokio::test]
-async fn test_one_time_proof_finishes_execution_claim() {
+async fn test_one_time_proof_releases_claim_but_preserves_payer_cancellation() {
     let storage = registered_storage();
     let counterparty = counterparty();
     let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
@@ -285,7 +285,7 @@ async fn test_one_time_proof_finishes_execution_claim() {
     .await;
     let reclaim = claim_payment_request_execution(
         &storage,
-        counterparty,
+        counterparty.clone(),
         &app_id(),
         &request_id,
         timestamp(),
@@ -296,6 +296,44 @@ async fn test_one_time_proof_finishes_execution_claim() {
     assert!(record.execution_claim_app_id.is_none());
     assert!(matches!(release, Err(PaykitSdkError::Policy { .. })));
     assert!(matches!(reclaim, Err(PaykitSdkError::Policy { .. })));
+
+    let server = paykit_lib::PaykitAppId::new("server").unwrap();
+    register_execution_app(&storage, server.clone()).await;
+    let other_app_cancel = enqueue_checked_payment_request_action(
+        &storage,
+        counterparty.clone(),
+        &server,
+        &parsed_event(cancellation_raw_for_app(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104",
+            request_id.as_str(),
+            server.as_str(),
+        )),
+        timestamp(),
+    )
+    .await;
+    assert!(matches!(
+        other_app_cancel,
+        Err(PaykitSdkError::Policy { .. })
+    ));
+
+    enqueue_checked_payment_request_action(
+        &storage,
+        counterparty.clone(),
+        &app_id(),
+        &parsed_event(cancellation_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d105",
+            request_id.as_str(),
+        )),
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    let record = payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(record.state, PaymentRequestLifecycleState::Canceled);
+    assert!(record.execution_claim_app_id.is_none());
 }
 
 #[tokio::test]

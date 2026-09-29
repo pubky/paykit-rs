@@ -320,7 +320,7 @@ where
                         Err(_) => true,
                     };
                     if requires_recovery {
-                        self.mark_link_recovery_required(&counterparty, lease.clone())
+                        self.mark_link_recovery_required(&counterparty, lease.clone(), None)
                             .await?;
                         peer_state = Some(LinkedPeerState::RecoveryRequired);
                     }
@@ -362,6 +362,7 @@ where
                         &counterparty,
                         &lease,
                         mark.new_episode,
+                        None,
                     )
                     .await;
                     return Err(PaykitSdkError::RecoveryRequired {
@@ -458,7 +459,7 @@ where
         }
 
         let Some(handshake_role) = stored_link_state.handshake_role else {
-            self.mark_link_recovery_required(&counterparty, lease)
+            self.mark_link_recovery_required(&counterparty, lease, None)
                 .await?;
             return Err(PaykitSdkError::RecoveryRequired {
                 context: format!(
@@ -468,7 +469,7 @@ where
             });
         };
         let Some(snapshot_bytes) = stored_link_state.handshake_snapshot.as_ref() else {
-            self.mark_link_recovery_required(&counterparty, lease)
+            self.mark_link_recovery_required(&counterparty, lease, None)
                 .await?;
             return Err(PaykitSdkError::RecoveryRequired {
                 context: format!(
@@ -478,14 +479,14 @@ where
             });
         };
 
-        let handshake = match self
+        let (session_access, handshake) = match self
             .restore_link_handshake_from_snapshot(counterparty.clone(), snapshot_bytes)
             .await
         {
-            Ok(handshake) => handshake,
+            Ok(restored) => restored,
             Err(err) => {
                 if Self::link_handshake_error_requires_recovery(&err) {
-                    self.mark_link_recovery_required(&counterparty, lease)
+                    self.mark_link_recovery_required(&counterparty, lease, None)
                         .await?;
                 }
                 return Err(err);
@@ -494,6 +495,7 @@ where
 
         self.advance_restored_link_handshake(
             counterparty,
+            session_access,
             handshake,
             handshake_role,
             stored_link_state.generation,
@@ -506,6 +508,7 @@ where
         &self,
         counterparty: &PubkyPublicKey,
         lease: PeerLinkOperationLease,
+        session_access: Option<&PubkySessionAccess>,
     ) -> Result<()> {
         let mark = mark_recovery_required_with_lease(
             &self.storage,
@@ -514,8 +517,13 @@ where
             self.clock.now(),
         )
         .await?;
-        self.publish_local_recovery_marker_if_possible(counterparty, &lease, mark.new_episode)
-            .await;
+        self.publish_local_recovery_marker_if_possible(
+            counterparty,
+            &lease,
+            mark.new_episode,
+            session_access,
+        )
+        .await;
         Ok(())
     }
 
@@ -523,7 +531,7 @@ where
         &self,
         counterparty: PubkyPublicKey,
         snapshot_bytes: &[u8],
-    ) -> Result<paykit_lib::EncryptedLinkHandshake> {
+    ) -> Result<(GuardedSessionAccess, paykit_lib::EncryptedLinkHandshake)> {
         let (session_access, secret_key) = self.private_link_session_access().await?;
         let remote_public_key = counterparty.to_public_key()?;
         let snapshot = paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(snapshot_bytes)?;
@@ -539,15 +547,16 @@ where
                 source: None,
             });
         }
-        paykit_lib::restore_encrypted_link_handshake(
+        let handshake = paykit_lib::restore_encrypted_link_handshake(
             session_access.session.clone(),
             secret_key,
             &remote_public_key,
             session_access.outbox_client.clone(),
             snapshot,
         )
-        .await
-        .map_err(Into::into)
+        .await?;
+        // Keep rotation excluded until advancement and its durable checkpoint finish.
+        Ok((session_access, handshake))
     }
 
     fn link_handshake_error_requires_recovery(err: &PaykitSdkError) -> bool {
@@ -563,6 +572,7 @@ where
     async fn advance_restored_link_handshake(
         &self,
         counterparty: PubkyPublicKey,
+        session_access: GuardedSessionAccess,
         handshake: paykit_lib::EncryptedLinkHandshake,
         handshake_role: EncryptedLinkHandshakeRole,
         expected_generation: u64,
@@ -573,7 +583,7 @@ where
             Err(err) => {
                 let err = PaykitSdkError::from(err);
                 if Self::link_handshake_error_requires_recovery(&err) {
-                    self.mark_link_recovery_required(&counterparty, lease)
+                    self.mark_link_recovery_required(&counterparty, lease, Some(&session_access))
                         .await?;
                 }
                 return Err(err);
@@ -603,8 +613,12 @@ where
                     self.clock.now(),
                 )
                 .await?;
-                self.remove_local_recovery_marker_if_recorded(&counterparty, &lease)
-                    .await?;
+                self.remove_local_recovery_marker_if_recorded(
+                    &counterparty,
+                    &lease,
+                    &session_access,
+                )
+                .await?;
                 Ok(report)
             }
         }
@@ -678,6 +692,7 @@ where
                             &counterparty,
                             &lease,
                             mark.new_episode,
+                            None,
                         )
                         .await;
                         return Err(PaykitSdkError::RecoveryRequired {

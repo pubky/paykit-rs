@@ -433,7 +433,7 @@ async fn test_reservation_cleanup_failure_keeps_cancellation_claim() {
 }
 
 #[tokio::test]
-async fn test_queue_error_cleanup_preserves_adapter_error_without_reservation_id() {
+async fn test_queue_error_cleanup_preserves_primary_error_without_reservation_id() {
     let storage = registered_test_storage();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let sdk = PaykitSdk::with_clock(
@@ -452,14 +452,21 @@ async fn test_queue_error_cleanup_preserves_adapter_error_without_reservation_id
     };
 
     let error = sdk
-        .cancel_reservations_after_queue_error(&[cancellation], &counterparty)
+        .cancel_reservations_and_return_queue_error::<()>(
+            &[cancellation],
+            &counterparty,
+            PaykitSdkError::Protocol {
+                context: "invalid private list".into(),
+                source: None,
+            },
+        )
         .await
         .unwrap_err();
 
     assert!(matches!(
         error,
-        PaykitSdkError::PaymentAdapter { ref context, .. }
-            if context == "cancellation failed"
+        PaykitSdkError::Protocol { ref context, .. }
+            if context == "invalid private list; reservation cleanup also failed"
     ));
     assert!(!error.to_string().contains("reservation-id-secret"));
 }

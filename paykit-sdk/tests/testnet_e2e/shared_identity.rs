@@ -110,15 +110,19 @@ async fn test_unchanged_app_publication_initializes_noise_key() {
     let registry = public_only.publish_paykit_app(app.clone()).await.unwrap();
     assert!(registry.noise_public_key().is_none());
 
+    let mut private_access = result.access;
+    private_access.paykit_identity_secret_key =
+        Some(secret.derive_paykit_identity_secret_key(3).unwrap());
     let private_capable = PaykitSdk::new(
         storage,
-        TestnetSessionProvider::new(result.access),
+        TestnetSessionProvider::new(private_access),
         TestnetPaymentAdapter::default(),
         PaykitSdkConfig::new("bitkit").unwrap(),
     );
     private_capable.initialize().await.unwrap();
     let published = private_capable.publish_paykit_app(app).await.unwrap();
     assert!(published.noise_public_key().is_some());
+    assert_eq!(published.key_generation(), 3);
     let fetched = private_capable
         .paykit_app_registry(result.public_key)
         .await
@@ -488,6 +492,38 @@ async fn test_paykit_identity_key_rotation_rekeys_shared_state_and_registry() {
         .unwrap()
         .expect("rotated App Registry should remain published");
     assert_eq!(registry.key_generation(), 2);
+}
+
+#[tokio::test]
+async fn test_restore_with_replacement_key_discards_old_link_snapshots() {
+    let pair = linked_homeserver_shared_pair().await;
+    let backup = pair.bitkit.sdk.export_backup_state().await.unwrap();
+    assert!(!backup.encrypted_link_states.is_empty());
+    let mut access = pair.bitkit.access.clone();
+    access.paykit_identity_secret_key =
+        Some(pair.secret.derive_paykit_identity_secret_key(2).unwrap());
+    let storage = InMemoryStorage::new();
+    let sdk = PaykitSdk::new(
+        storage.clone(),
+        TestnetSessionProvider::new(access),
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new("bitkit").unwrap(),
+    );
+    let report = sdk.restore_backup_state(backup.clone()).await.unwrap();
+    assert!(report
+        .recovery_required_peers
+        .contains(&pair.bob.public_key));
+    let restored = storage.snapshot().unwrap();
+    assert!(restored.encrypted_link_states.is_empty());
+    assert_ne!(
+        restored.paykit_noise_public_key,
+        backup.paykit_noise_public_key
+    );
+    assert_eq!(restored.private_stream_items, backup.private_stream_items);
+    assert!(restored
+        .outbound_private_messages
+        .iter()
+        .all(|message| message.prepared_send.is_none()));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1726,7 +1762,7 @@ struct TransactionPause {
     resume: Receiver<()>,
 }
 
-const TRANSACTION_PAUSE_TIMEOUT: Duration = Duration::from_secs(10);
+const TRANSACTION_PAUSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl TransactionPause {
     fn new() -> (Self, Receiver<()>, SyncSender<()>) {

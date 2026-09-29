@@ -162,10 +162,26 @@ where
             };
             report.attempted.push(sending.outbound_message_id);
 
+            let prepared_message_id = sending
+                .prepared_send
+                .as_ref()
+                .map(|_| sending.outbound_message_id);
             let Some(sending) = self
                 .claimed_message_ready_for_send(&counterparty, sending, &lease, &mut report, now)
                 .await?
             else {
+                if let Some(message_id) = prepared_message_id {
+                    self.record_outbound_recovery_marker_result(
+                        &mut report,
+                        &counterparty,
+                        &session_access,
+                        &lease,
+                        true,
+                        Some(message_id),
+                    )
+                    .await;
+                    break;
+                }
                 continue;
             };
 
@@ -370,7 +386,7 @@ where
         Ok((now - lease_timeout, now - retry_backoff))
     }
 
-    async fn claimed_message_ready_for_send(
+    pub(super) async fn claimed_message_ready_for_send(
         &self,
         counterparty: &PubkyPublicKey,
         sending: OutboundPrivateMessageRecord,
@@ -380,8 +396,9 @@ where
     ) -> Result<Option<OutboundPrivateMessageRecord>> {
         if let Err(err) = validate_queued_outbound_private_message(&sending) {
             let error = err.to_string();
-            let failed = mark_outbound_invalid(sending, error.clone(), self.clock.now());
-            let failed = self.save_outbound_with_lease(failed, lease).await?;
+            let failed = self
+                .invalidate_outbound_with_lease(sending, error.clone(), lease)
+                .await?;
             report.failed.push(OutboundPrivateSendFailure {
                 outbound_message_id: failed.outbound_message_id,
                 error,
@@ -409,8 +426,9 @@ where
         }
 
         let error = "Payment Endpoint Reservation expired before private list send".to_owned();
-        let failed = mark_outbound_invalid(sending, error.clone(), self.clock.now());
-        let failed = self.save_outbound_with_lease(failed, lease).await?;
+        let failed = self
+            .invalidate_outbound_with_lease(sending, error.clone(), lease)
+            .await?;
         report.failed.push(OutboundPrivateSendFailure {
             outbound_message_id: failed.outbound_message_id,
             error,
@@ -424,6 +442,31 @@ where
                 .await,
         );
         Ok(None)
+    }
+
+    async fn invalidate_outbound_with_lease(
+        &self,
+        sending: OutboundPrivateMessageRecord,
+        error: String,
+        lease: &PeerLinkOperationLease,
+    ) -> Result<OutboundPrivateMessageRecord> {
+        let now = self.clock.now();
+        let requires_recovery = sending.prepared_send.is_some();
+        let failed = mark_outbound_invalid(sending, error, now);
+        self.retry_storage_transaction(|| {
+            let failed = failed.clone();
+            let lease = lease.clone();
+            move |tx| {
+                crate::storage::require_peer_link_operation_lease(tx, &lease)?;
+                if requires_recovery {
+                    // The allocated Noise slot cannot be skipped on this link.
+                    mark_recovery_required_in_transaction(tx, &failed.counterparty, now)?;
+                }
+                tx.save_outbound_private_message(failed.clone())?;
+                Ok(failed)
+            }
+        })
+        .await
     }
 
     async fn record_private_send_success(

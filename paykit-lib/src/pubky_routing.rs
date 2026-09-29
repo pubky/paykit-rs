@@ -465,16 +465,9 @@ pub async fn fetch_paykit_app_registry(
     storage: &PublicStorage,
     owner: &PublicKey,
 ) -> Result<Option<PaykitAppRegistry>> {
-    let addr = format!("{owner}{PAYKIT_APP_REGISTRY_PATH}");
-    fetch_text(
-        storage,
-        addr,
-        "fetch Paykit App Registry",
-        Some(crate::PAYKIT_APP_REGISTRY_MAX_BYTES),
-    )
-    .await?
-    .map(|body| parse_paykit_app_registry_json(&body))
-    .transpose()
+    Ok(fetch_paykit_app_registry_with_revision(storage, owner)
+        .await?
+        .map(|(registry, _)| registry))
 }
 
 /// Fetches and parses the identity-wide Paykit App Registry with its content revision.

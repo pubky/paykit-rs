@@ -116,58 +116,8 @@ async fn test_automatic_recovery_marker_publish_records_missing_session() {
     );
     let lease = sdk.claim_peer_link_operation(&counterparty).await.unwrap();
 
-    sdk.publish_local_recovery_marker_if_possible(&counterparty, &lease, true)
+    sdk.publish_local_recovery_marker_if_possible(&counterparty, &lease, true, None)
         .await;
-    sdk.release_peer_link_operation(&lease).await.unwrap();
-
-    let status = sdk
-        .encrypted_link_recovery_marker_status(&counterparty)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        status.local_marker_last_error.as_deref(),
-        Some("no Pubky session available")
-    );
-}
-
-#[tokio::test]
-async fn test_automatic_recovery_marker_remove_records_missing_session() {
-    let storage = InMemoryStorage::new();
-    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    storage
-        .transaction({
-            let counterparty = counterparty.clone();
-            move |tx| {
-                tx.save_linked_peer(LinkedPeerRecord {
-                    counterparty: counterparty.clone(),
-                    state: LinkedPeerState::Linked,
-                    last_sync_at: Some(FixedClock.now()),
-                    last_private_receive_at: None,
-                    failure_count: 0,
-                    local_recovery_attempt_id: Some("650e8400-e29b-41d4-a716-446655440000".into()),
-                    local_recovery_marker_created_at: Some(FixedClock.now()),
-                    local_recovery_marker_last_error: None,
-                    remote_recovery_attempt_id: None,
-                    remote_recovery_marker_observed_at: None,
-                });
-                Ok(())
-            }
-        })
-        .await
-        .unwrap();
-    let sdk = PaykitSdk::with_clock(
-        storage.clone(),
-        TestPubkySessionProvider { session: None },
-        TestPaymentAdapter,
-        PaykitSdkConfig::new("test-app").unwrap(),
-        FixedClock,
-    );
-    let lease = sdk.claim_peer_link_operation(&counterparty).await.unwrap();
-
-    sdk.remove_local_recovery_marker_if_recorded(&counterparty, &lease)
-        .await
-        .unwrap();
     sdk.release_peer_link_operation(&lease).await.unwrap();
 
     let status = sdk
@@ -243,7 +193,7 @@ async fn test_replaced_lease_cannot_record_recovery_marker_publish_error() {
         FixedClock,
     );
 
-    sdk.publish_local_recovery_marker_if_possible(&counterparty, &stale_lease, true)
+    sdk.publish_local_recovery_marker_if_possible(&counterparty, &stale_lease, true, None)
         .await;
 
     let peer = crate::load_linked_peer(&storage, &counterparty)
@@ -264,7 +214,7 @@ async fn test_replaced_lease_cannot_record_recovery_marker_publish_error() {
 }
 
 #[tokio::test]
-async fn test_replaced_lease_cannot_clear_recovery_marker() {
+async fn test_replaced_lease_cannot_access_recovery_marker_for_cleanup() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let attempt_id = "650e8400-e29b-41d4-a716-446655440000";
@@ -319,7 +269,7 @@ async fn test_replaced_lease_cannot_clear_recovery_marker() {
     );
 
     let err = sdk
-        .remove_local_recovery_marker_if_recorded(&counterparty, &stale_lease)
+        .has_local_recovery_marker(&counterparty, &stale_lease)
         .await
         .unwrap_err();
 

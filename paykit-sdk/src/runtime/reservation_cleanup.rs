@@ -59,10 +59,26 @@ where
         &self,
         cancellations: &[PrivatePaymentEndpointReservationCancellation],
         counterparty: &PubkyPublicKey,
-        err: PaykitSdkError,
+        mut err: PaykitSdkError,
     ) -> Result<T> {
-        self.cancel_reservations_after_queue_error(cancellations, counterparty)
-            .await?;
+        if self
+            .cancel_reservations_after_queue_error(cancellations, counterparty)
+            .await
+            .is_err()
+        {
+            let context = match &mut err {
+                PaykitSdkError::ConcurrentUpdate { context, .. }
+                | PaykitSdkError::Storage { context, .. }
+                | PaykitSdkError::Identity { context, .. }
+                | PaykitSdkError::Transport { context, .. }
+                | PaykitSdkError::NotFound { context, .. }
+                | PaykitSdkError::Protocol { context, .. }
+                | PaykitSdkError::Policy { context, .. }
+                | PaykitSdkError::PaymentAdapter { context, .. }
+                | PaykitSdkError::RecoveryRequired { context, .. } => context,
+            };
+            context.push_str("; reservation cleanup also failed");
+        }
         Err(err)
     }
 

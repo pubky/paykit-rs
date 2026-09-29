@@ -81,9 +81,12 @@ async fn test_key_rotation_preserves_history_and_resets_private_link_state() {
         .unwrap();
 
     storage
-        .transaction({
+        .rotate_paykit_identity_key(key(7, 1), key(8, 2), {
             let owner = owner.clone();
-            move |tx| rotate_private_state(tx, &owner, FixedClock.now())
+            move |tx, already_rotated| {
+                assert!(!already_rotated);
+                rotate_private_state(tx, &owner, FixedClock.now())
+            }
         })
         .await
         .unwrap();
@@ -102,4 +105,67 @@ async fn test_key_rotation_preserves_history_and_resets_private_link_state() {
         OutboundPrivateMessageStatus::RecoveryRequired
     );
     assert!(state.outbound_private_messages[0].prepared_send.is_none());
+
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                let mut peer = tx.linked_peer(&counterparty).unwrap();
+                peer.failure_count = 1;
+                tx.save_linked_peer(peer);
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let before_retry = storage.snapshot().unwrap();
+    storage
+        .rotate_paykit_identity_key(key(7, 1), key(8, 2), |tx, already_rotated| {
+            if !already_rotated {
+                rotate_private_state(tx, &owner, FixedClock.now())?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(storage.snapshot().unwrap(), before_retry);
+    assert!(storage
+        .rotate_paykit_identity_key(key(7, 1), key(9, 2), |_, _| Ok(()))
+        .await
+        .is_err());
+    assert!(storage
+        .transaction(|tx| crate::storage::bind_paykit_noise_key(
+            tx,
+            crate::storage::paykit_noise_public_key(&key(7, 1))
+        ))
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn test_key_rotation_waits_for_active_session_operations() {
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+    let sdk = PaykitSdk::with_clock(
+        registered_test_storage(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("bitkit").unwrap(),
+        FixedClock,
+    );
+    let guard = sdk.session_operation_gate.read().await;
+    let rotation = sdk.rotate_paykit_identity_key(key(8, 2));
+    tokio::pin!(rotation);
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(matches!(
+        rotation.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    drop(guard);
+    assert!(matches!(
+        rotation.await,
+        Err(PaykitSdkError::Identity { .. })
+    ));
 }

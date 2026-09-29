@@ -121,19 +121,27 @@ impl PaykitAppRegistry {
         self.noise_public_key.as_ref()
     }
 
-    /// Initialize or verify the identity-wide Noise public key.
-    pub fn set_noise_public_key(&mut self, noise_public_key: PublicKey) -> Result<()> {
-        if self
-            .noise_public_key
-            .as_ref()
-            .is_some_and(|existing| existing != &noise_public_key)
-        {
+    /// Initialize or verify the identity-wide Noise public key and its generation.
+    pub fn set_noise_public_key(
+        &mut self,
+        noise_public_key: PublicKey,
+        key_generation: u64,
+    ) -> Result<()> {
+        if key_generation == 0 {
+            return Err(PaykitError::Validation(
+                "Paykit key generation must be positive".into(),
+            ));
+        }
+        if self.noise_public_key.as_ref().is_some_and(|existing| {
+            existing != &noise_public_key || self.key_generation != key_generation
+        }) {
             return Err(PaykitError::Validation(
                 "Paykit App Registry Noise public key is already initialized to a different key"
                     .into(),
             ));
         }
         self.noise_public_key = Some(noise_public_key);
+        self.key_generation = key_generation;
         Ok(())
     }
 
@@ -479,9 +487,10 @@ pub async fn update_paykit_app_registry(
 
 /// Fetch the identity-wide Paykit App Registry, if it exists.
 ///
-/// This unauthenticated read returns `Ok(None)` when the registry is missing or
-/// empty. The caller chooses the Pubky client, owner identity, timeout policy,
-/// and any key-rotation strategy; Paykit only reads the registry path.
+/// This unauthenticated read returns `Ok(None)` when the registry is missing.
+/// An empty file is malformed data. The caller chooses the Pubky client, owner
+/// identity, timeout policy, and key-rotation strategy; Paykit only reads the
+/// registry path.
 ///
 /// # Errors
 ///

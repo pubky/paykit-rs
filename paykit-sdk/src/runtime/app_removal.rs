@@ -15,6 +15,29 @@ where
             move |tx| {
                 let blockers = app_removal_blockers_in_transaction(tx, &app_id, now)?;
                 if blockers.is_empty() {
+                    for mut message in tx.export_storage_state().outbound_private_messages {
+                        if message.app_id == app_id && message.prepared_send.is_some() {
+                            return Err(PaykitSdkError::Policy {
+                                context: "cannot remove Paykit app with a prepared private send"
+                                    .into(),
+                                source: None,
+                            });
+                        }
+                        if message.app_id == app_id
+                            && message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
+                            && matches!(
+                                message.status,
+                                OutboundPrivateMessageStatus::Pending
+                                    | OutboundPrivateMessageStatus::RecoveryRequired
+                            )
+                            && message.last_attempt_at.is_none()
+                        {
+                            message.status = OutboundPrivateMessageStatus::Superseded;
+                            message.last_error = None;
+                            message.updated_at = now;
+                            tx.save_outbound_private_message(message)?;
+                        }
+                    }
                     tx.retire_paykit_app(app_id);
                 }
                 Ok(blockers)
@@ -30,6 +53,16 @@ pub(super) fn retire_app_outbound_private_messages(
     expires_at: DateTime<Utc>,
 ) -> Result<Vec<PeerLinkOperationLease>> {
     let snapshot = tx.export_storage_state();
+    if snapshot
+        .outbound_private_messages
+        .iter()
+        .any(|message| message.app_id == *app_id && message.prepared_send.is_some())
+    {
+        return Err(PaykitSdkError::Policy {
+            context: "cannot remove Paykit app with a prepared private send".into(),
+            source: None,
+        });
+    }
     let mut affected_counterparties = snapshot
         .outbound_private_messages
         .iter()

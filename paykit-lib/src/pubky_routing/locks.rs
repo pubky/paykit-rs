@@ -7,6 +7,7 @@ use crate::{PaykitError, Result};
 use super::{content_revision, is_not_found, read_bounded_body};
 
 const WRITE_LOCK_TIMEOUT: Duration = Duration::from_secs(60);
+const LOCK_ACQUISITION_MAX_ATTEMPTS: u64 = 8;
 
 #[derive(Debug, thiserror::Error)]
 #[error("resource changed since it was read")]
@@ -110,6 +111,8 @@ fn resource_changed() -> PaykitError {
 /// afterward. Cancellation leaves it to expire. A renewal failure stops the
 /// operation with an uncertain outcome, not a retryable write conflict: a PUT
 /// may already have committed. Callers must reconcile before retrying.
+/// Contended acquisition is retried with bounded backoff before `operation`
+/// runs. The operation itself is never replayed.
 ///
 /// The homeserver must prevent writes from committing after lock ownership is
 /// lost. Session creation, capability scope, key rotation, and request timeouts
@@ -125,10 +128,20 @@ where
     Fut: Future<Output = std::result::Result<T, E>>,
 {
     let storage = session.storage();
-    let lock = storage
-        .lock(path, WRITE_LOCK_TIMEOUT)
-        .await
-        .map_err(|source| E::from(lock_error("acquire Pubky write lock", source)))?;
+    let mut attempt = 1;
+    let lock = loop {
+        match storage.lock(path, WRITE_LOCK_TIMEOUT).await {
+            Ok(lock) => break lock,
+            Err(pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }))
+                if status == pubky::StatusCode::LOCKED
+                    && attempt < LOCK_ACQUISITION_MAX_ATTEMPTS =>
+            {
+                tokio::time::sleep(Duration::from_millis(50 * attempt)).await;
+                attempt += 1;
+            }
+            Err(source) => return Err(E::from(lock_error("acquire Pubky write lock", source))),
+        }
+    };
     let mut renewed = lock.clone();
     let renewal = async {
         loop {

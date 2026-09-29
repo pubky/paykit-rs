@@ -23,7 +23,7 @@ where
         replacement_key: crate::PaykitIdentitySecretKey,
     ) -> Result<paykit_lib::PaykitAppRegistry> {
         let _identity_guard = self.claim_identity_operation("rotate Paykit identity key")?;
-        let _session_guard = Arc::clone(&self.session_operation_gate).read_owned().await;
+        let _session_guard = Arc::clone(&self.session_operation_gate).write_owned().await;
         let access =
             self.pubky
                 .load_session_access()

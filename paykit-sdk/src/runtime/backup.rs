@@ -19,12 +19,25 @@ where
     /// and Payment Request evidence cannot be discarded; rejection changes no state.
     pub async fn restore_backup_state(&self, backup: SdkBackupState) -> Result<RestoreReport> {
         let _identity_guard = self.claim_identity_operation("restore backup")?;
+        let _session_guard = Arc::clone(&self.session_operation_gate).write_owned().await;
         let mut trusted_identity = None;
+        let mut trusted_noise_public_key = None;
         if backup.local_public_key().is_some() || backup.has_identity_scoped_state() {
             let session_access = self.validate_backup_restore_session(&backup).await?;
             trusted_identity = Some(self.restore_validation_identity(&session_access)?);
+            trusted_noise_public_key = session_access
+                .paykit_identity_secret_key()
+                .as_ref()
+                .map(crate::storage::paykit_noise_public_key);
         }
-        restore_sdk_backup_state(&self.storage, backup, trusted_identity, self.clock.now()).await
+        restore_sdk_backup_state(
+            &self.storage,
+            backup,
+            trusted_identity,
+            trusted_noise_public_key,
+            self.clock.now(),
+        )
+        .await
     }
 
     async fn validate_backup_restore_session(

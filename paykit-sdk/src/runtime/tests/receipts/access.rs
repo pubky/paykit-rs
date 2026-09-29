@@ -1,6 +1,61 @@
 use super::*;
 
 #[tokio::test]
+async fn test_receipt_access_history_survives_unavailable_registry_without_new_authorization() {
+    let storage = registered_test_storage();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let other = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            let other = other.clone();
+            move |tx| {
+                tx.save_identity_state(IdentityState {
+                    public_key: Some(PubkyPublicKey::from_public_key(
+                        &pubky::Keypair::random().public_key(),
+                    )),
+                    initialized_at: FixedClock.now(),
+                });
+                for peer in [counterparty.clone(), other] {
+                    save_authorized_receipt_access(tx, receipt_access_record(peer, "receipt-1"));
+                }
+                let mut unverified = receipt_access_record(counterparty, "receipt-2");
+                unverified.event_id = "750e8400-e29b-41d4-a716-446655440000".into();
+                unverified.stream_item_id = 2;
+                tx.save_receipt_access_record(unverified);
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        FailingPublicStorageProvider {
+            successful_loads: 0.into(),
+        },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+
+    let peer_records = sdk.receipt_access_records(&counterparty).await.unwrap();
+    assert_eq!(peer_records.len(), 1);
+    assert_eq!(peer_records[0].receipt_id, "receipt-1");
+    assert_eq!(sdk.receipt_access().await.unwrap().len(), 2);
+    let unverified = storage
+        .transaction(|tx| {
+            Ok(tx
+                .receipt_access_records(&counterparty)
+                .into_iter()
+                .find(|record| record.receipt_id == "receipt-2")
+                .unwrap())
+        })
+        .await
+        .unwrap();
+    assert!(!unverified.app_authorized);
+}
+
+#[tokio::test]
 async fn test_receipt_access_records_require_initialized_identity() {
     let storage = registered_test_storage();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

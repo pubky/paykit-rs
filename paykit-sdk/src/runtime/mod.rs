@@ -406,9 +406,19 @@ where
         let required_capabilities = PAYKIT_SESSION_CAPABILITIES;
         let public_key = session_access.public_key()?;
         session_access.capability_for_capabilities(required_capabilities)?;
+        let noise_public_key = session_access
+            .paykit_identity_secret_key()
+            .as_ref()
+            .map(crate::storage::paykit_noise_public_key);
         let state = self
             .storage
-            .transaction(move |tx| bind_storage_to_identity(tx, public_key, now))
+            .transaction(move |tx| {
+                let state = bind_storage_to_identity(tx, public_key, now)?;
+                if let Some(noise_public_key) = noise_public_key {
+                    crate::storage::bind_paykit_noise_key(tx, noise_public_key)?;
+                }
+                Ok(state)
+            })
             .await?;
 
         Ok((
@@ -457,6 +467,12 @@ where
             });
         }
         session_access.validate_for_capabilities(PAYKIT_SESSION_CAPABILITIES)?;
+        if let Some(key) = session_access.paykit_identity_secret_key() {
+            let public_key = crate::storage::paykit_noise_public_key(&key);
+            self.storage
+                .transaction(move |tx| crate::storage::bind_paykit_noise_key(tx, public_key))
+                .await?;
+        }
         Ok(GuardedSessionAccess {
             access: session_access,
             _guard: session_guard,

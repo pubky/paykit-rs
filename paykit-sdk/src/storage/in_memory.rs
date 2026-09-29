@@ -99,6 +99,14 @@ struct StorageStateTransaction {
 }
 
 impl StorageTransaction for StorageStateTransaction {
+    fn paykit_noise_public_key(&self) -> Option<crate::PubkyPublicKey> {
+        self.state.paykit_noise_public_key.clone()
+    }
+
+    fn save_paykit_noise_public_key(&mut self, public_key: crate::PubkyPublicKey) {
+        self.state.paykit_noise_public_key = Some(public_key);
+    }
+
     fn allowance_accounting_state(&self) -> Option<crate::AllowanceAccountingState> {
         self.state.allowance_accounting.clone()
     }

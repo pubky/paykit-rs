@@ -83,12 +83,27 @@ pub trait StorageAdapter: Send + Sync {
     /// contract because their at-rest protection is app-owned.
     async fn rotate_paykit_identity_key_erased<'a>(
         &self,
-        _current_key: PaykitIdentitySecretKey,
-        _replacement_key: PaykitIdentitySecretKey,
+        current_key: PaykitIdentitySecretKey,
+        replacement_key: PaykitIdentitySecretKey,
         f: StorageKeyRotationCallback<'a>,
     ) -> Result<Box<dyn Any + Send>> {
-        self.transaction_erased(Box::new(move |tx| f(tx, false)))
-            .await
+        current_key.validate_successor(&replacement_key)?;
+        let current = paykit_noise_public_key(&current_key);
+        let replacement = paykit_noise_public_key(&replacement_key);
+        self.transaction_erased(Box::new(move |tx| {
+            let stored = tx.paykit_noise_public_key();
+            let already_rotated = stored.as_ref() == Some(&replacement);
+            if stored.is_some() && !already_rotated && stored.as_ref() != Some(&current) {
+                return Err(PaykitSdkError::Identity {
+                    context: "Paykit rotation keys do not match the stored private state".into(),
+                    source: None,
+                });
+            }
+            let result = f(tx, already_rotated)?;
+            tx.save_paykit_noise_public_key(replacement);
+            Ok(result)
+        }))
+        .await
     }
 
     /// Run an atomic storage transaction.
@@ -244,6 +259,10 @@ where
 
 /// Mutable operations available inside one storage transaction.
 pub trait StorageTransaction {
+    /// Load the identity-wide Noise public key associated with private state.
+    fn paykit_noise_public_key(&self) -> Option<PubkyPublicKey>;
+    /// Associate private state with the active identity-wide Noise public key.
+    fn save_paykit_noise_public_key(&mut self, public_key: PubkyPublicKey);
     /// Load durable wallet accounting evidence.
     fn allowance_accounting_state(&self) -> Option<crate::AllowanceAccountingState>;
     /// Save validated durable wallet accounting evidence atomically.
@@ -506,6 +525,29 @@ pub trait StorageTransaction {
         &self,
         receipt_id: &str,
     ) -> Option<ReceiptIssuanceRecord>;
+}
+
+pub(crate) fn paykit_noise_public_key(key: &PaykitIdentitySecretKey) -> PubkyPublicKey {
+    PubkyPublicKey::from_public_key(
+        &pubky::Keypair::from_secret(&key.noise_secret_key()).public_key(),
+    )
+}
+
+pub(crate) fn bind_paykit_noise_key(
+    tx: &mut dyn StorageTransaction,
+    public_key: PubkyPublicKey,
+) -> Result<()> {
+    if tx
+        .paykit_noise_public_key()
+        .is_some_and(|stored| stored != public_key)
+    {
+        return Err(PaykitSdkError::Identity {
+            context: "active Paykit key does not match the stored private state".into(),
+            source: None,
+        });
+    }
+    tx.save_paykit_noise_public_key(public_key);
+    Ok(())
 }
 
 pub(crate) fn require_peer_link_operation_lease(

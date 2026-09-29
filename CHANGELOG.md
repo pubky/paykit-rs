@@ -55,6 +55,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Changed
 
+- **Rust API:** `PAYKIT_PATH_PREFIX` includes its trailing slash;
+  `MAX_ENCRYPTED_RECEIPT_BYTES` is now `ENCRYPTED_RECEIPT_MAX_BYTES`.
+  `PaykitAppRegistry::set_noise_public_key` takes the key generation explicitly.
+- Storage transactions and backups retain the active Noise public key. Custom
+  adapters must implement its load/save methods atomically with private state.
 - Upgrade Pubky to 0.14 and Pubky Noise to 0.1.0-rc11. Encrypted Link transport
   packets authenticate the message length and padding while retaining the
   1000-byte application payload limit. Communicating peers must use the same
@@ -102,6 +107,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Fixed
 
+- Preserve allocated Noise slots through reservation expiry and backup recovery.
+- Serialize key rotation against active session operations and make callback
+  storage rotation retries idempotent. Restoring with a replacement key relinks
+  peers without discarding payment history.
+- Retire unsent private lists atomically with app removal, allow the recorded
+  payer app to cancel after one-time proof submission, and remove managed
+  endpoints whose replacement failed to publish.
+- Report private lists blocked behind failed sends, preserve queue errors during
+  cleanup, and isolate unavailable registries when listing history and requests.
 - Reject backup restores that would discard retained Payment Request lifecycle
   or conflict evidence, so received Cancellation cannot be undone by restoring
   an older backup and reconciling unchanged payment history.

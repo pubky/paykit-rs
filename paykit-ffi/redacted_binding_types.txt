@@ -1,7 +1,9 @@
 ContactRecord
 ContactUpdate
+ConversionRate
 PaymentAmountContext
 PaymentRequestTerms
+PaymentProofSubmission
 PaymentTarget
 PreparedPrivateContactPayment
 PrivateContactPaymentResolution

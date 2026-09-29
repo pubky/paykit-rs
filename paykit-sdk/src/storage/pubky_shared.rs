@@ -61,6 +61,8 @@ struct EncryptedStateBlob {
 /// writes leave a remote marker; the next transaction waits five minutes under
 /// its renewed lock before reading state. This is a best-effort delay, not a
 /// substitute for homeserver enforcement of lock ownership at publication.
+/// Cancelling the SDK operation interrupts that wait; a later call restarts it.
+/// Whole-operation timeouts must allow the cooldown, unlike HTTP request timeouts.
 #[derive(Clone)]
 pub struct PubkySharedStateStorage {
     session_provider: Arc<dyn PubkySessionProvider>,
@@ -294,7 +296,11 @@ impl StorageAdapter for PubkySharedStateStorage {
                     };
                 let (updated_state, result) = run_storage_state_transaction(
                     initial_state,
-                    Box::new(move |tx| f(tx, already_rotated)),
+                    Box::new(|tx| {
+                        let result = f(tx, already_rotated)?;
+                        tx.save_paykit_noise_public_key(super::paykit_noise_public_key(&replacement_key));
+                        Ok(result)
+                    }),
                 )?;
                 validate_storage_state(&updated_state).map_err(|_| PaykitSdkError::Storage {
                     context: "SDK state failed validation before Paykit key rotation".into(),

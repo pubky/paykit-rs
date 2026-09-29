@@ -614,6 +614,8 @@ pub struct EventDedupRecord {
 /// Logical SDK storage state used by snapshots, tests, and backup/restore.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageState {
+    /// Identity-wide Noise public key associated with the private state.
+    pub paykit_noise_public_key: Option<PubkyPublicKey>,
     /// Durable payment accounting; absence requires complete wallet reconciliation.
     pub allowance_accounting: Option<crate::AllowanceAccountingState>,
     /// Current identity state.

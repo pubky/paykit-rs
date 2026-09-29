@@ -299,6 +299,7 @@ fn test_accounting_state_blob_round_trip_and_version_truncation_rejection() {
 #[test]
 fn test_accounting_backup_blob_round_trip_and_version_truncation_rejection() {
     let backup = sdk::SdkBackupState {
+        paykit_noise_public_key: None,
         version: sdk::SDK_BACKUP_VERSION,
         identity_state: None,
         linked_peers: vec![],

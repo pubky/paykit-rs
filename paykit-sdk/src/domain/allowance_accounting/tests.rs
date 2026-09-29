@@ -612,6 +612,7 @@ async fn test_accounting_restore_failure_is_atomic_and_missing_ledger_stays_bloc
         &fixture.storage,
         backup,
         None,
+        None,
         time(),
     )
     .await
@@ -750,6 +751,7 @@ async fn test_accounting_restore_rejects_identity_switch_without_erasing_ledger(
         &fixture.storage,
         backup,
         Some(identity),
+        None,
         time(),
     )
     .await

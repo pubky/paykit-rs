@@ -91,6 +91,22 @@ fn test_registry_requires_noise_key_for_private_capabilities() {
 }
 
 #[test]
+fn test_registry_initializes_later_key_generation() {
+    let mut registry = PaykitAppRegistry::new(None);
+    let key = pubky::Keypair::random().public_key();
+    assert!(registry.set_noise_public_key(key.clone(), 0).is_err());
+    registry.set_noise_public_key(key.clone(), 3).unwrap();
+    registry.set_noise_public_key(key.clone(), 3).unwrap();
+    assert!(registry.set_noise_public_key(key, 1).is_err());
+    assert_eq!(registry.key_generation(), 3);
+    let json = serialize_paykit_app_registry(&registry).unwrap();
+    assert_eq!(parse_paykit_app_registry_json(&json).unwrap(), registry);
+    registry
+        .rotate_noise_public_key(pubky::Keypair::random().public_key(), 4)
+        .unwrap();
+}
+
+#[test]
 fn test_remote_registry_reports_invalid_app_without_noise_key() {
     let raw = json!({
         "version": APP_REGISTRY_VERSION,

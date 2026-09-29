@@ -113,10 +113,10 @@ impl FfiPubkyLocalSecretKey {
         &self,
         key_generation: u64,
     ) -> Result<Arc<FfiPaykitIdentitySecretKey>, PaykitFfiError> {
-        let bytes: [u8; 32] = self.bytes.clone().try_into().map_err(|bytes: Vec<u8>| {
+        let bytes: [u8; 32] = self.bytes.as_slice().try_into().map_err(|_| {
             validation_error(format!(
                 "Pubky local secret key must be 32 bytes, got {}",
-                bytes.len()
+                self.bytes.len()
             ))
         })?;
         let secret =
@@ -187,7 +187,8 @@ fn paykit_identity_secret_from_bytes(
     bytes: Vec<u8>,
     key_generation: u64,
 ) -> Result<PaykitIdentitySecretKey, PaykitFfiError> {
-    let bytes: [u8; 32] = bytes.try_into().map_err(|bytes: Vec<u8>| {
+    let bytes = zeroize::Zeroizing::new(bytes);
+    let bytes: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
         validation_error(format!(
             "Paykit identity secret key must be 32 bytes, got {}",
             bytes.len()

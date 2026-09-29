@@ -83,20 +83,55 @@ where
         desired_entries.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
 
         let mut already_removed = Vec::new();
+        let mut failed_removals = Vec::new();
         let removal_candidates = match self.config.endpoint_management_scope {
-            EndpointManagementScope::ManagedOnly => self
-                .retry_storage_transaction(|| |tx| Ok(tx.public_endpoint_records()))
-                .await?
-                .into_iter()
-                .filter(|record| {
-                    record.app_id == self.config.app_id
-                        && record.status != PublicationStatus::Removed
-                        && !desired
-                            .keys()
-                            .any(|identifier| identifier.as_str() == record.identifier)
-                })
-                .map(|record| (record.identifier, record.payload))
-                .collect::<Vec<_>>(),
+            EndpointManagementScope::ManagedOnly => {
+                let records = self
+                    .retry_storage_transaction(|| |tx| Ok(tx.public_endpoint_records()))
+                    .await?
+                    .into_iter()
+                    .filter(|record| {
+                        record.app_id == self.config.app_id
+                            && record.status != PublicationStatus::Removed
+                            && !desired
+                                .keys()
+                                .any(|identifier| identifier.as_str() == record.identifier)
+                    })
+                    .collect::<Vec<_>>();
+                let public_storage = session_access.outbox_client.public_storage();
+                let session_info = session_access.session.info();
+                let mut candidates = Vec::new();
+                for record in records {
+                    let identifier =
+                        paykit_lib::PaymentEndpointIdentifier::new(&record.identifier)?;
+                    // A publication record can contain an attempted, unpublished payload.
+                    // Retain the current revision, including for empty endpoint files.
+                    match paykit_lib::get_payment_endpoint_with_revision(
+                        &public_storage,
+                        session_info.public_key(),
+                        &self.config.app_id,
+                        &identifier,
+                    )
+                    .await
+                    {
+                        Ok(Some((payload, revision))) => candidates.push((
+                            record.identifier,
+                            payload.map(paykit_lib::PaymentEndpointPayload::into_inner),
+                            Some(revision),
+                        )),
+                        Ok(None) => already_removed.push(record),
+                        Err(err) => failed_removals.push(failed_record(
+                            &self.config.app_id,
+                            record.identifier,
+                            record.payload,
+                            err.to_string(),
+                            now,
+                        )),
+                    }
+                }
+                already_removed.sort_by(|left, right| left.identifier.cmp(&right.identifier));
+                candidates
+            }
             EndpointManagementScope::FullAppEndpointNamespace => {
                 let local_public_key = session_access.session.info().public_key().clone();
                 let current = paykit_lib::get_payment_list(
@@ -132,14 +167,19 @@ where
                     .into_iter()
                     .filter(|(identifier, _)| !desired.contains_key(identifier))
                     .map(|(identifier, payload)| {
-                        (identifier.as_str().to_owned(), Some(payload.into_inner()))
+                        (
+                            identifier.as_str().to_owned(),
+                            Some(payload.into_inner()),
+                            None,
+                        )
                     })
                     .collect::<Vec<_>>()
             }
         };
 
         let mut removal_candidates = removal_candidates;
-        removal_candidates.sort_by(|(left, _), (right, _)| left.cmp(right));
+        removal_candidates.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
+        failed_removals.sort_by(|left, right| left.identifier.cmp(&right.identifier));
         self.retry_storage_transaction(|| {
             let app_id = self.config.app_id.clone();
             let lease = lease.clone();
@@ -149,6 +189,7 @@ where
                 .collect::<Vec<_>>();
             let removal_candidates = removal_candidates.clone();
             let already_removed = already_removed.clone();
+            let failed_removals = failed_removals.clone();
             move |tx| {
                 crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
                 crate::storage::require_paykit_app_active(tx, &app_id)?;
@@ -160,7 +201,7 @@ where
                         now,
                     ));
                 }
-                for (identifier, previous_payload) in removal_candidates {
+                for (identifier, previous_payload, _) in removal_candidates {
                     tx.save_public_endpoint_record(pending_removal_record(
                         &app_id,
                         identifier,
@@ -170,6 +211,9 @@ where
                 }
                 for record in already_removed {
                     tx.save_public_endpoint_record(removed_record(&app_id, record.identifier, now));
+                }
+                for record in failed_removals {
+                    tx.save_public_endpoint_record(record);
                 }
                 Ok(())
             }
@@ -183,6 +227,15 @@ where
                     identifier: record.identifier,
                     status: PublicationStatus::Removed,
                     error: None,
+                }),
+        );
+        report.failed.extend(
+            failed_removals
+                .into_iter()
+                .map(|record| EndpointSyncChange {
+                    identifier: record.identifier,
+                    status: record.status,
+                    error: record.last_error,
                 }),
         );
 
@@ -237,17 +290,24 @@ where
             }
         }
 
-        for (identifier_text, previous_payload) in removal_candidates {
+        for (identifier_text, previous_payload, revision) in removal_candidates {
             let identifier = paykit_lib::PaymentEndpointIdentifier::new(&identifier_text)?;
             self.require_paykit_app_operation_lease(lease).await?;
-            match self
-                .remove_public_endpoint_if_current(
-                    session_access,
-                    &identifier,
-                    previous_payload.as_deref(),
-                )
-                .await
-            {
+            let result = match revision {
+                Some(revision) => {
+                    self.remove_public_endpoint_at_revision(session_access, &identifier, &revision)
+                        .await
+                }
+                None => {
+                    self.remove_public_endpoint_if_current(
+                        session_access,
+                        &identifier,
+                        previous_payload.as_deref(),
+                    )
+                    .await
+                }
+            };
+            match result {
                 Ok(()) => {
                     self.retry_storage_transaction(|| {
                         let lease = lease.clone();
@@ -368,19 +428,29 @@ where
                 source: None,
             });
         }
+        self.remove_public_endpoint_at_revision(session_access, identifier, &revision)
+            .await
+    }
+
+    async fn remove_public_endpoint_at_revision(
+        &self,
+        session_access: &PubkySessionAccess,
+        identifier: &paykit_lib::PaymentEndpointIdentifier,
+        revision: &str,
+    ) -> Result<()> {
         match paykit_lib::remove_payment_endpoint_if_revision(
             &session_access.session,
             &self.config.app_id,
             identifier.clone(),
-            &revision,
+            revision,
         )
         .await
         {
             Ok(()) => Ok(()),
             Err(err) if paykit_lib::is_write_conflict(&err) => {
                 if paykit_lib::get_payment_endpoint_with_revision(
-                    &public_storage,
-                    owner,
+                    &session_access.outbox_client.public_storage(),
+                    session_access.session.info().public_key(),
                     &self.config.app_id,
                     identifier,
                 )

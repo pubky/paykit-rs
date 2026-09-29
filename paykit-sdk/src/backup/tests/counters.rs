@@ -5,6 +5,7 @@ async fn test_restore_backup_state_advances_counters() {
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
     let backup = SdkBackupState {
+        paykit_noise_public_key: None,
         allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty.clone())),

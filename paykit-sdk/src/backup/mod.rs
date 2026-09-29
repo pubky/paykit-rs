@@ -54,6 +54,8 @@ pub const SDK_BACKUP_VERSION: u32 = 1;
 /// Decryption Keys. Store and transport it with caller-managed encryption.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SdkBackupState {
+    /// Identity-wide Noise public key associated with the private snapshots.
+    pub paykit_noise_public_key: Option<PubkyPublicKey>,
     /// Complete durable wallet accounting; restore always requires reconciliation.
     pub allowance_accounting: Option<crate::AllowanceAccountingState>,
     /// Backup schema version.
@@ -212,13 +214,14 @@ pub(crate) async fn restore_backup_state<S>(
 where
     S: StorageAdapter,
 {
-    restore_backup_state_with_identity(storage, backup, None, DateTime::<Utc>::MIN_UTC).await
+    restore_backup_state_with_identity(storage, backup, None, None, DateTime::<Utc>::MIN_UTC).await
 }
 
 pub(crate) async fn restore_backup_state_with_identity<S>(
     storage: &S,
     backup: SdkBackupState,
     trusted_identity: Option<IdentityState>,
+    trusted_noise_public_key: Option<PubkyPublicKey>,
     now: DateTime<Utc>,
 ) -> Result<RestoreReport>
 where
@@ -275,6 +278,7 @@ where
                 current_state.next_paykit_app_operation_lease_id;
             let (state, report) = backup.into_storage_state(
                 current_identity,
+                trusted_noise_public_key.or(current_state.paykit_noise_public_key.clone()),
                 current_next_peer_link_operation_lease_id,
                 current_next_paykit_app_operation_lease_id,
             )?;
@@ -307,6 +311,7 @@ where
 
 fn storage_state_is_empty_except_identity(state: &StorageState) -> bool {
     let mut empty = StorageState {
+        paykit_noise_public_key: state.paykit_noise_public_key.clone(),
         identity_state: state.identity_state.clone(),
         peer_link_operation_leases: state.peer_link_operation_leases.clone(),
         paykit_app_operation_leases: state.paykit_app_operation_leases.clone(),
@@ -411,6 +416,7 @@ impl SdkBackupState {
 
         Self {
             version: SDK_BACKUP_VERSION,
+            paykit_noise_public_key: state.paykit_noise_public_key,
             allowance_accounting: state.allowance_accounting,
             identity_state: state.identity_state,
             linked_peers,
@@ -435,6 +441,7 @@ impl SdkBackupState {
     fn into_storage_state(
         self,
         current_identity: Option<&IdentityState>,
+        current_noise_public_key: Option<PubkyPublicKey>,
         next_peer_link_operation_lease_id: u64,
         next_paykit_app_operation_lease_id: u64,
     ) -> Result<(ValidatedStorageState, RestoreReport)> {
@@ -545,6 +552,12 @@ impl SdkBackupState {
             &outbound_private_messages,
         )?;
 
+        let key_changed = current_noise_public_key.is_some()
+            && current_noise_public_key != self.paykit_noise_public_key;
+        if key_changed {
+            // Snapshots and prepared ciphertext from another key cannot resume.
+            encrypted_link_states.clear();
+        }
         let recovery_required_peers = reconcile_restored_linked_peers(
             &mut linked_peers,
             &encrypted_link_states,
@@ -554,9 +567,10 @@ impl SdkBackupState {
             &mut encrypted_link_states,
             &recovery_required_peers,
         );
-        mark_restored_sending_outbound_recovery_required(
+        mark_restored_outbound_recovery_required(
             &mut outbound_private_messages,
             &recovery_required_peers,
+            key_changed,
         );
 
         let next_outbound_private_message_id = self
@@ -587,6 +601,7 @@ impl SdkBackupState {
         };
 
         let state = StorageState {
+            paykit_noise_public_key: current_noise_public_key.or(self.paykit_noise_public_key),
             allowance_accounting: self.allowance_accounting,
             identity_state,
             linked_peers,
@@ -661,6 +676,7 @@ impl SdkBackupState {
     }
     pub(crate) fn has_identity_scoped_state(&self) -> bool {
         self.allowance_accounting.is_some()
+            || self.paykit_noise_public_key.is_some()
             || !self.linked_peers.is_empty()
             || !self.contact_records.is_empty()
             || !self.retired_paykit_apps.is_empty()
@@ -677,6 +693,7 @@ impl SdkBackupState {
 
     pub(crate) fn has_private_state(&self) -> bool {
         self.allowance_accounting.is_some()
+            || self.paykit_noise_public_key.is_some()
             || !self.linked_peers.is_empty()
             || !self.retired_paykit_apps.is_empty()
             || !self.payment_endpoint_reservations.is_empty()

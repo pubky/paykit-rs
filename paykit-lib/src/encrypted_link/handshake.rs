@@ -108,6 +108,11 @@ pub enum HandshakeProgress {
 /// Initiates a Noise XX Encrypted Link Handshake with a counterparty
 /// (initiator role).
 ///
+/// `sender_secret_key` is the local Noise secret, not the Pubky identity secret.
+/// `receiver_identity_public_key` selects the counterparty's homeserver, while
+/// `receiver_noise_public_key` is its authenticated App Registry Noise key.
+/// Session creation, capability scope, and key rotation remain the caller's responsibility.
+///
 /// Call [`advance_handshake`] until it returns [`HandshakeProgress::Complete`].
 #[instrument(skip(session, sender_secret_key, outbox_client))]
 pub fn initiate_encrypted_link(
@@ -164,6 +169,11 @@ pub fn initiate_encrypted_link(
 
 /// Accepts a Noise XX Encrypted Link Handshake from a counterparty
 /// (responder role).
+///
+/// `receiver_secret_key` is the local Noise secret, not the Pubky identity secret.
+/// `sender_identity_public_key` selects the counterparty's homeserver, while
+/// `sender_noise_public_key` is its authenticated App Registry Noise key.
+/// Session creation, capability scope, and key rotation remain the caller's responsibility.
 ///
 /// Call [`advance_handshake`] until it returns [`HandshakeProgress::Complete`].
 #[instrument(skip(session, receiver_secret_key, outbox_client))]

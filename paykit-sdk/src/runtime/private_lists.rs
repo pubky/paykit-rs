@@ -301,7 +301,6 @@ where
             .sync_contact_private_payment_lists(clear_unlisted_linked_peers)
             .await?;
         let mut report = delivery_report_from_sync_report(sync);
-        let tracked_message_ids = private_list_delivery_message_ids(&report);
         let tracked_counterparties = private_list_delivery_counterparties(&report);
         let outbound = self.process_pending_private_messages().await?;
         for counterparty_report in outbound {
@@ -309,6 +308,8 @@ where
                 continue;
             }
             if let Some(send_report) = counterparty_report.report {
+                let tracked_message_ids =
+                    private_list_delivery_message_ids(&report, &counterparty_report.counterparty);
                 report
                     .failed_to_deliver
                     .extend(delivery_failures_from_send_report(
@@ -477,7 +478,6 @@ where
 
         queued_counterparties.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         queued_counterparties.dedup();
-        let tracked_message_ids = private_list_delivery_message_ids(&report);
         for counterparty in queued_counterparties {
             match self.private_list_delivery_ready(&counterparty).await {
                 Ok(true) => {}
@@ -499,6 +499,8 @@ where
                 .await
             {
                 Ok(send_report) => {
+                    let tracked_message_ids =
+                        private_list_delivery_message_ids(&report, &counterparty);
                     report
                         .failed_to_deliver
                         .extend(delivery_failures_from_send_report(
@@ -601,9 +603,12 @@ where
             match result {
                 Ok(record) => Ok(record),
                 Err(err) => {
-                    self.cancel_reservations_after_queue_error(&cancellations, &counterparty)
-                        .await?;
-                    Err(err)
+                    self.cancel_reservations_and_return_queue_error(
+                        &cancellations,
+                        &counterparty,
+                        err,
+                    )
+                    .await
                 }
             }
         } else {
@@ -677,11 +682,15 @@ fn delivery_report_from_sync_report(
     }
 }
 
-fn private_list_delivery_message_ids(report: &PrivatePaymentListDeliveryReport) -> HashSet<u64> {
+fn private_list_delivery_message_ids(
+    report: &PrivatePaymentListDeliveryReport,
+    counterparty: &PubkyPublicKey,
+) -> HashSet<u64> {
     report
         .queued
         .iter()
         .chain(&report.cleared)
+        .filter(|change| &change.counterparty == counterparty)
         .filter_map(|change| change.outbound_message_id)
         .collect()
 }
@@ -703,6 +712,30 @@ fn delivery_failures_from_send_report(
     tracked_message_ids: &HashSet<u64>,
 ) -> Vec<PrivatePaymentListDeliveryFailure> {
     let mut failures = Vec::new();
+
+    let mut unattempted = tracked_message_ids
+        .iter()
+        .filter(|id| !report.attempted.contains(id) && !report.sent.contains(id))
+        .copied()
+        .collect::<Vec<_>>();
+    unattempted.sort_unstable();
+    for message_id in unattempted {
+        if let Some(blocker) = report
+            .failed
+            .iter()
+            .find(|failure| failure.outbound_message_id < message_id)
+        {
+            failures.push(PrivatePaymentListDeliveryFailure {
+                counterparty: counterparty.clone(),
+                outbound_message_id: Some(message_id),
+                reservation_id: None,
+                error: format!(
+                    "Private Payment List is queued behind failed message {}: {}",
+                    blocker.outbound_message_id, blocker.error,
+                ),
+            });
+        }
+    }
 
     for failure in report
         .failed
@@ -749,6 +782,25 @@ fn delivery_failures_from_send_report(
 #[cfg(test)]
 mod delivery_report_tests {
     use super::*;
+
+    #[test]
+    fn test_private_list_delivery_reports_blocked_unattempted_list() {
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let report = OutboundPrivateSendReport {
+            attempted: vec![7],
+            failed: vec![OutboundPrivateSendFailure {
+                outbound_message_id: 7,
+                error: "transport failed".into(),
+            }],
+            ..OutboundPrivateSendReport::default()
+        };
+        let failures =
+            delivery_failures_from_send_report(counterparty, report, &HashSet::from([8]));
+
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].outbound_message_id, Some(8));
+        assert!(failures[0].error.contains("queued behind failed message 7"));
+    }
 
     #[test]
     fn test_private_list_delivery_ignores_unrelated_outbound_failures() {

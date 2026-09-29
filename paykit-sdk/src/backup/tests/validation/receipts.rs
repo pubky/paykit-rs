@@ -41,6 +41,7 @@ async fn test_restore_backup_state_rejects_receipt_key_hash_mismatch() {
         retrieved_at: timestamp(),
     };
     let backup = SdkBackupState {
+        paykit_noise_public_key: None,
         allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(counterparty)),
@@ -123,6 +124,7 @@ async fn test_restore_backup_state_rejects_receipt_recipient_mismatch() {
         retrieved_at: timestamp(),
     };
     let backup = SdkBackupState {
+        paykit_noise_public_key: None,
         allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(local_public_key)),
@@ -196,6 +198,7 @@ async fn test_restore_backup_state_rejects_receipt_issuance_access_mismatch() {
             .unwrap();
     issuance.payment_reference = "different-reference".into();
     let backup = SdkBackupState {
+        paykit_noise_public_key: None,
         allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(local_public_key)),
@@ -250,6 +253,7 @@ async fn test_restore_backup_state_redacts_invalid_receipt_issuance() {
     let sentinel = "SENTINEL_PRIVATE_RECEIPT_CONTENT";
     issuance.encrypted_receipt = format!(r#"{{"sentinel":"{sentinel}""#);
     let backup = SdkBackupState {
+        paykit_noise_public_key: None,
         allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(local_public_key)),
@@ -326,6 +330,7 @@ async fn test_restore_backup_state_rejects_duplicate_receipt_issuance_ids() {
     )
     .unwrap();
     let backup = SdkBackupState {
+        paykit_noise_public_key: None,
         allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(local_public_key)),

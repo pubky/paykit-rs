@@ -5,6 +5,7 @@ async fn test_restore_backup_state_rejects_invalid_public_endpoint_record() {
     let storage = InMemoryStorage::new();
     let local_public_key = public_key();
     let backup = SdkBackupState {
+        paykit_noise_public_key: None,
         allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(local_public_key)),
@@ -43,6 +44,7 @@ async fn test_restore_backup_state_rejects_inconsistent_public_endpoint_status()
     let storage = InMemoryStorage::new();
     let local_public_key = public_key();
     let backup = SdkBackupState {
+        paykit_noise_public_key: None,
         allowance_accounting: None,
         version: SDK_BACKUP_VERSION,
         identity_state: Some(identity(local_public_key)),

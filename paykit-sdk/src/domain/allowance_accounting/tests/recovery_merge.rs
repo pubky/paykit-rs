@@ -221,15 +221,22 @@ async fn test_accounting_backup_restore_rejects_populated_destination() {
         &fixture.storage,
         backup.clone(),
         None,
+        None,
         time()
     )
     .await
     .is_err());
     assert_eq!(fixture.storage.snapshot().unwrap(), before);
     let restored_storage = InMemoryStorage::new();
-    crate::backup::restore_backup_state_with_identity(&restored_storage, backup, None, time())
-        .await
-        .unwrap();
+    crate::backup::restore_backup_state_with_identity(
+        &restored_storage,
+        backup,
+        None,
+        None,
+        time(),
+    )
+    .await
+    .unwrap();
     let restored = restored_storage
         .snapshot()
         .unwrap()

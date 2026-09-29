@@ -105,6 +105,7 @@ where
     }
 
     /// Return accepted recurring Payment Requests from currently authorized remote apps.
+    /// Counterparties whose registry cannot be fetched or validated are omitted.
     pub async fn active_recurring_payment_requests(&self) -> Result<Vec<PaymentRequestRecord>> {
         let records = self
             .list_payment_requests(PaymentRequestFilter {
@@ -122,6 +123,7 @@ where
     }
 
     /// Return received Payment Requests from currently authorized apps that need a response.
+    /// Counterparties whose registry cannot be fetched or validated are omitted.
     pub async fn actionable_received_payment_requests(&self) -> Result<Vec<PaymentRequestRecord>> {
         let records = self
             .list_payment_requests(PaymentRequestFilter {
@@ -161,11 +163,15 @@ where
             .collect::<HashSet<_>>();
         let mut authorized_by_counterparty = HashMap::new();
         for counterparty in counterparties {
-            authorized_by_counterparty.insert(
-                counterparty.clone(),
-                self.authorized_payment_request_apps_for_peer(&counterparty)
-                    .await?,
-            );
+            let authorized = match self
+                .authorized_payment_request_apps_for_peer(&counterparty)
+                .await
+            {
+                Ok(authorized) => authorized,
+                Err(PaykitSdkError::Transport { .. } | PaykitSdkError::Protocol { .. }) => None,
+                Err(err) => return Err(err),
+            };
+            authorized_by_counterparty.insert(counterparty, authorized);
         }
         Ok(records
             .into_iter()

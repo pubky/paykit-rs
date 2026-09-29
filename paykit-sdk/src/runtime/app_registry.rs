@@ -512,9 +512,7 @@ where
         let existing = paykit_lib::get_paykit_app_registry(&public_storage, owner).await?;
         let mut registry = match existing {
             Some(registry) => registry,
-            None if create_if_missing => {
-                paykit_lib::PaykitAppRegistry::new(self.local_noise_public_key(session_access))
-            }
+            None if create_if_missing => paykit_lib::PaykitAppRegistry::new(None),
             None => {
                 return Err(PaykitSdkError::NotFound {
                     context: "Paykit app registry".into(),
@@ -574,10 +572,7 @@ where
                 paykit_lib::get_paykit_app_registry_with_revision(&public_storage, owner).await?;
             let (mut registry, revision) = match snapshot {
                 Some((registry, revision)) => (registry, Some(revision)),
-                None if create_if_missing => (
-                    paykit_lib::PaykitAppRegistry::new(self.local_noise_public_key(session_access)),
-                    None,
-                ),
+                None if create_if_missing => (paykit_lib::PaykitAppRegistry::new(None), None),
                 None => {
                     return Err(PaykitSdkError::NotFound {
                         context: "Paykit app registry".into(),
@@ -630,28 +625,16 @@ where
         unreachable!("bounded App Registry update loop always returns")
     }
 
-    fn local_noise_public_key(
-        &self,
-        session_access: &PubkySessionAccess,
-    ) -> Option<paykit_lib::PublicKey> {
-        session_access
-            .paykit_identity_secret_key()
-            .map(|secret_key| {
-                let noise_secret_key = secret_key.noise_secret_key();
-                pubky::Keypair::from_secret(&noise_secret_key)
-                    .public_key()
-                    .clone()
-            })
-    }
-
     fn validate_local_registry_noise_key(
         &self,
         session_access: &PubkySessionAccess,
         registry: &mut paykit_lib::PaykitAppRegistry,
     ) -> Result<()> {
-        if let Some(local_noise_public_key) = self.local_noise_public_key(session_access) {
+        if let Some(secret) = session_access.paykit_identity_secret_key() {
+            let local_noise_public_key =
+                pubky::Keypair::from_secret(&secret.noise_secret_key()).public_key();
             registry
-                .set_noise_public_key(local_noise_public_key)
+                .set_noise_public_key(local_noise_public_key, secret.key_generation())
                 .map_err(|_| PaykitSdkError::Identity {
                     context: "Paykit App Registry Noise key does not match the local identity"
                         .into(),

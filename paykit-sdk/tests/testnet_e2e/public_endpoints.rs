@@ -1,6 +1,7 @@
 use paykit_sdk::{
     load_public_endpoint_records, PaykitAppId, PaykitSdkError,
     PublicPaymentEndpointLoadFailureKind, PublicPaymentResolutionStatus, PublicationStatus,
+    StorageAdapter,
 };
 
 use crate::harness::{build_testnet, public_receiving_detail, TestUser};
@@ -83,6 +84,234 @@ async fn test_sync_public_endpoints_publishes_and_removes_managed_endpoints() {
         payload_of(&list, "btc-lightning-bolt11"),
         Some("lnbc-test-invoice")
     );
+}
+
+#[tokio::test]
+async fn test_managed_endpoint_removal_uses_published_payload_after_failed_update() {
+    let testnet = build_testnet().await;
+    let user = TestUser::sign_up(&testnet).await;
+    user.sdk
+        .sync_public_endpoints_with_receiving_details(vec![public_receiving_detail(
+            "btc-onchain",
+            "published-address",
+        )])
+        .await
+        .unwrap();
+    user.storage
+        .transaction(|tx| {
+            let mut record = tx.public_endpoint_records().remove(0);
+            record.payload = Some("unpublished-address".into());
+            record.status = PublicationStatus::Failed;
+            record.last_error = Some("publication failed".into());
+            tx.save_public_endpoint_record(record);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let unmanaged = paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
+    paykit_lib::set_payment_endpoint(
+        &user.access.session,
+        &user.app_id,
+        unmanaged.clone(),
+        paykit_lib::PaymentEndpointPayload::new("unmanaged-invoice"),
+    )
+    .await
+    .unwrap();
+
+    let report = user
+        .sdk
+        .sync_public_endpoints_with_receiving_details(Vec::new())
+        .await
+        .unwrap();
+
+    assert!(report.failed.is_empty());
+    assert_eq!(report.removed.len(), 1);
+    assert_eq!(report.removed[0].identifier, "btc-onchain");
+    let list = paykit_lib::get_payment_list(
+        &user.access.outbox_client.public_storage(),
+        &user.public_key.to_public_key().unwrap(),
+        &user.app_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(payload_of(&list, "btc-onchain"), None);
+    assert_eq!(
+        payload_of(&list, unmanaged.as_str()),
+        Some("unmanaged-invoice")
+    );
+    assert_eq!(
+        load_public_endpoint_records(&user.storage).await.unwrap()[0].status,
+        PublicationStatus::Removed
+    );
+}
+
+#[tokio::test]
+async fn test_managed_endpoint_read_failure_does_not_block_other_changes() {
+    let testnet = build_testnet().await;
+    let user = TestUser::sign_up(&testnet).await;
+    user.sdk
+        .sync_public_endpoints_with_receiving_details(vec![
+            public_receiving_detail("btc-onchain", "address"),
+            public_receiving_detail("btc-lightning-bolt11", "invoice"),
+        ])
+        .await
+        .unwrap();
+    user.access
+        .session
+        .storage()
+        .put(
+            format!(
+                "{}apps/{}/endpoints/btc-onchain",
+                paykit_lib::PAYKIT_PATH_PREFIX,
+                user.app_id
+            ),
+            vec![0xff],
+        )
+        .await
+        .unwrap();
+
+    let report = user
+        .sdk
+        .sync_public_endpoints_with_receiving_details(vec![public_receiving_detail(
+            "eur-sepa-iban",
+            "new-account",
+        )])
+        .await
+        .unwrap();
+
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(report.failed[0].identifier, "btc-onchain");
+    assert!(report.failed[0].error.is_some());
+    assert_eq!(report.published.len(), 1);
+    assert_eq!(report.published[0].identifier, "eur-sepa-iban");
+    assert_eq!(report.removed.len(), 1);
+    assert_eq!(report.removed[0].identifier, "btc-lightning-bolt11");
+    let records = load_public_endpoint_records(&user.storage).await.unwrap();
+    let failed = records
+        .iter()
+        .find(|record| record.identifier == "btc-onchain")
+        .unwrap();
+    assert_eq!(failed.status, PublicationStatus::Failed);
+    assert_eq!(failed.last_error, report.failed[0].error);
+    let public_storage = user.access.outbox_client.public_storage();
+    for (identifier, expected) in [
+        ("eur-sepa-iban", Some("new-account")),
+        ("btc-lightning-bolt11", None),
+    ] {
+        let payload = paykit_lib::get_payment_endpoint(
+            &public_storage,
+            user.access.session.info().public_key(),
+            &user.app_id,
+            &paykit_lib::PaymentEndpointIdentifier::new(identifier).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(payload.as_ref().map(|payload| payload.as_str()), expected);
+    }
+}
+
+#[tokio::test]
+async fn test_managed_empty_endpoint_removal_preserves_concurrent_replacement() {
+    struct ReplaceOnRemoval {
+        inner: paykit_sdk::InMemoryStorage,
+        session: pubky::PubkySession,
+        endpoint_path: String,
+        replaced: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageAdapter for ReplaceOnRemoval {
+        async fn transaction_erased<'a>(
+            &self,
+            f: paykit_sdk::storage::StorageTransactionCallback<'a>,
+        ) -> paykit_sdk::Result<Box<dyn std::any::Any + Send>> {
+            let result = self.inner.transaction_erased(f).await?;
+            if self
+                .inner
+                .snapshot()?
+                .public_endpoint_records
+                .values()
+                .any(|record| record.status == PublicationStatus::PendingRemoval)
+                && !self
+                    .replaced
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                // Publish after the removal snapshot is captured, before its conditional DELETE.
+                self.session
+                    .storage()
+                    .put(&self.endpoint_path, "replacement-address")
+                    .await
+                    .unwrap();
+            }
+            Ok(result)
+        }
+    }
+
+    let testnet = build_testnet().await;
+    let user = TestUser::sign_up(&testnet).await;
+    user.sdk
+        .sync_public_endpoints_with_receiving_details(vec![public_receiving_detail(
+            "btc-onchain",
+            "",
+        )])
+        .await
+        .unwrap();
+    let sdk = paykit_sdk::PaykitSdk::new(
+        ReplaceOnRemoval {
+            inner: user.storage.clone(),
+            session: user.access.session.clone(),
+            endpoint_path: format!(
+                "{}apps/{}/endpoints/btc-onchain",
+                paykit_lib::PAYKIT_PATH_PREFIX,
+                user.app_id
+            ),
+            replaced: false.into(),
+        },
+        crate::harness::TestnetSessionProvider::new(user.access.clone()),
+        user.adapter.clone(),
+        paykit_sdk::PaykitSdkConfig::new(user.app_id.clone()).unwrap(),
+    );
+
+    let report = sdk
+        .sync_public_endpoints_with_receiving_details(Vec::new())
+        .await
+        .unwrap();
+
+    assert!(report.removed.is_empty());
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(report.failed[0].identifier, "btc-onchain");
+    let records = load_public_endpoint_records(&user.storage).await.unwrap();
+    assert_eq!(records[0].status, PublicationStatus::Failed);
+    assert_eq!(records[0].last_error, report.failed[0].error);
+    let public_storage = user.access.outbox_client.public_storage();
+    let identifier = paykit_lib::PaymentEndpointIdentifier::new("btc-onchain").unwrap();
+    let payload = paykit_lib::get_payment_endpoint(
+        &public_storage,
+        user.access.session.info().public_key(),
+        &user.app_id,
+        &identifier,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(payload.as_str(), "replacement-address");
+
+    let retry = user
+        .sdk
+        .sync_public_endpoints_with_receiving_details(Vec::new())
+        .await
+        .unwrap();
+    assert!(retry.failed.is_empty());
+    assert_eq!(retry.removed.len(), 1);
+    assert!(paykit_lib::get_payment_endpoint_with_revision(
+        &public_storage,
+        user.access.session.info().public_key(),
+        &user.app_id,
+        &identifier,
+    )
+    .await
+    .unwrap()
+    .is_none());
 }
 
 #[tokio::test]

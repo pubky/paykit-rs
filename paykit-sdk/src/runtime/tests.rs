@@ -78,6 +78,38 @@ impl PubkySessionProvider for TestPubkySessionProvider {
     }
 }
 
+struct FailingPublicStorageProvider {
+    successful_loads: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl PubkySessionProvider for FailingPublicStorageProvider {
+    async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>> {
+        Ok(None)
+    }
+
+    async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
+        if self
+            .successful_loads
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            Ok(None)
+        } else {
+            Err(PaykitSdkError::Transport {
+                context: "registry unavailable".into(),
+                source: None,
+            })
+        }
+    }
+
+    async fn clear_session_access(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 struct RecordingClearSessionProvider {
     cleared: Arc<AtomicBool>,

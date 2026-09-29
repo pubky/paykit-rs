@@ -180,6 +180,7 @@ fn validate_live_identity(state: &StorageState) -> Result<()> {
 
 fn has_identity_scoped_live_state(state: &StorageState) -> bool {
     state.allowance_accounting.is_some()
+        || state.paykit_noise_public_key.is_some()
         || !state.linked_peers.is_empty()
         || !state.contact_records.is_empty()
         || !state.authorized_paykit_apps.is_empty()
