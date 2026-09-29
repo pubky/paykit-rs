@@ -1,13 +1,25 @@
 use super::*;
 
 pub(super) fn wallet_checks(terms: &PaymentRequestTerms, checks: &PaymentExecutionChecks) -> bool {
+    execution_wallet_checks(terms, checks, &PaymentExecutionMode::Automatic)
+}
+
+fn execution_wallet_checks(
+    terms: &PaymentRequestTerms,
+    checks: &PaymentExecutionChecks,
+    mode: &PaymentExecutionMode,
+) -> bool {
+    // Manual cross-asset execution relies on the wallet's fresh conversion
+    // attestation in local_enabled. It never consumes Allowance capacity.
+    let converted_manual = *mode == PaymentExecutionMode::Manual
+        && terms.amount().asset() != checks.actual_amount.asset();
     checks.endpoint_current
         && checks.local_enabled
         && checks.recurrence_eligible
         && terms
             .accepted_payment_endpoint_identifiers()
             .contains(&checks.payment_endpoint_identifier)
-        && same_amount(terms.amount(), &checks.actual_amount)
+        && (converted_manual || same_amount(terms.amount(), &checks.actual_amount))
 }
 
 fn same_amount(left: &paykit_lib::PaymentAmount, right: &paykit_lib::PaymentAmount) -> bool {
@@ -123,7 +135,9 @@ fn reserve_checked(
     let Ok(terms) = request_terms(&record) else {
         return blocked(AllowanceAccountingBlock::InvalidLifecycle);
     };
-    if !wallet_checks(&terms, checks) || !occurrence_matches(&key, &terms, checks.trusted_time) {
+    if !execution_wallet_checks(&terms, checks, &mode)
+        || !occurrence_matches(&key, &terms, checks.trusted_time)
+    {
         return blocked(AllowanceAccountingBlock::WalletChecksFailed);
     }
     if mode == PaymentExecutionMode::Automatic {
@@ -183,7 +197,11 @@ fn reserve_checked(
         } else {
             None
         },
-        amount: terms.amount().into(),
+        amount: if automatic {
+            terms.amount().into()
+        } else {
+            (&checks.actual_amount).into()
+        },
         admitted_at: checks.trusted_time,
         status: PaymentExecutionStatus::Prepared,
         epoch: state.epoch.clone(),
@@ -278,7 +296,9 @@ fn begin_checked(
         return blocked(AllowanceAccountingBlock::InvalidLifecycle);
     };
     if checks.trusted_time < attempt.admitted_at
-        || !wallet_checks(&terms, checks)
+        || !execution_wallet_checks(&terms, checks, &attempt.mode)
+        || !validation::amount(&attempt.amount)
+            .is_ok_and(|reserved| same_amount(&reserved, &checks.actual_amount))
         || !occurrence_matches(key, &terms, checks.trusted_time)
     {
         return blocked(AllowanceAccountingBlock::WalletChecksFailed);

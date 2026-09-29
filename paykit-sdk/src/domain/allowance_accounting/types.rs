@@ -110,7 +110,8 @@ pub struct PaymentAttemptRecord {
     pub allowance_id: Option<String>,
     /// Association revision used at admission.
     pub association_revision: Option<u64>,
-    /// Exact requested amount; excludes fees and refunds.
+    /// Requested amount for automatic execution; verified actual amount for manual execution.
+    /// Excludes fees and refunds, and cannot change between reservation and handoff.
     pub amount: AmountRecord,
     /// Original trusted admission time.
     pub admitted_at: DateTime<Utc>,
@@ -238,6 +239,10 @@ pub struct PaymentExecutionChecks {
     /// Endpoint details are current, usable, and unconsumed.
     pub endpoint_current: bool,
     /// Local enablement and every private safeguard passed.
+    /// For manual cross-asset execution this also attests that the wallet validated
+    /// the actual amount against the request's conversion policy, selected quote
+    /// when required, endpoint precision and upward rounding, and payment deadlines.
+    /// The wallet must persist its selected quote separately before execution.
     pub local_enabled: bool,
     /// Wallet scheduler verified this recurring interval; true for one-time payments.
     pub recurrence_eligible: bool,

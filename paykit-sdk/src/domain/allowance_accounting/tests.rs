@@ -2,6 +2,7 @@ use super::*;
 use crate::{InMemoryStorage, StorageAdapter};
 use chrono::{Duration, TimeZone};
 
+mod manual_conversion;
 mod recovery_merge;
 
 fn time() -> DateTime<Utc> {

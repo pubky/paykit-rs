@@ -1456,6 +1456,14 @@ when recurring. Allowance ID is excluded from this key. Automatic reservation
 reruns shared exact decimal, period, lifetime, and trusted-time checks using
 complete successful and unresolved automatic usage. Manual payments consume no
 Allowance capacity but exclude automatic payment of the same occurrence.
+Automatic execution requires the actual asset and amount to equal the requested
+Payment Amount. Manual cross-asset execution relies on `local_enabled` attesting
+the wallet's independent validation of conversion policy, required quote,
+endpoint precision, upward rounding, and payment deadlines. The wallet retains
+its selected quote separately. Same-asset manual payments still require the
+requested amount. Manual attempts retain the verified actual Payment Amount;
+handoff must use that same asset and numerically equal amount. Reconciliation
+must preserve this actual amount as immutable execution evidence.
 The trusted-time watermark advances even when evaluation is blocked.
 
 A Ready reservation has status Prepared and grants no execution authority.
