@@ -224,6 +224,7 @@ async fn persist_messages_at(
 mod conversion_quotes;
 mod enqueue;
 mod outbound_records;
+mod payment_endpoints;
 mod proofs;
 mod received_records;
 mod rejection_cancellation;

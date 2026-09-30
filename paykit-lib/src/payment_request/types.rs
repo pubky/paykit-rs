@@ -1,11 +1,11 @@
-use std::fmt;
+use std::{collections::HashMap, fmt};
 
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::{
     validation::{parse_utc_timestamp, validate_uuid_v4},
-    AllowanceId, EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
-    PrivateMessageKind, Result,
+    AllowanceId, EventId, PaykitError, PaymentAmount, PaymentEndpointIdentifier,
+    PaymentEndpointPayload, PaymentReference, PrivateMessageKind, Result,
 };
 
 use super::{PaymentConversion, PaymentConversionQuote, PaymentDeadline};
@@ -138,6 +138,9 @@ pub struct PaymentRequestTerms {
     pub(super) recurrence: Option<Recurrence>,
     /// Accepted Payment Endpoint Identifiers.
     pub(super) accepted_payment_endpoint_identifiers: Vec<PaymentEndpointIdentifier>,
+    /// Immutable Payment Endpoints owned by `required_app_id`, when bound.
+    pub(super) payment_endpoints:
+        Option<HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>>,
     /// Optional conversion policy; absence leaves conversion to wallet policy.
     pub(super) conversion: Option<PaymentConversion>,
     /// Optional deadline for actual payment, independent of proposal acceptance.
@@ -162,6 +165,10 @@ impl fmt::Debug for PaymentRequestTerms {
                 &self.accepted_payment_endpoint_identifiers,
             )
             .field("required_app_id", &self.required_app_id)
+            .field(
+                "payment_endpoints",
+                &self.payment_endpoints.as_ref().map(|_| "<redacted>"),
+            )
             .field(
                 "metadata",
                 &format_args!("<redacted:{} fields>", self.metadata.len()),
@@ -513,6 +520,11 @@ impl PaymentProof {
             .request
             .accepted_payment_endpoint_identifiers
             .contains(&self.payment_endpoint_identifier)
+            || request
+                .request
+                .payment_endpoints
+                .as_ref()
+                .is_some_and(|endpoints| !endpoints.contains_key(&self.payment_endpoint_identifier))
         {
             return Err(PaykitError::Validation(
                 "Payment Proof payment_endpoint_identifier is not accepted by Payment Request"
@@ -780,6 +792,39 @@ impl PaymentRequestTerms {
                 "accepted_payment_endpoint_identifiers must not be empty".into(),
             ));
         }
+        self.validate_payment_endpoints()?;
+        Ok(())
+    }
+
+    fn validate_payment_endpoints(&self) -> Result<()> {
+        let Some(endpoints) = &self.payment_endpoints else {
+            return Ok(());
+        };
+        if endpoints.is_empty() {
+            return Err(PaykitError::Validation(
+                "payment_endpoints must not be empty".into(),
+            ));
+        }
+        if self.required_app_id.is_none() {
+            return Err(PaykitError::Validation(
+                "payment_endpoints requires required_app_id".into(),
+            ));
+        }
+        for (identifier, payload) in endpoints {
+            if !self
+                .accepted_payment_endpoint_identifiers
+                .contains(identifier)
+            {
+                return Err(PaykitError::Validation(
+                    "payment_endpoints keys must be accepted Payment Endpoint Identifiers".into(),
+                ));
+            }
+            if payload.as_str().is_empty() {
+                return Err(PaykitError::Validation(
+                    "payment_endpoints payloads must not be empty".into(),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -827,6 +872,21 @@ impl PaymentRequestTerms {
     /// Access the accepted Payment Endpoint Identifiers.
     pub fn accepted_payment_endpoint_identifiers(&self) -> &[PaymentEndpointIdentifier] {
         &self.accepted_payment_endpoint_identifiers
+    }
+    /// Access immutable request-bound Payment Endpoints, when present.
+    ///
+    /// These destinations belong to `required_app_id`. A payer must not fall
+    /// back to endpoints outside this map. Absence leaves endpoint discovery unchanged.
+    ///
+    /// ```compile_fail,E0596
+    /// fn cannot_mutate(value: paykit_lib::PaymentRequestTerms) {
+    ///     value.payment_endpoints().unwrap().clear();
+    /// }
+    /// ```
+    pub fn payment_endpoints(
+        &self,
+    ) -> Option<&HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>> {
+        self.payment_endpoints.as_ref()
     }
     /// Access the optional payee App constraint.
     pub fn required_app_id(&self) -> Option<&crate::PaykitAppId> {
@@ -1052,6 +1112,7 @@ impl PaymentRequestTerms {
             amount,
             payment_reference,
             accepted_payment_endpoint_identifiers,
+            payment_endpoints: None,
             required_app_id: None,
             proposal_expires_at: None,
             recurrence: None,
@@ -1063,6 +1124,18 @@ impl PaymentRequestTerms {
 }
 
 impl PaymentRequestTermsBuilder {
+    /// Bind payment to immutable Payment Endpoints owned by `required_app_id`.
+    ///
+    /// A supplied map must be nonempty, contain nonempty payloads, and use only
+    /// accepted Payment Endpoint Identifiers. `required_app_id` must be set.
+    /// `None` preserves endpoint discovery; `Some` forbids fallback outside the map.
+    pub fn payment_endpoints(
+        mut self,
+        value: Option<HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload>>,
+    ) -> Self {
+        self.0.payment_endpoints = value;
+        self
+    }
     /// Constrain payment to an endpoint owned by the specified payee App.
     pub fn required_app_id(mut self, value: Option<crate::PaykitAppId>) -> Self {
         self.0.required_app_id = value;

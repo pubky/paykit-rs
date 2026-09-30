@@ -13,6 +13,61 @@ use super::*;
 
 const ALLOWANCE_ID: &str = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44";
 
+fn bound_terms() -> FfiPaymentRequestTerms {
+    FfiPaymentRequestTerms {
+        amount: FfiPaymentRequestAmount {
+            value: "0.001".into(),
+            asset: "btc".into(),
+        },
+        payment_reference: Arc::new(FfiPaymentReference::new("invoice-1".into()).unwrap()),
+        proposal_expires_at: None,
+        recurrence: None,
+        accepted_payment_endpoint_identifiers: vec!["btc-lightning-bolt11".into()],
+        required_app_id: Some("bitkit".into()),
+        payment_endpoints: Some(HashMap::from([(
+            "btc-lightning-bolt11".into(),
+            "private-invoice".into(),
+        )])),
+        conversion: None,
+        payment_deadline: None,
+        metadata: Arc::new(FfiPrivateJsonObject::new("{}".into()).unwrap()),
+    }
+}
+
+#[test]
+fn test_payment_endpoints_ffi_round_trip_and_redaction() {
+    for endpoints in [bound_terms().payment_endpoints, None] {
+        let mut ffi = bound_terms();
+        ffi.payment_endpoints = endpoints;
+        let native = PaymentRequestTerms::try_from(ffi.clone()).unwrap();
+        let record = PaymentRequestTermsRecord::from(&native);
+        let restored = FfiPaymentRequestTerms::try_from(record).unwrap();
+        assert_eq!(restored.payment_endpoints, ffi.payment_endpoints);
+        assert!(!format!("{restored:?}").contains("private-invoice"));
+        assert_eq!(PaymentRequestTerms::try_from(restored).unwrap(), native);
+    }
+}
+
+#[test]
+fn test_payment_endpoints_ffi_rejects_invalid_input() {
+    for endpoints in [
+        HashMap::new(),
+        HashMap::from([("btc-lightning-bolt11".into(), "".into())]),
+        HashMap::from([("private".into(), "private-invoice".into())]),
+        HashMap::from([("../btc".into(), "private-invoice".into())]),
+        HashMap::from([("eur-sepa-iban".into(), "private-iban".into())]),
+    ] {
+        let mut ffi = bound_terms();
+        ffi.payment_endpoints = Some(endpoints);
+        assert!(
+            matches!(PaymentRequestTerms::try_from(ffi), Err(PaykitFfiError::Protocol { code, .. }) if code == "validation")
+        );
+    }
+    let mut ffi = bound_terms();
+    ffi.required_app_id = None;
+    assert!(PaymentRequestTerms::try_from(ffi).is_err());
+}
+
 fn public_key() -> PubkyPublicKey {
     conversions::parse_public_key("8jsf5bm1ck3r7sn6pfx4q9mgqq5xn8fi6sizw6pxgjc8zs1bt4io".into())
         .unwrap()
@@ -21,6 +76,7 @@ fn public_key() -> PubkyPublicKey {
 #[test]
 fn test_payment_request_terms_parse_protocol_inputs() {
     let terms = FfiPaymentRequestTerms {
+        payment_endpoints: None,
         conversion: None,
         payment_deadline: None,
         amount: FfiPaymentRequestAmount {
@@ -106,6 +162,7 @@ fn test_payment_request_record_conversion_redacts_references() {
         payer_app_id: Some(paykit_sdk::PaykitAppId::new("wallet").unwrap()),
         execution_claim_app_id: Some(paykit_sdk::PaykitAppId::new("wallet").unwrap()),
         terms: Some(PaymentRequestTermsRecord {
+            payment_endpoints: None,
             conversion: None,
             payment_deadline: None,
             amount: AmountRecord {
@@ -284,6 +341,7 @@ fn test_recurrence_conversion_rejects_zero_interval() {
 #[test]
 fn test_terms_conversion_rejects_empty_endpoint_list() {
     let result = PaymentRequestTerms::try_from(FfiPaymentRequestTerms {
+        payment_endpoints: None,
         required_app_id: None,
 
         amount: FfiPaymentRequestAmount {
@@ -304,6 +362,7 @@ fn test_terms_conversion_rejects_empty_endpoint_list() {
 #[test]
 fn test_conversion_terms_and_quote_selection_survive_bindings() {
     let terms = FfiPaymentRequestTerms {
+        payment_endpoints: None,
         required_app_id: None,
 
         amount: FfiPaymentRequestAmount {

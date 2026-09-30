@@ -220,6 +220,8 @@ where
     /// The request amount is passed to the payment adapter. Candidates are
     /// restricted to the request's accepted Payment Endpoint Identifiers and,
     /// when present, its required payee App before adapter selection.
+    /// Request-bound Payment Endpoints replace list discovery and have no list
+    /// version; `after_private_payment_list_version` does not apply to them.
     pub async fn resolve_private_payment_request(
         &self,
         counterparty: PubkyPublicKey,
@@ -301,6 +303,48 @@ where
                 .await?;
             (context.registry, context.private_apps)
         };
+
+        if let Some((terms, endpoints)) = payment_request_terms.as_ref().and_then(|terms| {
+            terms
+                .payment_endpoints
+                .as_ref()
+                .map(|endpoints| (terms, endpoints))
+        }) {
+            let app_id =
+                terms
+                    .required_app_id
+                    .as_ref()
+                    .ok_or_else(|| PaykitSdkError::Protocol {
+                        context: "request-bound Payment Endpoints require a payee App".into(),
+                        source: None,
+                    })?;
+            if !private_allowed
+                || !authorized_private_apps
+                    .as_ref()
+                    .is_some_and(|apps| apps.contains(app_id))
+            {
+                return Ok(unresolved_private_resolution(false, state, None));
+            }
+            let mut candidates = endpoints
+                .iter()
+                .map(|(identifier, payload)| PrivatePaymentEndpointCandidate {
+                    counterparty: counterparty.clone(),
+                    app_id: app_id.clone(),
+                    identifier: identifier.clone(),
+                    payload: payload.clone(),
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by(|left, right| left.identifier.cmp(&right.identifier));
+            return self
+                .resolve_private_candidate_batch(
+                    counterparty,
+                    amount,
+                    candidates,
+                    PrivatePaymentResolutionState::Available,
+                    None,
+                )
+                .await;
+        }
 
         let mut private_views = if private_allowed {
             load_current_private_payment_lists(&self.storage, &counterparty).await?
@@ -397,7 +441,7 @@ where
             amount,
             candidates,
             state,
-            candidate_batch.private_payment_list_version,
+            Some(candidate_batch.private_payment_list_version),
         )
         .await
     }
@@ -420,6 +464,8 @@ where
     /// The request amount is passed to the payment adapter. Candidates are
     /// restricted to the request's accepted Payment Endpoint Identifiers and,
     /// when present, its required payee App before adapter selection.
+    /// Requests with bound Payment Endpoints have no public fallback; use
+    /// [`Self::resolve_private_payment_request`] for their private destinations.
     pub async fn resolve_public_payment_request(
         &self,
         counterparty: PubkyPublicKey,
@@ -439,6 +485,12 @@ where
         amount: Option<PaymentAmountContext>,
         payment_request_terms: Option<PaymentRequestTermsRecord>,
     ) -> Result<PublicContactPaymentResolution> {
+        if payment_request_terms
+            .as_ref()
+            .is_some_and(|terms| terms.payment_endpoints.is_some())
+        {
+            return Ok(unresolved_public_resolution(false, Vec::new(), 0));
+        }
         let required_app_id = payment_request_terms
             .as_ref()
             .and_then(|terms| terms.required_app_id.as_ref());
@@ -907,7 +959,7 @@ where
         amount: Option<PaymentAmountContext>,
         candidates: Vec<PrivatePaymentEndpointCandidate>,
         state: PrivatePaymentResolutionState,
-        private_payment_list_version: u64,
+        private_payment_list_version: Option<u64>,
     ) -> Result<PrivateContactPaymentResolution> {
         let payable = self
             .payment
@@ -923,13 +975,13 @@ where
             return Ok(unresolved_private_resolution(
                 true,
                 state,
-                Some(private_payment_list_version),
+                private_payment_list_version,
             ));
         }
         Ok(PrivateContactPaymentResolution {
             status: PrivatePaymentResolutionStatus::Payable,
             state,
-            private_payment_list_version: Some(private_payment_list_version),
+            private_payment_list_version,
             payable_endpoints,
         })
     }

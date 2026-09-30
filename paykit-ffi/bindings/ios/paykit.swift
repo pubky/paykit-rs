@@ -2247,6 +2247,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Resolve private endpoints allowed by an actionable received Payment Request.
+     * Bound destinations have no list version and never use list or public fallback.
      */
     func resolvePrivatePaymentRequest(counterparty: String, paymentRequestId: String, afterPrivatePaymentListVersion: UInt64?) async throws  -> PrivateContactPaymentResolution
 
@@ -2262,6 +2263,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Resolve public endpoints allowed by an actionable received Payment Request.
+     * Requests with bound Payment Endpoints return no public candidates.
      */
     func resolvePublicPaymentRequest(counterparty: String, paymentRequestId: String) async throws  -> PublicContactPaymentResolution
 
@@ -4462,6 +4464,7 @@ open func resolvePrivateContactPayment(counterparty: String, amount: PaymentAmou
 
     /**
      * Resolve private endpoints allowed by an actionable received Payment Request.
+     * Bound destinations have no list version and never use list or public fallback.
      */
 open func resolvePrivatePaymentRequest(counterparty: String, paymentRequestId: String, afterPrivatePaymentListVersion: UInt64?)async throws  -> PrivateContactPaymentResolution  {
     return
@@ -4522,6 +4525,7 @@ open func resolvePublicContactPayment(counterparty: String, amount: PaymentAmoun
 
     /**
      * Resolve public endpoints allowed by an actionable received Payment Request.
+     * Requests with bound Payment Endpoints return no public candidates.
      */
 open func resolvePublicPaymentRequest(counterparty: String, paymentRequestId: String)async throws  -> PublicContactPaymentResolution  {
     return
@@ -13982,6 +13986,11 @@ public struct PaymentRequestTerms {
      */
     public var acceptedPaymentEndpointIdentifiers: [String]
     /**
+     * Immutable request-bound Payment Endpoints owned by `required_app_id`.
+     * When present, payment must not fall back outside this nonempty map.
+     */
+    public var paymentEndpoints: [String: String]?
+    /**
      * Application that must handle this payment, when constrained.
      */
     public var requiredAppId: String?
@@ -14017,6 +14026,10 @@ public struct PaymentRequestTerms {
          * Accepted Payment Endpoint Identifier strings.
          */acceptedPaymentEndpointIdentifiers: [String],
         /**
+         * Immutable request-bound Payment Endpoints owned by `required_app_id`.
+         * When present, payment must not fall back outside this nonempty map.
+         */paymentEndpoints: [String: String]?,
+        /**
          * Application that must handle this payment, when constrained.
          */requiredAppId: String?,
         /**
@@ -14033,6 +14046,7 @@ public struct PaymentRequestTerms {
         self.proposalExpiresAt = proposalExpiresAt
         self.recurrence = recurrence
         self.acceptedPaymentEndpointIdentifiers = acceptedPaymentEndpointIdentifiers
+        self.paymentEndpoints = paymentEndpoints
         self.requiredAppId = requiredAppId
         self.conversion = conversion
         self.paymentDeadline = paymentDeadline
@@ -14058,6 +14072,7 @@ public struct FfiConverterTypePaymentRequestTerms: FfiConverterRustBuffer {
                 proposalExpiresAt: FfiConverterOptionString.read(from: &buf),
                 recurrence: FfiConverterOptionTypePaymentRequestRecurrence.read(from: &buf),
                 acceptedPaymentEndpointIdentifiers: FfiConverterSequenceString.read(from: &buf),
+                paymentEndpoints: FfiConverterOptionDictionaryStringString.read(from: &buf),
                 requiredAppId: FfiConverterOptionString.read(from: &buf),
                 conversion: FfiConverterOptionTypePaymentConversion.read(from: &buf),
                 paymentDeadline: FfiConverterOptionTypePaymentDeadline.read(from: &buf),
@@ -14071,6 +14086,7 @@ public struct FfiConverterTypePaymentRequestTerms: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.proposalExpiresAt, into: &buf)
         FfiConverterOptionTypePaymentRequestRecurrence.write(value.recurrence, into: &buf)
         FfiConverterSequenceString.write(value.acceptedPaymentEndpointIdentifiers, into: &buf)
+        FfiConverterOptionDictionaryStringString.write(value.paymentEndpoints, into: &buf)
         FfiConverterOptionString.write(value.requiredAppId, into: &buf)
         FfiConverterOptionTypePaymentConversion.write(value.conversion, into: &buf)
         FfiConverterOptionTypePaymentDeadline.write(value.paymentDeadline, into: &buf)
@@ -14239,7 +14255,7 @@ public func FfiConverterTypePreparedPrivateContactPayment_lower(_ value: Prepare
 
 
 /**
- * Result of resolving a Private Payment List for one counterparty.
+ * Result of resolving private Payment Endpoints for one counterparty.
  */
 public struct PrivateContactPaymentResolution {
     /**
@@ -14252,6 +14268,7 @@ public struct PrivateContactPaymentResolution {
     public var state: PrivatePaymentResolutionState
     /**
      * Opaque freshness token for the Private Payment List used by this result.
+     * Request-bound Payment Endpoints return `None` because no list is consumed.
      */
     public var privatePaymentListVersion: UInt64?
     /**
@@ -14270,6 +14287,7 @@ public struct PrivateContactPaymentResolution {
          */state: PrivatePaymentResolutionState,
         /**
          * Opaque freshness token for the Private Payment List used by this result.
+         * Request-bound Payment Endpoints return `None` because no list is consumed.
          */privatePaymentListVersion: UInt64?,
         /**
          * Payable private Payment Endpoints in adapter-preferred order.
@@ -20483,11 +20501,11 @@ extension PaymentRequestLocalRole: Codable {}
 public enum PrivatePaymentResolutionState {
 
     /**
-     * Private Payment List candidates were available for resolution.
+     * Private Payment Endpoint candidates were available for resolution.
      */
     case available
     /**
-     * No Private Payment List candidate was available.
+     * No private Payment Endpoint candidate was available.
      */
     case noPrivateEndpoint
     /**
@@ -23119,6 +23137,30 @@ fileprivate struct FfiConverterOptionSequenceString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionDictionaryStringString: FfiConverterRustBuffer {
+    typealias SwiftType = [String: String]?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterDictionaryStringString.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterDictionaryStringString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceUInt64: FfiConverterRustBuffer {
     typealias SwiftType = [UInt64]
 
@@ -24877,7 +24919,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_private_contact_payment() != 42116) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_private_payment_request() != 55309) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_private_payment_request() != 40125) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_profile() != 53128) {
@@ -24886,7 +24928,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_public_contact_payment() != 18766) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_public_payment_request() != 30467) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_public_payment_request() != 44750) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_state() != 30409) {

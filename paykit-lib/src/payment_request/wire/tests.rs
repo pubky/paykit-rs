@@ -41,6 +41,96 @@ fn request_terms() -> PaymentRequestTerms {
 }
 
 #[test]
+fn test_payment_endpoints_wire_round_trip_and_absence() {
+    let mut event = PaymentRequest::new(
+        EventId::new_v4(),
+        PaymentRequestId::new_v4(),
+        request_terms(),
+    );
+    let raw = serialize_payment_request_json(&app_id(), &event).unwrap();
+    let value: JsonValue = serde_json::from_str(&raw).unwrap();
+    assert!(value["request"].get("payment_endpoints").is_none());
+    assert_eq!(parse_payment_request_json(&raw).unwrap(), event);
+
+    event.request.required_app_id = Some(app_id());
+    event.request.payment_endpoints = Some(HashMap::from([(
+        PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+        PaymentEndpointPayload::new("private-invoice"),
+    )]));
+    let raw = serialize_payment_request_json(&app_id(), &event).unwrap();
+    let value: JsonValue = serde_json::from_str(&raw).unwrap();
+    assert_eq!(value["version"], 1);
+    assert_eq!(
+        value["request"]["payment_endpoints"]["btc-lightning-bolt11"],
+        "private-invoice"
+    );
+    assert_eq!(parse_payment_request_json(&raw).unwrap(), event);
+}
+
+#[test]
+fn test_payment_endpoints_wire_rejects_malformed_bindings() {
+    let event = PaymentRequest::new(
+        EventId::new_v4(),
+        PaymentRequestId::new_v4(),
+        request_terms(),
+    );
+    let raw = serialize_payment_request_json(&app_id(), &event).unwrap();
+    let mut value: JsonValue = serde_json::from_str(&raw).unwrap();
+    value["request"]["required_app_id"] = serde_json::json!("test-app");
+    for endpoints in [
+        JsonValue::Null,
+        serde_json::json!([]),
+        serde_json::json!({}),
+        serde_json::json!({"btc-lightning-bolt11": ""}),
+        serde_json::json!({"btc-lightning-bolt11": 1}),
+        serde_json::json!({"btc-lightning-bolt11": null}),
+        serde_json::json!({"private": "private-invoice"}),
+        serde_json::json!({"../btc": "private-invoice"}),
+        serde_json::json!({"eur-sepa-iban": "private-iban"}),
+    ] {
+        value["request"]["payment_endpoints"] = endpoints;
+        let error = parse_payment_request_json(&value.to_string()).unwrap_err();
+        assert!(matches!(error, PaykitError::InvalidData { .. }));
+        assert!(!format!("{error:?}").contains("private-invoice"));
+    }
+    value["request"]["payment_endpoints"] =
+        serde_json::json!({"btc-lightning-bolt11": "private-invoice"});
+    value["request"]["required_app_id"] = JsonValue::Null;
+    assert!(matches!(
+        parse_payment_request_json(&value.to_string()),
+        Err(PaykitError::InvalidData { .. })
+    ));
+}
+
+#[test]
+fn test_payment_endpoints_wire_order_is_stable() {
+    let lightning = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
+    let onchain = PaymentEndpointIdentifier::new("btc-onchain").unwrap();
+    let terms = PaymentRequestTerms::builder(
+        PaymentAmount::new("0.001", "btc").unwrap(),
+        PaymentReference::new("invoice-1").unwrap(),
+        vec![lightning.clone(), onchain.clone()],
+    )
+    .required_app_id(Some(app_id()))
+    .payment_endpoints(Some(HashMap::from([
+        (onchain, PaymentEndpointPayload::new("private-address")),
+        (lightning, PaymentEndpointPayload::new("private-invoice")),
+    ])))
+    .build()
+    .unwrap();
+    let event = PaymentRequest::new(EventId::new_v4(), PaymentRequestId::new_v4(), terms);
+    let raw = serialize_payment_request_json(&app_id(), &event).unwrap();
+    assert!(raw.contains(r#""payment_endpoints":{"btc-lightning-bolt11":"private-invoice","btc-onchain":"private-address"}"#));
+    for _ in 0..16 {
+        let parsed = parse_payment_request_json(&raw).unwrap();
+        assert_eq!(
+            serialize_payment_request_json(&app_id(), &parsed).unwrap(),
+            raw
+        );
+    }
+}
+
+#[test]
 fn event_header_ids_are_parsed_independently() {
     let json = r#"{
             "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",

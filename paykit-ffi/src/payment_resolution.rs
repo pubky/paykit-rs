@@ -75,9 +75,9 @@ pub enum FfiPrivatePaymentResolutionStatus {
 /// Encrypted Link and Private Payment List state observed during resolution.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FfiPrivatePaymentResolutionState {
-    /// Private Payment List candidates were available for resolution.
+    /// Private Payment Endpoint candidates were available for resolution.
     Available,
-    /// No Private Payment List candidate was available.
+    /// No private Payment Endpoint candidate was available.
     NoPrivateEndpoint,
     /// Private payment state is blocked by Encrypted Link recovery.
     RecoveryPending,
@@ -126,7 +126,7 @@ pub struct FfiPublicContactPaymentResolution {
     pub failures: Vec<FfiPublicPaymentEndpointLoadFailure>,
 }
 
-/// Result of resolving a Private Payment List for one counterparty.
+/// Result of resolving private Payment Endpoints for one counterparty.
 #[derive(uniffi::Record, Clone)]
 pub struct FfiPrivateContactPaymentResolution {
     /// Private payment resolution outcome.
@@ -134,6 +134,7 @@ pub struct FfiPrivateContactPaymentResolution {
     /// Encrypted Link and Private Payment List state observed during resolution.
     pub state: FfiPrivatePaymentResolutionState,
     /// Opaque freshness token for the Private Payment List used by this result.
+    /// Request-bound Payment Endpoints return `None` because no list is consumed.
     pub private_payment_list_version: Option<u64>,
     /// Payable private Payment Endpoints in adapter-preferred order.
     pub payable_endpoints: Vec<FfiResolvedPrivatePaymentEndpoint>,
@@ -199,6 +200,7 @@ impl FfiPaykitSdk {
     }
 
     /// Resolve private endpoints allowed by an actionable received Payment Request.
+    /// Bound destinations have no list version and never use list or public fallback.
     pub async fn resolve_private_payment_request(
         &self,
         counterparty: String,
@@ -217,6 +219,7 @@ impl FfiPaykitSdk {
     }
 
     /// Resolve public endpoints allowed by an actionable received Payment Request.
+    /// Requests with bound Payment Endpoints return no public candidates.
     pub async fn resolve_public_payment_request(
         &self,
         counterparty: String,

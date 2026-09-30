@@ -1226,6 +1226,14 @@ from durable derived state and filter candidates before adapter selection.
 Only accepted Payment Endpoint Identifiers are eligible, and a non-null
 `required_app_id` limits candidates to that payee App.
 
+When request terms include `payment_endpoints`, private resolution uses those
+immutable destinations instead of a Private Payment List. The result has no
+list version, and a consumed-list version does not suppress it. Public
+resolution returns no candidates for such requests. Apps must use the
+request-aware resolver and retain their per-request payment execution guards;
+they must not substitute a generic contact resolution when no bound endpoint
+is payable.
+
 Both public and private result statuses use `Payable`, `NoEndpoint`, and
 `UnsupportedEndpoint`; private resolution additionally uses
 `WaitingForUpdatedPaymentList`. Public and private statuses remain distinct

@@ -17,7 +17,7 @@ async fn test_resolve_private_candidate_batch_preserves_private_state() {
             None,
             vec![endpoint],
             PrivatePaymentResolutionState::RecoveryPending,
-            7,
+            Some(7),
         )
         .await
         .unwrap();
