@@ -48,6 +48,7 @@ fn payment_request_terms(
             .collect(),
         required_app_id: required_app_id
             .map(|app_id| paykit_lib::PaykitAppId::new(app_id).unwrap()),
+        payment_endpoints: None,
         metadata: serde_json::Map::new(),
     }
 }

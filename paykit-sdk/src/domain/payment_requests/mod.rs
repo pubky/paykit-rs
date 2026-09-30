@@ -160,6 +160,9 @@ pub struct PaymentRequestTermsRecord {
     pub recurrence: Option<PaymentRequestRecurrenceRecord>,
     /// Accepted Payment Endpoint Identifiers.
     pub accepted_payment_endpoint_identifiers: Vec<String>,
+    /// Immutable request-bound Payment Endpoints owned by `required_app_id`.
+    /// Payloads are private SDK state; preserve the full optional layout in storage.
+    pub payment_endpoints: Option<HashMap<String, String>>,
     /// Payee application whose Payment Endpoint must be paid, when constrained.
     pub required_app_id: Option<paykit_lib::PaykitAppId>,
     /// Optional conversion policy copied from immutable terms.
@@ -182,6 +185,10 @@ impl fmt::Debug for PaymentRequestTermsRecord {
                 &self.accepted_payment_endpoint_identifiers,
             )
             .field("required_app_id", &self.required_app_id)
+            .field(
+                "payment_endpoints",
+                &self.payment_endpoints.as_ref().map(|_| "<redacted>"),
+            )
             .field(
                 "metadata",
                 &format_args!("<redacted:{} fields>", self.metadata.len()),
@@ -211,6 +218,14 @@ impl From<&paykit_lib::PaymentRequestTerms> for PaymentRequestTermsRecord {
                 .map(|identifier| identifier.as_str().to_owned())
                 .collect(),
             required_app_id: terms.required_app_id().cloned(),
+            payment_endpoints: terms.payment_endpoints().map(|endpoints| {
+                endpoints
+                    .iter()
+                    .map(|(identifier, payload)| {
+                        (identifier.as_str().to_owned(), payload.as_str().to_owned())
+                    })
+                    .collect()
+            }),
             conversion: terms.conversion().cloned(),
             payment_deadline: terms.payment_deadline().cloned(),
             metadata: terms.metadata().clone(),

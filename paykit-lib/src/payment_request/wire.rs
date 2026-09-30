@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, HashMap};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
@@ -6,8 +8,8 @@ use crate::{
         deserialize_optional_no_null, BillingPeriodWire, PaymentAmountWire, RequiredNullable,
     },
     validation::{invalid_data, invalid_plaintext_json, invalid_wire, validate_wire_version_kind},
-    AllowanceId, EventId, PaykitAppId, PaykitError, PaymentEndpointIdentifier, PaymentReference,
-    PrivateMessageKind, Result,
+    AllowanceId, EventId, PaykitAppId, PaykitError, PaymentEndpointIdentifier,
+    PaymentEndpointPayload, PaymentReference, PrivateMessageKind, Result,
 };
 
 use super::{
@@ -38,6 +40,12 @@ struct PaymentRequestTermsWire {
     recurrence: RequiredNullable<RecurrenceWire>,
     accepted_payment_endpoint_identifiers: Vec<String>,
     required_app_id: RequiredNullable<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_no_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    payment_endpoints: Option<BTreeMap<String, String>>,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_no_null",
@@ -131,6 +139,21 @@ impl TryFrom<PaymentRequestTermsWire> for PaymentRequestTerms {
                 .transpose()?,
         )
         .conversion(wire.conversion)
+        .payment_endpoints(
+            wire.payment_endpoints
+                .map(|endpoints| {
+                    endpoints
+                        .into_iter()
+                        .map(|(identifier, payload)| {
+                            Ok((
+                                PaymentEndpointIdentifier::new(identifier)?,
+                                PaymentEndpointPayload::new(payload),
+                            ))
+                        })
+                        .collect::<Result<HashMap<_, _>>>()
+                })
+                .transpose()?,
+        )
         .payment_deadline(wire.payment_deadline)
         .metadata(wire.metadata)
         .build()
@@ -156,6 +179,14 @@ impl From<&PaymentRequestTerms> for PaymentRequestTermsWire {
                     .map(|app_id| app_id.as_str().to_owned()),
             ),
             conversion: terms.conversion.clone(),
+            payment_endpoints: terms.payment_endpoints().map(|endpoints| {
+                endpoints
+                    .iter()
+                    .map(|(identifier, payload)| {
+                        (identifier.as_str().to_owned(), payload.as_str().to_owned())
+                    })
+                    .collect()
+            }),
             payment_deadline: terms.payment_deadline.clone(),
             metadata: terms.metadata.clone(),
         }

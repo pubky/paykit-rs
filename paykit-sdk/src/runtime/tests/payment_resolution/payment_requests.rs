@@ -46,6 +46,144 @@ fn payment_request_cancellation_message(
     }
 }
 
+fn bound_payment_request_message(request_id: &str, payload: &str) -> PrivateApplicationMessage {
+    let mut message = constrained_payment_request_message(
+        EventId::new_v4().as_str(),
+        request_id,
+        "server",
+        "btc-bitcoin-p2wpkh",
+    );
+    let mut json: serde_json::Value = serde_json::from_str(&message.raw_json).unwrap();
+    json["request"]["payment_endpoints"] = serde_json::json!({"btc-bitcoin-p2wpkh": payload});
+    message.raw_json = serde_json::to_string(&json).unwrap();
+    message
+}
+
+#[tokio::test]
+async fn test_bound_requests_keep_destinations_without_private_list_fallback() {
+    let storage = registered_test_storage();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(PubkyPublicKey::from_public_key(
+                &pubky::Keypair::random().public_key(),
+            )),
+            initialized_at: FixedClock.now(),
+        })
+        .await
+        .unwrap();
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                save_authorized_paykit_app(
+                    tx,
+                    counterparty,
+                    paykit_lib::PaykitAppId::new("server").unwrap(),
+                    private_app_capabilities(),
+                );
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let first_id = PaymentRequestId::new_v4();
+    let second_id = PaymentRequestId::new_v4();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        vec![
+            bound_payment_request_message(first_id.as_str(), "address-first"),
+            bound_payment_request_message(second_id.as_str(), "address-second"),
+        ],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+
+    for changed_list in [false, true] {
+        if changed_list {
+            persist_private_stream_batch(
+                &storage,
+                counterparty.clone(),
+                vec![private_list_message_for_app(
+                    "server",
+                    "btc-bitcoin-p2wpkh",
+                    "unrelated-latest-address",
+                )],
+                None,
+                FixedClock.now(),
+            )
+            .await
+            .unwrap();
+        }
+        for (id, expected) in [(&first_id, "address-first"), (&second_id, "address-second")] {
+            let result = sdk
+                .resolve_private_payment_request(counterparty.clone(), id, Some(u64::MAX))
+                .await
+                .unwrap();
+            assert_eq!(result.status, PrivatePaymentResolutionStatus::Payable);
+            assert_eq!(result.private_payment_list_version, None);
+            assert_eq!(result.payable_endpoints.len(), 1);
+            assert_eq!(result.payable_endpoints[0].endpoint.payload, expected);
+            assert_eq!(result.payable_endpoints[0].target.payload, expected);
+            let public = sdk
+                .resolve_public_payment_request(counterparty.clone(), id)
+                .await
+                .unwrap();
+            assert_eq!(public.status, PublicPaymentResolutionStatus::NoEndpoint);
+            assert!(public.payable_endpoints.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_bound_request_still_requires_authorized_payee_app() {
+    let storage = registered_test_storage();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(PubkyPublicKey::from_public_key(
+                &pubky::Keypair::random().public_key(),
+            )),
+            initialized_at: FixedClock.now(),
+        })
+        .await
+        .unwrap();
+    let request_id = PaymentRequestId::new_v4();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        vec![bound_payment_request_message(
+            request_id.as_str(),
+            "private-address",
+        )],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    let result = sdk
+        .resolve_private_payment_request(counterparty, &request_id, None)
+        .await;
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
+}
+
 #[tokio::test]
 async fn test_resolve_private_payment_request_enforces_request_constraints() {
     let storage = registered_test_storage();

@@ -168,6 +168,11 @@ pixel and cache limits, and request timeouts remain app responsibilities.
   `prepareAndResolvePrivatePaymentRequest` — resolve using the request amount
   while enforcing its accepted endpoint identifiers and required payee App.
 
+`PaymentRequestTerms.paymentEndpoints` optionally binds exact destinations to
+the request. Use request-aware private resolution for these requests; it returns
+no list version and never substitutes newer private lists or public endpoints.
+Keep per-request payment execution guards even when the list version is absent.
+
 Returned records reflect local stream and outbound queue state. Outbound
 statuses indicate publication, not that the peer accepted the request or
 executed payment. The SDK tracks durable receipt separately and retries
