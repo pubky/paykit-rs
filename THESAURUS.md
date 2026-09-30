@@ -294,7 +294,7 @@
 - **Related terms**: Allowance, Allower, Payee, Payment Request
 
 ### Allowance ID
-- **Definition**: A stable UUID-v4 identifier for one immutable Allowance proposal and its lifecycle, scoped to its exact Allower and Allowee Receiver References.
+- **Definition**: A stable UUID-v4 identifier for one immutable Allowance proposal and its lifecycle, scoped to its Allower and Allowee Pubky identities.
 - **NOT**: A bearer credential, secret, Payment Request field, Payment Request ID, Event ID, or Payment Reference.
 - **Synonyms to AVOID**: allowance token, spending key
 - **Related terms**: Allowance, Allowance Terms, Event ID, Payment Request
