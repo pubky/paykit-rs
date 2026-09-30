@@ -173,10 +173,14 @@ impl PubkySharedStateStorage {
             paykit_lib::PAYKIT_SHARED_STATE_WRITE_PATH_PREFIX,
             blake3::hash(&encrypted).to_hex(),
         );
-        storage
-            .put(&pending_path, Vec::new())
-            .await
-            .map_err(|error| shared_write_error("mark pending Pubky shared-state write", error))?;
+        if let Err(error) = storage.put(&pending_path, Vec::new()).await {
+            // No state PUT was started, even if the marker PUT reached the server.
+            let _ = remove_pending_write(&storage, &pending_path).await;
+            return Err(shared_write_error(
+                "mark pending Pubky shared-state write",
+                error,
+            ));
+        }
         let write_result = storage.put_locked(lock, encrypted).await;
 
         match write_result {
@@ -410,7 +414,7 @@ where
                 .is_ok_and(|paths| !paths.is_empty())
             {
                 Err(PaykitSdkError::SharedStateBusy {
-                    context: "Pubky shared state is locked with an unconfirmed write; wait for recovery before retrying".into(),
+                    context: "Pubky shared state has a pending write or recovery in progress; retry later".into(),
                     source: Some(error.into()),
                 })
             } else {
@@ -482,14 +486,20 @@ async fn wait_for_pending_writes(session: &pubky::PubkySession) -> Result<()> {
 }
 
 async fn remove_pending_write(storage: &pubky::SessionStorage, path: &str) -> Result<()> {
-    match storage.delete(path).await {
-        Ok(_) => Ok(()),
-        Err(error) if is_not_found(&error) => Ok(()),
-        Err(error) => Err(shared_write_error(
-            "remove pending Pubky shared-state write",
-            error,
-        )),
+    for attempt in 0..3 {
+        match storage.delete(path).await {
+            Ok(_) => return Ok(()),
+            Err(error) if is_not_found(&error) => return Ok(()),
+            Err(error) if attempt == 2 => {
+                return Err(shared_write_error(
+                    "remove pending Pubky shared-state write",
+                    error,
+                ))
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(100 * (attempt + 1))).await,
+        }
     }
+    unreachable!("bounded marker removal attempts always return")
 }
 
 fn shared_write_error(context: &str, error: PubkyError) -> PaykitSdkError {

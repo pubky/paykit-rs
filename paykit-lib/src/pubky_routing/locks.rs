@@ -15,7 +15,7 @@ struct ResourceChanged;
 
 #[derive(Debug, thiserror::Error)]
 #[error("write lock renewal failed; the operation may have committed")]
-struct LockRenewalError(#[source] pubky::Error);
+struct LockRenewalError(#[source] anyhow::Error);
 
 /// Whether an operation must reread its resource before retrying a write.
 pub fn is_write_conflict(error: &PaykitError) -> bool {
@@ -109,7 +109,8 @@ fn resource_changed() -> PaykitError {
 ///
 /// Read the current contents inside `operation` and use the supplied lock for
 /// every mutation. The lock is renewed while the operation runs and released
-/// afterward. Cancellation leaves it to expire. A renewal failure stops the
+/// afterward. Transient renewal failures are retried within the last confirmed
+/// lease lifetime. Cancellation leaves it to expire. Loss of the lock stops the
 /// operation with an uncertain outcome, not a retryable write conflict: a PUT
 /// may already have committed. Callers must reconcile before retrying.
 /// Contended acquisition is retried with bounded backoff before `operation`
@@ -130,9 +131,10 @@ where
 {
     let storage = session.storage();
     let mut attempt = 1;
-    let lock = loop {
+    let (lock, acquired_at) = loop {
+        let requested_at = tokio::time::Instant::now();
         match storage.lock(path, WRITE_LOCK_TIMEOUT).await {
-            Ok(lock) => break lock,
+            Ok(lock) => break (lock, requested_at),
             Err(pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }))
                 if status == pubky::StatusCode::LOCKED
                     && attempt < LOCK_ACQUISITION_MAX_ATTEMPTS =>
@@ -145,10 +147,37 @@ where
     };
     let mut renewed = lock.clone();
     let renewal = async {
+        let mut valid_until = acquired_at + renewed.timeout();
         loop {
-            tokio::time::sleep(renewed.timeout() / 3).await;
-            if let Err(error) = storage.refresh_lock(&mut renewed, WRITE_LOCK_TIMEOUT).await {
-                break error;
+            tokio::time::sleep_until(valid_until - renewed.timeout() * 2 / 3).await;
+            loop {
+                let requested_at = tokio::time::Instant::now();
+                match tokio::time::timeout_at(
+                    valid_until,
+                    storage.refresh_lock(&mut renewed, WRITE_LOCK_TIMEOUT),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {
+                        valid_until = requested_at + renewed.timeout();
+                        break;
+                    }
+                    Ok(Err(error))
+                        if retryable_lock_refresh(&error)
+                            && requested_at + Duration::from_secs(1) < valid_until =>
+                    {
+                        tokio::time::sleep_until(
+                            (tokio::time::Instant::now() + Duration::from_secs(1)).min(valid_until),
+                        )
+                        .await;
+                    }
+                    Ok(Err(error)) => return anyhow::Error::from(error),
+                    Err(_) => {
+                        return anyhow::anyhow!(
+                            "Pubky write lock expired before renewal was confirmed"
+                        )
+                    }
+                }
             }
         }
     };
@@ -170,9 +199,42 @@ where
     result
 }
 
+fn retryable_lock_refresh(error: &pubky::Error) -> bool {
+    match error {
+        pubky::Error::Request(pubky::errors::RequestError::Transport(_)) => true,
+        pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }) => {
+            status.is_server_error() || *status == pubky::StatusCode::TOO_MANY_REQUESTS
+        }
+        _ => false,
+    }
+}
+
 fn lock_error(context: &str, source: pubky::Error) -> PaykitError {
     PaykitError::Transport {
         context: context.into(),
         source: source.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lock_refresh_retries_only_transient_server_errors() {
+        for (status, retryable) in [
+            (pubky::StatusCode::SERVICE_UNAVAILABLE, true),
+            (pubky::StatusCode::TOO_MANY_REQUESTS, true),
+            (pubky::StatusCode::PRECONDITION_FAILED, false),
+            (pubky::StatusCode::LOCKED, false),
+            (pubky::StatusCode::UNAUTHORIZED, false),
+            (pubky::StatusCode::FORBIDDEN, false),
+        ] {
+            let error = pubky::Error::Request(pubky::errors::RequestError::Server {
+                status,
+                message: "test response".into(),
+            });
+            assert_eq!(retryable_lock_refresh(&error), retryable);
+        }
     }
 }
