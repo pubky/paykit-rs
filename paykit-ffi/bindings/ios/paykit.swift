@@ -2205,7 +2205,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func removeContact(publicKey: String) async throws  -> ContactRecord?
 
     /**
-     * Remove the local public recovery marker for a counterparty.
+     * Remove a blocked peer's public marker. Active links retain their markers.
      */
     func removeEncryptedLinkRecoveryMarker(counterparty: String) async throws  -> EncryptedLinkRecoveryMarkerReport
 
@@ -4329,7 +4329,7 @@ open func removeContact(publicKey: String)async throws  -> ContactRecord?  {
 }
 
     /**
-     * Remove the local public recovery marker for a counterparty.
+     * Remove a blocked peer's public marker. Active links retain their markers.
      */
 open func removeEncryptedLinkRecoveryMarker(counterparty: String)async throws  -> EncryptedLinkRecoveryMarkerReport  {
     return
@@ -24857,7 +24857,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 39834) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_encrypted_link_recovery_marker() != 10086) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_encrypted_link_recovery_marker() != 34687) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_paykit_app() != 60800) {
