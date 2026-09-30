@@ -71,6 +71,24 @@ pub(crate) fn require_private_automation_ready(
     }
 }
 
+pub(crate) fn require_recovery_context(
+    peer: &LinkedPeerRecord,
+    context: &paykit_lib::EncryptedLinkRecoveryContext,
+) -> Result<()> {
+    if context.local_attempt_id() != peer.local_recovery_attempt_id.as_deref()
+        || context.remote_attempt_id() != peer.remote_recovery_attempt_id.as_deref()
+    {
+        return Err(PaykitSdkError::RecoveryRequired {
+            context: format!(
+                "Encrypted Link recovery context changed for counterparty {}",
+                peer.counterparty
+            ),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
 /// Result of starting or advancing an Encrypted Link Handshake.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkedPeerHandshakeReport {
@@ -444,6 +462,11 @@ where
                 .linked_peer(&counterparty)
                 .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
             ensure_not_blocked(&peer)?;
+            if lease.is_some() {
+                let snapshot =
+                    paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(&handshake_snapshot)?;
+                require_recovery_context(&peer, snapshot.recovery_context())?;
+            }
             peer.state = LinkedPeerState::Linking;
             peer.last_sync_at = Some(now);
             peer.failure_count = 0;
@@ -559,6 +582,11 @@ where
                 }
             }
 
+            if lease.is_some() {
+                let snapshot =
+                    paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(&handshake_snapshot)?;
+                require_recovery_context(&peer, snapshot.recovery_context())?;
+            }
             peer.state = LinkedPeerState::Linking;
             peer.last_sync_at = Some(now);
             peer.failure_count = 0;
@@ -692,6 +720,8 @@ where
                 }
             }
 
+            let snapshot = paykit_lib::EncryptedLinkSnapshot::deserialize(&link_snapshot)?;
+            require_recovery_context(&peer, snapshot.recovery_context())?;
             peer.state = LinkedPeerState::Linked;
             peer.last_sync_at = Some(now);
             peer.failure_count = 0;

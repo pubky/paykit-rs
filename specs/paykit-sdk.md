@@ -348,7 +348,7 @@ secret. Public-only session access can use public workflows but cannot
 establish or advance Encrypted Links. The SDK derives and persists public
 `IdentityState` from that access during initialization.
 
-Paykit key derivation MUST use BLAKE3's `derive_key(context, key_material)`
+Paykit KDF v1 MUST use BLAKE3's `derive_key(context, key_material)`
 operation (not keyed hashing), with the exact UTF-8 context strings below:
 
 ```text
@@ -366,6 +366,11 @@ The Noise public key is the Pubky keypair public key derived from `noise_secret`
 Delegated apps import the authorizer-derived secret through a trusted channel;
 they cannot verify this derivation without the Pubky root. The SDK checks it
 when the root is available.
+
+The hash mode, context strings, input order, encoding, and lengths above define
+Paykit KDF v1. Changing any of them requires a new explicitly selected derivation
+scheme version, not a key-generation increment. Generations rotate keys within
+this fixed scheme; they do not change its transcript.
 
 Canonical vectors (hex), using `pubky_secret = 09` repeated 32 times:
 
@@ -1093,8 +1098,10 @@ SDK behavior:
 4. Bind handshake and message paths to both peers' attempt IDs, ordered by Pubky
    identity. Snapshots retain this context. Following a remote attempt does not
    rotate the local ID, and repeated observations do not reset the connection.
-5. Check markers during handshake startup/advancement and before
-   `ensure_link_with_peer` reuses a completed link. Keep markers after completion;
+5. Check markers during handshake startup, before and after advancement, and
+   before send/receive or `ensure_link_with_peer` reuses a completed link.
+   Validate snapshot attempt IDs against the tracked peer state before restore
+   and in the handshake checkpoint transaction. Keep markers after completion;
    explicit removal is allowed only for blocked peers. Remote timestamps are not
    compared with local clocks.
 6. Publish/remove markers under a renewable Pubky write lock, rechecking peer
@@ -1104,6 +1111,12 @@ Recovery does not delete old streams. Their paths cannot overlap a replacement
 connection, including when an old write finishes late. Retiring these files is
 separate from relinking; pending application events still require replay and
 deduplication on the replacement link.
+
+A marker read is not a lock on the counterparty. The remote peer can recover
+after the last check, including just before or after a local checkpoint. The
+next successful marker check observes the new attempt; late writes remain on
+the retired stream. Link completion and message publication do not prove remote
+receipt.
 
 ### Publish Private Payment List
 

@@ -6,6 +6,174 @@ use std::time::{Duration, Instant};
 use crate::harness::{drive_link_to_linked, linked_two_party, private_receiving_detail, two_party};
 
 #[tokio::test]
+async fn test_handshake_rechecks_marker_after_advancement() {
+    use paykit_sdk::{PaykitSdk, PaykitSdkConfig, PubkySessionAccess, PubkySessionProvider};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RecoverDuringRestore<'a> {
+        local: &'a crate::harness::TestUser,
+        remote: &'a crate::harness::TestUser,
+        reads: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl PubkySessionProvider for RecoverDuringRestore<'_> {
+        async fn load_session_access(&self) -> paykit_sdk::Result<Option<PubkySessionAccess>> {
+            Ok(Some(self.local.access.clone()))
+        }
+
+        async fn load_public_storage(&self) -> paykit_sdk::Result<Option<pubky::PublicStorage>> {
+            // The first read checks the marker. The next checks the snapshot's
+            // Noise key during restore, before the completed link is saved.
+            if self.reads.fetch_add(1, Ordering::SeqCst) == 1 {
+                self.remote
+                    .sdk
+                    .publish_encrypted_link_recovery_marker(self.local.public_key.clone())
+                    .await?;
+            }
+            Ok(Some(self.local.access.outbox_client.public_storage()))
+        }
+
+        async fn clear_session_access(&self) -> paykit_sdk::Result<()> {
+            unreachable!("this test does not sign out")
+        }
+    }
+
+    let pair = two_party().await;
+    pair.alice
+        .sdk
+        .initiate_link_with_peer(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    pair.bob
+        .sdk
+        .accept_link_with_peer(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        assert!(Instant::now() < deadline, "initiator did not complete");
+        if pair
+            .alice
+            .sdk
+            .advance_link_handshake(pair.bob.public_key.clone())
+            .await
+            .unwrap()
+            .state
+            == LinkedPeerState::Linked
+        {
+            break;
+        }
+        assert_eq!(
+            pair.bob
+                .sdk
+                .advance_link_handshake(pair.alice.public_key.clone())
+                .await
+                .unwrap()
+                .state,
+            LinkedPeerState::Linking
+        );
+    }
+
+    let sdk = PaykitSdk::new(
+        pair.bob.storage.clone(),
+        RecoverDuringRestore {
+            local: &pair.bob,
+            remote: &pair.alice,
+            reads: AtomicUsize::new(0),
+        },
+        pair.bob.adapter.clone(),
+        PaykitSdkConfig::new(pair.bob.app_id.clone()).unwrap(),
+    );
+    let result = sdk
+        .advance_link_handshake(pair.alice.public_key.clone())
+        .await;
+    assert!(
+        matches!(result, Err(PaykitSdkError::RecoveryRequired { .. })),
+        "{result:?}"
+    );
+    let bob = pair.bob.storage.snapshot().unwrap();
+    let alice = pair.alice.storage.snapshot().unwrap();
+    assert_eq!(
+        bob.linked_peers[&pair.alice.public_key].state,
+        LinkedPeerState::RecoveryRequired
+    );
+    assert_eq!(
+        bob.linked_peers[&pair.alice.public_key].remote_recovery_attempt_id,
+        alice.linked_peers[&pair.bob.public_key].local_recovery_attempt_id
+    );
+    assert!(bob.encrypted_link_states[&pair.alice.public_key]
+        .link_snapshot
+        .is_none());
+    assert!(bob.peer_link_operation_leases.is_empty());
+    crate::harness::drive_recovery_to_linked(&pair.alice, &pair.bob).await;
+}
+
+#[tokio::test]
+async fn test_private_send_and_receive_observe_remote_recovery_before_using_link() {
+    let pair = linked_two_party().await;
+    for receive in [false, true] {
+        pair.alice
+            .sdk
+            .clear_private_payment_list(pair.bob.public_key.clone())
+            .await
+            .unwrap();
+        let before = pair.alice.storage.snapshot().unwrap();
+        let marker = pair
+            .bob
+            .sdk
+            .publish_encrypted_link_recovery_marker(pair.alice.public_key.clone())
+            .await
+            .unwrap();
+
+        let result = if receive {
+            pair.alice
+                .sdk
+                .receive_private_messages(pair.bob.public_key.clone())
+                .await
+                .map(|_| ())
+        } else {
+            pair.alice
+                .sdk
+                .process_outbound_private_messages(pair.bob.public_key.clone())
+                .await
+                .map(|_| ())
+        };
+        assert!(
+            matches!(result, Err(PaykitSdkError::RecoveryRequired { .. })),
+            "receive={receive}: {result:?}"
+        );
+        let after = pair.alice.storage.snapshot().unwrap();
+        let peer = &after.linked_peers[&pair.bob.public_key];
+        assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
+        assert_eq!(peer.remote_recovery_attempt_id, marker.local_attempt_id);
+        assert_eq!(
+            peer.local_recovery_attempt_id,
+            before.linked_peers[&pair.bob.public_key].local_recovery_attempt_id
+        );
+        assert!(after.encrypted_link_states[&pair.bob.public_key]
+            .link_snapshot
+            .is_none());
+        assert!(after.peer_link_operation_leases.is_empty());
+
+        crate::harness::drive_recovery_to_linked(&pair.alice, &pair.bob).await;
+        let sent = pair
+            .alice
+            .sdk
+            .process_outbound_private_messages(pair.bob.public_key.clone())
+            .await
+            .unwrap();
+        assert_eq!(sent.sent.len(), 1);
+        assert!(sent.failed.is_empty());
+        pair.bob
+            .sdk
+            .receive_private_messages(pair.alice.public_key.clone())
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn test_recovery_marker_publish_observe_remove_roundtrip() {
     let pair = linked_two_party().await;
     let sent = pair

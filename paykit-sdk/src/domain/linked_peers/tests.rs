@@ -14,6 +14,30 @@ fn counterparty() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
+#[test]
+fn test_recovery_context_requires_both_tracked_attempt_ids() {
+    let local = "11111111-1111-4111-8111-111111111111".to_owned();
+    let remote = "22222222-2222-4222-8222-222222222222".to_owned();
+    let mut peer = default_linked_peer(counterparty());
+    let initial = paykit_lib::EncryptedLinkRecoveryContext::default();
+    assert!(require_recovery_context(&peer, &initial).is_ok());
+    peer.local_recovery_attempt_id = Some(local.clone());
+    peer.remote_recovery_attempt_id = Some(remote.clone());
+    let current =
+        paykit_lib::EncryptedLinkRecoveryContext::new(Some(&local), Some(&remote)).unwrap();
+    assert!(require_recovery_context(&peer, &current).is_ok());
+    for context in [
+        initial,
+        paykit_lib::EncryptedLinkRecoveryContext::new(Some(&remote), Some(&remote)).unwrap(),
+        paykit_lib::EncryptedLinkRecoveryContext::new(Some(&local), Some(&local)).unwrap(),
+    ] {
+        assert!(matches!(
+            require_recovery_context(&peer, &context),
+            Err(PaykitSdkError::RecoveryRequired { .. })
+        ));
+    }
+}
+
 #[tokio::test]
 async fn test_save_link_handshake_state_marks_peer_linking() {
     let storage = InMemoryStorage::new();

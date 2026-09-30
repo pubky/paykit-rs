@@ -515,7 +515,7 @@ where
         };
 
         let (session_access, handshake) = match self
-            .restore_link_handshake_from_snapshot(counterparty.clone(), snapshot_bytes)
+            .restore_link_handshake_from_snapshot(counterparty.clone(), snapshot_bytes, &lease)
             .await
         {
             Ok(restored) => restored,
@@ -561,10 +561,13 @@ where
         &self,
         counterparty: PubkyPublicKey,
         snapshot_bytes: &[u8],
+        lease: &PeerLinkOperationLease,
     ) -> Result<(GuardedSessionAccess, paykit_lib::EncryptedLinkHandshake)> {
         let (session_access, secret_key) = self.private_link_session_access().await?;
         let remote_public_key = counterparty.to_public_key()?;
         let snapshot = paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(snapshot_bytes)?;
+        self.require_snapshot_recovery_context(&counterparty, snapshot.recovery_context(), lease)
+            .await?;
         if !self
             .snapshot_uses_current_counterparty_noise_key(
                 &counterparty,
@@ -618,6 +621,16 @@ where
                 return Err(err);
             }
         };
+
+        if self
+            .observe_remote_recovery_marker_with_lease(&counterparty, &session_access, &lease)
+            .await?
+        {
+            return Err(PaykitSdkError::RecoveryRequired {
+                context: format!("counterparty {counterparty} changed recovery attempt during handshake advancement"),
+                source: None,
+            });
+        }
 
         match progress {
             paykit_lib::HandshakeProgress::Pending(handshake) => {
@@ -834,6 +847,26 @@ where
                     });
                 }
                 crate::storage::bind_paykit_noise_key(tx, noise_public_key)
+            })
+            .await
+    }
+
+    pub(super) async fn require_snapshot_recovery_context(
+        &self,
+        counterparty: &PubkyPublicKey,
+        context: &paykit_lib::EncryptedLinkRecoveryContext,
+        lease: &PeerLinkOperationLease,
+    ) -> Result<()> {
+        self.storage
+            .transaction(|tx| {
+                crate::storage::require_peer_link_operation_lease(tx, lease)?;
+                let peer = tx.linked_peer(counterparty).ok_or_else(|| {
+                    PaykitSdkError::RecoveryRequired {
+                        context: format!("no Linked Peer record for counterparty {counterparty}"),
+                        source: None,
+                    }
+                })?;
+                crate::domain::linked_peers::require_recovery_context(&peer, context)
             })
             .await
     }

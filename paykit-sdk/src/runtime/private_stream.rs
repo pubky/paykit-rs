@@ -60,6 +60,10 @@ where
     ) -> Result<PrivateStreamIntakeReport> {
         self.ensure_peer_allows_private_automation(&counterparty)
             .await?;
+        self.observe_remote_recovery_marker_with_lease(&counterparty, &session_access, &lease)
+            .await?;
+        self.ensure_peer_allows_private_automation(&counterparty)
+            .await?;
         let secret_key = session_access.paykit_noise_secret_key()?;
         let remote_public_key = counterparty.to_public_key()?;
         let authorized_receipt_apps =
@@ -127,6 +131,8 @@ where
                 return Err(err.into());
             }
         };
+        self.require_snapshot_recovery_context(&counterparty, snapshot.recovery_context(), &lease)
+            .await?;
         if !self
             .snapshot_uses_current_counterparty_noise_key(
                 &counterparty,
