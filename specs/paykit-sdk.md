@@ -1231,7 +1231,7 @@ immutable destinations instead of a Private Payment List. The result has no
 list version, and a consumed-list version does not suppress it. Public
 resolution returns no candidates for such requests. Apps must use the
 request-aware resolver and retain their per-request payment execution guards;
-they must not substitute a generic contact resolution when no bound endpoint
+they must not substitute a generic contact resolution when no specified endpoint
 is payable.
 
 Both public and private result statuses use `Payable`, `NoEndpoint`, and
