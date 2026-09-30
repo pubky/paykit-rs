@@ -2175,7 +2175,8 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Persist the replacement first. Retry with the same keys and backup after
      * failure; already-recovered state is never overwritten. Old links require
      * recovery and payment execution requires complete wallet reconciliation.
-     * State newer than the backup is not recovered.
+     * State newer than the backup is not recovered. Unreadable generation
+     * headers and corrupt replacement-generation state are rejected, not overwritten.
      */
     func recoverSharedStateFromBackup(backup: SdkBackupBlob, replacementKey: PaykitIdentitySecretKey) async throws  -> PaykitAppRegistry
 
@@ -4209,7 +4210,8 @@ open func recordPaymentOutcome(report: PaymentOutcomeReport)async throws  -> Pay
      * Persist the replacement first. Retry with the same keys and backup after
      * failure; already-recovered state is never overwritten. Old links require
      * recovery and payment execution requires complete wallet reconciliation.
-     * State newer than the backup is not recovered.
+     * State newer than the backup is not recovered. Unreadable generation
+     * headers and corrupt replacement-generation state are rejected, not overwritten.
      */
 open func recoverSharedStateFromBackup(backup: SdkBackupBlob, replacementKey: PaykitIdentitySecretKey)async throws  -> PaykitAppRegistry  {
     return
@@ -24839,7 +24841,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_record_payment_outcome() != 2286) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_recover_shared_state_from_backup() != 30793) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_recover_shared_state_from_backup() != 19688) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_refresh_contact_paykit_profile() != 15127) {
