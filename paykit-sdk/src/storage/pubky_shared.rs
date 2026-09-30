@@ -305,17 +305,21 @@ impl StorageAdapter for PubkySharedStateStorage {
             }
             self.record_revision(snapshot.revision.clone())?;
             let initial_state = snapshot.state;
-            let (updated_state, result) = run_storage_state_transaction(initial_state.clone(), f)?;
+            let (mut updated_state, result) =
+                run_storage_state_transaction(initial_state.clone(), f)?;
 
             if updated_state == initial_state {
                 return Ok(result);
             }
             drop(initial_state);
 
+            // Validate before compaction so malformed evidence cannot disappear
+            // merely because a newer list supersedes it.
             validate_storage_state(&updated_state).map_err(|_| PaykitSdkError::Storage {
                 context: "SDK state failed validation before Pubky storage write".into(),
                 source: None,
             })?;
+            super::compaction::compact_private_payment_lists(&mut updated_state);
             let encrypted = encrypt_state(&access, &updated_state)?;
             self.commit_encrypted_state(&access, &lock, encrypted)
                 .await?;

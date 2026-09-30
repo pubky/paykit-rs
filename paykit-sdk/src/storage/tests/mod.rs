@@ -12,6 +12,7 @@ use crate::{
 };
 
 mod adapter;
+mod compaction;
 mod leases;
 mod queue;
 mod records;

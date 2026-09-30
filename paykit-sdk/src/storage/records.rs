@@ -656,11 +656,11 @@ pub struct StorageState {
     /// Reversible identity-wide payment-execution claims by counterparty and request id.
     pub payment_request_execution_claims:
         HashMap<(PubkyPublicKey, String), PaymentRequestExecutionClaim>,
-    /// Append-only outbound private message records.
+    /// Outbound Event Message history and retained Private Payment List publications.
     pub outbound_private_messages: Vec<OutboundPrivateMessageRecord>,
     /// Next outbound private message id.
     pub next_outbound_private_message_id: u64,
-    /// Append-only private stream items.
+    /// Received Event Message history and retained Latest-State Message items.
     pub private_stream_items: Vec<PrivateStreamItemRecord>,
     /// Next receive batch id.
     pub next_receive_batch_id: u64,

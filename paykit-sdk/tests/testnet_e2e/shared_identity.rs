@@ -255,6 +255,96 @@ async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sig
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_shared_state_compacts_private_lists_without_changing_read_only_state() {
+    let pair = linked_homeserver_shared_pair().await;
+    for user in [&pair.bitkit, &pair.server] {
+        for details in [
+            vec![private_receiving_detail(
+                "btc-lightning-bolt11",
+                "ln-private",
+            )],
+            Vec::new(),
+        ] {
+            user.sdk
+                .enqueue_private_payment_list_with_receiving_details(
+                    pair.bob.public_key.clone(),
+                    details,
+                )
+                .await
+                .unwrap();
+            let report = user
+                .sdk
+                .process_outbound_private_messages(pair.bob.public_key.clone())
+                .await
+                .unwrap();
+            assert_eq!(report.sent.len(), 1);
+            assert!(report.failed.is_empty());
+        }
+    }
+    for details in [
+        vec![private_receiving_detail("btc-lightning-bolt11", "ln-bob")],
+        Vec::new(),
+    ] {
+        pair.bob
+            .sdk
+            .enqueue_private_payment_list_with_receiving_details(
+                pair.bitkit.public_key.clone(),
+                details,
+            )
+            .await
+            .unwrap();
+        let report = pair
+            .bob
+            .sdk
+            .process_outbound_private_messages(pair.bitkit.public_key.clone())
+            .await
+            .unwrap();
+        assert_eq!(report.sent.len(), 1);
+        assert!(report.failed.is_empty());
+        pair.bitkit
+            .sdk
+            .receive_private_messages(pair.bob.public_key.clone())
+            .await
+            .unwrap();
+    }
+    let state = pair.server.storage_state().await;
+    let kind = paykit_lib::PrivateMessageKind::PrivatePaymentList.as_str();
+    let sent = state
+        .outbound_private_messages
+        .iter()
+        .filter(|record| record.kind == kind)
+        .collect::<Vec<_>>();
+    assert_eq!(sent.len(), 2);
+    for record in sent {
+        assert_eq!(record.status, OutboundPrivateMessageStatus::Sent);
+        assert!(
+            paykit_lib::parse_private_payment_list_json(&record.raw_json)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        state
+            .private_stream_items
+            .iter()
+            .filter(|record| record.known_paykit_kind.as_deref() == Some(kind))
+            .count(),
+        1
+    );
+    let views = pair
+        .server
+        .sdk
+        .current_private_payment_lists(&pair.bob.public_key)
+        .await
+        .unwrap();
+    assert_eq!(views.len(), 1);
+    assert!(views[0].payment_endpoints.is_empty());
+    let revision = pair.server.storage.last_revision().unwrap();
+    assert_eq!(pair.server.storage_state().await, state);
+    assert_eq!(pair.server.storage.last_revision().unwrap(), revision);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_same_app_devices_serialize_public_endpoint_sync() {
     let testnet = build_testnet().await;
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());

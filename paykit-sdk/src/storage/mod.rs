@@ -3,6 +3,7 @@ use std::{any::Any, collections::HashMap, sync::Arc};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
+mod compaction;
 mod in_memory;
 mod pubky_shared;
 mod queue;

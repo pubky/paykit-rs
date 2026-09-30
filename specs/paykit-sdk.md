@@ -300,6 +300,12 @@ have committed work, so callers must inspect durable records before retrying
 commands that create requests or payments. A storage instance also fails closed
 if a resource it previously observed disappears.
 
+Changed-state commits compact obsolete Private Payment Lists per counterparty
+and App ID. They retain the latest valid inbound list (including an empty clear),
+pending or prepared sends, reservation evidence, and the latest outbound intent,
+publication, and attempted send. Event Message history and deduplication records
+are not pruned, so the 64 MiB limit still applies to growing payment history.
+
 Before each state PUT, the adapter publishes an empty, uniquely named marker
 under `/pub/paykit/v0/shared-state-writes/`. A confirmed PUT or definitive lock
 rejection removes its marker; uncertain writes and cancellation leave it.
