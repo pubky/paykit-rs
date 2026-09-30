@@ -2,6 +2,7 @@ mod handshake;
 mod link;
 mod paths;
 mod private_application_message;
+mod recovery_context;
 mod snapshot;
 
 pub use handshake::{
@@ -18,4 +19,5 @@ pub use private_application_message::{
     clear_encrypted_link_outbox, PrivateApplicationMessage, PrivateMessageKind,
     PRIVATE_APPLICATION_MESSAGE_RECEIVE_LIMIT,
 };
+pub use recovery_context::EncryptedLinkRecoveryContext;
 pub use snapshot::{EncryptedLinkHandshakeSnapshot, EncryptedLinkSnapshot};

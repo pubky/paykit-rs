@@ -86,7 +86,8 @@ Paykit-side workflow.
 - `PaykitSdk.processOutboundPrivateMessages` and
   `processPendingPrivateMessages` — send queued private messages.
 - `PaykitSdk.*EncryptedLinkRecoveryMarker*` methods — inspect, publish,
-  observe, and remove recovery markers.
+  observe, and remove recovery markers. Active links retain their markers;
+  explicit removal requires a blocked peer.
 
 Private operation errors expose stable category/code fields and redacted
 context. Raw diagnostic details require an explicit debug export method.

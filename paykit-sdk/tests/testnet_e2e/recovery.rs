@@ -3,10 +3,7 @@ use paykit_sdk::{
 };
 use std::time::{Duration, Instant};
 
-use crate::harness::{
-    drive_link_to_linked, linked_two_party, private_receiving_detail, two_party,
-    wait_until_marker_is_newer_than_observer_checkpoint,
-};
+use crate::harness::{drive_link_to_linked, linked_two_party, private_receiving_detail, two_party};
 
 #[tokio::test]
 async fn test_recovery_marker_publish_observe_remove_roundtrip() {
@@ -24,7 +21,6 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
         .receive_private_messages_from_linked_peers()
         .await
         .unwrap();
-    wait_until_marker_is_newer_than_observer_checkpoint(&pair.bob, &pair.alice.public_key).await;
 
     let published = pair
         .alice
@@ -72,22 +68,6 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
     );
     assert_eq!(observed.state, LinkedPeerState::RecoveryRequired);
 
-    let lease = pair
-        .bob
-        .storage
-        .transaction(|tx| {
-            let now = chrono::Utc::now();
-            Ok(tx
-                .claim_peer_link_operation(
-                    &pair.alice.public_key,
-                    now,
-                    now + chrono::Duration::seconds(60),
-                )?
-                .unwrap())
-        })
-        .await
-        .unwrap();
-    let before = pair.bob.storage.snapshot().unwrap();
     let repeated = pair
         .bob
         .sdk
@@ -95,15 +75,6 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
         .await
         .unwrap();
     assert!(!repeated.remote_marker_changed);
-    assert_eq!(pair.bob.storage.snapshot().unwrap(), before);
-    pair.bob
-        .storage
-        .transaction(|tx| {
-            tx.release_peer_link_operation(&lease.counterparty, lease.lease_id);
-            Ok(())
-        })
-        .await
-        .unwrap();
 
     // Direct fetch through unauthenticated storage proves the marker file is
     // on the homeserver before removal. This also validates the fetch
@@ -146,39 +117,13 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
     .expect("the published marker should be present on the homeserver");
     assert_eq!(marker.attempt_id(), attempt_id.as_str());
 
-    // Removal clears the local marker; a later observe sees no new marker.
-    let removed = pair
-        .alice
-        .sdk
-        .remove_encrypted_link_recovery_marker(pair.bob.public_key.clone())
-        .await
-        .expect("removing the recovery marker should succeed");
-    assert!(removed.local_attempt_id.is_none());
-
-    // `remote_marker_changed` stays false both when the marker is gone and
-    // when the already-observed marker is still present, so assert remote
-    // deletion directly.
-    let marker = paykit_lib::fetch_encrypted_link_recovery_marker(
-        &storage,
-        &bob_noise_secret_key,
-        pair.bob.access.session.info().public_key(),
-        &alice_public_key,
-        &alice_noise_public_key,
-    )
-    .await
-    .expect("direct marker fetch after removal should succeed");
-    assert!(
-        marker.is_none(),
-        "the recovery marker must be deleted from the homeserver"
-    );
-
-    let observed_again = pair
-        .bob
-        .sdk
-        .observe_encrypted_link_recovery_marker(pair.alice.public_key.clone())
-        .await
-        .expect("re-observing after removal should succeed");
-    assert!(!observed_again.remote_marker_changed);
+    assert!(matches!(
+        pair.alice
+            .sdk
+            .remove_encrypted_link_recovery_marker(pair.bob.public_key.clone())
+            .await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
 
     pair.alice
         .sdk
@@ -209,6 +154,37 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
         republished.cleared[0].outbound_message_id,
         sent.cleared[0].outbound_message_id
     );
+    let marker = paykit_lib::fetch_encrypted_link_recovery_marker(
+        &storage,
+        &bob_noise_secret_key,
+        pair.bob.access.session.info().public_key(),
+        &alice_public_key,
+        &alice_noise_public_key,
+    )
+    .await
+    .unwrap()
+    .expect("the current recovery marker remains after relinking");
+    assert_eq!(marker.attempt_id(), attempt_id);
+    pair.alice
+        .sdk
+        .block_peer(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    pair.alice
+        .sdk
+        .remove_encrypted_link_recovery_marker(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    assert!(paykit_lib::fetch_encrypted_link_recovery_marker(
+        &storage,
+        &bob_noise_secret_key,
+        pair.bob.access.session.info().public_key(),
+        &alice_public_key,
+        &alice_noise_public_key,
+    )
+    .await
+    .unwrap()
+    .is_none());
 }
 
 #[tokio::test]
@@ -228,6 +204,171 @@ async fn test_publish_recovery_marker_without_private_link_state_fails() {
 }
 
 #[tokio::test]
+async fn test_marker_publication_rechecks_peer_lease_after_waiting_for_lock() {
+    let pair = linked_two_party().await;
+    let state = pair.alice.storage.snapshot().unwrap();
+    let link = &state.encrypted_link_states[&pair.bob.public_key];
+    let snapshot =
+        paykit_lib::EncryptedLinkSnapshot::deserialize(link.link_snapshot.as_ref().unwrap())
+            .unwrap();
+    let key = pair
+        .alice
+        .access
+        .local_secret_key
+        .as_ref()
+        .unwrap()
+        .derive_paykit_identity_secret_key(paykit_sdk::INITIAL_PAYKIT_KEY_GENERATION)
+        .unwrap();
+    let (path, _) = paykit_lib::encrypted_link_recovery_marker_paths(
+        &paykit_lib::derive_paykit_noise_secret_key(key.as_bytes()),
+        pair.alice.access.session.info().public_key(),
+        &pair.bob.public_key.to_public_key().unwrap(),
+        snapshot.remote_noise_public_key(),
+    );
+    let storage = pair.alice.access.session.storage();
+    let before = storage.get(&path).await.unwrap().text().await.unwrap();
+    let lock = storage.lock(&path, Duration::from_secs(60)).await.unwrap();
+    let previous_attempt = state.linked_peers[&pair.bob.public_key]
+        .local_recovery_attempt_id
+        .clone();
+    let publication = pair
+        .alice
+        .sdk
+        .publish_encrypted_link_recovery_marker(pair.bob.public_key.clone());
+    let lose_peer_lease = async {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "recovery was not staged");
+            let staged = pair.alice.storage.snapshot().unwrap();
+            if staged.linked_peers[&pair.bob.public_key].local_recovery_attempt_id
+                != previous_attempt
+            {
+                let lease = &staged.peer_link_operation_leases[&pair.bob.public_key];
+                pair.alice
+                    .storage
+                    .transaction(|tx| {
+                        tx.release_peer_link_operation(&lease.counterparty, lease.lease_id);
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+                storage.unlock(&lock).await.unwrap();
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    let (result, ()) = tokio::join!(publication, lose_peer_lease);
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
+    assert_eq!(
+        storage.get(&path).await.unwrap().text().await.unwrap(),
+        before
+    );
+}
+
+#[tokio::test]
+async fn test_recovery_during_handshake_isolates_late_old_writes() {
+    let pair = linked_two_party().await;
+    let old_state =
+        paykit_sdk::load_encrypted_link_state(&pair.alice.storage, &pair.bob.public_key)
+            .await
+            .unwrap()
+            .unwrap();
+    let old_snapshot =
+        paykit_lib::EncryptedLinkSnapshot::deserialize(&old_state.link_snapshot.unwrap()).unwrap();
+    let old_context = old_snapshot.recovery_context().clone();
+    let key = pair
+        .alice
+        .access
+        .local_secret_key
+        .as_ref()
+        .unwrap()
+        .derive_paykit_identity_secret_key(paykit_sdk::INITIAL_PAYKIT_KEY_GENERATION)
+        .unwrap();
+    let old_link = paykit_lib::restore_encrypted_link(
+        pair.alice.access.session.clone(),
+        paykit_lib::derive_paykit_noise_secret_key(key.as_bytes()),
+        &pair.bob.public_key.to_public_key().unwrap(),
+        pair.alice.access.outbox_client.clone(),
+        old_snapshot,
+    )
+    .await
+    .unwrap();
+    let old_path = format!("{}/0", old_link.config().write_path);
+
+    pair.alice
+        .sdk
+        .publish_encrypted_link_recovery_marker(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    pair.alice
+        .sdk
+        .ensure_link_with_peer(pair.bob.public_key.clone(), 1)
+        .await
+        .unwrap();
+    pair.bob
+        .sdk
+        .ensure_link_with_peer(pair.alice.public_key.clone(), 1)
+        .await
+        .unwrap();
+    let new_marker = pair
+        .bob
+        .sdk
+        .publish_encrypted_link_recovery_marker(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    let alice = pair
+        .alice
+        .restart_with_storage(pair.alice.storage.clone())
+        .await;
+    crate::harness::drive_recovery_to_linked(&alice, &pair.bob).await;
+
+    // A delayed write from the retired attempt cannot replace a current slot.
+    alice
+        .access
+        .session
+        .storage()
+        .put(&old_path, "stale ciphertext")
+        .await
+        .unwrap();
+    let state = paykit_sdk::load_encrypted_link_state(&alice.storage, &pair.bob.public_key)
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshot =
+        paykit_lib::EncryptedLinkSnapshot::deserialize(&state.link_snapshot.unwrap()).unwrap();
+    assert_ne!(snapshot.recovery_context(), &old_context);
+    assert_eq!(
+        snapshot.recovery_context().remote_attempt_id(),
+        new_marker.local_attempt_id.as_deref()
+    );
+    let generation = state.generation;
+    let linked = alice
+        .sdk
+        .ensure_link_with_peer(pair.bob.public_key.clone(), 1)
+        .await
+        .unwrap();
+    assert_eq!(linked.state, LinkedPeerState::Linked);
+    assert_eq!(linked.generation, generation);
+    let sent = alice
+        .sdk
+        .clear_private_payment_list_and_process_outbound(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(sent.cleared.len(), 1);
+    assert!(sent.failed_to_deliver.is_empty());
+    let received = pair
+        .bob
+        .sdk
+        .receive_private_messages_from_linked_peers()
+        .await
+        .unwrap();
+    assert_eq!(received.len(), 1);
+    assert!(received[0].error.is_none());
+    assert!(received[0].report.is_some());
+}
+
+#[tokio::test]
 async fn test_mutual_recovery_markers_do_not_block_relink() {
     let pair = linked_two_party().await;
 
@@ -238,36 +379,15 @@ async fn test_mutual_recovery_markers_do_not_block_relink() {
         .expect("alice should publish a recovery marker");
     pair.bob
         .sdk
-        .observe_encrypted_link_recovery_marker(pair.alice.public_key.clone())
-        .await
-        .expect("bob should observe alice's marker");
-    pair.bob
-        .sdk
         .publish_encrypted_link_recovery_marker(pair.alice.public_key.clone())
         .await
         .expect("bob should publish a recovery marker");
-    pair.alice
-        .sdk
-        .observe_encrypted_link_recovery_marker(pair.bob.public_key.clone())
-        .await
-        .expect("alice should observe bob's marker");
 
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut alice_state = LinkedPeerState::RecoveryRequired;
     let mut bob_state = LinkedPeerState::RecoveryRequired;
     while alice_state != LinkedPeerState::Linked || bob_state != LinkedPeerState::Linked {
         assert!(Instant::now() < deadline, "relink timed out");
-
-        pair.alice
-            .sdk
-            .observe_encrypted_link_recovery_marker(pair.bob.public_key.clone())
-            .await
-            .expect("alice marker observation should not reset an in-progress relink");
-        pair.bob
-            .sdk
-            .observe_encrypted_link_recovery_marker(pair.alice.public_key.clone())
-            .await
-            .expect("bob marker observation should not reset an in-progress relink");
 
         if alice_state != LinkedPeerState::Linked {
             alice_state = pair

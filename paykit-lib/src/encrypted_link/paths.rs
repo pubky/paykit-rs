@@ -1,3 +1,4 @@
+use super::EncryptedLinkRecoveryContext;
 use crate::{
     pubky_routing::identity_pair_path_domain, PaykitError, PublicKey, Result,
     PAYKIT_PRIVATE_PATH_PREFIX,
@@ -14,11 +15,12 @@ pub(super) const PAYKIT_PATH_DOMAIN: &[u8] = b"paykit-path-v0";
 /// Uses [`pubky_noise::path_derivation::derive_asymmetric_paths`] to derive
 /// per-counterparty-pair paths from a DH shared secret. The domain binds both
 /// Pubky identities, so copying a published Noise key cannot alias another
-/// identity's folders. App IDs do not participate in path derivation.
+/// identity's folders. Recovery attempt IDs isolate replacement streams;
+/// App IDs do not participate in path derivation.
 ///
 /// ```text
 /// dh_secret  = X25519(to_scalar_bytes(local_noise_seed), to_montgomery(remote_noise_pk))
-/// path_domain = domain || sorted(local_identity_bytes, remote_identity_bytes)
+/// path_domain = domain || sorted(identity_bytes) || recovery_ids_in_identity_order
 /// write_path = "{base}/{hex(SHA-256(path_domain || dh_secret || local_noise_pk))}"
 /// read_path  = "{base}/{hex(SHA-256(path_domain || dh_secret || remote_noise_pk))}"
 /// ```
@@ -39,11 +41,16 @@ pub(super) fn compute_private_payment_paths(
     local_identity_public_key: &PublicKey,
     remote_identity_public_key: &PublicKey,
     remote_noise_public_key: &PublicKey,
+    recovery_context: &EncryptedLinkRecoveryContext,
 ) -> (String, String) {
-    let path_domain = identity_pair_path_domain(
+    let mut path_domain = identity_pair_path_domain(
         PAYKIT_PATH_DOMAIN,
         local_identity_public_key,
         remote_identity_public_key,
+    );
+    recovery_context.append_bytes(
+        &mut path_domain,
+        local_identity_public_key.to_bytes() < remote_identity_public_key.to_bytes(),
     );
     pubky_noise::path_derivation::derive_asymmetric_paths(
         local_secret_key,
@@ -57,12 +64,14 @@ pub(super) fn validate_private_payment_paths(
     config: &pubky_noise::PubkyNoiseConfig,
     remote_identity_public_key: &PublicKey,
     remote_noise_public_key: &PublicKey,
+    recovery_context: &EncryptedLinkRecoveryContext,
 ) -> Result<()> {
     let (write_path, read_path) = compute_private_payment_paths(
         &config.pubky_root_keypair.secret_key(),
         config.local_session.info().public_key(),
         remote_identity_public_key,
         remote_noise_public_key,
+        recovery_context,
     );
     if config.write_path != write_path || config.read_path != read_path {
         return Err(PaykitError::Validation(
@@ -86,22 +95,44 @@ mod tests {
         let alice_noise_public = derive_paykit_noise_public_key(&alice.secret_key());
         let bob_noise_public = derive_paykit_noise_public_key(&bob.secret_key());
 
+        let alice_id = "650e8400-e29b-41d4-a716-446655440000";
+        let bob_id = "550e8400-e29b-41d4-a716-446655440000";
+        let alice_context =
+            EncryptedLinkRecoveryContext::new(Some(alice_id), Some(bob_id)).unwrap();
+        let bob_context = EncryptedLinkRecoveryContext::new(Some(bob_id), Some(alice_id)).unwrap();
         let (alice_write, alice_read) = compute_private_payment_paths(
             &alice_noise_secret,
             &alice.public_key(),
             &bob.public_key(),
             &bob_noise_public,
+            &alice_context,
         );
         let (bob_write, bob_read) = compute_private_payment_paths(
             &bob_noise_secret,
             &bob.public_key(),
             &alice.public_key(),
             &alice_noise_public,
+            &bob_context,
         );
 
         assert_eq!(alice_write, bob_read);
         assert_eq!(alice_read, bob_write);
         assert_ne!(alice_write, alice_read);
+        for context in [
+            EncryptedLinkRecoveryContext::default(),
+            EncryptedLinkRecoveryContext::new(Some(alice_id), None).unwrap(),
+            EncryptedLinkRecoveryContext::new(None, Some(bob_id)).unwrap(),
+        ] {
+            let (write, read) = compute_private_payment_paths(
+                &alice_noise_secret,
+                &alice.public_key(),
+                &bob.public_key(),
+                &bob_noise_public,
+                &context,
+            );
+            assert_ne!(write, alice_write);
+            assert_ne!(read, alice_read);
+        }
     }
 
     #[test]
@@ -111,10 +142,13 @@ mod tests {
         let other = pubky::Keypair::from_secret(&[3; 32]).public_key();
         let secret = derive_paykit_noise_secret_key(&[4; 32]);
         let remote_noise = derive_paykit_noise_public_key(&[5; 32]);
-        let original = compute_private_payment_paths(&secret, &alice, &bob, &remote_noise);
+        let context = EncryptedLinkRecoveryContext::default();
+        let original =
+            compute_private_payment_paths(&secret, &alice, &bob, &remote_noise, &context);
 
         for (local, remote) in [(&alice, &other), (&other, &bob)] {
-            let changed = compute_private_payment_paths(&secret, local, remote, &remote_noise);
+            let changed =
+                compute_private_payment_paths(&secret, local, remote, &remote_noise, &context);
             assert_ne!(original.0, changed.0);
             assert_ne!(original.1, changed.1);
         }

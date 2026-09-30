@@ -180,7 +180,6 @@ where
                         &counterparty,
                         &session_access,
                         &lease,
-                        true,
                         Some(message_id),
                     )
                     .await;
@@ -363,7 +362,7 @@ where
         lease: &PeerLinkOperationLease,
         session_access: &PubkySessionAccess,
     ) -> Result<()> {
-        let mark = mark_recovery_required_with_lease(
+        mark_recovery_required_with_lease(
             &self.storage,
             counterparty.clone(),
             lease.clone(),
@@ -371,12 +370,7 @@ where
         )
         .await?;
         let _ = self
-            .publish_local_recovery_marker_with_session(
-                counterparty,
-                session_access,
-                lease,
-                mark.new_episode,
-            )
+            .publish_local_recovery_marker_with_session(counterparty, session_access, lease)
             .await;
         Ok(())
     }
@@ -533,16 +527,16 @@ where
         let error = err.to_string();
         if requires_recovery {
             let failed = mark_outbound_recovery_required(sending, error.clone(), now);
-            let (failed, mark) = self
+            let failed = self
                 .retry_storage_transaction(|| {
                     let failed = failed.clone();
                     let lease = lease.clone();
                     let counterparty = counterparty.clone();
                     move |tx| {
                         crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                        let mark = mark_recovery_required_in_transaction(tx, &counterparty, now)?;
+                        mark_recovery_required_in_transaction(tx, &counterparty, now)?;
                         tx.save_outbound_private_message(failed.clone())?;
-                        Ok((failed, mark))
+                        Ok(failed)
                     }
                 })
                 .await?;
@@ -555,7 +549,6 @@ where
                 counterparty,
                 session_access,
                 lease,
-                mark.new_episode,
                 Some(failed.outbound_message_id),
             )
             .await;
@@ -598,16 +591,10 @@ where
         counterparty: &PubkyPublicKey,
         session_access: &PubkySessionAccess,
         lease: &PeerLinkOperationLease,
-        new_episode: bool,
         outbound_message_id: Option<u64>,
     ) {
         if let Err(err) = self
-            .publish_local_recovery_marker_with_session(
-                counterparty,
-                session_access,
-                lease,
-                new_episode,
-            )
+            .publish_local_recovery_marker_with_session(counterparty, session_access, lease)
             .await
         {
             report

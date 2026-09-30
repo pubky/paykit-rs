@@ -14,6 +14,7 @@ async fn test_handshake_paths_isolate_copied_noise_key() {
             local_noise_secret,
             remote_identity,
             &remote_noise_public,
+            EncryptedLinkRecoveryContext::default(),
             outbox_client.clone(),
         )
         .unwrap()
@@ -58,6 +59,7 @@ async fn test_handshake_paths_isolate_copied_noise_key() {
             &local_noise_secret,
             &other_identity,
             &remote_noise_public,
+            &EncryptedLinkRecoveryContext::default(),
         )
         .await
         .unwrap(),
@@ -158,6 +160,7 @@ async fn test_encrypted_link_restore_rejects_other_identity_paths() {
         config.pubky_root_keypair.secret_key(),
         &other_identity,
         snapshot.remote_noise_public_key(),
+        EncryptedLinkRecoveryContext::default(),
         config.outbox_client.clone(),
     )
     .unwrap();
@@ -182,6 +185,7 @@ async fn test_encrypted_link_restore_rejects_different_noise_key() {
         different_secret,
         &recipient,
         snapshot.remote_noise_public_key(),
+        snapshot.recovery_context().clone(),
         outbox_client.clone(),
     )
     .unwrap();
@@ -219,6 +223,7 @@ async fn test_handshake_restore_rejects_different_noise_key() {
         different_secret,
         &recipient,
         snapshot.remote_noise_public_key(),
+        snapshot.recovery_context().clone(),
         outbox_client.clone(),
     )
     .unwrap();
@@ -256,9 +261,19 @@ async fn test_handshake_snapshot_serialize_roundtrip() {
 
     let snapshot = initiator_handshake.snapshot().unwrap();
     let bytes = snapshot.serialize();
-    assert_eq!(bytes.len(), 229, "snapshot should be 229 bytes");
+    assert_eq!(bytes.len(), 301);
 
     let restored_snapshot = EncryptedLinkHandshakeSnapshot::deserialize(&bytes).unwrap();
+    assert_eq!(
+        restored_snapshot.recovery_context(),
+        snapshot.recovery_context()
+    );
+    let mut invalid = bytes.clone();
+    *invalid.last_mut().unwrap() = b'x';
+    assert!(matches!(
+        EncryptedLinkHandshakeSnapshot::deserialize(&invalid),
+        Err(PaykitError::InvalidData { .. })
+    ));
     assert_eq!(
         restored_snapshot.recipient(),
         snapshot.recipient(),
@@ -499,7 +514,7 @@ async fn test_encrypted_link_snapshot_serialize_roundtrip() {
     // Take a snapshot and serialize.
     let snapshot = setup.sender_link.snapshot().unwrap();
     let bytes = snapshot.serialize();
-    assert_eq!(bytes.len(), 229, "snapshot should be 229 bytes");
+    assert_eq!(bytes.len(), 301);
 
     // Deserialize and verify the recipient is reconstructed correctly.
     let restored_snapshot = EncryptedLinkSnapshot::deserialize(&bytes).unwrap();
@@ -831,6 +846,7 @@ fn test_encrypted_link_snapshot_deserialize_accepts_max_usable_noise_nonce() {
     let state = transport_snapshot_state_with_nonces(u64::MAX - 1, u64::MAX - 1);
     let mut bytes = state.serialize();
     bytes.extend_from_slice(&Keypair::random().public_key().as_inner().to_bytes());
+    bytes.extend_from_slice(&[0; 72]);
 
     let snapshot = EncryptedLinkSnapshot::deserialize(&bytes).unwrap();
 
@@ -844,6 +860,7 @@ fn test_encrypted_link_snapshot_deserialize_rejects_reserved_noise_nonce() {
             transport_snapshot_state_with_nonces(sending_nonce, receiving_nonce).serialize();
         let mut bytes = bytes;
         bytes.extend_from_slice(&Keypair::random().public_key().as_inner().to_bytes());
+        bytes.extend_from_slice(&[0; 72]);
 
         assert!(
             matches!(

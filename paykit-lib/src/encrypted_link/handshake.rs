@@ -6,6 +6,7 @@ use super::{
     link::EncryptedLink,
     paths::{compute_private_payment_paths, validate_private_payment_paths},
     snapshot::EncryptedLinkHandshakeSnapshot,
+    EncryptedLinkRecoveryContext,
 };
 
 /// Default maximum number of consecutive automatic recovery attempts before
@@ -31,6 +32,7 @@ pub struct EncryptedLinkHandshake {
     remote_identity_public_key: PublicKey,
     /// The counterparty's identity-wide Noise key, used for pairwise paths.
     remote_noise_public_key: PublicKey,
+    recovery_context: EncryptedLinkRecoveryContext,
     /// Shared Noise configuration needed for snapshot-based recovery.
     config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
     /// Number of consecutive recovery attempts so far.
@@ -64,6 +66,7 @@ impl EncryptedLinkHandshake {
                 })?,
             self.remote_identity_public_key.clone(),
             self.remote_noise_public_key.clone(),
+            self.recovery_context.clone(),
         ))
     }
 
@@ -111,6 +114,8 @@ pub enum HandshakeProgress {
 /// `sender_secret_key` is the local Noise secret, not the Pubky identity secret.
 /// `receiver_identity_public_key` selects the counterparty's homeserver, while
 /// `receiver_noise_public_key` is its authenticated App Registry Noise key.
+/// `recovery_context` selects the current pair of recovery attempts; both peers
+/// must use the same IDs in opposite local/remote order.
 /// Session creation, capability scope, and key rotation remain the caller's responsibility.
 ///
 /// Call [`advance_handshake`] until it returns [`HandshakeProgress::Complete`].
@@ -120,6 +125,7 @@ pub fn initiate_encrypted_link(
     sender_secret_key: [u8; 32],
     receiver_identity_public_key: &PublicKey,
     receiver_noise_public_key: &PublicKey,
+    recovery_context: EncryptedLinkRecoveryContext,
     outbox_client: pubky::Pubky,
 ) -> Result<EncryptedLinkHandshake> {
     debug!("initializing Encrypted Link handshake (initiator)");
@@ -129,6 +135,7 @@ pub fn initiate_encrypted_link(
         session.info().public_key(),
         receiver_identity_public_key,
         receiver_noise_public_key,
+        &recovery_context,
     );
 
     let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
@@ -161,6 +168,7 @@ pub fn initiate_encrypted_link(
         encryptor,
         remote_identity_public_key: receiver_identity_public_key.clone(),
         remote_noise_public_key: receiver_noise_public_key.clone(),
+        recovery_context,
         config,
         recovery_attempts: 0,
         max_recovery_attempts: DEFAULT_MAX_RECOVERY_ATTEMPTS,
@@ -173,6 +181,7 @@ pub fn initiate_encrypted_link(
 /// `receiver_secret_key` is the local Noise secret, not the Pubky identity secret.
 /// `sender_identity_public_key` selects the counterparty's homeserver, while
 /// `sender_noise_public_key` is its authenticated App Registry Noise key.
+/// `recovery_context` must mirror the initiator's current recovery attempt IDs.
 /// Session creation, capability scope, and key rotation remain the caller's responsibility.
 ///
 /// Call [`advance_handshake`] until it returns [`HandshakeProgress::Complete`].
@@ -182,6 +191,7 @@ pub fn accept_encrypted_link(
     receiver_secret_key: [u8; 32],
     sender_identity_public_key: &PublicKey,
     sender_noise_public_key: &PublicKey,
+    recovery_context: EncryptedLinkRecoveryContext,
     outbox_client: pubky::Pubky,
 ) -> Result<EncryptedLinkHandshake> {
     debug!("initializing Encrypted Link handshake (responder)");
@@ -191,6 +201,7 @@ pub fn accept_encrypted_link(
         session.info().public_key(),
         sender_identity_public_key,
         sender_noise_public_key,
+        &recovery_context,
     );
 
     let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
@@ -223,6 +234,7 @@ pub fn accept_encrypted_link(
         encryptor,
         remote_identity_public_key: sender_identity_public_key.clone(),
         remote_noise_public_key: sender_noise_public_key.clone(),
+        recovery_context,
         config,
         recovery_attempts: 0,
         max_recovery_attempts: DEFAULT_MAX_RECOVERY_ATTEMPTS,
@@ -300,6 +312,7 @@ pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<
                 config: handshake.config,
                 remote_identity_public_key: handshake.remote_identity_public_key,
                 remote_noise_public_key: handshake.remote_noise_public_key,
+                recovery_context: handshake.recovery_context,
                 recovery_attempts: handshake.recovery_attempts,
                 max_recovery_attempts: handshake.max_recovery_attempts,
             }))
@@ -337,6 +350,7 @@ fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakePr
         handshake.encryptor,
         handshake.remote_identity_public_key,
         handshake.remote_noise_public_key,
+        handshake.recovery_context,
         handshake.config,
     )))
 }
@@ -360,6 +374,7 @@ pub async fn restore_encrypted_link_handshake(
         session.info().public_key(),
         remote_identity_public_key,
         snapshot.remote_noise_public_key(),
+        snapshot.recovery_context(),
     );
 
     let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
@@ -420,10 +435,12 @@ async fn restore_encrypted_link_handshake_inner(
     }
 
     let remote_noise_public_key = snapshot.remote_noise_public_key().clone();
+    let recovery_context = snapshot.recovery_context().clone();
     validate_private_payment_paths(
         &config,
         remote_identity_public_key,
         &remote_noise_public_key,
+        &recovery_context,
     )?;
     let state = snapshot.into_state();
     if state.static_secret != Some(config.pubky_root_keypair.secret_key()) {
@@ -445,6 +462,7 @@ async fn restore_encrypted_link_handshake_inner(
         encryptor,
         remote_identity_public_key: remote_identity_public_key.clone(),
         remote_noise_public_key,
+        recovery_context,
         config,
         recovery_attempts: 0,
         max_recovery_attempts: DEFAULT_MAX_RECOVERY_ATTEMPTS,

@@ -1,8 +1,8 @@
 //! Stateless Encrypted Link Recovery Marker helpers.
 //!
-//! Recovery markers are public Pubky records used when a runtime decides an
-//! Encrypted Link with one counterparty can no longer be used safely. They are
-//! not sent over the broken link. Instead, each peer derives a pairwise marker
+//! Recovery markers are public Pubky records identifying per-peer Encrypted
+//! Link stream attempts. They are published before handshakes and retained
+//! after completion, independently of the link. Each peer derives a marker
 //! path from its local Noise secret key, the counterparty Noise public key, and
 //! the sorted Pubky identity pair. It writes a minimal marker to its own
 //! homeserver and polls the counterparty's derived marker path.
@@ -12,9 +12,8 @@
 //! counters, peer labels, or recovery transcripts.
 //!
 //! This module only provides the wire shape and Pubky publish/fetch/remove
-//! helpers. A higher-level runtime or SDK decides when a link is
-//! recovery-required, whether public markers are allowed by policy, and how to
-//! relink after observing a marker.
+//! helpers. A higher-level runtime or SDK coordinates marker writes, decides
+//! when a new attempt is needed, and relinks after observing a changed marker.
 
 use pubky::{
     errors::RequestError, Error as PubkyError, PubkySession, PublicKey, PublicStorage, StatusCode,
@@ -31,7 +30,7 @@ const RECOVERY_MARKER_KIND: &str = "paykit.encrypted_link_recovery";
 const RECOVERY_MARKER_PATH_DOMAIN: &[u8] = b"paykit-link-recovery-v0";
 const RECOVERY_MARKER_MAX_BYTES: usize = 4 * 1024;
 
-/// Minimal public marker that asks a counterparty to relink an Encrypted Link.
+/// Minimal public marker identifying a peer's current Encrypted Link attempt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EncryptedLinkRecoveryMarker {
     attempt_id: String,

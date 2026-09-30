@@ -14,7 +14,7 @@ use super::{
         private_candidate_batch, private_payable_from_batch, public_payable_from_batch,
         PrivateRecoveryOutcome,
     },
-    recovery::{local_recovery_marker_belongs_to_current_episode, RecoveryRequiredUpdate},
+    recovery::RecoveryRequiredUpdate,
 };
 use crate::{
     domain::adapters::{

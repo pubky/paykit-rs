@@ -227,6 +227,7 @@ async fn test_parallel_writer_reader_happy_path() {
             writer_noise_secret_key,
             &w_reader_pubkey,
             &reader_noise_public_key,
+            EncryptedLinkRecoveryContext::default(),
             writer_sdk,
         )
         .unwrap();
@@ -261,6 +262,7 @@ async fn test_parallel_writer_reader_happy_path() {
             reader_noise_secret_key,
             &r_writer_pubkey,
             &writer_noise_public_key,
+            EncryptedLinkRecoveryContext::default(),
             reader_sdk,
         )
         .unwrap();

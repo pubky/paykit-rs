@@ -56,6 +56,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Shared private state requires identity-wide `/pub/paykit/:rw` session scope.
   Recovery marker exchange is mandatory; the recovery-marker opt-out is removed
   from Rust, Swift, and Kotlin configuration.
+- Encrypted Link paths bind both peers' persistent recovery attempt IDs.
+  Snapshots retain those IDs, and recovery leaves retired streams untouched.
+  Markers remain after relinking; explicit removal requires a blocked peer.
+  Low-level handshake and outbox cleanup APIs take an `EncryptedLinkRecoveryContext`.
 - **Rust API:** `PAYKIT_PATH_PREFIX` includes its trailing slash;
   `MAX_ENCRYPTED_RECEIPT_BYTES` is now `ENCRYPTED_RECEIPT_MAX_BYTES`.
   `PaykitAppRegistry::set_noise_public_key` takes the key generation explicitly.

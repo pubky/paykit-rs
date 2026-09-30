@@ -89,7 +89,7 @@ where
             })?;
         let Some(snapshot_bytes) = stored_link_state.link_snapshot.as_ref() else {
             let now = self.clock.now();
-            let mark = mark_recovery_required_with_lease(
+            mark_recovery_required_with_lease(
                 &self.storage,
                 counterparty.clone(),
                 lease.clone(),
@@ -97,12 +97,7 @@ where
             )
             .await?;
             let _ = self
-                .publish_local_recovery_marker_with_session(
-                    &counterparty,
-                    &session_access,
-                    &lease,
-                    mark.new_episode,
-                )
+                .publish_local_recovery_marker_with_session(&counterparty, &session_access, &lease)
                 .await;
             return Err(PaykitSdkError::RecoveryRequired {
                 context: format!(
@@ -115,7 +110,7 @@ where
             Ok(snapshot) => snapshot,
             Err(err) => {
                 let now = self.clock.now();
-                let mark = mark_recovery_required_with_lease(
+                mark_recovery_required_with_lease(
                     &self.storage,
                     counterparty.clone(),
                     lease.clone(),
@@ -127,7 +122,6 @@ where
                         &counterparty,
                         &session_access,
                         &lease,
-                        mark.new_episode,
                     )
                     .await;
                 return Err(err.into());
@@ -141,7 +135,7 @@ where
             .await?
         {
             let now = self.clock.now();
-            let mark = mark_recovery_required_with_lease(
+            mark_recovery_required_with_lease(
                 &self.storage,
                 counterparty.clone(),
                 lease.clone(),
@@ -149,12 +143,7 @@ where
             )
             .await?;
             let _ = self
-                .publish_local_recovery_marker_with_session(
-                    &counterparty,
-                    &session_access,
-                    &lease,
-                    mark.new_episode,
-                )
+                .publish_local_recovery_marker_with_session(&counterparty, &session_access, &lease)
                 .await;
             return Err(PaykitSdkError::RecoveryRequired {
                 context: format!("counterparty {counterparty} rotated its Paykit identity key"),
@@ -174,7 +163,7 @@ where
             Ok(link) => link,
             Err(err) => {
                 let now = self.clock.now();
-                let mark = mark_recovery_required_with_lease(
+                mark_recovery_required_with_lease(
                     &self.storage,
                     counterparty.clone(),
                     lease.clone(),
@@ -186,7 +175,6 @@ where
                         &counterparty,
                         &session_access,
                         &lease,
-                        mark.new_episode,
                     )
                     .await;
                 return Err(err.into());
@@ -202,7 +190,7 @@ where
                         || matches!(err, paykit_lib::PaykitError::InvalidData { .. }) =>
                 {
                     let now = self.clock.now();
-                    let mark = mark_recovery_required_with_lease(
+                    mark_recovery_required_with_lease(
                         &self.storage,
                         counterparty.clone(),
                         lease.clone(),
@@ -214,7 +202,6 @@ where
                             &counterparty,
                             &session_access,
                             &lease,
-                            mark.new_episode,
                         )
                         .await;
                     return Err(err.into());

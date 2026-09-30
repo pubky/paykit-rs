@@ -307,6 +307,14 @@ async fn test_shared_state_compacts_private_lists_without_changing_read_only_sta
             .await
             .unwrap();
     }
+    let views = pair
+        .server
+        .sdk
+        .current_private_payment_lists(&pair.bob.public_key)
+        .await
+        .unwrap();
+    assert_eq!(views.len(), 1);
+    assert!(views[0].payment_endpoints.is_empty());
     let state = pair.server.storage_state().await;
     let kind = paykit_lib::PrivateMessageKind::PrivatePaymentList.as_str();
     let sent = state
@@ -331,14 +339,6 @@ async fn test_shared_state_compacts_private_lists_without_changing_read_only_sta
             .count(),
         1
     );
-    let views = pair
-        .server
-        .sdk
-        .current_private_payment_lists(&pair.bob.public_key)
-        .await
-        .unwrap();
-    assert_eq!(views.len(), 1);
-    assert!(views[0].payment_endpoints.is_empty());
     let revision = pair.server.storage.last_revision().unwrap();
     assert_eq!(pair.server.storage_state().await, state);
     assert_eq!(pair.server.storage.last_revision().unwrap(), revision);

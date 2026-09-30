@@ -83,8 +83,12 @@ pub(in crate::backup) fn reconcile_restored_linked_peers(
     }
 
     let mut peers = Vec::new();
-    for record in linked_peers.values() {
+    for record in linked_peers.values_mut() {
         if record.state == LinkedPeerState::RecoveryRequired {
+            // An incomplete restored checkpoint must not reuse an old stream.
+            record.local_recovery_attempt_id = None;
+            record.local_recovery_marker_created_at = None;
+            record.local_recovery_marker_last_error = None;
             peers.push(record.counterparty.clone());
         }
     }

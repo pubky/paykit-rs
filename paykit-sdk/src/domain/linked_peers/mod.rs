@@ -84,10 +84,6 @@ pub struct LinkedPeerHandshakeReport {
     pub handshake_role: Option<EncryptedLinkHandshakeRole>,
 }
 
-pub(crate) struct RecoveryRequiredMark {
-    pub new_episode: bool,
-}
-
 /// Load the durable Linked Peer record for a counterparty.
 pub async fn load_linked_peer<S>(
     storage: &S,
@@ -257,7 +253,7 @@ pub(crate) async fn mark_recovery_required_with_lease<S>(
     counterparty: PubkyPublicKey,
     lease: PeerLinkOperationLease,
     now: DateTime<Utc>,
-) -> Result<RecoveryRequiredMark>
+) -> Result<()>
 where
     S: StorageAdapter,
 {
@@ -268,22 +264,23 @@ pub(crate) fn mark_recovery_required_in_transaction<T>(
     tx: &mut T,
     counterparty: &PubkyPublicKey,
     now: DateTime<Utc>,
-) -> Result<RecoveryRequiredMark>
+) -> Result<()>
 where
     T: StorageTransaction + ?Sized,
 {
-    mark_recovery_required_in_transaction_inner(tx, counterparty, now, true)
+    mark_recovery_required_in_transaction_inner(tx, counterparty, now, true, None)
 }
 
 pub(crate) fn mark_recovery_required_for_marker_in_transaction<T>(
     tx: &mut T,
     counterparty: &PubkyPublicKey,
     now: DateTime<Utc>,
-) -> Result<RecoveryRequiredMark>
+    remote_attempt_id: Option<&str>,
+) -> Result<()>
 where
     T: StorageTransaction + ?Sized,
 {
-    mark_recovery_required_in_transaction_inner(tx, counterparty, now, false)
+    mark_recovery_required_in_transaction_inner(tx, counterparty, now, false, remote_attempt_id)
 }
 
 fn mark_recovery_required_in_transaction_inner<T>(
@@ -291,7 +288,8 @@ fn mark_recovery_required_in_transaction_inner<T>(
     counterparty: &PubkyPublicKey,
     now: DateTime<Utc>,
     bump_existing_episode: bool,
-) -> Result<RecoveryRequiredMark>
+    remote_attempt_id: Option<&str>,
+) -> Result<()>
 where
     T: StorageTransaction + ?Sized,
 {
@@ -300,6 +298,18 @@ where
         .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
     ensure_not_blocked(&record)?;
     let new_episode = record.state != LinkedPeerState::RecoveryRequired;
+    if let Some(attempt_id) = remote_attempt_id {
+        // Following the peer must not rotate our own attempt and trigger a loop.
+        record.remote_recovery_attempt_id = Some(attempt_id.to_owned());
+        record.remote_recovery_marker_observed_at = Some(now);
+    } else if new_episode || record.local_recovery_attempt_id.is_none() {
+        let marker = paykit_lib::EncryptedLinkRecoveryMarker::new_v4(
+            now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        )?;
+        record.local_recovery_attempt_id = Some(marker.attempt_id().to_owned());
+        record.local_recovery_marker_created_at = Some(now);
+        record.local_recovery_marker_last_error = None;
+    }
     record.state = LinkedPeerState::RecoveryRequired;
     if new_episode || record.last_sync_at.is_none() {
         record.last_sync_at = Some(now);
@@ -333,7 +343,7 @@ where
             ))?;
         }
     }
-    Ok(RecoveryRequiredMark { new_episode })
+    Ok(())
 }
 
 async fn mark_recovery_required_inner<S>(
@@ -341,7 +351,7 @@ async fn mark_recovery_required_inner<S>(
     counterparty: PubkyPublicKey,
     lease: Option<PeerLinkOperationLease>,
     now: DateTime<Utc>,
-) -> Result<RecoveryRequiredMark>
+) -> Result<()>
 where
     S: StorageAdapter,
 {

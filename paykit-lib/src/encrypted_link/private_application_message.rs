@@ -225,12 +225,12 @@ pub(super) async fn receive_private_application_messages(
 }
 
 /// Delete all encrypted stream slots written by the local identity for one
-/// counterparty.
+/// counterparty and recovery context.
 ///
 /// This clears the local write path used by the counterparty as their read path.
-/// It is intended for recovery before starting a fresh Encrypted Link Handshake
-/// after the previous link state has been abandoned. The counterparty's outbox
-/// is not touched. The local Pubky identity comes from `session`; the remote
+/// Only retire a context after neither peer needs its handshake or messages.
+/// Recovery itself uses a new context and does not require deletion. The
+/// counterparty's outbox is not touched. The local Pubky identity comes from `session`; the remote
 /// identity and Noise key must belong to the intended counterparty. The caller
 /// owns session creation, capability scope, key rotation, and request timeouts.
 pub async fn clear_encrypted_link_outbox(
@@ -238,12 +238,14 @@ pub async fn clear_encrypted_link_outbox(
     local_secret_key: &[u8; 32],
     remote_identity_public_key: &PublicKey,
     remote_noise_public_key: &PublicKey,
+    recovery_context: &super::EncryptedLinkRecoveryContext,
 ) -> Result<usize> {
     let (write_path, _) = compute_private_payment_paths(
         local_secret_key,
         session.info().public_key(),
         remote_identity_public_key,
         remote_noise_public_key,
+        recovery_context,
     );
     let list_path = format!("{write_path}/");
     let storage = session.storage();

@@ -375,11 +375,10 @@ async fn test_mark_recovery_required_clears_handshake_snapshot() {
         .await
         .unwrap();
 
-    let mark = mark_recovery_required_inner(&storage, counterparty.clone(), None, timestamp())
+    mark_recovery_required_inner(&storage, counterparty.clone(), None, timestamp())
         .await
         .unwrap();
 
-    assert!(mark.new_episode);
     let peer = load_linked_peer(&storage, &counterparty)
         .await
         .unwrap()

@@ -4,10 +4,7 @@ use paykit_sdk::{
     PaykitSdkError, PrivateStreamParseStatus,
 };
 
-use crate::harness::{
-    deliver, drive_recovery_to_linked, linked_two_party,
-    wait_until_marker_is_newer_than_observer_checkpoint, TestUser,
-};
+use crate::harness::{deliver, drive_recovery_to_linked, linked_two_party, TestUser};
 
 mod accounting;
 mod cancellation_restore;
@@ -232,8 +229,6 @@ async fn test_allowance_survives_restart_restore_and_link_recovery() {
         AllowanceHistoryStatus::Consistent
     );
 
-    wait_until_marker_is_newer_than_observer_checkpoint(&pair.alice, &restored_bob.public_key)
-        .await;
     restored_bob
         .sdk
         .publish_encrypted_link_recovery_marker(pair.alice.public_key.clone())

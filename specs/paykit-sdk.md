@@ -1040,8 +1040,8 @@ unless explicitly configured to manage that app's complete endpoint namespace.
 When one side can no longer trust its local Encrypted Link state, the SDK fails
 closed locally and publishes an Encrypted Link Recovery Marker through Pubky
 public storage when matching live session access is available. The marker is
-not sent over the broken link. It is a minimal public signal that the
-counterparty should relink.
+not sent over the broken link. Its attempt ID also identifies the peer's current
+stream generation, so the marker remains published after recovery completes.
 
 Marker privacy rules:
 
@@ -1054,8 +1054,8 @@ Marker privacy rules:
 
 SDK behavior:
 
-1. Publish a local marker when a link is marked recovery-required and matching
-   live session access is available.
+1. Persist and publish a local attempt ID before the first handshake. Rotate it
+   when local state requires a fresh connection; retries reuse the saved ID.
 2. Observe the counterparty marker before trusting cached private payment state
    when matching live session access is available. Cached state can still be
    listed for the same persisted identity without live session access, but it
@@ -1064,11 +1064,20 @@ SDK behavior:
 3. If a new counterparty attempt ID is observed, mark the peer
    recovery-required, clear active link/handshake snapshots, and pause private
    automation.
-4. Record observed attempt IDs so a stale marker does not repeatedly break a
-   re-established link.
-5. Remove local markers after successful relink when possible. Previously
-   observed attempt IDs are ignored; an unseen marker can still request recovery.
-   Remote timestamps are not compared with local clocks to suppress recovery.
+4. Bind handshake and message paths to both peers' attempt IDs, ordered by Pubky
+   identity. Snapshots retain this context. Following a remote attempt does not
+   rotate the local ID, and repeated observations do not reset the connection.
+5. Check markers during handshake startup/advancement and before
+   `ensure_link_with_peer` reuses a completed link. Keep markers after completion;
+   explicit removal is allowed only for blocked peers. Remote timestamps are not
+   compared with local clocks.
+6. Publish/remove markers under a renewable Pubky write lock, rechecking peer
+   operation ownership after acquiring the lock.
+
+Recovery does not delete old streams. Their paths cannot overlap a replacement
+connection, including when an old write finishes late. Retiring these files is
+separate from relinking; pending application events still require replay and
+deduplication on the replacement link.
 
 ### Publish Private Payment List
 

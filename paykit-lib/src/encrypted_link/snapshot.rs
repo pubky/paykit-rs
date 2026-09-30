@@ -1,3 +1,4 @@
+use super::EncryptedLinkRecoveryContext;
 use crate::{PaykitError, PublicKey, Result};
 
 /// Serializable snapshot of an established [`EncryptedLink`](crate::EncryptedLink).
@@ -12,6 +13,7 @@ pub struct EncryptedLinkSnapshot {
     recipient: PublicKey,
     /// The counterparty's identity-wide Noise public key.
     remote_noise_public_key: PublicKey,
+    recovery_context: EncryptedLinkRecoveryContext,
 }
 
 fn recipient_from_snapshot_state(
@@ -42,17 +44,26 @@ fn public_key_from_bytes(bytes: &[u8], context: &'static str) -> Result<PublicKe
 fn serialize_snapshot(
     state: &pubky_noise::serializer::PubkyNoiseSessionState,
     remote_noise_public_key: &PublicKey,
+    recovery_context: &EncryptedLinkRecoveryContext,
 ) -> Vec<u8> {
     let mut bytes = state.serialize();
     bytes.extend_from_slice(&remote_noise_public_key.to_bytes());
+    recovery_context.append_bytes(&mut bytes, true);
     bytes
 }
 
 fn deserialize_snapshot(
     bytes: &[u8],
     snapshot_kind: &'static str,
-) -> Result<(pubky_noise::serializer::PubkyNoiseSessionState, PublicKey)> {
-    let Some(state_len) = bytes.len().checked_sub(32) else {
+) -> Result<(
+    pubky_noise::serializer::PubkyNoiseSessionState,
+    PublicKey,
+    EncryptedLinkRecoveryContext,
+)> {
+    let Some(state_len) = bytes
+        .len()
+        .checked_sub(32 + EncryptedLinkRecoveryContext::ENCODED_LEN)
+    else {
         return Err(PaykitError::InvalidData {
             context: format!("{snapshot_kind} is too short"),
             source: None,
@@ -66,8 +77,9 @@ fn deserialize_snapshot(
         });
     }
     let remote_noise_public_key =
-        public_key_from_bytes(&bytes[state_len..], "remote Noise public key")?;
-    Ok((state, remote_noise_public_key))
+        public_key_from_bytes(&bytes[state_len..state_len + 32], "remote Noise public key")?;
+    let recovery_context = EncryptedLinkRecoveryContext::from_bytes(&bytes[state_len + 32..])?;
+    Ok((state, remote_noise_public_key, recovery_context))
 }
 
 impl std::fmt::Debug for EncryptedLinkSnapshot {
@@ -84,11 +96,13 @@ impl EncryptedLinkSnapshot {
         state: pubky_noise::serializer::PubkyNoiseSessionState,
         recipient: PublicKey,
         remote_noise_public_key: PublicKey,
+        recovery_context: EncryptedLinkRecoveryContext,
     ) -> Self {
         Self {
             state,
             recipient,
             remote_noise_public_key,
+            recovery_context,
         }
     }
 
@@ -103,9 +117,13 @@ impl EncryptedLinkSnapshot {
     /// Serialize to a compact binary format for durable storage.
     ///
     /// The output contains the `pubky-noise` session state followed by the
-    /// counterparty's 32-byte identity-wide Noise public key.
+    /// counterparty's 32-byte Noise public key and 72-byte recovery context.
     pub fn serialize(&self) -> Vec<u8> {
-        serialize_snapshot(&self.state, &self.remote_noise_public_key)
+        serialize_snapshot(
+            &self.state,
+            &self.remote_noise_public_key,
+            &self.recovery_context,
+        )
     }
 
     /// Deserialize from bytes previously produced by [`serialize`](Self::serialize).
@@ -113,7 +131,7 @@ impl EncryptedLinkSnapshot {
     /// Returns [`PaykitError::InvalidData`] if the bytes are malformed or the
     /// embedded public key cannot be reconstructed.
     pub fn deserialize(bytes: &[u8]) -> Result<Self> {
-        let (state, remote_noise_public_key) =
+        let (state, remote_noise_public_key, recovery_context) =
             deserialize_snapshot(bytes, "Encrypted Link snapshot")?;
         let recipient = recipient_from_snapshot_state(&state, "Encrypted Link snapshot")?;
 
@@ -121,6 +139,7 @@ impl EncryptedLinkSnapshot {
             state,
             recipient,
             remote_noise_public_key,
+            recovery_context,
         })
     }
 
@@ -132,6 +151,11 @@ impl EncryptedLinkSnapshot {
     /// Access the counterparty's identity-wide Noise public key.
     pub fn remote_noise_public_key(&self) -> &PublicKey {
         &self.remote_noise_public_key
+    }
+
+    /// Recovery attempts used to derive this connection's stream paths.
+    pub fn recovery_context(&self) -> &EncryptedLinkRecoveryContext {
+        &self.recovery_context
     }
 
     /// Stable identifier of the completed Noise handshake, unchanged by transport messages.
@@ -165,6 +189,7 @@ pub struct EncryptedLinkHandshakeSnapshot {
     recipient: PublicKey,
     /// The counterparty's identity-wide Noise public key.
     remote_noise_public_key: PublicKey,
+    recovery_context: EncryptedLinkRecoveryContext,
 }
 
 impl std::fmt::Debug for EncryptedLinkHandshakeSnapshot {
@@ -181,11 +206,13 @@ impl EncryptedLinkHandshakeSnapshot {
         state: pubky_noise::serializer::PubkyNoiseSessionState,
         recipient: PublicKey,
         remote_noise_public_key: PublicKey,
+        recovery_context: EncryptedLinkRecoveryContext,
     ) -> Self {
         Self {
             state,
             recipient,
             remote_noise_public_key,
+            recovery_context,
         }
     }
 
@@ -200,9 +227,13 @@ impl EncryptedLinkHandshakeSnapshot {
     /// Serialize to a compact binary format for durable storage.
     ///
     /// The output contains the `pubky-noise` session state followed by the
-    /// counterparty's 32-byte identity-wide Noise public key.
+    /// counterparty's 32-byte Noise public key and 72-byte recovery context.
     pub fn serialize(&self) -> Vec<u8> {
-        serialize_snapshot(&self.state, &self.remote_noise_public_key)
+        serialize_snapshot(
+            &self.state,
+            &self.remote_noise_public_key,
+            &self.recovery_context,
+        )
     }
 
     /// Deserialize from bytes previously produced by [`serialize`](Self::serialize).
@@ -210,7 +241,7 @@ impl EncryptedLinkHandshakeSnapshot {
     /// Returns [`PaykitError::InvalidData`] if the bytes are malformed or the
     /// embedded public key cannot be reconstructed.
     pub fn deserialize(bytes: &[u8]) -> Result<Self> {
-        let (state, remote_noise_public_key) =
+        let (state, remote_noise_public_key, recovery_context) =
             deserialize_snapshot(bytes, "Encrypted Link Handshake snapshot")?;
 
         let recipient = recipient_from_snapshot_state(&state, "Encrypted Link Handshake snapshot")?;
@@ -219,6 +250,7 @@ impl EncryptedLinkHandshakeSnapshot {
             state,
             recipient,
             remote_noise_public_key,
+            recovery_context,
         })
     }
 
@@ -230,5 +262,10 @@ impl EncryptedLinkHandshakeSnapshot {
     /// Access the counterparty's identity-wide Noise public key.
     pub fn remote_noise_public_key(&self) -> &PublicKey {
         &self.remote_noise_public_key
+    }
+
+    /// Recovery attempts used to derive this handshake's stream paths.
+    pub fn recovery_context(&self) -> &EncryptedLinkRecoveryContext {
+        &self.recovery_context
     }
 }

@@ -84,10 +84,7 @@ async fn test_mark_private_recovery_pending_skips_newer_link_generation() {
         .mark_private_recovery_pending(&counterparty, Some(2))
         .await
         .unwrap();
-    assert!(matches!(
-        recovery_update,
-        RecoveryRequiredUpdate::Marked { new_episode: true }
-    ));
+    assert!(matches!(recovery_update, RecoveryRequiredUpdate::Marked));
 
     let peer = crate::load_linked_peer(&storage, &counterparty)
         .await

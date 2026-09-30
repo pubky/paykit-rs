@@ -130,6 +130,11 @@ impl InProgressHandshakeSetup {
             initiator_noise_secret_key,
             responder_public_key,
             &responder_noise_public_key,
+            EncryptedLinkRecoveryContext::new(
+                Some("650e8400-e29b-41d4-a716-446655440000"),
+                Some("550e8400-e29b-41d4-a716-446655440000"),
+            )
+            .unwrap(),
             initiator_sdk,
         )
         .unwrap();
@@ -139,6 +144,11 @@ impl InProgressHandshakeSetup {
             responder_noise_secret_key,
             initiator_public_key,
             &initiator_noise_public_key,
+            EncryptedLinkRecoveryContext::new(
+                Some("550e8400-e29b-41d4-a716-446655440000"),
+                Some("650e8400-e29b-41d4-a716-446655440000"),
+            )
+            .unwrap(),
             responder_sdk,
         )
         .unwrap();
@@ -230,6 +240,7 @@ impl PrivateTestSetup {
             sender_noise_secret_key,
             receiver_public_key,
             &receiver_noise_public_key,
+            EncryptedLinkRecoveryContext::default(),
             sender_sdk,
         )
         .unwrap();
@@ -240,6 +251,7 @@ impl PrivateTestSetup {
             receiver_noise_secret_key,
             sender_public_key,
             &sender_noise_public_key,
+            EncryptedLinkRecoveryContext::default(),
             receiver_sdk,
         )
         .unwrap();

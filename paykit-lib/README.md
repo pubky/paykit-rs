@@ -304,12 +304,16 @@ its stream, while apps under the same identity still share one path pair.
 Session-based helpers obtain the local identity from the Pubky session.
 
 #### Handshake Initiation
-- `initiate_encrypted_link(session, sender_noise_secret_key, receiver_identity_public_key, receiver_noise_public_key, outbox_client) -> Result<EncryptedLinkHandshake>`
+- `initiate_encrypted_link(session, sender_noise_secret_key, receiver_identity_public_key, receiver_noise_public_key, recovery_context, outbox_client) -> Result<EncryptedLinkHandshake>`
   Initializes a Noise XX handshake as the **initiator**. Returns a handshake handle to be driven forward with `advance_handshake`.
-- `accept_encrypted_link(session, receiver_noise_secret_key, sender_identity_public_key, sender_noise_public_key, outbox_client) -> Result<EncryptedLinkHandshake>`
+- `accept_encrypted_link(session, receiver_noise_secret_key, sender_identity_public_key, sender_noise_public_key, recovery_context, outbox_client) -> Result<EncryptedLinkHandshake>`
   Initializes a Noise XX handshake as the **responder**. Returns a handshake handle to be driven forward with `advance_handshake`.
 
-**NOTE**: Due to the nature of Noise it is important that one party is the "initiator" and the other is the "responder". Sometimes it is impossible to determine the roles from user flow alone. One option is to compare the counterparty key to the local key and let the initiator be the one with the lexicographically bigger public key.
+`EncryptedLinkRecoveryContext` contains the local and remote recovery attempt IDs.
+Both peers use the same pair in opposite order. Replacement attempts derive
+separate stream paths; snapshots preserve the context for restart. The SDK
+manages persistent recovery markers and chooses the initiator by comparing Pubky
+public keys. Low-level callers must coordinate these roles and IDs themselves.
 
 #### Handshake advancing
 - `advance_handshake(handshake: EncryptedLinkHandshake) -> Result<HandshakeProgress>`
@@ -323,7 +327,7 @@ Session-based helpers obtain the local identity from the Pubky session.
 - `EncryptedLinkHandshake::config() -> &Arc<PubkyNoiseConfig>`
   Access the shared Noise configuration for in-process handshake restore.
 - `EncryptedLinkHandshakeSnapshot::serialize() -> Vec<u8>` / `EncryptedLinkHandshakeSnapshot::deserialize(bytes: &[u8]) -> Result<EncryptedLinkHandshakeSnapshot>` / `EncryptedLinkHandshakeSnapshot::recipient() -> &PublicKey` / `EncryptedLinkHandshakeSnapshot::remote_noise_public_key() -> &PublicKey`
-  Snapshot wire format helpers. Serialized snapshots contain the `pubky-noise` session state followed by the counterparty's 32-byte identity-wide Noise public key.
+  Snapshot wire format helpers. Serialized snapshots contain the `pubky-noise` session state followed by the counterparty's 32-byte Noise public key and 72-byte recovery context.
 - `restore_encrypted_link_handshake(session, secret_key, remote_identity_public_key, outbox_client, snapshot) -> Result<EncryptedLinkHandshake>`
   Cross-restart restore for an in-progress handshake.
 - `restore_encrypted_link_handshake_from_config(config, remote_identity_public_key, snapshot) -> Result<EncryptedLinkHandshake>`
@@ -532,7 +536,7 @@ An established `EncryptedLink` can be snapshotted, serialized to bytes, persiste
 **Snapshot type:**
 
 - `EncryptedLinkSnapshot::serialize() -> Vec<u8>`
-  Serializes the `pubky-noise` session state followed by the counterparty's 32-byte identity-wide Noise public key. The counterparty Pubky identity key remains embedded in the Noise state.
+  Serializes the `pubky-noise` session state followed by the counterparty's 32-byte Noise public key and 72-byte recovery context. The counterparty Pubky identity key remains embedded in the Noise state.
 - `EncryptedLinkSnapshot::deserialize(bytes: &[u8]) -> Result<EncryptedLinkSnapshot>`
   Reconstructs a snapshot from bytes, including the embedded recipient public key.
 - `EncryptedLinkSnapshot::recipient() -> &PublicKey`

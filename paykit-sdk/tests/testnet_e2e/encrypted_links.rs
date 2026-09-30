@@ -95,7 +95,6 @@ async fn test_advance_link_handshake_without_started_handshake_fails() {
 enum LinkCheckpoint {
     Linked,
     PreparedSend,
-    RemoteRecoveryMarker,
 }
 
 struct PausedLinkCheckpointStorage {
@@ -122,10 +121,6 @@ impl StorageAdapter for PausedLinkCheckpointStorage {
                 .encrypted_link_states
                 .get(&self.counterparty)
                 .is_some_and(|state| state.link_snapshot.is_some()),
-            LinkCheckpoint::RemoteRecoveryMarker => state
-                .linked_peers
-                .get(&self.counterparty)
-                .is_some_and(|peer| peer.remote_recovery_attempt_id.is_some()),
         };
         let pause = if checkpoint_ready {
             self.pause.lock().unwrap().take()
@@ -402,66 +397,6 @@ async fn test_handshake_registry_transport_failure_preserves_checkpoint() {
     let after = pair.alice.storage.snapshot().unwrap();
     assert_eq!(after.encrypted_link_states, before.encrypted_link_states);
     assert_eq!(after.linked_peers, before.linked_peers);
-}
-
-#[tokio::test]
-async fn test_remote_recovery_marker_survives_outbox_cleanup_failure() {
-    let pair = linked_two_party().await;
-    pair.bob
-        .sdk
-        .clear_private_payment_list_and_process_outbound(pair.alice.public_key.clone())
-        .await
-        .unwrap();
-    let published = pair
-        .alice
-        .sdk
-        .publish_encrypted_link_recovery_marker(pair.bob.public_key.clone())
-        .await
-        .unwrap();
-    let (ready, reached) = oneshot::channel();
-    let (resume, release) = oneshot::channel();
-    let sdk = PaykitSdk::new(
-        PausedLinkCheckpointStorage {
-            inner: pair.bob.storage.clone(),
-            counterparty: pair.alice.public_key.clone(),
-            pause: Mutex::new(Some((ready, release))),
-            checkpoint: LinkCheckpoint::RemoteRecoveryMarker,
-        },
-        TestnetSessionProvider::new(pair.bob.access.clone()),
-        pair.bob.adapter.clone(),
-        PaykitSdkConfig::new(pair.bob.app_id.clone()).unwrap(),
-    );
-    let observe = sdk.observe_encrypted_link_recovery_marker(pair.alice.public_key.clone());
-    tokio::pin!(observe);
-    tokio::select! {
-        reached = tokio::time::timeout(Duration::from_secs(30), reached) => reached.unwrap().unwrap(),
-        _ = &mut observe => panic!("observation must pause before cleanup"),
-    }
-    pair.bob.access.session.signout().await.unwrap();
-    resume.send(()).unwrap();
-    assert!(observe.await.is_err());
-    let state = pair.bob.storage.snapshot().unwrap();
-    let peer = &state.linked_peers[&pair.alice.public_key];
-    assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
-    assert_eq!(peer.remote_recovery_attempt_id, published.local_attempt_id);
-    let generation = state.encrypted_link_states[&pair.alice.public_key].generation;
-    let observed = sdk
-        .observe_encrypted_link_recovery_marker(pair.alice.public_key.clone())
-        .await
-        .unwrap();
-    assert!(!observed.remote_marker_changed);
-    assert!(sdk
-        .initiate_link_with_peer(pair.alice.public_key.clone())
-        .await
-        .is_err());
-    let state = pair.bob.storage.snapshot().unwrap();
-    assert_eq!(
-        state.encrypted_link_states[&pair.alice.public_key].generation,
-        generation
-    );
-    assert!(state.encrypted_link_states[&pair.alice.public_key]
-        .handshake_snapshot
-        .is_none());
 }
 
 #[tokio::test]

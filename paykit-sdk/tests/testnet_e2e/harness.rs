@@ -5,7 +5,6 @@
 //! Pubky testnet (homeserver) per test, and real signed-up sessions wrapped in
 //! the SDK's own `PubkySessionAccess` via `PubkySessionBootstrap`.
 
-use chrono::Utc;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -17,7 +16,7 @@ use paykit_sdk::{
     PrivatePaymentEndpointReservationCancellation, PrivatePaymentEndpointSelectionRequest,
     PrivateReceivingDetail, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
     PubkySessionBootstrap, PubkySessionProvider, PublicPaymentEndpointCandidate,
-    PublicPaymentEndpointSelectionRequest, PublicReceivingDetail, Result, StorageAdapter,
+    PublicPaymentEndpointSelectionRequest, PublicReceivingDetail, Result,
     PAYKIT_SESSION_CAPABILITIES,
 };
 use pubky_testnet::{
@@ -587,43 +586,6 @@ async fn drive_until_linked(alice: &TestUser, bob: &TestUser, recovering: bool) 
             bob_state = step(bob, alice, recovering, "responder", phase).await;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-/// Wait until a newly published recovery marker will be newer than the
-/// observer's persisted second-resolution checkpoint.
-pub async fn wait_until_marker_is_newer_than_observer_checkpoint(
-    observer: &TestUser,
-    counterparty: &PubkyPublicKey,
-) {
-    let cutoff = observer
-        .storage
-        .transaction({
-            let counterparty = counterparty.clone();
-            move |tx| {
-                let link_checkpoint = tx.encrypted_link_state(&counterparty).and_then(|state| {
-                    (state.link_snapshot.is_some() || state.handshake_snapshot.is_some())
-                        .then_some(state.checkpointed_at)
-                });
-                let receive_checkpoint = tx
-                    .linked_peer(&counterparty)
-                    .and_then(|peer| peer.last_private_receive_at);
-                Ok(link_checkpoint.max(receive_checkpoint))
-            }
-        })
-        .await
-        .expect("observer checkpoint lookup should succeed");
-
-    let Some(cutoff) = cutoff else {
-        return;
-    };
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Utc::now().timestamp() <= cutoff.timestamp() {
-        assert!(
-            Instant::now() < deadline,
-            "test clock did not advance past observer checkpoint"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 

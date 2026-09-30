@@ -5,7 +5,7 @@ use crate::{PaykitAppId, PaykitError, PublicKey, Result};
 use super::{
     paths::{compute_private_payment_paths, validate_private_payment_paths},
     private_application_message::{self, PrivateApplicationMessage},
-    EncryptedLinkSnapshot,
+    EncryptedLinkRecoveryContext, EncryptedLinkSnapshot,
 };
 
 /// Outbound private message prepared for atomic persistence before publication.
@@ -111,6 +111,7 @@ pub struct EncryptedLink {
     recipient: PublicKey,
     /// The counterparty's identity-wide Noise public key.
     remote_noise_public_key: PublicKey,
+    recovery_context: EncryptedLinkRecoveryContext,
     /// Shared Noise configuration retained for snapshot-based session resumption.
     config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
     /// Maximum number of automatic Private Application Message `send_message`
@@ -123,12 +124,14 @@ impl EncryptedLink {
         encryptor: pubky_noise::PubkyNoiseEncryptor,
         recipient: PublicKey,
         remote_noise_public_key: PublicKey,
+        recovery_context: EncryptedLinkRecoveryContext,
         config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
     ) -> Self {
         Self {
             encryptor,
             recipient,
             remote_noise_public_key,
+            recovery_context,
             config,
             max_send_retries: DEFAULT_MAX_SEND_RETRIES,
         }
@@ -165,6 +168,7 @@ impl EncryptedLink {
                 })?,
             self.recipient.clone(),
             self.remote_noise_public_key.clone(),
+            self.recovery_context.clone(),
         ))
     }
 
@@ -338,6 +342,7 @@ impl EncryptedLink {
             prepared.resulting_session_state().clone(),
             self.recipient.clone(),
             self.remote_noise_public_key.clone(),
+            self.recovery_context.clone(),
         );
         Ok(PreparedPrivateApplicationMessageSend {
             prepared,
@@ -466,6 +471,7 @@ impl EncryptedLink {
             prepared.resulting_session_state().clone(),
             self.recipient.clone(),
             self.remote_noise_public_key.clone(),
+            self.recovery_context.clone(),
         );
         Ok(Some(PreparedPrivateApplicationMessageReceive {
             prepared,
@@ -604,6 +610,7 @@ pub async fn restore_encrypted_link(
         session.info().public_key(),
         remote_identity_public_key,
         snapshot.remote_noise_public_key(),
+        snapshot.recovery_context(),
     );
 
     let config = pubky_noise::PubkyNoiseConfig::new_with_paths(
@@ -667,10 +674,12 @@ async fn restore_encrypted_link_inner(
     }
 
     let remote_noise_public_key = snapshot.remote_noise_public_key().clone();
+    let recovery_context = snapshot.recovery_context().clone();
     validate_private_payment_paths(
         &config,
         remote_identity_public_key,
         &remote_noise_public_key,
+        &recovery_context,
     )?;
     let state = snapshot.into_state();
     if state.static_secret != Some(config.pubky_root_keypair.secret_key()) {
@@ -694,6 +703,7 @@ async fn restore_encrypted_link_inner(
         encryptor,
         remote_identity_public_key.clone(),
         remote_noise_public_key,
+        recovery_context,
         config,
     ))
 }

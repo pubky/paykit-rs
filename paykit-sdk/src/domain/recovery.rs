@@ -23,7 +23,7 @@ pub struct EncryptedLinkRecoveryMarkerReport {
     pub counterparty: PubkyPublicKey,
     /// Current Linked Peer state.
     pub state: LinkedPeerState,
-    /// Locally published recovery attempt id.
+    /// Latest local recovery attempt ID, retained after marker removal.
     pub local_attempt_id: Option<String>,
     /// Creation time for the local marker payload.
     pub local_marker_created_at: Option<DateTime<Utc>>,

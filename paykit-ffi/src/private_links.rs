@@ -438,7 +438,7 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Remove the local public recovery marker for a counterparty.
+    /// Remove a blocked peer's public marker. Active links retain their markers.
     pub async fn remove_encrypted_link_recovery_marker(
         &self,
         counterparty: String,

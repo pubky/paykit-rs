@@ -116,7 +116,7 @@ async fn test_automatic_recovery_marker_publish_records_missing_session() {
     );
     let lease = sdk.claim_peer_link_operation(&counterparty).await.unwrap();
 
-    sdk.publish_local_recovery_marker_if_possible(&counterparty, &lease, true, None)
+    sdk.publish_local_recovery_marker_if_possible(&counterparty, &lease, None)
         .await;
     sdk.release_peer_link_operation(&lease).await.unwrap();
 
@@ -193,7 +193,7 @@ async fn test_replaced_lease_cannot_record_recovery_marker_publish_error() {
         FixedClock,
     );
 
-    sdk.publish_local_recovery_marker_if_possible(&counterparty, &stale_lease, true, None)
+    sdk.publish_local_recovery_marker_if_possible(&counterparty, &stale_lease, None)
         .await;
 
     let peer = crate::load_linked_peer(&storage, &counterparty)
@@ -214,76 +214,7 @@ async fn test_replaced_lease_cannot_record_recovery_marker_publish_error() {
 }
 
 #[tokio::test]
-async fn test_replaced_lease_cannot_access_recovery_marker_for_cleanup() {
-    let storage = InMemoryStorage::new();
-    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    let attempt_id = "650e8400-e29b-41d4-a716-446655440000";
-    let stale_lease = storage
-        .transaction({
-            let counterparty = counterparty.clone();
-            move |tx| {
-                tx.save_linked_peer(LinkedPeerRecord {
-                    counterparty: counterparty.clone(),
-                    state: LinkedPeerState::Linked,
-                    last_sync_at: Some(FixedClock.now()),
-                    last_private_receive_at: None,
-                    failure_count: 0,
-                    local_recovery_attempt_id: Some(attempt_id.into()),
-                    local_recovery_marker_created_at: Some(FixedClock.now()),
-                    local_recovery_marker_last_error: None,
-                    remote_recovery_attempt_id: None,
-                    remote_recovery_marker_observed_at: None,
-                });
-                Ok(tx
-                    .claim_peer_link_operation(
-                        &counterparty,
-                        FixedClock.now() - ChronoDuration::seconds(2),
-                        FixedClock.now() - ChronoDuration::seconds(1),
-                    )?
-                    .expect("stale lease should be available"))
-            }
-        })
-        .await
-        .unwrap();
-    storage
-        .transaction({
-            let counterparty = counterparty.clone();
-            move |tx| {
-                tx.claim_peer_link_operation(
-                    &counterparty,
-                    FixedClock.now(),
-                    FixedClock.now() + ChronoDuration::seconds(10),
-                )?
-                .expect("expired lease should be replaceable");
-                Ok(())
-            }
-        })
-        .await
-        .unwrap();
-    let sdk = PaykitSdk::with_clock(
-        storage.clone(),
-        TestPubkySessionProvider { session: None },
-        TestPaymentAdapter,
-        PaykitSdkConfig::new("test-app").unwrap(),
-        FixedClock,
-    );
-
-    let err = sdk
-        .has_local_recovery_marker(&counterparty, &stale_lease)
-        .await
-        .unwrap_err();
-
-    assert!(matches!(err, PaykitSdkError::Policy { .. }));
-    let peer = crate::load_linked_peer(&storage, &counterparty)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(peer.local_recovery_attempt_id.as_deref(), Some(attempt_id));
-    assert_eq!(peer.local_recovery_marker_last_error, None);
-}
-
-#[tokio::test]
-async fn test_mark_private_recovery_pending_preserves_marker_until_publish() {
+async fn test_mark_private_recovery_pending_rotates_local_attempt() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
@@ -327,17 +258,14 @@ async fn test_mark_private_recovery_pending_preserves_marker_until_publish() {
         .mark_private_recovery_pending(&counterparty, Some(2))
         .await
         .unwrap();
-    assert!(matches!(
-        recovery_update,
-        RecoveryRequiredUpdate::Marked { new_episode: true }
-    ));
+    assert!(matches!(recovery_update, RecoveryRequiredUpdate::Marked));
 
     let peer = crate::load_linked_peer(&storage, &counterparty)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
-    assert_eq!(
+    assert_ne!(
         peer.local_recovery_attempt_id.as_deref(),
         Some("650e8400-e29b-41d4-a716-446655440000")
     );
@@ -345,32 +273,6 @@ async fn test_mark_private_recovery_pending_preserves_marker_until_publish() {
         peer.remote_recovery_attempt_id.as_deref(),
         Some("550e8400-e29b-41d4-a716-446655440000")
     );
-}
-
-#[test]
-fn test_local_recovery_marker_must_belong_to_current_episode() {
-    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    let recovery_started_at = Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap();
-    let previous_episode_marker_at = Utc.with_ymd_and_hms(2026, 6, 3, 11, 59, 0).unwrap();
-    let current_episode_marker_at = Utc.with_ymd_and_hms(2026, 6, 3, 12, 1, 0).unwrap();
-    let mut peer = LinkedPeerRecord {
-        counterparty,
-        state: LinkedPeerState::RecoveryRequired,
-        last_sync_at: Some(recovery_started_at),
-        last_private_receive_at: None,
-        failure_count: 1,
-        local_recovery_attempt_id: Some("650e8400-e29b-41d4-a716-446655440000".into()),
-        local_recovery_marker_created_at: Some(previous_episode_marker_at),
-        local_recovery_marker_last_error: None,
-        remote_recovery_attempt_id: None,
-        remote_recovery_marker_observed_at: None,
-    };
-
-    assert!(!local_recovery_marker_belongs_to_current_episode(&peer));
-
-    peer.local_recovery_marker_created_at = Some(current_episode_marker_at);
-
-    assert!(local_recovery_marker_belongs_to_current_episode(&peer));
 }
 
 #[tokio::test]
@@ -418,10 +320,7 @@ async fn test_mark_private_recovery_pending_preserves_ongoing_local_marker() {
         .mark_private_recovery_pending(&counterparty, Some(2))
         .await
         .unwrap();
-    assert!(matches!(
-        recovery_update,
-        RecoveryRequiredUpdate::Marked { new_episode: false }
-    ));
+    assert!(matches!(recovery_update, RecoveryRequiredUpdate::Marked));
 
     let peer = crate::load_linked_peer(&storage, &counterparty)
         .await
