@@ -525,6 +525,73 @@ async fn test_handshake_advancement_checks_peer_state_after_claiming_lease() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_private_receive_checks_peer_state_after_claiming_lease() {
+    let pair = homeserver_shared_pair().await;
+    let counterparty = &pair.bob.public_key;
+    pair.bitkit
+        .sdk
+        .initiate_link_with_peer(counterparty.clone())
+        .await
+        .unwrap();
+
+    let lease = pair
+        .bitkit
+        .storage
+        .transaction(|tx| {
+            let now = Utc::now();
+            Ok(tx
+                .claim_peer_link_operation(counterparty, now, now + chrono::Duration::minutes(1))?
+                .unwrap())
+        })
+        .await
+        .unwrap();
+    let result = pair
+        .server
+        .sdk
+        .receive_private_messages(counterparty.clone())
+        .await;
+    assert!(
+        matches!(result, Err(PaykitSdkError::Policy { ref context, .. })
+            if context.contains("peer link operation already in progress")),
+        "another app's handshake must be reported as contention: {result:?}"
+    );
+    pair.bitkit
+        .storage
+        .transaction(|tx| {
+            assert_eq!(
+                tx.peer_link_operation_lease(counterparty),
+                Some(lease.clone())
+            );
+            tx.release_peer_link_operation(counterparty, lease.lease_id);
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let before = pair.server.storage_state().await;
+    assert_eq!(
+        before.linked_peers[counterparty].state,
+        LinkedPeerState::Linking
+    );
+    assert!(before.encrypted_link_states[counterparty]
+        .handshake_snapshot
+        .is_some());
+    let result = pair
+        .server
+        .sdk
+        .receive_private_messages(counterparty.clone())
+        .await;
+    assert!(matches!(
+        result,
+        Err(PaykitSdkError::RecoveryRequired { .. })
+    ));
+    let after = pair.server.storage_state().await;
+    assert_eq!(after.linked_peers, before.linked_peers);
+    assert_eq!(after.encrypted_link_states, before.encrypted_link_states);
+    assert!(after.peer_link_operation_leases.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_shared_apps_advance_one_handshake_without_diverging() {
     let pair = homeserver_shared_pair().await;
     pair.bitkit

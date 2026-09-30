@@ -16,8 +16,6 @@ where
         counterparty: PubkyPublicKey,
     ) -> Result<PrivateStreamIntakeReport> {
         let (session_access, _) = self.private_link_session_access().await?;
-        self.ensure_peer_allows_private_automation(&counterparty)
-            .await?;
         let lease = self.claim_peer_link_operation(&counterparty).await?;
         let result = self
             .receive_private_messages_with_claim(counterparty, lease.clone(), session_access)
@@ -60,6 +58,8 @@ where
         lease: PeerLinkOperationLease,
         session_access: GuardedSessionAccess,
     ) -> Result<PrivateStreamIntakeReport> {
+        self.ensure_peer_allows_private_automation(&counterparty)
+            .await?;
         let secret_key = session_access.paykit_noise_secret_key()?;
         let remote_public_key = counterparty.to_public_key()?;
         let authorized_receipt_apps =
