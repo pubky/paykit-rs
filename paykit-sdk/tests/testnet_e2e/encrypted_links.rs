@@ -220,7 +220,14 @@ async fn test_key_rotation_waits_for_handshake_checkpoint_without_nested_session
         _ = &mut handshake => panic!("handshake must wait for its checkpoint"),
     }
 
-    let replacement = PaykitIdentitySecretKey::new([42; 32], 2).unwrap();
+    let replacement = pair
+        .alice
+        .access
+        .local_secret_key
+        .as_ref()
+        .unwrap()
+        .derive_paykit_identity_secret_key(2)
+        .unwrap();
     let before = pair.alice.storage.snapshot().unwrap();
     let competing_rotation = pair
         .alice
@@ -295,7 +302,14 @@ async fn test_key_rotation_rejects_another_instances_prepared_send() {
         _ = &mut send => panic!("send must pause after durable preparation"),
     }
     let before = pair.alice.storage.snapshot().unwrap();
-    let replacement = PaykitIdentitySecretKey::new([42; 32], 2).unwrap();
+    let replacement = pair
+        .alice
+        .access
+        .local_secret_key
+        .as_ref()
+        .unwrap()
+        .derive_paykit_identity_secret_key(2)
+        .unwrap();
     assert!(matches!(
         pair.alice
             .sdk
@@ -519,7 +533,13 @@ async fn test_key_rotation_retries_exact_replacement_after_registry_failure() {
         user.adapter.clone(),
         PaykitSdkConfig::new(user.app_id.clone()).unwrap(),
     );
-    let replacement = PaykitIdentitySecretKey::new([42; 32], 2).unwrap();
+    let replacement = user
+        .access
+        .local_secret_key
+        .as_ref()
+        .unwrap()
+        .derive_paykit_identity_secret_key(2)
+        .unwrap();
     let rotation = sdk.rotate_paykit_identity_key(replacement.clone());
     tokio::pin!(rotation);
     tokio::select! {

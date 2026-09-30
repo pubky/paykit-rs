@@ -252,7 +252,11 @@ pub struct PaykitIdentitySecretKey {
 }
 
 impl PaykitIdentitySecretKey {
-    /// Wrap a 32-byte Paykit identity secret and its nonzero generation.
+    /// Import a 32-byte, generation-specific Paykit identity secret from an authorizer.
+    ///
+    /// Authorizers derive it with [`PubkyLocalSecretKey::derive_paykit_identity_secret_key`].
+    /// Without the Pubky secret, this constructor can validate only the generation,
+    /// not the key's derivation. Import keys only through a trusted authorization flow.
     pub fn new(bytes: [u8; 32], key_generation: u64) -> crate::Result<Self> {
         validate_paykit_key_generation(key_generation)?;
         Ok(Self {
@@ -284,6 +288,22 @@ impl PaykitIdentitySecretKey {
 
     pub(crate) fn shared_state_key(&self) -> [u8; 32] {
         blake3::derive_key("paykit/shared-state", &self.bytes)
+    }
+
+    pub(crate) fn validate_pubky_derivation(
+        &self,
+        root: Option<&PubkyLocalSecretKey>,
+    ) -> crate::Result<()> {
+        if let Some(root) = root {
+            if self != &root.derive_paykit_identity_secret_key(self.key_generation)? {
+                return Err(crate::PaykitSdkError::Identity {
+                    context: "Paykit identity secret does not match its Pubky-derived generation"
+                        .into(),
+                    source: None,
+                });
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn validate_successor(&self, replacement: &Self) -> crate::Result<()> {
@@ -346,7 +366,7 @@ pub struct PubkySessionAccess {
     pub session: pubky::PubkySession,
     /// Pubky client used for counterparty homeserver access.
     pub outbox_client: pubky::Pubky,
-    /// Local secret key required for Encrypted Links, when available.
+    /// Local Pubky secret for authorization and Paykit key derivation, when available.
     pub local_secret_key: Option<PubkyLocalSecretKey>,
     /// Delegated identity-wide Paykit secret, when supplied separately.
     ///
@@ -382,6 +402,10 @@ impl PubkySessionAccess {
                 context: "local Pubky secret key does not match session public key".into(),
                 source: None,
             });
+        }
+
+        if let Some(key) = &self.paykit_identity_secret_key {
+            key.validate_pubky_derivation(Some(local_secret_key))?;
         }
 
         Ok(())

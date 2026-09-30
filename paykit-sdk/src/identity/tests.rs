@@ -89,6 +89,39 @@ fn test_paykit_identity_secret_validates_generation_and_redacts_debug() {
 }
 
 #[test]
+fn test_paykit_key_derivation_matches_spec_vectors() {
+    let root = PubkyLocalSecretKey::new([9; 32]);
+    for (generation, identity, noise, state) in [
+        (
+            1,
+            "5ac67d4f33e44a52a647e6515811095c128ef51f23010e6d841d41ba8c0743c4",
+            "0e00cd53a2a7156f7e9720c406d05332920d11164d913b717601bba0a13b6bfb",
+            "501c714e7f1b8f44b51177b410e328c7e9df7e392ca6a972cc02189de1e30764",
+        ),
+        (
+            2,
+            "f3a1d35856bb4bdf769d6cfb3c943debd3871a62d4c14e4d7b4a7755c7b965c4",
+            "4882e20c237469fddab74a9fdf9271c493bb1357b00d110e8b9b89a7e25f12a2",
+            "9b3008988de501585c74df37d0bc8602ac67ea61f4a2c05834cfd0595a79faa4",
+        ),
+    ] {
+        let key = root.derive_paykit_identity_secret_key(generation).unwrap();
+        assert_eq!(hex::encode(key.as_bytes()), identity);
+        assert_eq!(hex::encode(key.noise_secret_key()), noise);
+        assert_eq!(hex::encode(key.shared_state_key()), state);
+        let imported = PaykitIdentitySecretKey::new(*key.as_bytes(), generation).unwrap();
+        assert_eq!(key, imported);
+        assert!(imported.validate_pubky_derivation(Some(&root)).is_ok());
+        assert!(imported.validate_pubky_derivation(None).is_ok());
+    }
+    let other = PaykitIdentitySecretKey::new([7; 32], 2).unwrap();
+    assert!(other.validate_pubky_derivation(Some(&root)).is_err());
+    let mislabeled = root.derive_paykit_identity_secret_key(1).unwrap();
+    let mislabeled = PaykitIdentitySecretKey::new(*mislabeled.as_bytes(), 2).unwrap();
+    assert!(mislabeled.validate_pubky_derivation(Some(&root)).is_err());
+}
+
+#[test]
 fn test_session_capabilities_cover_required_paykit_scopes() {
     let root = pubky::Capabilities::builder()
         .read_write("/")

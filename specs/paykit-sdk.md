@@ -348,6 +348,32 @@ secret. Public-only session access can use public workflows but cannot
 establish or advance Encrypted Links. The SDK derives and persists public
 `IdentityState` from that access during initialization.
 
+Paykit key derivation MUST use BLAKE3's `derive_key(context, key_material)`
+operation (not keyed hashing), with the exact UTF-8 context strings below:
+
+```text
+paykit_secret = derive_key("paykit/identity-secret", pubky_secret || u64_be(generation))
+noise_secret  = derive_key("paykit/noise", paykit_secret)
+state_key     = derive_key("paykit/shared-state", paykit_secret)
+```
+
+`pubky_secret` is the raw 32-byte Pubky secret, not its seed, mnemonic, or text
+encoding. `generation` MUST be positive and encoded as exactly eight big-endian
+bytes, making the first input 40 bytes. Each output and each second-stage input
+is exactly 32 bytes. Rotation uses the next generation derived from the same
+Pubky secret, never a previous Paykit secret or randomly chosen replacement.
+The Noise public key is the Pubky keypair public key derived from `noise_secret`.
+Delegated apps import the authorizer-derived secret through a trusted channel;
+they cannot verify this derivation without the Pubky root. The SDK checks it
+when the root is available.
+
+Canonical vectors (hex), using `pubky_secret = 09` repeated 32 times:
+
+| Generation | Paykit secret | Noise secret | Shared-state key |
+| --- | --- | --- | --- |
+| 1 | `5ac67d4f33e44a52a647e6515811095c128ef51f23010e6d841d41ba8c0743c4` | `0e00cd53a2a7156f7e9720c406d05332920d11164d913b717601bba0a13b6bfb` | `501c714e7f1b8f44b51177b410e328c7e9df7e392ca6a972cc02189de1e30764` |
+| 2 | `f3a1d35856bb4bdf769d6cfb3c943debd3871a62d4c14e4d7b4a7755c7b965c4` | `4882e20c237469fddab74a9fdf9271c493bb1357b00d110e8b9b89a7e25f12a2` | `9b3008988de501585c74df37d0bc8602ac67ea61f4a2c05834cfd0595a79faa4` |
+
 If `load_session_access` returns `None`, no live session access is currently
 available. Ordinary refreshes must preserve the shared Paykit state and block
 Pubky-backed workflows until session access is available again. Explicit
@@ -1375,7 +1401,11 @@ corrupt Pubky shared state. It requires a matching trusted backup, active sessio
 the current Paykit key, and its successor. Under the shared-state lock it verifies
 the App Registry key, rejects healthy state or unknown generations, and commits
 the restored state encrypted with the replacement key before updating the registry.
-Retries with the same keys preserve already-committed replacement state.
+Retries with the same keys preserve valid already-committed replacement state.
+Unreadable generation headers and corrupt replacement-generation state are
+rejected: restoring under already-used replacement keys could reuse Noise state.
+Only absent state or corrupt state with a readable current-generation header
+can be replaced.
 Recovery discards Noise checkpoints and prepared sends, preserves backup history,
 and requires relinking and wallet reconciliation before execution. State newer
 than the backup cannot be reconstructed. Callers must securely persist the

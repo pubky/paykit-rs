@@ -16,7 +16,9 @@ where
     /// Requests, Receipts, and app-owned records. It removes old Encrypted
     /// Link snapshots and leases, parks unsent private messages for recovery,
     /// and publishes the replacement Noise public key in the App Registry.
-    /// Persist `replacement_key` securely before calling this method. Shared
+    /// Derive `replacement_key` from the Pubky secret for the next generation,
+    /// or import that derived key from the identity's authorizer. Persist it
+    /// securely before calling this method. Shared
     /// state commits before the App Registry is published, so an error does not
     /// imply rollback. Retry with the exact same current and replacement keys;
     /// do not generate another replacement for the same generation. Distribute
@@ -48,6 +50,7 @@ where
                     source: None,
                 })?;
         current_key.validate_successor(&replacement_key)?;
+        replacement_key.validate_pubky_derivation(access.local_secret_key.as_ref())?;
 
         let owner = access.public_key()?;
         let public_storage = access.outbox_client.public_storage();

@@ -593,6 +593,14 @@ async fn test_paykit_identity_key_rotation_rekeys_shared_state_and_registry() {
         .expect("initialized SDK should report its identity");
     sdk.publish_paykit_app(test_app("Bitkit")).await.unwrap();
 
+    let invalid = paykit_sdk::PaykitIdentitySecretKey::new([42; 32], 2).unwrap();
+    let revision = storage.last_revision().unwrap();
+    assert!(matches!(
+        sdk.rotate_paykit_identity_key(invalid).await,
+        Err(PaykitSdkError::Identity { .. })
+    ));
+    assert_eq!(storage.last_revision().unwrap(), revision);
+
     let replacement = secret
         .derive_paykit_identity_secret_key(2)
         .expect("replacement Paykit key derivation should succeed");
@@ -624,6 +632,7 @@ async fn test_paykit_identity_key_rotation_rekeys_shared_state_and_registry() {
         .unwrap()
         .access;
     replacement_access.paykit_identity_secret_key = Some(replacement);
+    replacement_access.local_secret_key = None;
     let replacement_provider = TestnetSessionProvider::new(replacement_access);
     let replacement_storage = PubkySharedStateStorage::new(replacement_provider.clone());
     let replacement_sdk = PaykitSdk::new(
@@ -646,6 +655,59 @@ async fn test_paykit_identity_key_rotation_rekeys_shared_state_and_registry() {
         .unwrap()
         .expect("rotated App Registry should remain published");
     assert_eq!(registry.key_generation(), 2);
+}
+
+#[tokio::test]
+async fn test_key_rotation_compacts_obsolete_private_lists() {
+    let pair = linked_homeserver_shared_pair().await;
+    let access = &pair.bitkit.access;
+    let root = access.local_secret_key.as_ref().unwrap();
+    let current = root.derive_paykit_identity_secret_key(1).unwrap();
+    let replacement = root.derive_paykit_identity_secret_key(2).unwrap();
+    let mut queued = Vec::new();
+    for _ in 0..3 {
+        queued.push(
+            pair.bitkit
+                .sdk
+                .enqueue_private_payment_list_with_receiving_details(
+                    pair.bob.public_key.clone(),
+                    Vec::new(),
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    let latest = queued.last().unwrap().clone();
+    pair.bitkit
+        .storage
+        .rotate_paykit_identity_key(current, replacement.clone(), |tx, already_rotated| {
+            assert!(!already_rotated);
+            for (mut record, status) in queued.into_iter().zip([
+                OutboundPrivateMessageStatus::Invalid,
+                OutboundPrivateMessageStatus::RecoveryRequired,
+                OutboundPrivateMessageStatus::RecoveryRequired,
+            ]) {
+                record.status = status;
+                record.last_error = Some("link recovery required".into());
+                tx.save_outbound_private_message(record)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut access = access.clone();
+    access.paykit_identity_secret_key = Some(replacement);
+    let storage = PubkySharedStateStorage::new(TestnetSessionProvider::new(access));
+    let state = storage
+        .transaction(|tx| Ok(tx.export_storage_state()))
+        .await
+        .unwrap();
+    assert_eq!(state.outbound_private_messages.len(), 1);
+    assert_eq!(
+        state.outbound_private_messages[0].outbound_message_id,
+        latest.outbound_message_id
+    );
+    assert_eq!(state.outbound_private_messages[0].raw_json, latest.raw_json);
 }
 
 #[tokio::test]
@@ -1172,7 +1234,9 @@ async fn test_pubky_shared_state_rejects_a_competing_writer_until_lock_release()
     let (pause, loaded_rx, continue_tx) = TransactionPause::new();
     let locked_storage = first.clone();
     let locked_write = std::thread::spawn(move || {
-        tokio::runtime::Builder::new_current_thread()
+        // The synchronous pause must not stall the shared HTTP connection's driver.
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
             .enable_all()
             .build()
             .unwrap()
@@ -1188,20 +1252,27 @@ async fn test_pubky_shared_state_rejects_a_competing_writer_until_lock_release()
         .recv_timeout(TRANSACTION_PAUSE_TIMEOUT)
         .expect("the writer should hold the shared-state lock");
     let competing_callback_ran = AtomicBool::new(false);
-    let competing_write = second
-        .transaction(|tx| {
+    // Finish or cancel the contender before the paused writer's guard expires.
+    // Always resume and join the writer before reporting a contender failure.
+    let competing_write = tokio::time::timeout(
+        TRANSACTION_PAUSE_TIMEOUT / 2,
+        second.transaction(|tx| {
             competing_callback_ran.store(true, Ordering::SeqCst);
             let mut identity = tx.load_identity_state().unwrap();
             identity.initialized_at += chrono::Duration::seconds(1);
             tx.save_identity_state(identity);
             Ok(())
-        })
-        .await;
-    continue_tx.try_send(()).unwrap();
-    locked_write
+        }),
+    )
+    .await;
+    let resumed = continue_tx.try_send(());
+    let locked_result = locked_write
         .join()
-        .unwrap()
-        .expect("the lock holder should commit its transaction");
+        .expect("the paused writer must not panic");
+    let competing_write =
+        competing_write.expect("lock contention should finish before the writer is resumed");
+    resumed.expect("the lock holder should still be waiting");
+    locked_result.expect("the lock holder should commit its transaction");
 
     let error = competing_write.expect_err("a competing writer must not acquire the held lock");
     assert!(error.is_concurrent_update());
@@ -1302,7 +1373,8 @@ async fn test_independent_grants_share_homeserver_noise_state_under_concurrency(
     let (bitkit_send_sdk, send_loaded, continue_send) = pair.bitkit.paused_sdk();
     let send_counterparty = pair.bob.public_key.clone();
     let locked_send = std::thread::spawn(move || {
-        tokio::runtime::Builder::new_current_thread()
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
             .enable_all()
             .build()
             .unwrap()
@@ -1376,7 +1448,8 @@ async fn test_independent_grants_share_homeserver_noise_state_under_concurrency(
     let (bitkit_receive_sdk, receive_loaded, continue_receive) = pair.bitkit.paused_sdk();
     let receive_counterparty = pair.bob.public_key.clone();
     let locked_receive = std::thread::spawn(move || {
-        tokio::runtime::Builder::new_current_thread()
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
             .enable_all()
             .build()
             .unwrap()
@@ -1497,7 +1570,8 @@ async fn test_key_rotation_preserves_in_flight_write_and_rejects_old_key() {
     let writing_sdk = old_sdk.clone();
     let writing_contact = contact.clone();
     let locked_write = std::thread::spawn(move || {
-        tokio::runtime::Builder::new_current_thread()
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
             .enable_all()
             .build()
             .unwrap()

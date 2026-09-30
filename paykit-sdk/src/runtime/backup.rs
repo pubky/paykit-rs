@@ -44,13 +44,15 @@ where
     ///
     /// Requires the current Paykit key and its successor. Persist the replacement
     /// securely first; after success, distribute it to authorized apps. Healthy
-    /// state and unexpected generations are rejected. All old Noise snapshots and
+    /// state, unreadable generation headers, and unexpected generations are rejected.
+    /// Only corrupt current-generation state can be replaced. All old Noise snapshots and
     /// prepared sends are discarded, and execution requires wallet reconciliation.
     /// Data newer than the backup cannot be recovered by this operation.
     ///
     /// State commits before App Registry publication. Retry failures with the
     /// exact same keys and backup: committed replacement-key state is preserved,
-    /// even if another app has progressed it. Normal backup restore is unchanged.
+    /// even if another app has progressed it. Corrupt replacement-generation state
+    /// is rejected, not reset under keys that may already have been used.
     pub async fn recover_shared_state_from_backup(
         &self,
         backup: SdkBackupState,
@@ -67,6 +69,7 @@ where
                     source: None,
                 })?;
         current_key.validate_successor(&replacement_key)?;
+        replacement_key.validate_pubky_derivation(access.local_secret_key.as_ref())?;
         let identity = self.restore_validation_identity(&access)?;
         let owner = access.public_key()?;
         let replacement_noise = crate::storage::paykit_noise_public_key(&replacement_key);

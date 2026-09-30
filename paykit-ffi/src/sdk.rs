@@ -315,7 +315,8 @@ impl FfiPaykitSdk {
     /// Persist the replacement first. Retry with the same keys and backup after
     /// failure; already-recovered state is never overwritten. Old links require
     /// recovery and payment execution requires complete wallet reconciliation.
-    /// State newer than the backup is not recovered.
+    /// State newer than the backup is not recovered. Unreadable generation
+    /// headers and corrupt replacement-generation state are rejected, not overwritten.
     pub async fn recover_shared_state_from_backup(
         &self,
         backup: Arc<FfiSdkBackupBlob>,

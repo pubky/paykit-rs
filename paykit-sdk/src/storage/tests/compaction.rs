@@ -173,6 +173,7 @@ fn test_private_list_compaction_keeps_reservations_uncertain_sends_and_events() 
     // an uncertain clear, and newer unsent intent independently.
     let mut reservation = payment_endpoint_reservation_record(peer.clone());
     reservation.outbound_message_id = 0;
+    state.outbound_private_messages[0].status = OutboundPrivateMessageStatus::Invalid;
     state.payment_endpoint_reservations.insert(
         (peer.clone(), app_id(), reservation.reservation_id.clone()),
         reservation,
@@ -181,7 +182,7 @@ fn test_private_list_compaction_keeps_reservations_uncertain_sends_and_events() 
         destination_path: "reserved-slot".into(),
         ciphertext: vec![1],
     });
-    state.outbound_private_messages[1].status = OutboundPrivateMessageStatus::Sending;
+    state.outbound_private_messages[1].status = OutboundPrivateMessageStatus::RecoveryRequired;
     state.outbound_private_messages[4].status = OutboundPrivateMessageStatus::Superseded;
     state.outbound_private_messages[5].status = OutboundPrivateMessageStatus::Failed;
     state.outbound_private_messages[5].last_attempt_at = Some(timestamp());
@@ -198,4 +199,51 @@ fn test_private_list_compaction_keeps_reservations_uncertain_sends_and_events() 
         [0, 1, 3, 5, 6, 7]
     );
     assert_eq!(state.outbound_private_messages.last(), Some(&event));
+}
+
+#[test]
+fn test_private_list_compaction_bounds_failed_lists_without_losing_recovery_intent() {
+    let peers = [counterparty(), counterparty()];
+    let apps = [
+        app_id(),
+        paykit_lib::PaykitAppId::new("paykit-server").unwrap(),
+    ];
+    let mut state = StorageState::default();
+    for peer in peers {
+        for app in &apps {
+            let first_id = state.next_outbound_private_message_id;
+            for index in 0..20 {
+                let id = state.next_outbound_private_message_id;
+                state.next_outbound_private_message_id += 1;
+                let list = paykit_lib::PrivatePaymentList::new(app.clone(), HashMap::new());
+                let message = NewOutboundPrivateMessage::new(
+                    peer.clone(),
+                    app.clone(),
+                    "paykit.private_payment_list".into(),
+                    paykit_lib::serialize_private_payment_list_json(&list).unwrap(),
+                    timestamp(),
+                );
+                let mut record = OutboundPrivateMessageRecord::from_new(id, message);
+                record.status = if index == 0 || index == 19 {
+                    OutboundPrivateMessageStatus::RecoveryRequired
+                } else {
+                    OutboundPrivateMessageStatus::Invalid
+                };
+                state.outbound_private_messages.push(record);
+                compact_private_payment_lists(&mut state);
+                let ids = state
+                    .outbound_private_messages
+                    .iter()
+                    .filter(|record| record.counterparty == peer && &record.app_id == app)
+                    .map(|record| record.outbound_message_id)
+                    .collect::<Vec<_>>();
+                if index == 0 || index == 19 {
+                    assert_eq!(ids, [id]);
+                } else {
+                    assert_eq!(ids, [first_id, id]);
+                }
+            }
+        }
+    }
+    assert_eq!(state.outbound_private_messages.len(), 4);
 }

@@ -173,9 +173,9 @@ Common workflows:
   deterministically derive any generation-specific Paykit secret
 - rotate identity-wide Paykit key material with
   `rotate_paykit_identity_key`; rotation preserves durable history, resets old
-  Encrypted Link state, and requires the derived or externally supplied
-  replacement key to be persisted by every remaining authorized app before
-  private work resumes
+  Encrypted Link state, and uses the next generation derived from the Pubky
+  secret. Delegated apps import that key from their authorizer. Every remaining
+  authorized app must persist it before private work resumes
 - call `receive_private_messages` before deriving Private Payment Lists,
   Payment Requests, Allowances, Receipt Access state, or resolving a private
   contact payment when the freshest private endpoints matter
@@ -435,8 +435,10 @@ For missing or corrupt Pubky shared state, use
 and its successor. Persist the replacement key first, then distribute it after
 recovery. This preserves backup history but discards old Noise checkpoints and
 prepared sends; links must recover and payments require wallet reconciliation.
-It rejects healthy state and unknown generations. Retry an interrupted recovery
-with the same keys and backup; already-committed replacement state is preserved.
+It rejects healthy state, unreadable generation headers, and unknown generations.
+Retry an interrupted recovery with the same keys and backup; valid committed
+replacement state is preserved. Corrupt replacement-generation state is rejected,
+not overwritten under keys that may already have been used.
 Data newer than the backup cannot be recovered.
 
 Losing the durable SDK state without a backup means losing access to private

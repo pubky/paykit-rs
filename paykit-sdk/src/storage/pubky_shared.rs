@@ -226,6 +226,7 @@ impl StorageAdapter for PubkySharedStateStorage {
         let _guard = self.transaction_lock.lock().await;
         let access = self.load_access().await?;
         let owner = access.public_key()?;
+        replacement_key.validate_pubky_derivation(access.local_secret_key.as_ref())?;
         if state
             .identity_state
             .as_ref()
@@ -337,6 +338,8 @@ impl StorageAdapter for PubkySharedStateStorage {
         current_key.validate_successor(&replacement_key)?;
         let _guard = self.transaction_lock.lock().await;
         let access = self.load_session_access().await?;
+        current_key.validate_pubky_derivation(access.local_secret_key.as_ref())?;
+        replacement_key.validate_pubky_derivation(access.local_secret_key.as_ref())?;
         let session = access.session.clone();
         with_shared_state_lock(
             &session,
@@ -376,7 +379,7 @@ impl StorageAdapter for PubkySharedStateStorage {
                             }
                         },
                     };
-                let (updated_state, result) = run_storage_state_transaction(
+                let (mut updated_state, result) = run_storage_state_transaction(
                     initial_state,
                     Box::new(|tx| {
                         let result = f(tx, already_rotated)?;
@@ -388,6 +391,7 @@ impl StorageAdapter for PubkySharedStateStorage {
                     context: "SDK state failed validation before Paykit key rotation".into(),
                     source: None,
                 })?;
+                super::compaction::compact_private_payment_lists(&mut updated_state);
                 let encrypted =
                     encrypt_state_with_key(&replacement_key, &access.public_key()?, &updated_state)?;
                 self.commit_encrypted_state(&access, &lock, encrypted)

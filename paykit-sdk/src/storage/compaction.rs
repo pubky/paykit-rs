@@ -10,11 +10,20 @@ pub(super) fn compact_private_payment_lists(state: &mut StorageState) {
     let kind = PrivateMessageKind::PrivatePaymentList.as_str();
     let mut published = HashMap::new();
     let mut attempted = HashMap::new();
+    let mut latest = HashMap::new();
+    let mut recoverable = HashMap::new();
     for message in &state.outbound_private_messages {
         if message.kind != kind {
             continue;
         }
         let key = (message.counterparty.clone(), message.app_id.clone());
+        latest.insert(key.clone(), message.outbound_message_id);
+        if !matches!(
+            message.status,
+            OutboundPrivateMessageStatus::Invalid | OutboundPrivateMessageStatus::Superseded
+        ) {
+            recoverable.insert(key.clone(), message.outbound_message_id);
+        }
         if message.status == OutboundPrivateMessageStatus::Sent {
             published.insert(key.clone(), message.outbound_message_id);
         }
@@ -32,13 +41,19 @@ pub(super) fn compact_private_payment_lists(state: &mut StorageState) {
         .collect::<HashSet<_>>();
     keep.extend(published.into_values());
     keep.extend(attempted.into_values());
+    keep.extend(latest.into_values());
+    // A newer invalid list must not discard the last usable recovery intent.
+    keep.extend(recoverable.into_values());
     state.outbound_private_messages.retain(|message| {
         message.kind != kind
             || message.prepared_send.is_some()
             || keep.contains(&message.outbound_message_id)
             || !matches!(
                 message.status,
-                OutboundPrivateMessageStatus::Sent | OutboundPrivateMessageStatus::Superseded
+                OutboundPrivateMessageStatus::Sent
+                    | OutboundPrivateMessageStatus::Superseded
+                    | OutboundPrivateMessageStatus::Invalid
+                    | OutboundPrivateMessageStatus::RecoveryRequired
             )
     });
 

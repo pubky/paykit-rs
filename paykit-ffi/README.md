@@ -613,8 +613,10 @@ For missing or corrupt Pubky shared state, use
 and its successor. Persist the replacement key first and distribute it after
 success. Recovery preserves backup history, discards old Noise checkpoints and
 prepared sends, and requires relinking and wallet reconciliation. It rejects
-healthy state and unknown generations. Retry failures with the same keys and
-backup; already-recovered state is preserved. Data newer than the backup is lost.
+healthy state, unreadable generation headers, and unknown generations. Retry
+failures with the same keys and backup; valid already-recovered state is preserved.
+Corrupt replacement-generation state is rejected, not overwritten under keys
+that may already have been used. Data newer than the backup is lost.
 
 Use `exportBackupString` after SDK state changes when the app wants the user to
 recover Paykit private state after reinstall, sign-out, or device restore.
