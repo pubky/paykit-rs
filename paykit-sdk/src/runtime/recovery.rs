@@ -396,6 +396,14 @@ where
         };
 
         let attempt_id = marker.attempt_id().to_owned();
+        if !self
+            .remote_recovery_marker_needs_observation(counterparty, &attempt_id)
+            .await?
+        {
+            return self
+                .recovery_marker_report_or_default(counterparty, false)
+                .await;
+        }
         let lease = self.claim_peer_link_operation(counterparty).await?;
         let result = async {
             let changed = self
@@ -424,14 +432,12 @@ where
             .await
     }
 
-    #[cfg(test)]
-    pub(super) async fn mark_remote_recovery_marker_observed_if_needed(
+    async fn remote_recovery_marker_needs_observation(
         &self,
         counterparty: &PubkyPublicKey,
         attempt_id: &str,
     ) -> Result<bool> {
-        let should_mutate = self
-            .storage
+        self.storage
             .transaction(|tx| {
                 let existing_peer = tx.linked_peer(counterparty);
                 let link_state = tx.encrypted_link_state(counterparty);
@@ -442,8 +448,19 @@ where
                     attempt_id,
                 )
             })
-            .await?;
-        if !should_mutate {
+            .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn mark_remote_recovery_marker_observed_if_needed(
+        &self,
+        counterparty: &PubkyPublicKey,
+        attempt_id: &str,
+    ) -> Result<bool> {
+        if !self
+            .remote_recovery_marker_needs_observation(counterparty, attempt_id)
+            .await?
+        {
             return Ok(false);
         }
 

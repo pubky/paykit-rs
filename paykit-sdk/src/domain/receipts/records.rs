@@ -95,6 +95,7 @@ impl ReceiptIssuanceRecord {
         now: DateTime<Utc>,
     ) -> Result<Self> {
         let access_json = serialize_receipt_access_json(&app_id, &prepared.access)?;
+        crate::domain::outbound_private::validate_outbound_private_message(&access_json)?;
         Ok(Self {
             counterparty,
             app_id,

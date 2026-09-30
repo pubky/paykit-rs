@@ -641,6 +641,7 @@ where
         }
     };
     let raw_json = serialize_payment_request_event(app_id, event)?;
+    crate::domain::outbound_private::validate_outbound_private_message(&raw_json)?;
     let app_id = app_id.clone();
     let event = event.clone();
     retry_storage_transaction(storage, || {
@@ -825,9 +826,14 @@ where
                 source: None,
             })?;
             require_local_payer(&record, "release Payment Request execution claim")?;
-            if request_has_unresolved_payment(tx, &counterparty, &payment_request_id) {
+            if request_has_unresolved_payment(tx, &counterparty, &payment_request_id)
+                || request_has_unreported_successful_payment(
+                    tx.allowance_accounting_state().as_ref(),
+                    &record,
+                )
+            {
                 return Err(PaykitSdkError::Policy {
-                    context: "cannot release Payment Request execution claim with unresolved payment accounting".into(),
+                    context: "cannot release Payment Request execution claim with unresolved payment accounting or an unreported successful payment".into(),
                     source: None,
                 });
             }
@@ -1223,36 +1229,35 @@ fn same_billing_period(left: Option<(&str, &str)>, right: Option<(&str, &str)>) 
     }
 }
 
-/// A canceled executor retains proof authority for settled, unreported occurrences.
+/// An executor retains proof authority for settled, unreported occurrences.
 pub(crate) fn request_has_unreported_successful_payment(
     accounting: Option<&crate::AllowanceAccountingState>,
     record: &PaymentRequestRecord,
 ) -> bool {
     // Keep the executor's claim as proof authority until its settled occurrences
     // have evidence in the event log. Terminal lifecycle still forbids execution.
-    record.state == PaymentRequestLifecycleState::Canceled
-        && accounting.is_some_and(|state| {
-            state.history.occurrences.iter().any(|occurrence| {
-                occurrence.key.request.counterparty == record.counterparty
-                    && occurrence.key.request.payment_request_id == record.payment_request_id
-                    && occurrence
-                        .attempts
-                        .iter()
-                        .any(|attempt| attempt.status == crate::PaymentExecutionStatus::Succeeded)
-                    && !record.payment_proofs.iter().any(|proof| {
-                        match (&proof.billing_period, &occurrence.key.billing_period) {
-                            (None, None) => true,
-                            (Some(proof), Some(period)) => {
-                                DateTime::parse_from_rfc3339(&proof.starts_at)
-                                    .is_ok_and(|start| start == period.starts_at)
-                                    && DateTime::parse_from_rfc3339(&proof.ends_at)
-                                        .is_ok_and(|end| end == period.ends_at)
-                            }
-                            _ => false,
+    accounting.is_some_and(|state| {
+        state.history.occurrences.iter().any(|occurrence| {
+            occurrence.key.request.counterparty == record.counterparty
+                && occurrence.key.request.payment_request_id == record.payment_request_id
+                && occurrence
+                    .attempts
+                    .iter()
+                    .any(|attempt| attempt.status == crate::PaymentExecutionStatus::Succeeded)
+                && !record.payment_proofs.iter().any(|proof| {
+                    match (&proof.billing_period, &occurrence.key.billing_period) {
+                        (None, None) => true,
+                        (Some(proof), Some(period)) => {
+                            DateTime::parse_from_rfc3339(&proof.starts_at)
+                                .is_ok_and(|start| start == period.starts_at)
+                                && DateTime::parse_from_rfc3339(&proof.ends_at)
+                                    .is_ok_and(|end| end == period.ends_at)
                         }
-                    })
-            })
+                        _ => false,
+                    }
+                })
         })
+    })
 }
 
 fn require_local_action_app(

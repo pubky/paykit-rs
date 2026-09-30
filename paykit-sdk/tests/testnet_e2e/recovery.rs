@@ -1,4 +1,6 @@
-use paykit_sdk::{LinkedPeerState, PaykitSdkError, PrivatePaymentListReservationUpdate};
+use paykit_sdk::{
+    LinkedPeerState, PaykitSdkError, PrivatePaymentListReservationUpdate, StorageAdapter,
+};
 use std::time::{Duration, Instant};
 
 use crate::harness::{
@@ -69,6 +71,39 @@ async fn test_recovery_marker_publish_observe_remove_roundtrip() {
         Some(attempt_id.as_str())
     );
     assert_eq!(observed.state, LinkedPeerState::RecoveryRequired);
+
+    let lease = pair
+        .bob
+        .storage
+        .transaction(|tx| {
+            let now = chrono::Utc::now();
+            Ok(tx
+                .claim_peer_link_operation(
+                    &pair.alice.public_key,
+                    now,
+                    now + chrono::Duration::seconds(60),
+                )?
+                .unwrap())
+        })
+        .await
+        .unwrap();
+    let before = pair.bob.storage.snapshot().unwrap();
+    let repeated = pair
+        .bob
+        .sdk
+        .observe_encrypted_link_recovery_marker(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    assert!(!repeated.remote_marker_changed);
+    assert_eq!(pair.bob.storage.snapshot().unwrap(), before);
+    pair.bob
+        .storage
+        .transaction(|tx| {
+            tx.release_peer_link_operation(&lease.counterparty, lease.lease_id);
+            Ok(())
+        })
+        .await
+        .unwrap();
 
     // Direct fetch through unauthenticated storage proves the marker file is
     // on the homeserver before removal. This also validates the fetch

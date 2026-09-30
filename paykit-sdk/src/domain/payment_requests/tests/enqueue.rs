@@ -1,5 +1,32 @@
 use super::*;
 
+#[tokio::test]
+async fn test_checked_payment_proof_rejects_oversized_payload_before_state_changes() {
+    let storage = registered_storage();
+    let raw = proof_raw(
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103",
+        "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
+        "invoice-2026-0001",
+    );
+    let mut value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    value["proof"]["data"] = serde_json::json!("x".repeat(1000));
+    let event = parsed_event(serde_json::to_string(&value).unwrap());
+    let before = storage.snapshot().unwrap();
+    let error = enqueue_checked_payment_request_action(
+        &storage,
+        counterparty(),
+        &app_id(),
+        &event,
+        timestamp(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, PaykitSdkError::Protocol { ref context, .. } if context.contains("message size"))
+    );
+    assert_eq!(storage.snapshot().unwrap(), before);
+}
+
 struct RejectPostCommitReadStorage(InMemoryStorage);
 
 #[async_trait::async_trait]

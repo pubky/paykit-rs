@@ -99,24 +99,26 @@ async fn test_cross_app_claim_handoff_cannot_repeat_successful_payment() {
         })
         .await
         .unwrap();
-    crate::domain::payment_requests::release_payment_request_execution_claim(
+    let before = fixture.storage.snapshot().unwrap();
+    let release = crate::domain::payment_requests::release_payment_request_execution_claim(
         &fixture.storage,
         fixture.occurrence.request.counterparty.clone(),
         &app_id(),
         &fixture.occurrence.request.payment_request_id,
         time(),
     )
-    .await
-    .unwrap();
-    crate::domain::payment_requests::claim_payment_request_execution(
+    .await;
+    assert!(matches!(release, Err(PaykitSdkError::Policy { .. })));
+    assert_eq!(fixture.storage.snapshot().unwrap(), before);
+    let claim = crate::domain::payment_requests::claim_payment_request_execution(
         &fixture.storage,
         fixture.occurrence.request.counterparty.clone(),
         &other,
         &fixture.occurrence.request.payment_request_id,
         time(),
     )
-    .await
-    .unwrap();
+    .await;
+    assert!(matches!(claim, Err(PaykitSdkError::Policy { .. })));
     for mode in [
         PaymentExecutionMode::Manual,
         PaymentExecutionMode::Automatic,
@@ -126,7 +128,7 @@ async fn test_cross_app_claim_handoff_cannot_repeat_successful_payment() {
             .transaction(|tx| {
                 reserve(
                     tx,
-                    &other,
+                    &app_id(),
                     fixture.occurrence.clone(),
                     Some(1),
                     checks(),
@@ -144,6 +146,31 @@ async fn test_cross_app_claim_handoff_cannot_repeat_successful_payment() {
     }
     assert_eq!(fixture.state().history.occurrences.len(), 1);
     assert_eq!(fixture.state().history.occurrences[0].attempts.len(), 1);
+    let scope = &fixture.occurrence.request;
+    let proof = paykit_lib::PaymentRequestEvent::Proof(paykit_lib::PaymentProof::new(
+        paykit_lib::EventId::new_v4(),
+        scope.payment_request_id.clone(),
+        paykit_lib::PaymentReference::new("test").unwrap(),
+        None,
+        app_id(),
+        checks().payment_endpoint_identifier,
+        Default::default(),
+    ));
+    crate::domain::payment_requests::enqueue_checked_payment_request_action(
+        &fixture.storage,
+        scope.counterparty.clone(),
+        &app_id(),
+        &proof,
+        time(),
+    )
+    .await
+    .unwrap();
+    assert!(fixture
+        .storage
+        .snapshot()
+        .unwrap()
+        .payment_request_execution_claims
+        .is_empty());
 }
 
 #[tokio::test]

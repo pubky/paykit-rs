@@ -169,6 +169,7 @@ impl ContactRecord {
         updated_at: chrono::DateTime<chrono::Utc>,
     ) -> Self {
         self.public_contact_marker_status = PublicationStatus::PendingRemoval;
+        self.public_contact_removed_at = None;
         self.public_contact_last_error = None;
         self.updated_at = updated_at;
         self

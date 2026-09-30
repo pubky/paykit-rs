@@ -207,7 +207,14 @@ where
             move |tx| {
                 crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
                 crate::storage::require_paykit_app_active(tx, &app_id)?;
+                let records = tx.public_endpoint_records();
                 for (identifier, payload) in desired_entries {
+                    if records.iter().any(|record| {
+                        *record
+                            == published_record(&app_id, &identifier, &payload, record.updated_at)
+                    }) {
+                        continue;
+                    }
                     tx.save_public_endpoint_record(pending_publication_record(
                         &app_id,
                         &identifier,
@@ -348,6 +355,19 @@ where
                 let change = change.clone();
                 move |tx| {
                     crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
+                    if change.status == PublicationStatus::Published
+                        && tx.public_endpoint_records().iter().any(|record| {
+                            *record
+                                == published_record(
+                                    &app_id,
+                                    &identifier,
+                                    &payload,
+                                    record.updated_at,
+                                )
+                        })
+                    {
+                        return Ok(());
+                    }
                     let record = if change.status == PublicationStatus::Published {
                         published_record(&app_id, &identifier, &payload, now)
                     } else {

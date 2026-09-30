@@ -60,6 +60,12 @@ async fn test_sync_public_endpoints_publishes_and_removes_managed_endpoints() {
         .iter()
         .all(|record| record.status == PublicationStatus::Published));
 
+    user.sdk.sync_public_endpoints().await.unwrap();
+    assert_eq!(
+        load_public_endpoint_records(&user.storage).await.unwrap(),
+        records
+    );
+
     // Shrinking the desired set removes the stale endpoint remotely.
     user.adapter
         .set_public_details(vec![public_receiving_detail(

@@ -357,14 +357,12 @@ where
         let _session_guard = Arc::clone(&self.session_operation_gate).write_owned().await;
         let now = self.clock.now();
         let state = self
-            .storage
-            .transaction(move |tx| {
-                Ok(tx.load_identity_state().unwrap_or(IdentityState {
-                    public_key: None,
-                    initialized_at: now,
-                }))
-            })
-            .await?;
+            .load_signed_out_identity_state()
+            .await?
+            .unwrap_or(IdentityState {
+                public_key: None,
+                initialized_at: now,
+            });
         let session_access = self.pubky.load_session_access().await?;
         if session_access.is_none() && state.public_key.is_some() {
             return Err(PaykitSdkError::Identity {

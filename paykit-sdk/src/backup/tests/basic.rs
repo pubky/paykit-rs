@@ -478,6 +478,29 @@ async fn test_restore_backup_state_accepts_pending_contact_marker_removal() {
     assert_eq!(report.contact_records, 1);
 }
 
+#[test]
+fn test_pending_contact_marker_removal_preserves_uncertain_publication() {
+    let contact = contact_record(public_key());
+    for contact in [
+        contact.clone(),
+        contact
+            .clone()
+            .mark_public_contact_failed("PUT failed".into(), timestamp()),
+        contact.clone().mark_public_contact_removed(timestamp()),
+        contact.mark_public_contact_published(timestamp()),
+    ] {
+        let contact = contact.mark_public_contact_removal_pending(timestamp());
+        let mut state = crate::storage::StorageState {
+            identity_state: Some(identity(public_key())),
+            ..Default::default()
+        };
+        state
+            .contact_records
+            .insert(contact.public_key.clone(), contact);
+        crate::validate_storage_state(&state).unwrap();
+    }
+}
+
 #[tokio::test]
 async fn test_restore_backup_state_rejects_active_peer_work() {
     let storage = InMemoryStorage::new();

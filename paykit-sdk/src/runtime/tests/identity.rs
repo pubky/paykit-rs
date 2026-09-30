@@ -555,7 +555,7 @@ async fn test_sign_out_without_live_session_preserves_identity_scoped_state() {
 }
 
 #[tokio::test]
-async fn test_sign_out_preserves_session_when_storage_is_unavailable() {
+async fn test_sign_out_does_not_require_shared_state_access() {
     #[derive(Clone)]
     struct FailingStorage;
 
@@ -583,12 +583,7 @@ async fn test_sign_out_preserves_session_when_storage_is_unavailable() {
         FixedClock,
     );
 
-    let result = sdk.sign_out().await;
-
-    assert!(matches!(result, Err(PaykitSdkError::Storage { .. })));
-    assert!(!cleared.load(Ordering::SeqCst));
-
-    let status = sdk.forget_session_access().await.unwrap();
+    let status = sdk.sign_out().await.unwrap();
     assert!(cleared.load(Ordering::SeqCst));
     assert_eq!(status.capability, PubkyIdentityCapability::SignedOut);
     assert_eq!(

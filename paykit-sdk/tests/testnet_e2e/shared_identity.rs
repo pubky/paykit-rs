@@ -480,7 +480,15 @@ async fn test_paykit_identity_key_rotation_rekeys_shared_state_and_registry() {
         .await
         .unwrap()
         .access;
-    let provider = TestnetSessionProvider::new(access.clone());
+    let session_secret = access
+        .session
+        .as_grant()
+        .unwrap()
+        .export_local_secret()
+        .await
+        .unwrap();
+    let provider =
+        TestnetSessionProvider::with_session_secret(access.clone(), session_secret.clone());
     let storage = PubkySharedStateStorage::new(provider.clone());
     let sdk = PaykitSdk::new(
         storage.clone(),
@@ -510,8 +518,21 @@ async fn test_paykit_identity_key_rotation_rekeys_shared_state_and_registry() {
         .await
         .expect_err("the previous Paykit key must not decrypt rotated state");
     assert!(matches!(old_key_error, PaykitSdkError::Identity { .. }));
+    sdk.sign_out()
+        .await
+        .expect("old-key app must still be able to revoke its grant");
+    assert!(testnet
+        .sdk()
+        .unwrap()
+        .restore_session(&session_secret)
+        .await
+        .is_err());
 
-    let mut replacement_access = access;
+    let mut replacement_access = session_bootstrap(&testnet, "replacement.test")
+        .sign_in(&secret, PAYKIT_SESSION_CAPABILITIES)
+        .await
+        .unwrap()
+        .access;
     replacement_access.paykit_identity_secret_key = Some(replacement);
     let replacement_provider = TestnetSessionProvider::new(replacement_access);
     let replacement_storage = PubkySharedStateStorage::new(replacement_provider.clone());

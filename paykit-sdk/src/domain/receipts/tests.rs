@@ -155,6 +155,27 @@ fn test_receipt_issuance_record_redacts_sensitive_fields() {
 }
 
 #[test]
+fn test_receipt_issuance_rejects_oversized_access_before_persistence() {
+    let counterparty_key = public_key();
+    let draft = ReceiptDraftBuilder::new("\u{1f600}".repeat(256))
+        .unwrap()
+        .with_new_receipt_id()
+        .build()
+        .unwrap();
+    let prepared =
+        paykit_lib::prepare_receipt_for_recipient(counterparty_key.clone(), draft).unwrap();
+    assert!(matches!(
+        ReceiptIssuanceRecord::from_prepared(
+            PubkyPublicKey::from_public_key(&counterparty_key),
+            paykit_lib::PaykitAppId::new("bitkit").unwrap(),
+            prepared,
+            timestamp(),
+        ),
+        Err(PaykitSdkError::Protocol { .. })
+    ));
+}
+
+#[test]
 fn test_decrypt_receipt_record_from_access_validates_and_redacts() {
     let receipt_id = paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
     let key = ReceiptDecryptionKey::generate();

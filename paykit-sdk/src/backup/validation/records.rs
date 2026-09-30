@@ -120,9 +120,7 @@ fn validate_contact_marker_state(record: &ContactRecord) -> Result<()> {
                 || record.public_contact_last_error.is_some()
         }
         PendingRemoval => {
-            record.public_contact_published_at.is_none()
-                || record.public_contact_removed_at.is_some()
-                || record.public_contact_last_error.is_some()
+            record.public_contact_removed_at.is_some() || record.public_contact_last_error.is_some()
         }
         Removed => {
             record.public_contact_published_at.is_some()
