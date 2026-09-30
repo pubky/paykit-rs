@@ -213,13 +213,13 @@ Rules:
   When present, it MUST be a non-empty object mapping accepted Payment Endpoint
   Identifiers to non-empty UTF-8 Payment Endpoint Payload strings, and
   `required_app_id` MUST be non-null to identify their owning payee App.
-  These Payment Endpoints are immutable request-bound destinations. The payer
+  These Payment Endpoints are fixed for this Payment Request. The payer
   MUST use only this map and MUST NOT fall back to public or private Payment
-  Lists, including when a bound destination is unavailable or unsupported.
+  Lists, including when a specified destination is unavailable or unsupported.
   Absence preserves normal Payment Endpoint discovery. The complete Event
   Message, including these payloads, MUST fit the existing 1000-byte private
-  message limit. Payloads remain opaque; applications MUST NOT encode endpoint
-  bindings in metadata instead of this field.
+  message limit. Payloads remain opaque; applications MUST NOT encode these
+  destinations in metadata instead of this field.
 - `metadata` is optional. If present, it MUST be a JSON object.
 - Request terms are immutable after the initial `paykit.payment_request` event.
 
@@ -509,7 +509,7 @@ Validation rules:
   or index recurring payments SHOULD enforce recurrence eligibility according
   to their local scheduling policy.
 - `payment_endpoint_identifier` MUST be one of the request's `accepted_payment_endpoint_identifiers`.
-  If the request binds `payment_endpoints`, it MUST also be a key in that map.
+  If the request includes `payment_endpoints`, it MUST also be a key in that map.
 - The first valid proof completes a one-time request or its recurring Billing
   Period for SDK execution deduplication. The handling payer App may retain
   corrective evidence without authorizing another payment; competing Apps do
