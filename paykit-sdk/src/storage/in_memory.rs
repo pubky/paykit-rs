@@ -70,6 +70,10 @@ impl InMemoryStorage {
 
 #[async_trait]
 impl StorageAdapter for InMemoryStorage {
+    async fn load_local_identity_state(&self) -> Result<Option<IdentityState>> {
+        self.load_identity_state().await
+    }
+
     async fn transaction_erased<'a>(
         &self,
         f: StorageTransactionCallback<'a>,
@@ -406,6 +410,22 @@ impl StorageTransaction for StorageStateTransaction {
         {
             self.state.paykit_app_operation_leases.remove(app_id);
         }
+    }
+
+    fn renew_paykit_app_operation(
+        &mut self,
+        app_id: &paykit_lib::PaykitAppId,
+        lease_id: u64,
+        expires_at: DateTime<Utc>,
+    ) -> bool {
+        let Some(lease) = self.state.paykit_app_operation_leases.get_mut(app_id) else {
+            return false;
+        };
+        if lease.lease_id != lease_id {
+            return false;
+        }
+        lease.expires_at = lease.expires_at.max(expires_at);
+        true
     }
 
     fn payment_request_execution_claim(

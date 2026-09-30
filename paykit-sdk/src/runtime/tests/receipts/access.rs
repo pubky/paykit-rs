@@ -1,5 +1,117 @@
 use super::*;
 
+struct ReceiptRegistryFailureProvider {
+    loads: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl PubkySessionProvider for ReceiptRegistryFailureProvider {
+    async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>> {
+        Ok(None)
+    }
+
+    async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
+        if self.loads.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(PaykitSdkError::Transport {
+                context: "registry unavailable".into(),
+                source: None,
+            })
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn clear_session_access(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_retrieve_receipt_uses_only_historical_authority_during_registry_failure() {
+    for (authorized, conflicted) in [(true, false), (false, false), (true, true)] {
+        let (storage, mut access, _) = receipt_outbound_conflict_fixture().await;
+        access.app_authorized = authorized;
+        storage
+            .transaction(|tx| {
+                if conflicted {
+                    tx.save_event_dedup_record(conflicted_event_dedup_record(&access));
+                }
+                tx.save_receipt_access_record(access.clone());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            ReceiptRegistryFailureProvider { loads: 0.into() },
+            TestPaymentAdapter,
+            PaykitSdkConfig::new("bitkit").unwrap(),
+            FixedClock,
+        );
+        let result = sdk
+            .retrieve_receipt(access.counterparty.clone(), &access.receipt_id)
+            .await;
+        if conflicted {
+            assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
+            assert_eq!(sdk.pubky.loads.load(Ordering::SeqCst), 1);
+        } else if authorized {
+            assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+            assert_eq!(sdk.pubky.loads.load(Ordering::SeqCst), 2);
+        } else {
+            assert!(matches!(
+                result,
+                Err(PaykitSdkError::RecoveryRequired { .. })
+            ));
+            assert_eq!(sdk.pubky.loads.load(Ordering::SeqCst), 1);
+        }
+        let retained = storage
+            .transaction(|tx| Ok(tx.receipt_access_records(&access.counterparty)))
+            .await
+            .unwrap();
+        assert_eq!(retained[0].app_authorized, authorized);
+    }
+}
+
+#[tokio::test]
+async fn test_receipt_access_skips_blocked_peers_before_registry_lookup() {
+    let (storage, mut access, _) = receipt_outbound_conflict_fixture().await;
+    access.app_authorized = false;
+    storage
+        .transaction(|tx| {
+            save_authorized_paykit_app(
+                tx,
+                access.counterparty.clone(),
+                access.app_id.clone(),
+                paykit_lib::PaykitAppCapabilities {
+                    private_payments: false,
+                    payment_requests: false,
+                    receipts: true,
+                    outgoing_payments: false,
+                },
+            );
+            tx.save_receipt_access_record(access.clone());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        ReceiptRegistryFailureProvider { loads: 0.into() },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("bitkit").unwrap(),
+        FixedClock,
+    );
+    sdk.block_peer(access.counterparty.clone()).await.unwrap();
+
+    assert!(sdk.receipt_access().await.unwrap().is_empty());
+    assert_eq!(sdk.pubky.loads.load(Ordering::SeqCst), 0);
+    let retained = storage
+        .transaction(|tx| Ok(tx.receipt_access_records(&access.counterparty)))
+        .await
+        .unwrap();
+    assert!(!retained[0].app_authorized);
+}
+
 #[tokio::test]
 async fn test_receipt_access_history_survives_unavailable_registry_without_new_authorization() {
     let storage = registered_test_storage();

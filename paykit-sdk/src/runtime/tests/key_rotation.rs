@@ -15,6 +15,52 @@ fn test_replacement_key_requires_new_material_and_next_generation() {
 }
 
 #[tokio::test]
+async fn test_key_rotation_rejects_live_peer_lease_atomically() {
+    let storage = registered_test_storage();
+    let owner = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let peer = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(owner.clone()),
+            initialized_at: FixedClock.now(),
+        })
+        .await
+        .unwrap();
+    storage
+        .transaction(|tx| {
+            tx.claim_peer_link_operation(
+                &peer,
+                FixedClock.now(),
+                FixedClock.now() + ChronoDuration::seconds(60),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let before = storage.snapshot().unwrap();
+    let error = storage
+        .rotate_paykit_identity_key(key(7, 1), key(8, 2), |tx, _| {
+            rotate_private_state(tx, &owner, FixedClock.now())
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, PaykitSdkError::Policy { .. }));
+    assert_eq!(storage.snapshot().unwrap(), before);
+
+    storage
+        .rotate_paykit_identity_key(key(7, 1), key(8, 2), |tx, _| {
+            rotate_private_state(tx, &owner, FixedClock.now() + ChronoDuration::seconds(60))
+        })
+        .await
+        .unwrap();
+    assert!(storage
+        .snapshot()
+        .unwrap()
+        .peer_link_operation_leases
+        .is_empty());
+}
+
+#[tokio::test]
 async fn test_key_rotation_preserves_history_and_resets_private_link_state() {
     let owner = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

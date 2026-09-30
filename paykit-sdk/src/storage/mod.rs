@@ -157,6 +157,15 @@ pub trait StorageAdapter: Send + Sync {
             })
     }
 
+    /// Load identity metadata available without network or live session access.
+    ///
+    /// The default reports no local metadata. Local storage adapters can opt in
+    /// using their validated local read path; read or validation failures must
+    /// remain errors rather than being treated as absent identity metadata.
+    async fn load_local_identity_state(&self) -> Result<Option<IdentityState>> {
+        Ok(None)
+    }
+
     /// Load the current identity state.
     async fn load_identity_state(&self) -> Result<Option<IdentityState>> {
         let result = self
@@ -214,6 +223,10 @@ impl<T> StorageAdapter for Box<T>
 where
     T: StorageAdapter + ?Sized,
 {
+    async fn load_local_identity_state(&self) -> Result<Option<IdentityState>> {
+        (**self).load_local_identity_state().await
+    }
+
     async fn transaction_erased<'a>(
         &self,
         f: StorageTransactionCallback<'a>,
@@ -238,6 +251,10 @@ impl<T> StorageAdapter for Arc<T>
 where
     T: StorageAdapter + ?Sized,
 {
+    async fn load_local_identity_state(&self) -> Result<Option<IdentityState>> {
+        (**self).load_local_identity_state().await
+    }
+
     async fn transaction_erased<'a>(
         &self,
         f: StorageTransactionCallback<'a>,
@@ -405,6 +422,15 @@ pub trait StorageTransaction {
         &self,
         app_id: &paykit_lib::PaykitAppId,
     ) -> Option<PaykitAppOperationLease>;
+
+    /// Extend a Paykit App lease only if its stored lease ID still matches.
+    /// Return false without mutation after release or replacement by another worker.
+    fn renew_paykit_app_operation(
+        &mut self,
+        app_id: &paykit_lib::PaykitAppId,
+        lease_id: u64,
+        expires_at: DateTime<Utc>,
+    ) -> bool;
 
     /// Release a previously claimed Paykit App operation.
     fn release_paykit_app_operation(&mut self, app_id: &paykit_lib::PaykitAppId, lease_id: u64);

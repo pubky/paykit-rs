@@ -183,13 +183,26 @@ pub(crate) fn refresh_stored_message_classification(
     tx: &mut dyn crate::storage::StorageTransaction,
 ) -> Result<()> {
     let mut state = tx.export_storage_state();
+    refresh_storage_state_classification(&mut state)?;
+    tx.replace_storage_state(ValidatedStorageState::new(state));
+    Ok(())
+}
+
+pub(crate) fn refresh_storage_state_classification(state: &mut StorageState) -> Result<()> {
+    // Refresh may update derived indexes, but must not repair stream ordering or IDs.
+    let ordered = unique_private_stream_items(state.private_stream_items.clone())?;
+    if ordered != state.private_stream_items {
+        return Err(PaykitSdkError::Storage {
+            context: "private stream item records are not ordered by id".into(),
+            source: None,
+        });
+    }
     refresh_private_stream_classification(
         &mut state.private_stream_items,
         &mut state.event_dedup_records,
         &mut state.receipt_access_records,
     )?;
-    tx.replace_storage_state(ValidatedStorageState::new(state));
-    Ok(())
+    validation::validate_storage_state(state)
 }
 
 /// Export SDK-managed state from storage.
@@ -313,6 +326,7 @@ fn storage_state_is_empty_except_identity(state: &StorageState) -> bool {
     let mut empty = StorageState {
         paykit_noise_public_key: state.paykit_noise_public_key.clone(),
         identity_state: state.identity_state.clone(),
+        authorized_paykit_apps: state.authorized_paykit_apps.clone(),
         peer_link_operation_leases: state.peer_link_operation_leases.clone(),
         paykit_app_operation_leases: state.paykit_app_operation_leases.clone(),
         ..StorageState::default()

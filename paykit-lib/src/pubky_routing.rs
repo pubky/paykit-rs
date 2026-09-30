@@ -253,17 +253,20 @@ fn validate_payment_endpoint_payload(payload: &PaymentEndpointPayload) -> Result
 ///
 /// Directory listing and per-resource fetches are not atomic; the returned list is a
 /// best-effort snapshot of the payee's homeserver state.
-#[instrument(skip(storage), fields(payee = %payee))]
-pub async fn fetch_payment_list_with_limits(
+#[instrument(skip(storage, remaining_endpoints, remaining_requests, remaining_payload_bytes), fields(payee = %payee))]
+pub async fn fetch_payment_list_with_budget(
     storage: &PublicStorage,
     payee: &PublicKey,
     app_id: &PaykitAppId,
-    max_endpoints: usize,
-    max_total_payload_bytes: usize,
+    remaining_endpoints: &mut usize,
+    remaining_requests: &mut usize,
+    remaining_payload_bytes: &mut usize,
 ) -> Result<PaymentList> {
+    let max_endpoints = (*remaining_endpoints).min(PAYMENT_LIST_MAX_ENDPOINTS);
     let addr = format!("{payee}{}", payment_endpoint_path_prefix(app_id));
     debug!("listing payment endpoints");
-    let resources = list_resources(storage, addr, "list payment endpoints").await?;
+    let resources =
+        list_resources(storage, addr, "list payment endpoints", remaining_requests).await?;
 
     let resources = resources
         .into_iter()
@@ -283,12 +286,11 @@ pub async fn fetch_payment_list_with_limits(
     }
 
     let mut map = HashMap::new();
-    let mut remaining_payload_bytes = max_total_payload_bytes;
     for resource in resources {
-        if remaining_payload_bytes == 0 {
-            return Err(payment_list_limit_exceeded(format!(
-                "Payment List exceeds the allowed {max_total_payload_bytes} payload bytes"
-            )));
+        if *remaining_payload_bytes == 0 {
+            return Err(payment_list_limit_exceeded(
+                "Payment List payload budget exhausted".into(),
+            ));
         }
 
         let identifier_text = resource
@@ -310,22 +312,30 @@ pub async fn fetch_payment_list_with_limits(
             .to_string();
 
         let label = format!("fetch payment endpoint {identifier_text}");
-        let payload_limit = remaining_payload_bytes.min(PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES);
-        let payload =
-            match fetch_text(storage, resource.to_string(), &label, Some(payload_limit)).await {
-                Ok(payload) => payload,
-                Err(error)
-                    if payload_limit < PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES
-                        && is_response_size_limit_exceeded(&error) =>
-                {
-                    return Err(payment_list_limit_exceeded(format!(
-                        "Payment List exceeds the allowed {max_total_payload_bytes} payload bytes"
-                    )));
-                }
-                Err(error) => return Err(error),
-            };
+        let payload_limit = (*remaining_payload_bytes).min(PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES);
+        consume_payment_list_request(remaining_requests)?;
+        *remaining_endpoints -= 1;
+        let payload = match fetch_text_with_budget(
+            storage,
+            resource.to_string(),
+            &label,
+            Some(payload_limit),
+            remaining_payload_bytes,
+        )
+        .await
+        {
+            Ok(payload) => payload,
+            Err(error)
+                if payload_limit < PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES
+                    && is_response_size_limit_exceeded(&error) =>
+            {
+                return Err(payment_list_limit_exceeded(
+                    "Payment List payload budget exhausted".into(),
+                ));
+            }
+            Err(error) => return Err(error),
+        };
         if let Some(payload) = payload {
-            remaining_payload_bytes -= payload.len();
             debug!(identifier = %identifier_text, "fetched Payment Endpoint Payload");
             let payment_endpoint_identifier = PaymentEndpointIdentifier::new(&identifier_text)
                 .map_err(|err| PaykitError::InvalidData {
@@ -345,6 +355,13 @@ pub async fn fetch_payment_list_with_limits(
     Ok(PaymentList {
         payment_endpoints: map,
     })
+}
+
+fn consume_payment_list_request(remaining_requests: &mut usize) -> Result<()> {
+    *remaining_requests = remaining_requests.checked_sub(1).ok_or_else(|| {
+        payment_list_limit_exceeded("Payment List request budget exhausted".into())
+    })?;
+    Ok(())
 }
 
 /// Fetches an individual public payment endpoint from Pubky storage.
@@ -505,9 +522,29 @@ pub(crate) async fn fetch_text(
     label: &str,
     max_bytes: Option<usize>,
 ) -> Result<Option<String>> {
+    let mut remaining_payload_bytes = usize::MAX;
+    fetch_text_with_budget(
+        storage,
+        addr,
+        label,
+        max_bytes,
+        &mut remaining_payload_bytes,
+    )
+    .await
+}
+
+async fn fetch_text_with_budget(
+    storage: &PublicStorage,
+    addr: String,
+    label: &str,
+    max_bytes: Option<usize>,
+    remaining_payload_bytes: &mut usize,
+) -> Result<Option<String>> {
     trace!("fetching text resource");
     match storage.get(&addr).await {
-        Ok(mut resp) => read_text_response(&mut resp, label, max_bytes).await,
+        Ok(mut resp) => {
+            read_text_response(&mut resp, label, max_bytes, remaining_payload_bytes).await
+        }
         Err(err) if is_not_found(&err) => {
             debug!("resource not found (404/GONE)");
             Ok(None)
@@ -537,6 +574,16 @@ async fn read_response_body(
     label: &str,
     max_bytes: usize,
 ) -> Result<Vec<u8>> {
+    let mut remaining_payload_bytes = usize::MAX;
+    read_response_body_with_budget(response, label, max_bytes, &mut remaining_payload_bytes).await
+}
+
+async fn read_response_body_with_budget(
+    response: &mut reqwest::Response,
+    label: &str,
+    max_bytes: usize,
+    remaining_payload_bytes: &mut usize,
+) -> Result<Vec<u8>> {
     if let Some(content_length) = response.content_length() {
         if content_length > max_bytes as u64 {
             return Err(PaykitError::InvalidData {
@@ -553,6 +600,7 @@ async fn read_response_body(
             source: err.into(),
         }
     })? {
+        *remaining_payload_bytes = remaining_payload_bytes.saturating_sub(chunk.len());
         if bytes.len().saturating_add(chunk.len()) > max_bytes {
             return Err(PaykitError::InvalidData {
                 context: format!("{label}: response exceeds the {max_bytes}-byte limit"),
@@ -568,11 +616,13 @@ async fn read_text_response(
     response: &mut reqwest::Response,
     label: &str,
     max_bytes: Option<usize>,
+    remaining_payload_bytes: &mut usize,
 ) -> Result<Option<String>> {
-    let bytes = read_response_body(
+    let bytes = read_response_body_with_budget(
         response,
         label,
         max_bytes.unwrap_or(MAX_PUBLIC_RESOURCE_BYTES),
+        remaining_payload_bytes,
     )
     .await?;
     if bytes.is_empty() {
@@ -599,6 +649,7 @@ async fn list_resources(
     storage: &PublicStorage,
     addr: String,
     label: &str,
+    remaining_requests: &mut usize,
 ) -> Result<Vec<PubkyResource>> {
     trace!("listing directory resources");
     let mut resources = Vec::new();
@@ -625,6 +676,7 @@ async fn list_resources(
             builder = builder.cursor(cursor);
         }
 
+        consume_payment_list_request(remaining_requests)?;
         let page = match builder.send().await {
             Ok(page) => page,
             Err(err) if is_not_found(&err) => {

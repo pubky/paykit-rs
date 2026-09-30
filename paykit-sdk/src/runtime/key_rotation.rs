@@ -16,8 +16,13 @@ where
     /// Requests, Receipts, and app-owned records. It removes old Encrypted
     /// Link snapshots and leases, parks unsent private messages for recovery,
     /// and publishes the replacement Noise public key in the App Registry.
-    /// The caller must distribute and persist `replacement_key` for remaining
-    /// authorized applications before they resume private Paykit operations.
+    /// Persist `replacement_key` securely before calling this method. Shared
+    /// state commits before the App Registry is published, so an error does not
+    /// imply rollback. Retry with the exact same current and replacement keys;
+    /// do not generate another replacement for the same generation. Distribute
+    /// the replacement to remaining authorized applications before they resume.
+    /// Rotation rejects live shared peer leases. Expired leases cannot fence
+    /// remote requests already dispatched by another application.
     pub async fn rotate_paykit_identity_key(
         &self,
         replacement_key: crate::PaykitIdentitySecretKey,
@@ -155,6 +160,20 @@ pub(super) fn rotate_private_state(
     {
         return Err(PaykitSdkError::Identity {
             context: "shared SDK state does not match the rotating Pubky identity".into(),
+            source: None,
+        });
+    }
+
+    // This check and key replacement share the storage transaction, including
+    // across SDK instances. Never revoke a live sender or handshake's lease.
+    if state
+        .peer_link_operation_leases
+        .values()
+        .any(|lease| lease.expires_at > now)
+    {
+        return Err(PaykitSdkError::Policy {
+            context: "cannot rotate Paykit identity key while peer link operations are active"
+                .into(),
             source: None,
         });
     }

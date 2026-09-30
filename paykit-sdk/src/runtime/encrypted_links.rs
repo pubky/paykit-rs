@@ -154,6 +154,21 @@ where
             let lease = lease.clone();
             move |tx| {
                 crate::storage::require_peer_link_operation_lease(tx, &lease)?;
+                for message in tx.outbound_private_messages(&counterparty) {
+                    if matches!(
+                        message.status,
+                        OutboundPrivateMessageStatus::Pending
+                            | OutboundPrivateMessageStatus::Sending
+                            | OutboundPrivateMessageStatus::Failed
+                            | OutboundPrivateMessageStatus::RecoveryRequired
+                    ) {
+                        tx.save_outbound_private_message(mark_outbound_recovery_required(
+                            message,
+                            "counterparty is blocked; a fresh Encrypted Link is required".into(),
+                            now,
+                        ))?;
+                    }
+                }
                 let mut record = tx
                     .linked_peer(&counterparty)
                     .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
@@ -562,10 +577,7 @@ where
     fn link_handshake_error_requires_recovery(err: &PaykitSdkError) -> bool {
         matches!(
             err,
-            PaykitSdkError::Transport { .. }
-                | PaykitSdkError::NotFound { .. }
-                | PaykitSdkError::Protocol { .. }
-                | PaykitSdkError::RecoveryRequired { .. }
+            PaykitSdkError::Protocol { .. } | PaykitSdkError::RecoveryRequired { .. }
         )
     }
 
@@ -578,6 +590,8 @@ where
         expected_generation: u64,
         lease: PeerLinkOperationLease,
     ) -> Result<LinkedPeerHandshakeReport> {
+        self.require_current_peer_link_operation(&lease, &session_access)
+            .await?;
         let progress = match paykit_lib::advance_handshake(handshake).await {
             Ok(progress) => progress,
             Err(err) => {
@@ -646,9 +660,16 @@ where
         role: EncryptedLinkHandshakeRole,
         lease: PeerLinkOperationLease,
     ) -> Result<LinkedPeerHandshakeReport> {
-        let peer_state = self
+        let (peer_state, abandoned_link) = self
             .storage
-            .transaction(|tx| Ok(tx.linked_peer(&counterparty).map(|peer| peer.state)))
+            .transaction(|tx| {
+                Ok((
+                    tx.linked_peer(&counterparty).map(|peer| peer.state),
+                    tx.encrypted_link_state(&counterparty).is_some_and(|state| {
+                        state.link_snapshot.is_none() && state.handshake_snapshot.is_none()
+                    }),
+                ))
+            })
             .await?;
         if matches!(peer_state, Some(LinkedPeerState::Blocked)) {
             return Err(PaykitSdkError::Policy {
@@ -723,15 +744,16 @@ where
         let (session_access, secret_key) = self.private_link_session_access().await?;
         let remote_public_key = counterparty.to_public_key()?;
         let remote_noise_public_key = self.counterparty_noise_public_key(&counterparty).await?;
-        if matches!(peer_state, Some(LinkedPeerState::RecoveryRequired)) {
-            paykit_lib::clear_encrypted_link_outbox(
-                &session_access.session,
-                &secret_key,
-                &remote_public_key,
+        if abandoned_link || matches!(peer_state, Some(LinkedPeerState::RecoveryRequired)) {
+            self.clear_encrypted_link_outbox_with_lease(
+                &session_access,
+                &lease,
                 &remote_noise_public_key,
             )
             .await?;
         }
+        self.require_current_peer_link_operation(&lease, &session_access)
+            .await?;
         let handshake = match role {
             EncryptedLinkHandshakeRole::Initiator => paykit_lib::initiate_encrypted_link(
                 session_access.session.clone(),
@@ -782,6 +804,73 @@ where
         })
     }
 
+    pub(super) async fn require_current_peer_link_operation(
+        &self,
+        lease: &PeerLinkOperationLease,
+        session_access: &PubkySessionAccess,
+    ) -> Result<()> {
+        let secret = session_access.paykit_noise_secret_key()?;
+        let noise_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::from_secret(&secret).public_key());
+        self.storage
+            .transaction(|tx| {
+                crate::storage::require_peer_link_operation_lease(tx, lease)?;
+                if lease.expires_at <= self.clock.now() {
+                    return Err(PaykitSdkError::Policy {
+                        context: "peer link operation lease expired".into(),
+                        source: None,
+                    });
+                }
+                crate::storage::bind_paykit_noise_key(tx, noise_public_key)
+            })
+            .await
+    }
+
+    pub(super) async fn clear_encrypted_link_outbox_with_lease(
+        &self,
+        session_access: &PubkySessionAccess,
+        lease: &PeerLinkOperationLease,
+        remote_noise_public_key: &paykit_lib::PublicKey,
+    ) -> Result<()> {
+        self.require_current_peer_link_operation(lease, session_access)
+            .await?;
+        let secret = session_access.paykit_noise_secret_key()?;
+        let remote_public_key = lease.counterparty.to_public_key()?;
+        let cleanup = paykit_lib::clear_encrypted_link_outbox(
+            &session_access.session,
+            &secret,
+            &remote_public_key,
+            remote_noise_public_key,
+        );
+        tokio::pin!(cleanup);
+        let remaining = (lease.expires_at - self.clock.now())
+            .to_std()
+            .unwrap_or_default();
+        let expires = tokio::time::sleep(remaining);
+        tokio::pin!(expires);
+        let mut checks = tokio::time::interval(PEER_LINK_OPERATION_LEASE_TIMEOUT / 4);
+        // Stop cleanup when ownership is lost. Dropping the future cannot undo
+        // an already-dispatched DELETE; the Pubky request timeout is caller-owned.
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut expires => {
+                    return Err(PaykitSdkError::Policy {
+                        context: "peer link operation lease expired during outbox cleanup".into(),
+                        source: None,
+                    });
+                }
+                _ = checks.tick() => {
+                    self.require_current_peer_link_operation(lease, session_access).await?;
+                }
+                result = &mut cleanup => {
+                    result?;
+                    return self.require_current_peer_link_operation(lease, session_access).await;
+                }
+            }
+        }
+    }
+
     pub(super) async fn release_peer_link_operation(
         &self,
         lease: &PeerLinkOperationLease,
@@ -801,12 +890,10 @@ where
         lease: PeerLinkOperationLease,
         result: Result<T>,
     ) -> Result<T> {
-        let release_result = self.release_peer_link_operation(&lease).await;
-        match (result, release_result) {
-            (Ok(value), Ok(())) => Ok(value),
-            (Err(err), _) => Err(err),
-            (Ok(_), Err(err)) => Err(err),
-        }
+        // Cleanup failure must not obscure a confirmed publication or its error.
+        // An unreleased lease expires and can then be reclaimed.
+        let _ = self.release_peer_link_operation(&lease).await;
+        result
     }
 
     pub(super) async fn private_link_session_access(

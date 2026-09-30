@@ -562,8 +562,10 @@ async fn test_storage_and_backup_blobs_round_trip_private_sync_records() {
         paykit_sdk::export_backup_state(&paykit_sdk::storage::InMemoryStorage::from_state(state))
             .await
             .unwrap();
-    let encoded = encode_backup_state(&backup).unwrap();
+    let mut encoded = encode_backup_state(&backup).unwrap();
     assert_eq!(decode_backup_state(&encoded).unwrap(), backup);
+    encoded.push(0);
+    assert!(decode_backup_state(&encoded).is_err());
 }
 
 #[test]
@@ -654,11 +656,13 @@ fn test_state_blob_snapshot_encoding_round_trips() {
         revision: "revision-1".into(),
     };
 
-    let encoded = encode_sdk_state_blob_snapshot(snapshot.clone()).unwrap();
-    let decoded = decode_sdk_state_blob_snapshot(encoded).unwrap();
+    let mut encoded = encode_sdk_state_blob_snapshot(snapshot.clone()).unwrap();
+    let decoded = decode_sdk_state_blob_snapshot(encoded.clone()).unwrap();
 
     assert_eq!(decoded.revision, snapshot.revision);
     assert_eq!(decoded.blob.export_bytes(), snapshot.blob.export_bytes());
+    encoded.push(0);
+    assert!(decode_sdk_state_blob_snapshot(encoded).is_err());
 }
 
 #[test]

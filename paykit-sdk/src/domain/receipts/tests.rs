@@ -295,6 +295,63 @@ fn test_receipt_access_record_keeps_newest_retrieval_timestamp() {
 }
 
 #[test]
+fn test_receipt_metadata_is_monotonic_when_device_clock_is_behind() {
+    let recipient = public_key();
+    let draft = ReceiptDraftBuilder::new("invoice-2026-0001")
+        .unwrap()
+        .with_new_receipt_id()
+        .build()
+        .unwrap();
+    let prepared = paykit_lib::prepare_receipt_for_recipient(recipient.clone(), draft).unwrap();
+    let earlier = timestamp() - chrono::Duration::minutes(5);
+    let later = timestamp() + chrono::Duration::minutes(5);
+    let issuance = ReceiptIssuanceRecord::from_prepared(
+        PubkyPublicKey::from_public_key(&recipient),
+        paykit_lib::PaykitAppId::new("bitkit").unwrap(),
+        prepared,
+        timestamp(),
+    )
+    .unwrap();
+    let failed = issuance.mark_failed(earlier, "storage unavailable".into());
+    assert_eq!(failed.updated_at, timestamp());
+    let stored = failed
+        .mark_failed(later, "storage unavailable".into())
+        .mark_stored(earlier);
+    let queued = stored.mark_access_queued(1, earlier);
+    assert_eq!(queued.stored_at, Some(later));
+    assert_eq!(queued.updated_at, later);
+    assert_eq!(queued.access_queued_at, Some(later));
+
+    let receipt_id = paykit_lib::ReceiptId::new_v4();
+    let key = ReceiptDecryptionKey::generate();
+    let access = receipt_access_record(&receipt_id, &key, "invoice-2026-0001");
+    let failed = access.mark_retrieval_error(
+        ReceiptRetrievalStatus::Failed,
+        earlier,
+        "unavailable".into(),
+    );
+    assert_eq!(failed.retrieval_attempted_at, Some(timestamp()));
+    let failed =
+        failed.mark_retrieval_error(ReceiptRetrievalStatus::NotFound, later, "missing".into());
+    let retried = failed.mark_retrieval_error(
+        ReceiptRetrievalStatus::Failed,
+        earlier,
+        "unavailable".into(),
+    );
+    assert_eq!(retried.retrieval_attempted_at, Some(later));
+    let retrieved = retried.mark_retrieved(earlier);
+    assert_eq!(retrieved.retrieved_at, Some(later));
+    assert_eq!(retrieved.retrieval_attempted_at, Some(later));
+    let record = super::records::ReceiptRecord::from_receipt(
+        access.counterparty.clone(),
+        &retried,
+        receipt(receipt_id, "invoice-2026-0001", recipient),
+        earlier,
+    );
+    assert_eq!(record.retrieved_at, later);
+}
+
+#[test]
 fn test_receipt_access_view_hides_storage_only_fields() {
     let receipt_id = paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
     let key = ReceiptDecryptionKey::generate();

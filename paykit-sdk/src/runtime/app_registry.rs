@@ -93,7 +93,17 @@ where
     ) -> Result<()> {
         self.retry_storage_transaction(|| {
             let lease = lease.clone();
-            move |tx| crate::storage::require_paykit_app_operation_lease(tx, &lease)
+            move |tx| {
+                crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
+                let timeout = ChronoDuration::from_std(PAYKIT_APP_OPERATION_LEASE_TIMEOUT)
+                    .expect("fixed Paykit App lease timeout must fit chrono duration");
+                tx.renew_paykit_app_operation(
+                    &lease.app_id,
+                    lease.lease_id,
+                    self.clock.now() + timeout,
+                );
+                Ok(())
+            }
         })
         .await
     }
@@ -103,12 +113,9 @@ where
         lease: PaykitAppOperationLease,
         result: Result<T>,
     ) -> Result<T> {
-        let release_result = self.release_paykit_app_operation(&lease).await;
-        match (result, release_result) {
-            (Ok(value), Ok(())) => Ok(value),
-            (Err(err), _) => Err(err),
-            (Ok(_), Err(err)) => Err(err),
-        }
+        // A failed release leaves an expiring lease, not an uncommitted operation.
+        let _ = self.release_paykit_app_operation(&lease).await;
+        result
     }
 
     pub(super) async fn counterparty_app_authorization_context(
@@ -140,7 +147,12 @@ where
                 .transaction({
                     let counterparty = counterparty.clone();
                     move |tx| {
-                        tx.save_authorized_paykit_apps(counterparty, apps);
+                        if tx
+                            .load_identity_state()
+                            .is_some_and(|state| state.public_key.is_some())
+                        {
+                            tx.save_authorized_paykit_apps(counterparty, apps);
+                        }
                         Ok(())
                     }
                 })
@@ -206,6 +218,7 @@ where
         app: paykit_lib::PaykitApp,
     ) -> Result<paykit_lib::PaykitAppRegistry> {
         let _identity_guard = self.claim_identity_operation("publish Paykit app")?;
+        self.load_session_access_and_refresh_identity().await?;
         let app_lease = self.claim_paykit_app_publication_operation().await?;
         let result = self.publish_paykit_app_inner(app, &app_lease).await;
         self.finish_paykit_app_operation(app_lease, result).await
@@ -219,29 +232,36 @@ where
         let app_id = self.config.app_id.clone();
         let capabilities = app.capabilities();
         let (session_access, registry) = self.paykit_app_registry_update_context(true).await?;
+        self.require_paykit_app_operation_lease(app_lease).await?;
         let remote_capabilities = registry
             .apps()
             .get(&app_id)
             .map(|previous| previous.capabilities());
         let staged_capabilities = stage_app_capability_update(
             &self.storage,
-            &app_id,
+            app_lease,
             remote_capabilities,
             capabilities,
             self.clock.now(),
         )
         .await?;
         let published = self
-            .update_paykit_app_registry_with_access(&session_access, true, |registry| {
-                registry.register_app(app_id.clone(), app.clone())?;
-                Ok(())
-            })
+            .update_paykit_app_registry_with_access_inner(
+                &session_access,
+                true,
+                true,
+                Some(app_lease),
+                |registry| {
+                    registry.register_app(app_id.clone(), app.clone())?;
+                    Ok(())
+                },
+            )
             .await;
         let registry = match published {
             Ok(registry) => registry,
             Err(err) => {
                 if let Some((previous, staged)) = staged_capabilities {
-                    restore_app_capabilities(&self.storage, &app_id, staged, previous).await?;
+                    restore_app_capabilities(&self.storage, app_lease, staged, previous).await?;
                 }
                 return Err(err);
             }
@@ -279,6 +299,7 @@ where
     /// reactivate it.
     pub async fn remove_paykit_app(&self) -> Result<paykit_lib::PaykitAppRegistry> {
         let _identity_guard = self.claim_identity_operation("remove Paykit app")?;
+        self.load_session_access_and_refresh_identity().await?;
         let app_lease = self.claim_paykit_app_operation().await?;
         let result = self.remove_paykit_app_inner(&app_lease).await;
         self.finish_paykit_app_operation(app_lease, result).await
@@ -292,7 +313,8 @@ where
         self.load_paykit_app_registry_for_update(&session_access, true)
             .await?;
         let app_id = self.config.app_id.clone();
-        let blockers = begin_paykit_app_removal(&self.storage, &app_id, self.clock.now()).await?;
+        self.require_paykit_app_operation_lease(app_lease).await?;
+        let blockers = begin_paykit_app_removal(&self.storage, app_lease, self.clock.now()).await?;
         if !blockers.is_empty() {
             return Err(PaykitSdkError::Policy {
                 context: format!(
@@ -305,21 +327,22 @@ where
                 source: None,
             });
         }
-        let now = self.clock.now();
         let lease_timeout = ChronoDuration::from_std(PEER_LINK_OPERATION_LEASE_TIMEOUT)
             .expect("fixed peer link lease timeout must fit chrono duration");
         let leases = self
             .storage
             .transaction({
-                let app_id = app_id.clone();
+                let app_lease = app_lease.clone();
                 move |tx| {
-                    retire_app_outbound_private_messages(tx, &app_id, now, now + lease_timeout)
+                    let now = self.clock.now();
+                    retire_app_outbound_private_messages(tx, &app_lease, now, now + lease_timeout)
                 }
             })
             .await?;
         let cleanup_result = async {
             let mut cleanup_failures = Vec::new();
             for lease in &leases {
+                self.require_paykit_app_operation_lease(app_lease).await?;
                 cleanup_failures.extend(
                     self.cancel_terminal_private_list_reservations(
                         &lease.counterparty,
@@ -341,8 +364,8 @@ where
             let remaining_reservations = self
                 .storage
                 .transaction({
-                    let app_id = app_id.clone();
-                    move |tx| detach_shared_app_reservations(tx, &app_id)
+                    let app_lease = app_lease.clone();
+                    move |tx| detach_shared_app_reservations(tx, &app_lease)
                 })
                 .await?;
             if remaining_reservations != 0 {
@@ -381,14 +404,17 @@ where
             identifiers.sort_by(|left, right| left.as_str().cmp(right.as_str()));
             for identifier in identifiers {
                 self.require_paykit_app_operation_lease(app_lease).await?;
-                self.remove_public_endpoint_if_current(&session_access, &identifier, None)
+                self.remove_public_endpoint_if_current(&session_access, &identifier, None, app_lease)
                     .await?;
             }
 
             self.storage
                 .transaction({
                     let app_id = app_id.clone();
+                    let app_lease = app_lease.clone();
                     move |tx| {
+                        crate::storage::require_paykit_app_operation_lease(tx, &app_lease)?;
+                        let now = self.clock.now();
                         for record in tx
                             .public_endpoint_records()
                             .into_iter()
@@ -407,7 +433,7 @@ where
 
             self.require_paykit_app_operation_lease(app_lease).await?;
             let registry = self
-                .update_paykit_app_registry_with_access(&session_access, true, |registry| {
+                .update_paykit_app_registry_with_access_inner(&session_access, true, true, Some(app_lease), |registry| {
                     registry.remove_app(&app_id);
                     Ok(())
                 })
@@ -416,17 +442,10 @@ where
         }
         .await;
 
-        let mut release_error = None;
         for lease in &leases {
-            if let Err(err) = self.release_peer_link_operation(lease).await {
-                release_error.get_or_insert(err);
-            }
+            let _ = self.release_peer_link_operation(lease).await;
         }
-        match (cleanup_result, release_error) {
-            (Ok(registry), None) => Ok(registry),
-            (Err(err), _) => Err(err),
-            (Ok(_), Some(err)) => Err(err),
-        }
+        cleanup_result
     }
 
     /// Report work that must finish before this application can be removed.
@@ -537,6 +556,7 @@ where
             session_access,
             create_if_missing,
             true,
+            None,
             update,
         )
         .await
@@ -550,8 +570,14 @@ where
     where
         F: Fn(&mut paykit_lib::PaykitAppRegistry) -> Result<()>,
     {
-        self.update_paykit_app_registry_with_access_inner(session_access, false, false, update)
-            .await
+        self.update_paykit_app_registry_with_access_inner(
+            session_access,
+            false,
+            false,
+            None,
+            update,
+        )
+        .await
     }
 
     async fn update_paykit_app_registry_with_access_inner<F>(
@@ -559,6 +585,7 @@ where
         session_access: &PubkySessionAccess,
         create_if_missing: bool,
         validate_local_noise_key: bool,
+        app_lease: Option<&PaykitAppOperationLease>,
         update: F,
     ) -> Result<paykit_lib::PaykitAppRegistry>
     where
@@ -585,6 +612,9 @@ where
                 self.validate_local_registry_noise_key(session_access, &mut registry)?;
             }
             update(&mut registry)?;
+            if let Some(lease) = app_lease {
+                self.require_paykit_app_operation_lease(lease).await?;
+            }
             if registry == unchanged {
                 return Ok(registry);
             }

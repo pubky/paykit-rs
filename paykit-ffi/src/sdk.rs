@@ -142,8 +142,10 @@ impl FfiPaykitSdk {
     ///
     /// Every operation requires active session access with current Paykit identity
     /// key material and `required_session_capabilities()`. Homeserver write locks
-    /// serialize shared-state transactions; callers may retry the complete SDK
-    /// operation after a lock conflict.
+    /// serialize shared-state transactions. A multi-step operation may have
+    /// committed work before returning an error; inspect its records before
+    /// retrying commands that create requests or payments. Uncertain writes can
+    /// make the next operation wait through the shared-state cooldown.
     #[uniffi::constructor]
     pub fn with_pubky_shared_state(
         session_provider: Arc<dyn FfiSdkPubkySessionProvider>,
@@ -268,7 +270,7 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Clear local session access and SDK identity state without revoking the grant.
+    /// Clear local session access without revoking the grant or deleting shared state.
     ///
     /// Use this only when remote revocation cannot be reached and the app
     /// intentionally accepts that persisted copies of the grant remain valid.

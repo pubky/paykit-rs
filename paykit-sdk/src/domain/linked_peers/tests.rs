@@ -162,8 +162,8 @@ async fn test_save_linked_peer_link_state_requeues_recovery_required_messages() 
         .unwrap();
     assert_eq!(active.raw_json, active_payload);
     assert_eq!(active.status, OutboundPrivateMessageStatus::Pending);
-    assert_eq!(active.attempt_count, 0);
-    assert!(active.last_attempt_at.is_none());
+    assert_eq!(active.attempt_count, 1);
+    assert_eq!(active.last_attempt_at, Some(timestamp()));
     assert!(active.last_error.is_none());
     for app_id in [&retired_app_id, &unregistered_app_id] {
         let message = messages

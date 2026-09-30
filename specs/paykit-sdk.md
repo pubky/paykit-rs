@@ -294,10 +294,11 @@ does not by itself detect a homeserver replay of an older valid blob.
 
 Each transaction acquires a renewable WebDAV file lock, fetches and decrypts the
 latest blob, applies the existing `StorageTransaction`, validates and encrypts
-changed state, then writes with the lock token and releases the lock. A competing
-writer gets a storage conflict and can retry the whole SDK operation with fresh
-state. A storage instance also fails closed if a resource it previously
-observed disappears.
+changed state, then writes with the lock token and releases the lock. Contended
+transactions can return a storage conflict. Multi-step operations may already
+have committed work, so callers must inspect durable records before retrying
+commands that create requests or payments. A storage instance also fails closed
+if a resource it previously observed disappears.
 
 Before each state PUT, the adapter publishes an empty, uniquely named marker
 under `/pub/paykit/v0/shared-state-writes/`. A confirmed PUT or definitive lock
@@ -430,6 +431,10 @@ The identity-wide Paykit App Registry is stored at
 `/pub/paykit/v0/apps/{app_id}/endpoints/...`, so app ownership remains explicit
 without partitioning private communication.
 
+Apps sharing this state are mutually trusted: they hold the same Paykit key
+material and broad Pubky write access. App IDs attribute work and scope SDK
+commands; they do not isolate a malicious app from another app's state.
+
 The registry uses this closed-world JSON shape:
 
 ```json
@@ -468,6 +473,9 @@ Paykit identity secret. Key rotation advances `key_generation`, replaces the
 Noise public key, re-encrypts shared state, clears old Encrypted Link
 snapshots, and preserves non-cryptographic history. Private capabilities cannot
 be registered without a Noise public key.
+Persist the replacement key before starting rotation. If rotation fails after
+re-encrypting state but before publishing the registry, retry with that same
+replacement key; generating another replacement cannot recover that commit.
 
 An app must successfully publish its registry entry before creating
 app-attributed private work. Removal preflight reports outstanding requests,
@@ -940,6 +948,8 @@ identity-wide state across apps or processes must be enforced by the shared
 storage backing. Lease expiry makes a stale operation reclaimable by another
 worker; durable writes still check the stored lease id so an earlier holder
 cannot commit after a newer lease has replaced it.
+App workflows renew their current lease before remote publication or cleanup;
+renewal cannot revive a lease replaced by another worker.
 
 The local lease does not make an already-started remote write safe if its
 holder is suspended past expiry. Homeserver write locks must fence writes through
@@ -1396,8 +1406,8 @@ Bindings should not expose:
 
 SDK errors should be structured:
 
-- `ConcurrentUpdate`: another authorized client committed newer shared state;
-  reload and retry the complete operation
+- `ConcurrentUpdate`: a storage revision changed or a required lock was busy;
+  reread affected state before retrying, accounting for earlier committed steps
 - `Storage`: durable storage failure
 - `Identity`: Pubky session/key/capability failure
 - `Transport`: Pubky or Encrypted Link transport failure

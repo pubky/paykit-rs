@@ -465,6 +465,14 @@ async fn test_receipt_access_enqueue_is_idempotent_for_stale_record() {
         .await
         .unwrap();
 
+    let stored_at = FixedClock.now() + chrono::Duration::minutes(5);
+    storage
+        .transaction(|tx| {
+            tx.save_receipt_issuance_record(prepared.mark_stored(stored_at));
+            Ok(())
+        })
+        .await
+        .unwrap();
     let first = crate::domain::receipts::enqueue_receipt_access_for_issuance(
         &storage,
         prepared.clone(),
@@ -481,6 +489,12 @@ async fn test_receipt_access_enqueue_is_idempotent_for_stale_record() {
     .unwrap();
 
     assert_eq!(first.outbound_message_id, second.outbound_message_id);
+    assert_eq!(first.updated_at, stored_at);
+    assert_eq!(first.access_queued_at, Some(stored_at));
+    assert_eq!(
+        storage.snapshot().unwrap().outbound_private_messages[0].created_at,
+        stored_at
+    );
     assert_eq!(
         storage.snapshot().unwrap().outbound_private_messages.len(),
         1

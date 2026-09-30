@@ -141,6 +141,7 @@ fn redacted_error(error: &str) -> String {
 }
 
 /// Enqueue one raw JSON Private Application Message.
+#[cfg(test)]
 pub(crate) async fn enqueue_private_message<S>(
     storage: &S,
     counterparty: PubkyPublicKey,

@@ -148,6 +148,10 @@ fn validate_payment_request_execution_claims(state: &StorageState) -> Result<()>
             ));
         }
         if !unresolved_payment
+            && !crate::domain::payment_requests::request_has_unreported_successful_payment(
+                state.allowance_accounting.as_ref(),
+                record,
+            )
             && !matches!(
                 record.state,
                 PaymentRequestLifecycleState::Proposed

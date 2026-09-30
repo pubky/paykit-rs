@@ -92,11 +92,14 @@ fn load(tx: &dyn StorageTransaction) -> Result<AllowanceAccountingState> {
 }
 
 fn save(tx: &mut dyn StorageTransaction, mut state: AllowanceAccountingState) -> Result<()> {
+    validate_accounting(&state)?;
+    if tx.allowance_accounting_state().as_ref() == Some(&state) {
+        return Ok(());
+    }
     state.revision = state
         .revision
         .checked_add(1)
         .ok_or_else(|| protocol("Payment accounting revision exhausted"))?;
-    validate_accounting(&state)?;
     tx.save_allowance_accounting_state(state);
     Ok(())
 }

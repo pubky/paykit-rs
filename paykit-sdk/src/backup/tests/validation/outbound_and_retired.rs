@@ -1,6 +1,25 @@
 use super::*;
 use crate::storage::PreparedOutboundPrivateSend;
 
+#[test]
+fn test_pending_private_list_accepts_consistent_attempt_history() {
+    let mut pending = private_payment_list_outbound(public_key(), 7, "ln-private");
+    pending.attempt_count = 1;
+    pending.last_attempt_at = Some(timestamp());
+    let mut state = crate::storage::StorageState {
+        identity_state: Some(identity(public_key())),
+        next_outbound_private_message_id: 8,
+        outbound_private_messages: vec![pending],
+        ..Default::default()
+    };
+    crate::validate_storage_state(&state).unwrap();
+    state.outbound_private_messages[0].last_attempt_at = None;
+    assert!(crate::validate_storage_state(&state).is_err());
+    state.outbound_private_messages[0].last_attempt_at = Some(timestamp());
+    state.outbound_private_messages[0].attempt_count = 0;
+    assert!(crate::validate_storage_state(&state).is_err());
+}
+
 #[tokio::test]
 async fn test_restore_backup_state_preserves_invalid_outbound_audit_record() {
     let storage = InMemoryStorage::new();

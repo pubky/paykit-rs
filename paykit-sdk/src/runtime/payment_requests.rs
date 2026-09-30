@@ -310,18 +310,15 @@ where
     /// that the counterparty supports those extensions; they are not negotiated here.
     ///
     /// The returned record reflects the local outbound queue, not delivery or
-    /// counterparty processing.
+    /// counterparty processing. It is derived in the queue transaction, without
+    /// a fallible post-commit read.
     pub async fn propose_payment_request(
         &self,
         counterparty: PubkyPublicKey,
         terms: PaymentRequestTerms,
     ) -> Result<PaymentRequestRecord> {
         let event = PaymentRequest::new(EventId::new_v4(), PaymentRequestId::new_v4(), terms);
-        let payment_request_id = event.payment_request_id().clone();
-        self.enqueue_raw_payment_request(counterparty.clone(), &event)
-            .await?;
-        self.load_payment_request_record(&counterparty, &payment_request_id)
-            .await
+        self.enqueue_raw_payment_request(counterparty, &event).await
     }
 
     /// Claim a received Payment Request before beginning payment preparation.
@@ -387,7 +384,8 @@ where
     /// The current App must claim the request first. Success only queues acceptance;
     /// accounting callers must still reserve payment and obtain a fresh handoff.
     /// The execution claim remains until proof, cancellation, or an explicit release,
-    /// and longer while payment accounting has unresolved attempts.
+    /// and longer while payment accounting has unresolved attempts or a canceled
+    /// request has successful payments awaiting proof.
     /// The returned record does not imply delivery or counterparty processing.
     pub async fn accept_payment_request(
         &self,
@@ -565,7 +563,9 @@ where
     /// An unknown, ended, expired, or replaced Allowance may describe a historical
     /// payment; the SDK does not infer authority or update usage from this claim.
     /// Repeated or corrective proofs preserve evidence for the same occurrence
-    /// and do not imply another payment or settlement confirmation.
+    /// and do not imply another payment or settlement confirmation. Only that
+    /// occurrence's original proof sender may correct it, including after the
+    /// execution claim moves to another App.
     ///
     /// A canceled request requires a recorded Acceptance and caller evidence
     /// that execution crossed its irreversible boundary before cancellation was
@@ -593,20 +593,6 @@ where
             payment_proof_allowed_states(&record),
             "submit Payment Proof",
         )?;
-        let historical_evidence = record.payer_app_id.as_ref() == Some(&self.config.app_id)
-            && matches!(
-                record.state,
-                PaymentRequestLifecycleState::Canceled
-                    | PaymentRequestLifecycleState::ProofSubmitted
-            );
-        if !historical_evidence
-            && record.execution_claim_app_id.as_ref() != Some(&self.config.app_id)
-        {
-            return Err(PaykitSdkError::Policy {
-                context: "cannot submit Payment Proof: claim payment execution first".into(),
-                source: None,
-            });
-        }
         self.ensure_payment_request_origin_app_authorized(
             &counterparty,
             &record,
@@ -813,7 +799,7 @@ where
         &self,
         counterparty: PubkyPublicKey,
         event: &PaymentRequest,
-    ) -> Result<OutboundPrivateMessageRecord> {
+    ) -> Result<PaymentRequestRecord> {
         self.ensure_private_outbound_ready(&counterparty).await?;
         enqueue_payment_request_message(
             &self.storage,
@@ -837,7 +823,7 @@ where
             counterparty,
             &self.config.app_id,
             event,
-            self.clock.now(),
+            || self.clock.now(),
             expected_identity,
         )
         .await

@@ -129,7 +129,7 @@ impl PubkySharedStateStorage {
             let owner = access.public_key()?.to_public_key()?;
             if paykit_lib::get_paykit_app_registry(&access.outbox_client.public_storage(), &owner)
                 .await?
-                .is_some()
+                .is_some_and(|registry| registry.noise_public_key().is_some())
             {
                 return Err(PaykitSdkError::Storage {
                     context: "Pubky shared state is missing for an initialized Paykit identity"
@@ -192,6 +192,14 @@ impl PubkySharedStateStorage {
                     context: "Pubky shared-state lock expired during transaction".into(),
                     source: Some(write_error.into()),
                 })
+            }
+            Err(write_error) if is_quota_rejection(&write_error) => {
+                // Pubky homeserver quota checks reject before publishing staged bytes.
+                let _ = remove_pending_write(&storage, &pending_path).await;
+                Err(shared_write_error(
+                    "Pubky shared-state write rejected by storage quota",
+                    write_error,
+                ))
             }
             Err(write_error) => Err(shared_write_error(
                 "write encrypted Pubky shared state could not be confirmed",
@@ -493,11 +501,7 @@ fn decrypt_state_with_key(
     if encrypted.len() > MAX_SHARED_STATE_BYTES {
         return Err(shared_state_size_error());
     }
-    let envelope: EncryptedStateEnvelope<'_> =
-        postcard::from_bytes(encrypted).map_err(|err| PaykitSdkError::Storage {
-            context: "decode encrypted Pubky shared state".into(),
-            source: Some(err.into()),
-        })?;
+    let envelope = decode_encrypted_state_envelope(encrypted)?;
     if envelope.version != SHARED_STATE_ENVELOPE_VERSION {
         return Err(PaykitSdkError::Storage {
             context: format!(
@@ -540,11 +544,7 @@ fn decrypt_state_with_key(
 }
 
 fn encrypted_state_key_generation(encrypted: &[u8]) -> Result<u64> {
-    let envelope: EncryptedStateEnvelope<'_> =
-        postcard::from_bytes(encrypted).map_err(|err| PaykitSdkError::Storage {
-            context: "decode encrypted Pubky shared state".into(),
-            source: Some(err.into()),
-        })?;
+    let envelope = decode_encrypted_state_envelope(encrypted)?;
     if envelope.version != SHARED_STATE_ENVELOPE_VERSION || envelope.key_generation == 0 {
         return Err(PaykitSdkError::Storage {
             context: "encrypted Pubky shared state has an unsupported version or key generation"
@@ -553,6 +553,21 @@ fn encrypted_state_key_generation(encrypted: &[u8]) -> Result<u64> {
         });
     }
     Ok(envelope.key_generation)
+}
+
+fn decode_encrypted_state_envelope(encrypted: &[u8]) -> Result<EncryptedStateEnvelope<'_>> {
+    let (envelope, remainder) =
+        postcard::take_from_bytes(encrypted).map_err(|err| PaykitSdkError::Storage {
+            context: "decode encrypted Pubky shared state".into(),
+            source: Some(err.into()),
+        })?;
+    if !remainder.is_empty() {
+        return Err(PaykitSdkError::Storage {
+            context: "encrypted Pubky shared state contains trailing bytes".into(),
+            source: None,
+        });
+    }
+    Ok(envelope)
 }
 
 fn shared_state_aad(public_key: &PubkyPublicKey, key_generation: u64) -> Vec<u8> {
@@ -600,6 +615,14 @@ fn is_precondition_failed(err: &PubkyError) -> bool {
         err,
         PubkyError::Request(RequestError::Server { status, .. })
             if *status == StatusCode::PRECONDITION_FAILED
+    )
+}
+
+fn is_quota_rejection(err: &PubkyError) -> bool {
+    matches!(
+        err,
+        PubkyError::Request(RequestError::Server { status, .. })
+            if *status == StatusCode::INSUFFICIENT_STORAGE
     )
 }
 
@@ -663,6 +686,36 @@ mod tests {
         let last = encrypted.last_mut().unwrap();
         *last ^= 1;
         assert!(decrypt_state_with_key(&secret(7, 1), &identity, &encrypted).is_err());
+    }
+
+    #[test]
+    fn test_encrypted_state_rejects_trailing_bytes() {
+        let key = secret(7, 1);
+        let identity = identity();
+        let mut encrypted =
+            encrypt_state_with_key(&key, &identity, &StorageState::default()).unwrap();
+        encrypted.push(0);
+        assert!(decrypt_state_with_key(&key, &identity, &encrypted).is_err());
+        assert!(encrypted_state_key_generation(&encrypted).is_err());
+    }
+
+    #[test]
+    fn test_quota_rejection_does_not_include_ambiguous_failures() {
+        for status in [
+            StatusCode::INSUFFICIENT_STORAGE,
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::GATEWAY_TIMEOUT,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            let error = PubkyError::Request(RequestError::Server {
+                status,
+                message: String::new(),
+            });
+            assert_eq!(
+                is_quota_rejection(&error),
+                status == StatusCode::INSUFFICIENT_STORAGE
+            );
+        }
     }
 
     #[test]

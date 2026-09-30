@@ -11,6 +11,10 @@ struct IdentitySwitchStorage {
 
 #[async_trait]
 impl StorageAdapter for IdentitySwitchStorage {
+    async fn load_local_identity_state(&self) -> Result<Option<IdentityState>> {
+        self.load_identity_state().await
+    }
+
     async fn transaction_erased<'a>(
         &self,
         callback: crate::storage::StorageTransactionCallback<'a>,

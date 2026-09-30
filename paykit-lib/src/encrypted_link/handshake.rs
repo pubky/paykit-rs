@@ -292,10 +292,7 @@ pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<
                 handshake.remote_identity_public_key.clone(),
             )
             .await
-            .map_err(|err| PaykitError::Transport {
-                context: format!("handshake recovery via restore() failed: {err:?}"),
-                source: anyhow::anyhow!("restore after HomeserverWriteError failed: {err:?}"),
-            })?;
+            .map_err(|err| handshake_error("handshake recovery via restore() failed", err))?;
 
             debug!("handshake recovered successfully, returning Pending");
             Ok(HandshakeProgress::Pending(EncryptedLinkHandshake {
@@ -307,23 +304,33 @@ pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<
                 max_recovery_attempts: handshake.max_recovery_attempts,
             }))
         }
-        Err(err) => Err(PaykitError::Transport {
-            context: format!("handshake step failed: {err:?}"),
-            source: anyhow::anyhow!("pubky-noise handle_handshake failed: {err:?}"),
-        }),
+        Err(err) => Err(handshake_error("handshake step failed", err)),
+    }
+}
+
+fn handshake_error(context: &str, err: pubky_noise::PubkyNoiseError) -> PaykitError {
+    let context = format!("{context}: {err:?}");
+    let source = anyhow::anyhow!("pubky-noise handshake failed: {err:?}");
+    match err {
+        pubky_noise::PubkyNoiseError::HomeserverResponseError
+        | pubky_noise::PubkyNoiseError::HomeserverWriteError
+        // Replay errors also cover transient HTTP failures in pubky-noise.
+        | pubky_noise::PubkyNoiseError::RestoreBackupReplayError => {
+            PaykitError::Transport { context, source }
+        }
+        _ => PaykitError::InvalidData {
+            context,
+            source: Some(source),
+        },
     }
 }
 
 /// Transitions a completed handshake into an [`EncryptedLink`].
 fn finish_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakeProgress> {
-    let _link_id =
-        handshake
-            .encryptor
-            .transition_transport()
-            .map_err(|err| PaykitError::Transport {
-                context: format!("failed to transition to transport mode: {err:?}"),
-                source: anyhow::anyhow!("pubky-noise transition_transport failed: {err:?}"),
-            })?;
+    let _link_id = handshake
+        .encryptor
+        .transition_transport()
+        .map_err(|err| handshake_error("failed to transition to transport mode", err))?;
 
     debug!("Encrypted Link established");
     Ok(HandshakeProgress::Complete(EncryptedLink::from_parts(
@@ -424,10 +431,7 @@ async fn restore_encrypted_link_handshake_inner(
         remote_identity_public_key.clone(),
     )
     .await
-    .map_err(|err| PaykitError::Transport {
-        context: format!("failed to restore Encrypted Link handshake: {err:?}"),
-        source: anyhow::anyhow!("pubky-noise handshake restore failed: {err:?}"),
-    })?;
+    .map_err(|err| handshake_error("failed to restore Encrypted Link handshake", err))?;
 
     debug!("Encrypted Link handshake restored successfully (recovery tuning reset to defaults)");
 
@@ -439,4 +443,23 @@ async fn restore_encrypted_link_handshake_inner(
         recovery_attempts: 0,
         max_recovery_attempts: DEFAULT_MAX_RECOVERY_ATTEMPTS,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_handshake_io_failures_remain_retryable() {
+        for error in [
+            pubky_noise::PubkyNoiseError::HomeserverResponseError,
+            pubky_noise::PubkyNoiseError::HomeserverWriteError,
+            pubky_noise::PubkyNoiseError::RestoreBackupReplayError,
+        ] {
+            assert!(matches!(
+                handshake_error("handshake failed", error),
+                PaykitError::Transport { .. }
+            ));
+        }
+    }
 }

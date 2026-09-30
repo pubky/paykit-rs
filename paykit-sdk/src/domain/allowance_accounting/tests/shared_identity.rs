@@ -269,6 +269,139 @@ async fn test_unresolved_attempt_prevents_claim_release() {
 }
 
 #[tokio::test]
+async fn test_canceled_payment_retains_executor_authority_until_first_proof() {
+    let fixture = Fixture::new().await;
+    let executor = register_other_app(&fixture).await;
+    let scope = &fixture.occurrence.request;
+    crate::domain::payment_requests::release_payment_request_execution_claim(
+        &fixture.storage,
+        scope.counterparty.clone(),
+        &app_id(),
+        &scope.payment_request_id,
+        time(),
+    )
+    .await
+    .unwrap();
+    crate::domain::payment_requests::claim_payment_request_execution(
+        &fixture.storage,
+        scope.counterparty.clone(),
+        &executor,
+        &scope.payment_request_id,
+        time(),
+    )
+    .await
+    .unwrap();
+    let prepared = fixture
+        .storage
+        .transaction(|tx| {
+            reserve(
+                tx,
+                &executor,
+                fixture.occurrence.clone(),
+                Some(1),
+                checks(),
+                PaymentExecutionMode::Automatic,
+            )
+        })
+        .await
+        .unwrap();
+    let prepared = attempt(prepared);
+    fixture
+        .storage
+        .transaction(|tx| begin(tx, &executor, prepared.attempt_id.clone(), checks()))
+        .await
+        .unwrap();
+    let cancellation =
+        paykit_lib::PaymentRequestEvent::Cancellation(paykit_lib::PaymentRequestCancellation::new(
+            paykit_lib::EventId::new_v4(),
+            scope.payment_request_id.clone(),
+            None,
+        ));
+    crate::domain::private_stream::persist_private_stream_batch(
+        &fixture.storage,
+        scope.counterparty.clone(),
+        vec![message(
+            paykit_lib::serialize_payment_request_event(&app_id(), &cancellation).unwrap(),
+        )],
+        None,
+        time(),
+    )
+    .await
+    .unwrap();
+    let before = fixture.state();
+    fixture
+        .storage
+        .transaction(|tx| {
+            reconcile(
+                tx,
+                AllowanceAccountingReconciliation {
+                    expected_revision: Some(before.revision),
+                    history: before.history,
+                    trusted_time: time(),
+                    outcomes: vec![PaymentOutcomeReport {
+                        attempt_id: prepared.attempt_id.clone(),
+                        outcome: PaymentOutcome::Succeeded,
+                    }],
+                },
+            )
+        })
+        .await
+        .unwrap();
+    let settled = fixture.state();
+    crate::validate_storage_state(&fixture.storage.snapshot().unwrap()).unwrap();
+    let proof = paykit_lib::PaymentRequestEvent::Proof(paykit_lib::PaymentProof::new(
+        paykit_lib::EventId::new_v4(),
+        scope.payment_request_id.clone(),
+        paykit_lib::PaymentReference::new("test").unwrap(),
+        None,
+        app_id(),
+        checks().payment_endpoint_identifier,
+        Default::default(),
+    ));
+    let rejected = crate::domain::payment_requests::enqueue_checked_payment_request_action(
+        &fixture.storage,
+        scope.counterparty.clone(),
+        &app_id(),
+        &proof,
+        time(),
+    )
+    .await;
+    assert!(matches!(rejected, Err(PaykitSdkError::Policy { .. })));
+    assert!(matches!(
+        fixture
+            .storage
+            .transaction(|tx| begin(tx, &executor, prepared.attempt_id, checks()))
+            .await
+            .unwrap(),
+        PaymentAttemptDecision::Blocked { .. }
+    ));
+    crate::domain::payment_requests::enqueue_checked_payment_request_action(
+        &fixture.storage,
+        scope.counterparty.clone(),
+        &executor,
+        &proof,
+        time(),
+    )
+    .await
+    .unwrap();
+    let records = crate::domain::payment_requests::payment_request_records(
+        &fixture.storage,
+        &scope.counterparty,
+        time(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        records[0].state,
+        crate::PaymentRequestLifecycleState::Canceled
+    );
+    assert_eq!(records[0].payment_proofs.len(), 1);
+    assert!(records[0].execution_claim_app_id.is_none());
+    assert_eq!(fixture.state(), settled);
+    crate::validate_storage_state(&fixture.storage.snapshot().unwrap()).unwrap();
+}
+
+#[tokio::test]
 async fn test_inbound_cancellation_retains_claim_until_wallet_reconciles() {
     let fixture = Fixture::new().await;
     let prepared = attempt(fixture.reserve().await);

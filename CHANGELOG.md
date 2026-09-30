@@ -7,12 +7,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-## [0.1.0-rc57] - 2026-09-28
+## 0.1.0-rc57 - Unreleased
 
 ### Added
 
-- An identity-wide Paykit App Registry with app-owned endpoints and payment
-  preferences, replacing independent receiver folders and markers.
+- An identity-wide Paykit App Registry with app-owned endpoints and
+  identity-wide payment preferences, replacing receiver folders and markers.
 - Encrypted Pubky-hosted SDK state shared by authorized apps, including Encrypted
   Links, private messages, requests, and receipts. Swift and Kotlin expose the
   shared-state constructors.
@@ -58,8 +58,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - **Rust API:** `PAYKIT_PATH_PREFIX` includes its trailing slash;
   `MAX_ENCRYPTED_RECEIPT_BYTES` is now `ENCRYPTED_RECEIPT_MAX_BYTES`.
   `PaykitAppRegistry::set_noise_public_key` takes the key generation explicitly.
+- Counterparty APIs take Pubky identities instead of receiver paths. App Registry
+  APIs replace Receiver Markers; publishing and SDK configuration require an
+  explicit `PaykitAppId`. Private messages retain their source App ID while
+  links and private state are shared across the identity.
 - Storage transactions and backups retain the active Noise public key. Custom
-  adapters must implement its load/save methods atomically with private state.
+  adapters must implement its load/save methods atomically with private state,
+  and `renew_paykit_app_operation` must only extend the matching stored lease.
 - Upgrade Pubky to 0.14 and Pubky Noise to 0.1.0-rc11. Encrypted Link transport
   packets authenticate the message length and padding while retaining the
   1000-byte application payload limit. Communicating peers must use the same
@@ -599,7 +604,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc51...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc56...HEAD
+[0.1.0-rc54]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc52...v0.1.0-rc54
+[0.1.0-rc52]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc51...v0.1.0-rc52
 [0.1.0-rc51]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc50...v0.1.0-rc51
 [0.1.0-rc50]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc49...v0.1.0-rc50
 [0.1.0-rc49]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc48...v0.1.0-rc49

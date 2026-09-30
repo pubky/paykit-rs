@@ -14,6 +14,10 @@ struct ValidatingStorage(InMemoryStorage);
 
 #[async_trait::async_trait]
 impl StorageAdapter for ValidatingStorage {
+    async fn load_local_identity_state(&self) -> Result<Option<IdentityState>> {
+        self.load_identity_state().await
+    }
+
     async fn transaction_erased<'a>(
         &self,
         f: crate::storage::StorageTransactionCallback<'a>,

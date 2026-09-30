@@ -369,7 +369,8 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Fetch public Pubky app follows up to `max_entries`.
+    /// Fetch public Pubky app follows, rejecting lists larger than `max_entries`.
+    /// This limit does not truncate or paginate the result.
     pub async fn fetch_pubky_follows(
         &self,
         public_key: String,

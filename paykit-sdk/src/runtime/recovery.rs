@@ -398,27 +398,25 @@ where
         let attempt_id = marker.attempt_id().to_owned();
         let lease = self.claim_peer_link_operation(counterparty).await?;
         let result = async {
-            let should_observe = self
-                .should_observe_remote_recovery_marker_with_lease(counterparty, &attempt_id, &lease)
+            let changed = self
+                .mark_remote_recovery_marker_observed_with_lease(
+                    counterparty,
+                    &attempt_id,
+                    lease.clone(),
+                )
                 .await?;
-            if !should_observe {
+            if !changed {
                 return Ok(false);
             }
-            self.mark_recovery_required_for_marker_with_lease(counterparty, &lease)
-                .await?;
-            paykit_lib::clear_encrypted_link_outbox(
-                &session_access.session,
-                &secret_key,
-                &remote_public_key,
+            // Persist acceptance before cleanup: a failed DELETE must not make
+            // the same marker abandon a subsequently established handshake.
+            self.clear_encrypted_link_outbox_with_lease(
+                session_access,
+                &lease,
                 remote_noise_public_key,
             )
             .await?;
-            self.mark_remote_recovery_marker_observed_with_lease(
-                counterparty,
-                &attempt_id,
-                lease.clone(),
-            )
-            .await
+            Ok(true)
         }
         .await;
         let changed = self.finish_peer_link_operation(lease, result).await?;
@@ -460,6 +458,7 @@ where
         self.finish_peer_link_operation(lease, result).await
     }
 
+    #[cfg(test)]
     pub(super) async fn should_observe_remote_recovery_marker_with_lease(
         &self,
         counterparty: &PubkyPublicKey,

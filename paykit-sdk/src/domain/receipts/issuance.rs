@@ -129,6 +129,10 @@ where
                 return Ok(current);
             }
             require_paykit_app_capability(tx, &app_id, PrivateMessageKind::ReceiptAccess)?;
+            let now = now
+                .max(current.updated_at)
+                .max(current.created_at)
+                .max(current.stored_at.unwrap_or(current.created_at));
             let outbound = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                 current.counterparty.clone(),
                 app_id,

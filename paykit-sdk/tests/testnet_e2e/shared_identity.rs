@@ -1853,7 +1853,6 @@ impl Clock for FixedTestClock {
 struct OneShotCrashStorage {
     inner: PubkySharedStateStorage,
     crash_point: PrivateOperationCrashPoint,
-    prepared_committed: Arc<AtomicBool>,
     reached: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
 
@@ -1867,7 +1866,6 @@ impl OneShotCrashStorage {
             Self {
                 inner,
                 crash_point,
-                prepared_committed: Arc::new(AtomicBool::new(false)),
                 reached: Arc::new(Mutex::new(Some(reached_tx))),
             },
             reached_rx,
@@ -1896,41 +1894,55 @@ impl StorageAdapter for OneShotCrashStorage {
         &self,
         transaction: StorageTransactionCallback<'a>,
     ) -> PaykitResult<Box<dyn Any + Send>> {
-        // Publication is the only operation between prepared-state persistence
-        // and the next storage transaction, which records send success.
-        if self.crash_point == PrivateOperationCrashPoint::CiphertextPublished
-            && self.prepared_committed.load(Ordering::SeqCst)
-        {
-            self.stop_at_crash_boundary().await;
-        }
-
         let prepared_in_transaction = Arc::new(AtomicBool::new(false));
         let observed_prepared = Arc::clone(&prepared_in_transaction);
         let receive_in_transaction = Arc::new(AtomicBool::new(false));
         let observed_receive = Arc::clone(&receive_in_transaction);
+        let sent_in_transaction = Arc::new(AtomicBool::new(false));
+        let observed_sent = Arc::clone(&sent_in_transaction);
+        let crash_point = self.crash_point;
         let result = self
             .inner
             .transaction_erased(Box::new(move |tx| {
                 let before = tx.export_storage_state();
                 let result = transaction(tx);
-                if result.is_ok() && contains_new_prepared_send(&before, &tx.export_storage_state())
-                {
+                let after = tx.export_storage_state();
+                if result.is_ok() && contains_new_prepared_send(&before, &after) {
                     observed_prepared.store(true, Ordering::SeqCst);
                 }
-                if result.is_ok()
-                    && contains_new_private_stream_item(&before, &tx.export_storage_state())
-                {
+                if result.is_ok() && contains_new_private_stream_item(&before, &after) {
                     observed_receive.store(true, Ordering::SeqCst);
+                }
+                if result.is_ok()
+                    && crash_point == PrivateOperationCrashPoint::CiphertextPublished
+                    && after.outbound_private_messages.iter().any(|message| {
+                        message.status == OutboundPrivateMessageStatus::Sent
+                            && before.outbound_private_messages.iter().any(|previous| {
+                                previous.outbound_message_id == message.outbound_message_id
+                                    && previous.status == OutboundPrivateMessageStatus::Sending
+                                    && previous.prepared_send.is_some()
+                            })
+                    })
+                {
+                    observed_sent.store(true, Ordering::SeqCst);
+                    // Keep the prepared send durable without committing its acknowledgement.
+                    return Err(PaykitSdkError::Storage {
+                        context: "injected interruption after ciphertext publication".into(),
+                        source: None,
+                    });
                 }
                 result
             }))
-            .await?;
+            .await;
 
-        if prepared_in_transaction.load(Ordering::SeqCst) {
-            self.prepared_committed.store(true, Ordering::SeqCst);
-            if self.crash_point == PrivateOperationCrashPoint::PreparedStateCommitted {
-                self.stop_at_crash_boundary().await;
-            }
+        if sent_in_transaction.load(Ordering::SeqCst) {
+            self.stop_at_crash_boundary().await;
+        }
+        let result = result?;
+        if prepared_in_transaction.load(Ordering::SeqCst)
+            && self.crash_point == PrivateOperationCrashPoint::PreparedStateCommitted
+        {
+            self.stop_at_crash_boundary().await;
         }
         if receive_in_transaction.load(Ordering::SeqCst)
             && self.crash_point == PrivateOperationCrashPoint::PrivateReceiveCheckpointCommitted

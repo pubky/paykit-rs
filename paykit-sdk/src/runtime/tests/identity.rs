@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn test_initialize_persists_signed_out_identity() {
+async fn test_initialize_without_session_does_not_create_shared_state() {
     let storage = InMemoryStorage::new();
     let pubky = TestPubkySessionProvider { session: None };
     let sdk = PaykitSdk::with_clock(
@@ -15,9 +15,11 @@ async fn test_initialize_persists_signed_out_identity() {
     let report = sdk.initialize().await.unwrap();
 
     assert_eq!(report.capability, PubkyIdentityCapability::SignedOut);
-    let stored = storage.snapshot().unwrap().identity_state.unwrap();
-    assert!(stored.public_key.is_none());
-    assert_eq!(stored.initialized_at, FixedClock.now());
+    assert!(storage.snapshot().unwrap().identity_state.is_none());
+    assert_eq!(
+        sdk.identity_status().await.unwrap().unwrap().capability,
+        PubkyIdentityCapability::SignedOut
+    );
 }
 
 #[tokio::test]
@@ -197,6 +199,103 @@ async fn test_identity_status_cached_capability_requires_live_session() {
     let status = sdk.identity_status().await.unwrap().unwrap();
 
     assert_eq!(status.capability, PubkyIdentityCapability::SignedOut);
+}
+
+#[tokio::test]
+async fn test_signed_out_pubky_storage_does_not_require_remote_state() {
+    let storage: Box<Arc<dyn StorageAdapter>> = Box::new(Arc::new(
+        crate::PubkySharedStateStorage::new(TestPubkySessionProvider { session: None }),
+    ));
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+
+    assert!(sdk.identity_status().await.unwrap().is_none());
+    assert_eq!(
+        sdk.initialize().await.unwrap().capability,
+        PubkyIdentityCapability::SignedOut
+    );
+    sdk.forget_session_access().await.unwrap();
+    assert_eq!(
+        sdk.initialize().await.unwrap().capability,
+        PubkyIdentityCapability::SignedOut
+    );
+    assert_eq!(
+        sdk.identity_status().await.unwrap().unwrap().capability,
+        PubkyIdentityCapability::SignedOut
+    );
+}
+
+#[tokio::test]
+async fn test_signed_out_local_identity_preserves_history_and_reports_corruption() {
+    struct LocalBlobStorage(Vec<u8>);
+
+    #[async_trait]
+    impl StorageAdapter for LocalBlobStorage {
+        async fn load_local_identity_state(&self) -> Result<Option<IdentityState>> {
+            self.load_identity_state().await
+        }
+
+        async fn transaction_erased<'a>(
+            &self,
+            f: crate::storage::StorageTransactionCallback<'a>,
+        ) -> Result<Box<dyn std::any::Any + Send>> {
+            let initial = crate::storage::decode_storage_state_blob(&self.0)?;
+            let (updated, result) =
+                crate::storage::run_storage_state_transaction(initial.clone(), f)?;
+            assert_eq!(
+                updated, initial,
+                "signed-out identity reads must not write state"
+            );
+            Ok(result)
+        }
+    }
+
+    let public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let state = crate::storage::StorageState {
+        identity_state: Some(IdentityState {
+            public_key: Some(public_key.clone()),
+            initialized_at: FixedClock.now(),
+        }),
+        ..crate::storage::StorageState::default()
+    };
+    for corrupt in [false, true] {
+        let mut blob = crate::storage::encode_storage_state_blob(&state).unwrap();
+        if corrupt {
+            blob.push(0);
+        }
+        let storage: Box<Arc<dyn StorageAdapter>> = Box::new(Arc::new(LocalBlobStorage(blob)));
+        let sdk = PaykitSdk::with_clock(
+            storage,
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::new("test-app").unwrap(),
+            FixedClock,
+        );
+        sdk.forget_session_access().await.unwrap();
+        if corrupt {
+            assert!(matches!(
+                sdk.identity_status().await,
+                Err(PaykitSdkError::Storage { .. })
+            ));
+            assert!(matches!(
+                sdk.initialize().await,
+                Err(PaykitSdkError::Storage { .. })
+            ));
+        } else {
+            let status = sdk.identity_status().await.unwrap().unwrap();
+            assert_eq!(status.public_key.as_ref(), Some(&public_key));
+            assert_eq!(status.capability, PubkyIdentityCapability::SignedOut);
+            assert_eq!(
+                sdk.initialize().await.unwrap().public_key.as_ref(),
+                Some(&public_key)
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -488,4 +587,12 @@ async fn test_sign_out_preserves_session_when_storage_is_unavailable() {
 
     assert!(matches!(result, Err(PaykitSdkError::Storage { .. })));
     assert!(!cleared.load(Ordering::SeqCst));
+
+    let status = sdk.forget_session_access().await.unwrap();
+    assert!(cleared.load(Ordering::SeqCst));
+    assert_eq!(status.capability, PubkyIdentityCapability::SignedOut);
+    assert_eq!(
+        sdk.identity_status().await.unwrap().unwrap().capability,
+        PubkyIdentityCapability::SignedOut
+    );
 }

@@ -33,6 +33,8 @@ pub struct FfiSdkStateBlobSnapshot {
 /// The SDK invokes these callbacks while holding its per-handle storage lock.
 /// Implementations must not call back into the same SDK handle from either
 /// callback because doing so would deadlock.
+/// Independent handles for one identity must use the same atomic backing store;
+/// a per-handle mutex does not coordinate separate applications or processes.
 #[uniffi::export(with_foreign)]
 pub trait FfiSdkStateBlobStore: Send + Sync {
     /// Load the current SDK state blob, when one exists.
@@ -41,7 +43,9 @@ pub trait FfiSdkStateBlobStore: Send + Sync {
     /// Atomically save a new SDK state blob.
     ///
     /// `expected_revision` is `None` when no previous blob was loaded. The
-    /// platform store should reject the write if the stored revision changed.
+    /// platform store must return `PaykitFfiError::ConcurrentUpdate` without
+    /// writing if the stored revision changed (including an unexpected blob
+    /// when `expected_revision` is `None`).
     /// A successful changed write must return a non-empty, globally unique
     /// revision that has never represented an earlier state blob. Reusing a
     /// revision permits an ABA stale write to overwrite newer state.
@@ -75,6 +79,15 @@ impl FfiSdkStorageAdapter {
 
 #[async_trait]
 impl StorageAdapter for FfiSdkStorageAdapter {
+    async fn load_local_identity_state(
+        &self,
+    ) -> paykit_sdk::Result<Option<paykit_sdk::IdentityState>> {
+        match self {
+            Self::Callback(storage) => storage.load_identity_state().await,
+            Self::PubkyShared(_) => Ok(None),
+        }
+    }
+
     async fn transaction_erased<'a>(
         &self,
         f: StorageTransactionCallback<'a>,
@@ -233,12 +246,19 @@ pub(crate) fn encode_backup_state(backup: &SdkBackupState) -> Result<Vec<u8>, Pa
 }
 
 pub(crate) fn decode_backup_state(bytes: &[u8]) -> Result<SdkBackupState, PaykitFfiError> {
-    let envelope: BackupStateEnvelope = postcard::from_bytes(bytes).map_err(|err| {
-        storage_error(
+    let (envelope, remainder): (BackupStateEnvelope, _) = postcard::take_from_bytes(bytes)
+        .map_err(|err| {
+            storage_error(
+                "decode_backup_blob",
+                format!("decode SDK backup blob: {err}"),
+            )
+        })?;
+    if !remainder.is_empty() {
+        return Err(storage_error(
             "decode_backup_blob",
-            format!("decode SDK backup blob: {err}"),
-        )
-    })?;
+            "SDK backup blob contains trailing bytes",
+        ));
+    }
     if envelope.version != SDK_BACKUP_BLOB_VERSION {
         return Err(storage_error(
             "unsupported_backup_blob_version",
@@ -277,12 +297,19 @@ pub fn encode_sdk_state_blob_snapshot(
 pub fn decode_sdk_state_blob_snapshot(
     bytes: Vec<u8>,
 ) -> Result<FfiSdkStateBlobSnapshot, PaykitFfiError> {
-    let envelope: StateBlobSnapshotEnvelope = postcard::from_bytes(&bytes).map_err(|err| {
+    let (envelope, remainder): (StateBlobSnapshotEnvelope, _) = postcard::take_from_bytes(&bytes)
+        .map_err(|err| {
         storage_error(
             "decode_state_snapshot_blob",
             format!("decode SDK state blob snapshot: {err}"),
         )
     })?;
+    if !remainder.is_empty() {
+        return Err(storage_error(
+            "decode_state_snapshot_blob",
+            "SDK state snapshot contains trailing bytes",
+        ));
+    }
     if envelope.version != SDK_STATE_BLOB_VERSION {
         return Err(storage_error(
             "unsupported_state_snapshot_blob_version",

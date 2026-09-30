@@ -1,5 +1,60 @@
 use super::*;
 
+struct RejectPostCommitReadStorage(InMemoryStorage);
+
+#[async_trait::async_trait]
+impl StorageAdapter for RejectPostCommitReadStorage {
+    async fn transaction_erased<'a>(
+        &self,
+        callback: crate::storage::StorageTransactionCallback<'a>,
+    ) -> Result<Box<dyn std::any::Any + Send>> {
+        if !self.0.snapshot()?.outbound_private_messages.is_empty() {
+            return Err(PaykitSdkError::ConcurrentUpdate {
+                context: "state changed after proposal commit".into(),
+                source: None,
+            });
+        }
+        self.0.transaction_erased(callback).await
+    }
+}
+
+#[tokio::test]
+async fn test_proposal_returns_record_from_queue_transaction() {
+    let storage = RejectPostCommitReadStorage(registered_storage());
+    let PaymentRequestEvent::Request(request) = parsed_event(request_raw(
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+        "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
+        "invoice-2026-0001",
+        None,
+        None,
+    )) else {
+        panic!("expected proposal")
+    };
+    let peer = counterparty();
+    let record = enqueue_payment_request(&storage, peer.clone(), &app_id(), &request, timestamp())
+        .await
+        .unwrap();
+    assert_eq!(
+        record.payment_request_id,
+        request.payment_request_id().as_str()
+    );
+    assert_eq!(record.state, PaymentRequestLifecycleState::Proposed);
+    assert!(record.proposal_outbound_message_id.is_some());
+    assert_eq!(
+        storage
+            .0
+            .snapshot()
+            .unwrap()
+            .outbound_private_messages
+            .len(),
+        1
+    );
+    assert!(payment_request_records(&storage, &peer, timestamp())
+        .await
+        .unwrap_err()
+        .is_concurrent_update());
+}
+
 #[tokio::test]
 async fn test_enqueue_payment_request_event_stores_canonical_payload() {
     let storage = registered_storage();
@@ -543,7 +598,7 @@ async fn test_recurring_claim_handoff_preserves_completed_period() {
 
     let duplicate = enqueue_checked_payment_request_action(
         &storage,
-        counterparty,
+        counterparty.clone(),
         &server,
         &recurring_proof_event(
             "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104",
@@ -556,6 +611,82 @@ async fn test_recurring_claim_handoff_preserves_completed_period() {
     .unwrap_err();
 
     assert!(matches!(duplicate, PaykitSdkError::Policy { .. }));
+
+    let accounting = storage.snapshot().unwrap().allowance_accounting;
+    for (sender, start, end) in [
+        (
+            &bitkit,
+            "2026-06-01T00:00:00.000Z",
+            "2026-07-01T00:00:00.000Z",
+        ),
+        (&server, "2026-07-01T00:00:00Z", "2026-08-01T00:00:00Z"),
+        (&bitkit, "2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z"),
+    ] {
+        let proof = PaymentProof::new(
+            EventId::new_v4(),
+            request_id.clone(),
+            paykit_lib::PaymentReference::new("invoice-2026-0001").unwrap(),
+            Some(BillingPeriod::new(start, end).unwrap()),
+            // The endpoint belongs to the payee, independently of the proof sender.
+            paykit_lib::PaykitAppId::new("merchant").unwrap(),
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            JsonMap::new(),
+        );
+        enqueue_checked_payment_request_action(
+            &storage,
+            counterparty.clone(),
+            sender,
+            &PaymentRequestEvent::Proof(proof),
+            timestamp(),
+        )
+        .await
+        .unwrap();
+        let record = payment_request_records(&storage, &counterparty, timestamp())
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(record.execution_claim_app_id.as_ref(), Some(&server));
+        assert_eq!(storage.snapshot().unwrap().allowance_accounting, accounting);
+    }
+    let duplicate = PaymentProof::new(
+        EventId::new_v4(),
+        request_id.clone(),
+        paykit_lib::PaymentReference::new("invoice-2026-0001").unwrap(),
+        Some(BillingPeriod::new("2026-06-01T00:00:00.000Z", "2026-07-01T00:00:00.000Z").unwrap()),
+        bitkit.clone(),
+        PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+        JsonMap::new(),
+    );
+    assert!(matches!(
+        enqueue_checked_payment_request_action(
+            &storage,
+            counterparty.clone(),
+            &server,
+            &PaymentRequestEvent::Proof(duplicate.clone()),
+            timestamp()
+        )
+        .await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
+
+    // Replay independently rejects a competing sender even when admission is bypassed.
+    enqueue_payment_request_event(
+        &storage,
+        counterparty.clone(),
+        &server,
+        &PaymentRequestEvent::Proof(duplicate),
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    let record = payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(record.payment_proofs.len(), 4);
+    assert_eq!(record.payer_app_id.as_ref(), Some(&server));
+    assert_eq!(record.state, PaymentRequestLifecycleState::ActiveRecurring);
+    assert_eq!(storage.snapshot().unwrap().allowance_accounting, accounting);
 }
 
 async fn register_execution_app(storage: &InMemoryStorage, app_id: paykit_lib::PaykitAppId) {

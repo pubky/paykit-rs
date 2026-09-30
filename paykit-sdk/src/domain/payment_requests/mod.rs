@@ -21,8 +21,9 @@ use paykit_lib::{PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRe
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
+#[cfg(test)]
+use crate::domain::outbound_private::enqueue_private_message;
 use crate::{
-    domain::outbound_private::enqueue_private_message,
     domain::outbound_private::OutboundPrivateMessageStatus,
     domain::private_stream::{
         is_payment_request_kind, outbound_event_carriers, payload_hash, OutboundEventCarriers,
@@ -513,6 +514,7 @@ pub(crate) fn payment_request_record_blocks_app_removal(
 ///
 /// The exact canonical JSON payload is serialized before it is stored, so retry
 /// workers can resend the same Event ID and payload.
+#[cfg(test)]
 pub(crate) async fn enqueue_payment_request_event<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
@@ -527,19 +529,39 @@ where
     enqueue_private_message(storage, counterparty, raw_json, now).await
 }
 
-/// Queue a raw Payment Request proposal for outbound delivery.
+/// Queue a Payment Request proposal and derive its result in the same transaction.
 pub(crate) async fn enqueue_payment_request<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
     app_id: &paykit_lib::PaykitAppId,
-    event: &PaymentRequest,
+    request: &PaymentRequest,
     now: DateTime<Utc>,
-) -> Result<OutboundPrivateMessageRecord>
+) -> Result<PaymentRequestRecord>
 where
     S: StorageAdapter,
 {
-    let event = PaymentRequestEvent::Request(event.clone());
-    enqueue_payment_request_event(storage, counterparty, app_id, &event, now).await
+    let event = PaymentRequestEvent::Request(request.clone());
+    let raw_json = serialize_payment_request_event(app_id, &event)?;
+    let (_, kind) = crate::domain::outbound_private::validate_outbound_private_message(&raw_json)?;
+    storage
+        .transaction(|tx| {
+            require_paykit_app_capability(tx, app_id, PrivateMessageKind::PaymentRequest)?;
+            tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                counterparty.clone(),
+                app_id.clone(),
+                kind,
+                raw_json,
+                now,
+            ))?;
+            payment_request_records_from_transaction(tx, &counterparty, now)?
+                .into_iter()
+                .find(|record| record.payment_request_id == request.payment_request_id().as_str())
+                .ok_or_else(|| PaykitSdkError::Protocol {
+                    context: "queued Payment Request has no derived record".into(),
+                    source: None,
+                })
+        })
+        .await
 }
 
 /// Queue a raw Payment Request acceptance for outbound delivery.
@@ -590,7 +612,7 @@ where
         counterparty,
         app_id,
         event,
-        now,
+        || now,
         None,
     )
     .await
@@ -602,7 +624,7 @@ pub(crate) async fn enqueue_checked_payment_request_action_with_identity<S>(
     counterparty: PubkyPublicKey,
     app_id: &paykit_lib::PaykitAppId,
     event: &PaymentRequestEvent,
-    now: DateTime<Utc>,
+    now: impl Fn() -> DateTime<Utc> + Send + Sync,
     expected_identity: Option<crate::IdentityState>,
 ) -> Result<OutboundPrivateMessageRecord>
 where
@@ -631,7 +653,9 @@ where
                 let event = event.clone();
                 let raw_json = raw_json.clone();
                 let expected_identity = expected_identity.clone();
+                let now = &now;
                 move |tx| {
+                    let now = now();
                     if expected_identity
                         .as_ref()
                         .is_some_and(|expected| tx.load_identity_state().as_ref() != Some(expected))
@@ -673,10 +697,21 @@ where
                             event.payment_request_id().as_str(),
                         )
                     {
-                        tx.remove_payment_request_execution_claim(
-                            &counterparty,
-                            event.payment_request_id().as_str(),
-                        );
+                        let records =
+                            payment_request_records_from_transaction(tx, &counterparty, now)?;
+                        let pending_proof = records.iter().any(|record| {
+                            record.payment_request_id == event.payment_request_id().as_str()
+                                && request_has_unreported_successful_payment(
+                                    tx.allowance_accounting_state().as_ref(),
+                                    record,
+                                )
+                        });
+                        if !pending_proof {
+                            tx.remove_payment_request_execution_claim(
+                                &counterparty,
+                                event.payment_request_id().as_str(),
+                            );
+                        }
                     }
                     Ok(outbound)
                 }
@@ -973,9 +1008,35 @@ pub(crate) fn require_current_payment_request_action(
                 payment_proof_allowed_states(&record),
                 "submit Payment Proof",
             )?;
-            let historical_evidence = record.payer_app_id.as_ref() == Some(app_id)
-                && matches!(record.state, PaymentRequestLifecycleState::Canceled | PaymentRequestLifecycleState::ProofSubmitted);
-            if !historical_evidence {
+            let correction = if let Some(existing) =
+                proof_for_billing_period(&record, proof.billing_period().as_ref())
+            {
+                let sender = tx
+                    .outbound_private_messages(counterparty)
+                    .into_iter()
+                    .find(|message| Some(message.outbound_message_id) == existing.outbound_message_id)
+                    .map(|message| message.app_id);
+                if sender.as_ref() != Some(app_id) {
+                    return Err(PaykitSdkError::Policy {
+                        context: "cannot submit Payment Proof: another Paykit app reported this billing period".into(),
+                        source: None,
+                    });
+                }
+                true
+            } else {
+                false
+            };
+            let historical_evidence = record.state == PaymentRequestLifecycleState::Canceled
+                && record.payer_app_id.as_ref() == Some(app_id)
+                && record.execution_claim_app_id.is_none()
+                && !tx.allowance_accounting_state().is_some_and(|state| {
+                    state.history.occurrences.iter().any(|occurrence| {
+                        occurrence.key.request.counterparty == *counterparty
+                            && occurrence.key.request.payment_request_id == payment_request_id.as_str()
+                            && !occurrence.attempts.is_empty()
+                    })
+                });
+            if !correction && !historical_evidence {
                 require_execution_claim_owner(
                     tx,
                     counterparty,
@@ -990,13 +1051,9 @@ pub(crate) fn require_current_payment_request_action(
                 source: None,
             })?;
             validate_proof_conversion(&record, proof, &request)?;
-            if record.payer_app_id.as_ref() != Some(app_id) {
-                require_unpaid_billing_period(&record, proof)?;
-            }
-            Ok(record
-                .terms
-                .as_ref()
-                .is_some_and(|terms| terms.recurrence.is_none()))
+            Ok(!correction
+                && (record.state == PaymentRequestLifecycleState::Canceled
+                    || record.terms.as_ref().is_some_and(|terms| terms.recurrence.is_none())))
         }
         _ => Err(PaykitSdkError::Protocol {
             context:
@@ -1134,6 +1191,10 @@ pub(crate) fn release_resolved_payment_execution_claims(
         let records = payment_request_records_from_transaction(tx, &claim.counterparty, now)?;
         if records.iter().any(|record| {
             record.payment_request_id == claim.payment_request_id
+                && !request_has_unreported_successful_payment(
+                    tx.allowance_accounting_state().as_ref(),
+                    record,
+                )
                 && matches!(
                     record.state,
                     PaymentRequestLifecycleState::Canceled
@@ -1171,31 +1232,71 @@ fn require_execution_claim_owner(
     }
 }
 
-fn require_unpaid_billing_period(
-    record: &PaymentRequestRecord,
-    proof: &paykit_lib::PaymentProof,
-) -> Result<()> {
-    let duplicate = record.payment_proofs.iter().any(|existing| {
-        existing
-            .billing_period
-            .as_ref()
-            .map(|period| (period.starts_at.as_str(), period.ends_at.as_str()))
-            == proof
-                .billing_period()
+fn proof_for_billing_period<'a>(
+    record: &'a PaymentRequestRecord,
+    period: Option<&BillingPeriod>,
+) -> Option<&'a PaymentProofRecord> {
+    record.payment_proofs.iter().find(|existing| {
+        same_billing_period(
+            existing
+                .billing_period
                 .as_ref()
-                .map(|period| (period.starts_at(), period.ends_at()))
-    });
-    if duplicate {
-        Err(PaykitSdkError::Policy {
-            context: format!(
-                "cannot submit Payment Proof: Payment Request {} already has proof for this billing period",
-                record.payment_request_id
-            ),
-            source: None,
-        })
-    } else {
-        Ok(())
+                .map(|period| (period.starts_at.as_str(), period.ends_at.as_str())),
+            period.map(|period| (period.starts_at(), period.ends_at())),
+        )
+    })
+}
+
+fn same_billing_period(left: Option<(&str, &str)>, right: Option<(&str, &str)>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some((left_start, left_end)), Some((right_start, right_end))) => {
+            match (
+                DateTime::parse_from_rfc3339(left_start),
+                DateTime::parse_from_rfc3339(left_end),
+                DateTime::parse_from_rfc3339(right_start),
+                DateTime::parse_from_rfc3339(right_end),
+            ) {
+                (Ok(left_start), Ok(left_end), Ok(right_start), Ok(right_end)) => {
+                    left_start == right_start && left_end == right_end
+                }
+                _ => false,
+            }
+        }
+        _ => false,
     }
+}
+
+/// A canceled executor retains proof authority for settled, unreported occurrences.
+pub(crate) fn request_has_unreported_successful_payment(
+    accounting: Option<&crate::AllowanceAccountingState>,
+    record: &PaymentRequestRecord,
+) -> bool {
+    // Keep the executor's claim as proof authority until its settled occurrences
+    // have evidence in the event log. Terminal lifecycle still forbids execution.
+    record.state == PaymentRequestLifecycleState::Canceled
+        && accounting.is_some_and(|state| {
+            state.history.occurrences.iter().any(|occurrence| {
+                occurrence.key.request.counterparty == record.counterparty
+                    && occurrence.key.request.payment_request_id == record.payment_request_id
+                    && occurrence
+                        .attempts
+                        .iter()
+                        .any(|attempt| attempt.status == crate::PaymentExecutionStatus::Succeeded)
+                    && !record.payment_proofs.iter().any(|proof| {
+                        match (&proof.billing_period, &occurrence.key.billing_period) {
+                            (None, None) => true,
+                            (Some(proof), Some(period)) => {
+                                DateTime::parse_from_rfc3339(&proof.starts_at)
+                                    .is_ok_and(|start| start == period.starts_at)
+                                    && DateTime::parse_from_rfc3339(&proof.ends_at)
+                                        .is_ok_and(|end| end == period.ends_at)
+                            }
+                            _ => false,
+                        }
+                    })
+            })
+        })
 }
 
 fn require_local_action_app(

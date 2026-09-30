@@ -186,6 +186,47 @@ fn attempt(decision: PaymentAttemptDecision) -> PaymentAttemptRecord {
 }
 
 #[tokio::test]
+async fn test_candidate_evaluation_preserves_reconciliation_revision() {
+    let fixture = Fixture::new().await;
+    fixture
+        .storage
+        .transaction(|tx| {
+            let mut state = load(tx)?;
+            invalidate_accounting(&mut state);
+            tx.save_allowance_accounting_state(state);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let before = fixture.state();
+    let candidates = fixture
+        .storage
+        .transaction(|tx| candidates(tx, fixture.occurrence.request.clone(), time()))
+        .await
+        .unwrap();
+    assert!(!candidates.is_empty());
+    assert!(candidates.iter().all(
+        |candidate| candidate.blocked == Some(AllowanceAccountingBlock::ReconciliationRequired)
+    ));
+    assert_eq!(fixture.state(), before);
+    fixture
+        .storage
+        .transaction(|tx| {
+            reconcile(
+                tx,
+                AllowanceAccountingReconciliation {
+                    expected_revision: Some(before.revision),
+                    history: before.history,
+                    outcomes: vec![],
+                    trusted_time: time(),
+                },
+            )
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn test_accounting_atomic_manual_and_automatic_exclusion() {
     let fixture = Fixture::new().await;
     let (automatic, manual) = tokio::join!(

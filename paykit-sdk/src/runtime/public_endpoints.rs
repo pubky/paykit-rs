@@ -303,6 +303,7 @@ where
                         session_access,
                         &identifier,
                         previous_payload.as_deref(),
+                        lease,
                     )
                     .await
                 }
@@ -403,6 +404,7 @@ where
         session_access: &PubkySessionAccess,
         identifier: &paykit_lib::PaymentEndpointIdentifier,
         expected_payload: Option<&str>,
+        lease: &PaykitAppOperationLease,
     ) -> Result<()> {
         let session_info = session_access.session.info();
         let owner = session_info.public_key();
@@ -428,6 +430,7 @@ where
                 source: None,
             });
         }
+        self.require_paykit_app_operation_lease(lease).await?;
         self.remove_public_endpoint_at_revision(session_access, identifier, &revision)
             .await
     }

@@ -84,7 +84,8 @@ impl FfiPaykitSdk {
 
     /// Rotate identity-wide Paykit key material to the next generation.
     ///
-    /// Persist and distribute the replacement key to remaining authorized
+    /// Persist the replacement before this call and retry with the same key
+    /// after an error or interruption. Distribute it to remaining authorized
     /// applications before private Paykit operations resume.
     pub async fn rotate_paykit_identity_key(
         &self,

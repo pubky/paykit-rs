@@ -15,30 +15,38 @@ async fn test_retrieve_receipt_returns_cached_record_for_public_only_identity() 
                     public_key: Some(local_public_key.clone()),
                     initialized_at: FixedClock.now(),
                 });
-                save_retrieved_authorized_receipt_access(
-                    tx,
-                    receipt_access_record(counterparty.clone(), receipt_id),
-                );
-                tx.save_receipt_record(receipt_record(counterparty, receipt_id, local_public_key));
+                let mut access = receipt_access_record(counterparty.clone(), receipt_id);
+                access.received_at = FixedClock.now() - chrono::Duration::minutes(2);
+                let retrieved_at = FixedClock.now() - chrono::Duration::minutes(1);
+                save_authorized_receipt_access(tx, access.mark_retrieved(retrieved_at));
+                let mut receipt = receipt_record(counterparty, receipt_id, local_public_key);
+                receipt.retrieved_at = retrieved_at;
+                tx.save_receipt_record(receipt);
                 Ok(())
             }
         })
         .await
         .unwrap();
     let sdk = PaykitSdk::with_clock(
-        storage,
+        storage.clone(),
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
         PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
+    let before = storage.snapshot().unwrap().receipt_access_records;
     let record = sdk
         .retrieve_receipt(counterparty, receipt_id)
         .await
         .unwrap();
 
     assert_eq!(record.receipt_id, receipt_id);
+    assert_eq!(
+        record.retrieved_at,
+        FixedClock.now() - chrono::Duration::minutes(1)
+    );
+    assert_eq!(storage.snapshot().unwrap().receipt_access_records, before);
 }
 
 #[tokio::test]

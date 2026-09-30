@@ -1922,7 +1922,8 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func fetchPubkyFileBounded(uri: String, maxBytes: UInt64) async throws  -> Data?
 
     /**
-     * Fetch public Pubky app follows up to `max_entries`.
+     * Fetch public Pubky app follows, rejecting lists larger than `max_entries`.
+     * This limit does not truncate or paginate the result.
      */
     func fetchPubkyFollows(publicKey: String, maxEntries: UInt64) async throws  -> [String]
 
@@ -1937,7 +1938,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func fetchPubkyText(uri: String, maxBytes: UInt64) async throws  -> String?
 
     /**
-     * Clear local session access and SDK identity state without revoking the grant.
+     * Clear local session access without revoking the grant or deleting shared state.
      *
      * Use this only when remote revocation cannot be reached and the app
      * intentionally accepts that persisted copies of the grant remain valid.
@@ -2271,7 +2272,8 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Rotate identity-wide Paykit key material to the next generation.
      *
-     * Persist and distribute the replacement key to remaining authorized
+     * Persist the replacement before this call and retry with the same key
+     * after an error or interruption. Distribute it to remaining authorized
      * applications before private Paykit operations resume.
      */
     func rotatePaykitIdentityKey(replacementKey: PaykitIdentitySecretKey) async throws  -> PaykitAppRegistry
@@ -2503,8 +2505,10 @@ public static func withPubkyClientConfig(stateStore: SdkStateBlobStore, sessionP
      *
      * Every operation requires active session access with current Paykit identity
      * key material and `required_session_capabilities()`. Homeserver write locks
-     * serialize shared-state transactions; callers may retry the complete SDK
-     * operation after a lock conflict.
+     * serialize shared-state transactions. A multi-step operation may have
+     * committed work before returning an error; inspect its records before
+     * retrying commands that create requests or payments. Uncertain writes can
+     * make the next operation wait through the shared-state cooldown.
      */
 public static func withPubkySharedState(sessionProvider: SdkPubkySessionProvider, config: PaykitSdkConfig)throws  -> PaykitSdk  {
     return try  FfiConverterTypePaykitSdk_lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
@@ -3237,7 +3241,8 @@ open func fetchPubkyFileBounded(uri: String, maxBytes: UInt64)async throws  -> D
 }
 
     /**
-     * Fetch public Pubky app follows up to `max_entries`.
+     * Fetch public Pubky app follows, rejecting lists larger than `max_entries`.
+     * This limit does not truncate or paginate the result.
      */
 open func fetchPubkyFollows(publicKey: String, maxEntries: UInt64)async throws  -> [String]  {
     return
@@ -3297,7 +3302,7 @@ open func fetchPubkyText(uri: String, maxBytes: UInt64)async throws  -> String? 
 }
 
     /**
-     * Clear local session access and SDK identity state without revoking the grant.
+     * Clear local session access without revoking the grant or deleting shared state.
      *
      * Use this only when remote revocation cannot be reached and the app
      * intentionally accepts that persisted copies of the grant remain valid.
@@ -4561,7 +4566,8 @@ open func retrieveReceipt(counterparty: String, receiptId: String)async throws  
     /**
      * Rotate identity-wide Paykit key material to the next generation.
      *
-     * Persist and distribute the replacement key to remaining authorized
+     * Persist the replacement before this call and retry with the same key
+     * after an error or interruption. Distribute it to remaining authorized
      * applications before private Paykit operations resume.
      */
 open func rotatePaykitIdentityKey(replacementKey: PaykitIdentitySecretKey)async throws  -> PaykitAppRegistry  {
@@ -7891,6 +7897,8 @@ public func FfiConverterTypeSdkStateBlob_lower(_ value: SdkStateBlob) -> UnsafeM
  * The SDK invokes these callbacks while holding its per-handle storage lock.
  * Implementations must not call back into the same SDK handle from either
  * callback because doing so would deadlock.
+ * Independent handles for one identity must use the same atomic backing store;
+ * a per-handle mutex does not coordinate separate applications or processes.
  */
 public protocol SdkStateBlobStore: AnyObject, Sendable {
 
@@ -7903,7 +7911,9 @@ public protocol SdkStateBlobStore: AnyObject, Sendable {
      * Atomically save a new SDK state blob.
      *
      * `expected_revision` is `None` when no previous blob was loaded. The
-     * platform store should reject the write if the stored revision changed.
+     * platform store must return `PaykitError::ConcurrentUpdate` without
+     * writing if the stored revision changed (including an unexpected blob
+     * when `expected_revision` is `None`).
      * A successful changed write must return a non-empty, globally unique
      * revision that has never represented an earlier state blob. Reusing a
      * revision permits an ABA stale write to overwrite newer state.
@@ -7917,6 +7927,8 @@ public protocol SdkStateBlobStore: AnyObject, Sendable {
  * The SDK invokes these callbacks while holding its per-handle storage lock.
  * Implementations must not call back into the same SDK handle from either
  * callback because doing so would deadlock.
+ * Independent handles for one identity must use the same atomic backing store;
+ * a per-handle mutex does not coordinate separate applications or processes.
  */
 open class SdkStateBlobStoreImpl: SdkStateBlobStore, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -7984,7 +7996,9 @@ open func loadStateBlob()throws  -> SdkStateBlobSnapshot?  {
      * Atomically save a new SDK state blob.
      *
      * `expected_revision` is `None` when no previous blob was loaded. The
-     * platform store should reject the write if the stored revision changed.
+     * platform store must return `PaykitError::ConcurrentUpdate` without
+     * writing if the stored revision changed (including an unexpected blob
+     * when `expected_revision` is `None`).
      * A successful changed write must return a non-empty, globally unique
      * revision that has never represented an earlier state blob. Reusing a
      * revision permits an ABA stale write to overwrite newer state.
@@ -24619,7 +24633,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_file_bounded() != 56305) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_follows() != 64326) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_follows() != 43200) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_profile() != 60331) {
@@ -24628,7 +24642,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_text() != 46340) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_forget_session_access() != 58467) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_forget_session_access() != 59961) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_get_allowance() != 6959) {
@@ -24814,7 +24828,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_retrieve_receipt() != 26622) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_rotate_paykit_identity_key() != 22596) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_rotate_paykit_identity_key() != 40244) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contact() != 1121) {
@@ -24988,7 +25002,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffisdkstateblobstore_load_state_blob() != 17391) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffisdkstateblobstore_save_state_blob_atomically() != 61831) {
+    if (uniffi_paykit_checksum_method_ffisdkstateblobstore_save_state_blob_atomically() != 12907) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffiaccountingamount_new() != 11690) {
@@ -25027,7 +25041,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_client_config() != 13764) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_shared_state() != 22329) {
+    if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_shared_state() != 25757) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffipaykitsdk_with_pubky_shared_state_and_client_config() != 34759) {

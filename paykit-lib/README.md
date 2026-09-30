@@ -588,8 +588,10 @@ let mut link = restore_encrypted_link(
 
 ## Exports
 
-The crate exports:
+Key exports include:
 
+- `PaykitAppId`, `PaykitApp`, `PaykitAppRegistry`, and its read/publish helpers for identity-wide app discovery and payment preferences.
+- `with_write_lock` for Pubky read-modify-write operations. Encrypted shared SDK state and rotatable Paykit key material are provided by `paykit-sdk`, not this stateless crate.
 - `PAYKIT_PATH_PREFIX` (`/pub/paykit/v0/`) and `PAYKIT_PRIVATE_PATH_PREFIX` (`/pub/paykit/v0/private`) to standardize Pubky path construction.
 - `set_payment_endpoint`, `remove_payment_endpoint`, `get_payment_list`, and `get_payment_endpoint` for Public Payment Endpoint operations over `pubky::PubkySession` and `pubky::PublicStorage`.
 - `EncryptedLink`, `EncryptedLinkHandshake`, `HandshakeProgress`, `EncryptedLinkSnapshot`, `EncryptedLinkHandshakeSnapshot`, `PrivateApplicationMessage`, and `PrivateMessageKind` for Encrypted Link types.

@@ -418,6 +418,10 @@ must use the replacement Paykit secret. Delegated apps receive it from the
 identity's key-management layer; a root-key holder can derive it for that
 generation.
 
+Persist the replacement key before calling `rotatePaykitIdentityKey`. If the
+call fails or is interrupted, retry with the same replacement: shared state may
+already use it even if the registry update has not completed.
+
 `PaykitSdk.exportBackupString` and `restoreBackupString` are text-form
 wrappers for platforms that prefer a single encoded SDK backup string.
 `PaykitSdk.backupStateRevision` lets apps compare backup contents before and

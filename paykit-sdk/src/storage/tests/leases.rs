@@ -190,11 +190,16 @@ async fn test_paykit_app_operation_lease_blocks_same_app_only() {
             let bitkit = bitkit.clone();
             let server = server.clone();
             move |tx| {
+                assert!(tx.renew_paykit_app_operation(
+                    &bitkit,
+                    first.lease_id,
+                    timestamp() + chrono::Duration::seconds(120),
+                ));
                 Ok((
                     tx.claim_paykit_app_operation(
                         &bitkit,
-                        timestamp(),
-                        timestamp() + chrono::Duration::seconds(60),
+                        timestamp() + chrono::Duration::seconds(61),
+                        timestamp() + chrono::Duration::seconds(121),
                     )?,
                     tx.claim_paykit_app_operation(
                         &server,
@@ -213,7 +218,7 @@ async fn test_paykit_app_operation_lease_blocks_same_app_only() {
 }
 
 #[tokio::test]
-async fn test_paykit_app_operation_stale_release_keeps_newer_lease() {
+async fn test_paykit_app_operation_stale_holder_keeps_newer_lease() {
     let storage = InMemoryStorage::new();
     let app_id = app_id();
 
@@ -250,6 +255,11 @@ async fn test_paykit_app_operation_stale_release_keeps_newer_lease() {
         .transaction({
             let app_id = app_id.clone();
             move |tx| {
+                assert!(!tx.renew_paykit_app_operation(
+                    &app_id,
+                    first.lease_id,
+                    timestamp() + chrono::Duration::seconds(120),
+                ));
                 tx.release_paykit_app_operation(&app_id, first.lease_id);
                 Ok(())
             }

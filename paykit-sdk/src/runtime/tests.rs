@@ -595,6 +595,24 @@ fn registered_test_storage() -> InMemoryStorage {
     )
 }
 
+async fn test_app_operation<S: StorageAdapter>(storage: &S) -> PaykitAppOperationLease {
+    storage
+        .transaction(|tx| {
+            if let Some(lease) = tx.paykit_app_operation_lease(&app_id()) {
+                return Ok(lease);
+            }
+            Ok(tx
+                .claim_paykit_app_operation(
+                    &app_id(),
+                    FixedClock.now(),
+                    FixedClock.now() + ChronoDuration::seconds(60),
+                )?
+                .unwrap())
+        })
+        .await
+        .unwrap()
+}
+
 async fn seed_private_capable_identity_and_link(
     storage: &InMemoryStorage,
     counterparty: PubkyPublicKey,

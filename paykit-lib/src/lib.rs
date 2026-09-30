@@ -69,10 +69,11 @@ pub use payment_amount::PaymentAmount;
 #[doc(inline)]
 pub use payment_endpoint::{
     create_payment_endpoint, get_payment_endpoint, get_payment_endpoint_with_revision,
-    get_payment_list, get_payment_list_with_limits, is_payment_list_limit_exceeded,
-    remove_payment_endpoint, remove_payment_endpoint_if_revision, set_payment_endpoint,
-    update_payment_endpoint, PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentList,
-    PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES, PAYMENT_LIST_MAX_ENDPOINTS,
+    get_payment_list, get_payment_list_with_budget, get_payment_list_with_limits,
+    is_payment_list_limit_exceeded, remove_payment_endpoint, remove_payment_endpoint_if_revision,
+    set_payment_endpoint, update_payment_endpoint, PaymentEndpointIdentifier,
+    PaymentEndpointPayload, PaymentList, PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES,
+    PAYMENT_LIST_MAX_ENDPOINTS,
 };
 #[doc(inline)]
 pub use payment_reference::{PaymentReference, PAYMENT_REFERENCE_MAX_LEN};

@@ -52,7 +52,7 @@ async fn test_app_removal_retires_unattempted_private_lists_atomically() {
 
     let blockers = crate::runtime::app_removal::begin_paykit_app_removal(
         &storage,
-        &app_id(),
+        &test_app_operation(&storage).await,
         FixedClock.now(),
     )
     .await

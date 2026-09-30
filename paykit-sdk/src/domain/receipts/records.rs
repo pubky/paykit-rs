@@ -132,6 +132,7 @@ impl ReceiptIssuanceRecord {
 
     pub(crate) fn mark_stored(&self, stored_at: DateTime<Utc>) -> Self {
         let mut record = self.clone();
+        let stored_at = stored_at.max(self.updated_at).max(self.created_at);
         record.status = ReceiptIssuanceStatus::Stored;
         record.updated_at = stored_at;
         record.stored_at = Some(stored_at);
@@ -145,6 +146,10 @@ impl ReceiptIssuanceRecord {
         queued_at: DateTime<Utc>,
     ) -> Self {
         let mut record = self.clone();
+        let queued_at = queued_at
+            .max(self.updated_at)
+            .max(self.created_at)
+            .max(self.stored_at.unwrap_or(self.created_at));
         record.status = ReceiptIssuanceStatus::AccessQueued;
         record.updated_at = queued_at;
         record.outbound_message_id = Some(outbound_message_id);
@@ -156,7 +161,7 @@ impl ReceiptIssuanceRecord {
     pub(crate) fn mark_failed(&self, failed_at: DateTime<Utc>, error: String) -> Self {
         let mut record = self.clone();
         record.status = ReceiptIssuanceStatus::Failed;
-        record.updated_at = failed_at;
+        record.updated_at = failed_at.max(self.updated_at).max(self.created_at);
         record.last_error = Some(error);
         record
     }
@@ -428,6 +433,9 @@ impl ReceiptAccessRecord {
 
     pub(crate) fn mark_retrieved(&self, retrieved_at: DateTime<Utc>) -> Self {
         let mut record = self.clone();
+        let retrieved_at = retrieved_at
+            .max(self.received_at)
+            .max(self.retrieval_attempted_at.unwrap_or(self.received_at));
         let retrieved_at = record
             .retrieved_at
             .map_or(retrieved_at, |current| current.max(retrieved_at));
@@ -455,7 +463,11 @@ impl ReceiptAccessRecord {
     ) -> Self {
         let mut record = self.clone();
         record.retrieval_status = status;
-        record.retrieval_attempted_at = Some(attempted_at);
+        record.retrieval_attempted_at = Some(
+            attempted_at
+                .max(self.received_at)
+                .max(self.retrieval_attempted_at.unwrap_or(self.received_at)),
+        );
         record.retrieved_at = None;
         record.last_retrieval_error = Some(error);
         record
@@ -554,7 +566,9 @@ impl ReceiptRecord {
             amount: receipt.amount.as_ref().map(AmountRecord::from),
             metadata: receipt.metadata,
             location: access.location.clone(),
-            retrieved_at,
+            retrieved_at: retrieved_at
+                .max(access.received_at)
+                .max(access.retrieval_attempted_at.unwrap_or(access.received_at)),
         }
     }
 }

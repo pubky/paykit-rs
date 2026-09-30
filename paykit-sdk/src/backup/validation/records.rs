@@ -394,8 +394,7 @@ fn validate_outbound_private_status(record: &OutboundPrivateMessageRecord) -> Re
 
     let invalid = match record.status {
         OutboundPrivateMessageStatus::Pending => {
-            record.attempt_count != 0
-                || record.last_attempt_at.is_some()
+            (record.attempt_count == 0) != record.last_attempt_at.is_none()
                 || record.sent_at.is_some()
                 || record.last_error.is_some()
         }

@@ -307,12 +307,6 @@ pub(super) fn apply_stored_event(
                 mark_invalid_stored(record, stored, "Payment Proof came from the wrong side");
                 return;
             }
-            if record.state == PaymentRequestLifecycleState::ProofSubmitted
-                && stored.app_id() != record.payer_app_id
-            {
-                touch_stored_audit(record, stored);
-                return;
-            }
             let follows_cancellation = record.state == PaymentRequestLifecycleState::Canceled;
             if record.rejected_event_id.is_some() || !proof_follows_acceptance(record) {
                 mark_invalid_stored(record, stored, "Payment Proof arrived before acceptance");
@@ -322,6 +316,18 @@ pub(super) fn apply_stored_event(
                 mark_invalid_stored(record, stored, "Payment Proof has no payer App attribution");
                 return;
             };
+            let previous_proof = proof_for_billing_period(record, proof.billing_period().as_ref());
+            if previous_proof.is_some_and(|existing| {
+                events
+                    .get(existing.event_id.as_str())
+                    .and_then(|event| event.app_id())
+                    .as_ref()
+                    != Some(&payer_app_id)
+            }) {
+                touch_stored_audit(record, stored);
+                return;
+            }
+            let correction = previous_proof.is_some();
             let Some(request) = request_from_record(record) else {
                 mark_invalid_stored(
                     record,
@@ -339,21 +345,6 @@ pub(super) fn apply_stored_event(
                 });
             if let Err(err) = proof.validate_conversion_quote(&request, quote) {
                 mark_invalid_stored(record, stored, err.to_string());
-                return;
-            }
-            if record.payer_app_id.as_ref() != Some(&payer_app_id)
-                && record.payment_proofs.iter().any(|existing| {
-                    existing
-                        .billing_period
-                        .as_ref()
-                        .map(|period| (period.starts_at.as_str(), period.ends_at.as_str()))
-                        == proof
-                            .billing_period()
-                            .as_ref()
-                            .map(|period| (period.starts_at(), period.ends_at()))
-                })
-            {
-                touch_stored_audit(record, stored);
                 return;
             }
             record.payment_proofs.push(PaymentProofRecord {
@@ -384,7 +375,9 @@ pub(super) fn apply_stored_event(
                 proof: proof.proof().clone(),
                 recorded_at: stored.record_time(),
             });
-            record.payer_app_id = Some(payer_app_id);
+            if !correction {
+                record.payer_app_id = Some(payer_app_id);
+            }
             record.state = if follows_cancellation {
                 PaymentRequestLifecycleState::Canceled
             } else if request.request().recurrence().is_some() {

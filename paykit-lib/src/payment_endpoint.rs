@@ -306,13 +306,53 @@ pub async fn get_payment_list_with_limits(
     max_endpoints: usize,
     max_total_payload_bytes: usize,
 ) -> Result<PaymentList> {
-    debug!("fetching Payment List");
-    let result = pubky_routing::fetch_payment_list_with_limits(
+    let mut remaining_requests = usize::MAX;
+    let mut remaining_endpoints = max_endpoints;
+    let mut remaining_payload_bytes = max_total_payload_bytes;
+    get_payment_list_with_budget(
         storage,
         payee,
         app_id,
-        max_endpoints.min(PAYMENT_LIST_MAX_ENDPOINTS),
-        max_total_payload_bytes,
+        &mut remaining_endpoints,
+        &mut remaining_requests,
+        &mut remaining_payload_bytes,
+    )
+    .await
+}
+
+/// Fetch an app's public Payment Endpoints using a budget shared across app loads.
+///
+/// Each directory-page or endpoint request consumes one request before it starts.
+/// Each endpoint fetch also consumes one endpoint attempt, regardless of its result.
+/// Endpoint body bytes consume the byte budget as they are read, even if the list
+/// later fails validation. Missing and empty resources still consume requests.
+/// Counters are retained on failure; exhausting the aggregate byte budget saturates
+/// that counter at zero. Per-endpoint and per-list protocol limits still apply.
+///
+/// The caller owns client timeouts, session creation, capability scope, and key
+/// rotation. This read only requires public Pubky storage.
+#[instrument(skip(
+    storage,
+    remaining_endpoints,
+    remaining_requests,
+    remaining_payload_bytes
+))]
+pub async fn get_payment_list_with_budget(
+    storage: &pubky::PublicStorage,
+    payee: &PublicKey,
+    app_id: &PaykitAppId,
+    remaining_endpoints: &mut usize,
+    remaining_requests: &mut usize,
+    remaining_payload_bytes: &mut usize,
+) -> Result<PaymentList> {
+    debug!("fetching Payment List");
+    let result = pubky_routing::fetch_payment_list_with_budget(
+        storage,
+        payee,
+        app_id,
+        remaining_endpoints,
+        remaining_requests,
+        remaining_payload_bytes,
     )
     .await
     .map_err(|err| map_error("get_payment_list", err))?;

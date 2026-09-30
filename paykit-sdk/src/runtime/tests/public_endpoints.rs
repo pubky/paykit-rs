@@ -348,6 +348,7 @@ async fn test_sync_public_endpoints_rejects_reentrant_call() {
 #[tokio::test]
 async fn test_retire_app_outbound_private_messages_stops_app_queue() {
     let storage = InMemoryStorage::new();
+    let lease = test_app_operation(&storage).await;
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let identity = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let app_id = app_id();
@@ -377,7 +378,7 @@ async fn test_retire_app_outbound_private_messages_stops_app_queue() {
                 ))?;
                 retire_app_outbound_private_messages(
                     tx,
-                    &app_id,
+                    &lease,
                     FixedClock.now(),
                     FixedClock.now() + chrono::Duration::seconds(60),
                 )
@@ -409,6 +410,7 @@ async fn test_retire_app_outbound_private_messages_stops_app_queue() {
 #[tokio::test]
 async fn test_retire_app_outbound_private_messages_rejects_active_peer_work() {
     let storage = InMemoryStorage::new();
+    let lease = test_app_operation(&storage).await;
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let app_id = app_id();
     storage
@@ -436,11 +438,11 @@ async fn test_retire_app_outbound_private_messages_rejects_active_peer_work() {
         .unwrap();
     let err = storage
         .transaction({
-            let app_id = app_id.clone();
+            let lease = lease.clone();
             move |tx| {
                 retire_app_outbound_private_messages(
                     tx,
-                    &app_id,
+                    &lease,
                     FixedClock.now(),
                     FixedClock.now() + chrono::Duration::seconds(60),
                 )
@@ -458,11 +460,10 @@ async fn test_retire_app_outbound_private_messages_rejects_active_peer_work() {
 
     storage
         .transaction({
-            let app_id = app_id.clone();
             move |tx| {
                 retire_app_outbound_private_messages(
                     tx,
-                    &app_id,
+                    &lease,
                     FixedClock.now() + chrono::Duration::seconds(61),
                     FixedClock.now() + chrono::Duration::seconds(121),
                 )
@@ -480,6 +481,7 @@ async fn test_retire_app_outbound_private_messages_rejects_active_peer_work() {
 #[tokio::test]
 async fn test_retire_app_outbound_private_messages_includes_cleanup_only_reservations() {
     let storage = InMemoryStorage::new();
+    let lease = test_app_operation(&storage).await;
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let app_id = app_id();
     let cleanup_counterparties = storage
@@ -501,7 +503,7 @@ async fn test_retire_app_outbound_private_messages_includes_cleanup_only_reserva
                 });
                 retire_app_outbound_private_messages(
                     tx,
-                    &app_id,
+                    &lease,
                     FixedClock.now(),
                     FixedClock.now() + chrono::Duration::seconds(60),
                 )
@@ -522,6 +524,7 @@ async fn test_retire_app_outbound_private_messages_includes_cleanup_only_reserva
 #[tokio::test]
 async fn test_detach_shared_app_reservations_keeps_unshared_cleanup_work() {
     let storage = InMemoryStorage::new();
+    let lease = test_app_operation(&storage).await;
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let app_id = app_id();
     let remaining = storage
@@ -568,11 +571,11 @@ async fn test_detach_shared_app_reservations_keeps_unshared_cleanup_work() {
                 }
                 retire_app_outbound_private_messages(
                     tx,
-                    &app_id,
+                    &lease,
                     FixedClock.now(),
                     FixedClock.now() + chrono::Duration::seconds(60),
                 )?;
-                detach_shared_app_reservations(tx, &app_id)
+                detach_shared_app_reservations(tx, &lease)
             }
         })
         .await

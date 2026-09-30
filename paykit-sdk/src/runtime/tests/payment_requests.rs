@@ -1064,6 +1064,146 @@ fn payment_request_rejection_raw(event_id: &str, request_id: &str) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_acceptance_samples_time_after_transaction_fence() {
+    let inner = registered_test_storage();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let request_id = PaymentRequestId::new_v4();
+    let initial = FixedClock.now();
+    let expiry =
+        (initial + ChronoDuration::seconds(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    persist_private_stream_batch(
+        &inner,
+        counterparty.clone(),
+        vec![payment_request_message(
+            EventId::new_v4().as_str(),
+            request_id.as_str(),
+            Some(&expiry),
+        )],
+        None,
+        initial,
+    )
+    .await
+    .unwrap();
+    authorize_payment_request_app(&inner, counterparty.clone(), "bitkit").await;
+    crate::domain::payment_requests::claim_payment_request_execution(
+        &inner,
+        counterparty.clone(),
+        &app_id(),
+        &request_id,
+        initial,
+    )
+    .await
+    .unwrap();
+    let (storage, entered) = TransactionGateStorage::new(inner.clone());
+    let clock = MutableClock::new(initial);
+    let task = tokio::spawn({
+        let storage = storage.clone();
+        let clock = clock.clone();
+        async move {
+            crate::domain::payment_requests::enqueue_checked_payment_request_action_with_identity(
+                &storage,
+                counterparty,
+                &app_id(),
+                &PaymentRequestEvent::Acceptance(PaymentRequestAcceptance::new(
+                    EventId::new_v4(),
+                    request_id,
+                )),
+                || clock.now(),
+                None,
+            )
+            .await
+        }
+    });
+    entered
+        .recv_timeout(Duration::from_secs(2))
+        .expect("acceptance waits for storage");
+    clock.set(initial + ChronoDuration::seconds(2));
+    storage.release();
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(PaykitSdkError::Policy { .. })
+    ));
+    assert!(inner
+        .snapshot()
+        .unwrap()
+        .outbound_private_messages
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_proof_correction_after_handoff_reaches_send_readiness() {
+    let server = paykit_lib::PaykitAppId::new("server").unwrap();
+    let storage = InMemoryStorage::with_registered_apps([app_id(), server.clone()]);
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let request_id = PaymentRequestId::new_v4();
+    persist_private_stream_batch(
+        &storage, counterparty.clone(),
+        vec![private_application_message(payment_request_raw(
+            EventId::new_v4().as_str(), request_id.as_str(),
+            Some(r#"{"every":1,"unit":"month","starts_at":"2026-06-01T00:00:00Z","anchor":"2026-06-01T00:00:00Z","ends_at":null}"#),
+        ))], None, FixedClock.now(),
+    ).await.unwrap();
+    authorize_payment_request_app(&storage, counterparty.clone(), "bitkit").await;
+    let period = BillingPeriod::new("2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z").unwrap();
+    for event in [
+        PaymentRequestEvent::Acceptance(PaymentRequestAcceptance::new(
+            EventId::new_v4(),
+            request_id.clone(),
+        )),
+        PaymentRequestEvent::Proof(PaymentProof::new(
+            EventId::new_v4(),
+            request_id.clone(),
+            paykit_lib::PaymentReference::new("invoice-2026-0001").unwrap(),
+            Some(period.clone()),
+            paykit_lib::PaykitAppId::new("merchant").unwrap(),
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            JsonMap::new(),
+        )),
+    ] {
+        crate::domain::payment_requests::enqueue_payment_request_event(
+            &storage,
+            counterparty.clone(),
+            &app_id(),
+            &event,
+            FixedClock.now(),
+        )
+        .await
+        .unwrap();
+    }
+    crate::domain::payment_requests::claim_payment_request_execution(
+        &storage,
+        counterparty.clone(),
+        &server,
+        &request_id,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("bitkit").unwrap(),
+        FixedClock,
+    );
+    let error = sdk
+        .submit_payment_proof(
+            counterparty,
+            &request_id,
+            Some(period),
+            paykit_lib::PaykitAppId::new("merchant").unwrap(),
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            JsonMap::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, PaykitSdkError::Identity { .. }),
+        "{error:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_quote_payment_request_samples_time_after_transaction_fence() {
     let inner = registered_test_storage();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

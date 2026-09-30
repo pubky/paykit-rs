@@ -169,17 +169,19 @@ async fn test_public_payment_list_loader_passes_remaining_endpoint_budget_across
     let calls = Arc::new(Mutex::new(Vec::new()));
     let loaded = load_public_payment_lists_with_budget(public_app_ids(64), {
         let calls = calls.clone();
-        move |app_id, max_endpoints, max_payload_bytes| {
+        move |app_id, max_endpoints, max_requests, max_payload_bytes| {
             calls
                 .lock()
                 .unwrap()
                 .push((app_id.clone(), max_endpoints, max_payload_bytes));
             async move {
-                if app_id.as_str() == "app-00" {
-                    Ok(public_payment_list(255, 1))
-                } else {
-                    Ok(public_payment_list(1, 1))
-                }
+                let endpoint_count = if app_id.as_str() == "app-00" { 255 } else { 1 };
+                (
+                    Ok(public_payment_list(endpoint_count, 1)),
+                    max_endpoints - endpoint_count,
+                    max_requests - endpoint_count - 1,
+                    max_payload_bytes - endpoint_count,
+                )
             }
         }
     })
@@ -203,17 +205,19 @@ async fn test_public_payment_list_loader_passes_remaining_payload_budget_across_
     let calls = Arc::new(Mutex::new(Vec::new()));
     let loaded = load_public_payment_lists_with_budget(public_app_ids(64), {
         let calls = calls.clone();
-        move |app_id, max_endpoints, max_payload_bytes| {
+        move |app_id, max_endpoints, max_requests, max_payload_bytes| {
             calls
                 .lock()
                 .unwrap()
                 .push((app_id.clone(), max_endpoints, max_payload_bytes));
             async move {
-                if app_id.as_str() == "app-00" {
-                    Ok(public_payment_list(63, 64 * 1024))
-                } else {
-                    Ok(public_payment_list(1, 64 * 1024))
-                }
+                let endpoint_count = if app_id.as_str() == "app-00" { 63 } else { 1 };
+                (
+                    Ok(public_payment_list(endpoint_count, 64 * 1024)),
+                    max_endpoints - endpoint_count,
+                    max_requests - endpoint_count - 1,
+                    max_payload_bytes - endpoint_count * 64 * 1024,
+                )
             }
         }
     })
@@ -234,14 +238,24 @@ async fn test_public_payment_list_loader_passes_remaining_payload_budget_across_
 #[tokio::test]
 async fn test_public_payment_list_loader_distinguishes_invalid_data_from_resource_limits() {
     let loaded = load_public_payment_lists_with_budget(public_app_ids(3), {
-        move |app_id, _, _| async move {
+        move |app_id, max_endpoints, max_requests, max_payload_bytes| async move {
             if app_id.as_str() == "app-00" {
-                Err(paykit_lib::PaykitError::InvalidData {
-                    context: "malformed Payment Endpoint".into(),
-                    source: None,
-                })
+                (
+                    Err(paykit_lib::PaykitError::InvalidData {
+                        context: "malformed Payment Endpoint".into(),
+                        source: None,
+                    }),
+                    max_endpoints - 1,
+                    max_requests - 2,
+                    max_payload_bytes - 10,
+                )
             } else {
-                Ok(public_payment_list(256, 1))
+                (
+                    Ok(public_payment_list(max_endpoints, 1)),
+                    0,
+                    max_requests - max_endpoints - 1,
+                    max_payload_bytes - max_endpoints,
+                )
             }
         }
     })
@@ -259,6 +273,53 @@ async fn test_public_payment_list_loader_distinguishes_invalid_data_from_resourc
         loaded.failures[1].kind,
         PublicPaymentEndpointLoadFailureKind::ResourceLimit
     );
+}
+
+#[tokio::test]
+async fn test_public_payment_list_budget_counts_empty_and_failed_loads() {
+    for (succeeds, endpoint_attempts, request_attempts, payload_bytes) in [
+        (true, 64, 65, 0),
+        (false, 64, 65, 0),
+        (false, 0, 80, 0),
+        (false, 16, 17, 1024 * 1024),
+    ] {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let loaded = load_public_payment_lists_with_budget(public_app_ids(64), {
+            let calls = calls.clone();
+            move |_, endpoints, requests, bytes| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    let result = if succeeds {
+                        Ok(public_payment_list(0, 0))
+                    } else {
+                        Err(paykit_lib::PaykitError::InvalidData {
+                            context: "Payment List discarded after reading endpoints".into(),
+                            source: None,
+                        })
+                    };
+                    (
+                        result,
+                        endpoints - endpoint_attempts,
+                        requests - request_attempts,
+                        bytes - payload_bytes,
+                    )
+                }
+            }
+        })
+        .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(loaded.loaded_app_count, if succeeds { 4 } else { 0 });
+        assert_eq!(
+            loaded
+                .failures
+                .iter()
+                .filter(
+                    |failure| failure.kind == PublicPaymentEndpointLoadFailureKind::ResourceLimit
+                )
+                .count(),
+            60
+        );
+    }
 }
 
 #[test]

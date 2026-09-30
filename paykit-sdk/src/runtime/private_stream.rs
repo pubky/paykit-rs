@@ -197,7 +197,10 @@ where
             let prepared = match link.prepare_next_private_application_message().await {
                 Ok(Some(prepared)) => prepared,
                 Ok(None) => break,
-                Err(err) if err.is_non_retryable_private_receive_error() => {
+                Err(err)
+                    if err.is_non_retryable_private_receive_error()
+                        || matches!(err, paykit_lib::PaykitError::InvalidData { .. }) =>
+                {
                     let now = self.clock.now();
                     let mark = mark_recovery_required_with_lease(
                         &self.storage,

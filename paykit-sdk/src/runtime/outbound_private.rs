@@ -217,6 +217,8 @@ where
                 .prepared_send
                 .as_ref()
                 .expect("prepared send must be durable before publication");
+            self.require_current_peer_link_operation(&lease, &session_access)
+                .await?;
             match link
                 .publish_prepared_private_application_message(
                     &prepared.destination_path,
@@ -522,7 +524,7 @@ where
         session_access: &PubkySessionAccess,
         report: &mut OutboundPrivateSendReport,
     ) -> Result<()> {
-        let requires_recovery = err.is_non_retryable_private_send_error();
+        let requires_recovery = private_send_error_requires_recovery(&err);
         let now = self.clock.now();
         let error = err.to_string();
         if requires_recovery {
@@ -612,6 +614,14 @@ where
                 });
         }
     }
+}
+
+pub(super) fn private_send_error_requires_recovery(err: &paykit_lib::PaykitError) -> bool {
+    err.is_non_retryable_private_send_error()
+        || matches!(
+            err,
+            paykit_lib::PaykitError::Validation(_) | paykit_lib::PaykitError::InvalidData { .. }
+        )
 }
 
 fn terminal_private_list_reservation_needs_cleanup(

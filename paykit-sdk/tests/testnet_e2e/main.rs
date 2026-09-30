@@ -15,3 +15,4 @@ mod public_endpoints;
 mod recovery;
 mod sessions;
 mod shared_identity;
+mod storage_loading;

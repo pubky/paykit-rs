@@ -180,6 +180,9 @@ pub struct PaykitSdk<S, K, P, C = SystemClock> {
     // Session-backed workflows hold a read guard; sign-out waits for all of
     // them before clearing access under the write guard.
     session_operation_gate: Arc<RwLock<()>>,
+    // Retain only identity metadata so local cleanup and signed-out status do not
+    // require access to session-protected storage.
+    last_identity_state: Mutex<Option<IdentityState>>,
     // Runtime-local delivery witnesses are reusable only on the same Noise link
     // and for the same App. Restarting conservatively republishes each list.
     private_payment_list_publications:
@@ -251,6 +254,7 @@ where
             clock,
             identity_operation_in_progress: Arc::new(Mutex::new(false)),
             session_operation_gate: Arc::new(RwLock::new(())),
+            last_identity_state: Mutex::new(None),
             private_payment_list_publications: Mutex::new(HashMap::new()),
         }
     }
@@ -277,6 +281,35 @@ where
         })
     }
 
+    fn cached_identity_state(&self) -> Option<IdentityState> {
+        self.last_identity_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn cache_identity_state(&self, state: IdentityState) {
+        *self
+            .last_identity_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state);
+    }
+
+    async fn load_signed_out_identity_state(&self) -> Result<Option<IdentityState>> {
+        let cached = self.cached_identity_state();
+        if cached
+            .as_ref()
+            .is_some_and(|state| state.public_key.is_some())
+        {
+            return Ok(cached);
+        }
+        let state = self.storage.load_local_identity_state().await?.or(cached);
+        if let Some(state) = &state {
+            self.cache_identity_state(state.clone());
+        }
+        Ok(state)
+    }
+
     async fn retry_storage_transaction<T, F, O>(&self, operation: F) -> Result<T>
     where
         T: Send + 'static,
@@ -287,12 +320,17 @@ where
     }
 
     /// Initialize durable SDK identity state.
+    ///
+    /// Without a live session, return cached or locally available identity
+    /// metadata without creating or refreshing shared state.
     pub async fn initialize(&self) -> Result<IdentityStatus> {
         let _identity_guard = self.claim_identity_operation("initialize")?;
         let (session, state) = self.load_session_access_and_refresh_identity().await?;
-        self.storage
-            .transaction(crate::backup::refresh_stored_message_classification)
-            .await?;
+        if session.is_some() {
+            self.storage
+                .transaction(crate::backup::refresh_stored_message_classification)
+                .await?;
+        }
         let live_session_available = session.is_some();
         let required_capabilities = PAYKIT_SESSION_CAPABILITIES;
         let private_link_capable = session
@@ -350,6 +388,7 @@ where
             self.pubky.revoke_session_access(&access).await?;
         }
         self.pubky.clear_session_access().await?;
+        self.cache_identity_state(state.clone());
 
         Ok(IdentityStatus::from_state(&state, false, false))
     }
@@ -358,20 +397,17 @@ where
     ///
     /// Identity-wide Paykit state remains intact. A copied or separately
     /// persisted grant remains valid until it expires or is revoked elsewhere.
+    /// No remote storage or session validation is required. The returned status
+    /// includes only identity metadata already observed by this runtime.
     pub async fn forget_session_access(&self) -> Result<IdentityStatus> {
         let _identity_guard = self.claim_identity_operation("forget session access")?;
         let _session_guard = Arc::clone(&self.session_operation_gate).write_owned().await;
-        let now = self.clock.now();
-        let state = self
-            .storage
-            .transaction(move |tx| {
-                Ok(tx.load_identity_state().unwrap_or(IdentityState {
-                    public_key: None,
-                    initialized_at: now,
-                }))
-            })
-            .await?;
         self.pubky.clear_session_access().await?;
+        let state = self.cached_identity_state().unwrap_or(IdentityState {
+            public_key: None,
+            initialized_at: self.clock.now(),
+        });
+        self.cache_identity_state(state.clone());
 
         Ok(IdentityStatus::from_state(&state, false, false))
     }
@@ -385,21 +421,14 @@ where
 
         let Some(session_access) = session else {
             let state = self
-                .storage
-                .transaction(move |tx| {
-                    if let Some(previous) = tx.load_identity_state() {
-                        return Ok(previous);
-                    }
+                .load_signed_out_identity_state()
+                .await?
+                .unwrap_or(IdentityState {
+                    public_key: None,
+                    initialized_at: now,
+                });
 
-                    let state = IdentityState {
-                        public_key: None,
-                        initialized_at: now,
-                    };
-                    tx.save_identity_state(state.clone());
-                    Ok(state)
-                })
-                .await?;
-
+            self.cache_identity_state(state.clone());
             return Ok((None, state));
         };
 
@@ -421,6 +450,7 @@ where
             })
             .await?;
 
+        self.cache_identity_state(state.clone());
         Ok((
             Some(GuardedSessionAccess {
                 access: session_access,
@@ -479,13 +509,24 @@ where
         })
     }
 
-    /// Return the last persisted identity status, if initialized.
+    /// Return the last observed identity status, if initialized.
+    ///
+    /// Without live session access, use only cached or locally available identity
+    /// metadata. Session-protected storage is not read, and an uninitialized
+    /// runtime without local metadata returns `None`.
     pub async fn identity_status(&self) -> Result<Option<IdentityStatus>> {
         let _session_guard = Arc::clone(&self.session_operation_gate).read_owned().await;
         let session = self.pubky.load_session_access().await?;
+        if session.is_none() {
+            return Ok(self
+                .load_signed_out_identity_state()
+                .await?
+                .map(|state| IdentityStatus::from_state(&state, false, false)));
+        }
         let Some(state) = self.storage.load_identity_state().await? else {
             return Ok(None);
         };
+        self.cache_identity_state(state.clone());
         if let Some(session) = &session {
             session.validate()?;
         }

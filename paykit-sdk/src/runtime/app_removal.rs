@@ -3,7 +3,7 @@ use crate::domain::payment_requests::payment_request_records_from_transaction;
 
 pub(super) async fn begin_paykit_app_removal<S>(
     storage: &S,
-    app_id: &paykit_lib::PaykitAppId,
+    lease: &PaykitAppOperationLease,
     now: DateTime<Utc>,
 ) -> Result<PaykitAppRemovalBlockers>
 where
@@ -11,8 +11,10 @@ where
 {
     storage
         .transaction({
-            let app_id = app_id.clone();
+            let lease = lease.clone();
             move |tx| {
+                crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
+                let app_id = lease.app_id;
                 let blockers = app_removal_blockers_in_transaction(tx, &app_id, now)?;
                 if blockers.is_empty() {
                     for mut message in tx.export_storage_state().outbound_private_messages {
@@ -48,10 +50,12 @@ where
 
 pub(super) fn retire_app_outbound_private_messages(
     tx: &mut dyn StorageTransaction,
-    app_id: &paykit_lib::PaykitAppId,
+    lease: &PaykitAppOperationLease,
     now: DateTime<Utc>,
     expires_at: DateTime<Utc>,
 ) -> Result<Vec<PeerLinkOperationLease>> {
+    crate::storage::require_paykit_app_operation_lease(tx, lease)?;
+    let app_id = &lease.app_id;
     let snapshot = tx.export_storage_state();
     if snapshot
         .outbound_private_messages
@@ -277,7 +281,7 @@ where
 
 pub(super) async fn stage_app_capability_update<S>(
     storage: &S,
-    app_id: &paykit_lib::PaykitAppId,
+    lease: &PaykitAppOperationLease,
     remote_previous: Option<paykit_lib::PaykitAppCapabilities>,
     next: paykit_lib::PaykitAppCapabilities,
     now: DateTime<Utc>,
@@ -290,10 +294,13 @@ pub(super) async fn stage_app_capability_update<S>(
 where
     S: StorageAdapter,
 {
+    let app_id = &lease.app_id;
     let staged_update = storage
         .transaction({
             let app_id = app_id.clone();
+            let lease = lease.clone();
             move |tx| {
+                crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
                 let local_previous = tx.paykit_app_capabilities(&app_id);
                 let registered = tx.paykit_app_is_registered(&app_id);
                 let retired = tx.paykit_app_is_retired(&app_id);
@@ -337,7 +344,7 @@ where
         require_app_capability_downgrade_safe(storage, app_id, previous, next, now).await
     {
         if let Some((local_previous, staged)) = staged_update {
-            restore_app_capabilities(storage, app_id, staged, local_previous).await?;
+            restore_app_capabilities(storage, lease, staged, local_previous).await?;
         }
         return Err(err);
     }
@@ -367,7 +374,7 @@ fn no_paykit_app_capabilities() -> paykit_lib::PaykitAppCapabilities {
 
 pub(super) async fn restore_app_capabilities<S>(
     storage: &S,
-    app_id: &paykit_lib::PaykitAppId,
+    lease: &PaykitAppOperationLease,
     staged: paykit_lib::PaykitAppCapabilities,
     previous: paykit_lib::PaykitAppCapabilities,
 ) -> Result<()>
@@ -376,8 +383,10 @@ where
 {
     storage
         .transaction({
-            let app_id = app_id.clone();
+            let lease = lease.clone();
             move |tx| {
+                crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
+                let app_id = lease.app_id;
                 if tx.paykit_app_capabilities(&app_id) == Some(staged) {
                     tx.save_paykit_app_capabilities(&app_id, previous);
                 }
@@ -504,8 +513,10 @@ fn app_removal_blockers_in_transaction(
 
 pub(super) fn detach_shared_app_reservations(
     tx: &mut dyn StorageTransaction,
-    app_id: &paykit_lib::PaykitAppId,
+    lease: &PaykitAppOperationLease,
 ) -> Result<usize> {
+    crate::storage::require_paykit_app_operation_lease(tx, lease)?;
+    let app_id = &lease.app_id;
     let snapshot = tx.export_storage_state();
     let outbound_by_id = snapshot
         .outbound_private_messages

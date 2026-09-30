@@ -164,6 +164,7 @@ async fn test_forget_session_access_preserves_shared_app_state() {
         PaykitSdkConfig::new("bitkit").unwrap(),
     );
 
+    sdk.initialize().await.unwrap();
     let status = sdk.forget_session_access().await.unwrap();
 
     assert_eq!(

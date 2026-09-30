@@ -16,6 +16,8 @@ use candidates::{
 
 const PREPARE_PRIVATE_PAYMENT_SYNC_ROUND_LIMIT: usize = 8;
 const PUBLIC_PAYMENT_RESOLUTION_MAX_ENDPOINTS: usize = 256;
+const PUBLIC_PAYMENT_RESOLUTION_MAX_REQUESTS: usize =
+    PUBLIC_PAYMENT_RESOLUTION_MAX_ENDPOINTS + paykit_lib::PAYKIT_APP_REGISTRY_MAX_APPS;
 const PUBLIC_PAYMENT_RESOLUTION_MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Default)]
@@ -33,6 +35,7 @@ pub(in crate::runtime) struct PublicPaymentListLoad {
 
 struct PublicPaymentResolutionBudget {
     remaining_endpoints: usize,
+    remaining_requests: usize,
     remaining_payload_bytes: usize,
 }
 
@@ -40,33 +43,22 @@ impl Default for PublicPaymentResolutionBudget {
     fn default() -> Self {
         Self {
             remaining_endpoints: PUBLIC_PAYMENT_RESOLUTION_MAX_ENDPOINTS,
+            remaining_requests: PUBLIC_PAYMENT_RESOLUTION_MAX_REQUESTS,
             remaining_payload_bytes: PUBLIC_PAYMENT_RESOLUTION_MAX_PAYLOAD_BYTES,
         }
     }
 }
 
 impl PublicPaymentResolutionBudget {
-    fn remaining_limits(&self) -> Option<(usize, usize)> {
-        (self.remaining_endpoints > 0 && self.remaining_payload_bytes > 0)
-            .then_some((self.remaining_endpoints, self.remaining_payload_bytes))
-    }
-
-    fn consume(&mut self, endpoint_count: usize, payload_bytes: usize) -> bool {
-        let current_endpoint_count =
-            PUBLIC_PAYMENT_RESOLUTION_MAX_ENDPOINTS - self.remaining_endpoints;
-        let current_payload_bytes =
-            PUBLIC_PAYMENT_RESOLUTION_MAX_PAYLOAD_BYTES - self.remaining_payload_bytes;
-        if !public_payment_list_fits_resolution_budget(
-            current_endpoint_count,
-            current_payload_bytes,
-            endpoint_count,
-            payload_bytes,
-        ) {
-            return false;
-        }
-        self.remaining_endpoints -= endpoint_count;
-        self.remaining_payload_bytes -= payload_bytes;
-        true
+    fn remaining_limits(&self) -> Option<(usize, usize, usize)> {
+        (self.remaining_endpoints > 0
+            && self.remaining_requests > 0
+            && self.remaining_payload_bytes > 0)
+            .then_some((
+                self.remaining_endpoints,
+                self.remaining_requests,
+                self.remaining_payload_bytes,
+            ))
     }
 }
 
@@ -103,7 +95,7 @@ pub(in crate::runtime) fn public_payment_endpoint_resource_limit_failure(
         app_id,
         kind: PublicPaymentEndpointLoadFailureKind::ResourceLimit,
         context: format!(
-            "public Payment Endpoint resolution is limited to {PUBLIC_PAYMENT_RESOLUTION_MAX_ENDPOINTS} endpoints and {PUBLIC_PAYMENT_RESOLUTION_MAX_PAYLOAD_BYTES} payload bytes"
+            "public Payment Endpoint resolution is limited to {PUBLIC_PAYMENT_RESOLUTION_MAX_ENDPOINTS} endpoints, {PUBLIC_PAYMENT_RESOLUTION_MAX_REQUESTS} requests, and {PUBLIC_PAYMENT_RESOLUTION_MAX_PAYLOAD_BYTES} payload bytes"
         ),
     }
 }
@@ -125,8 +117,15 @@ pub(in crate::runtime) async fn load_public_payment_lists_with_budget<F, Fut>(
     mut fetch: F,
 ) -> PublicPaymentListLoad
 where
-    F: FnMut(paykit_lib::PaykitAppId, usize, usize) -> Fut,
-    Fut: Future<Output = paykit_lib::Result<paykit_lib::PaymentList>>,
+    F: FnMut(paykit_lib::PaykitAppId, usize, usize, usize) -> Fut,
+    Fut: Future<
+        Output = (
+            paykit_lib::Result<paykit_lib::PaymentList>,
+            usize,
+            usize,
+            usize,
+        ),
+    >,
 {
     let mut load = PublicPaymentListLoad {
         payment_lists: Vec::new(),
@@ -135,12 +134,24 @@ where
     };
     let mut budget = PublicPaymentResolutionBudget::default();
     for app_id in app_ids {
-        let Some((max_endpoints, max_payload_bytes)) = budget.remaining_limits() else {
+        let Some((max_endpoints, max_requests, max_payload_bytes)) = budget.remaining_limits()
+        else {
             load.failures
                 .push(public_payment_endpoint_resource_limit_failure(app_id));
             continue;
         };
-        let payment_list = match fetch(app_id.clone(), max_endpoints, max_payload_bytes).await {
+        let (result, remaining_endpoints, remaining_requests, remaining_payload_bytes) = fetch(
+            app_id.clone(),
+            max_endpoints,
+            max_requests,
+            max_payload_bytes,
+        )
+        .await;
+        // Failed or discarded lists have already consumed remote work.
+        budget.remaining_endpoints = remaining_endpoints;
+        budget.remaining_requests = remaining_requests;
+        budget.remaining_payload_bytes = remaining_payload_bytes;
+        let payment_list = match result {
             Ok(payment_list) => payment_list,
             Err(error) => {
                 load.failures
@@ -153,7 +164,12 @@ where
             .values()
             .map(|payload| payload.as_str().len())
             .sum::<usize>();
-        if !budget.consume(payment_list.payment_endpoints.len(), app_payload_bytes) {
+        if !public_payment_list_fits_resolution_budget(
+            PUBLIC_PAYMENT_RESOLUTION_MAX_ENDPOINTS - max_endpoints,
+            PUBLIC_PAYMENT_RESOLUTION_MAX_PAYLOAD_BYTES - max_payload_bytes,
+            payment_list.payment_endpoints.len(),
+            app_payload_bytes,
+        ) {
             load.failures
                 .push(public_payment_endpoint_resource_limit_failure(app_id));
             continue;
@@ -724,18 +740,28 @@ where
         };
         let loaded = load_public_payment_lists_with_budget(
             public_app_load_order(&registry, required_app_id),
-            |app_id, max_endpoints, max_payload_bytes| {
+            |app_id,
+             mut remaining_endpoints,
+             mut remaining_requests,
+             mut remaining_payload_bytes| {
                 let public_storage = &public_storage;
                 let public_key = &public_key;
                 async move {
-                    paykit_lib::get_payment_list_with_limits(
+                    let result = paykit_lib::get_payment_list_with_budget(
                         public_storage,
                         public_key,
                         &app_id,
-                        max_endpoints,
-                        max_payload_bytes,
+                        &mut remaining_endpoints,
+                        &mut remaining_requests,
+                        &mut remaining_payload_bytes,
                     )
-                    .await
+                    .await;
+                    (
+                        result,
+                        remaining_endpoints,
+                        remaining_requests,
+                        remaining_payload_bytes,
+                    )
                 }
             },
         )

@@ -635,14 +635,26 @@ async fn test_restore_backup_state_rejects_overwriting_existing_shared_state() {
 }
 
 #[tokio::test]
-async fn test_restore_backup_state_accepts_matching_identity_only_state() {
+async fn test_restore_backup_state_accepts_matching_identity_and_authorization_cache() {
     let storage = InMemoryStorage::new();
     let local_public_key = public_key();
     storage
         .transaction({
             let local_public_key = local_public_key.clone();
             move |tx| {
-                tx.save_identity_state(identity(local_public_key));
+                tx.save_identity_state(identity(local_public_key.clone()));
+                tx.save_authorized_paykit_apps(
+                    local_public_key,
+                    HashMap::from([(
+                        app_id(),
+                        paykit_lib::PaykitAppCapabilities {
+                            private_payments: true,
+                            payment_requests: true,
+                            receipts: true,
+                            outgoing_payments: true,
+                        },
+                    )]),
+                );
                 Ok(())
             }
         })

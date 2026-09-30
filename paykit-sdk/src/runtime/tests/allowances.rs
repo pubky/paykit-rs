@@ -82,7 +82,7 @@ async fn test_app_removal_preserves_identity_wide_allowance_authority() {
 
     let pending = crate::runtime::app_removal::begin_paykit_app_removal(
         &storage,
-        &app_id(),
+        &test_app_operation(&storage).await,
         FixedClock.now(),
     )
     .await
@@ -98,7 +98,7 @@ async fn test_app_removal_preserves_identity_wide_allowance_authority() {
         .unwrap();
     let delivered = crate::runtime::app_removal::begin_paykit_app_removal(
         &storage,
-        &app_id(),
+        &test_app_operation(&storage).await,
         FixedClock.now(),
     )
     .await

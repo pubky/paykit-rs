@@ -29,6 +29,7 @@ where
         let (stored_receipt, mut access_records, conflicted_access_records) = self
             .storage
             .transaction(|tx| {
+                let mut conflicts = HashMap::new();
                 let stored_receipt = tx.receipt_record(&counterparty, receipt_id);
                 let mut access_records = Vec::new();
                 let mut conflicted_access_records = Vec::new();
@@ -37,7 +38,7 @@ where
                     .into_iter()
                     .filter(|record| record.receipt_id == receipt_id)
                 {
-                    if Self::receipt_access_event_is_conflicted(tx, &record) {
+                    if Self::receipt_access_event_is_conflicted(tx, &record, &mut conflicts) {
                         conflicted_access_records.push(record);
                     } else {
                         access_records.push(record);
@@ -64,18 +65,25 @@ where
             self.reconcile_cached_receipt_access_records(
                 &record,
                 &access_records,
-                self.clock.now(),
+                record.retrieved_at,
             )
             .await?;
             self.storage
                 .transaction({
                     let record = record.clone();
-                    move |tx| Self::validate_receipt_record_accesses(tx, &record, None)
+                    move |tx| {
+                        Self::validate_receipt_record_accesses(
+                            tx,
+                            &record,
+                            None,
+                            &mut HashMap::new(),
+                        )
+                    }
                 })
                 .await?;
             return Ok(record);
         }
-        let authorized_app_ids = self.authorized_receipt_apps_for_peer(&counterparty).await?;
+        let authorized_app_ids = self.available_receipt_apps_for_peer(&counterparty).await?;
         self.persist_receipt_app_authorization(&counterparty, authorized_app_ids.as_deref())
             .await?;
         for record in &mut access_records {
@@ -183,6 +191,7 @@ where
                                     tx,
                                     &persisted_record,
                                     Some(&access_event_id),
+                                    &mut HashMap::new(),
                                 )?;
                                 let current = tx
                                     .receipt_access_records(&persisted_record.issuer)
@@ -195,7 +204,10 @@ where
                                         ),
                                         source: None,
                                     })?;
-                                tx.save_receipt_access_record(current.mark_retrieved(now));
+                                let retrieved = current.mark_retrieved(now);
+                                persisted_record.retrieved_at = persisted_record.retrieved_at
+                                    .max(retrieved.retrieved_at.unwrap_or(now));
+                                tx.save_receipt_access_record(retrieved);
                                 tx.save_receipt_record(persisted_record.clone());
                                 Ok(persisted_record)
                             }
@@ -244,15 +256,12 @@ where
             return Ok(Vec::new());
         }
         self.ensure_peer_not_blocked(counterparty).await?;
-        let authorized_app_ids = match self.authorized_receipt_apps_for_peer(counterparty).await {
-            Ok(authorized) => authorized,
-            Err(PaykitSdkError::Transport { .. } | PaykitSdkError::Protocol { .. }) => None,
-            Err(err) => return Err(err),
-        };
+        let authorized_app_ids = self.available_receipt_apps_for_peer(counterparty).await?;
         self.persist_receipt_app_authorization(counterparty, authorized_app_ids.as_deref())
             .await?;
         self.storage
             .transaction(|tx| {
+                let mut conflicts = HashMap::new();
                 let mut records = tx
                     .receipt_access_records(counterparty)
                     .into_iter()
@@ -262,7 +271,9 @@ where
                                 .as_ref()
                                 .is_some_and(|app_ids| app_ids.contains(&record.app_id))
                     })
-                    .filter(|record| !Self::receipt_access_event_is_conflicted(tx, record))
+                    .filter(|record| {
+                        !Self::receipt_access_event_is_conflicted(tx, record, &mut conflicts)
+                    })
                     .map(|record| ReceiptAccessView::from(&record))
                     .collect::<Vec<_>>();
                 records.sort_by_key(|record| Reverse(record.received_at));
@@ -289,21 +300,23 @@ where
         let counterparties = self
             .storage
             .transaction(|tx| {
-                Ok(tx
-                    .export_storage_state()
+                let snapshot = tx.export_storage_state();
+                Ok(snapshot
                     .receipt_access_records
                     .into_values()
+                    .filter(|record| {
+                        !snapshot
+                            .linked_peers
+                            .get(&record.counterparty)
+                            .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
+                    })
                     .map(|record| record.counterparty)
                     .collect::<HashSet<_>>())
             })
             .await?;
         let mut authorized_by_counterparty = HashMap::new();
         for counterparty in counterparties {
-            let authorized = match self.authorized_receipt_apps_for_peer(&counterparty).await {
-                Ok(authorized) => authorized,
-                Err(PaykitSdkError::Transport { .. } | PaykitSdkError::Protocol { .. }) => None,
-                Err(err) => return Err(err),
-            };
+            let authorized = self.available_receipt_apps_for_peer(&counterparty).await?;
             self.persist_receipt_app_authorization(&counterparty, authorized.as_deref())
                 .await?;
             authorized_by_counterparty.insert(counterparty, authorized);
@@ -311,6 +324,7 @@ where
         self.storage
             .transaction(|tx| {
                 let snapshot = tx.export_storage_state();
+                let mut conflicts = HashMap::new();
                 let mut records = snapshot
                     .receipt_access_records
                     .into_values()
@@ -327,7 +341,9 @@ where
                                 .and_then(Option::as_ref)
                                 .is_some_and(|app_ids| app_ids.contains(&record.app_id))
                     })
-                    .filter(|record| !Self::receipt_access_event_is_conflicted(tx, record))
+                    .filter(|record| {
+                        !Self::receipt_access_event_is_conflicted(tx, record, &mut conflicts)
+                    })
                     .map(|record| ReceiptAccessView::from(&record))
                     .collect::<Vec<_>>();
                 records.sort_by_key(|record| Reverse(record.received_at));
@@ -345,14 +361,17 @@ where
         self.ensure_peer_not_blocked(issuer).await?;
         self.storage
             .transaction(|tx| {
+                let mut conflicts = HashMap::new();
                 let mut records = tx
                     .export_storage_state()
                     .receipt_records
                     .into_values()
                     .filter(|record| &record.issuer == issuer)
                     .filter(|record| record.recipient_public_key == local_public_key)
-                    .filter(|record| Self::receipt_record_access_is_usable(tx, record))
-                    .filter(|record| !Self::receipt_record_access_event_is_conflicted(tx, record))
+                    .filter(|record| {
+                        Self::validate_receipt_record_accesses(tx, record, None, &mut conflicts)
+                            .is_ok()
+                    })
                     .collect::<Vec<_>>();
                 records.sort_by_key(|record| Reverse(record.retrieved_at));
                 Ok(records)
@@ -374,23 +393,38 @@ where
         self.storage
             .transaction(|tx| {
                 let snapshot = tx.export_storage_state();
+                let mut conflicts = HashMap::new();
                 let mut records = snapshot
                     .receipt_records
                     .into_values()
                     .filter(|record| record.recipient_public_key == local_public_key)
-                    .filter(|record| Self::receipt_record_access_is_usable(tx, record))
                     .filter(|record| {
                         !snapshot
                             .linked_peers
                             .get(&record.issuer)
                             .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
                     })
-                    .filter(|record| !Self::receipt_record_access_event_is_conflicted(tx, record))
+                    .filter(|record| {
+                        Self::validate_receipt_record_accesses(tx, record, None, &mut conflicts)
+                            .is_ok()
+                    })
                     .collect::<Vec<_>>();
                 records.sort_by_key(|record| Reverse(record.retrieved_at));
                 Ok(records)
             })
             .await
+    }
+
+    async fn available_receipt_apps_for_peer(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<Option<Vec<paykit_lib::PaykitAppId>>> {
+        match self.authorized_receipt_apps_for_peer(counterparty).await {
+            Ok(authorized) => Ok(authorized),
+            // An unavailable registry cannot grant new authority or revoke receipt history.
+            Err(PaykitSdkError::Transport { .. } | PaykitSdkError::Protocol { .. }) => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 
     async fn persist_receipt_app_authorization(
@@ -403,6 +437,12 @@ where
         };
         self.storage
             .transaction(|tx| {
+                if tx
+                    .linked_peer(counterparty)
+                    .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
+                {
+                    return Ok(());
+                }
                 for record in tx.receipt_access_records(counterparty) {
                     if !record.app_authorized && authorized_app_ids.contains(&record.app_id) {
                         tx.save_receipt_access_record(record.mark_app_authorized());
@@ -435,11 +475,7 @@ where
                             continue;
                         };
                         if receipt_record_matches_access(&record, &access) {
-                            if access.retrieval_status != ReceiptRetrievalStatus::Retrieved
-                                || access
-                                    .retrieved_at
-                                    .is_none_or(|retrieved_at| retrieved_at < now)
-                            {
+                            if access.retrieval_status != ReceiptRetrievalStatus::Retrieved {
                                 tx.save_receipt_access_record(access.mark_retrieved(now));
                             }
                         } else {
@@ -466,42 +502,26 @@ where
     fn receipt_access_event_is_conflicted(
         tx: &dyn crate::storage::StorageTransaction,
         access: &ReceiptAccessRecord,
+        conflicts: &mut HashMap<PubkyPublicKey, HashSet<String>>,
     ) -> bool {
-        Self::receipt_event_is_conflicted(tx, &access.counterparty, &access.event_id)
-    }
-
-    fn receipt_record_access_event_is_conflicted(
-        tx: &dyn crate::storage::StorageTransaction,
-        record: &ReceiptRecord,
-    ) -> bool {
-        Self::receipt_event_is_conflicted(tx, &record.issuer, &record.receipt_access_event_id)
-    }
-
-    fn receipt_event_is_conflicted(
-        tx: &dyn crate::storage::StorageTransaction,
-        counterparty: &PubkyPublicKey,
-        event_id: &str,
-    ) -> bool {
-        tx.event_dedup_record(counterparty, event_id)
+        tx.event_dedup_record(&access.counterparty, &access.event_id)
             .is_some_and(|dedupe| !dedupe.conflicting_stream_item_ids.is_empty())
-            || crate::domain::private_stream::outbound_event_carriers(
-                &tx.outbound_private_messages(counterparty),
-            )
-            .event_ids
-            .contains(event_id)
-    }
-
-    fn receipt_record_access_is_usable(
-        tx: &dyn crate::storage::StorageTransaction,
-        record: &ReceiptRecord,
-    ) -> bool {
-        Self::validate_receipt_record_accesses(tx, record, None).is_ok()
+            || conflicts
+                .entry(access.counterparty.clone())
+                .or_insert_with(|| {
+                    crate::domain::private_stream::outbound_event_carriers(
+                        &tx.outbound_private_messages(&access.counterparty),
+                    )
+                    .event_ids
+                })
+                .contains(&access.event_id)
     }
 
     fn validate_receipt_record_accesses(
         tx: &dyn crate::storage::StorageTransaction,
         record: &ReceiptRecord,
         pending_event_id: Option<&str>,
+        conflicts: &mut HashMap<PubkyPublicKey, HashSet<String>>,
     ) -> Result<()> {
         let access_records = tx
             .receipt_access_records(&record.issuer)
@@ -510,7 +530,7 @@ where
             .collect::<Vec<_>>();
         if access_records
             .iter()
-            .any(|access| Self::receipt_access_event_is_conflicted(tx, access))
+            .any(|access| Self::receipt_access_event_is_conflicted(tx, access, conflicts))
         {
             return Err(Self::conflicted_receipt_access_error(&record.receipt_id));
         }

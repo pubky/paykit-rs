@@ -722,11 +722,12 @@ pub(crate) fn requeue_recovery_required_outbound_messages(
             continue;
         }
         message.status = OutboundPrivateMessageStatus::Pending;
-        message.attempt_count = 0;
         message.updated_at = now;
-        message.last_attempt_at = None;
+        // Recovery cannot prove that a previous publication missed the peer.
+        // Keep attempt evidence for both Event Messages and Private Payment Lists.
         message.sent_at = None;
         message.last_error = None;
+        message.prepared_send = None;
         tx.save_outbound_private_message(message)?;
     }
     crate::domain::payment_requests::release_resolved_payment_execution_claims(tx, now)
