@@ -17,8 +17,75 @@ fn request_terms() -> PaymentRequestTerms {
         )
         .unwrap()],
         required_app_id: None,
+        payment_endpoints: None,
         metadata: JsonMap::new(),
     }
+}
+
+fn bound_terms_builder() -> PaymentRequestTermsBuilder {
+    PaymentRequestTerms::builder(
+        PaymentAmount::new("0.001", "btc").unwrap(),
+        PaymentReference::new("invoice-1").unwrap(),
+        vec![
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            PaymentEndpointIdentifier::new("btc-onchain").unwrap(),
+        ],
+    )
+    .required_app_id(Some(app_id()))
+}
+
+fn bound_endpoints(
+    identifier: &str,
+    payload: &str,
+) -> HashMap<PaymentEndpointIdentifier, PaymentEndpointPayload> {
+    HashMap::from([(
+        PaymentEndpointIdentifier::new(identifier).unwrap(),
+        PaymentEndpointPayload::new(payload),
+    )])
+}
+
+#[test]
+fn test_payment_endpoints_builder_preserves_immutable_subset() {
+    let endpoints = bound_endpoints("btc-lightning-bolt11", "private-invoice");
+    let terms = bound_terms_builder()
+        .payment_endpoints(Some(endpoints.clone()))
+        .build()
+        .unwrap();
+    assert_eq!(terms.payment_endpoints(), Some(&endpoints));
+    assert!(!format!("{terms:?}").contains("private-invoice"));
+    assert!(bound_terms_builder()
+        .payment_endpoints(None)
+        .required_app_id(None)
+        .build()
+        .unwrap()
+        .payment_endpoints()
+        .is_none());
+}
+
+#[test]
+fn test_payment_endpoints_builder_rejects_invalid_bindings() {
+    for endpoints in [
+        HashMap::new(),
+        bound_endpoints("btc-lightning-bolt11", ""),
+        bound_endpoints("eur-sepa-iban", "private-iban"),
+    ] {
+        assert!(matches!(
+            bound_terms_builder()
+                .payment_endpoints(Some(endpoints))
+                .build(),
+            Err(PaykitError::Validation(_))
+        ));
+    }
+    assert!(matches!(
+        bound_terms_builder()
+            .required_app_id(None)
+            .payment_endpoints(Some(bound_endpoints(
+                "btc-lightning-bolt11",
+                "private-invoice"
+            )))
+            .build(),
+        Err(PaykitError::Validation(_))
+    ));
 }
 
 #[test]
@@ -181,6 +248,23 @@ fn payment_proof_rejects_unaccepted_endpoint() {
     proof.payment_endpoint_identifier = PaymentEndpointIdentifier::new("btc-onchain").unwrap();
     let err = proof.validate_for_request(&request).unwrap_err();
     assert!(matches!(err, PaykitError::Validation(ref msg) if msg.contains("not accepted")));
+}
+
+#[test]
+fn test_payment_proof_requires_request_bound_endpoint() {
+    let terms = bound_terms_builder()
+        .payment_endpoints(Some(bound_endpoints("btc-onchain", "invoice-address")))
+        .build()
+        .unwrap();
+    let request = PaymentRequest::new(EventId::new_v4(), PaymentRequestId::new_v4(), terms);
+    let mut proof = payment_proof_for(&request);
+    assert!(matches!(
+        proof.validate_for_request(&request),
+        Err(PaykitError::Validation(_))
+    ));
+
+    proof.payment_endpoint_identifier = PaymentEndpointIdentifier::new("btc-onchain").unwrap();
+    proof.validate_for_request(&request).unwrap();
 }
 
 #[test]

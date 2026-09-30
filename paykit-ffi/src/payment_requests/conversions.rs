@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use paykit_lib::{
     AllowanceId, BillingPeriod, ConversionRate, EventId, PaykitAppId, PaymentAmount,
@@ -188,6 +188,22 @@ impl TryFrom<FfiPaymentRequestTerms> for PaymentRequestTerms {
                 .map_err(|err| validation_error(err.to_string()))?,
         )
         .conversion(value.conversion.map(Into::into))
+        .payment_endpoints(
+            value
+                .payment_endpoints
+                .map(|endpoints| {
+                    endpoints
+                        .into_iter()
+                        .map(|(identifier, payload)| {
+                            Ok((
+                                parse_endpoint_identifier(identifier)?,
+                                paykit_lib::PaymentEndpointPayload::new(payload),
+                            ))
+                        })
+                        .collect::<Result<HashMap<_, _>, PaykitFfiError>>()
+                })
+                .transpose()?,
+        )
         .payment_deadline(value.payment_deadline.map(Into::into))
         .metadata(value.metadata.parse_map("Payment Request metadata")?)
         .build()
@@ -207,6 +223,7 @@ impl TryFrom<PaymentRequestTermsRecord> for FfiPaymentRequestTerms {
             proposal_expires_at: value.proposal_expires_at,
             recurrence: value.recurrence.map(Into::into),
             accepted_payment_endpoint_identifiers: value.accepted_payment_endpoint_identifiers,
+            payment_endpoints: value.payment_endpoints,
             required_app_id: value.required_app_id.map(|app_id| app_id.to_string()),
             conversion: value.conversion.map(Into::into),
             payment_deadline: value.payment_deadline.map(Into::into),

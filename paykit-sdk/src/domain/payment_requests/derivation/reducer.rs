@@ -541,6 +541,24 @@ pub(crate) fn request_from_record(record: &PaymentRequestRecord) -> Option<Payme
         .proposal_expires_at(terms.proposal_expires_at.clone())
         .recurrence(recurrence)
         .required_app_id(terms.required_app_id.clone())
+        .payment_endpoints(
+            terms
+                .payment_endpoints
+                .as_ref()
+                .map(|endpoints| {
+                    endpoints
+                        .iter()
+                        .map(|(identifier, payload)| {
+                            Ok((
+                                paykit_lib::PaymentEndpointIdentifier::new(identifier)?,
+                                paykit_lib::PaymentEndpointPayload::new(payload.clone()),
+                            ))
+                        })
+                        .collect::<paykit_lib::Result<HashMap<_, _>>>()
+                })
+                .transpose()
+                .ok()?,
+        )
         .conversion(terms.conversion.clone())
         .payment_deadline(terms.payment_deadline.clone())
         .metadata(terms.metadata.clone())

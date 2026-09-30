@@ -62,13 +62,13 @@ pub enum PrivatePaymentResolutionStatus {
     WaitingForUpdatedPaymentList,
 }
 
-/// Private state observed while resolving a Private Payment List.
+/// Private state observed while resolving Payment Endpoints.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum PrivatePaymentResolutionState {
-    /// Private Payment List candidates were available for resolution.
+    /// Private Payment Endpoint candidates were available for resolution.
     Available,
-    /// No Private Payment List candidate was available.
+    /// No private Payment Endpoint candidate was available.
     NoPrivateEndpoint,
     /// Private payment state is blocked by Encrypted Link recovery.
     RecoveryPending,
@@ -131,7 +131,7 @@ impl fmt::Debug for PublicContactPaymentResolution {
     }
 }
 
-/// Result of resolving a Private Payment List for one counterparty.
+/// Result of resolving private Payment Endpoints for one counterparty.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivateContactPaymentResolution {
     /// Private payment resolution outcome.
@@ -141,7 +141,8 @@ pub struct PrivateContactPaymentResolution {
     /// Local stream version of the Private Payment List used for this result.
     ///
     /// Treat this value as an opaque freshness token scoped to this SDK state
-    /// and counterparty. A payable result always includes a version.
+    /// and counterparty. Request-bound endpoints do not consume a Private
+    /// Payment List and return `None`.
     pub private_payment_list_version: Option<u64>,
     /// Payable private Payment Endpoints in adapter-preferred order.
     pub payable_endpoints: Vec<ResolvedPrivatePaymentEndpoint>,
