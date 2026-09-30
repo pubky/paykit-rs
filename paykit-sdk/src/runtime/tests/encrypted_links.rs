@@ -486,7 +486,7 @@ async fn test_ensure_link_recovery_required_ignores_stale_handshake_snapshot() {
 }
 
 #[tokio::test]
-async fn test_advance_link_handshake_rejects_recovery_required_peer() {
+async fn test_advance_link_handshake_preserves_recovery_state_without_session() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
@@ -528,10 +528,7 @@ async fn test_advance_link_handshake_rejects_recovery_required_peer() {
 
     let result = sdk.advance_link_handshake(counterparty.clone()).await;
 
-    assert!(matches!(
-        result,
-        Err(PaykitSdkError::RecoveryRequired { .. })
-    ));
+    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     assert_eq!(
         crate::load_encrypted_link_state(&storage, &counterparty)
             .await

@@ -256,8 +256,6 @@ where
         &self,
         counterparty: PubkyPublicKey,
     ) -> Result<LinkedPeerHandshakeReport> {
-        self.ensure_peer_not_recovery_required_or_blocked(&counterparty)
-            .await?;
         let (session_access, _) = self.private_link_session_access().await?;
         drop(session_access);
         let lease = self.claim_peer_link_operation(&counterparty).await?;
