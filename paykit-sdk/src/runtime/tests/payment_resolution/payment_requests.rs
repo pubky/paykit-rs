@@ -71,7 +71,6 @@ async fn test_resolve_private_payment_request_enforces_request_constraints() {
                 "btc-lightning-bolt11",
             ),
             private_list_message_for_app("bitkit", "btc-lightning-bolt11", "bitkit-lightning"),
-            private_list_message_for_app("server", "btc-lightning-bolt11", "server-lightning"),
         ],
         None,
         FixedClock.now(),
@@ -100,13 +99,40 @@ async fn test_resolve_private_payment_request_enforces_request_constraints() {
         .await
         .unwrap();
     let sdk = PaykitSdk::with_clock(
-        storage,
+        storage.clone(),
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
         PaykitSdkConfig::new("server").unwrap(),
         FixedClock,
     );
 
+    let missing = sdk
+        .resolve_private_payment_request(
+            counterparty.clone(),
+            &PaymentRequestId::new(request_id).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status, PrivatePaymentResolutionStatus::NoEndpoint);
+    assert_eq!(
+        missing.state,
+        PrivatePaymentResolutionState::NoPrivateEndpoint
+    );
+    assert_eq!(missing.private_payment_list_version, None);
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        vec![private_list_message_for_app(
+            "server",
+            "btc-lightning-bolt11",
+            "server-lightning",
+        )],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
     let result = sdk
         .resolve_private_payment_request(
             counterparty,

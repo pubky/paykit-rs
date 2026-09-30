@@ -384,6 +384,7 @@ pub async fn restore_encrypted_link_handshake(
 ///
 /// Restored handshakes reset recovery tuning to defaults. `remote_identity_public_key` must
 /// match `snapshot.recipient()`.
+/// The config's Noise key must match the snapshot's static key.
 /// The config paths must match the session's local Pubky identity, the remote
 /// identity, and the Noise keys; mismatches return [`PaykitError::Validation`].
 #[instrument(skip(config, snapshot))]
@@ -425,6 +426,11 @@ async fn restore_encrypted_link_handshake_inner(
         &remote_noise_public_key,
     )?;
     let state = snapshot.into_state();
+    if state.static_secret != Some(config.pubky_root_keypair.secret_key()) {
+        return Err(PaykitError::Validation(
+            "Noise config key does not match snapshot static key".into(),
+        ));
+    }
     let encryptor = pubky_noise::PubkyNoiseEncryptor::restore(
         config.clone(),
         state,

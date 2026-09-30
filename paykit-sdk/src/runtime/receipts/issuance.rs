@@ -184,7 +184,7 @@ where
                 Err(err) => {
                     self.save_receipt_issuance_failure(
                         &counterparty,
-                        receipt_id,
+                        &record,
                         self.clock.now(),
                         err.to_string(),
                     )
@@ -201,7 +201,7 @@ where
             Err(err) => {
                 self.save_receipt_issuance_failure(
                     &counterparty,
-                    receipt_id,
+                    &record,
                     self.clock.now(),
                     err.to_string(),
                 )
@@ -267,14 +267,15 @@ where
     pub(in crate::runtime) async fn save_receipt_issuance_failure(
         &self,
         counterparty: &PubkyPublicKey,
-        receipt_id: &str,
+        attempted: &ReceiptIssuanceRecord,
         failed_at: DateTime<Utc>,
         error: String,
     ) -> Result<()> {
         self.storage
             .transaction({
                 let counterparty = counterparty.clone();
-                let receipt_id = receipt_id.to_owned();
+                let receipt_id = attempted.receipt_id.clone();
+                let storage_attempt = attempted.stored_at.is_none();
                 move |tx| {
                     let current = tx
                         .receipt_issuance_record(&counterparty, &receipt_id)
@@ -283,7 +284,7 @@ where
                             source: None,
                         })?;
                     if current.status == ReceiptIssuanceStatus::AccessQueued
-                        || current.stored_at.is_some()
+                        || (storage_attempt && current.stored_at.is_some())
                     {
                         return Ok(());
                     }

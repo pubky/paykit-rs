@@ -611,8 +611,10 @@ reserved and ordinary entries should include both as returned reservations.
 
 The payment adapter creates reservations before the SDK can persist linked
 records. Adapters should make reserved details idempotent, expiring, or safe to
-abandon if the process stops before durable queueing. The SDK cancels returned
-reservations on SDK-side validation or queueing failure.
+abandon if the process stops before durable queueing. After acquiring the peer
+lease, the SDK cancels unpersisted reservations on validation or queueing failure.
+If lease acquisition fails, caller-supplied reservations remain caller-owned:
+retry or release them without canceling reservations another worker has queued.
 Any adapter that returns reservations must explicitly implement reservation
 cancellation; cleanup must not be silently treated as successful.
 
@@ -628,6 +630,10 @@ When cleanup starts canceling a persisted reservation through the payment
 adapter, the SDK marks the reservation as cancellation-started in storage before
 calling the adapter. Reservation IDs with cancellation-started records must not be
 reused for new Private Payment Lists until cleanup removes the record.
+App-removal cleanup checks its App lease when claiming cancellation, before
+adapter dispatch, and before deleting the reservation. If ownership changes
+after dispatch, cancellation may already have happened externally; the record
+remains for the current worker to reconcile through idempotent cancellation.
 
 Single-use Payment Request reservations are outside the SDK shape until the
 request-specific context is defined.
@@ -948,7 +954,8 @@ identity-wide state across apps or processes must be enforced by the shared
 storage backing. Lease expiry makes a stale operation reclaimable by another
 worker; durable writes still check the stored lease id so an earlier holder
 cannot commit after a newer lease has replaced it.
-App workflows renew their current lease before remote publication or cleanup;
+App workflows check their current lease before remote publication or cleanup
+and renew it when at most half its lifetime remains;
 renewal cannot revive a lease replaced by another worker.
 
 The local lease does not make an already-started remote write safe if its
@@ -1050,8 +1057,9 @@ SDK behavior:
    automation.
 4. Record observed attempt IDs so a stale marker does not repeatedly break a
    re-established link.
-5. Remove local markers after successful relink when possible; stale remote
-   markers remain safe because attempt IDs are deduped locally.
+5. Remove local markers after successful relink when possible. Previously
+   observed attempt IDs are ignored; an unseen marker can still request recovery.
+   Remote timestamps are not compared with local clocks to suppress recovery.
 
 ### Publish Private Payment List
 
@@ -1063,8 +1071,8 @@ SDK behavior:
    persist the outbound record plus linked reservation records atomically.
 5. If reservations are not returned, ask `PaymentAdapter` for private receiving
    details scoped to the counterparty and queue the list normally.
-6. Cancel adapter reservations when SDK-side validation or queueing fails
-   before durable queueing.
+6. After acquiring the peer lease, cancel unpersisted adapter reservations when
+   SDK-side validation or queueing fails.
 7. Let the identity-wide outbound Private Application Message worker send
    through the Encrypted Link.
 8. Persist send result and updated link snapshot.
@@ -1104,6 +1112,10 @@ complete list cannot fit the remaining aggregate budget receives a structured
 It does not inspect or mutate Linked Peer, Encrypted Link, or Private Payment
 List state.
 
+Payment Request resolution restricted to a `required_app_id` loads only that
+app's public endpoints. Failure to load it returns `Unavailable`, regardless
+of other apps' endpoints.
+
 ### Resolve Private Payment
 
 `resolve_private_contact_payment` checks only Linked Peer and cached Private
@@ -1124,6 +1136,9 @@ input version, resolution returns `WaitingForUpdatedPaymentList` with no
 payable endpoints. These versions are opaque local freshness tokens scoped to
 one SDK state and counterparty; they are not the
 serialized Private Application Message schema version.
+
+For a Payment Request restricted to one app, freshness is scoped to that app's
+list. Updates from other apps do not advance the request's list version.
 
 The application owns consumption. Submitting, pending, or uncertain payment
 execution should persist the returned version as consumed before another
@@ -1225,6 +1240,8 @@ A proof after Cancellation may report only an execution the payer durably
 recorded as past its irreversible boundary before observing Cancellation. It
 does not reopen the request or authorize another payment. Apply the
 [Payment Proof validation rules](payment-requests.md#paykitpayment_proof).
+Reporting past execution does not require the payee's originating App to remain
+registered. New claims and execution still require its current authorization.
 
 The SDK should not mark a payment as settled unless the payment adapter provides
 settlement confirmation.
@@ -1309,7 +1326,7 @@ Backup should not include:
 - payment-provider secrets unless explicitly provided by the payment adapter
 - wallet seed material
 
-Restore flow:
+Normal restore flow:
 
 1. Require an otherwise empty SDK state backing, then validate the local
    identity. A portable backup must not replace newer shared state.
@@ -1334,6 +1351,17 @@ Encrypted Link checkpoints are resumed; missing, malformed, mismatched, or
 otherwise unsafe checkpoints pause private automation until relink. Concurrent
 multi-app updates use homeserver-enforced write locks and crash-safe
 prepared Noise operations.
+
+`recover_shared_state_from_backup` is the explicit recovery path for missing or
+corrupt Pubky shared state. It requires a matching trusted backup, active session,
+the current Paykit key, and its successor. Under the shared-state lock it verifies
+the App Registry key, rejects healthy state or unknown generations, and commits
+the restored state encrypted with the replacement key before updating the registry.
+Retries with the same keys preserve already-committed replacement state.
+Recovery discards Noise checkpoints and prepared sends, preserves backup history,
+and requires relinking and wallet reconciliation before execution. State newer
+than the backup cannot be reconstructed. Callers must securely persist the
+replacement key before recovery and distribute it to authorized apps afterward.
 
 ## Public SDK API Shape
 

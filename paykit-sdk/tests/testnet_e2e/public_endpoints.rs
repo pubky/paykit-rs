@@ -146,7 +146,7 @@ async fn test_managed_endpoint_removal_uses_published_payload_after_failed_updat
 }
 
 #[tokio::test]
-async fn test_managed_endpoint_read_failure_does_not_block_other_changes() {
+async fn test_managed_endpoint_cleanup_does_not_decode_malformed_payloads() {
     let testnet = build_testnet().await;
     let user = TestUser::sign_up(&testnet).await;
     user.sdk
@@ -179,24 +179,24 @@ async fn test_managed_endpoint_read_failure_does_not_block_other_changes() {
         .await
         .unwrap();
 
-    assert_eq!(report.failed.len(), 1);
-    assert_eq!(report.failed[0].identifier, "btc-onchain");
-    assert!(report.failed[0].error.is_some());
+    assert!(report.failed.is_empty());
     assert_eq!(report.published.len(), 1);
     assert_eq!(report.published[0].identifier, "eur-sepa-iban");
-    assert_eq!(report.removed.len(), 1);
+    assert_eq!(report.removed.len(), 2);
     assert_eq!(report.removed[0].identifier, "btc-lightning-bolt11");
+    assert_eq!(report.removed[1].identifier, "btc-onchain");
     let records = load_public_endpoint_records(&user.storage).await.unwrap();
-    let failed = records
+    let removed = records
         .iter()
         .find(|record| record.identifier == "btc-onchain")
         .unwrap();
-    assert_eq!(failed.status, PublicationStatus::Failed);
-    assert_eq!(failed.last_error, report.failed[0].error);
+    assert_eq!(removed.status, PublicationStatus::Removed);
+    assert!(removed.last_error.is_none());
     let public_storage = user.access.outbox_client.public_storage();
     for (identifier, expected) in [
         ("eur-sepa-iban", Some("new-account")),
         ("btc-lightning-bolt11", None),
+        ("btc-onchain", None),
     ] {
         let payload = paykit_lib::get_payment_endpoint(
             &public_storage,
@@ -208,6 +208,204 @@ async fn test_managed_endpoint_read_failure_does_not_block_other_changes() {
         .unwrap();
         assert_eq!(payload.as_ref().map(|payload| payload.as_str()), expected);
     }
+}
+
+#[tokio::test]
+async fn test_public_endpoint_sync_rejects_excess_count_before_publication() {
+    let testnet = build_testnet().await;
+    let user = TestUser::sign_up(&testnet).await;
+    let details = (0..=paykit_lib::PAYMENT_LIST_MAX_ENDPOINTS)
+        .map(|index| public_receiving_detail(&format!("endpoint-{index}"), "payload"))
+        .collect();
+    assert!(user
+        .sdk
+        .sync_public_endpoints_with_receiving_details(details)
+        .await
+        .is_err());
+    assert!(load_public_endpoint_records(&user.storage)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(paykit_lib::get_payment_list(
+        &user.access.outbox_client.public_storage(),
+        user.access.session.info().public_key(),
+        &user.app_id,
+    )
+    .await
+    .unwrap()
+    .payment_endpoints
+    .is_empty());
+}
+
+#[tokio::test]
+async fn test_public_endpoint_sync_counts_unmanaged_endpoints_and_removes_before_replacement() {
+    let testnet = build_testnet().await;
+    let user = TestUser::sign_up(&testnet).await;
+    user.sdk
+        .sync_public_endpoints_with_receiving_details(vec![public_receiving_detail(
+            "old", "address",
+        )])
+        .await
+        .unwrap();
+    for index in 1..paykit_lib::PAYMENT_LIST_MAX_ENDPOINTS {
+        user.access
+            .session
+            .storage()
+            .put(
+                format!(
+                    "{}apps/{}/endpoints/unmanaged-{index}",
+                    paykit_lib::PAYKIT_PATH_PREFIX,
+                    user.app_id
+                ),
+                "unmanaged",
+            )
+            .await
+            .unwrap();
+    }
+
+    let full = user
+        .sdk
+        .sync_public_endpoints_with_receiving_details(vec![
+            public_receiving_detail("old", "address"),
+            public_receiving_detail("new", "replacement"),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(full.failed.len(), 1);
+    assert_eq!(full.failed[0].identifier, "new");
+    assert_eq!(full.published.len(), 1);
+    assert_eq!(full.published[0].identifier, "old");
+
+    let replacement = user
+        .sdk
+        .sync_public_endpoints_with_receiving_details(vec![public_receiving_detail(
+            "new",
+            "replacement",
+        )])
+        .await
+        .unwrap();
+    assert!(replacement.failed.is_empty());
+    assert_eq!(replacement.removed.len(), 1);
+    assert_eq!(replacement.removed[0].identifier, "old");
+    assert_eq!(replacement.published.len(), 1);
+    let list = paykit_lib::get_payment_list(
+        &user.access.outbox_client.public_storage(),
+        user.access.session.info().public_key(),
+        &user.app_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        list.payment_endpoints.len(),
+        paykit_lib::PAYMENT_LIST_MAX_ENDPOINTS
+    );
+    assert_eq!(payload_of(&list, "old"), None);
+    assert_eq!(payload_of(&list, "new"), Some("replacement"));
+}
+
+#[tokio::test]
+async fn test_public_endpoint_sync_repairs_oversized_and_malformed_payloads() {
+    let testnet = build_testnet().await;
+    let user = TestUser::sign_up(&testnet).await;
+    for (identifier, bytes) in [
+        ("btc-onchain", vec![0xff]),
+        (
+            "btc-lightning-bolt11",
+            vec![b'x'; paykit_lib::PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES + 1],
+        ),
+    ] {
+        user.access
+            .session
+            .storage()
+            .put(
+                format!(
+                    "{}apps/{}/endpoints/{identifier}",
+                    paykit_lib::PAYKIT_PATH_PREFIX,
+                    user.app_id
+                ),
+                bytes,
+            )
+            .await
+            .unwrap();
+    }
+    assert!(user
+        .sdk
+        .sync_public_endpoints_with_receiving_details(vec![public_receiving_detail(
+            "btc-lightning-bolt11",
+            &"x".repeat(paykit_lib::PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES + 1),
+        )])
+        .await
+        .is_err());
+    let report = user
+        .sdk
+        .sync_public_endpoints_with_receiving_details(vec![
+            public_receiving_detail("btc-onchain", "address"),
+            public_receiving_detail("btc-lightning-bolt11", "invoice"),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(report.published.len(), 2);
+    assert!(report.failed.is_empty());
+    let list = paykit_lib::get_payment_list(
+        &user.access.outbox_client.public_storage(),
+        user.access.session.info().public_key(),
+        &user.app_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(payload_of(&list, "btc-onchain"), Some("address"));
+    assert_eq!(payload_of(&list, "btc-lightning-bolt11"), Some("invoice"));
+}
+
+#[tokio::test]
+async fn test_full_namespace_cleanup_removes_oversized_and_malformed_payloads() {
+    let testnet = build_testnet().await;
+    let user = TestUser::sign_up(&testnet).await;
+    for (identifier, bytes) in [
+        ("btc-onchain", vec![0xff]),
+        (
+            "btc-lightning-bolt11",
+            vec![b'x'; paykit_lib::PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES + 1],
+        ),
+    ] {
+        user.access
+            .session
+            .storage()
+            .put(
+                format!(
+                    "{}apps/{}/endpoints/{identifier}",
+                    paykit_lib::PAYKIT_PATH_PREFIX,
+                    user.app_id
+                ),
+                bytes,
+            )
+            .await
+            .unwrap();
+    }
+    let mut config = paykit_sdk::PaykitSdkConfig::new(user.app_id.clone()).unwrap();
+    config.endpoint_management_scope =
+        paykit_sdk::EndpointManagementScope::FullAppEndpointNamespace;
+    let sdk = paykit_sdk::PaykitSdk::new(
+        user.storage.clone(),
+        crate::harness::TestnetSessionProvider::new(user.access.clone()),
+        user.adapter.clone(),
+        config,
+    );
+    let report = sdk
+        .sync_public_endpoints_with_receiving_details(Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(report.removed.len(), 2);
+    assert!(report.failed.is_empty());
+    assert!(paykit_lib::get_payment_list(
+        &user.access.outbox_client.public_storage(),
+        user.access.session.info().public_key(),
+        &user.app_id,
+    )
+    .await
+    .unwrap()
+    .payment_endpoints
+    .is_empty());
 }
 
 #[tokio::test]

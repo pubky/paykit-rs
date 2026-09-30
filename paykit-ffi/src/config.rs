@@ -53,7 +53,9 @@ pub struct FfiPubkyClientConfig {
 /// Return SDK configuration defaults for one application.
 #[uniffi::export]
 pub fn default_config(app_id: String) -> Result<FfiPaykitSdkConfig, PaykitFfiError> {
-    Ok(PaykitSdkConfig::new(app_id)?.into())
+    Ok(PaykitSdkConfig::new(app_id)
+        .map_err(|err| validation_error(err.to_string()))?
+        .into())
 }
 
 /// Return the default Pubky client configuration.

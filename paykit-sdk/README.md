@@ -370,7 +370,11 @@ persisting a partial checkpoint.
 The SDK serializes identity-scoped calls on one runtime instance and uses
 storage-backed per-peer leases for Encrypted Link work. Independent runtimes
 using `PubkySharedStateStorage` acquire a homeserver write lock before reading
-state. Contention can be retried by restarting the operation with fresh state.
+state. After contention or an uncertain result, inspect durable request/payment
+records and resume existing work; a multi-step operation may already have
+committed intent, so do not blindly restart it.
+Apps with shared keys and write access are mutually trusted; App IDs do not
+provide cryptographic isolation from other authorized apps.
 The homeserver must fence writes through commit when lock ownership expires
 and publish complete files durably. Locks alone do not provide storage crash safety.
 
@@ -413,7 +417,7 @@ raw private payloads, Encrypted Link snapshots, and Receipt Decryption Keys so
 custom adapters can persist exact SDK state. App code should usually prefer the
 `PaykitSdk` runtime methods and app-facing record/view types.
 
-Backup restore is accepted only into an otherwise empty SDK state backing, so
+Normal backup restore is accepted only into an otherwise empty SDK state backing, so
 an older app backup cannot replace newer shared state. Participating apps must
 publish their App Registry entries again after restore. Restore preserves
 terminal invalid and recovery-required outbound private records for audit,
@@ -422,6 +426,15 @@ validated before restore.
 Restored Encrypted Link checkpoints resume when they are valid. Missing or
 unsafe checkpoints mark affected peers recovery-required so private automation
 pauses until relink.
+
+For missing or corrupt Pubky shared state, use
+`recover_shared_state_from_backup(backup, replacement_key)` with the current key
+and its successor. Persist the replacement key first, then distribute it after
+recovery. This preserves backup history but discards old Noise checkpoints and
+prepared sends; links must recover and payments require wallet reconciliation.
+It rejects healthy state and unknown generations. Retry an interrupted recovery
+with the same keys and backup; already-committed replacement state is preserved.
+Data newer than the backup cannot be recovered.
 
 Losing the durable SDK state without a backup means losing access to private
 Paykit runtime state. Public Paykit data can be rediscovered from Pubky, but

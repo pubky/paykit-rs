@@ -171,6 +171,80 @@ async fn test_encrypted_link_restore_rejects_other_identity_paths() {
 }
 
 #[tokio::test]
+async fn test_encrypted_link_restore_rejects_different_noise_key() {
+    let setup = PrivateTestSetup::new().await;
+    let snapshot = setup.sender_link.snapshot().unwrap();
+    let recipient = snapshot.recipient().clone();
+    let different_secret = derive_paykit_noise_secret_key(&[99; 32]);
+    let outbox_client = setup.sender_link.config().outbox_client.clone();
+    let different_handshake = initiate_encrypted_link(
+        setup.sender_session.clone(),
+        different_secret,
+        &recipient,
+        snapshot.remote_noise_public_key(),
+        outbox_client.clone(),
+    )
+    .unwrap();
+
+    let from_config = restore_encrypted_link_from_config(
+        different_handshake.config().clone(),
+        &recipient,
+        EncryptedLinkSnapshot::deserialize(&snapshot.serialize()).unwrap(),
+    )
+    .await;
+    let from_secret = restore_encrypted_link(
+        setup.sender_session,
+        different_secret,
+        &recipient,
+        outbox_client,
+        snapshot,
+    )
+    .await;
+
+    for result in [from_config, from_secret] {
+        assert!(matches!(result, Err(PaykitError::Validation(message))
+            if message == "Noise config key does not match snapshot static key"));
+    }
+}
+
+#[tokio::test]
+async fn test_handshake_restore_rejects_different_noise_key() {
+    let setup = InProgressHandshakeSetup::new().await;
+    let snapshot = setup.initiator_handshake.snapshot().unwrap();
+    let recipient = snapshot.recipient().clone();
+    let different_secret = derive_paykit_noise_secret_key(&[99; 32]);
+    let outbox_client = setup.initiator_handshake.config().outbox_client.clone();
+    let different_handshake = initiate_encrypted_link(
+        setup.initiator_session.clone(),
+        different_secret,
+        &recipient,
+        snapshot.remote_noise_public_key(),
+        outbox_client.clone(),
+    )
+    .unwrap();
+
+    let from_config = restore_encrypted_link_handshake_from_config(
+        different_handshake.config().clone(),
+        &recipient,
+        EncryptedLinkHandshakeSnapshot::deserialize(&snapshot.serialize()).unwrap(),
+    )
+    .await;
+    let from_secret = restore_encrypted_link_handshake(
+        setup.initiator_session,
+        different_secret,
+        &recipient,
+        outbox_client,
+        snapshot,
+    )
+    .await;
+
+    for result in [from_config, from_secret] {
+        assert!(matches!(result, Err(PaykitError::Validation(message))
+            if message == "Noise config key does not match snapshot static key"));
+    }
+}
+
+#[tokio::test]
 async fn test_handshake_snapshot_serialize_roundtrip() {
     let InProgressHandshakeSetup {
         _testnet,
@@ -631,6 +705,34 @@ async fn test_encrypted_link_serialize_convenience() {
 
     setup.sender_session.signout().await.unwrap();
     setup.receiver_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_prepared_private_message_rejects_oversized_payload_without_advancing() {
+    let mut setup = PrivateTestSetup::new().await;
+    let mut payload = serde_json::json!({
+        "version": 1,
+        "kind": "paykit.test_packet",
+        "app_id": "bitkit",
+        "payload": "",
+    });
+    payload["payload"] = "x"
+        .repeat(pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN + 1 - payload.to_string().len())
+        .into();
+    let raw_json = payload.to_string();
+    let before = setup.sender_link.serialize().unwrap();
+
+    assert!(matches!(
+        setup.sender_link.prepare_private_application_message_json(&raw_json),
+        Err(PaykitError::Validation(message)) if message.contains("exceeds max message size")
+    ));
+    assert_eq!(setup.sender_link.serialize().unwrap(), before);
+
+    payload["payload"] = "".into();
+    assert!(setup
+        .sender_link
+        .prepare_private_application_message_json(&payload.to_string())
+        .is_ok());
 }
 
 #[tokio::test]

@@ -1179,6 +1179,13 @@ async fn test_proof_correction_after_handoff_reaches_send_readiness() {
     )
     .await
     .unwrap();
+    storage
+        .transaction(|tx| {
+            tx.save_authorized_paykit_apps(counterparty.clone(), HashMap::new());
+            Ok(())
+        })
+        .await
+        .unwrap();
     let sdk = PaykitSdk::with_clock(
         storage,
         TestPubkySessionProvider { session: None },

@@ -502,7 +502,7 @@ async fn test_receipt_access_enqueue_is_idempotent_for_stale_record() {
 }
 
 #[tokio::test]
-async fn test_receipt_issuance_failure_does_not_regress_access_queued_record() {
+async fn test_receipt_issuance_failure_respects_storage_and_queue_progress() {
     let storage = registered_test_storage();
     let local_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
@@ -539,22 +539,68 @@ async fn test_receipt_issuance_failure_does_not_regress_access_queued_record() {
         })
         .await
         .unwrap();
-    crate::domain::receipts::enqueue_receipt_access_for_issuance(
-        &storage,
-        prepared.clone(),
-        FixedClock.now(),
-    )
-    .await
-    .unwrap();
+    let stored = prepared.mark_stored(FixedClock.now());
+    storage
+        .transaction(|tx| {
+            tx.save_receipt_issuance_record(stored.clone());
+            Ok(())
+        })
+        .await
+        .unwrap();
 
     sdk.save_receipt_issuance_failure(
         &counterparty,
-        &prepared.receipt_id,
+        &prepared,
         FixedClock.now(),
-        "stale failure".into(),
+        "stale storage failure".into(),
     )
     .await
     .unwrap();
+    assert_eq!(
+        storage
+            .transaction(|tx| Ok(tx
+                .receipt_issuance_record(&counterparty, &prepared.receipt_id)
+                .unwrap()))
+            .await
+            .unwrap(),
+        stored,
+    );
+    sdk.save_receipt_issuance_failure(
+        &counterparty,
+        &stored,
+        FixedClock.now(),
+        "queue failure".into(),
+    )
+    .await
+    .unwrap();
+    let failed = storage
+        .transaction(|tx| {
+            Ok(tx
+                .receipt_issuance_record(&counterparty, &prepared.receipt_id)
+                .unwrap())
+        })
+        .await
+        .unwrap();
+    assert_eq!(failed.status, ReceiptIssuanceStatus::Failed);
+    assert_eq!(failed.stored_at, stored.stored_at);
+    assert_eq!(failed.last_error.as_deref(), Some("queue failure"));
+    crate::domain::receipts::enqueue_receipt_access_for_issuance(
+        &storage,
+        failed,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    for attempted in [&prepared, &stored] {
+        sdk.save_receipt_issuance_failure(
+            &counterparty,
+            attempted,
+            FixedClock.now(),
+            "stale failure".into(),
+        )
+        .await
+        .unwrap();
+    }
 
     let stored = storage
         .transaction(move |tx| {

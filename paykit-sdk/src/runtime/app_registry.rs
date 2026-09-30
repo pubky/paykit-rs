@@ -97,11 +97,13 @@ where
                 crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
                 let timeout = ChronoDuration::from_std(PAYKIT_APP_OPERATION_LEASE_TIMEOUT)
                     .expect("fixed Paykit App lease timeout must fit chrono duration");
-                tx.renew_paykit_app_operation(
-                    &lease.app_id,
-                    lease.lease_id,
-                    self.clock.now() + timeout,
-                );
+                let now = self.clock.now();
+                if tx
+                    .paykit_app_operation_lease(&lease.app_id)
+                    .is_some_and(|active| active.expires_at <= now + timeout / 2)
+                {
+                    tx.renew_paykit_app_operation(&lease.app_id, lease.lease_id, now + timeout);
+                }
                 Ok(())
             }
         })
@@ -164,23 +166,31 @@ where
                 receipt_apps: Some(receipt_apps),
             })
         } else {
-            let apps = self
-                .storage
-                .transaction(|tx| Ok(tx.authorized_paykit_apps(counterparty)))
-                .await?;
-            Ok(CounterpartyAppAuthorizationContext {
-                registry: None,
-                private_apps: apps.as_ref().map(|apps| {
-                    authorized_app_ids(apps, |capabilities| capabilities.private_payments)
-                }),
-                payment_request_apps: apps.as_ref().map(|apps| {
-                    authorized_app_ids(apps, |capabilities| capabilities.payment_requests)
-                }),
-                receipt_apps: apps
-                    .as_ref()
-                    .map(|apps| authorized_app_ids(apps, |capabilities| capabilities.receipts)),
-            })
+            self.cached_counterparty_app_authorization_context(counterparty)
+                .await
         }
+    }
+
+    pub(super) async fn cached_counterparty_app_authorization_context(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<CounterpartyAppAuthorizationContext> {
+        let apps = self
+            .storage
+            .transaction(|tx| Ok(tx.authorized_paykit_apps(counterparty)))
+            .await?;
+        Ok(CounterpartyAppAuthorizationContext {
+            registry: None,
+            private_apps: apps
+                .as_ref()
+                .map(|apps| authorized_app_ids(apps, |capabilities| capabilities.private_payments)),
+            payment_request_apps: apps
+                .as_ref()
+                .map(|apps| authorized_app_ids(apps, |capabilities| capabilities.payment_requests)),
+            receipt_apps: apps
+                .as_ref()
+                .map(|apps| authorized_app_ids(apps, |capabilities| capabilities.receipts)),
+        })
     }
 
     pub(super) async fn authorized_receipt_apps_for_peer(
@@ -218,7 +228,13 @@ where
         app: paykit_lib::PaykitApp,
     ) -> Result<paykit_lib::PaykitAppRegistry> {
         let _identity_guard = self.claim_identity_operation("publish Paykit app")?;
-        self.load_session_access_and_refresh_identity().await?;
+        let (session, _) = self.load_session_access_and_refresh_identity().await?;
+        if session.is_none() {
+            return Err(PaykitSdkError::Identity {
+                context: "publishing a Paykit app requires an active Pubky session".into(),
+                source: None,
+            });
+        }
         let app_lease = self.claim_paykit_app_publication_operation().await?;
         let result = self.publish_paykit_app_inner(app, &app_lease).await;
         self.finish_paykit_app_operation(app_lease, result).await
@@ -347,6 +363,7 @@ where
                     self.cancel_terminal_private_list_reservations(
                         &lease.counterparty,
                         Some(lease),
+                        Some(app_lease),
                     )
                     .await,
                 );
@@ -377,15 +394,13 @@ where
                 });
             }
 
-            let payment_list = paykit_lib::get_payment_list(
+            let mut identifiers = paykit_lib::list_payment_endpoint_identifiers(
                 &session_access.outbox_client.public_storage(),
                 session_access.session.info().public_key(),
                 &app_id,
             )
-            .await?;
-            let mut identifiers = payment_list
-                .payment_endpoints
-                .into_keys()
+            .await?
+                .into_iter()
                 .collect::<HashSet<_>>();
             for record in self
                 .storage

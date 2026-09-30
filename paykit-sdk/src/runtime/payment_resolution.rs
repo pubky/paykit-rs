@@ -292,9 +292,15 @@ where
 
         drop(session_access);
 
-        let (app_registry, authorized_private_apps) = self
-            .private_app_authorization_context(&counterparty)
-            .await?;
+        let (app_registry, authorized_private_apps) = if private_live {
+            self.private_app_authorization_context(&counterparty)
+                .await?
+        } else {
+            let context = self
+                .cached_counterparty_app_authorization_context(&counterparty)
+                .await?;
+            (context.registry, context.private_apps)
+        };
 
         let mut private_views = if private_allowed {
             load_current_private_payment_lists(&self.storage, &counterparty).await?
@@ -305,16 +311,20 @@ where
             &mut private_views,
             authorized_private_apps.as_deref(),
         );
-        if private_views
-            .iter()
-            .any(|view| !view.payment_endpoints.is_empty())
-        {
+        let required_app_id = payment_request_terms
+            .as_ref()
+            .and_then(|terms| terms.required_app_id.as_ref());
+        if private_views.iter().any(|view| {
+            required_app_id.is_none_or(|app_id| app_id == &view.app_id)
+                && !view.payment_endpoints.is_empty()
+        }) {
             state = PrivatePaymentResolutionState::Available;
         }
         let mut candidate_batch = private_candidate_batch(
             &counterparty,
             &private_views,
             after_private_payment_list_version,
+            required_app_id,
         )?;
         filter_private_candidate_batch_for_request(
             candidate_batch.as_mut(),
@@ -331,6 +341,7 @@ where
                     &counterparty,
                     authorized_private_apps.as_deref(),
                     after_private_payment_list_version,
+                    required_app_id,
                 )
                 .await?
             {
@@ -658,6 +669,7 @@ where
         counterparty: &PubkyPublicKey,
         authorized_private_apps: Option<&[paykit_lib::PaykitAppId]>,
         after_private_payment_list_version: Option<u64>,
+        required_app_id: Option<&paykit_lib::PaykitAppId>,
     ) -> Result<PrivateRecoveryOutcome> {
         let Some(identity) = self.storage.load_identity_state().await? else {
             return Ok(PrivateRecoveryOutcome::NotNeeded);
@@ -708,6 +720,7 @@ where
                     counterparty,
                     &private_views,
                     after_private_payment_list_version,
+                    required_app_id,
                 )?))
             }
             Err(PaykitSdkError::Policy { .. })

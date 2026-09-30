@@ -93,3 +93,26 @@ async fn test_restore_backup_state_rejects_concurrent_identity_operation() {
 
     assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
 }
+
+#[tokio::test]
+async fn test_recover_shared_state_requires_identity_and_exclusive_operation() {
+    let sdk = PaykitSdk::with_clock(
+        InMemoryStorage::new(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    let replacement = crate::PaykitIdentitySecretKey::new([8; 32], 2).unwrap();
+    assert!(matches!(
+        sdk.recover_shared_state_from_backup(empty_backup_state(), replacement.clone())
+            .await,
+        Err(PaykitSdkError::Identity { .. })
+    ));
+    let _guard = sdk.claim_identity_operation("test operation").unwrap();
+    assert!(matches!(
+        sdk.recover_shared_state_from_backup(empty_backup_state(), replacement)
+            .await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
+}

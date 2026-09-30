@@ -16,7 +16,7 @@ where
         let result = async {
             let mut report = OutboundPrivateSendReport::default();
             report.reservation_cleanup_failures.extend(
-                self.cancel_terminal_private_list_reservations(&counterparty, Some(&lease))
+                self.cancel_terminal_private_list_reservations(&counterparty, Some(&lease), None)
                     .await,
             );
             let queued = queued_outbound_private_messages(&self.storage, &counterparty).await?;
@@ -155,8 +155,12 @@ where
             .await?;
             let Some(sending) = sending else {
                 report.reservation_cleanup_failures.extend(
-                    self.cancel_terminal_private_list_reservations(&counterparty, Some(&lease))
-                        .await,
+                    self.cancel_terminal_private_list_reservations(
+                        &counterparty,
+                        Some(&lease),
+                        None,
+                    )
+                    .await,
                 );
                 break;
             };
@@ -244,7 +248,7 @@ where
                 }
             }
             report.reservation_cleanup_failures.extend(
-                self.cancel_terminal_private_list_reservations(&counterparty, Some(&lease))
+                self.cancel_terminal_private_list_reservations(&counterparty, Some(&lease), None)
                     .await,
             );
         }
@@ -406,7 +410,7 @@ where
                 error,
             });
             report.reservation_cleanup_failures.extend(
-                self.cancel_terminal_private_list_reservations(counterparty, Some(lease))
+                self.cancel_terminal_private_list_reservations(counterparty, Some(lease), None)
                     .await,
             );
             return Ok(None);
@@ -436,11 +440,11 @@ where
             error,
         });
         report.reservation_cleanup_failures.extend(
-            self.cancel_reservation_records(expired_releases, Some(lease))
+            self.cancel_reservation_records(expired_releases, Some(lease), None)
                 .await,
         );
         report.reservation_cleanup_failures.extend(
-            self.cancel_terminal_private_list_reservations(counterparty, Some(lease))
+            self.cancel_terminal_private_list_reservations(counterparty, Some(lease), None)
                 .await,
         );
         Ok(None)
@@ -565,7 +569,7 @@ where
             error,
         });
         report.reservation_cleanup_failures.extend(
-            self.cancel_terminal_private_list_reservations(counterparty, Some(lease))
+            self.cancel_terminal_private_list_reservations(counterparty, Some(lease), None)
                 .await,
         );
         Ok(())

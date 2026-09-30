@@ -316,7 +316,7 @@ fn is_not_found(err: &PubkyError) -> bool {
     )
 }
 
-fn validate_private_application_message_size(
+pub(super) fn validate_private_application_message_size(
     plaintext: &[u8],
     context: &'static str,
 ) -> Result<()> {

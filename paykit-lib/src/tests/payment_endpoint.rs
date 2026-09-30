@@ -14,6 +14,159 @@ fn app_capabilities() -> PaykitAppCapabilities {
 }
 
 #[tokio::test]
+async fn test_endpoint_repair_and_removal_use_raw_revisions() {
+    let setup = TestSetup::new().await;
+    let app = app_id();
+    let identifier = PaymentEndpointIdentifier::new("btc-onchain").unwrap();
+    let path = pubky_routing::payment_endpoint_path(&app, &identifier);
+    for bytes in [
+        vec![0xff],
+        vec![b'x'; PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES + 1],
+    ] {
+        setup
+            .session
+            .storage()
+            .put(&path, bytes.clone())
+            .await
+            .unwrap();
+        assert!(
+            get_payment_endpoint(&setup.public_storage, &setup.public_key, &app, &identifier)
+                .await
+                .is_err()
+        );
+        let revision =
+            pubky_routing::fetch_payment_endpoint_revision(&setup.session, &app, &identifier)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(revision, content_revision(&bytes));
+
+        update_payment_endpoint(
+            &setup.session,
+            &app,
+            identifier.clone(),
+            PaymentEndpointPayload::new("repaired"),
+            &revision,
+        )
+        .await
+        .unwrap();
+        let error = remove_payment_endpoint_if_revision(
+            &setup.session,
+            &app,
+            identifier.clone(),
+            &revision,
+        )
+        .await
+        .unwrap_err();
+        assert!(is_write_conflict(&error));
+
+        setup.session.storage().put(&path, bytes).await.unwrap();
+        remove_payment_endpoint_if_revision(&setup.session, &app, identifier.clone(), &revision)
+            .await
+            .unwrap();
+        assert!(
+            pubky_routing::fetch_payment_endpoint_revision(&setup.session, &app, &identifier)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_malformed_registry_can_be_conditionally_repaired() {
+    let setup = TestSetup::new().await;
+    setup
+        .session
+        .storage()
+        .put(PAYKIT_APP_REGISTRY_PATH, vec![0xff])
+        .await
+        .unwrap();
+    assert!(
+        get_paykit_app_registry_with_revision(&setup.public_storage, &setup.public_key)
+            .await
+            .is_err()
+    );
+    let resource = format!("{}{PAYKIT_APP_REGISTRY_PATH}", setup.public_key)
+        .parse()
+        .unwrap();
+    let revision = pubky_routing::fetch_resource_revision(
+        &setup.public_storage,
+        &resource,
+        PAYKIT_APP_REGISTRY_MAX_BYTES,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let registry = PaykitAppRegistry::new(None);
+    update_paykit_app_registry(&setup.session, &registry, &revision)
+        .await
+        .unwrap();
+    assert_eq!(
+        get_paykit_app_registry(&setup.public_storage, &setup.public_key)
+            .await
+            .unwrap(),
+        Some(registry.clone())
+    );
+    assert!(is_write_conflict(
+        &update_paykit_app_registry(&setup.session, &registry, &revision)
+            .await
+            .unwrap_err()
+    ));
+}
+
+#[tokio::test]
+async fn test_endpoint_cleanup_listing_accepts_overfull_lists() {
+    let setup = TestSetup::new().await;
+    let app = app_id();
+    for index in 0..=PAYMENT_LIST_MAX_ENDPOINTS {
+        let identifier = PaymentEndpointIdentifier::new(format!("endpoint-{index:03}")).unwrap();
+        setup
+            .session
+            .storage()
+            .put(
+                pubky_routing::payment_endpoint_path(&app, &identifier),
+                vec![0xff],
+            )
+            .await
+            .unwrap();
+    }
+    assert!(
+        get_payment_list(&setup.public_storage, &setup.public_key, &app)
+            .await
+            .is_err()
+    );
+    let identifiers = pubky_routing::list_payment_endpoint_identifiers(
+        &setup.public_storage,
+        &setup.public_key,
+        &app,
+    )
+    .await
+    .unwrap();
+    assert_eq!(identifiers.len(), PAYMENT_LIST_MAX_ENDPOINTS + 1);
+}
+
+#[tokio::test]
+async fn test_payment_list_exact_byte_budget_allows_trailing_empty_endpoint() {
+    let setup = TestSetup::new().await;
+    for (name, body) in [("a", "full"), ("b", "")] {
+        set_payment_endpoint(
+            &setup.session,
+            &app_id(),
+            PaymentEndpointIdentifier::new(name).unwrap(),
+            PaymentEndpointPayload::new(body),
+        )
+        .await
+        .unwrap();
+    }
+    let list =
+        get_payment_list_with_limits(&setup.public_storage, &setup.public_key, &app_id(), 2, 4)
+            .await
+            .unwrap();
+    assert_eq!(list.payment_endpoints.len(), 1);
+}
+
+#[tokio::test]
 async fn test_write_lock_is_renewed_and_released_after_failure() {
     let setup = TestSetup::new().await;
     let path = format!("{PAYKIT_PATH_PREFIX}lock-test.json");

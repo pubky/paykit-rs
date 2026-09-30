@@ -762,6 +762,72 @@ async fn test_enqueue_payment_request_allows_same_app_cancellation_after_accepta
 }
 
 #[tokio::test]
+async fn test_expired_proposal_cancellation_respects_existing_claim() {
+    for owner in [
+        None,
+        Some(app_id()),
+        Some(paykit_lib::PaykitAppId::new("server").unwrap()),
+    ] {
+        let storage = registered_storage();
+        let peer = counterparty();
+        let request_id = paykit_lib::PaymentRequestId::new_v4();
+        persist_messages(
+            &storage,
+            peer.clone(),
+            vec![request_raw(
+                "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+                request_id.as_str(),
+                "invoice-2026-0001",
+                Some("2026-06-03T12:00:01Z"),
+                None,
+            )],
+        )
+        .await;
+        storage
+            .transaction(|tx| {
+                tx.save_authorized_paykit_apps(
+                    peer.clone(),
+                    HashMap::from([(app_id(), payment_request_capabilities())]),
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        if let Some(owner) = &owner {
+            register_execution_app(&storage, owner.clone()).await;
+            claim_execution(&storage, peer.clone(), request_id.as_str(), owner.clone()).await;
+        }
+        let now = timestamp() + ChronoDuration::seconds(2);
+        assert!(matches!(
+            claim_payment_request_execution(&storage, peer.clone(), &app_id(), &request_id, now)
+                .await,
+            Err(PaykitSdkError::Policy { .. })
+        ));
+        let result = enqueue_checked_payment_request_action(
+            &storage,
+            peer.clone(),
+            &app_id(),
+            &PaymentRequestEvent::Cancellation(PaymentRequestCancellation::new(
+                EventId::new_v4(),
+                request_id,
+                None,
+            )),
+            now,
+        )
+        .await;
+        if owner.as_ref().is_some_and(|owner| *owner != app_id()) {
+            assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
+        } else {
+            result.unwrap();
+            assert_eq!(
+                payment_request_records(&storage, &peer, now).await.unwrap()[0].state,
+                PaymentRequestLifecycleState::Canceled
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_enqueue_payment_request_rejects_other_app_cancellation_after_acceptance() {
     let storage = registered_storage();
     let counterparty = counterparty();

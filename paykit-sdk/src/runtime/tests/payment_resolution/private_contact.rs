@@ -94,7 +94,9 @@ async fn test_resolve_private_contact_payment_uses_authorized_cache_without_live
     cache_bitkit_private_app(&storage, &counterparty).await;
     let sdk = PaykitSdk::with_clock(
         storage,
-        TestPubkySessionProvider { session: None },
+        FailingPublicStorageProvider {
+            successful_loads: 0.into(),
+        },
         TestPaymentAdapter,
         PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
@@ -102,7 +104,7 @@ async fn test_resolve_private_contact_payment_uses_authorized_cache_without_live
 
     let result = sdk
         .resolve_private_contact_payment(
-            counterparty,
+            counterparty.clone(),
             Some(crate::PaymentAmountContext {
                 value: "10.00".into(),
                 asset: "usd".into(),
@@ -116,6 +118,13 @@ async fn test_resolve_private_contact_payment_uses_authorized_cache_without_live
     assert_eq!(result.state, PrivatePaymentResolutionState::Available);
     assert_eq!(result.private_payment_list_version, Some(0));
     assert_eq!(result.payable_endpoints[0].endpoint.payload, "ln-private");
+    assert_eq!(
+        sdk.current_private_payment_lists(&counterparty)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -400,7 +409,7 @@ async fn test_recover_private_candidates_reports_pending_for_linking_peer() {
     );
 
     let outcome = sdk
-        .recover_private_candidates_for_resolution(&counterparty, None, None)
+        .recover_private_candidates_for_resolution(&counterparty, None, None, None)
         .await
         .unwrap();
 

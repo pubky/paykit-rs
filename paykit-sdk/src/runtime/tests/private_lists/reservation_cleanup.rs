@@ -1,6 +1,133 @@
 use super::*;
 
 #[tokio::test]
+async fn test_app_removal_cleanup_rejects_replaced_lease_at_each_boundary() {
+    struct PausedStorage {
+        inner: InMemoryStorage,
+        calls: std::sync::atomic::AtomicUsize,
+        pause_at: usize,
+        entered: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl StorageAdapter for PausedStorage {
+        async fn transaction_erased<'a>(
+            &self,
+            callback: crate::storage::StorageTransactionCallback<'a>,
+        ) -> Result<Box<dyn std::any::Any + Send>> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == self.pause_at {
+                self.entered.notify_one();
+                self.resume.notified().await;
+            }
+            self.inner.transaction_erased(callback).await
+        }
+    }
+
+    #[derive(Clone)]
+    struct TakeoverClock;
+    impl Clock for TakeoverClock {
+        fn now(&self) -> DateTime<Utc> {
+            FixedClock.now() + ChronoDuration::seconds(61)
+        }
+    }
+
+    for pause_at in 0..3 {
+        let storage = registered_test_storage();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let app_lease = test_app_operation(&storage).await;
+        let peer_lease = storage
+            .transaction(|tx| {
+                tx.save_payment_endpoint_reservation(
+                    crate::storage::PaymentEndpointReservationRecord {
+                        reservation_id: "reservation-1".into(),
+                        counterparty: counterparty.clone(),
+                        app_id: app_id(),
+                        identifier: "btc-lightning-bolt11".into(),
+                        payload_hash: reservation_payload_hash("one"),
+                        outbound_message_id: 1,
+                        attribution: HashMap::new(),
+                        expires_at: None,
+                        cancellation_started_at: None,
+                        created_at: FixedClock.now(),
+                    },
+                );
+                Ok(tx
+                    .claim_peer_link_operation(
+                        &counterparty,
+                        FixedClock.now(),
+                        FixedClock.now() + ChronoDuration::seconds(120),
+                    )?
+                    .unwrap())
+            })
+            .await
+            .unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let canceled = Arc::new(Mutex::new(Vec::new()));
+        let sdk = PaykitSdk::with_clock(
+            PausedStorage {
+                inner: storage.clone(),
+                calls: 0.into(),
+                pause_at,
+                entered: entered.clone(),
+                resume: resume.clone(),
+            },
+            TestPubkySessionProvider { session: None },
+            InvalidReservedPrivateListPaymentAdapter {
+                canceled: canceled.clone(),
+            },
+            PaykitSdkConfig::new("bitkit").unwrap(),
+            FixedClock,
+        );
+        let cancellation = PaymentEndpointReservationCancellationRecord {
+            outbound_message_id: 1,
+            app_id: app_id(),
+            cancellation: PrivatePaymentEndpointReservationCancellation {
+                reservation_id: "reservation-1".into(),
+                counterparty: counterparty.clone(),
+                identifier: "btc-lightning-bolt11".into(),
+                payload_hash: reservation_payload_hash("one"),
+                attribution: HashMap::new(),
+            },
+        };
+        let cleanup = tokio::spawn(async move {
+            sdk.cancel_reservation_records(vec![cancellation], Some(&peer_lease), Some(&app_lease))
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+            .await
+            .expect("cleanup must reach the lease boundary");
+        let replacement_sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::new("bitkit").unwrap(),
+            TakeoverClock,
+        );
+        replacement_sdk.claim_paykit_app_operation().await.unwrap();
+        storage
+            .transaction(|tx| {
+                tx.activate_paykit_app(&app_id());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let before_resume = storage.snapshot().unwrap();
+        resume.notify_one();
+        let failures = cleanup.await.unwrap();
+        assert_eq!(failures.len(), 1, "boundary {pause_at}");
+        assert_eq!(canceled.lock().unwrap().len(), usize::from(pause_at == 2));
+        assert!(storage.snapshot().unwrap() == before_resume);
+        let reservation = before_resume
+            .payment_endpoint_reservations
+            .get(&(counterparty, app_id(), "reservation-1".into()))
+            .unwrap();
+        assert_eq!(reservation.cancellation_started_at.is_some(), pause_at != 0);
+    }
+}
+
+#[tokio::test]
 async fn test_unattempted_superseded_reservation_cleanup_cancels_without_claimed_message() {
     let storage = registered_test_storage();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
@@ -74,7 +201,7 @@ async fn test_unattempted_superseded_reservation_cleanup_cancels_without_claimed
     );
 
     let failures = sdk
-        .cancel_unattempted_superseded_reservations(&counterparty, None)
+        .cancel_unattempted_superseded_reservations(&counterparty, None, None)
         .await;
 
     assert!(failures.is_empty());
@@ -140,7 +267,7 @@ async fn test_terminal_private_list_reservation_cleanup_cancels_invalid_message_
     );
 
     let failures = sdk
-        .cancel_terminal_private_list_reservations(&counterparty, None)
+        .cancel_terminal_private_list_reservations(&counterparty, None, None)
         .await;
 
     assert!(failures.is_empty());
@@ -202,7 +329,7 @@ async fn test_reservation_cleanup_skips_reused_reservation_from_newer_outbound_m
     };
 
     let failures = sdk
-        .cancel_reservation_records(vec![cancellation], None)
+        .cancel_reservation_records(vec![cancellation], None, None)
         .await;
 
     assert!(failures.is_empty());
@@ -271,7 +398,7 @@ async fn test_reservation_cleanup_skips_another_apps_reservation() {
     };
 
     let failures = sdk
-        .cancel_reservation_records(vec![cancellation], None)
+        .cancel_reservation_records(vec![cancellation], None, None)
         .await;
 
     assert!(failures.is_empty());
@@ -353,7 +480,7 @@ async fn test_reservation_cleanup_rejects_stale_peer_operation_lease_before_adap
     };
 
     let failures = sdk
-        .cancel_reservation_records(vec![cancellation], Some(&stale_lease))
+        .cancel_reservation_records(vec![cancellation], Some(&stale_lease), None)
         .await;
 
     assert_eq!(failures.len(), 1);
@@ -414,12 +541,12 @@ async fn test_reservation_cleanup_failure_keeps_cancellation_claim() {
     };
 
     let failures = sdk
-        .cancel_reservation_records(vec![cancellation.clone()], None)
+        .cancel_reservation_records(vec![cancellation.clone()], None, None)
         .await;
 
     assert_eq!(failures.len(), 1);
     assert!(sdk
-        .cancel_reservation_records(vec![cancellation], None)
+        .cancel_reservation_records(vec![cancellation], None, None)
         .await
         .is_empty());
     let record = storage
@@ -529,7 +656,7 @@ async fn test_reservation_cleanup_removes_claimed_record_after_lease_changes() {
     };
 
     let failures = sdk
-        .cancel_reservation_records(vec![cancellation], Some(&lease))
+        .cancel_reservation_records(vec![cancellation], Some(&lease), None)
         .await;
 
     assert!(failures.is_empty());

@@ -63,6 +63,109 @@ async fn record(storage: &InMemoryStorage, peer: &PubkyPublicKey) -> PaymentRequ
 }
 
 #[tokio::test]
+async fn test_cancellation_retains_settled_payment_claim_after_origin_app_removal() {
+    let storage = registered_storage();
+    let peer = counterparty();
+    persist_authorized_request(&storage, peer.clone(), REQUEST_ID).await;
+    claim_execution(&storage, peer.clone(), REQUEST_ID, app_id()).await;
+    enqueue_checked_payment_request_action(
+        &storage,
+        peer.clone(),
+        &app_id(),
+        &parsed_event(acceptance_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
+            REQUEST_ID,
+        )),
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    storage
+        .transaction(|tx| {
+            let epoch = EventId::new_v4().to_string();
+            tx.save_allowance_accounting_state(crate::AllowanceAccountingState {
+                revision: 1,
+                epoch: epoch.clone(),
+                requires_reconciliation: false,
+                history: crate::AllowanceAccountingHistory {
+                    occurrences: vec![crate::PaymentOccurrenceRecord {
+                        key: crate::PaymentOccurrenceKey {
+                            request: crate::PaymentAccountingScope {
+                                local_public_key: tx
+                                    .load_identity_state()
+                                    .unwrap()
+                                    .public_key
+                                    .unwrap(),
+                                counterparty: peer.clone(),
+                                payment_request_id: REQUEST_ID.into(),
+                            },
+                            billing_period: None,
+                        },
+                        disposition: crate::PaymentDisposition::ManualOnly,
+                        allowance_id: None,
+                        association_revision: None,
+                        attempts: vec![crate::PaymentAttemptRecord {
+                            attempt_id: EventId::new_v4().to_string(),
+                            mode: crate::PaymentExecutionMode::Manual,
+                            allowance_id: None,
+                            association_revision: None,
+                            amount: AmountRecord {
+                                value: "0.001".into(),
+                                asset: "btc".into(),
+                            },
+                            admitted_at: timestamp(),
+                            status: crate::PaymentExecutionStatus::Succeeded,
+                            epoch,
+                        }],
+                    }],
+                    ..Default::default()
+                },
+            });
+            tx.save_authorized_paykit_apps(peer.clone(), HashMap::new());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let accepted = record(&storage, &peer).await;
+    assert!(matches!(
+        storage
+            .transaction(|tx| require_payment_execution_authority(tx, &peer, &app_id(), &accepted))
+            .await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
+    persist_messages(
+        &storage,
+        peer.clone(),
+        vec![cancellation_raw(SECOND_PROOF_ID, REQUEST_ID)],
+    )
+    .await;
+    let canceled = record(&storage, &peer).await;
+    assert_eq!(canceled.state, PaymentRequestLifecycleState::Canceled);
+    assert_eq!(canceled.execution_claim_app_id, Some(app_id()));
+    let accounting = storage.snapshot().unwrap().allowance_accounting;
+    let proof = parsed_event(proof_raw(FIRST_PROOF_ID, REQUEST_ID, REFERENCE));
+    storage
+        .transaction(|tx| {
+            let other = paykit_lib::PaykitAppId::new("other-wallet").unwrap();
+            assert!(matches!(
+                require_current_payment_request_action(tx, &peer, &other, &proof, timestamp()),
+                Err(PaykitSdkError::Policy { .. })
+            ));
+            Ok(())
+        })
+        .await
+        .unwrap();
+    enqueue_checked_payment_request_action(&storage, peer.clone(), &app_id(), &proof, timestamp())
+        .await
+        .unwrap();
+    let reported = record(&storage, &peer).await;
+    assert_eq!(reported.state, PaymentRequestLifecycleState::Canceled);
+    assert_eq!(reported.payment_proofs.len(), 1);
+    assert!(reported.execution_claim_app_id.is_none());
+    assert_eq!(storage.snapshot().unwrap().allowance_accounting, accounting);
+}
+
+#[tokio::test]
 async fn test_corrective_payment_proofs_preserve_inbound_and_outbound_evidence() {
     for role in [
         PaymentRequestLocalRole::Payer,

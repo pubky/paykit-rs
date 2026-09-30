@@ -98,7 +98,7 @@ where
     }
 }
 
-fn apply_registry_key_rotation(
+pub(super) fn apply_registry_key_rotation(
     registry: &mut paykit_lib::PaykitAppRegistry,
     current_key: &crate::PaykitIdentitySecretKey,
     replacement_key: &crate::PaykitIdentitySecretKey,

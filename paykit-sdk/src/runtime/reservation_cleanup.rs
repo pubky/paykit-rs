@@ -86,6 +86,7 @@ where
         &self,
         counterparty: &PubkyPublicKey,
         lease: Option<&PeerLinkOperationLease>,
+        app_lease: Option<&PaykitAppOperationLease>,
     ) -> Vec<ReservationCleanupFailure> {
         let cancellations =
             match unattempted_superseded_reservation_cancellations(&self.storage, counterparty)
@@ -99,16 +100,18 @@ where
                     }];
                 }
             };
-        self.cancel_reservation_records(cancellations, lease).await
+        self.cancel_reservation_records(cancellations, lease, app_lease)
+            .await
     }
 
     pub(super) async fn cancel_terminal_private_list_reservations(
         &self,
         counterparty: &PubkyPublicKey,
         lease: Option<&PeerLinkOperationLease>,
+        app_lease: Option<&PaykitAppOperationLease>,
     ) -> Vec<ReservationCleanupFailure> {
         let mut failures = self
-            .cancel_unattempted_superseded_reservations(counterparty, lease)
+            .cancel_unattempted_superseded_reservations(counterparty, lease, app_lease)
             .await;
         let cancellations =
             match invalid_private_list_reservation_cancellations(&self.storage, counterparty).await
@@ -122,7 +125,10 @@ where
                     return failures;
                 }
             };
-        failures.extend(self.cancel_reservation_records(cancellations, lease).await);
+        failures.extend(
+            self.cancel_reservation_records(cancellations, lease, app_lease)
+                .await,
+        );
         failures
     }
 
@@ -130,6 +136,7 @@ where
         &self,
         cancellations: Vec<PaymentEndpointReservationCancellationRecord>,
         lease: Option<&PeerLinkOperationLease>,
+        app_lease: Option<&PaykitAppOperationLease>,
     ) -> Vec<ReservationCleanupFailure> {
         let mut failures = Vec::new();
         for cancellation_record in cancellations {
@@ -144,7 +151,7 @@ where
                     &app_id,
                     cancellation_record.outbound_message_id,
                     lease,
-                    self.clock.now(),
+                    app_lease,
                 )
                 .await
             {
@@ -158,6 +165,15 @@ where
                     continue;
                 }
             };
+            if let Some(app_lease) = app_lease {
+                if let Err(err) = self.require_paykit_app_operation_lease(app_lease).await {
+                    failures.push(ReservationCleanupFailure {
+                        reservation_id: Some(cancellation.reservation_id),
+                        error: err.to_string(),
+                    });
+                    continue;
+                }
+            }
             match self
                 .payment
                 .cancel_private_receiving_detail_reservation(&cancellation)
@@ -169,7 +185,13 @@ where
                         .transaction({
                             let cancellation = cancellation.clone();
                             let outbound_message_id = cancellation_record.outbound_message_id;
+                            let app_lease = app_lease.cloned();
                             move |tx| {
+                                if let Some(app_lease) = app_lease.as_ref() {
+                                    crate::storage::require_paykit_app_operation_lease(
+                                        tx, app_lease,
+                                    )?;
+                                }
                                 if tx
                                     .payment_endpoint_reservation(
                                         &cancellation.counterparty,
@@ -216,17 +238,22 @@ where
         app_id: &paykit_lib::PaykitAppId,
         outbound_message_id: u64,
         lease: Option<&PeerLinkOperationLease>,
-        now: DateTime<Utc>,
+        app_lease: Option<&PaykitAppOperationLease>,
     ) -> Result<Option<DateTime<Utc>>> {
         let claim_timeout = ChronoDuration::from_std(RESERVATION_CANCELLATION_CLAIM_TIMEOUT)
             .expect("fixed reservation cancellation timeout must fit chrono duration");
-        let stale_before = now - claim_timeout;
         self.storage
             .transaction({
                 let cancellation = cancellation.clone();
                 let app_id = app_id.clone();
                 let lease = lease.cloned();
+                let app_lease = app_lease.cloned();
                 move |tx| {
+                    let now = self.clock.now();
+                    let stale_before = now - claim_timeout;
+                    if let Some(app_lease) = app_lease.as_ref() {
+                        crate::storage::require_paykit_app_operation_lease(tx, app_lease)?;
+                    }
                     if let Some(lease) = lease.as_ref() {
                         crate::storage::require_peer_link_operation_lease(tx, lease)?;
                     }

@@ -2170,6 +2170,16 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func recordPaymentOutcome(report: PaymentOutcomeReport) async throws  -> PaymentAttemptRecord
 
     /**
+     * Recover missing or corrupt Pubky shared state with a successor Paykit key.
+     *
+     * Persist the replacement first. Retry with the same keys and backup after
+     * failure; already-recovered state is never overwritten. Old links require
+     * recovery and payment execution requires complete wallet reconciliation.
+     * State newer than the backup is not recovered.
+     */
+    func recoverSharedStateFromBackup(backup: SdkBackupBlob, replacementKey: PaykitIdentitySecretKey) async throws  -> PaykitAppRegistry
+
+    /**
      * Refresh the cached Paykit Profile for a Contact Record.
      */
     func refreshContactPaykitProfile(publicKey: String) async throws  -> ContactRecord?
@@ -4194,6 +4204,31 @@ open func recordPaymentOutcome(report: PaymentOutcomeReport)async throws  -> Pay
 }
 
     /**
+     * Recover missing or corrupt Pubky shared state with a successor Paykit key.
+     *
+     * Persist the replacement first. Retry with the same keys and backup after
+     * failure; already-recovered state is never overwritten. Old links require
+     * recovery and payment execution requires complete wallet reconciliation.
+     * State newer than the backup is not recovered.
+     */
+open func recoverSharedStateFromBackup(backup: SdkBackupBlob, replacementKey: PaykitIdentitySecretKey)async throws  -> PaykitAppRegistry  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_recover_shared_state_from_backup(
+                    self.uniffiClonePointer(),
+                    FfiConverterTypeSdkBackupBlob_lower(backup),FfiConverterTypePaykitIdentitySecretKey_lower(replacementKey)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaykitAppRegistry_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
      * Refresh the cached Paykit Profile for a Contact Record.
      */
 open func refreshContactPaykitProfile(publicKey: String)async throws  -> ContactRecord?  {
@@ -6163,7 +6198,10 @@ open class PubkySessionAccess: PubkySessionAccessProtocol, @unchecked Sendable {
      * Create session access material from platform secure storage.
      *
      * `client_id` must be the stable app identifier recorded in the exported
-     * grant.
+     * grant. Independently restoring the same grant replaces its previous
+     * bearer session. Use separate grants for independent SDK handles, or
+     * share live access returned by the bootstrap helper with the same Pubky
+     * client configuration.
      */
 public convenience init(clientId: String, sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, paykitIdentitySecretKey: PaykitIdentitySecretKey?)throws  {
     let pointer =
@@ -6314,7 +6352,10 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
      * Import an exported Pubky grant session secret.
      *
      * The grant must belong to this bootstrap's client ID and cover every
-     * required capability.
+     * required capability. Importing replaces the grant's previous bearer.
+     * Return the result's live `session_access` from the session provider,
+     * using the same Pubky client configuration, to replace a cached session
+     * without restoring the grant again.
      */
     func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
@@ -6489,7 +6530,10 @@ open func approveAuthWithCompanionClaim(authUrl: String, expectedCapabilities: S
      * Import an exported Pubky grant session secret.
      *
      * The grant must belong to this bootstrap's client ID and cover every
-     * required capability.
+     * required capability. Importing replaces the grant's previous bearer.
+     * Return the result's live `session_access` from the session provider,
+     * using the same Pubky client configuration, to replace a cached session
+     * without restoring the grant again.
      */
 open func importSession(sessionSecret: String, localSecretKey: PubkyLocalSecretKey?, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
     return
@@ -24774,6 +24818,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_record_payment_outcome() != 2286) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_recover_shared_state_from_backup() != 30793) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_refresh_contact_paykit_profile() != 15127) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -24936,7 +24983,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim() != 38549) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 26600) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 34968) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_republish_identity() != 55914) {
@@ -25062,7 +25109,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_constructor_ffipubkylocalsecretkey_new() != 13295) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 35471) {
+    if (uniffi_paykit_checksum_constructor_ffipubkysessionaccess_new() != 63636) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffipubkysessionbootstrap_new() != 23385) {

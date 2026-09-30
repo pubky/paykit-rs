@@ -12,6 +12,150 @@ use crate::harness::{
 };
 
 #[tokio::test]
+async fn test_recover_corrupt_shared_state_checks_registry_keys_and_generation() {
+    let testnet = build_testnet().await;
+    let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
+    let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
+    let access = session_bootstrap(&testnet, "recovery.test")
+        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .await
+        .unwrap()
+        .access;
+    let provider = TestnetSessionProvider::new(access.clone());
+    let storage = PubkySharedStateStorage::new(provider.clone());
+    let sdk = PaykitSdk::new(
+        storage.clone(),
+        provider,
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new("bitkit").unwrap(),
+    );
+    sdk.initialize().await.unwrap();
+    sdk.publish_paykit_app(
+        PaykitApp::new(
+            "Bitkit",
+            PaykitAppCapabilities {
+                private_payments: true,
+                payment_requests: true,
+                receipts: true,
+                outgoing_payments: true,
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let backup = sdk.export_backup_state().await.unwrap();
+    let replacement = secret.derive_paykit_identity_secret_key(2).unwrap();
+    let remote = access.session.storage();
+    let original = remote
+        .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap()
+        .to_vec();
+    assert!(matches!(
+        sdk.recover_shared_state_from_backup(backup.clone(), replacement.clone())
+            .await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
+
+    let mut wrong_identity = backup.clone();
+    wrong_identity.identity_state.as_mut().unwrap().public_key = Some(
+        PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()),
+    );
+    assert!(matches!(
+        sdk.recover_shared_state_from_backup(wrong_identity, replacement.clone())
+            .await,
+        Err(PaykitSdkError::Identity { .. })
+    ));
+
+    let ((version, _), ciphertext) = postcard::take_from_bytes::<(u32, u64)>(&original).unwrap();
+    let mut future = postcard::to_allocvec(&(version, 3_u64)).unwrap();
+    future.extend_from_slice(ciphertext);
+    remote
+        .put(paykit_lib::PAYKIT_SHARED_STATE_PATH, future.clone())
+        .await
+        .unwrap();
+    assert!(matches!(
+        sdk.recover_shared_state_from_backup(backup.clone(), replacement.clone())
+            .await,
+        Err(PaykitSdkError::Identity { .. })
+    ));
+    assert_eq!(
+        remote
+            .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .as_ref(),
+        future.as_slice()
+    );
+
+    let mut damaged = original;
+    *damaged.last_mut().unwrap() ^= 1;
+    remote
+        .put(paykit_lib::PAYKIT_SHARED_STATE_PATH, damaged.clone())
+        .await
+        .unwrap();
+    assert!(sdk.restore_backup_state(backup.clone()).await.is_err());
+    let mut wrong_access = access.clone();
+    wrong_access.paykit_identity_secret_key =
+        Some(paykit_sdk::PaykitIdentitySecretKey::new([9; 32], 1).unwrap());
+    let wrong_provider = TestnetSessionProvider::new(wrong_access);
+    let wrong_sdk = PaykitSdk::new(
+        PubkySharedStateStorage::new(wrong_provider.clone()),
+        wrong_provider,
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new("bitkit").unwrap(),
+    );
+    assert!(matches!(
+        wrong_sdk
+            .recover_shared_state_from_backup(backup.clone(), replacement.clone())
+            .await,
+        Err(PaykitSdkError::Identity { .. })
+    ));
+    assert_eq!(
+        remote
+            .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .as_ref(),
+        damaged.as_slice()
+    );
+
+    assert_eq!(
+        sdk.recover_shared_state_from_backup(backup, replacement.clone())
+            .await
+            .unwrap()
+            .key_generation(),
+        2
+    );
+    assert!(storage
+        .transaction(|tx| Ok(tx.export_storage_state()))
+        .await
+        .is_err());
+    let mut new_access = access;
+    new_access.paykit_identity_secret_key = Some(replacement);
+    PubkySharedStateStorage::new(TestnetSessionProvider::new(new_access))
+        .transaction(|tx| {
+            assert_eq!(
+                tx.load_identity_state().unwrap().public_key,
+                Some(secret.public_key())
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn test_shared_state_bootstraps_after_public_only_registry_but_rejects_lost_state() {
     let testnet = build_testnet().await;
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());

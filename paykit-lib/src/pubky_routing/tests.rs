@@ -117,3 +117,62 @@ fn test_payment_list_request_budget_stops_at_zero() {
     assert!(is_payment_list_limit_exceeded(&error));
     assert_eq!(remaining, 0);
 }
+
+#[tokio::test]
+async fn test_zero_byte_budget_accepts_empty_body_but_rejects_payload() {
+    let mut remaining = 0;
+    let mut empty =
+        response_for_test("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await;
+    assert_eq!(
+        read_text_response(&mut empty, "endpoint", Some(0), &mut remaining)
+            .await
+            .unwrap(),
+        None
+    );
+
+    let mut nonempty = response_for_test(
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1\r\nx\r\n0\r\n\r\n",
+    ).await;
+    let error = read_text_response(&mut nonempty, "endpoint", Some(0), &mut remaining)
+        .await
+        .unwrap_err();
+    assert!(is_response_size_limit_exceeded(&error));
+}
+
+#[tokio::test]
+async fn test_raw_revision_hashes_exact_bytes_with_a_streaming_limit() {
+    let wire = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\nab\r\n2\r\ncd\r\n0\r\n\r\n";
+    let revision = read_response_revision(response_for_test(wire).await, 4, "resource")
+        .await
+        .unwrap();
+    assert_eq!(revision, content_revision(b"abcd"));
+    assert!(matches!(
+        read_response_revision(response_for_test(wire).await, 3, "resource").await,
+        Err(PaykitError::InvalidData { .. })
+    ));
+}
+
+#[test]
+fn test_endpoint_identifier_listing_rejects_unrelated_resources() {
+    let owner = pubky::Keypair::random().public_key();
+    let app = PaykitAppId::new("bitkit").unwrap();
+    let prefix = payment_endpoint_path_prefix(&app);
+    let valid: PubkyResource = format!("{owner}{prefix}btc-onchain").parse().unwrap();
+    assert_eq!(
+        payment_endpoint_identifier(&valid, &owner, &prefix)
+            .unwrap()
+            .as_str(),
+        "btc-onchain"
+    );
+    for address in [
+        format!(
+            "{}{prefix}btc-onchain",
+            pubky::Keypair::random().public_key()
+        ),
+        format!("{owner}/pub/other/btc-onchain"),
+        format!("{owner}{prefix}nested/btc-onchain"),
+    ] {
+        assert!(payment_endpoint_identifier(&address.parse().unwrap(), &owner, &prefix).is_err());
+    }
+}

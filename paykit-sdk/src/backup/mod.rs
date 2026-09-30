@@ -452,7 +452,7 @@ impl SdkBackupState {
         }
     }
 
-    fn into_storage_state(
+    pub(crate) fn into_storage_state(
         self,
         current_identity: Option<&IdentityState>,
         current_noise_public_key: Option<PubkyPublicKey>,

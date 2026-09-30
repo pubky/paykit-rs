@@ -18,21 +18,29 @@ where
             return Ok(Vec::new());
         }
         self.ensure_peer_not_blocked(counterparty).await?;
-        if session_access
+        let private_live = session_access
             .as_ref()
             .map(|session| {
                 session.private_link_capable_for_capabilities(PAYKIT_SESSION_CAPABILITIES)
             })
             .transpose()?
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        if private_live {
             self.observe_remote_recovery_marker_for_cached_private_state(
                 counterparty,
                 session_access.as_deref(),
             )
             .await?;
         }
-        let (_, authorized_app_ids) = self.private_app_authorization_context(counterparty).await?;
+        let authorized_app_ids = if private_live {
+            self.private_app_authorization_context(counterparty)
+                .await?
+                .1
+        } else {
+            self.cached_counterparty_app_authorization_context(counterparty)
+                .await?
+                .private_apps
+        };
         let mut views = load_current_private_payment_lists(&self.storage, counterparty).await?;
         filter_private_views_by_authorized_apps(&mut views, authorized_app_ids.as_deref());
         Ok(views)

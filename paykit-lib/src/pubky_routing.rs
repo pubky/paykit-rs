@@ -192,7 +192,7 @@ pub async fn update_payment_endpoint(
         &path,
         payload.as_str().as_bytes().to_vec(),
         Some(revision),
-        PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES,
+        usize::MAX,
     )
     .await?;
     Ok(())
@@ -235,8 +235,7 @@ pub async fn delete_payment_endpoint_if_revision(
     revision: &str,
 ) -> Result<()> {
     let path = payment_endpoint_path(app_id, identifier);
-    delete_resource_if_revision(session, &path, revision, PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES)
-        .await?;
+    delete_resource_if_revision(session, &path, revision, usize::MAX).await?;
     Ok(())
 }
 
@@ -265,8 +264,14 @@ pub async fn fetch_payment_list_with_budget(
     let max_endpoints = (*remaining_endpoints).min(PAYMENT_LIST_MAX_ENDPOINTS);
     let addr = format!("{payee}{}", payment_endpoint_path_prefix(app_id));
     debug!("listing payment endpoints");
-    let resources =
-        list_resources(storage, addr, "list payment endpoints", remaining_requests).await?;
+    let resources = list_resources(
+        storage,
+        addr,
+        "list payment endpoints",
+        remaining_requests,
+        PAYMENT_LIST_MAX_ENDPOINTS,
+    )
+    .await?;
 
     let resources = resources
         .into_iter()
@@ -287,12 +292,6 @@ pub async fn fetch_payment_list_with_budget(
 
     let mut map = HashMap::new();
     for resource in resources {
-        if *remaining_payload_bytes == 0 {
-            return Err(payment_list_limit_exceeded(
-                "Payment List payload budget exhausted".into(),
-            ));
-        }
-
         let identifier_text = resource
             .path
             .as_str()
@@ -425,6 +424,102 @@ pub async fn fetch_payment_endpoint_with_revision(
         Some(PaymentEndpointPayload::new(payload))
     };
     Ok(Some((payload, revision)))
+}
+
+/// Lists one App's Payment Endpoint Identifiers without loading their payloads.
+///
+/// Cleanup can enumerate more than a valid Payment List's endpoint limit. Listing
+/// remains bounded to 100 pages; invalid identifiers or paths are rejected.
+/// Invalid names require explicit Pubky cleanup rather than bypassing identifier validation.
+/// Session creation, capability scope, and key rotation remain the caller's responsibility.
+pub async fn list_payment_endpoint_identifiers(
+    storage: &PublicStorage,
+    owner: &PublicKey,
+    app_id: &PaykitAppId,
+) -> Result<Vec<PaymentEndpointIdentifier>> {
+    let prefix = payment_endpoint_path_prefix(app_id);
+    let mut requests = LIST_MAX_PAGES + 1;
+    let resources = list_resources(
+        storage,
+        format!("{owner}{prefix}"),
+        "list Payment Endpoint Identifiers",
+        &mut requests,
+        LIST_MAX_PAGES * usize::from(LIST_PAGE_LIMIT),
+    )
+    .await?;
+    resources
+        .into_iter()
+        .filter(|resource| !resource.path.as_str().ends_with('/'))
+        .map(|resource| payment_endpoint_identifier(&resource, owner, &prefix))
+        .collect()
+}
+
+fn payment_endpoint_identifier(
+    resource: &PubkyResource,
+    owner: &PublicKey,
+    prefix: &str,
+) -> Result<PaymentEndpointIdentifier> {
+    let identifier = resource
+        .path
+        .as_str()
+        .strip_prefix(prefix)
+        .filter(|_| resource.owner == *owner)
+        .ok_or_else(|| {
+            invalid_data(
+                "Payment Endpoint listing returned an unrelated resource",
+                None,
+            )
+        })?;
+    PaymentEndpointIdentifier::new(identifier).map_err(|error| {
+        invalid_data(
+            "Payment Endpoint listing returned an invalid identifier",
+            Some(error.into()),
+        )
+    })
+}
+
+/// Reads a resource's content fingerprint without decoding its bytes.
+///
+/// This supports conditional repair of malformed documents. Reads are streamed
+/// and bounded by `max_bytes`; missing resources return `None`. Session creation,
+/// capability scope, key rotation, and request timeouts remain the caller's responsibility.
+pub async fn fetch_resource_revision(
+    storage: &PublicStorage,
+    resource: &PubkyResource,
+    max_bytes: usize,
+) -> Result<Option<String>> {
+    let response = match storage.get(resource.clone()).await {
+        Ok(response) => response,
+        Err(error) if is_not_found(&error) => return Ok(None),
+        Err(error) => {
+            return Err(PaykitError::Transport {
+                context: "fetch resource revision".into(),
+                source: error.into(),
+            })
+        }
+    };
+    read_response_revision(response, max_bytes, "fetch resource revision")
+        .await
+        .map(Some)
+}
+
+/// Reads an owned Payment Endpoint's fingerprint for conditional repair or removal.
+///
+/// Unlike payment discovery, maintenance must also handle oversized or non-UTF-8
+/// payloads. The complete body is hashed incrementally without retaining it in
+/// memory. Use this on the caller's own endpoints; request timeouts, session
+/// creation, capability scope, and key rotation remain the caller's responsibility.
+pub async fn fetch_payment_endpoint_revision(
+    session: &PubkySession,
+    app_id: &PaykitAppId,
+    identifier: &PaymentEndpointIdentifier,
+) -> Result<Option<String>> {
+    locks::resource_revision(
+        session,
+        &payment_endpoint_path(app_id, identifier),
+        usize::MAX,
+    )
+    .await
 }
 
 pub(crate) fn payment_endpoint_path_prefix(app_id: &PaykitAppId) -> String {
@@ -578,6 +673,41 @@ async fn read_response_body(
     read_response_body_with_budget(response, label, max_bytes, &mut remaining_payload_bytes).await
 }
 
+async fn read_response_revision(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+    label: &str,
+) -> Result<String> {
+    let mut hasher = blake3::Hasher::new();
+    let mut remaining = max_bytes;
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(invalid_data(
+            format!("{label}: response exceeds the {max_bytes}-byte limit"),
+            None,
+        ));
+    }
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| PaykitError::Transport {
+            context: label.into(),
+            source: error.into(),
+        })?
+    {
+        remaining = remaining.checked_sub(chunk.len()).ok_or_else(|| {
+            invalid_data(
+                format!("{label}: response exceeds the {max_bytes}-byte limit"),
+                None,
+            )
+        })?;
+        hasher.update(&chunk);
+    }
+    Ok(format!("blake3:{}", hasher.finalize().to_hex()))
+}
+
 async fn read_response_body_with_budget(
     response: &mut reqwest::Response,
     label: &str,
@@ -650,6 +780,7 @@ async fn list_resources(
     addr: String,
     label: &str,
     remaining_requests: &mut usize,
+    max_resources: usize,
 ) -> Result<Vec<PubkyResource>> {
     trace!("listing directory resources");
     let mut resources = Vec::new();
@@ -705,11 +836,9 @@ async fn list_resources(
         }
 
         let page_len = page.len();
-        if resources.len().saturating_add(page_len) > PAYMENT_LIST_MAX_ENDPOINTS {
+        if resources.len().saturating_add(page_len) > max_resources {
             return Err(PaykitError::InvalidData {
-                context: format!(
-                    "{label}: directory contains more than {PAYMENT_LIST_MAX_ENDPOINTS} resources"
-                ),
+                context: format!("{label}: directory contains more than {max_resources} resources"),
                 source: None,
             });
         }

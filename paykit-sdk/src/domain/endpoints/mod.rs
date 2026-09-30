@@ -41,6 +41,13 @@ pub(crate) fn normalize_receiving_details(
     let mut desired = HashMap::with_capacity(details.len());
 
     for detail in details {
+        if detail.payload.len() > paykit_lib::PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES {
+            return Err(paykit_lib::PaykitError::Validation(format!(
+                "Payment Endpoint payload must not exceed {} bytes",
+                paykit_lib::PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES
+            ))
+            .into());
+        }
         let identifier = PaymentEndpointIdentifier::new(detail.identifier)?;
         if desired.contains_key(&identifier) {
             return Err(PaykitSdkError::Protocol {

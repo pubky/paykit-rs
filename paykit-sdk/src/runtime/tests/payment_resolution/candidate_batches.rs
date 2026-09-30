@@ -127,10 +127,7 @@ fn test_public_app_load_order_prioritizes_configured_defaults() {
         public_app_load_order(&registry, None),
         vec![endpoint_default.clone(), default.clone(), alpha.clone()]
     );
-    assert_eq!(
-        public_app_load_order(&registry, Some(&alpha)),
-        vec![alpha, endpoint_default, default]
-    );
+    assert_eq!(public_app_load_order(&registry, Some(&alpha)), vec![alpha]);
 }
 
 #[test]
@@ -371,7 +368,7 @@ fn test_private_candidate_batch_returns_complete_aggregate_after_update() {
         },
     ];
 
-    let batch = private_candidate_batch(&counterparty, &views, None)
+    let batch = private_candidate_batch(&counterparty, &views, None, None)
         .unwrap()
         .unwrap();
 
@@ -380,6 +377,11 @@ fn test_private_candidate_batch_returns_complete_aggregate_after_update() {
     assert_eq!(candidates[0].app_id.as_str(), "bitkit");
     assert_eq!(candidates[1].app_id.as_str(), "tether");
     assert!(batch.is_newer_than(Some(4)));
+    let required = private_candidate_batch(&counterparty, &views, Some(4), Some(&views[0].app_id))
+        .unwrap()
+        .unwrap();
+    assert!(!required.is_newer_than(Some(4)));
+    assert!(!required.has_candidates());
 }
 
 #[test]
@@ -400,7 +402,7 @@ fn test_private_candidate_batch_advances_for_empty_updated_app_list() {
         },
     ];
 
-    let batch = private_candidate_batch(&counterparty, &views, Some(4))
+    let batch = private_candidate_batch(&counterparty, &views, Some(4), None)
         .unwrap()
         .unwrap();
 
@@ -432,7 +434,7 @@ fn test_payment_request_constraints_filter_private_candidates() {
             last_refresh_at: Some(FixedClock.now()),
         },
     ];
-    let mut batch = private_candidate_batch(&counterparty, &views, None)
+    let mut batch = private_candidate_batch(&counterparty, &views, None, None)
         .unwrap()
         .unwrap();
     let terms = payment_request_terms(Some("server"), &["btc-lightning-bolt11"]);

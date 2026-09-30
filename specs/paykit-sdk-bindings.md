@@ -99,8 +99,9 @@ handling.
 Bindings also expose constructors backed by `PubkySharedStateStorage`. This
 stores the same logical state as one encrypted Pubky resource and does not
 require platform state-blob callbacks. Independent concurrent writers use
-renewable homeserver write locks; lock conflicts can be retried by restarting
-the SDK operation with fresh state.
+renewable homeserver write locks. After contention or an uncertain result,
+inspect durable request/payment records and resume existing work. Multi-step
+operations may already have committed intent; do not blindly restart them.
 
 Each SDK storage transaction should load the current blob, mutate the full
 logical state in Rust, then save the replacement with the loaded revision. If

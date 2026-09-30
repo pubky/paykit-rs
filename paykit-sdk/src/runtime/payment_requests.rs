@@ -566,6 +566,7 @@ where
     /// and do not imply another payment or settlement confirmation. Only that
     /// occurrence's original proof sender may correct it, including after the
     /// execution claim moves to another App.
+    /// Reporting evidence does not require the payee App to remain registered.
     ///
     /// A canceled request requires a recorded Acceptance and caller evidence
     /// that execution crossed its irreversible boundary before cancellation was
@@ -593,12 +594,6 @@ where
             payment_proof_allowed_states(&record),
             "submit Payment Proof",
         )?;
-        self.ensure_payment_request_origin_app_authorized(
-            &counterparty,
-            &record,
-            "submit Payment Proof",
-        )
-        .await?;
         let request = request_from_record(&record).ok_or_else(|| PaykitSdkError::Protocol {
             context: "Payment Request terms are unavailable".into(),
             source: None,

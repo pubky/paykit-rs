@@ -4,7 +4,7 @@ use pubky::{PubkySession, StorageLock};
 
 use crate::{PaykitError, Result};
 
-use super::{content_revision, is_not_found, read_bounded_body};
+use super::{is_not_found, read_response_revision};
 
 const WRITE_LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 const LOCK_ACQUISITION_MAX_ATTEMPTS: u64 = 8;
@@ -31,7 +31,7 @@ pub fn is_write_conflict(error: &PaykitError) -> bool {
 /// Replace a resource after checking its content revision under a write lock.
 ///
 /// `None` requires an absent resource. A revision comes from
-/// [`content_revision`] of the exact previously read bytes, not HTTP metadata.
+/// [`crate::content_revision`] of the exact previously read bytes, not HTTP metadata.
 /// Reads are bounded by `max_bytes`. Session capabilities, key rotation, and
 /// request timeouts remain the caller's responsibility.
 pub async fn put_resource_if_revision(
@@ -83,7 +83,7 @@ pub async fn delete_resource_if_revision(
     .await
 }
 
-async fn resource_revision(
+pub(super) async fn resource_revision(
     session: &PubkySession,
     path: &str,
     max_bytes: usize,
@@ -91,10 +91,11 @@ async fn resource_revision(
     let response = match session.storage().get(path).await {
         Ok(response) => response,
         Err(error) if is_not_found(&error) => return Ok(None),
-        Err(error) => return Err(lock_error("read locked Pubky resource", error)),
+        Err(error) => return Err(lock_error("read Pubky resource revision", error)),
     };
-    let bytes = read_bounded_body(response, max_bytes, "read locked Pubky resource").await?;
-    Ok(Some(content_revision(&bytes)))
+    read_response_revision(response, max_bytes, "read Pubky resource revision")
+        .await
+        .map(Some)
 }
 
 fn resource_changed() -> PaykitError {

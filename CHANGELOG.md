@@ -18,10 +18,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   shared-state constructors.
 - Delegated Paykit keys and key rotation that preserve identity history while
   relinking counterparties.
-- Payment Request conversion terms, actual-payment deadlines, recurring payee
-  quotes with inclusive validity intervals, and quote selection on Payment Proofs.
-  Rust, Swift and Kotlin expose the terms and immutable quote history.
-- An ERC-20 signed payment proof profile and interoperability vectors.
+- Explicit backup recovery for missing or corrupt Pubky shared state using a
+  replacement Paykit key, with relinking and wallet reconciliation.
 - Added shared Allowance request matching, exact decimal arithmetic, anchored
   and rolling period calculations, and amount/count/lifetime limit evaluation.
 - Added durable SDK Allowance selection, automatic Acceptance, deferred and
@@ -55,6 +53,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Changed
 
+- Shared private state requires identity-wide `/pub/paykit/:rw` session scope.
+  Recovery marker exchange is mandatory; the recovery-marker opt-out is removed
+  from Rust, Swift, and Kotlin configuration.
 - **Rust API:** `PAYKIT_PATH_PREFIX` includes its trailing slash;
   `MAX_ENCRYPTED_RECEIPT_BYTES` is now `ENCRYPTED_RECEIPT_MAX_BYTES`.
   `PaykitAppRegistry::set_noise_public_key` takes the key generation explicitly.
@@ -130,6 +131,31 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   payment, and reuse of an Event ID with changed bytes still fails closed.
 - Kept the first crossing Payment Request Acceptance after payee cancellation;
   a second Acceptance now invalidates history without replacing the first.
+
+## [0.1.0-rc56] - 2026-09-28
+
+### Added
+
+- Payment Request conversion terms, payment deadlines, recurring payee quotes,
+  and quote selection on Payment Proofs, exposed through Rust, Swift, and Kotlin.
+- An ERC-20 EIP-712 payment-proof profile and interoperability vectors. This
+  specifies the proof format, not an EVM verifier.
+
+### Changed
+
+- New wire extensions require coordinated peer support. Persisted rc55 SDK state
+  is not supported by rc56.
+
+## [0.1.0-rc55] - 2026-09-15
+
+### Added
+
+- One-shot identity republishing through `PubkySessionBootstrap.republishIdentity`.
+  Rebroadcasts an existing signed record unchanged without a secret or session.
+
+### Fixed
+
+- Android builds no longer request the unavailable legacy SDK `tools` package.
 
 ## [0.1.0-rc54] - 2026-09-14
 
@@ -605,6 +631,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   publication on crates.io and docs.rs.
 
 [Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc56...HEAD
+[0.1.0-rc56]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc56
+[0.1.0-rc55]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc55
 [0.1.0-rc54]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc52...v0.1.0-rc54
 [0.1.0-rc52]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc51...v0.1.0-rc52
 [0.1.0-rc51]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc50...v0.1.0-rc51

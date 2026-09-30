@@ -313,6 +313,9 @@ where
                         tx,
                         &counterparty,
                         &record.payment_request_id,
+                    ) && !crate::domain::payment_requests::request_has_unreported_successful_payment(
+                        tx.allowance_accounting_state().as_ref(),
+                        &record,
                     ) {
                         tx.remove_payment_request_execution_claim(
                             &counterparty,

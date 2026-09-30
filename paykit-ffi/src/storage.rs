@@ -79,6 +79,26 @@ impl FfiSdkStorageAdapter {
 
 #[async_trait]
 impl StorageAdapter for FfiSdkStorageAdapter {
+    async fn recover_shared_state_from_backup(
+        &self,
+        current_key: paykit_sdk::PaykitIdentitySecretKey,
+        replacement_key: paykit_sdk::PaykitIdentitySecretKey,
+        state: paykit_sdk::storage::ValidatedStorageState,
+    ) -> paykit_sdk::Result<()> {
+        match self {
+            Self::Callback(storage) => {
+                storage
+                    .recover_shared_state_from_backup(current_key, replacement_key, state)
+                    .await
+            }
+            Self::PubkyShared(storage) => {
+                storage
+                    .recover_shared_state_from_backup(current_key, replacement_key, state)
+                    .await
+            }
+        }
+    }
+
     async fn load_local_identity_state(
         &self,
     ) -> paykit_sdk::Result<Option<paykit_sdk::IdentityState>> {

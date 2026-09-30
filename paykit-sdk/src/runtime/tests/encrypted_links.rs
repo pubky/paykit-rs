@@ -132,7 +132,7 @@ async fn test_block_and_relink_preserve_attempted_private_list_reservations() {
     .await
     .unwrap();
     assert!(sdk
-        .cancel_unattempted_superseded_reservations(&counterparty, None)
+        .cancel_unattempted_superseded_reservations(&counterparty, None, None)
         .await
         .is_empty());
     assert!(canceled.lock().unwrap().is_empty());

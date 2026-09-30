@@ -4,20 +4,25 @@ pub(in crate::runtime) fn private_candidate_batch(
     counterparty: &PubkyPublicKey,
     views: &[PrivatePaymentListView],
     after_private_payment_list_version: Option<u64>,
+    required_app_id: Option<&paykit_lib::PaykitAppId>,
 ) -> Result<Option<PrivatePaymentCandidateBatch>> {
-    if views.is_empty() {
-        return Ok(None);
-    }
-    let mut private_payment_list_version = 0;
+    let mut private_payment_list_version: Option<u64> = None;
     let mut candidates = Vec::new();
     for view in views {
+        if required_app_id.is_some_and(|app_id| app_id != &view.app_id) {
+            continue;
+        }
         let stream_item_id =
             view.latest_stream_item_id
                 .ok_or_else(|| PaykitSdkError::Protocol {
                     context: "current Private Payment List has no stream item id".into(),
                     source: None,
                 })?;
-        private_payment_list_version = private_payment_list_version.max(stream_item_id);
+        private_payment_list_version = Some(
+            private_payment_list_version
+                .unwrap_or(0)
+                .max(stream_item_id),
+        );
         if after_private_payment_list_version.is_none_or(|version| stream_item_id > version) {
             candidates.extend(view.payment_endpoints.iter().map(|(identifier, payload)| {
                 PrivatePaymentEndpointCandidate {
@@ -35,6 +40,9 @@ pub(in crate::runtime) fn private_candidate_batch(
             .cmp(right.app_id.as_str())
             .then_with(|| left.identifier.cmp(&right.identifier))
     });
+    let Some(private_payment_list_version) = private_payment_list_version else {
+        return Ok(None);
+    };
     Ok(Some(PrivatePaymentCandidateBatch {
         private_payment_list_version,
         candidates,
@@ -156,6 +164,14 @@ pub(in crate::runtime) fn public_app_load_order(
     registry: &paykit_lib::PaykitAppRegistry,
     required_app_id: Option<&paykit_lib::PaykitAppId>,
 ) -> Vec<paykit_lib::PaykitAppId> {
+    if let Some(app_id) = required_app_id {
+        return registry
+            .apps()
+            .contains_key(app_id)
+            .then(|| app_id.clone())
+            .into_iter()
+            .collect();
+    }
     let endpoint_defaults = registry
         .default_apps_by_endpoint()
         .values()
@@ -163,9 +179,7 @@ pub(in crate::runtime) fn public_app_load_order(
     let mut app_ids = registry.apps().keys().cloned().collect::<Vec<_>>();
     app_ids.sort_by(|left, right| {
         let rank = |app_id: &paykit_lib::PaykitAppId| {
-            if required_app_id == Some(app_id) {
-                0
-            } else if endpoint_defaults.contains(&app_id) {
+            if endpoint_defaults.contains(&app_id) {
                 1
             } else if registry.default_app_id() == Some(app_id) {
                 2

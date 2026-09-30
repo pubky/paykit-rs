@@ -18,7 +18,7 @@ pub(crate) async fn received_payment_request_records<S>(
 where
     S: StorageAdapter,
 {
-    let (items, dedupe_records, execution_claims, outbound_carriers) = storage
+    storage
         .transaction(|tx| {
             let items = tx.private_stream_items(counterparty);
             let outbound = tx.outbound_private_messages(counterparty);
@@ -38,24 +38,17 @@ where
                     dedupe_records.insert(event_id.as_str().to_owned(), record);
                 }
             }
-            let execution_claims = tx
-                .export_storage_state()
-                .payment_request_execution_claims
-                .into_iter()
-                .filter(|((claim_counterparty, _), _)| claim_counterparty == counterparty)
-                .collect::<HashMap<_, _>>();
-            Ok((items, dedupe_records, execution_claims, outbound_carriers))
+            let mut records = derive_received_payment_request_records(
+                counterparty.clone(),
+                items,
+                dedupe_records,
+                outbound_carriers,
+                now,
+            )?;
+            apply_execution_claims(tx, &mut records);
+            Ok(records)
         })
-        .await?;
-    let mut records = derive_received_payment_request_records(
-        counterparty.clone(),
-        items,
-        dedupe_records,
-        outbound_carriers,
-        now,
-    )?;
-    apply_execution_claims(&mut records, &execution_claims);
-    Ok(records)
+        .await
 }
 
 /// Derive local Payment Request records for one counterparty.
@@ -107,24 +100,15 @@ pub(crate) fn payment_request_records_from_transaction(
         dedupe_records,
         now,
     )?;
-    apply_execution_claims(
-        &mut records,
-        &tx.export_storage_state().payment_request_execution_claims,
-    );
+    apply_execution_claims(tx, &mut records);
     Ok(records)
 }
 
-fn apply_execution_claims(
-    records: &mut [PaymentRequestRecord],
-    claims: &HashMap<(PubkyPublicKey, String), PaymentRequestExecutionClaim>,
-) {
+fn apply_execution_claims(tx: &dyn StorageTransaction, records: &mut [PaymentRequestRecord]) {
     for record in records {
-        record.execution_claim_app_id = claims
-            .get(&(
-                record.counterparty.clone(),
-                record.payment_request_id.clone(),
-            ))
-            .map(|claim| claim.app_id.clone());
+        record.execution_claim_app_id = tx
+            .payment_request_execution_claim(&record.counterparty, &record.payment_request_id)
+            .map(|claim| claim.app_id);
     }
 }
 

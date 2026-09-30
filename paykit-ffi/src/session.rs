@@ -99,7 +99,10 @@ impl FfiPubkySessionAccess {
     /// Create session access material from platform secure storage.
     ///
     /// `client_id` must be the stable app identifier recorded in the exported
-    /// grant.
+    /// grant. Independently restoring the same grant replaces its previous
+    /// bearer session. Use separate grants for independent SDK handles, or
+    /// share live access returned by the bootstrap helper with the same Pubky
+    /// client configuration.
     #[uniffi::constructor]
     pub fn new(
         client_id: String,
@@ -576,7 +579,10 @@ impl FfiPubkySessionBootstrap {
     /// Import an exported Pubky grant session secret.
     ///
     /// The grant must belong to this bootstrap's client ID and cover every
-    /// required capability.
+    /// required capability. Importing replaces the grant's previous bearer.
+    /// Return the result's live `session_access` from the session provider,
+    /// using the same Pubky client configuration, to replace a cached session
+    /// without restoring the grant again.
     pub async fn import_session(
         &self,
         session_secret: String,

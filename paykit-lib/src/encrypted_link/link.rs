@@ -322,6 +322,10 @@ impl EncryptedLink {
         &mut self,
         raw_json: &str,
     ) -> Result<PreparedPrivateApplicationMessageSend> {
+        private_application_message::validate_private_application_message_size(
+            raw_json.as_bytes(),
+            "Private Application Message",
+        )?;
         validate_private_application_message_json(raw_json)?;
         let prepared = self
             .encryptor
@@ -627,6 +631,7 @@ pub async fn restore_encrypted_link(
 ///
 /// Restored links reset `max_send_retries` to [`DEFAULT_MAX_SEND_RETRIES`].
 /// `remote_identity_public_key` must match `snapshot.recipient()`.
+/// The config's Noise key must match the snapshot's static key.
 /// The config paths must match the session's local Pubky identity, the remote
 /// identity, and the Noise keys; mismatches return [`PaykitError::Validation`].
 #[instrument(skip(config, snapshot))]
@@ -668,6 +673,11 @@ async fn restore_encrypted_link_inner(
         &remote_noise_public_key,
     )?;
     let state = snapshot.into_state();
+    if state.static_secret != Some(config.pubky_root_keypair.secret_key()) {
+        return Err(PaykitError::Validation(
+            "Noise config key does not match snapshot static key".into(),
+        ));
+    }
     let encryptor = pubky_noise::PubkyNoiseEncryptor::restore(
         config.clone(),
         state,

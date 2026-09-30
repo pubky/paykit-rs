@@ -450,12 +450,20 @@ sdk.initialize()
 status = sdk.identityStatus()
 ```
 
+Use a separate Pubky grant for each independently restored session. Restoring
+the same grant again replaces its existing bearer. When reconnecting through
+`PubkySessionBootstrap.importSession`, return its live `sessionAccess` from the
+provider with the same client configuration instead of restoring it again.
+
 Apps that share one identity-wide Pubky state can instead construct the handle
 with `withPaymentAdapterAndPubkySharedState`. This mode does not use
 `SdkStateBlobStore` callbacks. It requires active session access with current
 Paykit identity key material for every operation. Independent runtimes use
-renewable homeserver write locks across each state transaction. A lock conflict
-can be retried by restarting the SDK operation with fresh state.
+renewable homeserver write locks across each state transaction. After contention
+or an uncertain result, inspect durable request/payment records and resume
+existing work; a multi-step operation may already have committed intent.
+Apps with shared keys and write access are mutually trusted; App IDs do not
+provide cryptographic isolation from other authorized apps.
 An unconfirmed state write leaves a homeserver marker. The next operation waits
 five minutes under a renewed lock before reloading state; cancelling restarts
 that wait on the next attempt.
@@ -591,10 +599,18 @@ backupText = sdk.exportBackupString()
 sdk.restoreBackupString(backupText)
 ```
 
-Restore requires an otherwise empty SDK state backing. This prevents an older
+Normal restore requires an otherwise empty SDK state backing. This prevents an older
 app backup from replacing newer state written by another app sharing the same
 identity. After restore, participating apps publish their App Registry entries
 again before creating new app-attributed work.
+
+For missing or corrupt Pubky shared state, use
+`recoverSharedStateFromBackup(backupBlob, replacementKey)` with the current key
+and its successor. Persist the replacement key first and distribute it after
+success. Recovery preserves backup history, discards old Noise checkpoints and
+prepared sends, and requires relinking and wallet reconciliation. It rejects
+healthy state and unknown generations. Retry failures with the same keys and
+backup; already-recovered state is preserved. Data newer than the backup is lost.
 
 Use `exportBackupString` after SDK state changes when the app wants the user to
 recover Paykit private state after reinstall, sign-out, or device restore.

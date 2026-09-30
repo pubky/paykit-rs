@@ -16,6 +16,68 @@ fn capabilities() -> paykit_lib::PaykitAppCapabilities {
 }
 
 #[tokio::test]
+async fn test_app_lease_checks_only_renew_near_expiry() {
+    let storage = registered_test_storage();
+    let lease = test_app_operation(&storage).await;
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("bitkit").unwrap(),
+        FixedClock,
+    );
+    let before = storage.snapshot().unwrap();
+    sdk.require_paykit_app_operation_lease(&lease)
+        .await
+        .unwrap();
+    assert!(storage.snapshot().unwrap() == before);
+    storage
+        .transaction(|tx| {
+            tx.renew_paykit_app_operation(
+                &lease.app_id,
+                lease.lease_id,
+                FixedClock.now() + ChronoDuration::seconds(20),
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    sdk.require_paykit_app_operation_lease(&lease)
+        .await
+        .unwrap();
+    let renewed = storage
+        .transaction(|tx| Ok(tx.paykit_app_operation_lease(&lease.app_id).unwrap()))
+        .await
+        .unwrap();
+    assert_eq!(renewed.lease_id, lease.lease_id);
+    assert_eq!(
+        renewed.expires_at,
+        FixedClock.now() + ChronoDuration::seconds(60)
+    );
+}
+
+#[tokio::test]
+async fn test_app_publication_requires_session_before_claiming_state() {
+    let storage = InMemoryStorage::new();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("bitkit").unwrap(),
+        FixedClock,
+    );
+    let result = sdk
+        .publish_paykit_app(paykit_lib::PaykitApp::new("Bitkit", capabilities()).unwrap())
+        .await;
+    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    assert!(storage
+        .snapshot()
+        .unwrap()
+        .paykit_app_operation_leases
+        .is_empty());
+}
+
+#[tokio::test]
 async fn test_replaced_app_lease_rejects_lifecycle_mutations() {
     let storage = registered_test_storage();
     let stale = test_app_operation(&storage).await;

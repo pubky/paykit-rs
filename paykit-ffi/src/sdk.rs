@@ -310,6 +310,27 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
+    /// Recover missing or corrupt Pubky shared state with a successor Paykit key.
+    ///
+    /// Persist the replacement first. Retry with the same keys and backup after
+    /// failure; already-recovered state is never overwritten. Old links require
+    /// recovery and payment execution requires complete wallet reconciliation.
+    /// State newer than the backup is not recovered.
+    pub async fn recover_shared_state_from_backup(
+        &self,
+        backup: Arc<FfiSdkBackupBlob>,
+        replacement_key: Arc<crate::secrets::FfiPaykitIdentitySecretKey>,
+    ) -> Result<crate::app_registry::FfiPaykitAppRegistry, PaykitFfiError> {
+        self.runtime
+            .recover_shared_state_from_backup(
+                decode_backup_state(&backup.export_bytes())?,
+                replacement_key.to_sdk()?,
+            )
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
     /// Restore SDK-managed backup state from a hex string.
     pub async fn restore_backup_string(
         &self,

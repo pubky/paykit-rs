@@ -211,6 +211,79 @@ impl PubkySharedStateStorage {
 
 #[async_trait]
 impl StorageAdapter for PubkySharedStateStorage {
+    async fn recover_shared_state_from_backup(
+        &self,
+        current_key: PaykitIdentitySecretKey,
+        replacement_key: PaykitIdentitySecretKey,
+        state: super::ValidatedStorageState,
+    ) -> Result<()> {
+        current_key.validate_successor(&replacement_key)?;
+        let state = state.into_storage_state();
+        let _guard = self.transaction_lock.lock().await;
+        let access = self.load_access().await?;
+        let owner = access.public_key()?;
+        if state
+            .identity_state
+            .as_ref()
+            .and_then(|identity| identity.public_key.as_ref())
+            != Some(&owner)
+            || state.paykit_noise_public_key.as_ref()
+                != Some(&super::paykit_noise_public_key(&replacement_key))
+            || access.paykit_identity_secret_key().as_ref() != Some(&current_key)
+        {
+            return Err(PaykitSdkError::Identity {
+                context: "shared-state recovery identity or keys do not match the live session"
+                    .into(),
+                source: None,
+            });
+        }
+        validate_storage_state(&state)?;
+        let session = access.session.clone();
+        paykit_lib::with_write_lock(
+            &session,
+            paykit_lib::PAYKIT_SHARED_STATE_PATH,
+            |lock| async move {
+                wait_for_pending_writes(&access.session).await?;
+                let registry = paykit_lib::get_paykit_app_registry(
+                    &access.outbox_client.public_storage(),
+                    &owner.to_public_key()?,
+                )
+                .await?
+                .ok_or_else(|| PaykitSdkError::NotFound {
+                    context: "shared-state recovery requires the Paykit App Registry".into(),
+                    source: None,
+                })?;
+                let registry_replaced = registry.key_generation() == replacement_key.key_generation();
+                let registry_key = if registry_replaced { &replacement_key } else { &current_key };
+                if registry.key_generation() != registry_key.key_generation()
+                    || registry.noise_public_key()
+                        != Some(&super::paykit_noise_public_key(registry_key).to_public_key()?)
+                {
+                    return Err(PaykitSdkError::Identity {
+                        context: "shared-state recovery keys do not match the App Registry".into(),
+                        source: None,
+                    });
+                }
+                let encrypted = load_encrypted_blob(&access).await?;
+                if let Some(blob) = &encrypted {
+                    if recovery_already_committed(&current_key, &replacement_key, &owner, &blob.bytes)? {
+                        self.record_revision(Some(blob.revision.clone()))?;
+                        return Ok(());
+                    }
+                }
+                if registry_replaced {
+                    return Err(PaykitSdkError::Identity {
+                        context: "replacement shared state is missing or corrupt; use its current key and a new successor".into(),
+                        source: None,
+                    });
+                }
+                let encrypted = encrypt_state_with_key(&replacement_key, &owner, &state)?;
+                self.commit_encrypted_state(&access, &lock, encrypted).await
+            },
+        )
+        .await
+    }
+
     async fn transaction_erased<'a>(
         &self,
         f: StorageTransactionCallback<'a>,
@@ -498,6 +571,17 @@ fn decrypt_state_with_key(
     public_key: &PubkyPublicKey,
     encrypted: &[u8],
 ) -> Result<StorageState> {
+    let plaintext = decrypt_state_blob(secret, public_key, encrypted)?;
+    let state = decode_storage_state_blob(&plaintext)?;
+    validate_state_identity(public_key, &state)?;
+    Ok(state)
+}
+
+fn decrypt_state_blob(
+    secret: &PaykitIdentitySecretKey,
+    public_key: &PubkyPublicKey,
+    encrypted: &[u8],
+) -> Result<Zeroizing<Vec<u8>>> {
     if encrypted.len() > MAX_SHARED_STATE_BYTES {
         return Err(shared_state_size_error());
     }
@@ -538,9 +622,71 @@ fn decrypt_state_with_key(
                 source: None,
             })?,
     );
-    let state = decode_storage_state_blob(&plaintext)?;
-    validate_state_identity(public_key, &state)?;
-    Ok(state)
+    Ok(plaintext)
+}
+
+fn recovery_already_committed(
+    current_key: &PaykitIdentitySecretKey,
+    replacement_key: &PaykitIdentitySecretKey,
+    owner: &PubkyPublicKey,
+    encrypted: &[u8],
+) -> Result<bool> {
+    // Read the header independently: truncated ciphertext is recoverable, but
+    // unrecognizable headers must not be treated as evidence of the old generation.
+    let ((version, generation), _) =
+        postcard::take_from_bytes::<(u32, u64)>(encrypted).map_err(|error| {
+            PaykitSdkError::Storage {
+                context: "cannot identify the corrupt shared-state generation".into(),
+                source: Some(error.into()),
+            }
+        })?;
+    if version != SHARED_STATE_ENVELOPE_VERSION {
+        return Err(PaykitSdkError::Storage {
+            context: "cannot recover an unsupported shared-state envelope version".into(),
+            source: None,
+        });
+    }
+    if generation == replacement_key.key_generation() {
+        let state = decrypt_state_with_key(replacement_key, owner, encrypted)?;
+        if state
+            .identity_state
+            .as_ref()
+            .and_then(|identity| identity.public_key.as_ref())
+            != Some(owner)
+            || state.paykit_noise_public_key.as_ref()
+                != Some(&super::paykit_noise_public_key(replacement_key))
+        {
+            return Err(PaykitSdkError::Identity {
+                context: "replacement shared state does not match recovery identity and key".into(),
+                source: None,
+            });
+        }
+        return Ok(true);
+    }
+    if generation != current_key.key_generation() {
+        return Err(PaykitSdkError::Identity {
+            context: "shared-state recovery found an unexpected key generation".into(),
+            source: None,
+        });
+    }
+    if let Ok(plaintext) = decrypt_state_blob(current_key, owner, encrypted) {
+        if postcard::take_from_bytes::<u32>(&plaintext)
+            .is_ok_and(|(version, _)| version != super::SDK_STATE_BLOB_VERSION)
+        {
+            return Err(PaykitSdkError::Storage {
+                context: "cannot recover an unsupported SDK state blob version".into(),
+                source: None,
+            });
+        }
+        if let Ok(state) = decode_storage_state_blob(&plaintext) {
+            validate_state_identity(owner, &state)?;
+            return Err(PaykitSdkError::Policy {
+                context: "cannot recover a backup over healthy shared state".into(),
+                source: None,
+            });
+        }
+    }
+    Ok(false)
 }
 
 fn encrypted_state_key_generation(encrypted: &[u8]) -> Result<u64> {
@@ -666,6 +812,52 @@ mod tests {
             decrypt_state_with_key(&key, &identity, &encrypted).unwrap(),
             state
         );
+    }
+
+    #[test]
+    fn test_recovery_rejects_healthy_state_and_unknown_generations() {
+        let owner = identity();
+        let current = secret(7, 1);
+        let replacement = secret(8, 2);
+        let healthy = encrypt_state_with_key(&current, &owner, &StorageState::default()).unwrap();
+        assert!(matches!(
+            recovery_already_committed(&current, &replacement, &owner, &healthy),
+            Err(PaykitSdkError::Policy { .. })
+        ));
+        for (version, generation) in [(1_u32, 0_u64), (1, 3), (2, 1)] {
+            let header = postcard::to_allocvec(&(version, generation)).unwrap();
+            assert!(recovery_already_committed(&current, &replacement, &owner, &header).is_err());
+        }
+        assert!(recovery_already_committed(&current, &replacement, &owner, &[]).is_err());
+        let truncated = postcard::to_allocvec(&(1_u32, 1_u64)).unwrap();
+        assert!(!recovery_already_committed(&current, &replacement, &owner, &truncated).unwrap());
+        let mut damaged = healthy;
+        *damaged.last_mut().unwrap() ^= 1;
+        assert!(!recovery_already_committed(&current, &replacement, &owner, &damaged).unwrap());
+    }
+
+    #[test]
+    fn test_recovery_retry_requires_valid_replacement_state() {
+        let owner = identity();
+        let current = secret(7, 1);
+        let replacement = secret(8, 2);
+        let state = StorageState {
+            identity_state: Some(crate::IdentityState {
+                public_key: Some(owner.clone()),
+                initialized_at: chrono::Utc::now(),
+            }),
+            paykit_noise_public_key: Some(super::super::paykit_noise_public_key(&replacement)),
+            ..StorageState::default()
+        };
+        let encrypted = encrypt_state_with_key(&replacement, &owner, &state).unwrap();
+        assert!(recovery_already_committed(&current, &replacement, &owner, &encrypted).unwrap());
+        assert!(recovery_already_committed(&current, &secret(9, 2), &owner, &encrypted).is_err());
+        assert!(
+            recovery_already_committed(&current, &replacement, &identity(), &encrypted).is_err()
+        );
+        let mut damaged = encrypted;
+        *damaged.last_mut().unwrap() ^= 1;
+        assert!(recovery_already_committed(&current, &replacement, &owner, &damaged).is_err());
     }
 
     #[test]

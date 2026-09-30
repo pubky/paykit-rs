@@ -30,16 +30,14 @@ use crate::{
     },
     domain::records::{AmountRecord, BillingPeriodRecord},
     storage::{
-        require_paykit_app_capability, EventDedupRecord, NewOutboundPrivateMessage,
-        OutboundPrivateMessageRecord, PaymentRequestExecutionClaim, PrivateStreamItemRecord,
-        StorageAdapter, StorageTransaction,
+        require_paykit_app_capability, retry_storage_transaction, EventDedupRecord,
+        NewOutboundPrivateMessage, OutboundPrivateMessageRecord, PaymentRequestExecutionClaim,
+        PrivateStreamItemRecord, StorageAdapter, StorageTransaction,
     },
     PaykitSdkError, PubkyPublicKey, Result,
 };
 
 mod derivation;
-
-const PAYMENT_REQUEST_UPDATE_MAX_ATTEMPTS: usize = 8;
 
 pub(crate) use derivation::derive_payment_request_records_from_parts;
 
@@ -645,89 +643,69 @@ where
     let raw_json = serialize_payment_request_event(app_id, event)?;
     let app_id = app_id.clone();
     let event = event.clone();
-    for attempt in 0..PAYMENT_REQUEST_UPDATE_MAX_ATTEMPTS {
-        let result = storage
-            .transaction({
-                let counterparty = counterparty.clone();
-                let app_id = app_id.clone();
-                let event = event.clone();
-                let raw_json = raw_json.clone();
-                let expected_identity = expected_identity.clone();
-                let now = &now;
-                move |tx| {
-                    let now = now();
-                    if expected_identity
-                        .as_ref()
-                        .is_some_and(|expected| tx.load_identity_state().as_ref() != Some(expected))
-                    {
-                        return Err(PaykitSdkError::Policy {
-                            context: "Payment accounting identity changed during operation".into(),
-                            source: None,
-                        });
-                    }
-                    require_paykit_app_capability(tx, &app_id, PrivateMessageKind::PaymentRequest)?;
-                    let release_execution_claim = require_current_payment_request_action(
-                        tx,
-                        &counterparty,
-                        &app_id,
-                        &event,
-                        now,
-                    )?;
-                    if !matches!(event, PaymentRequestEvent::Proof(_)) {
-                        crate::domain::allowance_accounting::manual_response(
-                            tx,
-                            crate::PaymentRequestScope {
-                                counterparty: counterparty.clone(),
-                                payment_request_id: event.payment_request_id().clone(),
-                            },
-                        )?;
-                    }
-                    let outbound =
-                        tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
-                            counterparty.clone(),
-                            app_id.clone(),
-                            kind.as_str().to_owned(),
-                            raw_json,
-                            now,
-                        ))?;
-                    if release_execution_claim
-                        && !request_has_unresolved_payment(
-                            tx,
-                            &counterparty,
-                            event.payment_request_id().as_str(),
-                        )
-                    {
-                        let records =
-                            payment_request_records_from_transaction(tx, &counterparty, now)?;
-                        let pending_proof = records.iter().any(|record| {
-                            record.payment_request_id == event.payment_request_id().as_str()
-                                && request_has_unreported_successful_payment(
-                                    tx.allowance_accounting_state().as_ref(),
-                                    record,
-                                )
-                        });
-                        if !pending_proof {
-                            tx.remove_payment_request_execution_claim(
-                                &counterparty,
-                                event.payment_request_id().as_str(),
-                            );
-                        }
-                    }
-                    Ok(outbound)
-                }
-            })
-            .await;
-        match result {
-            Err(err)
-                if err.is_concurrent_update()
-                    && attempt + 1 < PAYMENT_REQUEST_UPDATE_MAX_ATTEMPTS =>
+    retry_storage_transaction(storage, || {
+        let counterparty = counterparty.clone();
+        let app_id = app_id.clone();
+        let event = event.clone();
+        let raw_json = raw_json.clone();
+        let expected_identity = expected_identity.clone();
+        let now = &now;
+        move |tx| {
+            let now = now();
+            if expected_identity
+                .as_ref()
+                .is_some_and(|expected| tx.load_identity_state().as_ref() != Some(expected))
             {
-                continue;
+                return Err(PaykitSdkError::Policy {
+                    context: "Payment accounting identity changed during operation".into(),
+                    source: None,
+                });
             }
-            result => return result,
+            require_paykit_app_capability(tx, &app_id, PrivateMessageKind::PaymentRequest)?;
+            let release_execution_claim =
+                require_current_payment_request_action(tx, &counterparty, &app_id, &event, now)?;
+            if !matches!(event, PaymentRequestEvent::Proof(_)) {
+                crate::domain::allowance_accounting::manual_response(
+                    tx,
+                    crate::PaymentRequestScope {
+                        counterparty: counterparty.clone(),
+                        payment_request_id: event.payment_request_id().clone(),
+                    },
+                )?;
+            }
+            let outbound = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                counterparty.clone(),
+                app_id.clone(),
+                kind.as_str().to_owned(),
+                raw_json,
+                now,
+            ))?;
+            if release_execution_claim
+                && !request_has_unresolved_payment(
+                    tx,
+                    &counterparty,
+                    event.payment_request_id().as_str(),
+                )
+            {
+                let records = payment_request_records_from_transaction(tx, &counterparty, now)?;
+                let pending_proof = records.iter().any(|record| {
+                    record.payment_request_id == event.payment_request_id().as_str()
+                        && request_has_unreported_successful_payment(
+                            tx.allowance_accounting_state().as_ref(),
+                            record,
+                        )
+                });
+                if !pending_proof {
+                    tx.remove_payment_request_execution_claim(
+                        &counterparty,
+                        event.payment_request_id().as_str(),
+                    );
+                }
+            }
+            Ok(outbound)
         }
-    }
-    unreachable!("bounded Payment Request update loop always returns")
+    })
+    .await
 }
 
 pub(crate) async fn claim_payment_request_execution<S>(
@@ -740,95 +718,82 @@ pub(crate) async fn claim_payment_request_execution<S>(
 where
     S: StorageAdapter,
 {
-    for attempt in 0..PAYMENT_REQUEST_UPDATE_MAX_ATTEMPTS {
-        let result = storage
-            .transaction({
-                let counterparty = counterparty.clone();
-                let app_id = app_id.clone();
-                let payment_request_id = payment_request_id.as_str().to_owned();
-                move |tx| {
-                    require_paykit_app_capability(
-                        tx,
-                        &app_id,
-                        PrivateMessageKind::PaymentRequest,
-                    )?;
-                    if !tx
-                        .paykit_app_capabilities(&app_id)
-                        .is_some_and(|capabilities| capabilities.outgoing_payments)
-                    {
-                        return Err(PaykitSdkError::Policy {
-                            context: format!(
-                                "Paykit app '{app_id}' is not authorized for outgoing payments"
-                            ),
-                            source: None,
-                        });
-                    }
-                    let mut record = payment_request_records_from_transaction(
-                        tx,
-                        &counterparty,
-                        now,
-                    )?
-                    .into_iter()
-                    .find(|record| record.payment_request_id == payment_request_id)
-                    .ok_or_else(|| PaykitSdkError::NotFound {
+    retry_storage_transaction(storage, || {
+        let counterparty = counterparty.clone();
+        let app_id = app_id.clone();
+        let payment_request_id = payment_request_id.as_str().to_owned();
+        move |tx| {
+            require_paykit_app_capability(
+                tx,
+                &app_id,
+                PrivateMessageKind::PaymentRequest,
+            )?;
+            if !tx
+                .paykit_app_capabilities(&app_id)
+                .is_some_and(|capabilities| capabilities.outgoing_payments)
+            {
+                return Err(PaykitSdkError::Policy {
+                    context: format!(
+                        "Paykit app '{app_id}' is not authorized for outgoing payments"
+                    ),
+                    source: None,
+                });
+            }
+            let mut record = payment_request_records_from_transaction(
+                tx,
+                &counterparty,
+                now,
+            )?
+            .into_iter()
+            .find(|record| record.payment_request_id == payment_request_id)
+            .ok_or_else(|| PaykitSdkError::NotFound {
+                context: format!(
+                    "Payment Request {payment_request_id} is not known for counterparty {counterparty}"
+                ),
+                source: None,
+            })?;
+            require_local_payer(&record, "claim Payment Request for execution")?;
+            require_execution_claim_state(
+                &record,
+                "claim Payment Request for execution",
+            )?;
+            require_origin_app_authorized(
+                tx,
+                &counterparty,
+                &record,
+                "claim Payment Request for execution",
+            )?;
+            if let Some(existing) =
+                tx.payment_request_execution_claim(&counterparty, &payment_request_id)
+            {
+                if existing.app_id != app_id {
+                    return Err(PaykitSdkError::Policy {
                         context: format!(
-                            "Payment Request {payment_request_id} is not known for counterparty {counterparty}"
+                            "Payment Request {payment_request_id} is already claimed by Paykit app '{}'",
+                            existing.app_id
                         ),
                         source: None,
-                    })?;
-                    require_local_payer(&record, "claim Payment Request for execution")?;
-                    require_execution_claim_state(
-                        &record,
-                        "claim Payment Request for execution",
-                    )?;
-                    require_origin_app_authorized(
-                        tx,
-                        &counterparty,
-                        &record,
-                        "claim Payment Request for execution",
-                    )?;
-                    if let Some(existing) =
-                        tx.payment_request_execution_claim(&counterparty, &payment_request_id)
-                    {
-                        if existing.app_id != app_id {
-                            return Err(PaykitSdkError::Policy {
-                                context: format!(
-                                    "Payment Request {payment_request_id} is already claimed by Paykit app '{}'",
-                                    existing.app_id
-                                ),
-                                source: None,
-                            });
-                        }
-                    } else {
-                        if request_has_unresolved_payment(tx, &counterparty, &payment_request_id) {
-                            return Err(PaykitSdkError::Policy {
-                                context: "cannot claim Payment Request with unresolved payment accounting".into(),
-                                source: None,
-                            });
-                        }
-                        tx.save_payment_request_execution_claim(PaymentRequestExecutionClaim {
-                            counterparty: counterparty.clone(),
-                            payment_request_id: payment_request_id.clone(),
-                            app_id: app_id.clone(),
-                            claimed_at: now,
-                        });
-                    }
-                    record.execution_claim_app_id = Some(app_id);
-                    Ok(record)
+                    });
                 }
-            })
-            .await;
-        match result {
-            Err(err)
-                if err.is_concurrent_update()
-                    && attempt + 1 < PAYMENT_REQUEST_UPDATE_MAX_ATTEMPTS =>
-            {
-                continue;
+            } else {
+                if request_has_unresolved_payment(tx, &counterparty, &payment_request_id) {
+                    return Err(PaykitSdkError::Policy {
+                        context: "cannot claim Payment Request with unresolved payment accounting".into(),
+                        source: None,
+                    });
+                }
+                tx.save_payment_request_execution_claim(PaymentRequestExecutionClaim {
+                    counterparty: counterparty.clone(),
+                    payment_request_id: payment_request_id.clone(),
+                    app_id: app_id.clone(),
+                    claimed_at: now,
+                });
             }
-            result => return result,
+            record.execution_claim_app_id = Some(app_id);
+            Ok(record)
         }
-    }
-    unreachable!("bounded Payment Request claim loop always returns")
+    })
+    .await
 }
 
 pub(crate) async fn release_payment_request_execution_claim<S>(
@@ -841,70 +806,57 @@ pub(crate) async fn release_payment_request_execution_claim<S>(
 where
     S: StorageAdapter,
 {
-    for attempt in 0..PAYMENT_REQUEST_UPDATE_MAX_ATTEMPTS {
-        let result = storage
-            .transaction({
-                let counterparty = counterparty.clone();
-                let app_id = app_id.clone();
-                let payment_request_id = payment_request_id.as_str().to_owned();
-                move |tx| {
-                    let mut record = payment_request_records_from_transaction(
-                        tx,
-                        &counterparty,
-                        now,
-                    )?
-                    .into_iter()
-                    .find(|record| record.payment_request_id == payment_request_id)
-                    .ok_or_else(|| PaykitSdkError::NotFound {
+    retry_storage_transaction(storage, || {
+        let counterparty = counterparty.clone();
+        let app_id = app_id.clone();
+        let payment_request_id = payment_request_id.as_str().to_owned();
+        move |tx| {
+            let mut record = payment_request_records_from_transaction(
+                tx,
+                &counterparty,
+                now,
+            )?
+            .into_iter()
+            .find(|record| record.payment_request_id == payment_request_id)
+            .ok_or_else(|| PaykitSdkError::NotFound {
+                context: format!(
+                    "Payment Request {payment_request_id} is not known for counterparty {counterparty}"
+                ),
+                source: None,
+            })?;
+            require_local_payer(&record, "release Payment Request execution claim")?;
+            if request_has_unresolved_payment(tx, &counterparty, &payment_request_id) {
+                return Err(PaykitSdkError::Policy {
+                    context: "cannot release Payment Request execution claim with unresolved payment accounting".into(),
+                    source: None,
+                });
+            }
+            require_execution_claim_release_state(
+                &record,
+                "release Payment Request execution claim",
+            )?;
+            if let Some(existing) =
+                tx.payment_request_execution_claim(&counterparty, &payment_request_id)
+            {
+                if existing.app_id != app_id {
+                    return Err(PaykitSdkError::Policy {
                         context: format!(
-                            "Payment Request {payment_request_id} is not known for counterparty {counterparty}"
+                            "Payment Request {payment_request_id} is claimed by Paykit app '{}'",
+                            existing.app_id
                         ),
                         source: None,
-                    })?;
-                    require_local_payer(&record, "release Payment Request execution claim")?;
-                    if request_has_unresolved_payment(tx, &counterparty, &payment_request_id) {
-                        return Err(PaykitSdkError::Policy {
-                            context: "cannot release Payment Request execution claim with unresolved payment accounting".into(),
-                            source: None,
-                        });
-                    }
-                    require_execution_claim_release_state(
-                        &record,
-                        "release Payment Request execution claim",
-                    )?;
-                    if let Some(existing) =
-                        tx.payment_request_execution_claim(&counterparty, &payment_request_id)
-                    {
-                        if existing.app_id != app_id {
-                            return Err(PaykitSdkError::Policy {
-                                context: format!(
-                                    "Payment Request {payment_request_id} is claimed by Paykit app '{}'",
-                                    existing.app_id
-                                ),
-                                source: None,
-                            });
-                        }
-                        tx.remove_payment_request_execution_claim(
-                            &counterparty,
-                            &payment_request_id,
-                        );
-                    }
-                    record.execution_claim_app_id = None;
-                    Ok(record)
+                    });
                 }
-            })
-            .await;
-        match result {
-            Err(err)
-                if err.is_concurrent_update()
-                    && attempt + 1 < PAYMENT_REQUEST_UPDATE_MAX_ATTEMPTS =>
-            {
-                continue;
+                tx.remove_payment_request_execution_claim(
+                    &counterparty,
+                    &payment_request_id,
+                );
             }
-            result => return result,
+            record.execution_claim_app_id = None;
+            Ok(record)
         }
-    }
-    unreachable!("bounded Payment Request claim release loop always returns")
+    })
+    .await
 }
 
 pub(crate) fn require_current_payment_request_action(
@@ -987,7 +939,10 @@ pub(crate) fn require_current_payment_request_action(
                         .payment_request_execution_claim(counterparty, payment_request_id.as_str())
                         .is_none()
                     && !request_has_unresolved_payment(tx, counterparty, payment_request_id.as_str());
-                if !completed_execution {
+                let unclaimed_expired_proposal = record.state
+                    == PaymentRequestLifecycleState::ProposalExpired
+                    && record.execution_claim_app_id.is_none();
+                if !completed_execution && !unclaimed_expired_proposal {
                     require_execution_claim_owner(
                         tx,
                         counterparty,
@@ -1045,7 +1000,8 @@ pub(crate) fn require_current_payment_request_action(
                     "submit Payment Proof",
                 )?;
             }
-            require_origin_app_authorized(tx, counterparty, &record, "submit Payment Proof")?;
+            // Evidence reports a past payment; withdrawing the payee App cannot
+            // revoke the payer's claim or its authority to correct that evidence.
             let request = request_from_record(&record).ok_or_else(|| PaykitSdkError::Protocol {
                 context: "Payment Request terms are unavailable".into(),
                 source: None,

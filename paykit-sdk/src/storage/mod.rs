@@ -106,6 +106,23 @@ pub trait StorageAdapter: Send + Sync {
         .await
     }
 
+    /// Recover missing or corrupt Pubky shared state under a replacement key.
+    ///
+    /// Implementations must reject healthy current state and unexpected key
+    /// generations, and preserve already-committed replacement-key state on retry.
+    /// Local adapters do not support this operation; use ordinary backup restore.
+    async fn recover_shared_state_from_backup(
+        &self,
+        _current_key: PaykitIdentitySecretKey,
+        _replacement_key: PaykitIdentitySecretKey,
+        _state: ValidatedStorageState,
+    ) -> Result<()> {
+        Err(PaykitSdkError::Policy {
+            context: "shared-state recovery requires Pubky-backed storage".into(),
+            source: None,
+        })
+    }
+
     /// Run an atomic storage transaction.
     async fn transaction<T, F>(&self, f: F) -> Result<T>
     where
@@ -227,6 +244,17 @@ where
         (**self).load_local_identity_state().await
     }
 
+    async fn recover_shared_state_from_backup(
+        &self,
+        current_key: PaykitIdentitySecretKey,
+        replacement_key: PaykitIdentitySecretKey,
+        state: ValidatedStorageState,
+    ) -> Result<()> {
+        (**self)
+            .recover_shared_state_from_backup(current_key, replacement_key, state)
+            .await
+    }
+
     async fn transaction_erased<'a>(
         &self,
         f: StorageTransactionCallback<'a>,
@@ -253,6 +281,17 @@ where
 {
     async fn load_local_identity_state(&self) -> Result<Option<IdentityState>> {
         (**self).load_local_identity_state().await
+    }
+
+    async fn recover_shared_state_from_backup(
+        &self,
+        current_key: PaykitIdentitySecretKey,
+        replacement_key: PaykitIdentitySecretKey,
+        state: ValidatedStorageState,
+    ) -> Result<()> {
+        (**self)
+            .recover_shared_state_from_backup(current_key, replacement_key, state)
+            .await
     }
 
     async fn transaction_erased<'a>(
