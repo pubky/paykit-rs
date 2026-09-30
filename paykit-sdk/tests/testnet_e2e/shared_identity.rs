@@ -79,6 +79,49 @@ async fn test_independent_apps_register_concurrently_without_lost_updates() {
 }
 
 #[tokio::test]
+async fn test_failed_app_publication_keeps_capability_restrictions_until_republished() {
+    let testnet = build_testnet().await;
+    let user = TestUser::sign_up_with_app(&testnet, app_id("bitkit")).await;
+    let mut capabilities = test_app("Bitkit").capabilities();
+    capabilities.receipts = false;
+    let app = PaykitApp::new("Bitkit", capabilities).unwrap();
+    let remote = user.access.session.storage();
+    let lock = remote
+        .lock(
+            paykit_lib::PAYKIT_APP_REGISTRY_PATH,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    let error = user.sdk.publish_paykit_app(app.clone()).await.unwrap_err();
+    assert!(error.is_concurrent_update());
+    assert_eq!(
+        user.storage
+            .transaction(|tx| Ok(tx.paykit_app_capabilities(&user.app_id)))
+            .await
+            .unwrap(),
+        Some(capabilities),
+        "publication failure must not restore wider capabilities"
+    );
+    remote.unlock(&lock).await.unwrap();
+
+    let registry = user.sdk.publish_paykit_app(app).await.unwrap();
+    assert_eq!(
+        registry.apps().get(&user.app_id).unwrap().capabilities(),
+        capabilities
+    );
+    let restored = test_app("Bitkit");
+    user.sdk.publish_paykit_app(restored.clone()).await.unwrap();
+    assert_eq!(
+        user.storage
+            .transaction(|tx| Ok(tx.paykit_app_capabilities(&user.app_id)))
+            .await
+            .unwrap(),
+        Some(restored.capabilities())
+    );
+}
+
+#[tokio::test]
 async fn test_unchanged_app_publication_initializes_noise_key() {
     let testnet = build_testnet().await;
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
@@ -773,10 +816,10 @@ async fn test_pubky_shared_state_waits_for_abandoned_write_before_reading() {
                 })
                 .await;
             // The lock probe below may acquire the lease before this task starts.
-            if result
-                .as_ref()
-                .is_err_and(|error| error.is_concurrent_update())
-                && started.elapsed() < Duration::from_secs(10)
+            if result.as_ref().is_err_and(|error| {
+                error.is_concurrent_update()
+                    || matches!(error, PaykitSdkError::SharedStateBusy { .. })
+            }) && started.elapsed() < Duration::from_secs(10)
             {
                 tokio::time::sleep(Duration::from_millis(25)).await;
                 continue;
@@ -832,7 +875,8 @@ async fn test_pubky_shared_state_waits_for_abandoned_write_before_reading() {
     .await
     .expect("a competing transaction should fail without joining the cooldown")
     .expect_err("the cooldown must retain the exclusive state lock");
-    assert!(error.is_concurrent_update());
+    assert!(matches!(error, PaykitSdkError::SharedStateBusy { .. }));
+    assert!(!error.is_concurrent_update());
     assert!(!competing_callback_ran.load(Ordering::SeqCst));
 
     // Admin DAV bypasses the client lock, simulating a previously admitted late publication.

@@ -75,11 +75,27 @@ pub enum PaykitFfiError {
         /// Redacted human-readable error context.
         context: String,
     },
+    /// Shared state is locked with an unconfirmed write; back off for recovery.
+    #[error("shared_state_busy/{code}: {context}")]
+    SharedStateBusy {
+        /// Stable machine-readable error code.
+        code: String,
+        /// Redacted human-readable error context.
+        context: String,
+    },
 }
 
 impl From<PaykitSdkError> for PaykitFfiError {
     fn from(err: PaykitSdkError) -> Self {
         match err {
+            PaykitSdkError::SharedStateBusy { context, source } => {
+                callback_ffi_error(source.as_ref(), &context).unwrap_or_else(|| {
+                    Self::SharedStateBusy {
+                        code: "shared_state_busy".into(),
+                        context,
+                    }
+                })
+            }
             PaykitSdkError::ConcurrentUpdate { context, source } => {
                 callback_ffi_error(source.as_ref(), &context).unwrap_or_else(|| {
                     Self::ConcurrentUpdate {
@@ -172,6 +188,10 @@ fn callback_ffi_error(source: Option<&anyhow::Error>, context: &str) -> Option<P
     let error = source?.downcast_ref::<PaykitFfiError>()?;
     let context = context.to_owned();
     Some(match error {
+        PaykitFfiError::SharedStateBusy { code, .. } => PaykitFfiError::SharedStateBusy {
+            code: code.clone(),
+            context,
+        },
         PaykitFfiError::ConcurrentUpdate { code, .. } => PaykitFfiError::ConcurrentUpdate {
             code: code.clone(),
             context,
@@ -214,6 +234,13 @@ fn callback_ffi_error(source: Option<&anyhow::Error>, context: &str) -> Option<P
 pub(crate) fn ffi_error_to_sdk(err: PaykitFfiError, context: &'static str) -> PaykitSdkError {
     let source = Some(anyhow::Error::new(err.clone()));
     match err {
+        PaykitFfiError::SharedStateBusy {
+            code,
+            context: _reason,
+        } => PaykitSdkError::SharedStateBusy {
+            context: format!("{context}: {code}"),
+            source,
+        },
         PaykitFfiError::ConcurrentUpdate {
             code,
             context: _reason,

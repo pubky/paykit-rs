@@ -614,6 +614,7 @@ fn recovery_marker_error_text(err: &PaykitSdkError) -> String {
         | PaykitSdkError::Protocol { .. }
         | PaykitSdkError::Policy { .. }
         | PaykitSdkError::ConcurrentUpdate { .. }
+        | PaykitSdkError::SharedStateBusy { .. }
         | PaykitSdkError::RecoveryRequired { .. } => err.to_string(),
     }
 }

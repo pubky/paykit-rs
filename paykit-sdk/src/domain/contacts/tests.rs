@@ -292,7 +292,7 @@ fn test_pending_public_contact_marker_may_exist_remotely() {
     )
     .mark_public_contact_publication_pending(chrono::Utc::now());
 
-    assert!(record.may_have_public_marker());
+    assert!(!record.can_remove_locally());
 }
 
 #[test]

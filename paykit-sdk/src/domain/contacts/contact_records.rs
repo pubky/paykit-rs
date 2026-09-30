@@ -203,16 +203,6 @@ impl ContactRecord {
             PublicationStatus::NotPublished | PublicationStatus::Removed
         )
     }
-
-    pub(crate) fn may_have_public_marker(&self) -> bool {
-        matches!(
-            self.public_contact_marker_status,
-            PublicationStatus::PendingPublication
-                | PublicationStatus::PendingRemoval
-                | PublicationStatus::Published
-        ) || (self.public_contact_published_at.is_some()
-            && self.public_contact_removed_at.is_none())
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

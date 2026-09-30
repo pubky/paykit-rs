@@ -384,8 +384,11 @@ For testing, shared-state writes publish a unique pending marker before their
 PUT and remove it after a confirmed result. An unconfirmed write leaves its
 marker; the next transaction waits five minutes under a renewed lock, then
 reloads state. Cancellation leaves the marker and restarts the wait on the next
-attempt. The cooldown adds no timed delay to
-normal successful writes, but cannot rule out a write completing after five
+attempt. Other runtimes that cannot acquire the lock while a marker exists
+receive `SharedStateBusy`, not a retryable `ConcurrentUpdate`; back off and show
+recovery as pending. This can also block reads, and there is no fixed completion
+deadline. The cooldown adds no timed delay to normal successful writes,
+but cannot rule out a write completing after five
 minutes and does not replace the homeserver fix.
 
 `sign_out` validates the active identity, revokes this application's Pubky

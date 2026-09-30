@@ -1,6 +1,6 @@
 use super::app_removal::{
     app_removal_blockers, begin_paykit_app_removal, detach_shared_app_reservations,
-    restore_app_capabilities, retire_app_outbound_private_messages, stage_app_capability_update,
+    retire_app_outbound_private_messages, stage_app_capability_update,
 };
 use super::*;
 
@@ -222,7 +222,8 @@ where
     /// Add or replace this application in the identity-wide registry.
     ///
     /// Publishing also reactivates an application whose earlier removal did
-    /// not complete.
+    /// not complete. After a failed publication, staged capability restrictions
+    /// remain in effect until a successful publication reconciles them.
     pub async fn publish_paykit_app(
         &self,
         app: paykit_lib::PaykitApp,
@@ -253,7 +254,7 @@ where
             .apps()
             .get(&app_id)
             .map(|previous| previous.capabilities());
-        let staged_capabilities = stage_app_capability_update(
+        stage_app_capability_update(
             &self.storage,
             app_lease,
             remote_capabilities,
@@ -261,7 +262,8 @@ where
             self.clock.now(),
         )
         .await?;
-        let published = self
+        // Keep the staged restrictions on failure: publication may have committed.
+        let registry = self
             .update_paykit_app_registry_with_access_inner(
                 &session_access,
                 true,
@@ -272,16 +274,7 @@ where
                     Ok(())
                 },
             )
-            .await;
-        let registry = match published {
-            Ok(registry) => registry,
-            Err(err) => {
-                if let Some((previous, staged)) = staged_capabilities {
-                    restore_app_capabilities(&self.storage, app_lease, staged, previous).await?;
-                }
-                return Err(err);
-            }
-        };
+            .await?;
         let now = self.clock.now();
         self.storage
             .transaction({

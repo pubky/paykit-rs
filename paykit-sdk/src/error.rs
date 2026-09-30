@@ -16,6 +16,19 @@ pub enum PaykitSdkError {
         source: Option<anyhow::Error>,
     },
 
+    /// Shared state is locked while an unconfirmed write is pending.
+    ///
+    /// The holder may be waiting for write recovery. Back off rather than
+    /// immediately retrying; cancellation can restart the recovery wait.
+    #[error("shared state busy: {context}")]
+    SharedStateBusy {
+        /// Human-readable recovery context.
+        context: String,
+        /// Underlying lock-acquisition failure.
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+
     /// Durable storage failed.
     #[error("storage error: {context}")]
     Storage {
@@ -102,6 +115,9 @@ impl fmt::Debug for PaykitSdkError {
         match self {
             Self::ConcurrentUpdate { context, source } => {
                 debug_error_variant(f, "ConcurrentUpdate", context, source)
+            }
+            Self::SharedStateBusy { context, source } => {
+                debug_error_variant(f, "SharedStateBusy", context, source)
             }
             Self::Storage { context, source } => debug_error_variant(f, "Storage", context, source),
             Self::Identity { context, source } => {

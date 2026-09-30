@@ -22004,6 +22004,17 @@ public enum PaykitError: Swift.Error {
          * Redacted human-readable error context.
          */context: String
     )
+    /**
+     * Shared state is locked with an unconfirmed write; back off for recovery.
+     */
+    case SharedStateBusy(
+        /**
+         * Stable machine-readable error code.
+         */code: String,
+        /**
+         * Redacted human-readable error context.
+         */context: String
+    )
 }
 
 
@@ -22053,6 +22064,10 @@ public struct FfiConverterTypePaykitError: FfiConverterRustBuffer {
             context: try FfiConverterString.read(from: &buf)
             )
         case 9: return .RecoveryRequired(
+            code: try FfiConverterString.read(from: &buf),
+            context: try FfiConverterString.read(from: &buf)
+            )
+        case 10: return .SharedStateBusy(
             code: try FfiConverterString.read(from: &buf),
             context: try FfiConverterString.read(from: &buf)
             )
@@ -22118,6 +22133,12 @@ public struct FfiConverterTypePaykitError: FfiConverterRustBuffer {
 
         case let .RecoveryRequired(code,context):
             writeInt(&buf, Int32(9))
+            FfiConverterString.write(code, into: &buf)
+            FfiConverterString.write(context, into: &buf)
+
+
+        case let .SharedStateBusy(code,context):
+            writeInt(&buf, Int32(10))
             FfiConverterString.write(code, into: &buf)
             FfiConverterString.write(context, into: &buf)
 

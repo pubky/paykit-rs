@@ -307,6 +307,9 @@ Marker cleanup failure does not undo a confirmed commit. A transaction finding
 pending markers holds and renews the state lock for five minutes, removes the
 observed markers, then loads fresh state. Read-only transactions and key rotation
 use the same barrier. Cancelling the wait leaves the markers for the next caller.
+Competing runtimes that cannot acquire the lock while markers exist receive
+`SharedStateBusy`, including on reads. They should back off for recovery, not
+immediately retry; cancellation can restart the wait, so there is no fixed deadline.
 
 This cooldown is a best-effort mitigation for Pubky 0.14's missing commit-time
 lock enforcement, not a production concurrency guarantee. A write delayed beyond
@@ -1436,6 +1439,8 @@ SDK errors should be structured:
 
 - `ConcurrentUpdate`: a storage revision changed or a required lock was busy;
   reread affected state before retrying, accounting for earlier committed steps
+- `SharedStateBusy`: the shared-state lock is busy with an unconfirmed write;
+  back off for recovery rather than immediately retrying, including for reads
 - `Storage`: durable storage failure
 - `Identity`: Pubky session/key/capability failure
 - `Transport`: Pubky or Encrypted Link transport failure

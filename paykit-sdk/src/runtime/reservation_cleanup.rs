@@ -68,6 +68,7 @@ where
         {
             let context = match &mut err {
                 PaykitSdkError::ConcurrentUpdate { context, .. }
+                | PaykitSdkError::SharedStateBusy { context, .. }
                 | PaykitSdkError::Storage { context, .. }
                 | PaykitSdkError::Identity { context, .. }
                 | PaykitSdkError::Transport { context, .. }
