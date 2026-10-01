@@ -16,14 +16,13 @@ pub(super) fn is_claimable_outbound_private_message(
 ) -> bool {
     match message.status {
         OutboundPrivateMessageStatus::Pending => true,
-        OutboundPrivateMessageStatus::Failed => message
+        OutboundPrivateMessageStatus::Failed | OutboundPrivateMessageStatus::Sent => message
             .last_attempt_at
             .is_none_or(|last_attempt_at| last_attempt_at <= failed_retry_after),
         OutboundPrivateMessageStatus::Sending => {
             is_stale_sending_outbound_private_message(message, stale_before)
         }
-        OutboundPrivateMessageStatus::Sent
-        | OutboundPrivateMessageStatus::Invalid
+        OutboundPrivateMessageStatus::Invalid
         | OutboundPrivateMessageStatus::RecoveryRequired
         | OutboundPrivateMessageStatus::Superseded => false,
     }
@@ -55,6 +54,46 @@ pub(crate) fn outbound_private_queue_head_is_claimable(
     stale_before: DateTime<Utc>,
     failed_retry_after: DateTime<Utc>,
 ) -> bool {
+    next_claimable_outbound_private_message(
+        messages,
+        registered_apps,
+        retired_apps,
+        stale_before,
+        failed_retry_after,
+    )
+    .is_some()
+}
+
+pub(super) fn next_claimable_outbound_private_message(
+    messages: &[OutboundPrivateMessageRecord],
+    registered_apps: &HashSet<paykit_lib::PaykitAppId>,
+    retired_apps: &HashSet<paykit_lib::PaykitAppId>,
+    stale_before: DateTime<Utc>,
+    failed_retry_after: DateTime<Utc>,
+) -> Option<u64> {
+    let claimable = |message: &OutboundPrivateMessageRecord| {
+        message.is_queued()
+            && (message.is_delivery_confirmation()
+                || (registered_apps.contains(&message.app_id)
+                    && !retired_apps.contains(&message.app_id)))
+            && is_claimable_outbound_private_message(message, stale_before, failed_retry_after)
+    };
+    // A reserved Noise slot must be published before any later ciphertext,
+    // including identity-level confirmations for inactive applications.
+    if let Some(prepared) = messages
+        .iter()
+        .filter(|message| message.prepared_send.is_some())
+        .min_by_key(|message| message.outbound_message_id)
+    {
+        return claimable(prepared).then_some(prepared.outbound_message_id);
+    }
+    if let Some(confirmation) = messages
+        .iter()
+        .filter(|message| message.is_delivery_confirmation() && claimable(message))
+        .min_by_key(|message| message.outbound_message_id)
+    {
+        return Some(confirmation.outbound_message_id);
+    }
     let latest_private_list_ids = messages
         .iter()
         .filter(|message| {
@@ -77,13 +116,12 @@ pub(crate) fn outbound_private_queue_head_is_claimable(
     ordered.sort_by_key(|message| message.outbound_message_id);
 
     for message in ordered {
-        if matches!(
-            message.status,
-            OutboundPrivateMessageStatus::Sent
-                | OutboundPrivateMessageStatus::Invalid
-                | OutboundPrivateMessageStatus::RecoveryRequired
-                | OutboundPrivateMessageStatus::Superseded
-        ) {
+        if !message.is_queued() || message.is_delivery_confirmation() {
+            continue;
+        }
+        // Published events waiting for confirmation do not hold up newer data
+        // while their retry backoff is still active.
+        if message.status == OutboundPrivateMessageStatus::Sent && !claimable(message) {
             continue;
         }
         let is_supersedable_private_list = message.status == OutboundPrivateMessageStatus::Pending
@@ -98,15 +136,15 @@ pub(crate) fn outbound_private_queue_head_is_claimable(
             if !inactive_outbound_private_message_blocks_queue(message, retired_apps) {
                 continue;
             }
-            return false;
+            return None;
         }
         if retired_apps.contains(&message.app_id) {
             continue;
         }
-        return is_claimable_outbound_private_message(message, stale_before, failed_retry_after);
+        return claimable(message).then_some(message.outbound_message_id);
     }
 
-    false
+    None
 }
 
 pub(super) fn supersede_outdated_private_payment_lists(

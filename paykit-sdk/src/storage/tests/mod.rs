@@ -13,6 +13,7 @@ use crate::{
 
 mod adapter;
 mod compaction;
+mod event_delivery;
 mod leases;
 mod queue;
 mod records;

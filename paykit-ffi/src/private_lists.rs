@@ -527,6 +527,7 @@ mod tests {
             updated_at: Utc::now(),
             last_attempt_at: None,
             sent_at: None,
+            confirmed_at: None,
             last_error: Some("private send secret".into()),
             prepared_send: None,
         };

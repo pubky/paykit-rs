@@ -347,13 +347,15 @@ where
         });
     }
     for message in tx.outbound_private_messages(counterparty) {
-        if matches!(
-            message.status,
-            OutboundPrivateMessageStatus::Pending
-                | OutboundPrivateMessageStatus::Sending
-                | OutboundPrivateMessageStatus::Failed
-                | OutboundPrivateMessageStatus::RecoveryRequired
-        ) {
+        if (message.status == OutboundPrivateMessageStatus::Sent && message.is_unconfirmed_event())
+            || matches!(
+                message.status,
+                OutboundPrivateMessageStatus::Pending
+                    | OutboundPrivateMessageStatus::Sending
+                    | OutboundPrivateMessageStatus::Failed
+                    | OutboundPrivateMessageStatus::RecoveryRequired
+            )
+        {
             tx.save_outbound_private_message(mark_outbound_recovery_required(
                 message,
                 "Encrypted Link recovery is required".into(),
@@ -755,9 +757,18 @@ pub(crate) fn requeue_recovery_required_outbound_messages(
     now: DateTime<Utc>,
 ) -> Result<()> {
     for mut message in tx.outbound_private_messages(counterparty) {
-        if message.status != OutboundPrivateMessageStatus::RecoveryRequired
-            || !tx.paykit_app_is_registered(&message.app_id)
-            || tx.paykit_app_is_retired(&message.app_id)
+        if message.status != OutboundPrivateMessageStatus::RecoveryRequired {
+            continue;
+        }
+        if message.confirmed_at.is_some() {
+            tx.save_outbound_private_message(crate::domain::outbound_private::mark_outbound_sent(
+                message, now,
+            ))?;
+            continue;
+        }
+        if !message.is_delivery_confirmation()
+            && (!tx.paykit_app_is_registered(&message.app_id)
+                || tx.paykit_app_is_retired(&message.app_id))
         {
             continue;
         }
@@ -765,7 +776,9 @@ pub(crate) fn requeue_recovery_required_outbound_messages(
         message.updated_at = now;
         // Recovery cannot prove that a previous publication missed the peer.
         // Keep attempt evidence for both Event Messages and Private Payment Lists.
-        message.sent_at = None;
+        if !message.is_unconfirmed_event() {
+            message.sent_at = None;
+        }
         message.last_error = None;
         message.prepared_send = None;
         tx.save_outbound_private_message(message)?;

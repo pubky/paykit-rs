@@ -23,6 +23,22 @@ async fn persist_messages(
     persist_private_stream_batch(storage, counterparty.clone(), messages, None, timestamp())
         .await
         .unwrap();
+    // These history roundtrips start after confirmation publication has finished.
+    storage
+        .transaction(|tx| {
+            for mut message in tx.outbound_private_messages(counterparty) {
+                if message.is_delivery_confirmation() {
+                    message.attempt_count = 1;
+                    message.last_attempt_at = Some(timestamp());
+                    tx.save_outbound_private_message(
+                        crate::domain::outbound_private::mark_outbound_sent(message, timestamp()),
+                    )?;
+                }
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 async fn current_backup(counterparty: &PubkyPublicKey, payloads: Vec<String>) -> SdkBackupState {
