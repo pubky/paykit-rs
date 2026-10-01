@@ -7,6 +7,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc58 - 2026-10-01
+
+### Fixed
+
+- Report competing peer operations as retryable shared-state contention.
+- Keep private payment resolution pending while another app owns the peer.
+- Preserve transport and protocol failures if recording the failure also
+  encounters shared-state contention.
+
 ## 0.1.0-rc57 - Unreleased
 
 ### Added
