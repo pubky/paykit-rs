@@ -129,11 +129,25 @@ where
     F: FnOnce(StorageLock) -> Fut,
     Fut: Future<Output = std::result::Result<T, E>>,
 {
+    with_write_lock_timeout(session, path, WRITE_LOCK_TIMEOUT, operation).await
+}
+
+pub(crate) async fn with_write_lock_timeout<T, E, F, Fut>(
+    session: &PubkySession,
+    path: &str,
+    timeout: Duration,
+    operation: F,
+) -> std::result::Result<T, E>
+where
+    E: From<PaykitError>,
+    F: FnOnce(StorageLock) -> Fut,
+    Fut: Future<Output = std::result::Result<T, E>>,
+{
     let storage = session.storage();
     let mut attempt = 1;
     let (lock, acquired_at) = loop {
         let requested_at = tokio::time::Instant::now();
-        match storage.lock(path, WRITE_LOCK_TIMEOUT).await {
+        match storage.lock(path, timeout).await {
             Ok(lock) => break (lock, requested_at),
             Err(pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }))
                 if status == pubky::StatusCode::LOCKED
@@ -154,7 +168,7 @@ where
                 let requested_at = tokio::time::Instant::now();
                 match tokio::time::timeout_at(
                     valid_until,
-                    storage.refresh_lock(&mut renewed, WRITE_LOCK_TIMEOUT),
+                    storage.refresh_lock(&mut renewed, timeout),
                 )
                 .await
                 {

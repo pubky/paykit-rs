@@ -247,3 +247,78 @@ extension PaymentDisposition: CustomStringConvertible, CustomDebugStringConverti
     public var description: String { "PaymentDisposition(<redacted>)" }
     public var debugDescription: String { description }
 }
+
+extension PaymentRequestRecord: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PaymentRequestRecord(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PaymentProofRecord: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PaymentProofRecord(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PaymentConversionQuoteRecord: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PaymentConversionQuoteRecord(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PaymentRequestAmount: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PaymentRequestAmount(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PaymentRequestRecurrence: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PaymentRequestRecurrence(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension AllowanceRecord: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "AllowanceRecord(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension LinkedPeerRecord: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "LinkedPeerRecord(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PrivatePaymentListEndpoint: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PrivatePaymentListEndpoint(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PrivatePaymentListView: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PrivatePaymentListView(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension QueuedPrivateMessage: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "QueuedPrivateMessage(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension ReceiptAccessView: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "ReceiptAccessView(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PaykitProfileRecord: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PaykitProfileRecord(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PubkyProfileRecord: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PubkyProfileRecord(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PaykitBlobRecord: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PaykitBlobRecord(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension SdkStateBlobSnapshot: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "SdkStateBlobSnapshot(<redacted>)" }
+    public var debugDescription: String { description }
+}

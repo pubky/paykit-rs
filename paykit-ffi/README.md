@@ -557,8 +557,9 @@ requests, undelivered events, incomplete Receipt issuance, and Private Payment
 Lists that must first be cleared.
 
 An empty `reservations` list publishes an empty Private Payment List for that
-counterparty. `failedToQueue` means the SDK did not persist an outbound
-private message for that counterparty. `failedToDeliver` means the SDK
+counterparty. `failedToQueue` reports a queueing failure, not a rollback guarantee;
+inspect durable state before replacing reservations or retrying the workflow.
+`failedToDeliver` means the SDK
 queued the message, then delivery or reservation cleanup failed; keep the state
 and retry with `processPendingPrivateMessages`.
 

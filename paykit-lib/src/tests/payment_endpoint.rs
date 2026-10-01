@@ -171,16 +171,21 @@ async fn test_write_lock_is_renewed_and_released_after_failure() {
     let setup = TestSetup::new().await;
     let path = format!("{PAYKIT_PATH_PREFIX}lock-test.json");
     let storage = setup.session.storage();
-    let error = with_write_lock(&setup.session, &path, |lock| async move {
-        tokio::time::sleep(lock.timeout() + std::time::Duration::from_secs(1)).await;
-        let conflict = storage.lock(lock.path(), lock.timeout()).await.unwrap_err();
-        assert!(matches!(conflict,
-            pubky::Error::Request(pubky::errors::RequestError::Server { status, .. })
-                if status == pubky::StatusCode::LOCKED
-        ));
-        storage.put_locked(&lock, "renewed").await.unwrap();
-        Err::<(), _>(PaykitError::Validation("operation failed".into()))
-    })
+    let error = pubky_routing::with_write_lock_timeout(
+        &setup.session,
+        &path,
+        std::time::Duration::from_secs(6),
+        |lock| async move {
+            tokio::time::sleep(lock.timeout() + std::time::Duration::from_secs(1)).await;
+            let conflict = storage.lock(lock.path(), lock.timeout()).await.unwrap_err();
+            assert!(matches!(conflict,
+                pubky::Error::Request(pubky::errors::RequestError::Server { status, .. })
+                    if status == pubky::StatusCode::LOCKED
+            ));
+            storage.put_locked(&lock, "renewed").await.unwrap();
+            Err::<(), _>(PaykitError::Validation("operation failed".into()))
+        },
+    )
     .await
     .unwrap_err();
     assert!(matches!(error, PaykitError::Validation(_)));
@@ -259,12 +264,17 @@ async fn test_renewal_loss_after_commit_is_not_a_retryable_conflict() {
     let setup = TestSetup::new().await;
     let path = format!("{PAYKIT_PATH_PREFIX}uncertain-write.json");
     let storage = setup.session.storage();
-    let error = with_write_lock(&setup.session, &path, |lock| async move {
-        storage.put_locked(&lock, "committed").await.unwrap();
-        // Model ownership lost while the committed write's response is unresolved.
-        storage.unlock(&lock).await.unwrap();
-        std::future::pending::<Result<()>>().await
-    })
+    let error = pubky_routing::with_write_lock_timeout(
+        &setup.session,
+        &path,
+        std::time::Duration::from_secs(6),
+        |lock| async move {
+            storage.put_locked(&lock, "committed").await.unwrap();
+            // Model ownership lost while the committed write's response is unresolved.
+            storage.unlock(&lock).await.unwrap();
+            std::future::pending::<Result<()>>().await
+        },
+    )
     .await
     .unwrap_err();
     assert!(!is_write_conflict(&error));

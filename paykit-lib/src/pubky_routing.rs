@@ -19,6 +19,8 @@ use crate::{
 };
 
 mod locks;
+#[cfg(test)]
+pub(crate) use locks::with_write_lock_timeout;
 pub use locks::{
     delete_resource_if_revision, is_write_conflict, put_resource_if_revision, with_write_lock,
 };

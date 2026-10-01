@@ -417,12 +417,12 @@ where
         .await;
     match result {
         Err(error) if !acquired && error.is_concurrent_update() => {
-            if pending_write_paths(session)
+            if !pending_write_paths(session)
                 .await
-                .is_ok_and(|paths| !paths.is_empty())
+                .is_ok_and(|paths| paths.is_empty())
             {
                 Err(PaykitSdkError::SharedStateBusy {
-                    context: "Pubky shared state has a pending write or recovery in progress; retry later".into(),
+                    context: "Pubky shared state is locked and pending writes could not be ruled out; retry later".into(),
                     source: Some(error.into()),
                 })
             } else {
@@ -461,6 +461,8 @@ async fn pending_write_paths(session: &pubky::PubkySession) -> Result<Vec<String
             || !suffix
                 .is_some_and(|id| id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
         {
+            // An unknown marker may describe an unfinished write. Do not let
+            // another writer proceed by treating it as an empty directory.
             return Err(PaykitSdkError::Storage {
                 context: "invalid pending Pubky shared-state write path".into(),
                 source: None,

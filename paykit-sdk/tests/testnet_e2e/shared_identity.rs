@@ -1048,6 +1048,46 @@ async fn test_restore_with_replacement_key_discards_old_link_snapshots() {
         .all(|message| message.prepared_send.is_none()));
 }
 
+#[tokio::test]
+async fn test_unknown_pending_write_blocks_shared_state() {
+    let testnet = build_testnet().await;
+    let user = TestUser::sign_up_with_app(&testnet, app_id("bitkit")).await;
+    let storage = PubkySharedStateStorage::new(TestnetSessionProvider::new(user.access.clone()));
+    let remote = user.access.session.storage();
+    let marker = format!(
+        "{}unknown",
+        paykit_lib::PAYKIT_SHARED_STATE_WRITE_PATH_PREFIX
+    );
+    remote.put(&marker, Vec::<u8>::new()).await.unwrap();
+    let lock = remote
+        .lock(
+            paykit_lib::PAYKIT_SHARED_STATE_PATH,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    let callback_ran = AtomicBool::new(false);
+    let error = storage
+        .transaction(|_| {
+            callback_ran.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, PaykitSdkError::SharedStateBusy { .. }));
+    remote.unlock(&lock).await.unwrap();
+    let error = storage
+        .transaction(|_| {
+            callback_ran.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, PaykitSdkError::Storage { .. }));
+    assert!(!callback_ran.load(Ordering::SeqCst));
+    assert!(remote.get(&marker).await.is_ok());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_pubky_shared_state_waits_for_abandoned_write_before_reading() {
     let testnet = build_testnet_with_admin().await;
