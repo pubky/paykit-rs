@@ -1,132 +1,161 @@
 # Payment Workflows
 
-These sequences describe SDK integration, not a hosted checkout API. Method
-names are Rust; mobile equivalents use camelCase. Check installed declarations
-for concrete types and argument labels. Keep caller-owned steps, such as wallet
-execution and order authorization, outside SDK calls.
+Method names here are Rust SDK methods unless explicitly labeled FFI. Check
+installed declarations for types and borrowing. Wallet execution, authorization,
+settlement, external idempotency, and order/entitlement policy are caller-owned.
 
-## Wallet Receive and Pay a Contact
+## Publish and Discover
 
-1. Restore secure session/receiver-key material and durable SDK state, then
-   initialize the runtime. Use its configured capabilities for auth. Publish a
-   Receiver Marker explicitly when enabling private communication.
-2. Discover the contact's receiver paths. Keep one Contact Record for the Pubky
-   identity with its selected receiver paths. Use an exact remote path for the
-   payment; the SDK does not select a preferred wallet or aggregate receivers.
-   A new scan can refresh discovery without creating a duplicate identity contact.
-3. The receiving wallet creates wallet-valid receiving details. Public sync
-   publishes the current public set; private sync queues a complete private set
-   for each target receiver after link setup. Use stable reservation IDs if the
-   wallet reserves addresses/invoices. An empty private set clears it. Do not
-   enable unlisted-peer cleanup on a partial set of updates.
-4. The payer invokes `prepare_and_resolve_private_contact_payment` and examines
-   `resolution.status`, `resolution.state`, and preparation reports on success.
-   It can throw `RecoveryRequired` while the stored peer is still `Linking`;
-   preserve that handshake and retry later. Pending/recovering private state is
-   not permission to pay from stale data or silently fall back. For an explicit
-   public flow, call `resolve_public_contact_payment` separately.
-5. The wallet validates and authorizes execution of an adapter-built target.
-   Using any endpoint consumes the whole Private Payment List. Before submitting
-   payment, persist its returned version, scoped to SDK state plus counterparty
-   key/path. Keep it consumed while execution is pending or uncertain. Pass that
-   version on later resolutions; merely displaying a list does not consume it.
-6. Track actual payment outcome in the wallet. A lost response from the wallet
-   payment operation requires wallet-specific reconciliation, not another payment
-   because a Paykit message was retried. Continue SDK receive/outbound work and
-   backup dirty tracking independently.
+Initialize the identity's live state/session/key access and explicitly publish
+this app with `publish_paykit_app`. A Contact Record represents one Pubky
+identity, not one app. `paykit_app_registry(owner)` discovers registered apps,
+capabilities, Noise key/generation, and optional defaults. Public Payment
+Endpoints are app-scoped; the private link is identity-wide. Preserve candidate
+`app_id` through selection and execution; defaults do not override wallet policy
+or a Payment Request's required payee App.
 
-Payment References correlate a payment with an order/invoice; they are not Event
-IDs, Receipt IDs, or receiver identifiers. Use endpoint identifiers and payload
-constructors/helpers rather than inventing path or invoice parsing rules.
+- Public: call `sync_public_endpoints()` or
+  `sync_public_endpoints_with_receiving_details(details)`. Keep `ManagedOnly`
+  unless the app intentionally owns its entire app endpoint namespace.
+- Private: first call `ensure_link_with_peer(counterparty, max_advance_steps)`.
+  List queueing needs an active link or persisted handshake; sync does not
+  initiate one. Use
+  `sync_private_payment_lists_with_reservations_and_process_outbound(updates,
+  clear_unlisted_linked_peers)` for reserved wallet details. Each update contains
+  the counterparty and this app's complete reservations, not receiver paths.
+- An empty private list clears that app's list for the counterparty, not another
+  app's list or the shared link. Use unlisted-peer cleanup only with a complete
+  keep set for this app. Retain reservation IDs through retries.
+- Inspect public sync failures and private `failed_to_queue`/`failed_to_deliver`
+  (FFI `failedToQueue`/`failedToDeliver`). An unconfirmed shared-state write may
+  have committed; earlier pending work also survives. These reports are
+  not rollback guarantees. Inspect durable queue/reservation records before
+  recreating or cancelling wallet reservations, then resume appropriate work.
 
-## Payment Request to Receipt
+Saved contacts are private shared records by default. Public Contact Markers
+are separately opt-in, not app enrollment or proof of a live link. For display,
+`resolve_profile` prefers Paykit Profile with Pubky Profile fallback. Public
+profile updates/deletion use the fetched revision to reject concurrent edits;
+profile/avatar/blob publication is public, not private backup storage.
 
-Prerequisites: initialized peers with session access and published markers.
-Complete the handshake before queueing Payment Request events or processing
-Receipt Access issuance; unlike Private Payment Lists, these operations require
-an active link. Preparing a receipt locally does not require an active link.
-Both sides run their private synchronization cycle. The following is a sequence,
-not a single cross-party atomic transaction.
+## Pay a Contact
 
-1. The payee builds `PaymentRequestTerms`, including its Payment Reference,
-   amount, allowed endpoint identifiers, expiry, and optional recurrence. Call
-   `propose_payment_request` once for that logical proposal and retain its
-   Payment Request ID in the application's order correlation.
-2. Process outbound work. The payer receives through `receive_private_messages`
-   and queries `actionable_received_payment_requests` or `list_payment_requests`.
-   The payee's returned proposal record reflects local queueing, not peer delivery.
-3. The payer checks terms and user authorization, then calls
-   `accept_payment_request` or `reject_payment_request`. Exchange the queued
-   event through normal workers; acceptance does not execute payment.
-4. The payer's wallet executes the selected payment and calls
-   `submit_payment_proof` with method-specific evidence and the relevant billing
-   period, if recurring. The SDK correlates the request/reference; it does not
-   establish settlement from arbitrary proof JSON.
-5. The payee validates the evidence using the payment method, expected recipient,
-   amount, and its settlement policy. Only then should its application issue a
-   payment-confirming Receipt or authorize the corresponding order entitlement.
-6. Build a Receipt draft with the same Payment Reference and applicable request/
-   billing-period correlation. Persist a stable Receipt ID before repeatable
-   issuance, or retain the ID returned by `prepare_receipt_issuance`. Continue
-   with `process_receipt_issuance`; it stores the Encrypted Receipt and queues
-   Receipt Access. Process outbound work to send that access event.
-7. The recipient indexes Receipt Access through normal intake and uses
-   `retrieve_receipt` to fetch/decrypt/validate it. Successful retrieval is not a
-   generic blockchain check or permission to unlock any product: the consuming
-   application still checks issuer trust, recipient, correlation, and entitlement.
+1. Choose public or private deliberately. Private preparation is
+   `prepare_and_resolve_private_contact_payment(counterparty, amount,
+   after_private_payment_list_version, max_advance_steps)`. Public resolution is
+   `resolve_public_contact_payment(counterparty, amount)`; it never consults
+   private links. `amount` is `Option<PaymentAmountContext>`.
+2. Private resolution combines current lists from authorized apps with per-app
+   latest-state semantics. Inspect both `resolution.status` and `.state` and
+   the link/receive/outbound reports. Preparation can throw `RecoveryRequired`
+   while the stored peer is `Linking`; inspect state and retry later. Never
+   substitute stale endpoints or a hidden public fallback for recovery.
+3. For list-backed payment, persist `private_payment_list_version` before wallet
+   submission, scoped to the SDK state and counterparty. Using an endpoint
+   consumes the whole list, not just that entry. Pass the opaque consumed token
+   on later resolution; candidates from lists at or below it are excluded.
+   Merely displaying candidates is not consumption.
+4. Validate the adapter-built target and obtain wallet authorization. Preserve
+   the consumed version through pending/uncertain wallet execution. Reconcile a
+   lost wallet response using its durable execution journal/idempotency, not a
+   fresh send because another SDK retry succeeded. Coordinate concurrent app
+   execution; shared Noise storage is not itself a payment-execution lock.
 
-An uncertain proposal call can already have queued a request. Inspect existing
-SDK records before proposing again: `propose_payment_request` generates fresh
-IDs per call. Retry durable outbound work instead of recreating events. Apply
-the same distinction to receipt issuance: repeat with the retained Receipt ID,
-not a newly generated receipt for every network attempt.
+Public resolution reports app-specific `failures` while retaining valid results
+from other apps. `Unavailable` differs from `NoEndpoint`; `ResourceLimit` can
+mean an app's complete list exceeded the bounded aggregate. Do not interpret
+partial discovery as proof that no other payment route exists.
 
-For recurring requests, the app owns scheduling, spending authorization,
-settlement validation, and one-payment-per-period policy. `ActiveRecurring` is
-not an automatic payment worker. Cancellation changes the coordination state;
-it does not reverse an already executed payment or refund an order.
+## Explicit Payment Request Destinations
 
-## Checkout, Processors, and Locks
+Use `PaymentRequestTerms::builder(amount, payment_reference,
+accepted_payment_endpoint_identifiers)` and validated builder methods. A request
+may bind immutable endpoints with `.required_app_id(Some(app_id))` and
+`.payment_endpoints(Some(endpoints))`. The map must be nonempty, have nonempty
+payloads, and contain only accepted identifiers. `None` means ordinary discovery;
+`Some` forbids fallback outside the map. The required App is the **payee's
+endpoint owner**, not the payer app selected to execute. The envelope's source
+App ID is a separate attribution.
 
-A shop may call its transaction service, which calls a payment processor using
-that processor's HTTP contract. Keep SDK payment coordination separate from
-service invoice state and shop order/entitlement state. Do not treat an HTTP
-`activate` or `resolve` operation as a Paykit protocol event unless the actual
-service defines that translation.
+Resolve received requests through
+`resolve_private_payment_request(counterparty, &payment_request_id,
+after_private_payment_list_version)` or
+`prepare_and_resolve_private_payment_request(counterparty, &payment_request_id,
+after_private_payment_list_version, max_advance_steps)`. These apply the request's
+amount, accepted identifiers, and required payee App before adapter selection.
+Bound endpoints replace list discovery and return no private-list version;
+the consumed-list token does not apply. They still require valid private/app
+state and wallet validation. `resolve_public_payment_request(counterparty,
+&payment_request_id)` has no fallback for bound requests. Unsupported or expired
+bound details are a blocked payment, not permission to pay a different address.
 
-Preserve the order-to-request/invoice correlation and the issuing receiver or
-processor identity/endpoint across retries. An idempotent HTTP request is not
-necessarily an idempotent wallet payment. A new signature, Event ID, or request
-ID must not turn an uncertain old operation into a second payment.
+## Request, Execution, and Receipt
 
-Payment Proof, Receipt, and Locks access grant are different objects. Follow the
-Locks/service contract for content authorization and secret handling; do not
-invent a conversion from a Receipt to an access grant. A watch-only processor
-can observe supported payments but cannot spend funds merely because it can
-issue receipts. Its always-on availability also does not make a mobile wallet
-always available to generate new receiving details.
+Complete the Encrypted Link before queueing Payment Request events or processing
+Receipt Access issuance. Local receipt preparation can precede a link. Both
+identities run receive and outbound workers, including Delivery Confirmations.
 
-## Integration Acceptance Checks
+1. Payee: `propose_payment_request(counterparty, terms)` creates fresh request
+   and Event IDs. Retain the returned Payment Request ID and order correlation.
+   After an uncertain result, inspect existing records instead of proposing
+   again; resume durable outbound work with original IDs/payloads.
+2. Payer: query `actionable_received_payment_requests()` or
+   `list_payment_requests(filter)`. Claim with
+   `claim_payment_request_for_execution(counterparty, &payment_request_id)`
+   before payment preparation; shared claims coordinate local apps. Check terms
+   and consent, then accept or reject. A still-proposed request must be accepted
+   successfully before execution. A claim or Acceptance is not payment.
+3. Resolve through the request-specific API and execute only through the wallet.
+   Retain one execution identity per occurrence across manual/automatic paths.
+   Do not release claims or unresolved reservations to let another app retry an
+   uncertain financial execution.
+4. Submit method-specific Payment Proof through SDK lifecycle APIs. Preserve the
+   Payment Reference, chosen payee App/endpoint, and applicable Billing Period
+   and conversion quote correlation. `ProofSubmitted` is not settlement.
+5. Payee: verify actual recipient, amount, method evidence, and settlement policy
+   before issuing a payment-confirming Receipt or granting an entitlement.
+   Persist a stable Receipt ID or retain the ID from `prepare_receipt_issuance`.
+   `process_receipt_issuance` stores the Encrypted Receipt and queues Receipt
+   Access; resume the same issuance after partial failure, then drain outbound.
+6. Recipient: intake indexes Receipt Access; `retrieve_receipt` fetches,
+   decrypts, and validates it. The app still checks issuer trust, correlation,
+   and entitlement. Receipt Access, Receipt, Payment Proof, and product access
+   grants are distinct objects.
 
-Test the selected flow at the application's boundaries; mocks alone cannot prove
-the two peers' lifecycle, generated binding, and storage contracts agree.
+Recurring requests still need app scheduling, user/local authorization, payment
+execution, and one-payment-per-Billing-Period policy. Cancellation is not a refund.
+For conversion/deadline features, establish peer support, preserve the selected
+quote with the execution, and validate payment timing/amount externally.
 
-| Case | What to check |
-| --- | --- |
-| Two receivers under one contact | Requests and payments reach the intended receiver; no duplicate identity contact or unintended cleanup |
-| No private link or offline peer | The UI reports pending/unavailable; queued work survives restart; no hidden public fallback |
-| One recipient list consumed | Resolution waits for a newer list rather than offering another entry from the consumed list |
-| Public/private publication partially fails | Per-target failures are handled even when the outer call succeeds |
-| Retry after an uncertain send | Logical IDs/correlation remain stable; no duplicate payment or request is created |
-| Proof submitted but settlement absent/mismatched | No payment-confirming Receipt or paid entitlement is granted solely on the submitted proof |
-| Receipt stored before access delivery fails | The same issuance is resumed and recipient access eventually works without a second Receipt |
-| Restart or backup restore | Matching session/key material and SDK state restore access; the seed alone is not treated as a private-history backup |
+For Allowance-based automation, use SDK accounting rather than a parallel local
+counter: reconcile complete wallet history, persist selection/association,
+reserve with `reserve_automatic_payment` or `reserve_manual_payment`, obtain a
+fresh handoff through `begin_payment_execution`, then `record_payment_outcome`.
+Only Ready with Submitted status grants one handoff; use its attempt ID for wallet
+idempotency. Unknown outcomes stay reserved. Restore/relink requires complete
+reconciliation before automation; an empty history, timeout, or Payment Proof
+cannot establish unused capacity. Read the
+[Allowance contract](https://github.com/pubky/paykit-rs/blob/master/specs/allowances.md)
+and [SDK accounting workflow](https://github.com/pubky/paykit-rs/blob/master/paykit-sdk/README.md#allowance-integration)
+when implementing automatic handling.
 
-For corrupted links and simultaneous recovery, use the cases in
-[Link Recovery](recovery.md). A fresh successful payment is not evidence that a
-preserved broken-link scenario is repaired.
+## Acceptance Checks
 
-Sources: [payment resolution](https://github.com/pubky/paykit-rs/blob/master/paykit-sdk/src/runtime/payment_resolution.rs),
+Test at app boundaries with isolated peers and no real funds:
+
+- Two apps share one identity/state: one Contact Record/link, app-attributed
+  endpoints/lists, no cross-app cleanup or duplicate request execution.
+- Offline peer/restart: durable intent survives, handshakes resume, no public fallback.
+- Consumed list and uncertain wallet result: no second endpoint/payment is offered
+  from consumed state; request-bound endpoints bypass list freshness only.
+- Partial publication/send/confirmation failure: retain IDs, reconcile progress,
+  confirm event replay without duplicate application effects.
+- Wrong/missing settlement evidence: no paid entitlement or payment-confirming Receipt.
+- Receipt stored before access delivery fails: resume the same issuance.
+- Sign-out/removal/key rotation/backup recovery: shared history and other apps are
+  preserved; stale keys and unreconciled wallet history cannot resume execution.
+
+Sources: [resolution](https://github.com/pubky/paykit-rs/blob/master/paykit-sdk/src/runtime/payment_resolution.rs),
 [request lifecycle](https://github.com/pubky/paykit-rs/blob/master/paykit-sdk/src/runtime/payment_requests.rs),
-[receipt issuance/retrieval](https://github.com/pubky/paykit-rs/blob/master/paykit-sdk/src/runtime/receipts.rs),
-[Payment Requests spec](https://github.com/pubky/paykit-rs/blob/master/specs/payment-requests.md).
+[request terms](https://github.com/pubky/paykit-rs/blob/master/paykit-lib/src/payment_request/types.rs),
+[receipt issuance](https://github.com/pubky/paykit-rs/tree/master/paykit-sdk/src/runtime/receipts).

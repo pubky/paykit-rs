@@ -1,143 +1,118 @@
 # Mobile Integration
 
-Use the generated Swift/Kotlin SDK, not a new app-side Paykit protocol layer.
-Verify platform argument labels and types in the installed package. The examples
-below show call order and arguments as pseudocode, not complete platform code.
-Canonical sources: [FFI guide](https://github.com/pubky/paykit-rs/blob/master/paykit-ffi/README.md),
-[Rust binding declarations](https://github.com/pubky/paykit-rs/tree/master/paykit-ffi/src),
-and [Swift declarations](https://github.com/pubky/paykit-rs/blob/master/paykit-ffi/bindings/ios/paykit.swift).
+Use generated Swift/Kotlin SDK declarations from the installed artifact. The
+camelCase calls below have been checked against FFI source and generated Swift;
+argument types/labels must still match the application's pin. No receiver path
+argument is present. Read [Identity and State](identity-state.md) for the shared
+architecture and [Link Recovery](recovery.md) for workers/errors.
 
-For custom chat bindings or an apparent gap in platform support, first read
-[Integration Boundaries](boundaries.md). For recovering broken peers, use
-[Link Recovery](recovery.md); the lifecycle is not specific to Swift or Kotlin.
+## Shared-State Setup
 
-## Setup and Persistence
+Swift-shaped call-order example; the app supplies the providers and capabilities:
 
 ```text
-config = defaultConfig("example-wallet/wallet")
-sessionCapabilities = requiredSessionCapabilities(config)
-sdk = PaykitSdk.withPaymentAdapter(stateStore, sessionProvider, paymentAdapter, config)
-await sdk.initialize()
-status = await sdk.identityStatus() // optional until identity state exists
-```
-
-- `SdkStateBlobStore` stores the entire opaque `SdkStateBlob` with a revision.
-  `saveStateBlobAtomically(blob, expectedRevision)` must reject stale revisions;
-  a null expected revision means the store must still be absent. Atomically
-  replace the blob and revision together. Return a new revision after a successful
-  save. Do not overwrite after a conflict or treat decode/storage errors as an
-  empty store. See the [storage contract](https://github.com/pubky/paykit-rs/blob/master/paykit-ffi/src/storage.rs).
-- Protect state and secrets at rest. Keep one long-lived handle per active
-  identity/receiver. If multiple handles or processes share storage, serialize
-  identity lifecycle, restore, and public sync operations as well as implementing
-  the store's atomic revision check.
-- `SdkPubkySessionProvider` loads current session access; it is not a mandate to
-  implement an identity manager. Persist the exported grant/PoP secret, stable
-  client ID, and receiver Noise secret securely. The Pubky identity secret is
-  optional. Keep the live access returned by bootstrap usable immediately.
-- If external auth must survive process loss, persist the complete
-  `PubkyAuthRequest.saveState()` result and restore with `resumeAuth`; the
-  authorization URL alone is insufficient. Do not log either secret-bearing value.
-- A remembered identity with `liveSessionAvailable == false` can mean temporarily
-  locked session storage, not sign-out. Preserve local state and restore access.
-- Android requires the package's native initialization before network use. Follow
-  [Android Initialization](https://github.com/pubky/paykit-rs/blob/master/paykit-ffi/README.md#android-initialization).
-  For plain JVM tests, use `PaykitPublicKeys` and `PaykitSdkDefaults` constants
-  rather than invoking native-backed key/config functions unnecessarily.
-
-## Publish Private Reservations
-
-On private-payment enrollment, explicitly call
-`publishPaykitReceiverMarker(receiverCapabilities)` to advertise this receiver's
-Noise public key. `receiverCapabilities` is a `PaykitReceiverCapabilities` record,
-not the auth `sessionCapabilities` string. Set `privatePayments`,
-`paymentRequests`, `receipts`, and `outgoingPayments` true only for features the
-app actually supports. The remote receiver must publish its marker too. Before
-the first list sync, call `ensureLinkWithPeer(counterparty, counterpartyReceiverPath,
-maxAdvanceSteps)` and inspect the report. List sync requires a linked peer or a
-persisted, resumable handshake; it does not start the handshake itself.
-
-Provide plain `PrivatePaymentListReservationUpdateInput` records containing the
-counterparty key, exact remote receiver path, and a list of
-`PrivatePaymentEndpointReservationInput` values. Each reservation contains
-`reservationId`, `identifier`, `payload`, `expiresAt`, and `attribution`.
-
-```text
-report = await sdk.syncPrivatePaymentListsWithReservationsAndProcessOutbound(
-    updates,
-    clearUnlistedLinkedPeers
+config = defaultConfig(appId: "example-wallet")
+sessionCapabilities = requiredSessionCapabilities()
+sdk = PaykitSdk.withPaymentAdapterAndPubkySharedState(
+    sessionProvider: sessionProvider,
+    paymentAdapter: paymentAdapter,
+    config: config
+)
+status = await sdk.initialize()
+registry = await sdk.publishPaykitApp(
+    displayName: "Example Wallet",
+    capabilities: capabilities
 )
 ```
 
-An empty reservations list explicitly clears that target's Private Payment List.
-For adapter callbacks, `UseCurrentReceivingDetails` requests ordinary adapter
-details; `Reservations` with an empty list requests an empty list. Do not collapse
-those responses into one empty/default value.
+This constructor has no `stateStore` parameter or `SdkStateBlobStore` callbacks.
+`withPaymentAdapterAndPubkySharedStateAndClientConfig` adds `pubkyClient`.
+State-backed calls require active grant access and current Paykit key material;
+shared-state reads are not an offline cache. `identityStatus()` is optional
+before initialization; use its `capability`, not an obsolete
+`liveSessionAvailable` field. Missing/locked access does not authorize deletion.
 
-Set `clearUnlistedLinkedPeers` only when the supplied set is complete for the
-receivers being retained; do not enable cleanup for a partial update. For
-`syncContactPrivatePaymentLists`, the keep set comes from saved contacts and
-their receiver paths. Removing a private list is not disconnecting its Noise link.
+`PubkySessionAccess(clientId:sessionSecret:localSecretKey:paykitIdentitySecretKey:)`
+accepts an optional root key and optional delegated/current-generation key.
+`PubkyLocalSecretKey.derivePaykitIdentitySecretKey(keyGeneration:)` derives a
+key; `PaykitIdentitySecretKey(bytes:keyGeneration:)` imports one. The root-only
+fallback is generation 1, not automatic detection of the current generation.
+Persist credentials, client ID, and key/generation in secure storage.
 
-`failedToQueue` reports an error during queueing or clearing, not a rollback.
-An earlier list may remain pending, and the current update may already be saved
-before lease cleanup fails. Check persisted queue/reservation state before
-releasing or recreating reservations. `failedToDeliver` reports send or cleanup
-failure after queueing; inspect its nested error and
-continue durable work with `processPendingPrivateMessages` when appropriate.
-That worker skips `Linking` peers; advance their handshakes with
-`ensureLinkWithPeer` on later cycles before expecting delivery.
+Use separate grants for independently restored sessions: restoring the same
+grant replaces its existing bearer. Return bootstrap's live `sessionAccess`
+with the same client configuration instead of immediately restoring it again.
+For pending external auth, persist all of `PubkyAuthRequest.saveState()` and
+restore via `resumeAuth`; the URL alone omits the proof-of-possession key. Do
+not log either. Once completion consumes an approval, a later exchange failure
+or cancellation requires a new auth request.
 
-## Resolve a Payment
+Callbacks must not reenter the same SDK handle while it awaits them. Android
+must call `PaykitAndroid.initialize(applicationContext)` before networking;
+plain JVM tests can use `PaykitPublicKeys` and `PaykitSdkDefaults` constants.
+Keep one long-lived handle per active app/identity. Switch identities with a new
+handle and the correct backing, never the preceding identity's blob.
+
+## Reservation Publication and Resolution
+
+Call `ensureLinkWithPeer(counterparty:maxAdvanceSteps:)` before initial private
+list publication. Pass `PrivatePaymentListReservationUpdateInput(counterparty,
+reservations)` with no remote app/path argument. Each
+`PrivatePaymentEndpointReservationInput` contains `reservationId`, `identifier`,
+`payload`, `expiresAt`, and `attribution`. Use
+`syncPrivatePaymentListsWithReservationsAndProcessOutbound(updates:clearUnlistedLinkedPeers:)`.
+An empty reservation list clears this app's list for that counterparty;
+`UseCurrentReceivingDetails` and `Reservations([])` are distinct adapter responses.
+Only enable unlisted-peer cleanup for a complete keep set for this app.
+
+Inspect `failedToQueue` and `failedToDeliver`: neither means rollback. An
+unconfirmed shared-state write may have committed; earlier work can still be
+pending. Inspect durable queue/reservation state before releasing or recreating wallet
+reservations. See [Payment Workflows](workflows.md) for retry and consumption rules.
 
 ```text
 prepared = await sdk.prepareAndResolvePrivateContactPayment(
-    counterparty,
-    counterpartyReceiverPath,
-    amount,                         // PaymentAmountContext or nil/null
-    afterPrivatePaymentListVersion, // nil/null until a list was consumed
-    maxAdvanceSteps
+    counterparty: counterparty,
+    amount: amount,
+    afterPrivatePaymentListVersion: consumedVersion,
+    maxAdvanceSteps: maxAdvanceSteps
 )
-resolution = prepared.resolution
 ```
 
-This call can throw `RecoveryRequired` while the stored peer is still `Linking`.
-Check `linkedPeers()` for the exact counterparty/path; preserve a pending
-handshake and retry later, without resetting state or silently using public
-endpoints. See [Link Recovery](recovery.md) for other failures.
+`amount` is optional `PaymentAmountContext`; `consumedVersion` is optional
+`UInt64` in Swift. Inspect `prepared.resolution.status`, `.state`,
+`.privatePaymentListVersion`, and `.payableEndpoints`, plus preparation reports.
+Public resolution is `resolvePublicContactPayment(counterparty:amount:)`, with
+no private fallback. For a Payment Request, use the request-specific resolution
+APIs rather than replacing its destination constraints with contact resolution.
+Export `PaymentPayload` text only at the wallet boundary, never routine logging.
 
-On success, use `resolution.status`, `resolution.state`, and
-`resolution.payableEndpoints`. Using any endpoint consumes the entire list:
-persist `resolution.privatePaymentListVersion` before submitting payment and
-retain it while the payment is pending or uncertain.
-Retain the link/receive/outbound reports for diagnosing partial progress. This
-call never resolves public endpoints; a public flow uses
-`resolvePublicContactPayment(counterparty, counterpartyReceiverPath, amount)`.
+## Callback Storage and Backup Boundaries
 
-Endpoint payloads and targets use `PaymentPayload`; call `exportText()` at the
-wallet integration boundary, not for routine UI/logging. Wallet-specific
-payability and execution remain the payment adapter/application's responsibility.
+Use `withPaymentAdapter(stateStore:sessionProvider:paymentAdapter:config:)` only
+when intentionally selecting custom/local storage. Every runtime for an identity
+must resolve to the same logical state; independent local stores are not shared
+state. `saveStateBlobAtomically(blob, expectedRevision)` must atomically store
+blob/revision, reject stale revisions, and require absence for a null revision.
+Return a new nonempty revision never reused for another blob; reject decode
+errors rather than loading empty state. Protect these plaintext blobs at rest.
 
-## Backups and Errors
+`exportBackupString()` is a separate, unencrypted hex export, not the live Pubky
+resource. Encrypt it at the app backup boundary. Compare `backupStateRevision()`
+before/after mutations, including a `finally` path after failures, to schedule
+backup; failed comparison means conservatively dirty. This excludes transient
+leases and is not `stateRevision()` or a storage CAS token. Restore/recovery
+constraints and key handling are in [Identity and State](identity-state.md#backups-and-restore).
 
-`SdkStateBlob` is live local persistence; `exportBackupString()` is a separate
-SDK backup containing secret-bearing snapshots, private messages, and Receipt
-Decryption Keys. The exported string is not encrypted; the app must encrypt it
-before storage or upload and never log it. Preserve session credentials and the
-receiver Noise secret separately in secure storage too. Restore SDK backups
-with `restoreBackupString` after restoring appropriate session access. Neither
-exporting a backup nor retaining the seed replaces live atomic storage.
+Android callback-supplied blob, payment-payload, and reservation-attribution
+wrappers implement `AutoCloseable`; export needed values and close wrappers
+before returning. Swift uses ARC. Treat explicitly exported private fields as
+sensitive even when generated descriptions are redacted.
+`PrivateOperationError.category`/`code` support branching; `redactedContext` is
+for normal diagnostics. `exportDebugDetails()` is sensitive, explicit diagnostics
+only. Generic batch codes do not prove retryability.
 
-Compare `backupStateRevision()` before and after mutating workflows to schedule
-the app's backup, including when an operation throws after persisting progress.
-Run the after-check in a `finally`/equivalent cleanup path; if it cannot be read,
-conservatively mark the backup dirty. This fingerprint excludes transient leases.
-It is not `stateRevision()` and must not be used as the store's CAS revision.
-
-Use structured error categories/codes where available. Some batch reports carry
-only a generic operation-failed code, not the underlying cause; inspect peer/queue
-state as described in [Link Recovery](recovery.md) instead of parsing debug text
-or blindly retrying. `PrivateOperationError`
-offers `redactedContext` for ordinary logging; `exportDebugDetails()` is for
-explicit diagnostics and can reveal sensitive data. Reports may contain
-per-target failures even when the outer call succeeds.
+Sources: [constructors/backups](https://github.com/pubky/paykit-rs/blob/master/paykit-ffi/src/sdk.rs),
+[session callbacks](https://github.com/pubky/paykit-rs/blob/master/paykit-ffi/src/session.rs),
+[storage contract](https://github.com/pubky/paykit-rs/blob/master/paykit-ffi/src/storage.rs),
+[generated Swift](https://github.com/pubky/paykit-rs/blob/master/paykit-ffi/bindings/ios/paykit.swift).
