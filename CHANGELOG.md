@@ -7,6 +7,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc59 - 2026-10-01
+
+### Fixed
+
+- Redact sensitive payment, profile, and shared-state records in Swift and Kotlin
+  debug output.
+- Report shared state as busy when lock acquisition fails and pending writes
+  cannot be ruled out.
+
 ## 0.1.0-rc58 - 2026-10-01
 
 ### Fixed
