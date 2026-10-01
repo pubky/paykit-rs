@@ -1,7 +1,7 @@
 //! Durable wallet payment admission. This module never executes or settles payment.
 
 use crate::storage::StorageTransaction;
-use crate::{PaykitReceiverPath, PaykitSdkError, Result};
+use crate::{PaykitSdkError, Result};
 use chrono::{DateTime, Utc};
 use paykit_lib::{AllowanceId, AllowanceTerms, PaymentRequestTerms};
 
@@ -16,7 +16,7 @@ pub(crate) use history::{
 };
 pub(crate) use selection::{candidates, reassociate, select, set_disposition};
 pub use types::*;
-pub(crate) use validation::validate_accounting;
+pub(crate) use validation::{payer_scope, validate_accounting};
 
 fn policy(message: &str) -> PaykitSdkError {
     PaykitSdkError::Policy {
@@ -38,27 +38,20 @@ fn new_id() -> String {
 
 fn scope(
     tx: &dyn StorageTransaction,
-    local_path: &PaykitReceiverPath,
     input: &PaymentRequestScope,
 ) -> Result<PaymentAccountingScope> {
     let identity = tx
         .load_identity_state()
-        .and_then(|state| state.local_pubky_public_key)
+        .and_then(|state| state.public_key)
         .ok_or_else(|| policy("Payment accounting requires an initialized payer identity"))?;
     Ok(PaymentAccountingScope {
         local_public_key: identity,
-        local_receiver_path: local_path.clone(),
         counterparty: input.counterparty.clone(),
-        counterparty_receiver_path: input.counterparty_receiver_path.clone(),
         payment_request_id: input.payment_request_id.as_str().to_owned(),
     })
 }
 
-fn key(
-    tx: &dyn StorageTransaction,
-    local_path: &PaykitReceiverPath,
-    input: &PaymentOccurrence,
-) -> Result<PaymentOccurrenceKey> {
+fn key(tx: &dyn StorageTransaction, input: &PaymentOccurrence) -> Result<PaymentOccurrenceKey> {
     let billing_period = input
         .billing_period
         .as_ref()
@@ -75,7 +68,7 @@ fn key(
         })
         .transpose()?;
     Ok(PaymentOccurrenceKey {
-        request: scope(tx, local_path, &input.request)?,
+        request: scope(tx, &input.request)?,
         billing_period,
     })
 }
@@ -99,11 +92,14 @@ fn load(tx: &dyn StorageTransaction) -> Result<AllowanceAccountingState> {
 }
 
 fn save(tx: &mut dyn StorageTransaction, mut state: AllowanceAccountingState) -> Result<()> {
+    validate_accounting(&state)?;
+    if tx.allowance_accounting_state().as_ref() == Some(&state) {
+        return Ok(());
+    }
     state.revision = state
         .revision
         .checked_add(1)
         .ok_or_else(|| protocol("Payment accounting revision exhausted"))?;
-    validate_accounting(&state)?;
     tx.save_allowance_accounting_state(state);
     Ok(())
 }
@@ -113,16 +109,11 @@ fn request(
     scope: &PaymentAccountingScope,
     time: DateTime<Utc>,
 ) -> Result<crate::PaymentRequestRecord> {
-    use crate::domain::payment_requests::payment_request_records_in;
-    payment_request_records_in(
-        tx,
-        &scope.counterparty,
-        &scope.counterparty_receiver_path,
-        time,
-    )?
-    .into_iter()
-    .find(|record| record.payment_request_id == scope.payment_request_id)
-    .ok_or_else(|| policy("Payment Request history is unavailable"))
+    use crate::domain::payment_requests::payment_request_records_from_transaction;
+    payment_request_records_from_transaction(tx, &scope.counterparty, time)?
+        .into_iter()
+        .find(|record| record.payment_request_id == scope.payment_request_id)
+        .ok_or_else(|| policy("Payment Request history is unavailable"))
 }
 
 fn request_terms(record: &crate::PaymentRequestRecord) -> Result<PaymentRequestTerms> {
@@ -144,7 +135,7 @@ fn valid_request(
             || (record.state == State::ProofSubmitted && record.accepted_event_id.is_some()))
             || (proposed && record.state == State::Proposed))
         && tx
-            .linked_peer(&scope.counterparty, &scope.counterparty_receiver_path)
+            .linked_peer(&scope.counterparty)
             .is_some_and(|peer| peer.state == LinkedPeerState::Linked)
 }
 
@@ -154,27 +145,27 @@ fn allowance_terms(
     id: &str,
 ) -> Result<(crate::AllowanceRecord, AllowanceTerms)> {
     use crate::domain::allowances::allowance_records_in_transaction;
-    let record = allowance_records_in_transaction(
-        tx,
-        &scope.counterparty,
-        &scope.counterparty_receiver_path,
-    )
-    .into_iter()
-    .find(|record| record.allowance_id == id)
-    .ok_or_else(|| policy("Allowance history is unavailable"))?;
+    let record = allowance_records_in_transaction(tx, &scope.counterparty)
+        .into_iter()
+        .find(|record| record.allowance_id == id)
+        .ok_or_else(|| policy("Allowance history is unavailable"))?;
     let raw = if let Some(item_id) = record.proposal_stream_item_id {
-        tx.private_stream_items(&scope.counterparty, &scope.counterparty_receiver_path)
+        tx.private_stream_items(&scope.counterparty)
             .into_iter()
             .find(|item| item.stream_item_id == item_id)
             .map(|item| item.raw_json)
     } else {
-        tx.outbound_private_messages(&scope.counterparty, &scope.counterparty_receiver_path)
+        tx.outbound_private_messages(&scope.counterparty)
             .into_iter()
             .find(|item| Some(item.outbound_message_id) == record.proposal_outbound_message_id)
             .map(|item| item.raw_json)
     }
     .ok_or_else(|| policy("Allowance proposal history is unavailable"))?;
+    let app_id = serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|value| value.get("app_id")?.as_str().map(str::to_owned));
     let message = paykit_lib::PrivateApplicationMessage {
+        app_id,
         version: Some(1),
         kind: Some("paykit.allowance_proposal".into()),
         raw_json: raw,
@@ -211,9 +202,7 @@ fn watermark(
     } else {
         state.history.watermarks.push(AllowanceWatermarkRecord {
             local_public_key: scope.local_public_key.clone(),
-            local_receiver_path: scope.local_receiver_path.clone(),
             counterparty: scope.counterparty.clone(),
-            counterparty_receiver_path: scope.counterparty_receiver_path.clone(),
             allowance_id: id.to_owned(),
             evaluated_at: time,
         });
@@ -227,9 +216,7 @@ fn watermark_scope(
     id: &str,
 ) -> bool {
     record.local_public_key == scope.local_public_key
-        && record.local_receiver_path == scope.local_receiver_path
         && record.counterparty == scope.counterparty
-        && record.counterparty_receiver_path == scope.counterparty_receiver_path
         && record.allowance_id == id
 }
 
@@ -272,10 +259,9 @@ fn occupied(record: &PaymentOccurrenceRecord) -> bool {
 /// Serialize an ordinary manual response with every payment admission path.
 pub(crate) fn manual_response(
     tx: &mut dyn StorageTransaction,
-    local: &PaykitReceiverPath,
     input: PaymentRequestScope,
 ) -> Result<()> {
-    let scope = scope(tx, local, &input)?;
+    let scope = scope(tx, &input)?;
     let mut state = tx
         .allowance_accounting_state()
         .unwrap_or_else(|| AllowanceAccountingState {

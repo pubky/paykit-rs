@@ -10,7 +10,7 @@ const FIRST_PROOF_ID: &str = "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103";
 const SECOND_PROOF_ID: &str = "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104";
 
 async fn outbound(storage: &InMemoryStorage, peer: &PubkyPublicKey, raw: String) {
-    enqueue_untyped_private_message(storage, peer.clone(), receiver_path(), raw, timestamp())
+    enqueue_untyped_private_message(storage, peer.clone(), raw, timestamp())
         .await
         .unwrap();
 }
@@ -46,17 +46,123 @@ fn attributed_proof(event_id: &str, allowance_id: &str) -> String {
     else {
         panic!("expected proof");
     };
-    serialize_payment_request_event(&PaymentRequestEvent::Proof(
-        proof.with_allowance_id(AllowanceId::new(allowance_id).unwrap()),
-    ))
+    serialize_payment_request_event(
+        &paykit_lib::PaykitAppId::new("bitkit").unwrap(),
+        &PaymentRequestEvent::Proof(
+            proof.with_allowance_id(AllowanceId::new(allowance_id).unwrap()),
+        ),
+    )
     .unwrap()
 }
 
 async fn record(storage: &InMemoryStorage, peer: &PubkyPublicKey) -> PaymentRequestRecord {
-    payment_request_records(storage, peer, &receiver_path(), timestamp())
+    payment_request_records(storage, peer, timestamp())
         .await
         .unwrap()
         .remove(0)
+}
+
+#[tokio::test]
+async fn test_cancellation_retains_settled_payment_claim_after_origin_app_removal() {
+    let storage = registered_storage();
+    let peer = counterparty();
+    persist_authorized_request(&storage, peer.clone(), REQUEST_ID).await;
+    claim_execution(&storage, peer.clone(), REQUEST_ID, app_id()).await;
+    enqueue_checked_payment_request_action(
+        &storage,
+        peer.clone(),
+        &app_id(),
+        &parsed_event(acceptance_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
+            REQUEST_ID,
+        )),
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    storage
+        .transaction(|tx| {
+            let epoch = EventId::new_v4().to_string();
+            tx.save_allowance_accounting_state(crate::AllowanceAccountingState {
+                revision: 1,
+                epoch: epoch.clone(),
+                requires_reconciliation: false,
+                history: crate::AllowanceAccountingHistory {
+                    occurrences: vec![crate::PaymentOccurrenceRecord {
+                        key: crate::PaymentOccurrenceKey {
+                            request: crate::PaymentAccountingScope {
+                                local_public_key: tx
+                                    .load_identity_state()
+                                    .unwrap()
+                                    .public_key
+                                    .unwrap(),
+                                counterparty: peer.clone(),
+                                payment_request_id: REQUEST_ID.into(),
+                            },
+                            billing_period: None,
+                        },
+                        disposition: crate::PaymentDisposition::ManualOnly,
+                        allowance_id: None,
+                        association_revision: None,
+                        attempts: vec![crate::PaymentAttemptRecord {
+                            attempt_id: EventId::new_v4().to_string(),
+                            mode: crate::PaymentExecutionMode::Manual,
+                            allowance_id: None,
+                            association_revision: None,
+                            amount: AmountRecord {
+                                value: "0.001".into(),
+                                asset: "btc".into(),
+                            },
+                            admitted_at: timestamp(),
+                            status: crate::PaymentExecutionStatus::Succeeded,
+                            epoch,
+                        }],
+                    }],
+                    ..Default::default()
+                },
+            });
+            tx.save_authorized_paykit_apps(peer.clone(), HashMap::new());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let accepted = record(&storage, &peer).await;
+    assert!(matches!(
+        storage
+            .transaction(|tx| require_payment_execution_authority(tx, &peer, &app_id(), &accepted))
+            .await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
+    persist_messages(
+        &storage,
+        peer.clone(),
+        vec![cancellation_raw(SECOND_PROOF_ID, REQUEST_ID)],
+    )
+    .await;
+    let canceled = record(&storage, &peer).await;
+    assert_eq!(canceled.state, PaymentRequestLifecycleState::Canceled);
+    assert_eq!(canceled.execution_claim_app_id, Some(app_id()));
+    let accounting = storage.snapshot().unwrap().allowance_accounting;
+    let proof = parsed_event(proof_raw(FIRST_PROOF_ID, REQUEST_ID, REFERENCE));
+    storage
+        .transaction(|tx| {
+            let other = paykit_lib::PaykitAppId::new("other-wallet").unwrap();
+            assert!(matches!(
+                require_current_payment_request_action(tx, &peer, &other, &proof, timestamp()),
+                Err(PaykitSdkError::Policy { .. })
+            ));
+            Ok(())
+        })
+        .await
+        .unwrap();
+    enqueue_checked_payment_request_action(&storage, peer.clone(), &app_id(), &proof, timestamp())
+        .await
+        .unwrap();
+    let reported = record(&storage, &peer).await;
+    assert_eq!(reported.state, PaymentRequestLifecycleState::Canceled);
+    assert_eq!(reported.payment_proofs.len(), 1);
+    assert!(reported.execution_claim_app_id.is_none());
+    assert_eq!(storage.snapshot().unwrap().allowance_accounting, accounting);
 }
 
 #[tokio::test]
@@ -65,7 +171,7 @@ async fn test_corrective_payment_proofs_preserve_inbound_and_outbound_evidence()
         PaymentRequestLocalRole::Payer,
         PaymentRequestLocalRole::Payee,
     ] {
-        let storage = InMemoryStorage::new();
+        let storage = registered_storage();
         let peer = counterparty();
         accepted_request(&storage, &peer, role).await;
         let first = attributed_proof(FIRST_PROOF_ID, ALLOWANCE_ID);
@@ -100,7 +206,7 @@ async fn test_corrective_payment_proofs_preserve_inbound_and_outbound_evidence()
 
 #[tokio::test]
 async fn test_replayed_payment_proof_is_not_another_proof_record() {
-    let storage = InMemoryStorage::new();
+    let storage = registered_storage();
     let peer = counterparty();
     accepted_request(&storage, &peer, PaymentRequestLocalRole::Payee).await;
     let proof = attributed_proof(FIRST_PROOF_ID, ALLOWANCE_ID);
@@ -118,7 +224,7 @@ async fn test_replayed_payment_proof_is_not_another_proof_record() {
 
 #[tokio::test]
 async fn test_payment_proof_reused_event_id_with_changed_attribution_fails_closed() {
-    let storage = InMemoryStorage::new();
+    let storage = registered_storage();
     let peer = counterparty();
     accepted_request(&storage, &peer, PaymentRequestLocalRole::Payee).await;
     persist_messages(
@@ -139,7 +245,7 @@ async fn test_payment_proof_reused_event_id_with_changed_attribution_fails_close
 
 #[tokio::test]
 async fn test_different_payment_proof_attributions_remain_informational_claims() {
-    let storage = InMemoryStorage::new();
+    let storage = registered_storage();
     let peer = counterparty();
     accepted_request(&storage, &peer, PaymentRequestLocalRole::Payee).await;
     persist_messages(
@@ -164,15 +270,12 @@ async fn test_different_payment_proof_attributions_remain_informational_claims()
         result.payment_proofs[1].allowance_id.as_deref(),
         Some(REQUEST_ID)
     );
-    assert!(allowance_records(&storage, &peer, &receiver_path())
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(allowance_records(&storage, &peer).await.unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn test_payment_proof_can_report_ended_allowance_without_restoring_authority() {
-    let storage = InMemoryStorage::new();
+    let storage = registered_storage();
     let peer = counterparty();
     accepted_request(&storage, &peer, PaymentRequestLocalRole::Payee).await;
     persist_messages(
@@ -201,9 +304,7 @@ async fn test_payment_proof_can_report_ended_allowance_without_restoring_authori
         )],
     )
     .await;
-    let before = allowance_records(&storage, &peer, &receiver_path())
-        .await
-        .unwrap();
+    let before = allowance_records(&storage, &peer).await.unwrap();
     assert_eq!(before[0].state, AllowanceLifecycleState::Ended);
     assert_eq!(before[0].history_status, AllowanceHistoryStatus::Consistent);
 
@@ -220,17 +321,12 @@ async fn test_payment_proof_can_report_ended_allowance_without_restoring_authori
             .as_deref(),
         Some(ALLOWANCE_ID)
     );
-    assert_eq!(
-        allowance_records(&storage, &peer, &receiver_path())
-            .await
-            .unwrap(),
-        before
-    );
+    assert_eq!(allowance_records(&storage, &peer).await.unwrap(), before);
 }
 
 #[tokio::test]
 async fn test_proof_submitted_requires_retained_acceptance_for_another_proof() {
-    let storage = InMemoryStorage::new();
+    let storage = registered_storage();
     let peer = counterparty();
     accepted_request(&storage, &peer, PaymentRequestLocalRole::Payee).await;
     persist_messages(
@@ -251,7 +347,7 @@ async fn test_proof_submitted_requires_retained_acceptance_for_another_proof() {
 
 #[tokio::test]
 async fn test_payment_proof_record_omits_absent_attribution_and_redacts_submission() {
-    let storage = InMemoryStorage::new();
+    let storage = registered_storage();
     let peer = counterparty();
     accepted_request(&storage, &peer, PaymentRequestLocalRole::Payee).await;
     persist_messages(
@@ -269,6 +365,8 @@ async fn test_payment_proof_record_omits_absent_attribution_and_redacts_submissi
         proof
     );
     let submission = PaymentProofSubmission {
+        payment_app_id: paykit_lib::PaykitAppId::new("bitkit").unwrap(),
+
         conversion_quote_id: None,
         billing_period: None,
         payment_endpoint_identifier: PaymentEndpointIdentifier::new("btc-lightning-bolt11")

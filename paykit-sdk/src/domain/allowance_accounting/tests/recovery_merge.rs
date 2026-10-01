@@ -6,7 +6,6 @@ async fn defer(fixture: &Fixture) -> AllowanceAccountingState {
         .transaction(|tx| {
             set_disposition(
                 tx,
-                &path(),
                 fixture.occurrence.clone(),
                 PaymentDisposition::Deferred {
                     reason: "endpoint temporarily unavailable".into(),
@@ -30,7 +29,7 @@ async fn execute_after_deferral(
             .transaction(|tx| {
                 reserve(
                     tx,
-                    &path(),
+                    &app_id(),
                     fixture.occurrence.clone(),
                     Some(1),
                     checks(),
@@ -43,7 +42,7 @@ async fn execute_after_deferral(
     if status != PaymentExecutionStatus::Prepared {
         fixture
             .storage
-            .transaction(|tx| begin(tx, &path(), prepared.attempt_id.clone(), checks()))
+            .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id.clone(), checks()))
             .await
             .map(attempt)
             .unwrap();
@@ -89,7 +88,6 @@ async fn restore_and_reconcile(
             tx.save_allowance_accounting_state(destination.clone());
             reconcile(
                 tx,
-                &path(),
                 AllowanceAccountingReconciliation {
                     expected_revision: Some(destination.revision),
                     history: recovered.history,
@@ -203,15 +201,13 @@ async fn test_accounting_recovery_preserves_deferral_with_failed_only_evidence()
 }
 
 #[tokio::test]
-async fn test_accounting_backup_restore_merges_execution_over_deferred_destination() {
+async fn test_accounting_backup_restore_rejects_populated_destination() {
     let (fixture, deferred, executed) = execute_after_deferral(
         PaymentExecutionMode::Automatic,
         PaymentExecutionStatus::Prepared,
     )
     .await;
-    let backup = crate::export_backup_state(&fixture.storage, path())
-        .await
-        .unwrap();
+    let backup = crate::export_backup_state(&fixture.storage).await.unwrap();
     fixture
         .storage
         .transaction(|tx| {
@@ -220,10 +216,32 @@ async fn test_accounting_backup_restore_merges_execution_over_deferred_destinati
         })
         .await
         .unwrap();
-    crate::backup::restore_backup_state_with_identity(&fixture.storage, backup, path(), None)
-        .await
+    let before = fixture.storage.snapshot().unwrap();
+    assert!(crate::backup::restore_backup_state_with_identity(
+        &fixture.storage,
+        backup.clone(),
+        None,
+        None,
+        time()
+    )
+    .await
+    .is_err());
+    assert_eq!(fixture.storage.snapshot().unwrap(), before);
+    let restored_storage = InMemoryStorage::new();
+    crate::backup::restore_backup_state_with_identity(
+        &restored_storage,
+        backup,
+        None,
+        None,
+        time(),
+    )
+    .await
+    .unwrap();
+    let restored = restored_storage
+        .snapshot()
+        .unwrap()
+        .allowance_accounting
         .unwrap();
-    let restored = fixture.state();
     assert!(restored.requires_reconciliation);
     assert_eq!(
         restored.history.occurrences[0].disposition,
@@ -236,7 +254,17 @@ async fn test_accounting_backup_restore_merges_execution_over_deferred_destinati
         vec![expected_attempt]
     );
     assert!(matches!(
-        fixture.reserve().await,
+        restored_storage
+            .transaction(|tx| reserve(
+                tx,
+                &app_id(),
+                fixture.occurrence.clone(),
+                Some(1),
+                checks(),
+                PaymentExecutionMode::Automatic
+            ))
+            .await
+            .unwrap(),
         PaymentAttemptDecision::Blocked {
             reason: AllowanceAccountingBlock::ReconciliationRequired
         }
@@ -260,7 +288,6 @@ async fn test_accounting_recovery_rejects_already_malformed_deferred_evidence() 
         .transaction(|tx| {
             reconcile(
                 tx,
-                &path(),
                 AllowanceAccountingReconciliation {
                     expected_revision: Some(before.revision),
                     history: malformed.history,

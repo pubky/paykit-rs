@@ -45,8 +45,6 @@ impl FfiAccountingAmount {
 pub struct FfiPaymentRequestScope {
     /// Authenticated counterparty.
     pub counterparty: String,
-    /// Counterparty runtime folder.
-    pub counterparty_receiver_path: String,
     /// Immutable Payment Request identifier.
     pub payment_request_id: String,
 }
@@ -69,12 +67,8 @@ pub struct FfiPaymentOccurrence {
 pub struct FfiPaymentAccountingScope {
     /// Payer identity, taken from the SDK's identity state.
     pub local_public_key: String,
-    /// Payer runtime folder, taken from SDK configuration.
-    pub local_receiver_path: String,
     /// Authenticated payee identity.
     pub counterparty: String,
-    /// Authenticated payee runtime folder.
-    pub counterparty_receiver_path: String,
     /// Stable Payment Request ID.
     pub payment_request_id: String,
 }
@@ -179,12 +173,8 @@ pub struct FfiAllowanceAssociationRecord {
 pub struct FfiAllowanceWatermarkRecord {
     /// Local payer identity.
     pub local_public_key: String,
-    /// Local runtime folder.
-    pub local_receiver_path: String,
     /// Remote Allowee identity.
     pub counterparty: String,
-    /// Remote runtime folder.
-    pub counterparty_receiver_path: String,
     /// Allowance whose usage and evaluation time are tracked.
     pub allowance_id: String,
     /// Latest trusted evaluation instant, including blocked evaluations.
@@ -204,12 +194,12 @@ pub struct FfiAllowanceAccountingHistory {
     pub watermarks: Vec<FfiAllowanceWatermarkRecord>,
 }
 
-/// Durable ledger coordinated by one SDK runtime and its wallet executor.
+/// Identity-wide durable ledger shared by authorized apps and their executors.
 ///
 /// Treat these fields as private wallet data; do not log or describe the record.
 #[derive(uniffi::Record, Clone)]
 pub struct FfiAllowanceAccountingState {
-    /// Monotonic local ledger revision for reconciliation compare-and-set.
+    /// Monotonic ledger revision for reconciliation compare-and-set.
     pub revision: u64,
     /// Epoch invalidating prepared handoffs after restore or private-state loss.
     pub epoch: String,
@@ -402,16 +392,7 @@ pub enum FfiPaymentOutcome {
     Unknown,
 }
 
-macro_rules! redacted_debug {
-    ($($type:ty),+ $(,)?) => {$ (
-        impl fmt::Debug for $type {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str(concat!(stringify!($type), "(<redacted>)"))
-            }
-        }
-    )+ };
-}
-redacted_debug!(
+impl_redacted_debug!(
     FfiPaymentRequestScope,
     FfiPaymentOccurrence,
     FfiPaymentAccountingScope,

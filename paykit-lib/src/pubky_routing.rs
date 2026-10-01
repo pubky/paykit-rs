@@ -4,7 +4,7 @@
 //! module centralizes public payment endpoint path construction and public
 //! storage access so call sites do not hard-code Pubky paths.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use pubky::{
     errors::RequestError, Error as PubkyError, PubkyResource, PubkySession, PublicKey,
@@ -13,22 +13,75 @@ use pubky::{
 use tracing::{debug, error, instrument, trace};
 
 use crate::{
-    parse_paykit_receiver_marker_json, serialize_paykit_receiver_marker, validation::invalid_data,
-    PaykitError, PaykitReceiverMarker, PaykitReceiverPath, PaymentEndpointIdentifier,
-    PaymentEndpointPayload, PaymentList, Result,
+    parse_paykit_app_registry_json, serialize_paykit_app_registry, validation::invalid_data,
+    PaykitAppId, PaykitAppRegistry, PaykitError, PaymentEndpointIdentifier, PaymentEndpointPayload,
+    PaymentList, Result, PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES, PAYMENT_LIST_MAX_ENDPOINTS,
 };
 
-/// Conventional prefix for Paykit public data.
-pub const PAYKIT_PATH_PREFIX: &str = "/pub/paykit/v0";
+mod locks;
+#[cfg(test)]
+pub(crate) use locks::with_write_lock_timeout;
+pub use locks::{
+    delete_resource_if_revision, is_write_conflict, put_resource_if_revision, with_write_lock,
+};
 
-/// Conventional prefix for receiver-scoped Paykit private data.
+/// Content fingerprint used to detect an application-level stale edit.
+pub fn content_revision(bytes: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(bytes).to_hex())
+}
+
+/// Conventional prefix for public Paykit data hosted on Pubky storage.
+///
+pub const PAYKIT_PATH_PREFIX: &str = "/pub/paykit/v0/";
+
+/// Public path for the identity-wide Paykit App Registry.
+pub const PAYKIT_APP_REGISTRY_PATH: &str = "/pub/paykit/v0/app-registry.json";
+
+/// Pubky path for the encrypted identity-wide SDK state.
+pub const PAYKIT_SHARED_STATE_PATH: &str = "/pub/paykit/v0/shared-state.bin";
+
+/// Prefix for empty markers identifying unconfirmed shared-state writes.
+pub const PAYKIT_SHARED_STATE_WRITE_PATH_PREFIX: &str = "/pub/paykit/v0/shared-state-writes/";
+
+/// Conventional prefix for private (encrypted) Paykit data.
+///
+/// This prefix is used as the base path for pubky-noise's encrypted messaging.
+/// The actual write and read paths are derived per-counterparty pair using
+/// [`pubky_noise::path_derivation::derive_asymmetric_paths`]. Pubky-noise manages
+/// individual file slots within the derived folders using a counter-based scheme.
 pub const PAYKIT_PRIVATE_PATH_PREFIX: &str = "/pub/paykit/v0/private";
+
+/// Conventional prefix for Encrypted Link recovery markers.
+///
+/// Marker paths are derived per-counterparty pair before being appended below
+/// this prefix, so the prefix itself does not identify the counterparty pair.
+pub const PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX: &str =
+    "/pub/paykit/v0/encrypted-link-recovery";
+
+pub(crate) fn identity_pair_path_domain(
+    domain: &[u8],
+    local_identity_public_key: &PublicKey,
+    remote_identity_public_key: &PublicKey,
+) -> Vec<u8> {
+    let mut identities = [
+        local_identity_public_key.to_bytes(),
+        remote_identity_public_key.to_bytes(),
+    ];
+    identities.sort_unstable();
+    // Fixed-width keys make the pair unambiguous; sorting preserves peer parity.
+    // The caller still derives paths with a Noise DH secret to keep them private.
+    let mut path_domain = Vec::with_capacity(domain.len() + 64);
+    path_domain.extend_from_slice(domain);
+    path_domain.extend_from_slice(&identities[0]);
+    path_domain.extend_from_slice(&identities[1]);
+    path_domain
+}
 
 const LIST_PAGE_LIMIT: u16 = 100;
 const LIST_MAX_PAGES: usize = 100;
 
 /// Maximum accepted size for a public Paykit document (Payment Endpoint
-/// payloads, receiver markers).
+/// payloads, the Paykit App Registry, and recovery markers).
 ///
 /// Public objects are served by other users' homeservers and must not be
 /// trusted to fit in memory; an unbounded read lets a hostile publisher
@@ -36,325 +89,211 @@ const LIST_MAX_PAGES: usize = 100;
 /// (LNURL, BOLT11 invoice, JSON endpoint payload).
 pub(crate) const MAX_PUBLIC_RESOURCE_BYTES: usize = 64 * 1024;
 
-/// Writes or updates a receiver-scoped Payment Endpoint document.
-#[instrument(skip(session, payload), fields(receiver = %receiver_path, identifier = %identifier))]
-pub async fn upsert_payment_endpoint(
-    session: &PubkySession,
-    receiver_path: &PaykitReceiverPath,
-    identifier: &PaymentEndpointIdentifier,
-    payload: &PaymentEndpointPayload,
-) -> Result<()> {
-    let path = payment_endpoint_path(receiver_path, identifier);
-    debug!(path = %path, "writing Payment Endpoint to Pubky storage");
-    session
-        .storage()
-        .put(path, payload.as_str().to_string())
-        .await
-        .map_err(|err| {
-            error!(error = %err, "failed to put Payment Endpoint");
-            PaykitError::Transport {
-                context: "put Payment Endpoint".into(),
-                source: err.into(),
-            }
-        })?;
-    Ok(())
-}
+#[derive(Debug, thiserror::Error)]
+#[error("Payment List exceeds caller-supplied limits")]
+struct PaymentListLimitExceeded;
 
-/// Removes a receiver-scoped Payment Endpoint from the authenticated Pubky session.
-#[instrument(skip(session), fields(receiver = %receiver_path, identifier = %identifier))]
-pub async fn delete_payment_endpoint(
-    session: &PubkySession,
-    receiver_path: &PaykitReceiverPath,
-    identifier: &PaymentEndpointIdentifier,
-) -> Result<()> {
-    let path = payment_endpoint_path(receiver_path, identifier);
-    debug!(path = %path, "deleting Payment Endpoint from Pubky storage");
-    match session.storage().delete(path).await {
-        Ok(_) => {}
-        Err(err) if is_not_found(&err) => {
-            debug!("Payment Endpoint already absent");
-        }
-        Err(err) => {
-            error!(error = %err, "failed to delete Payment Endpoint");
-            return Err(PaykitError::Transport {
-                context: "delete Payment Endpoint".into(),
-                source: err.into(),
-            });
-        }
-    }
-    Ok(())
-}
+#[derive(Debug, thiserror::Error)]
+#[error("response exceeds caller-supplied byte limit")]
+struct ResponseSizeLimitExceeded;
 
-/// Writes or updates a receiver marker document.
-#[instrument(skip(session, marker), fields(receiver = %marker.receiver_path))]
-pub async fn upsert_paykit_receiver_marker(
-    session: &PubkySession,
-    marker: &PaykitReceiverMarker,
-) -> Result<()> {
-    let path = receiver_marker_path(&marker.receiver_path);
-    let payload = serialize_paykit_receiver_marker(marker)?;
-    debug!(path = %path, "writing Paykit receiver marker to Pubky storage");
-    session.storage().put(path, payload).await.map_err(|err| {
-        error!(error = %err, "failed to put Paykit receiver marker");
-        PaykitError::Transport {
-            context: "put Paykit receiver marker".into(),
-            source: err.into(),
-        }
-    })?;
-    Ok(())
-}
-
-/// Removes a receiver marker document.
-#[instrument(skip(session), fields(receiver = %receiver_path))]
-pub async fn delete_paykit_receiver_marker(
-    session: &PubkySession,
-    receiver_path: &PaykitReceiverPath,
-) -> Result<()> {
-    let path = receiver_marker_path(receiver_path);
-    debug!(path = %path, "deleting Paykit receiver marker from Pubky storage");
-    match session.storage().delete(path).await {
-        Ok(_) => {}
-        Err(err) if is_not_found(&err) => {
-            debug!("Paykit receiver marker already absent");
-        }
-        Err(err) => {
-            error!(error = %err, "failed to delete Paykit receiver marker");
-            return Err(PaykitError::Transport {
-                context: "delete Paykit receiver marker".into(),
-                source: err.into(),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Fetches all public Payment Endpoints for one receiver from Pubky storage.
-///
-/// Directory listing and per-resource fetches are not atomic; the returned list is a
-/// best-effort snapshot of the payee's homeserver state.
-#[instrument(skip(storage), fields(payee = %payee, receiver = %receiver_path))]
-pub async fn fetch_payment_list(
-    storage: &PublicStorage,
-    payee: &PublicKey,
-    receiver_path: &PaykitReceiverPath,
-) -> Result<PaymentList> {
-    let addr = format!("{payee}{}", payment_endpoint_path_prefix(receiver_path));
-    debug!(addr = %addr, "listing Payment Endpoints");
-    fetch_payment_list_from_directory(storage, addr).await
-}
-
-/// Fetches a public receiver marker for one receiver.
-#[instrument(skip(storage), fields(owner = %owner, receiver = %receiver_path))]
-pub async fn fetch_paykit_receiver_marker(
-    storage: &PublicStorage,
-    owner: &PublicKey,
-    receiver_path: &PaykitReceiverPath,
-) -> Result<Option<PaykitReceiverMarker>> {
-    let addr = format!("{owner}{}", receiver_marker_path(receiver_path));
-    debug!(addr = %addr, "fetching Paykit receiver marker");
-    match fetch_nonempty_text(storage, addr, "fetch Paykit receiver marker").await? {
-        Some(payload) => parse_paykit_receiver_marker_json(&payload, receiver_path).map(Some),
-        None => Ok(None),
-    }
-}
-
-/// Lists public Paykit receiver paths published by an identity.
-#[instrument(skip(storage), fields(owner = %owner))]
-pub async fn fetch_paykit_receiver_paths(
-    storage: &PublicStorage,
-    owner: &PublicKey,
-) -> Result<Vec<PaykitReceiverPath>> {
-    let addr = format!("{owner}{}", receiver_path_prefix());
-    debug!(addr = %addr, "listing Paykit receivers");
-    let app_resources = list_resources(storage, addr, "list Paykit receiver apps").await?;
-    let mut receiver_paths = Vec::new();
-    let mut seen_receiver_paths = HashSet::new();
-
-    for resource in app_resources {
-        let path = resource.path.as_str();
-        let Some(app_segment) = listed_child_segment(path, &receiver_path_prefix()) else {
-            debug!(path = %path, "skipping Paykit app path with unexpected shape");
-            continue;
-        };
-
-        if !is_valid_receiver_app_segment(app_segment) {
-            debug!(path = %path, app_segment = %app_segment, "skipping invalid Paykit receiver app segment");
-            continue;
-        }
-
-        let runtime_addr = format!("{owner}{PAYKIT_PATH_PREFIX}/{app_segment}/");
-        let runtime_resources =
-            list_resources(storage, runtime_addr, "list Paykit receiver runtimes").await?;
-
-        for runtime_resource in runtime_resources {
-            let runtime_path = runtime_resource.path.as_str();
-            let app_prefix = format!("{PAYKIT_PATH_PREFIX}/{app_segment}/");
-            let Some(runtime_segment) = listed_child_segment(runtime_path, &app_prefix) else {
-                debug!(path = %runtime_path, "skipping Paykit runtime path with unexpected shape");
-                continue;
-            };
-            let receiver_text = format!("{app_segment}/{runtime_segment}");
-            let receiver_path = match PaykitReceiverPath::new(&receiver_text) {
-                Ok(receiver_path) => receiver_path,
-                Err(err) => {
-                    debug!(
-                        path = %runtime_path,
-                        receiver_path = %receiver_text,
-                        error = %err,
-                        "skipping invalid Paykit receiver path from directory listing"
-                    );
-                    continue;
-                }
-            };
-            if seen_receiver_paths.insert(receiver_path.clone())
-                && receiver_is_publicly_advertised(storage, owner, &receiver_path).await?
-            {
-                receiver_paths.push(receiver_path);
-            }
-        }
-    }
-
-    receiver_paths.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-    Ok(receiver_paths)
-}
-
-async fn receiver_is_publicly_advertised(
-    storage: &PublicStorage,
-    owner: &PublicKey,
-    receiver_path: &PaykitReceiverPath,
-) -> Result<bool> {
-    match fetch_paykit_receiver_marker(storage, owner, receiver_path).await {
-        Ok(Some(_)) => return Ok(true),
-        Ok(None) => {}
-        Err(PaykitError::InvalidData { context, .. }) => {
-            debug!(
-                receiver = %receiver_path,
-                error = %context,
-                "ignoring invalid Paykit receiver marker during discovery"
-            );
-        }
-        Err(err) => return Err(err),
-    }
-
-    let endpoint_addr = format!("{owner}{}", payment_endpoint_path_prefix(receiver_path));
-    let resources =
-        list_resources(storage, endpoint_addr, "list receiver payment endpoints").await?;
-    Ok(resources
-        .into_iter()
-        .any(|resource| !resource.path.as_str().ends_with('/')))
-}
-
-/// Fetches an individual receiver-scoped public Payment Endpoint.
-#[instrument(skip(storage), fields(payee = %payee, receiver = %receiver_path, identifier = %identifier))]
-pub async fn fetch_payment_endpoint(
-    storage: &PublicStorage,
-    payee: &PublicKey,
-    receiver_path: &PaykitReceiverPath,
-    identifier: &PaymentEndpointIdentifier,
-) -> Result<Option<PaymentEndpointPayload>> {
-    let addr = format!(
-        "{payee}{}",
-        payment_endpoint_path(receiver_path, identifier)
-    );
-    debug!(addr = %addr, "fetching Payment Endpoint");
-    match fetch_text(storage, addr, "fetch Payment Endpoint").await? {
-        Some(payload) => Ok(Some(PaymentEndpointPayload::new(payload))),
-        None => Ok(None),
-    }
-}
-
-/// Return the receiver registry path prefix.
-pub(crate) fn receiver_path_prefix() -> String {
-    format!("{PAYKIT_PATH_PREFIX}/")
-}
-
-/// Return the receiver marker path for one Paykit receiver.
-pub(crate) fn receiver_marker_path(receiver_path: &PaykitReceiverPath) -> String {
-    format!("{PAYKIT_PATH_PREFIX}/{receiver_path}/receiver.json")
-}
-
-/// Return the receiver-scoped public Payment Endpoint path prefix.
-pub(crate) fn payment_endpoint_path_prefix(receiver_path: &PaykitReceiverPath) -> String {
-    format!("{PAYKIT_PATH_PREFIX}/{receiver_path}/endpoints/")
-}
-
-/// Return the receiver-scoped public Payment Endpoint path.
-pub(crate) fn payment_endpoint_path(
-    receiver_path: &PaykitReceiverPath,
-    identifier: &PaymentEndpointIdentifier,
-) -> String {
-    format!(
-        "{}{}",
-        payment_endpoint_path_prefix(receiver_path),
-        identifier.as_str()
+pub(crate) fn is_payment_list_limit_exceeded(error: &PaykitError) -> bool {
+    matches!(
+        error,
+        PaykitError::InvalidData {
+            source: Some(source),
+            ..
+        } if source.downcast_ref::<PaymentListLimitExceeded>().is_some()
     )
 }
 
-/// Return the receiver-scoped private message base path.
-pub(crate) fn private_message_path_prefix(receiver_path: &PaykitReceiverPath) -> String {
-    format!("{PAYKIT_PRIVATE_PATH_PREFIX}/{receiver_path}/messages")
+fn is_response_size_limit_exceeded(error: &PaykitError) -> bool {
+    matches!(
+        error,
+        PaykitError::InvalidData {
+            source: Some(source),
+            ..
+        } if source.downcast_ref::<ResponseSizeLimitExceeded>().is_some()
+    )
 }
 
-/// Return the receiver-scoped Receipt Location prefix.
-pub(crate) fn receipt_path_prefix(receiver_path: &PaykitReceiverPath) -> String {
-    format!("{PAYKIT_PRIVATE_PATH_PREFIX}/{receiver_path}/receipts")
-}
-
-/// Return the receiver-scoped Encrypted Link recovery marker base path.
-pub(crate) fn encrypted_link_recovery_path_prefix(receiver_path: &PaykitReceiverPath) -> String {
-    format!("{PAYKIT_PRIVATE_PATH_PREFIX}/{receiver_path}/encrypted-link-recovery")
-}
-
-pub(crate) fn receiver_pair_path_domain(
-    base_domain: &[u8],
-    local_public_key: &PublicKey,
-    local_receiver_path: &PaykitReceiverPath,
-    remote_public_key: &PublicKey,
-    remote_receiver_path: &PaykitReceiverPath,
-) -> Vec<u8> {
-    let mut endpoints = [
-        (
-            local_public_key.z32(),
-            local_receiver_path.as_str().to_owned(),
-        ),
-        (
-            remote_public_key.z32(),
-            remote_receiver_path.as_str().to_owned(),
-        ),
-    ];
-    endpoints.sort();
-
-    let mut domain = Vec::with_capacity(
-        base_domain.len()
-            + endpoints
-                .iter()
-                .map(|(public_key, receiver_path)| public_key.len() + receiver_path.len() + 2)
-                .sum::<usize>()
-            + 1,
-    );
-    domain.extend_from_slice(base_domain);
-    for (public_key, receiver_path) in endpoints {
-        domain.push(0);
-        domain.extend_from_slice(public_key.as_bytes());
-        domain.push(0);
-        domain.extend_from_slice(receiver_path.as_bytes());
+fn payment_list_limit_exceeded(context: String) -> PaykitError {
+    PaykitError::InvalidData {
+        context,
+        source: Some(PaymentListLimitExceeded.into()),
     }
-    domain
 }
 
-async fn fetch_payment_list_from_directory(
+pub(crate) fn log_payment_endpoint_storage_failure(
+    operation: &'static str,
+    _error: &impl std::fmt::Display,
+) {
+    error!(operation, "payment endpoint storage request failed");
+}
+
+/// Writes or updates a payment endpoint document in the authenticated Pubky session.
+#[instrument(skip(session, payload), fields(identifier = %identifier))]
+pub async fn upsert_payment_endpoint(
+    session: &PubkySession,
+    app_id: &PaykitAppId,
+    identifier: &PaymentEndpointIdentifier,
+    payload: &PaymentEndpointPayload,
+) -> Result<()> {
+    validate_payment_endpoint_payload(payload)?;
+    let path = payment_endpoint_path(app_id, identifier);
+    debug!(path = %path, "writing payment endpoint to Pubky storage");
+    with_write_lock(session, &path, |lock| async move {
+        session
+            .storage()
+            .put_locked(&lock, payload.as_str().to_string())
+            .await
+            .map_err(|err| {
+                log_payment_endpoint_storage_failure("put", &err);
+                PaykitError::Transport {
+                    context: "put endpoint".into(),
+                    source: err.into(),
+                }
+            })
+            .map(|_| ())
+    })
+    .await?;
+    debug!("payment endpoint stored successfully");
+    Ok(())
+}
+
+pub async fn create_payment_endpoint(
+    session: &PubkySession,
+    app_id: &PaykitAppId,
+    identifier: &PaymentEndpointIdentifier,
+    payload: &PaymentEndpointPayload,
+) -> Result<()> {
+    validate_payment_endpoint_payload(payload)?;
+    let path = payment_endpoint_path(app_id, identifier);
+    put_resource_if_revision(
+        session,
+        &path,
+        payload.as_str().as_bytes().to_vec(),
+        None,
+        PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES,
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn update_payment_endpoint(
+    session: &PubkySession,
+    app_id: &PaykitAppId,
+    identifier: &PaymentEndpointIdentifier,
+    payload: &PaymentEndpointPayload,
+    revision: &str,
+) -> Result<()> {
+    validate_payment_endpoint_payload(payload)?;
+    let path = payment_endpoint_path(app_id, identifier);
+    put_resource_if_revision(
+        session,
+        &path,
+        payload.as_str().as_bytes().to_vec(),
+        Some(revision),
+        usize::MAX,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Removes an existing payment endpoint from the authenticated Pubky session.
+#[instrument(skip(session), fields(identifier = %identifier))]
+pub async fn delete_payment_endpoint(
+    session: &PubkySession,
+    app_id: &PaykitAppId,
+    identifier: &PaymentEndpointIdentifier,
+) -> Result<()> {
+    let path = payment_endpoint_path(app_id, identifier);
+    debug!(path = %path, "deleting payment endpoint from Pubky storage");
+    with_write_lock(session, &path, |lock| async move {
+        match session.storage().delete_locked(&lock).await {
+            Ok(_) => {}
+            Err(err) if is_not_found(&err) => {
+                debug!("payment endpoint already absent");
+            }
+            Err(err) => {
+                log_payment_endpoint_storage_failure("delete", &err);
+                return Err(PaykitError::Transport {
+                    context: "delete endpoint".into(),
+                    source: err.into(),
+                });
+            }
+        }
+        Ok::<_, PaykitError>(())
+    })
+    .await?;
+    debug!("payment endpoint removed successfully");
+    Ok(())
+}
+
+pub async fn delete_payment_endpoint_if_revision(
+    session: &PubkySession,
+    app_id: &PaykitAppId,
+    identifier: &PaymentEndpointIdentifier,
+    revision: &str,
+) -> Result<()> {
+    let path = payment_endpoint_path(app_id, identifier);
+    delete_resource_if_revision(session, &path, revision, usize::MAX).await?;
+    Ok(())
+}
+
+fn validate_payment_endpoint_payload(payload: &PaymentEndpointPayload) -> Result<()> {
+    if payload.as_str().len() > PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES {
+        return Err(PaykitError::Validation(format!(
+            "Payment Endpoint payload must not exceed {PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
+/// Fetches all public payment endpoints for the provided payee from Pubky storage.
+///
+/// Directory listing and per-resource fetches are not atomic; the returned list is a
+/// best-effort snapshot of the payee's homeserver state.
+#[instrument(skip(storage, remaining_endpoints, remaining_requests, remaining_payload_bytes), fields(payee = %payee))]
+pub async fn fetch_payment_list_with_budget(
     storage: &PublicStorage,
-    addr: String,
+    payee: &PublicKey,
+    app_id: &PaykitAppId,
+    remaining_endpoints: &mut usize,
+    remaining_requests: &mut usize,
+    remaining_payload_bytes: &mut usize,
 ) -> Result<PaymentList> {
-    let resources = list_resources(storage, addr, "list payment endpoints").await?;
+    let max_endpoints = (*remaining_endpoints).min(PAYMENT_LIST_MAX_ENDPOINTS);
+    let addr = format!("{payee}{}", payment_endpoint_path_prefix(app_id));
+    debug!("listing payment endpoints");
+    let resources = list_resources(
+        storage,
+        addr,
+        "list payment endpoints",
+        remaining_requests,
+        PAYMENT_LIST_MAX_ENDPOINTS,
+    )
+    .await?;
+
+    let resources = resources
+        .into_iter()
+        .filter(|resource| !resource.path.as_str().ends_with('/'))
+        .collect::<Vec<_>>();
+    if resources.len() > max_endpoints {
+        let context =
+            format!("Payment List contains more than the allowed {max_endpoints} endpoints");
+        return if max_endpoints < PAYMENT_LIST_MAX_ENDPOINTS {
+            Err(payment_list_limit_exceeded(context))
+        } else {
+            Err(PaykitError::InvalidData {
+                context,
+                source: None,
+            })
+        };
+    }
 
     let mut map = HashMap::new();
     for resource in resources {
-        if resource.path.as_str().ends_with('/') {
-            trace!(path = %resource.path, "skipping directory resource");
-            continue;
-        }
-
         let identifier_text = resource
             .path
             .as_str()
@@ -362,7 +301,7 @@ async fn fetch_payment_list_from_directory(
             .next()
             .filter(|segment| !segment.is_empty())
             .ok_or_else(|| {
-                error!(path = %resource.path, "invalid resource path for Payment Endpoint");
+                error!("invalid resource path for Payment Endpoint");
                 PaykitError::InvalidData {
                     context: format!(
                         "cannot extract Payment Endpoint Identifier from resource path '{}'",
@@ -374,7 +313,31 @@ async fn fetch_payment_list_from_directory(
             .to_string();
 
         let label = format!("fetch payment endpoint {identifier_text}");
-        if let Some(payload) = fetch_text(storage, resource.to_string(), &label).await? {
+        let payload_limit = (*remaining_payload_bytes).min(PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES);
+        consume_payment_list_request(remaining_requests)?;
+        *remaining_endpoints -= 1;
+        let payload = match fetch_text_with_budget(
+            storage,
+            resource.to_string(),
+            &label,
+            Some(payload_limit),
+            remaining_payload_bytes,
+        )
+        .await
+        {
+            Ok(payload) => payload,
+            Err(error)
+                if payload_limit < PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES
+                    && is_response_size_limit_exceeded(&error) =>
+            {
+                return Err(payment_list_limit_exceeded(
+                    "Payment List payload budget exhausted".into(),
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(payload) = payload {
+            debug!(identifier = %identifier_text, "fetched Payment Endpoint Payload");
             let payment_endpoint_identifier = PaymentEndpointIdentifier::new(&identifier_text)
                 .map_err(|err| PaykitError::InvalidData {
                     context: format!(
@@ -389,152 +352,437 @@ async fn fetch_payment_list_from_directory(
         }
     }
 
+    debug!(count = map.len(), "Payment List collected");
     Ok(PaymentList {
         payment_endpoints: map,
     })
 }
 
-fn listed_child_segment<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
-    let suffix = path.strip_prefix(prefix)?;
-    suffix
-        .trim_end_matches('/')
-        .split('/')
-        .next()
-        .filter(|segment| !segment.is_empty())
+fn consume_payment_list_request(remaining_requests: &mut usize) -> Result<()> {
+    *remaining_requests = remaining_requests.checked_sub(1).ok_or_else(|| {
+        payment_list_limit_exceeded("Payment List request budget exhausted".into())
+    })?;
+    Ok(())
 }
 
-fn is_valid_receiver_app_segment(segment: &str) -> bool {
-    PaykitReceiverPath::new(format!("{segment}/wallet")).is_ok()
+/// Fetches an individual public payment endpoint from Pubky storage.
+#[instrument(skip(storage), fields(payee = %payee, identifier = %identifier))]
+pub async fn fetch_payment_endpoint(
+    storage: &PublicStorage,
+    payee: &PublicKey,
+    app_id: &PaykitAppId,
+    identifier: &PaymentEndpointIdentifier,
+) -> Result<Option<PaymentEndpointPayload>> {
+    let addr = format!("{payee}{}", payment_endpoint_path(app_id, identifier));
+    debug!("fetching individual payment endpoint");
+    match fetch_text(
+        storage,
+        addr,
+        "fetch endpoint",
+        Some(PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES),
+    )
+    .await?
+    {
+        Some(payload) => {
+            debug!("payment endpoint found");
+            Ok(Some(PaymentEndpointPayload::new(payload)))
+        }
+        None => {
+            debug!("payment endpoint not found");
+            Ok(None)
+        }
+    }
 }
 
-/// Read a public response body with a hard size bound.
+pub async fn fetch_payment_endpoint_with_revision(
+    storage: &PublicStorage,
+    payee: &PublicKey,
+    app_id: &PaykitAppId,
+    identifier: &PaymentEndpointIdentifier,
+) -> Result<Option<(Option<PaymentEndpointPayload>, String)>> {
+    let addr = format!("{payee}{}", payment_endpoint_path(app_id, identifier));
+    let response = match storage.get(&addr).await {
+        Ok(response) => response,
+        Err(err) if is_not_found(&err) => return Ok(None),
+        Err(err) => {
+            return Err(PaykitError::Transport {
+                context: "fetch endpoint".into(),
+                source: err.into(),
+            });
+        }
+    };
+    let bytes = read_bounded_body(
+        response,
+        PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES,
+        "fetch endpoint",
+    )
+    .await?;
+    let revision = content_revision(&bytes);
+    let payload = String::from_utf8(bytes)
+        .map_err(|err| invalid_data("Payment Endpoint is not UTF-8", Some(err.into())))?;
+    let payload = if payload.is_empty() {
+        None
+    } else {
+        Some(PaymentEndpointPayload::new(payload))
+    };
+    Ok(Some((payload, revision)))
+}
+
+/// Lists one App's Payment Endpoint Identifiers without loading their payloads.
 ///
-/// A hostile homeserver can stream an arbitrarily large body, so the limit is
-/// enforced while reading rather than after buffering. `Content-Length` is
-/// checked first as a cheap early rejection when present.
+/// Cleanup can enumerate more than a valid Payment List's endpoint limit. Listing
+/// remains bounded to 100 pages; invalid identifiers or paths are rejected.
+/// Invalid names require explicit Pubky cleanup rather than bypassing identifier validation.
+/// Session creation, capability scope, and key rotation remain the caller's responsibility.
+pub async fn list_payment_endpoint_identifiers(
+    storage: &PublicStorage,
+    owner: &PublicKey,
+    app_id: &PaykitAppId,
+) -> Result<Vec<PaymentEndpointIdentifier>> {
+    let prefix = payment_endpoint_path_prefix(app_id);
+    let mut requests = LIST_MAX_PAGES + 1;
+    let resources = list_resources(
+        storage,
+        format!("{owner}{prefix}"),
+        "list Payment Endpoint Identifiers",
+        &mut requests,
+        LIST_MAX_PAGES * usize::from(LIST_PAGE_LIMIT),
+    )
+    .await?;
+    resources
+        .into_iter()
+        .filter(|resource| !resource.path.as_str().ends_with('/'))
+        .map(|resource| payment_endpoint_identifier(&resource, owner, &prefix))
+        .collect()
+}
+
+fn payment_endpoint_identifier(
+    resource: &PubkyResource,
+    owner: &PublicKey,
+    prefix: &str,
+) -> Result<PaymentEndpointIdentifier> {
+    let identifier = resource
+        .path
+        .as_str()
+        .strip_prefix(prefix)
+        .filter(|_| resource.owner == *owner)
+        .ok_or_else(|| {
+            invalid_data(
+                "Payment Endpoint listing returned an unrelated resource",
+                None,
+            )
+        })?;
+    PaymentEndpointIdentifier::new(identifier).map_err(|error| {
+        invalid_data(
+            "Payment Endpoint listing returned an invalid identifier",
+            Some(error.into()),
+        )
+    })
+}
+
+/// Reads a resource's content fingerprint without decoding its bytes.
+///
+/// This supports conditional repair of malformed documents. Reads are streamed
+/// and bounded by `max_bytes`; missing resources return `None`. Session creation,
+/// capability scope, key rotation, and request timeouts remain the caller's responsibility.
+pub async fn fetch_resource_revision(
+    storage: &PublicStorage,
+    resource: &PubkyResource,
+    max_bytes: usize,
+) -> Result<Option<String>> {
+    let response = match storage.get(resource.clone()).await {
+        Ok(response) => response,
+        Err(error) if is_not_found(&error) => return Ok(None),
+        Err(error) => {
+            return Err(PaykitError::Transport {
+                context: "fetch resource revision".into(),
+                source: error.into(),
+            })
+        }
+    };
+    read_response_revision(response, max_bytes, "fetch resource revision")
+        .await
+        .map(Some)
+}
+
+/// Reads an owned Payment Endpoint's fingerprint for conditional repair or removal.
+///
+/// Unlike payment discovery, maintenance must also handle oversized or non-UTF-8
+/// payloads. The complete body is hashed incrementally without retaining it in
+/// memory. Use this on the caller's own endpoints; request timeouts, session
+/// creation, capability scope, and key rotation remain the caller's responsibility.
+pub async fn fetch_payment_endpoint_revision(
+    session: &PubkySession,
+    app_id: &PaykitAppId,
+    identifier: &PaymentEndpointIdentifier,
+) -> Result<Option<String>> {
+    locks::resource_revision(
+        session,
+        &payment_endpoint_path(app_id, identifier),
+        usize::MAX,
+    )
+    .await
+}
+
+pub(crate) fn payment_endpoint_path_prefix(app_id: &PaykitAppId) -> String {
+    format!("{PAYKIT_PATH_PREFIX}apps/{app_id}/endpoints/")
+}
+
+pub(crate) fn payment_endpoint_path(
+    app_id: &PaykitAppId,
+    identifier: &PaymentEndpointIdentifier,
+) -> String {
+    format!(
+        "{}{}",
+        payment_endpoint_path_prefix(app_id),
+        identifier.as_str()
+    )
+}
+
+/// Creates the identity-wide Paykit App Registry if it does not exist.
+pub async fn create_paykit_app_registry(
+    session: &PubkySession,
+    registry: &PaykitAppRegistry,
+) -> Result<()> {
+    let body = serialize_paykit_app_registry(registry)?;
+    put_resource_if_revision(
+        session,
+        PAYKIT_APP_REGISTRY_PATH,
+        body.into_bytes(),
+        None,
+        crate::PAYKIT_APP_REGISTRY_MAX_BYTES,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Replaces the identity-wide Paykit App Registry at one exact revision.
+pub async fn update_paykit_app_registry(
+    session: &PubkySession,
+    registry: &PaykitAppRegistry,
+    revision: &str,
+) -> Result<()> {
+    let body = serialize_paykit_app_registry(registry)?;
+    put_resource_if_revision(
+        session,
+        PAYKIT_APP_REGISTRY_PATH,
+        body.into_bytes(),
+        Some(revision),
+        crate::PAYKIT_APP_REGISTRY_MAX_BYTES,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Fetches and parses the identity-wide Paykit App Registry.
+pub async fn fetch_paykit_app_registry(
+    storage: &PublicStorage,
+    owner: &PublicKey,
+) -> Result<Option<PaykitAppRegistry>> {
+    Ok(fetch_paykit_app_registry_with_revision(storage, owner)
+        .await?
+        .map(|(registry, _)| registry))
+}
+
+/// Fetches and parses the identity-wide Paykit App Registry with its content revision.
+pub async fn fetch_paykit_app_registry_with_revision(
+    storage: &PublicStorage,
+    owner: &PublicKey,
+) -> Result<Option<(PaykitAppRegistry, String)>> {
+    let addr = format!("{owner}{PAYKIT_APP_REGISTRY_PATH}");
+    let response = match storage.get(&addr).await {
+        Ok(response) => response,
+        Err(err) if is_not_found(&err) => return Ok(None),
+        Err(err) => {
+            return Err(PaykitError::Transport {
+                context: "fetch Paykit App Registry".into(),
+                source: err.into(),
+            });
+        }
+    };
+    let bytes = read_bounded_body(
+        response,
+        crate::PAYKIT_APP_REGISTRY_MAX_BYTES,
+        "fetch Paykit App Registry",
+    )
+    .await?;
+    let revision = content_revision(&bytes);
+    let body = String::from_utf8(bytes)
+        .map_err(|err| invalid_data("Paykit App Registry is not UTF-8", Some(err.into())))?;
+    Ok(Some((parse_paykit_app_registry_json(&body)?, revision)))
+}
+
+#[instrument(skip(storage, addr, label), fields(operation = %label))]
+pub(crate) async fn fetch_text(
+    storage: &PublicStorage,
+    addr: String,
+    label: &str,
+    max_bytes: Option<usize>,
+) -> Result<Option<String>> {
+    let mut remaining_payload_bytes = usize::MAX;
+    fetch_text_with_budget(
+        storage,
+        addr,
+        label,
+        max_bytes,
+        &mut remaining_payload_bytes,
+    )
+    .await
+}
+
+async fn fetch_text_with_budget(
+    storage: &PublicStorage,
+    addr: String,
+    label: &str,
+    max_bytes: Option<usize>,
+    remaining_payload_bytes: &mut usize,
+) -> Result<Option<String>> {
+    trace!("fetching text resource");
+    match storage.get(&addr).await {
+        Ok(mut resp) => {
+            read_text_response(&mut resp, label, max_bytes, remaining_payload_bytes).await
+        }
+        Err(err) if is_not_found(&err) => {
+            debug!("resource not found (404/GONE)");
+            Ok(None)
+        }
+        Err(err) => {
+            error!("transport error during fetch");
+            Err(PaykitError::Transport {
+                context: label.to_string(),
+                source: err.into(),
+            })
+        }
+    }
+}
+
+/// Read a response with a hard streaming bound, including when Content-Length
+/// is absent or inaccurate. Outbox bodies are also untrusted homeserver data.
 pub(crate) async fn read_bounded_body(
-    mut resp: reqwest::Response,
+    mut response: reqwest::Response,
     max_bytes: usize,
     label: &str,
 ) -> Result<Vec<u8>> {
-    if let Some(content_length) = resp.content_length() {
+    read_response_body(&mut response, label, max_bytes).await
+}
+
+async fn read_response_body(
+    response: &mut reqwest::Response,
+    label: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>> {
+    let mut remaining_payload_bytes = usize::MAX;
+    read_response_body_with_budget(response, label, max_bytes, &mut remaining_payload_bytes).await
+}
+
+async fn read_response_revision(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+    label: &str,
+) -> Result<String> {
+    let mut hasher = blake3::Hasher::new();
+    let mut remaining = max_bytes;
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(invalid_data(
+            format!("{label}: response exceeds the {max_bytes}-byte limit"),
+            None,
+        ));
+    }
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| PaykitError::Transport {
+            context: label.into(),
+            source: error.into(),
+        })?
+    {
+        remaining = remaining.checked_sub(chunk.len()).ok_or_else(|| {
+            invalid_data(
+                format!("{label}: response exceeds the {max_bytes}-byte limit"),
+                None,
+            )
+        })?;
+        hasher.update(&chunk);
+    }
+    Ok(format!("blake3:{}", hasher.finalize().to_hex()))
+}
+
+async fn read_response_body_with_budget(
+    response: &mut reqwest::Response,
+    label: &str,
+    max_bytes: usize,
+    remaining_payload_bytes: &mut usize,
+) -> Result<Vec<u8>> {
+    if let Some(content_length) = response.content_length() {
         if content_length > max_bytes as u64 {
-            return Err(resource_too_large(label, max_bytes));
+            return Err(PaykitError::InvalidData {
+                context: format!("{label}: response exceeds the {max_bytes}-byte limit"),
+                source: Some(ResponseSizeLimitExceeded.into()),
+            });
         }
     }
-
-    let mut body = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|err| {
-        error!(error = %err, "failed to read response bytes");
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|err| {
+        error!("failed to read response bytes");
         PaykitError::Transport {
             context: label.to_string(),
             source: err.into(),
         }
     })? {
-        if body.len() + chunk.len() > max_bytes {
-            return Err(resource_too_large(label, max_bytes));
+        *remaining_payload_bytes = remaining_payload_bytes.saturating_sub(chunk.len());
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(PaykitError::InvalidData {
+                context: format!("{label}: response exceeds the {max_bytes}-byte limit"),
+                source: Some(ResponseSizeLimitExceeded.into()),
+            });
         }
-        body.extend_from_slice(&chunk);
+        bytes.extend_from_slice(&chunk);
     }
-    Ok(body)
+    Ok(bytes)
 }
 
-fn resource_too_large(label: &str, max_bytes: usize) -> PaykitError {
-    invalid_data(
-        format!("{label}: resource exceeds maximum size of {max_bytes} bytes"),
-        None,
-    )
-}
-
-#[instrument(skip(storage), fields(addr = %addr, label = %label))]
-async fn fetch_text(storage: &PublicStorage, addr: String, label: &str) -> Result<Option<String>> {
-    trace!("fetching text resource");
-    match storage.get(&addr).await {
-        Ok(resp) => {
-            let bytes = read_bounded_body(resp, MAX_PUBLIC_RESOURCE_BYTES, label).await?;
-            if bytes.is_empty() {
-                debug!("resource is empty, returning None");
-                return Ok(None);
-            }
-            let data = String::from_utf8(bytes).map_err(|err| {
-                let pos = err.utf8_error().valid_up_to();
-                error!(
-                    error = %err,
-                    valid_up_to = pos,
-                    "response contains invalid UTF-8 — data may be corrupt"
-                );
-                PaykitError::InvalidData {
-                    context: format!("{label}: invalid UTF-8 at byte {pos}"),
-                    source: Some(err.into()),
-                }
-            })?;
-            trace!(len = data.len(), "text resource fetched");
-            Ok(Some(data))
-        }
-        Err(err) if is_not_found(&err) => {
-            debug!("resource not found (404/GONE)");
-            Ok(None)
-        }
-        Err(err) => {
-            error!(error = %err, "transport error during fetch");
-            Err(PaykitError::Transport {
-                context: label.to_string(),
-                source: err.into(),
-            })
-        }
-    }
-}
-
-#[instrument(skip(storage), fields(addr = %addr, label = %label))]
-async fn fetch_nonempty_text(
-    storage: &PublicStorage,
-    addr: String,
+async fn read_text_response(
+    response: &mut reqwest::Response,
     label: &str,
+    max_bytes: Option<usize>,
+    remaining_payload_bytes: &mut usize,
 ) -> Result<Option<String>> {
-    trace!("fetching non-empty text resource");
-    match storage.get(&addr).await {
-        Ok(resp) => {
-            let bytes = read_bounded_body(resp, MAX_PUBLIC_RESOURCE_BYTES, label).await?;
-            if bytes.is_empty() {
-                return Err(invalid_data(
-                    format!("{label}: resource must not be empty"),
-                    None,
-                ));
-            }
-            let data = String::from_utf8(bytes).map_err(|err| {
-                let pos = err.utf8_error().valid_up_to();
-                error!(
-                    error = %err,
-                    valid_up_to = pos,
-                    "response contains invalid UTF-8 — data may be corrupt"
-                );
-                PaykitError::InvalidData {
-                    context: format!("{label}: invalid UTF-8 at byte {pos}"),
-                    source: Some(err.into()),
-                }
-            })?;
-            trace!(len = data.len(), "text resource fetched");
-            Ok(Some(data))
-        }
-        Err(err) if is_not_found(&err) => {
-            debug!("resource not found (404/GONE)");
-            Ok(None)
-        }
-        Err(err) => {
-            error!(error = %err, "transport error during fetch");
-            Err(PaykitError::Transport {
-                context: label.to_string(),
-                source: err.into(),
-            })
-        }
+    let bytes = read_response_body_with_budget(
+        response,
+        label,
+        max_bytes.unwrap_or(MAX_PUBLIC_RESOURCE_BYTES),
+        remaining_payload_bytes,
+    )
+    .await?;
+    if bytes.is_empty() {
+        debug!("resource is empty, returning None");
+        return Ok(None);
     }
+    let data = String::from_utf8(bytes).map_err(|err| {
+        let pos = err.utf8_error().valid_up_to();
+        error!(
+            valid_up_to = pos,
+            "response contains invalid UTF-8 — data may be corrupt"
+        );
+        PaykitError::InvalidData {
+            context: format!("{label}: invalid UTF-8 at byte {pos}"),
+            source: Some(err.into()),
+        }
+    })?;
+    trace!(len = data.len(), "text resource fetched");
+    Ok(Some(data))
 }
 
-#[instrument(skip(storage), fields(addr = %addr, label = %label))]
+#[instrument(skip(storage, addr, label), fields(operation = %label))]
 async fn list_resources(
     storage: &PublicStorage,
     addr: String,
     label: &str,
+    remaining_requests: &mut usize,
+    max_resources: usize,
 ) -> Result<Vec<PubkyResource>> {
     trace!("listing directory resources");
     let mut resources = Vec::new();
@@ -549,7 +797,7 @@ async fn list_resources(
                 return Ok(resources);
             }
             Err(err) => {
-                error!(error = %err, "failed to create list builder");
+                error!("failed to create list builder");
                 return Err(PaykitError::Transport {
                     context: label.to_string(),
                     source: err.into(),
@@ -561,6 +809,7 @@ async fn list_resources(
             builder = builder.cursor(cursor);
         }
 
+        consume_payment_list_request(remaining_requests)?;
         let page = match builder.send().await {
             Ok(page) => page,
             Err(err) if is_not_found(&err) => {
@@ -568,7 +817,7 @@ async fn list_resources(
                 return Ok(resources);
             }
             Err(err) => {
-                error!(error = %err, "list send failed");
+                error!("list send failed");
                 return Err(PaykitError::Transport {
                     context: format!("{label} send failed"),
                     source: err.into(),
@@ -589,16 +838,29 @@ async fn list_resources(
         }
 
         let page_len = page.len();
+        if resources.len().saturating_add(page_len) > max_resources {
+            return Err(PaykitError::InvalidData {
+                context: format!("{label}: directory contains more than {max_resources} resources"),
+                source: None,
+            });
+        }
         let next_cursor = page
             .last()
-            .map(|resource| format!("{}{}", resource.owner.z32(), resource.path.as_str()));
-        if cursor.is_some() && next_cursor == cursor {
-            return Err(invalid_data(
-                format!("{label}: listing cursor did not advance"),
-                None,
-            ));
+            .map(|resource| format!("{}{}", resource.owner.z32(), resource.path.as_str()))
+            .ok_or_else(|| PaykitError::InvalidData {
+                context: format!("{label}: non-empty page has no cursor resource"),
+                source: None,
+            })?;
+        if cursor
+            .as_ref()
+            .is_some_and(|previous| next_cursor.as_str() <= previous.as_str())
+        {
+            return Err(PaykitError::InvalidData {
+                context: format!("{label}: directory cursor did not advance"),
+                source: None,
+            });
         }
-        cursor = next_cursor;
+        cursor = Some(next_cursor);
         resources.extend(page);
 
         if page_len < LIST_PAGE_LIMIT as usize {
@@ -619,90 +881,4 @@ fn is_not_found(err: &PubkyError) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_receiver_scoped_payment_endpoint_path() {
-        let receiver_path = PaykitReceiverPath::new("bitkit/wallet").unwrap();
-        let identifier = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
-
-        assert_eq!(
-            payment_endpoint_path(&receiver_path, &identifier),
-            "/pub/paykit/v0/bitkit/wallet/endpoints/btc-lightning-bolt11"
-        );
-        assert_eq!(receiver_path_prefix(), "/pub/paykit/v0/");
-        assert_eq!(
-            receiver_marker_path(&receiver_path),
-            "/pub/paykit/v0/bitkit/wallet/receiver.json"
-        );
-        assert_eq!(
-            private_message_path_prefix(&receiver_path),
-            "/pub/paykit/v0/private/bitkit/wallet/messages"
-        );
-        assert_eq!(
-            receipt_path_prefix(&receiver_path),
-            "/pub/paykit/v0/private/bitkit/wallet/receipts"
-        );
-        assert_eq!(
-            encrypted_link_recovery_path_prefix(&receiver_path),
-            "/pub/paykit/v0/private/bitkit/wallet/encrypted-link-recovery"
-        );
-    }
-
-    #[test]
-    fn test_listed_child_segment_returns_direct_child() {
-        assert_eq!(
-            listed_child_segment("/pub/paykit/v0/bitkit/", "/pub/paykit/v0/"),
-            Some("bitkit")
-        );
-        assert_eq!(
-            listed_child_segment("/pub/paykit/v0/bitkit/wallet/", "/pub/paykit/v0/bitkit/"),
-            Some("wallet")
-        );
-        assert_eq!(
-            listed_child_segment(
-                "/pub/paykit/v0/bitkit/wallet/endpoints/x",
-                "/pub/paykit/v0/"
-            ),
-            Some("bitkit")
-        );
-    }
-
-    #[test]
-    fn test_receiver_app_segment_validation_rejects_unsafe_listing_names() {
-        for segment in ["bitkit", "paykit-server", "wallet2"] {
-            assert!(is_valid_receiver_app_segment(segment), "{segment}");
-        }
-        for segment in ["", ".", "..", "private", "Bitkit", "bitkit_wallet"] {
-            assert!(!is_valid_receiver_app_segment(segment), "{segment}");
-        }
-    }
-
-    // CLAUDE.md contract: public reads treat 404/GONE as absence, never as errors.
-    fn server_error(status: StatusCode) -> PubkyError {
-        PubkyError::Request(RequestError::Server {
-            status,
-            message: "test response".into(),
-        })
-    }
-
-    #[test]
-    fn test_is_not_found_matches_not_found_and_gone() {
-        assert!(is_not_found(&server_error(StatusCode::NOT_FOUND)));
-        assert!(is_not_found(&server_error(StatusCode::GONE)));
-    }
-
-    #[test]
-    fn test_is_not_found_rejects_other_statuses_and_variants() {
-        assert!(!is_not_found(&server_error(
-            StatusCode::INTERNAL_SERVER_ERROR
-        )));
-        assert!(!is_not_found(&server_error(StatusCode::FORBIDDEN)));
-
-        let validation_error = PubkyError::Request(RequestError::Validation {
-            message: "invalid request".into(),
-        });
-        assert!(!is_not_found(&validation_error));
-    }
-}
+mod tests;

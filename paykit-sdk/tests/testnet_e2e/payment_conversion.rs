@@ -28,7 +28,6 @@ async fn test_recurring_quote_issuance_and_proof_delivery() {
         .sdk
         .propose_payment_request(
             payer.public_key.clone(),
-            payer.receiver_path.clone(),
             PaymentRequestTerms::builder(
                 PaymentAmount::new("10", "usd").unwrap(),
                 PaymentReference::new("monthly-membership").unwrap(),
@@ -45,7 +44,12 @@ async fn test_recurring_quote_issuance_and_proof_delivery() {
     deliver(payee, payer).await;
     payer
         .sdk
-        .accept_payment_request(payee.public_key.clone(), payee.receiver_path.clone(), &id)
+        .claim_payment_request_for_execution(payee.public_key.clone(), &id)
+        .await
+        .unwrap();
+    payer
+        .sdk
+        .accept_payment_request(payee.public_key.clone(), &id)
         .await
         .unwrap();
     deliver(payer, payee).await;
@@ -58,7 +62,6 @@ async fn test_recurring_quote_issuance_and_proof_delivery() {
         .sdk
         .quote_payment_request(
             payee.public_key.clone(),
-            payee.receiver_path.clone(),
             &id,
             period.clone(),
             rates.clone(),
@@ -70,7 +73,6 @@ async fn test_recurring_quote_issuance_and_proof_delivery() {
         .sdk
         .quote_payment_request(
             payer.public_key.clone(),
-            payer.receiver_path.clone(),
             &id,
             period.clone(),
             rates.clone(),
@@ -82,7 +84,6 @@ async fn test_recurring_quote_issuance_and_proof_delivery() {
         .sdk
         .quote_payment_request(
             payer.public_key.clone(),
-            payer.receiver_path.clone(),
             &id,
             period.clone(),
             rates.clone(),
@@ -100,9 +101,10 @@ async fn test_recurring_quote_issuance_and_proof_delivery() {
         .sdk
         .submit_payment_proof_submission(
             payee.public_key.clone(),
-            payee.receiver_path.clone(),
             &id,
             PaymentProofSubmission {
+                payment_app_id: payee.app_id.clone(),
+
                 billing_period: Some(period.clone()),
                 payment_endpoint_identifier: PaymentEndpointIdentifier::new(
                     "usdt-arbitrum-address",
@@ -121,7 +123,7 @@ async fn test_recurring_quote_issuance_and_proof_delivery() {
     deliver(payer, payee).await;
     let received = payee
         .sdk
-        .payment_requests_with(&payer.public_key, &payer.receiver_path)
+        .payment_requests_with(&payer.public_key)
         .await
         .unwrap()
         .remove(0);
@@ -139,25 +141,13 @@ async fn test_recurring_quote_issuance_and_proof_delivery() {
     );
     payee
         .sdk
-        .cancel_payment_request(
-            payer.public_key.clone(),
-            payer.receiver_path.clone(),
-            &id,
-            None,
-        )
+        .cancel_payment_request(payer.public_key.clone(), &id, None)
         .await
         .unwrap();
     assert!(matches!(
         payee
             .sdk
-            .quote_payment_request(
-                payer.public_key.clone(),
-                payer.receiver_path.clone(),
-                &id,
-                period,
-                rates,
-                expires
-            )
+            .quote_payment_request(payer.public_key.clone(), &id, period, rates, expires)
             .await,
         Err(PaykitSdkError::Policy { .. })
     ));

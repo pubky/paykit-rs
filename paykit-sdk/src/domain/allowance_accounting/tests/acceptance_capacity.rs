@@ -21,13 +21,13 @@ async fn propose(fixture: &Fixture, recurring: bool) -> PaymentOccurrence {
     crate::domain::private_stream::persist_private_stream_batch(
         &fixture.storage,
         occurrence.request.counterparty.clone(),
-        path(),
         vec![message(raw.to_string())],
         None,
         time(),
     )
     .await
     .unwrap();
+    claim(&fixture.storage, &occurrence).await;
     occurrence
 }
 
@@ -44,7 +44,7 @@ async fn accept(
         .transaction(|tx| {
             select(
                 tx,
-                &path(),
+                &app_id(),
                 occurrence.request.clone(),
                 AllowanceSelectionInput {
                     allowance_id: fixture.allowance.clone(),
@@ -77,20 +77,18 @@ async fn with_limits(changes: serde_json::Value) -> Fixture {
     crate::domain::outbound_private::enqueue_private_message(
         &fixture.storage,
         fixture.occurrence.request.counterparty.clone(),
-        path(),
         raw.to_string(),
         time(),
     )
     .await
     .unwrap();
     let acceptance = serde_json::json!({
-        "version": 1, "kind": "paykit.allowance_acceptance", "event_id": new_id(),
+        "version": 1, "app_id": "bitkit", "kind": "paykit.allowance_acceptance", "event_id": new_id(),
         "allowance_id": fixture.allowance.as_str(), "proposal_event_id": proposal_id
     });
     crate::domain::private_stream::persist_private_stream_batch(
         &fixture.storage,
         fixture.occurrence.request.counterparty.clone(),
-        path(),
         vec![message(acceptance.to_string())],
         None,
         time(),
@@ -120,7 +118,7 @@ async fn request_state(
 ) -> crate::PaymentRequestLifecycleState {
     fixture
         .storage
-        .transaction(|tx| Ok(request(tx, &scope(tx, &path(), &occurrence.request)?, time())?.state))
+        .transaction(|tx| Ok(request(tx, &scope(tx, &occurrence.request)?, time())?.state))
         .await
         .unwrap()
 }
@@ -189,7 +187,7 @@ async fn test_one_time_acceptance_counts_committed_and_unresolved_usage() {
         if status != PaymentExecutionStatus::Prepared {
             fixture
                 .storage
-                .transaction(|tx| begin(tx, &path(), prepared.attempt_id.clone(), checks()))
+                .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id.clone(), checks()))
                 .await
                 .unwrap();
         }
@@ -232,7 +230,7 @@ async fn test_one_time_acceptance_excludes_failed_and_manual_attempts() {
                     .transaction(|tx| {
                         reserve(
                             tx,
-                            &path(),
+                            &app_id(),
                             fixture.occurrence.clone(),
                             None,
                             checks(),
@@ -289,7 +287,7 @@ async fn test_blocked_acceptance_preserves_selection_and_advances_watermark() {
         .transaction(|tx| {
             select(
                 tx,
-                &path(),
+                &app_id(),
                 second.request.clone(),
                 AllowanceSelectionInput {
                     allowance_id: fixture.allowance.clone(),
@@ -317,7 +315,7 @@ async fn test_blocked_acceptance_preserves_selection_and_advances_watermark() {
     // The failed preflight leaves the ordinary manual response path available.
     fixture
         .storage
-        .transaction(|tx| manual_response(tx, &path(), second.request.clone()))
+        .transaction(|tx| manual_response(tx, second.request.clone()))
         .await
         .unwrap();
     assert_eq!(
@@ -333,7 +331,7 @@ async fn test_blocked_acceptance_preserves_selection_and_advances_watermark() {
 }
 
 #[tokio::test]
-async fn test_capacity_usage_is_scoped_to_both_receiver_references_and_allowance() {
+async fn test_capacity_usage_is_scoped_to_both_identities_and_allowance() {
     let fixture = Fixture::new().await;
     attempt(fixture.reserve().await);
     let state = fixture.state();
@@ -342,21 +340,17 @@ async fn test_capacity_usage_is_scoped_to_both_receiver_references_and_allowance
     assert_eq!(usage.len(), 1);
     assert_eq!(usage[0].admitted_at(), time());
     assert_eq!(usage[0].amount().value(), "1");
-    // Identical Allowance IDs in another authenticated receiver scope cannot
+    // Identical Allowance IDs in another authenticated identity scope cannot
     // spend this scope's capacity. Request IDs, however, share that capacity.
-    for field in 0..5 {
+    for field in 0..3 {
         let mut other = scope.clone();
         match field {
             0 => other.local_public_key = public_key(),
-            1 => other.local_receiver_path = PaykitReceiverPath::new("bitkit/server").unwrap(),
-            2 => other.counterparty = public_key(),
-            3 => {
-                other.counterparty_receiver_path = PaykitReceiverPath::new("bitkit/server").unwrap()
-            }
+            1 => other.counterparty = public_key(),
             _ => other.payment_request_id = new_id(),
         }
         let usage = execution::allowance_usage(&state, &other, fixture.allowance.as_str()).unwrap();
-        assert_eq!(usage.len(), usize::from(field == 4));
+        assert_eq!(usage.len(), usize::from(field == 2));
     }
     assert!(
         execution::allowance_usage(&state, scope, AllowanceId::new_v4().as_str())

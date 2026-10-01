@@ -788,6 +788,7 @@ impl AllowanceEvent {
 /// A recognized Allowance Event Message plus its redacted parse result.
 #[derive(Clone, PartialEq, Eq)]
 pub struct AllowanceEventMessage {
+    pub(super) app_id: Option<crate::PaykitAppId>,
     pub(super) kind: PrivateMessageKind,
     pub(super) event_id: Option<EventId>,
     pub(super) allowance_id: Option<AllowanceId>,
@@ -796,6 +797,11 @@ pub struct AllowanceEventMessage {
 }
 
 impl AllowanceEventMessage {
+    /// Access the source Paykit App attribution, when valid.
+    pub fn app_id(&self) -> Option<&crate::PaykitAppId> {
+        self.app_id.as_ref()
+    }
+
     /// Access the recognized Private Message Kind.
     pub fn kind(&self) -> PrivateMessageKind {
         self.kind

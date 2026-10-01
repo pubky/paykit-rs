@@ -1,9 +1,34 @@
+use std::fmt;
+
 use thiserror::Error;
 
 /// Error type for stateful Paykit SDK workflows.
-#[derive(Debug, Error)]
+#[derive(Error)]
 #[non_exhaustive]
 pub enum PaykitSdkError {
+    /// Another client owns the peer operation or changed shared state.
+    #[error("concurrent update: {context}")]
+    ConcurrentUpdate {
+        /// Human-readable retry context.
+        context: String,
+        /// Underlying cause, when available.
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+
+    /// Shared state is locked while an unconfirmed write is pending.
+    ///
+    /// The holder may be waiting for write recovery. Back off rather than
+    /// immediately retrying; cancellation can restart the recovery wait.
+    #[error("shared state busy: {context}")]
+    SharedStateBusy {
+        /// Human-readable recovery context.
+        context: String,
+        /// Underlying lock-acquisition failure.
+        #[source]
+        source: Option<anyhow::Error>,
+    },
+
     /// Durable storage failed.
     #[error("storage error: {context}")]
     Storage {
@@ -85,8 +110,66 @@ pub enum PaykitSdkError {
     },
 }
 
+impl fmt::Debug for PaykitSdkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ConcurrentUpdate { context, source } => {
+                debug_error_variant(f, "ConcurrentUpdate", context, source)
+            }
+            Self::SharedStateBusy { context, source } => {
+                debug_error_variant(f, "SharedStateBusy", context, source)
+            }
+            Self::Storage { context, source } => debug_error_variant(f, "Storage", context, source),
+            Self::Identity { context, source } => {
+                debug_error_variant(f, "Identity", context, source)
+            }
+            Self::Transport { context, source } => {
+                debug_error_variant(f, "Transport", context, source)
+            }
+            Self::NotFound { context, source } => {
+                debug_error_variant(f, "NotFound", context, source)
+            }
+            Self::Protocol { context, source } => {
+                debug_error_variant(f, "Protocol", context, source)
+            }
+            Self::Policy { context, source } => debug_error_variant(f, "Policy", context, source),
+            Self::PaymentAdapter { context, source } => {
+                debug_error_variant(f, "PaymentAdapter", context, source)
+            }
+            Self::RecoveryRequired { context, source } => {
+                debug_error_variant(f, "RecoveryRequired", context, source)
+            }
+        }
+    }
+}
+
+impl PaykitSdkError {
+    /// Return whether retrying from current shared state after contention is appropriate.
+    pub fn is_concurrent_update(&self) -> bool {
+        matches!(self, Self::ConcurrentUpdate { .. })
+    }
+}
+
+fn debug_error_variant(
+    f: &mut fmt::Formatter<'_>,
+    name: &'static str,
+    context: &str,
+    source: &Option<anyhow::Error>,
+) -> fmt::Result {
+    f.debug_struct(name)
+        .field("context", &context)
+        .field("source", &source.as_ref().map(|_| "<redacted>"))
+        .finish()
+}
+
 impl From<paykit_lib::PaykitError> for PaykitSdkError {
     fn from(err: paykit_lib::PaykitError) -> Self {
+        if paykit_lib::is_write_conflict(&err) {
+            return Self::ConcurrentUpdate {
+                context: "Pubky resource is locked or changed; retry from current state".into(),
+                source: Some(err.into()),
+            };
+        }
         match err {
             paykit_lib::PaykitError::Transport { context, source } => Self::Transport {
                 context,
@@ -96,15 +179,8 @@ impl From<paykit_lib::PaykitError> for PaykitSdkError {
                 context: msg,
                 source: None,
             },
-            // SECURITY / REDACTION: drop lib `InvalidData` sources entirely.
-            // They carry raw parse/decode causes derived from network data or
-            // decrypted plaintext. A retained cause would stay out of FFI
-            // exception text (the conversion drops every `source` that is not
-            // an app-authored `PaykitFfiError` recovered by downcast), but
-            // `PaykitSdkError` derives field-wise `Debug`, so it would still
-            // surface in `format!("{err:?}")` and structured Rust logs.
-            // Dropping it keeps that local logging channel structurally
-            // closed; only the lib-supplied `context` string survives.
+            // Network parse causes can contain raw private payload fragments.
+            // Keep only the curated context when crossing into SDK errors.
             paykit_lib::PaykitError::InvalidData { context, source: _ } => Self::Protocol {
                 context,
                 source: None,

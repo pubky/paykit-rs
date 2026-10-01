@@ -5,12 +5,12 @@ async fn converted_fixture() -> Fixture {
     fixture.occurrence.request.payment_request_id = paykit_lib::PaymentRequestId::new_v4();
     let request_id = fixture.occurrence.request.payment_request_id.clone();
     let raw = serde_json::json!({
-        "version": 1, "kind": "paykit.payment_request", "event_id": new_id(),
+        "version": 1, "app_id": "bitkit", "kind": "paykit.payment_request", "event_id": new_id(),
         "payment_request_id": request_id.as_str(),
         "request": {
             "amount": { "value": "1", "asset": "usd" },
             "payment_reference": "converted", "proposal_expires_at": null,
-            "recurrence": null, "metadata": {},
+            "recurrence": null, "required_app_id": null, "metadata": {},
             "accepted_payment_endpoint_identifiers": ["btc-lightning-bolt11"],
             "conversion": { "type": "fixed", "rates": [{"asset": "btc", "value": "0.00001"}] }
         }
@@ -18,17 +18,17 @@ async fn converted_fixture() -> Fixture {
     crate::domain::private_stream::persist_private_stream_batch(
         &fixture.storage,
         fixture.occurrence.request.counterparty.clone(),
-        path(),
         vec![message(raw.to_string())],
         None,
         time(),
     )
     .await
     .unwrap();
+    claim(&fixture.storage, &fixture.occurrence).await;
     crate::domain::payment_requests::enqueue_payment_request_acceptance(
         &fixture.storage,
         fixture.occurrence.request.counterparty.clone(),
-        path(),
+        &app_id(),
         &paykit_lib::PaymentRequestAcceptance::new(paykit_lib::EventId::new_v4(), request_id),
         time(),
     )
@@ -53,7 +53,7 @@ async fn reserve_manual(
         .transaction(|tx| {
             reserve(
                 tx,
-                &path(),
+                &app_id(),
                 fixture.occurrence.clone(),
                 None,
                 checks,
@@ -73,7 +73,14 @@ async fn test_accounting_manual_conversion_retains_actual_amount_and_hands_off()
     assert_eq!(prepared.allowance_id, None);
     let submitted = fixture
         .storage
-        .transaction(|tx| begin(tx, &path(), prepared.attempt_id.clone(), converted_checks()))
+        .transaction(|tx| {
+            begin(
+                tx,
+                &app_id(),
+                prepared.attempt_id.clone(),
+                converted_checks(),
+            )
+        })
         .await
         .unwrap();
     assert_eq!(attempt(submitted).status, PaymentExecutionStatus::Submitted);
@@ -94,7 +101,7 @@ async fn test_accounting_manual_conversion_handoff_cannot_change_amount_or_asset
         changed.actual_amount = paykit_lib::PaymentAmount::new(value, asset).unwrap();
         let decision = fixture
             .storage
-            .transaction(|tx| begin(tx, &path(), prepared.attempt_id.clone(), changed))
+            .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id.clone(), changed))
             .await
             .unwrap();
         assert!(matches!(
@@ -118,7 +125,7 @@ async fn test_accounting_conversion_requires_manual_authority_and_wallet_attesta
         .transaction(|tx| {
             reserve(
                 tx,
-                &path(),
+                &app_id(),
                 fixture.occurrence.clone(),
                 None,
                 converted_checks(),
@@ -159,7 +166,7 @@ async fn test_accounting_manual_same_asset_requires_requested_amount() {
     assert_eq!(prepared.amount.value, "1");
     let submitted = fixture
         .storage
-        .transaction(|tx| begin(tx, &path(), prepared.attempt_id.clone(), checks()))
+        .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id.clone(), checks()))
         .await
         .unwrap();
     assert_eq!(attempt(submitted).status, PaymentExecutionStatus::Submitted);

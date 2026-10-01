@@ -61,6 +61,8 @@ fn request(conversion: Option<PaymentConversion>) -> PaymentRequest {
 }
 fn parse(value: Value) -> PaymentRequestEventMessage {
     parse_payment_request_event_message(&PrivateApplicationMessage {
+        app_id: Some("bitkit".into()),
+
         version: Some(1),
         kind: value["kind"].as_str().map(str::to_owned),
         raw_json: value.to_string(),
@@ -68,7 +70,8 @@ fn parse(value: Value) -> PaymentRequestEventMessage {
     .unwrap()
 }
 fn round_trip(event: PaymentRequestEvent) {
-    let raw = serialize_payment_request_event(&event).unwrap();
+    let raw = serialize_payment_request_event(&crate::PaykitAppId::new("bitkit").unwrap(), &event)
+        .unwrap();
     assert!(
         raw.len() <= pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN,
         "representative event must fit one encrypted message"
@@ -78,12 +81,41 @@ fn round_trip(event: PaymentRequestEvent) {
         event
     );
 }
+
+#[test]
+fn test_conversion_quote_requires_valid_sending_app_attribution() {
+    let request = request(Some(PaymentConversion::PerPeriod {}));
+    let quote = PaymentConversionQuote::new(
+        EventId::new_v4(),
+        request.payment_request_id().clone(),
+        period(),
+        vec![rate("usdt", "1")],
+        "2026-06-01T00:00:00Z".into(),
+        "2026-06-02T00:00:00Z".into(),
+    )
+    .unwrap();
+    let app_id = crate::PaykitAppId::new("merchant").unwrap();
+    let raw =
+        serialize_payment_request_event(&app_id, &PaymentRequestEvent::ConversionQuote(quote))
+            .unwrap();
+    let value: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(parse(value.clone()).app_id(), Some(&app_id));
+    for app in [Value::Null, Value::from(""), Value::from("../merchant")] {
+        let mut invalid = value.clone();
+        invalid["app_id"] = app;
+        assert!(!parse(invalid).is_valid());
+    }
+    let mut missing = value;
+    missing.as_object_mut().unwrap().remove("app_id");
+    assert!(!parse(missing).is_valid());
+}
 fn proof(request: &PaymentRequest, asset: &str) -> PaymentProof {
     PaymentProof::new(
         EventId::new_v4(),
         request.payment_request_id().clone(),
         request.request().payment_reference().clone(),
         Some(period()),
+        crate::PaykitAppId::new("bitkit").unwrap(),
         PaymentEndpointIdentifier::new(asset).unwrap(),
         Default::default(),
     )
@@ -308,8 +340,11 @@ fn test_payment_deadlines_require_the_correct_request_shape() {
 
 #[test]
 fn test_payment_conversion_wire_rejects_ambiguous_and_unknown_fields() {
-    let raw =
-        serialize_payment_request_event(&PaymentRequestEvent::Request(request(None))).unwrap();
+    let raw = serialize_payment_request_event(
+        &crate::PaykitAppId::new("bitkit").unwrap(),
+        &PaymentRequestEvent::Request(request(None)),
+    )
+    .unwrap();
     for (field, value) in [
         ("conversion", Value::Null),
         ("conversion", json!({"type":"floating"})),

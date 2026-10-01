@@ -16,6 +16,9 @@ on low-level `paykit-lib` protocol bindings.
 ### Runtime
 
 - `PaykitSdk` — stateful SDK runtime handle.
+- `PaykitSdk.withPubkySharedState` and
+  `PaykitSdk.withPaymentAdapterAndPubkySharedState` — use the first-party
+  encrypted Pubky state instead of platform blob callbacks.
 - `SdkStateBlobStore` — platform callback interface for opaque SDK state
   blob load/save.
 - `SdkPubkySessionProvider` — platform callback interface for live Pubky
@@ -25,21 +28,20 @@ on low-level `paykit-lib` protocol bindings.
   construction.
 - `PaykitSdk.initialize`, `identityStatus`, `signOut`, and
   `forgetSessionAccess` — app-facing account/session lifecycle for the current
-  Paykit runtime. `signOut` revokes the Pubky grant and preserves local state if
-  live access or remote revocation is unavailable; `forgetSessionAccess`
-  performs explicit local-only cleanup.
-- `PaykitSdk.stateRevision` — return the platform SDK state revision so
+  Paykit runtime. `signOut` revokes the Pubky grant and leaves identity-wide
+  Paykit state intact; `forgetSessionAccess` performs local-only cleanup.
+- `PaykitSdk.stateRevision` — return the latest observed SDK state revision so
   apps can detect when SDK-managed state changed.
-- `PaykitSdk.backupStateRevision` — fingerprint the backup contents without
+- `PaykitSdk.backupStateRevision` — fingerprint backup contents without
   transient operation leases, so empty polls do not trigger app backups.
 - `PubkySessionAccess` — opaque Pubky session access material. Use its
   explicit export methods only when persisting or loading platform-protected
   session state.
-- `defaultConfig(receiverPath)` — return the default `PaykitSdkConfig` policy
-  for an explicit Paykit receiver path.
+- `defaultConfig(appId)` — return the default `PaykitSdkConfig` policy for one
+  Paykit App ID.
 - `defaultPubkyClientConfig()` — return default `PubkyClientConfig`.
-- `requiredSessionCapabilities(config)` — return Pubky capabilities required by
-  a config.
+- `requiredSessionCapabilities()` — return the Pubky capabilities required by
+  the SDK.
 
 FFI methods accept raw z32 Pubky public keys and `pubky...` app-key strings.
 App-facing records return `pubky...` strings. Use
@@ -53,11 +55,15 @@ load the native UniFFI library just to format keys.
 
 - `PaykitSdk.withPaymentAdapter` — create a runtime with payment adapter
   callbacks.
-- `paykitReceiverPaths` — list a Pubky identity's Paykit receiver paths before
-  scoped public Payment List reads.
-- `publishPaykitReceiverMarker`, `removePaykitReceiverMarker`, and
-  `paykitReceiverMarker` — publish or inspect a lightweight public receiver
-  discovery marker.
+- `paykitAppRegistry` — fetch an identity's public Paykit App Registry.
+- `publishPaykitApp` — publish this app's registry entry before endpoint sync.
+- `rotatePaykitIdentityKey` — re-encrypt shared state with the next Paykit key
+  generation and require fresh Encrypted Links while preserving durable history.
+- `removePaykitApp` — remove this app's public Payment Endpoints and registry
+  entry after its active Payment Requests and pending private financial work
+  are complete.
+- `setDefaultPaykitApp` and `setDefaultPaykitAppForEndpoint` — maintain
+  identity-wide and per-endpoint app preferences.
 - `PaykitSdk.syncPublicEndpoints` — publish current public receiving details
   and remove stale SDK-managed public Payment Endpoints.
 - `PaykitSdk.syncPublicEndpointsWithReceivingDetails` — publish explicit
@@ -80,7 +86,8 @@ Paykit-side workflow.
 - `PaykitSdk.processOutboundPrivateMessages` and
   `processPendingPrivateMessages` — send queued private messages.
 - `PaykitSdk.*EncryptedLinkRecoveryMarker*` methods — inspect, publish,
-  observe, and remove recovery markers.
+  observe, and remove recovery markers. Active links retain their markers;
+  explicit removal requires a blocked peer.
 
 Private operation errors expose stable category/code fields and redacted
 context. Raw diagnostic details require an explicit debug export method.
@@ -88,13 +95,13 @@ context. Raw diagnostic details require an explicit debug export method.
 ### Private Payment Lists and Payment Resolution
 
 - `PaykitSdk.enqueuePrivatePaymentList` — queue current private receiving
-  details for one counterparty receiver.
+  details for one counterparty.
 - `PaykitSdk.enqueuePrivatePaymentListWithReceivingDetails` — queue an
-  explicit complete private list for one counterparty receiver.
+  explicit complete private list for one counterparty.
 - `PaykitSdk.clearPrivatePaymentList` — queue an empty private list for one
-  counterparty receiver.
+  counterparty.
 - `PaykitSdk.clearPrivatePaymentListAndProcessOutbound` — queue an empty
-  private list and attempt delivery for that counterparty receiver.
+  private list and attempt delivery for that counterparty.
 - `PaykitSdk.syncContactPrivatePaymentLists` — queue current private lists
   for saved contacts and optionally clear linked peers that are no longer
   saved contacts.
@@ -102,9 +109,9 @@ context. Raw diagnostic details require an explicit debug export method.
   contact private lists and attempt outbound delivery in one app-facing call.
 - `PaykitSdk.syncPrivatePaymentListsWithReservationsAndProcessOutbound` —
   queue reservation-backed private lists supplied by the app and attempt
-  delivery, with per-counterparty-receiver queue and delivery failures.
-- `PaykitSdk.currentPrivatePaymentList` — inspect the latest cached Private
-  Payment List view for one counterparty receiver.
+  delivery, with per-counterparty queue and delivery failures.
+- `PaykitSdk.currentPrivatePaymentLists` — inspect the latest cached Private
+  Payment List view from each app for one counterparty.
 - `PaykitSdk.prepareAndResolvePrivateContactPayment` — app-facing private
   payment setup:
   refresh live session access, ensure or advance private link state,
@@ -114,22 +121,23 @@ context. Raw diagnostic details require an explicit debug export method.
   Payment Endpoints into adapter-built private payment targets.
 - `PaykitSdk.resolvePublicContactPayment` — independently resolve only payable
   public Payment Endpoints into adapter-built public payment targets. It does
-  not inspect or mutate Encrypted Link state.
+  not inspect or mutate Encrypted Link state. The result includes per-app load
+  failures when one registered app publishes invalid or unavailable data.
 
 The bindings do not expose a mixed public/private resolution call, a source
 discriminator, or implicit fallback between the two payment modes.
 
 Private endpoint payloads and payment targets use `PaymentPayload`, so raw
 payment-method data is exported only through explicit payload methods.
-The reservation callback returns `ReceivingDetailReservationResponse`:
+The reservation callback returns `PrivateReceivingDetailReservationResponse`:
 `UseCurrentReceivingDetails` means the SDK should call regular current
 receiving details, while `Reservations` means use exactly the supplied list,
 including an empty list.
 
 For direct reservation publication, pass one
-`PrivatePaymentListReservationUpdateInput` per counterparty receiver. An empty
+`PrivatePaymentListReservationUpdateInput` per counterparty. An empty
 reservation list means "publish an empty Private Payment List for this
-counterparty receiver".
+counterparty".
 Helpers that both queue and attempt delivery return
 `PrivatePaymentListDeliveryReport` with `queued`, `cleared`,
 `failedToQueue`, and `failedToDeliver` groups. A peer whose Encrypted Link is
@@ -138,21 +146,12 @@ outbound worker run after the link becomes `LINKED`.
 
 ### Public File Downloads
 
-`fetchPubkyFileBounded(uri, maxBytes)` enforces a caller-selected byte limit while
-reading successful response bodies, before returning bytes across FFI. The
-effective limit is the smaller of `maxBytes` and 5 MiB. It returns
-`nil` in Swift or `null` in Kotlin for missing files and throws for oversized
-bodies and truncation the transport can detect, such as a Content-Length
-shortfall or an incomplete chunked body. A close-delimited body has no declared
-length, so an early connection close can return partial bytes successfully.
-Zero permits only an empty body. Transport buffers and the current chunk are
-additional memory. Image decode, pixel, cache and request-timeout limits remain
-the app's responsibility. HTTP error bodies remain unbounded inside the current
-Pubky client before Paykit regains control. Closing that gap through this path
-requires a Pubky client API change. This is not complete response-size protection.
-A hostile homeserver can bypass the limit by returning an HTTP error status.
-A Pubky request timeout limits that request's duration, not its memory use.
-`fetchPubkyFile` limits successful bodies to 5 MiB.
+`fetchPubkyFile(uri, maxBytes)` and `fetchPubkyText(uri, maxBytes)` require a
+positive byte limit. `fetchPubkyFileBounded(uri, maxBytes)` additionally caps
+the limit at 5 MiB and permits zero for an empty body. Missing files return
+`nil`/`null`; oversized successful bodies fail before full buffering. Pubky
+currently buffers HTTP error bodies before returning them to Paykit. Image decoding,
+pixel and cache limits, and request timeouts remain app responsibilities.
 
 ### Payment Requests
 
@@ -165,9 +164,15 @@ A Pubky request timeout limits that request's duration, not its memory use.
   inspect SDK-derived Payment Request records.
 - `PaymentReference` — redacted Payment Reference object with explicit text
   export for payment execution or display.
+- `PaykitSdk.resolvePrivatePaymentRequest`, `resolvePublicPaymentRequest`, and
+  `prepareAndResolvePrivatePaymentRequest` — resolve using the request amount
+  while enforcing its accepted endpoint identifiers and required payee App.
 
 Returned records reflect local stream and outbound queue state. Outbound
 statuses still indicate whether a queued event has been sent.
+`actionableReceivedPaymentRequests` includes every request that still needs a
+payer response. A required Paykit App constrains the payee endpoint, not the
+payer app that responds.
 
 ### Allowances
 
@@ -192,9 +197,10 @@ implementations must add the six Allowance methods when adopting these bindings.
 ### Allowance payment accounting
 
 The accounting APIs use the SDK's shared matching and exact decimal rules. They
-never execute a wallet payment. Use one coordinated SDK runtime and executor for
-the local identity; sessions, capabilities, key rotation, endpoint freshness,
-trusted time, user consent, and wallet idempotency remain the caller's responsibility.
+never execute a wallet payment. All apps use the identity's shared ledger and
+coordinate handoffs through it; sessions, capabilities, key rotation, endpoint
+freshness, trusted time, user consent, and wallet idempotency remain the caller's
+responsibility.
 
 1. Read `allowanceAccountingState`. Before first admission, reconcile the complete
    wallet journal through `reconcileAllowanceAccounting`. Supply an empty history
@@ -206,7 +212,9 @@ trusted time, user consent, and wallet idempotency remain the caller's responsib
    discovery itself never chooses or combines Allowances. Candidate checks cover
    static matching and active time; actual capacity is checked at admission.
 3. `acceptPaymentRequestAutomatically` atomically persists selection and queues
-   ordinary Acceptance after SDK and wallet checks. Recurring Acceptance reserves
+   ordinary Acceptance after SDK and wallet checks. As with manual Acceptance,
+   call `claimPaymentRequestForExecution` first to assign the request to this app.
+   Recurring Acceptance reserves
    no amount or count. Each scheduled Billing Period needs its own later admission.
 4. Call `reserveAutomaticPayment` with the occurrence, expected association
    revision, and fresh `PaymentExecutionChecks`. The checks include the actual
@@ -218,6 +226,8 @@ trusted time, user consent, and wallet idempotency remain the caller's responsib
    status permits handoff. Use its stable attempt ID as the external wallet's
    idempotency key. An admission or handoff `Blocked` result is a successful
    durable decision: its updated trusted-time watermark must remain saved.
+   Reservation and handoff require this app's execution claim and outgoing
+   payment capability; unresolved attempts keep the claim held.
 6. Report wallet-verified settlement through `recordPaymentOutcome`. `Succeeded`
    commits usage; verified terminal `Failed` releases it. Timeouts, missing
    callbacks, or uncertain settlement are `Unknown` and keep capacity reserved.
@@ -246,9 +256,9 @@ an unresolved payment into a new execution opportunity.
 
 `AllowanceAccountingHistory` contains typed associations, occurrences, attempts,
 and per-Allowance watermarks. Treat every record and value accessed through
-`AccountingAmount` getters as private wallet data. Rust debug formatting and the
-amount object's native default formatting are redacted; platform record fields
-remain explicit data and must not be logged or included in generated descriptions.
+`AccountingAmount` getters as private wallet data. Rust debug formatting and
+native record descriptions are redacted. Explicitly accessed fields remain
+private data and must not be logged.
 
 The unreleased state and backup blob formats remain version 1 and may evolve
 directly during development. Previous development data is unsupported; no migration
@@ -259,7 +269,8 @@ Preserve opaque blobs with caller-managed encryption in storage and backups.
 
 Restore rejects backups that would discard retained Allowance or Payment Request
 lifecycle evidence, including Cancellation and Event ID conflicts. Rejection
-leaves current state unchanged.
+leaves current state unchanged. Restore requires empty storage apart from
+initialized identity metadata; it cannot replace an existing shared state.
 
 After restore or private-state loss, accounting remains blocked until complete
 wallet reconciliation. A stale but internally valid backup can omit later spend:
@@ -276,10 +287,7 @@ methods and typed records. They are compile-only surface checks, not a payment
 workflow to execute in sequence. SDK protocol mocks must implement these methods
 when adopting this binding version.
 
-Review context: [candidate selection](https://github.com/pubky/paykit-rs/pull/136#discussion_r4004039601),
-[deferral](https://github.com/pubky/paykit-rs/pull/136#discussion_r4004039605),
-[future reassociation](https://github.com/pubky/paykit-rs/pull/136#discussion_r4004039611), and
-[shared SDK support](https://github.com/pubky/paykit-rs/pull/136#discussion_r4004039617).
+See the [SDK accounting contract](../specs/paykit-sdk.md#durable-allowance-payment-accounting).
 
 ### Receipts
 
@@ -349,7 +357,7 @@ let claim = PubkyAuthCompanionClaim(
 )
 try await bootstrap.approveAuthWithCompanionClaim(
     authUrl: authUrl,
-    expectedCapabilities: "/pub/paykit/v0/bitkit/server/:rw",
+    expectedCapabilities: "/pub/paykit/:rw",
     localSecretKey: identityKey,
     claim: claim
 )
@@ -365,7 +373,7 @@ val claim = PubkyAuthCompanionClaim(
 )
 bootstrap.approveAuthWithCompanionClaim(
     authUrl = authUrl,
-    expectedCapabilities = "/pub/paykit/v0/bitkit/server/:rw",
+    expectedCapabilities = "/pub/paykit/:rw",
     localSecretKey = identityKey,
     claim = claim,
 )
@@ -374,53 +382,63 @@ bootstrap.approveAuthWithCompanionClaim(
 ### Profiles and Contacts
 
 - `PaykitSdk.publishPaykitProfile` / `fetchPaykitProfile` — write and read
-  public Paykit Profiles.
-- `PaykitSdk.deletePaykitProfile` — remove this identity's Paykit Profile.
+  public Paykit Profiles. Updates pass the revision returned by the preceding
+  fetch or publication.
+- `PaykitSdk.deletePaykitProfile(revision)` — remove the fetched profile only
+  if its revision is still current.
 - `PaykitSdk.publishPaykitBlob`, `uploadProfileAvatar`,
   `deletePaykitBlob`, `fetchPubkyFile`, `fetchPubkyFileBounded`, and `fetchPubkyText` — publish profile
-  blobs and read public Pubky resources.
+  blobs and read public Pubky resources with caller-provided size limits.
 - `PaykitSdk.saveContact`, `contactRecord`, `contactRecords`, and
-  `removeContact` — manage local Contact Records. Each contact is one Pubky
-  identity with one or more Paykit receiver paths.
-- `PaykitSdk.fetchPubkyProfile`, `fetchPubkyFollows`, and
-  `resolveContactProfile` — read Pubky app profile/follow data and resolve
-  contact display metadata.
-- `PaykitSdk.resolveProfile` and `currentProfile` — profile-resolution
-  aliases for non-contact and current-identity screens.
+  `removeContact` — manage Contact Records. Each contact is one Pubky
+  identity.
+- `PaykitSdk.fetchPubkyProfile` and bounded `fetchPubkyFollows` — read Pubky
+  app profile and follow data.
+- `PaykitSdk.resolveProfile` and `currentProfile` — resolve profile display
+  metadata for another identity or the current identity.
 - `PaykitSdk.publishPublicContact`, `removePublicContact`, and
   `syncPublicContactMarkers` — opt-in Public Contact Marker workflows.
 
-`PaykitProfile.extraJson` is a JSON object string so apps can carry
-app-specific public profile fields without exposing an FFI JSON value model.
+`PaykitProfile.extraJson` is a JSON object string for application-defined
+identity profile fields without exposing an FFI JSON value model.
 
 ### State and Secret Blobs
 
-- `SdkStateBlob` — internal SDK runtime state for platform durable
-  storage. Store it encrypted or inside platform-protected storage.
+- `SdkStateBlob` — internal identity-wide SDK runtime state. Store it in the
+  shared durable backing used by every runtime for that Pubky identity.
 - `SdkBackupBlob` — SDK backup/export payload for app-controlled
   backup flows.
 - `PubkyLocalSecretKey` — local Pubky secret key bytes.
-- `ReceiverNoiseSecretKey` — receiver-scoped Noise secret key bytes. Generate
-  it once per receiver, persist it with session access, and reuse it when
-  signing in, completing auth, or importing that session. It remains required
-  when an external signer owns the Pubky identity secret.
+- `PaykitIdentitySecretKey` — rotatable identity-wide Paykit secret plus key
+  generation.
+
+Any generation can be derived from `PubkyLocalSecretKey` by passing its
+generation number. Delegated apps can instead load `PaykitIdentitySecretKey`
+without receiving the Pubky root secret. After rotation, every remaining app
+must use the replacement Paykit secret. Delegated apps receive it from the
+identity's key-management layer; a root-key holder can derive it for that
+generation.
+
+Persist the replacement key before calling `rotatePaykitIdentityKey`. If the
+call fails or is interrupted, retry with the same replacement: shared state may
+already use it even if the registry update has not completed.
 
 `PaykitSdk.exportBackupString` and `restoreBackupString` are text-form
 wrappers for platforms that prefer a single encoded SDK backup string.
 `PaykitSdk.backupStateRevision` lets apps compare backup contents before and
 after SDK-mutating workflows to mark app backups dirty. `stateRevision`
-remains the platform storage revision, including transient lease changes.
+remains the selected storage mode's revision, including transient lease changes.
 `encodeSdkStateBlobSnapshot` and `decodeSdkStateBlobSnapshot` are convenience
 helpers for apps that store the opaque state blob and revision in one platform
 record.
 
 These are opaque binding objects. Use their explicit export methods only at
-platform secure-storage or backup boundaries.
+the shared-state storage or backup boundary.
 
 ## Mobile Workflow Guide
 
-The app usually keeps one long-lived `PaykitSdk` handle for the current local
-Paykit identity. On startup:
+The app usually keeps one long-lived `PaykitSdk` handle for the current Paykit
+identity. On startup:
 
 ```text
 sdk = PaykitSdk.withPaymentAdapter(
@@ -433,17 +451,66 @@ sdk.initialize()
 status = sdk.identityStatus()
 ```
 
-Use `identityStatus` to gate product actions. A persisted identity can remain
-visible while live session access is unavailable. A missing `publicKey` means
-explicit sign-out; a present `publicKey` with `liveSessionAvailable == false`
-means the identity is remembered but Pubky-backed workflows must wait.
+Use a separate Pubky grant for each independently restored session. Restoring
+the same grant again replaces its existing bearer. When reconnecting through
+`PubkySessionBootstrap.importSession`, return its live `sessionAccess` from the
+provider with the same client configuration instead of restoring it again.
 
-`SdkStateBlobStore` must persist every blob save atomically. If the app stores
-the SDK backup inside a larger app backup record, compare `backupStateRevision`
-before and after SDK-mutating workflows and mark the app backup dirty when it
-changes, including when a workflow fails after persisting progress. If the
-comparison fails, conservatively mark the app backup dirty. Do not use this
-fingerprint as the state store's compare-and-swap revision.
+Apps that share one identity-wide Pubky state can instead construct the handle
+with `withPaymentAdapterAndPubkySharedState`. This mode does not use
+`SdkStateBlobStore` callbacks. It requires active session access with current
+Paykit identity key material for every operation. Independent runtimes use
+renewable homeserver write locks across each state transaction. After contention
+or an uncertain result, inspect durable request/payment records and resume
+existing work; a multi-step operation may already have committed intent.
+Apps with shared keys and write access are mutually trusted; App IDs do not
+provide cryptographic isolation from other authorized apps.
+An unconfirmed state write leaves a homeserver marker. The next operation waits
+five minutes under a renewed lock before reloading state; cancelling restarts
+that wait on the next attempt. A competing runtime that cannot acquire the lock
+while a marker exists receives `SharedStateBusy` (`shared_state_busy`). Back off
+and show recovery as pending instead of immediately retrying. Reads can also be
+blocked; there is no fixed completion deadline.
+This is a best-effort testing mitigation, not a replacement for homeserver
+commit-time lock enforcement. Normal successful writes have no cooldown.
+
+Use `identityStatus` to gate product actions. `publicKey` identifies the last
+initialized identity when known. `SignedOut` means Pubky-backed workflows must
+wait even though the identity and its Paykit state remain available. With
+callback storage, `PublicOnly` permits public workflows and
+`PrivateLinkCapable` also permits Encrypted Link workflows. Pubky shared-state
+storage requires `PrivateLinkCapable` access because decrypting state requires
+the Paykit identity secret.
+
+When callback storage is selected, `SdkStateBlobStore` must persist every blob
+save atomically. Every runtime for the same Pubky identity must resolve to the
+same logical blob. A protected device-local blob is suitable only while one
+process owns the runtime. If the app also stores the SDK blob inside a larger
+app backup record, compare `backupStateRevision` before and after SDK-mutating
+workflows and mark the app backup dirty when it changes, including when a
+workflow fails after persisting progress. If the comparison fails, conservatively
+mark the backup dirty. Do not use this fingerprint as the store's CAS revision.
+
+State-store callbacks run while the SDK holds its per-handle storage lock. They
+must only load or save the blob and must not call back into that SDK handle.
+Session-provider and payment-adapter callbacks are also synchronous boundaries:
+none of these callbacks may call back into the same SDK handle while the
+originating SDK operation is waiting for it.
+
+Generated Android wrappers for callback-supplied SDK blobs, payment payloads,
+and reservation attribution implement `AutoCloseable`. Callback implementations
+should export the values they need and close those wrappers before returning;
+Swift releases the equivalent objects through ARC.
+
+Each successful changed blob write must return a new non-empty opaque revision
+that is never reused for another state blob. Reusing any earlier revision makes
+ABA stale-writer detection unsafe. Reusing the expected revision is rejected by
+the Rust adapter directly.
+
+When switching identities, select or create the state backing for the new
+Pubky key, construct a new `PaykitSdk` handle with that store and session, then
+call `initialize`. Do not reuse the previous identity's blob. Reopening the
+previous store restores that identity without deleting its state.
 
 ```text
 before = sdk.backupStateRevision()
@@ -456,18 +523,18 @@ if after != before:
 
 ### Publish Receive Details
 
-When receiving details change, publish public endpoints and, for saved local
+When receiving details change, publish public endpoints and, for saved
 contacts, queue private lists:
 
 ```text
+sdk.publishPaykitApp(displayName, capabilities)
 sdk.syncPublicEndpointsWithReceivingDetails(publicDetails)
 
 updates = [
     PrivatePaymentListReservationUpdateInput(
         counterparty,
-        counterpartyReceiverPath,
         reservations: [
-            PaymentEndpointReservationInput(
+            PrivatePaymentEndpointReservationInput(
                 reservationId,
                 identifier,
                 payload,
@@ -484,9 +551,15 @@ report = sdk.syncPrivatePaymentListsWithReservationsAndProcessOutbound(
 )
 ```
 
+Publishing the app is required before it can create app-attributed private
+work. Call `paykitAppRemovalBlockers` before de-registration to inspect active
+requests, undelivered events, incomplete Receipt issuance, and Private Payment
+Lists that must first be cleared.
+
 An empty `reservations` list publishes an empty Private Payment List for that
-counterparty receiver. `failedToQueue` means the SDK did not persist an outbound
-private message for that counterparty receiver. `failedToDeliver` means the SDK
+counterparty. `failedToQueue` reports a queueing failure, not a rollback guarantee;
+inspect durable state before replacing reservations or retrying the workflow.
+`failedToDeliver` means the SDK
 queued the message, then delivery or reservation cleanup failed; keep the state
 and retry with `processPendingPrivateMessages`.
 
@@ -497,8 +570,8 @@ For private contact payment UX, use the high-level private preparation call:
 ```text
 prepared = sdk.prepareAndResolvePrivateContactPayment(
     counterparty,
-    counterpartyReceiverPath,
     amount, // PaymentAmountContext or nil/null
+    nil/null, // previous private list version when one was consumed
     maxAdvanceSteps
 )
 ```
@@ -514,7 +587,6 @@ Public payment is a separate call and result type:
 ```text
 resolution = sdk.resolvePublicContactPayment(
     counterparty,
-    counterpartyReceiverPath,
     amount // PaymentAmountContext or nil/null
 )
 ```
@@ -524,19 +596,34 @@ application chooses which payment mode to present and invoke.
 
 ### Backup And Restore
 
-The SDK backup is separate from the live state blob. Store both according to
-the product's backup model:
+The SDK backup is separate from the live shared-state blob. Store the backup
+according to the product's recovery model:
 
 ```text
 backupText = sdk.exportBackupString()
 sdk.restoreBackupString(backupText)
 ```
 
+Normal restore requires an otherwise empty SDK state backing. This prevents an older
+app backup from replacing newer state written by another app sharing the same
+identity. After restore, participating apps publish their App Registry entries
+again before creating new app-attributed work.
+
+For missing or corrupt Pubky shared state, use
+`recoverSharedStateFromBackup(backupBlob, replacementKey)` with the current key
+and its successor. Persist the replacement key first and distribute it after
+success. Recovery preserves backup history, discards old Noise checkpoints and
+prepared sends, and requires relinking and wallet reconciliation. It rejects
+healthy state, unreadable generation headers, and unknown generations. Retry
+failures with the same keys and backup; valid already-recovered state is preserved.
+Corrupt replacement-generation state is rejected, not overwritten under keys
+that may already have been used. Data newer than the backup is lost.
+
 Use `exportBackupString` after SDK state changes when the app wants the user to
 recover Paykit private state after reinstall, sign-out, or device restore.
 Without an SDK backup or live state blob, public Paykit data can be
 rediscovered from Pubky, but private link checkpoints, private stream indexes,
-receipt keys, queued outbound messages, and local Contact Records are not
+receipt keys, queued outbound messages, and Contact Records are not
 derivable from the Pubky public key alone.
 
 ### Error And Report Handling
@@ -547,15 +634,13 @@ derivable from the Pubky public key alone.
 - `EndpointSyncReport.failed` means public endpoint publication/removal was not
   fully applied. Keep local receiving details and retry sync later.
 - `PrivatePaymentListDeliveryReport.failedToQueue` is a local persistence or
-  validation problem for that counterparty receiver; show or log it as a
+  validation problem for that counterparty; show or log it as a
   blocked update.
 - `PrivatePaymentListDeliveryReport.failedToDeliver` is retryable workflow
   state unless the nested error says recovery is required. Keep the queued
   state and let the retry worker continue.
-- Contact payment resolution may return public Payment Endpoints while
-  `privateState` reports private recovery or unavailable private state.
-  Treat `status` as the general result and `privateState` as the private
-  transport state.
+- Private resolution reports private availability and recovery state. Public
+  resolution has a separate result and does not carry private-link state.
 
 ## Building
 
@@ -566,44 +651,13 @@ cd paykit-ffi
 ./build.sh all
 ```
 
-Build only iOS artifacts for local debugging:
+The iOS script regenerates SwiftPM interfaces in `bindings/ios` and writes the
+XCFramework and zip to `dist/ios`. It also updates the checksum in
+`Package.swift`; keep that change only when preparing a release.
 
-```bash
-cd paykit-ffi
-./build_ios.sh
-```
-
-The iOS script regenerates the SwiftPM interface files in `bindings/ios` and
-writes release artifacts to:
-
-```text
-dist/ios/Paykit.xcframework
-dist/ios/Paykit.xcframework.zip
-```
-
-It also computes the zip checksum and updates the root `Package.swift`. The
-generated XCFramework directory and zip are ignored and must not be committed.
-
-Build only Android artifacts for local debugging:
-
-```bash
-cd paykit-ffi
-./build_android.sh
-```
-
-The Android script regenerates ignored UniFFI Kotlin bindings, JNI libraries,
-native debug symbols, and a local Maven publication:
-
-```text
-bindings/android/lib/src/main/kotlin/com/synonym/paykit/paykit.android.kt
-bindings/android/lib/src/main/kotlin/com/synonym/paykit/paykit.common.kt
-bindings/android/lib/src/main/jniLibs/**/libpaykit.so
-bindings/android/native-debug-symbols.zip
-```
-
-The Gradle wrapper/configuration, `AndroidManifest.xml`, ProGuard files, and
-`kotlin-manual` helper sources are tracked because Android consumers need them
-at source checkout time.
+Android Kotlin bindings, JNI libraries, debug symbols, and the local Maven
+publication are generated artifacts, not tracked sources. The Gradle project,
+manifest, ProGuard rules, and `kotlin-manual` helpers remain tracked.
 
 Release builds use the same script with `-r`:
 

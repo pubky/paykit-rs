@@ -46,8 +46,12 @@ fn test_validated_terms_preserve_existing_wire_values() {
         PaymentRequestId::new_v4(),
         terms,
     ));
-    let raw = crate::serialize_payment_request_event(&event).unwrap();
+    let raw =
+        crate::serialize_payment_request_event(&crate::PaykitAppId::new("bitkit").unwrap(), &event)
+            .unwrap();
     let message = crate::PrivateApplicationMessage {
+        app_id: Some("bitkit".into()),
+
         version: Some(1),
         kind: Some("paykit.payment_request".into()),
         raw_json: raw,
@@ -121,6 +125,7 @@ fn test_valid_components_still_require_proof_request_correlation() {
         PaymentRequestId::new_v4(),
         request.request().payment_reference().clone(),
         None,
+        crate::PaykitAppId::new("bitkit").unwrap(),
         PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
         serde_json::Map::new(),
     );

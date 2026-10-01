@@ -105,6 +105,7 @@ The payee can issue quotes after an opted-in recurring request has been accepted
 {
   "version": 1,
   "kind": "paykit.payment_conversion_quote",
+  "app_id": "merchant",
   "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103",
   "payment_request_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
   "billing_period": {"starts_at":"2026-10-01T00:00:00Z","ends_at":"2026-11-01T00:00:00Z"},
@@ -116,7 +117,8 @@ The payee can issue quotes after an opted-in recurring request has been accepted
 
 The Event ID is the quote identifier; no second identity or revision counter is
 needed. A quote is an authenticated payee Event Message, scoped to the exact
-Encrypted Link and request. It has its own nonempty rates list and required
+identity-wide Encrypted Link and request. Its `app_id` must match the
+App that proposed the request. It has its own nonempty rates list and required
 validity interval (`valid_from` through `expires_at`, inclusive). The SDK sets
 `valid_from` to its issuance clock rounded down to whole seconds, matching
 common chain timestamp precision. The payee must not backdate quotes to reprice
@@ -133,7 +135,9 @@ but cannot silently switch the approved amount or selected quote afterward.
 Quote publication or receipt never grants spending authorization.
 
 The payer sets the Payment Proof's optional `conversion_quote_id` to the selected
-quote's Event ID and supplies the same `billing_period`. The quote must belong to
+quote's Event ID and supplies the same `billing_period`. The proof also names
+`payment_app_id`, the payee App owning the selected endpoint, while its
+`app_id` attributes the message to the sending payer App. The quote must belong to
 the same request, period and payee; its rates must cover the payment asset. A
 quote identifier is invalid on requests without `per_period` conversion. The
 identifier is required for cross-asset proofs under `per_period`, and optional
@@ -167,7 +171,7 @@ Existing messages with no conversion/deadline fields retain their meaning. Peers
 must support these fields and the new event before using them. This is a
 coordinated protocol revision; the caller must establish support through its
 application deployment or an explicitly agreed peer capability mechanism. The
-existing `payment_requests` receiver flag does not advertise this extension.
+existing `payment_requests` App capability does not advertise this extension.
 The SDK does not discover extension support or negotiate a downgrade; implementations
 must not strip unknown terms to make a request appear payable. Closed-world
 parsing rejects unsupported terms. No on-chain execution, allowance accounting,

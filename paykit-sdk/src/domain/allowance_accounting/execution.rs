@@ -60,10 +60,7 @@ pub(super) fn allowance_usage(
         .iter()
         .filter(|occurrence| {
             occurrence.key.request.local_public_key == scope.local_public_key
-                && occurrence.key.request.local_receiver_path == scope.local_receiver_path
                 && occurrence.key.request.counterparty == scope.counterparty
-                && occurrence.key.request.counterparty_receiver_path
-                    == scope.counterparty_receiver_path
         })
         .flat_map(|occurrence| &occurrence.attempts)
         .filter(|attempt| {
@@ -82,14 +79,14 @@ pub(super) fn allowance_usage(
 
 pub(crate) fn reserve(
     tx: &mut dyn StorageTransaction,
-    local: &PaykitReceiverPath,
+    app_id: &paykit_lib::PaykitAppId,
     input: PaymentOccurrence,
     expected_revision: Option<u64>,
     checks: PaymentExecutionChecks,
     mode: PaymentExecutionMode,
 ) -> Result<PaymentAttemptDecision> {
     validation::valid_time(checks.trusted_time)?;
-    let key = key(tx, local, &input)?;
+    let key = key(tx, &input)?;
     let Some(mut state) = tx
         .allowance_accounting_state()
         .filter(|s| !s.requires_reconciliation)
@@ -97,13 +94,22 @@ pub(crate) fn reserve(
         return Ok(blocked(AllowanceAccountingBlock::ReconciliationRequired));
     };
     validate_accounting(&state)?;
-    let decision = reserve_checked(tx, &mut state, key, expected_revision, &checks, mode);
+    let decision = reserve_checked(
+        tx,
+        app_id,
+        &mut state,
+        key,
+        expected_revision,
+        &checks,
+        mode,
+    );
     save(tx, state)?;
     Ok(decision)
 }
 
 fn reserve_checked(
     tx: &dyn StorageTransaction,
+    app_id: &paykit_lib::PaykitAppId,
     state: &mut AllowanceAccountingState,
     key: PaymentOccurrenceKey,
     expected_revision: Option<u64>,
@@ -129,7 +135,15 @@ fn reserve_checked(
     let Ok(record) = request(tx, &key.request, checks.trusted_time) else {
         return blocked(AllowanceAccountingBlock::InvalidLifecycle);
     };
-    if !valid_request(tx, &key.request, &record, false) {
+    if !valid_request(tx, &key.request, &record, false)
+        || crate::domain::payment_requests::require_payment_execution_authority(
+            tx,
+            &key.request.counterparty,
+            app_id,
+            &record,
+        )
+        .is_err()
+    {
         return blocked(AllowanceAccountingBlock::InvalidLifecycle);
     }
     let Ok(terms) = request_terms(&record) else {
@@ -234,7 +248,7 @@ fn reserve_checked(
 
 pub(crate) fn begin(
     tx: &mut dyn StorageTransaction,
-    local: &PaykitReceiverPath,
+    app_id: &paykit_lib::PaykitAppId,
     attempt_id: String,
     checks: PaymentExecutionChecks,
 ) -> Result<PaymentAttemptDecision> {
@@ -258,15 +272,11 @@ pub(crate) fn begin(
                 .map(|a| (o.key.clone(), a.clone()))
         })
         .ok_or_else(|| policy("Unknown payment attempt"))?;
-    let current_identity = tx
-        .load_identity_state()
-        .and_then(|i| i.local_pubky_public_key);
-    let result = if current_identity.as_ref() != Some(&key.request.local_public_key)
-        || *local != key.request.local_receiver_path
-    {
+    let current_identity = tx.load_identity_state().and_then(|i| i.public_key);
+    let result = if current_identity.as_ref() != Some(&key.request.local_public_key) {
         blocked(AllowanceAccountingBlock::InvalidLifecycle)
     } else {
-        begin_checked(tx, &mut state, &key, &attempt, &checks)
+        begin_checked(tx, app_id, &mut state, &key, &attempt, &checks)
     };
     save(tx, state)?;
     Ok(result)
@@ -274,6 +284,7 @@ pub(crate) fn begin(
 
 fn begin_checked(
     tx: &dyn StorageTransaction,
+    app_id: &paykit_lib::PaykitAppId,
     state: &mut AllowanceAccountingState,
     key: &PaymentOccurrenceKey,
     attempt: &PaymentAttemptRecord,
@@ -289,7 +300,15 @@ fn begin_checked(
     let Ok(record) = request(tx, &key.request, checks.trusted_time) else {
         return blocked(AllowanceAccountingBlock::InvalidLifecycle);
     };
-    if !valid_request(tx, &key.request, &record, false) {
+    if !valid_request(tx, &key.request, &record, false)
+        || crate::domain::payment_requests::require_payment_execution_authority(
+            tx,
+            &key.request.counterparty,
+            app_id,
+            &record,
+        )
+        .is_err()
+    {
         return blocked(AllowanceAccountingBlock::InvalidLifecycle);
     }
     let Ok(terms) = request_terms(&record) else {

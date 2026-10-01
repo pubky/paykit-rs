@@ -9,9 +9,7 @@ use chrono::{DateTime, Utc};
 use paykit_lib::{AllowanceRole, AllowanceTerms};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    domain::outbound_private::OutboundPrivateMessageStatus, PaykitReceiverPath, PubkyPublicKey,
-};
+use crate::{domain::outbound_private::OutboundPrivateMessageStatus, PubkyPublicKey};
 
 mod commands;
 mod derivation;
@@ -207,11 +205,8 @@ impl From<&AllowanceTerms> for AllowanceTermsRecord {
 /// Filter for listing SDK-derived Allowances.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AllowanceFilter {
-    /// Restrict results to one counterparty. Without a receiver path, every
-    /// exact link for that counterparty is included.
+    /// Restrict results to one counterparty identity.
     pub counterparty: Option<PubkyPublicKey>,
-    /// Restrict results to one counterparty receiver/runtime folder.
-    pub counterparty_receiver_path: Option<PaykitReceiverPath>,
     /// Restrict results to one local Allowance role.
     pub local_role: Option<AllowanceLocalRole>,
     /// Restrict results to lifecycle states. An empty list means all states.
@@ -223,10 +218,6 @@ impl AllowanceFilter {
         self.counterparty
             .as_ref()
             .is_none_or(|counterparty| &record.counterparty == counterparty)
-            && self
-                .counterparty_receiver_path
-                .as_ref()
-                .is_none_or(|path| &record.counterparty_receiver_path == path)
             && self
                 .local_role
                 .is_none_or(|role| record.local_role == Some(role))
@@ -241,8 +232,6 @@ impl AllowanceFilter {
 pub struct AllowanceRecord {
     /// Counterparty associated with the authenticated private history.
     pub counterparty: PubkyPublicKey,
-    /// Counterparty receiver/runtime folder associated with the history.
-    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Stable Allowance ID.
     pub allowance_id: String,
     /// Local role derived from the authenticated proposal source.
@@ -292,14 +281,9 @@ pub struct AllowanceRecord {
 }
 
 impl AllowanceRecord {
-    pub(crate) fn new(
-        counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
-        allowance_id: String,
-    ) -> Self {
+    pub(crate) fn new(counterparty: PubkyPublicKey, allowance_id: String) -> Self {
         Self {
             counterparty,
-            counterparty_receiver_path,
             allowance_id,
             local_role: None,
             state: AllowanceLifecycleState::Proposed,

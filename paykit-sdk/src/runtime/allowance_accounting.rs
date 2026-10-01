@@ -10,7 +10,7 @@ where
 {
     /// Read retained wallet accounting, including evidence requiring reconciliation.
     pub async fn allowance_accounting_state(&self) -> Result<Option<AllowanceAccountingState>> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
+        let (_session, identity) = self.load_session_access_and_refresh_identity().await?;
         self.storage
             .transaction(move |tx| {
                 ensure_accounting_identity(tx, &identity)?;
@@ -28,12 +28,11 @@ where
         &self,
         input: AllowanceAccountingReconciliation,
     ) -> Result<AllowanceAccountingState> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        let local = self.config.receiver_path.clone();
+        let (_session, identity) = self.load_session_access_and_refresh_identity().await?;
         self.storage
             .transaction(move |tx| {
                 ensure_accounting_identity(tx, &identity)?;
-                accounting::reconcile(tx, &local, input)
+                accounting::reconcile(tx, input)
             })
             .await
     }
@@ -45,12 +44,11 @@ where
         scope: PaymentRequestScope,
         trusted_time: DateTime<Utc>,
     ) -> Result<Vec<AllowanceCandidate>> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        let local = self.config.receiver_path.clone();
+        let (_session, identity) = self.load_session_access_and_refresh_identity().await?;
         self.storage
             .transaction(move |tx| {
                 ensure_accounting_identity(tx, &identity)?;
-                accounting::candidates(tx, &local, scope, trusted_time)
+                accounting::candidates(tx, scope, trusted_time)
             })
             .await
     }
@@ -62,12 +60,11 @@ where
         scope: PaymentRequestScope,
         input: AllowanceSelectionInput,
     ) -> Result<AllowanceAssociationRecord> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        let local = self.config.receiver_path.clone();
+        let (_session, identity) = self.load_session_access_and_refresh_identity().await?;
         self.storage
             .transaction(move |tx| {
                 ensure_accounting_identity(tx, &identity)?;
-                accounting::select(tx, &local, scope, input, None)
+                accounting::select(tx, &self.config.app_id, scope, input, None)
             })
             .await?
             .map_err(selection_block)
@@ -75,6 +72,7 @@ where
 
     /// Atomically persist selection and queue ordinary Payment Request Acceptance.
     ///
+    /// The current app must already own the Payment Request execution claim.
     /// One-time Acceptance checks current capacity; insufficient capacity leaves
     /// the request proposed. Recurring Acceptance defers capacity checks until due.
     /// Neither reserves or consumes usage. Every actual occurrence still requires
@@ -86,13 +84,22 @@ where
         checks: PaymentExecutionChecks,
     ) -> Result<AllowanceAssociationRecord> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        self.ensure_private_outbound_ready(&scope.counterparty, &scope.counterparty_receiver_path)
+        let record = self
+            .load_payment_request_record(&scope.counterparty, &scope.payment_request_id)
             .await?;
-        let local = self.config.receiver_path.clone();
+        self.ensure_payment_request_origin_app_authorized(
+            &scope.counterparty,
+            &record,
+            "accept Payment Request automatically",
+        )
+        .await?;
+        let _session = self
+            .ensure_private_outbound_ready(&scope.counterparty)
+            .await?;
         self.storage
             .transaction(move |tx| {
                 ensure_accounting_identity(tx, &identity)?;
-                accounting::select(tx, &local, scope, input, Some(checks))
+                accounting::select(tx, &self.config.app_id, scope, input, Some(checks))
             })
             .await?
             .map_err(selection_block)
@@ -124,12 +131,11 @@ where
         occurrence: PaymentOccurrence,
         disposition: PaymentDisposition,
     ) -> Result<PaymentOccurrenceRecord> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        let local = self.config.receiver_path.clone();
+        let (_session, identity) = self.load_session_access_and_refresh_identity().await?;
         self.storage
             .transaction(move |tx| {
                 ensure_accounting_identity(tx, &identity)?;
-                accounting::set_disposition(tx, &local, occurrence, disposition)
+                accounting::set_disposition(tx, occurrence, disposition)
             })
             .await
     }
@@ -146,18 +152,18 @@ where
         scope: PaymentRequestScope,
         input: AllowanceReassociationInput,
     ) -> Result<AllowanceAssociationRecord> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        let local = self.config.receiver_path.clone();
+        let (_session, identity) = self.load_session_access_and_refresh_identity().await?;
         self.storage
             .transaction(move |tx| {
                 ensure_accounting_identity(tx, &identity)?;
-                accounting::reassociate(tx, &local, scope, input)
+                accounting::reassociate(tx, scope, input)
             })
             .await?
             .map_err(selection_block)
     }
 
     /// Atomically reserve complete Allowance usage and the shared manual/automatic key.
+    /// The current app must own the execution claim and retain outgoing-payment capability.
     /// Ready returns Prepared; it is not yet a wallet handoff permit.
     pub async fn reserve_automatic_payment(
         &self,
@@ -176,6 +182,7 @@ where
 
     /// Reserve a manually authorized payment using the same semantic exclusion key.
     /// Manual payments consume no Allowance capacity. The caller supplies user authority.
+    /// The current app must own the execution claim and retain outgoing-payment capability.
     pub async fn reserve_manual_payment(
         &self,
         occurrence: PaymentOccurrence,
@@ -192,12 +199,11 @@ where
         checks: PaymentExecutionChecks,
         mode: PaymentExecutionMode,
     ) -> Result<PaymentAttemptDecision> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        let local = self.config.receiver_path.clone();
+        let (_session, identity) = self.load_session_access_and_refresh_identity().await?;
         self.storage
             .transaction(move |tx| {
                 ensure_accounting_identity(tx, &identity)?;
-                accounting::reserve(tx, &local, occurrence, revision, checks, mode)
+                accounting::reserve(tx, &self.config.app_id, occurrence, revision, checks, mode)
             })
             .await
     }
@@ -207,18 +213,19 @@ where
     /// Only a Ready Submitted response authorizes immediate execution. Use its
     /// attempt ID for external wallet idempotency. Storage and external settlement
     /// cannot commit atomically: a crash after this call requires reconciliation,
-    /// never timeout release or a second execution. Use one coordinated runtime.
+    /// never timeout release or a second execution. All apps sharing the identity
+    /// must use the same durable ledger and coordinate external wallet idempotency.
+    /// The current app must still own the execution claim and outgoing-payment capability.
     pub async fn begin_payment_execution(
         &self,
         attempt_id: String,
         checks: PaymentExecutionChecks,
     ) -> Result<PaymentAttemptDecision> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        let local = self.config.receiver_path.clone();
+        let (_session, identity) = self.load_session_access_and_refresh_identity().await?;
         self.storage
             .transaction(move |tx| {
                 ensure_accounting_identity(tx, &identity)?;
-                accounting::begin(tx, &local, attempt_id, checks)
+                accounting::begin(tx, &self.config.app_id, attempt_id, checks)
             })
             .await
     }
@@ -230,7 +237,7 @@ where
         &self,
         input: PaymentOutcomeReport,
     ) -> Result<PaymentAttemptRecord> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
+        let (_session, identity) = self.load_session_access_and_refresh_identity().await?;
         self.storage
             .transaction(move |tx| {
                 ensure_accounting_identity(tx, &identity)?;
@@ -251,11 +258,6 @@ pub(super) fn ensure_accounting_identity(
     tx: &dyn StorageTransaction,
     expected: &IdentityState,
 ) -> Result<()> {
-    ensure_sign_out_generation(
-        tx,
-        expected.sign_out_generation,
-        "update Allowance accounting",
-    )?;
     if tx.load_identity_state().as_ref() != Some(expected) {
         return Err(PaykitSdkError::Policy {
             context: "Payment accounting identity changed during operation".into(),

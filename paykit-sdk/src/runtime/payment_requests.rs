@@ -22,27 +22,17 @@ where
     pub async fn received_payment_requests_from(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<PaymentRequestRecord>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.local_pubky_public_key.is_none() {
+        if identity.public_key.is_none() {
             return Ok(Vec::new());
         }
-        self.ensure_peer_not_blocked(counterparty, counterparty_receiver_path)
+        self.ensure_peer_not_blocked(counterparty).await?;
+        let mut records =
+            derive_received_payment_request_records(&self.storage, counterparty, self.clock.now())
+                .await?;
+        self.mark_recovery_required_payment_request_records(counterparty, &mut records)
             .await?;
-        let mut records = derive_received_payment_request_records(
-            &self.storage,
-            counterparty,
-            counterparty_receiver_path,
-            self.clock.now(),
-        )
-        .await?;
-        self.mark_recovery_required_payment_request_records(
-            counterparty,
-            counterparty_receiver_path,
-            &mut records,
-        )
-        .await?;
         Ok(records)
     }
 
@@ -53,27 +43,16 @@ where
     pub async fn payment_requests_with(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<PaymentRequestRecord>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.local_pubky_public_key.is_none() {
+        if identity.public_key.is_none() {
             return Ok(Vec::new());
         }
-        self.ensure_peer_not_blocked(counterparty, counterparty_receiver_path)
+        self.ensure_peer_not_blocked(counterparty).await?;
+        let mut records =
+            derive_payment_request_records(&self.storage, counterparty, self.clock.now()).await?;
+        self.mark_recovery_required_payment_request_records(counterparty, &mut records)
             .await?;
-        let mut records = derive_payment_request_records(
-            &self.storage,
-            counterparty,
-            counterparty_receiver_path,
-            self.clock.now(),
-        )
-        .await?;
-        self.mark_recovery_required_payment_request_records(
-            counterparty,
-            counterparty_receiver_path,
-            &mut records,
-        )
-        .await?;
         Ok(records)
     }
 
@@ -87,61 +66,28 @@ where
         filter: PaymentRequestFilter,
     ) -> Result<Vec<PaymentRequestRecord>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.local_pubky_public_key.is_none() {
+        if identity.public_key.is_none() {
             return Ok(Vec::new());
         }
         let now = self.clock.now();
 
-        let counterparties = match (&filter.counterparty, &filter.counterparty_receiver_path) {
-            (Some(counterparty), Some(receiver_path)) => {
-                self.ensure_peer_not_blocked(counterparty, receiver_path)
-                    .await?;
-                vec![(counterparty.clone(), receiver_path.clone())]
-            }
-            (Some(counterparty), None) => {
-                let counterparties = self
-                    .payment_request_counterparties_for_counterparty(
-                        counterparty,
-                        filter.received_only,
-                    )
-                    .await?;
-                for (_, receiver_path) in &counterparties {
-                    self.ensure_peer_not_blocked(counterparty, receiver_path)
-                        .await?;
-                }
-                counterparties
-            }
-            _ => {
-                self.payment_request_counterparties(filter.received_only)
-                    .await?
-            }
+        let counterparties = if let Some(counterparty) = &filter.counterparty {
+            self.ensure_peer_not_blocked(counterparty).await?;
+            vec![counterparty.clone()]
+        } else {
+            self.payment_request_counterparties(filter.received_only)
+                .await?
         };
 
         let mut records = Vec::new();
-        for (counterparty, counterparty_receiver_path) in counterparties {
+        for counterparty in counterparties {
             let mut peer_records = if filter.received_only {
-                derive_received_payment_request_records(
-                    &self.storage,
-                    &counterparty,
-                    &counterparty_receiver_path,
-                    now,
-                )
-                .await?
+                derive_received_payment_request_records(&self.storage, &counterparty, now).await?
             } else {
-                derive_payment_request_records(
-                    &self.storage,
-                    &counterparty,
-                    &counterparty_receiver_path,
-                    now,
-                )
-                .await?
+                derive_payment_request_records(&self.storage, &counterparty, now).await?
             };
-            self.mark_recovery_required_payment_request_records(
-                &counterparty,
-                &counterparty_receiver_path,
-                &mut peer_records,
-            )
-            .await?;
+            self.mark_recovery_required_payment_request_records(&counterparty, &mut peer_records)
+                .await?;
             records.extend(
                 peer_records
                     .into_iter()
@@ -158,104 +104,162 @@ where
             .await
     }
 
-    /// Return accepted recurring Payment Requests across non-blocked counterparties.
+    /// Return accepted recurring Payment Requests from currently authorized remote apps.
+    /// Counterparties whose registry cannot be fetched or validated are omitted.
     pub async fn active_recurring_payment_requests(&self) -> Result<Vec<PaymentRequestRecord>> {
-        self.list_payment_requests(PaymentRequestFilter {
-            states: vec![PaymentRequestLifecycleState::ActiveRecurring],
-            recurring: Some(true),
-            ..PaymentRequestFilter::default()
-        })
-        .await
+        let records = self
+            .list_payment_requests(PaymentRequestFilter {
+                states: vec![PaymentRequestLifecycleState::ActiveRecurring],
+                recurring: Some(true),
+                ..PaymentRequestFilter::default()
+            })
+            .await?;
+        Ok(self
+            .filter_authorized_remote_payment_request_apps(records)
+            .await?
+            .into_iter()
+            .filter(|record| self.execution_available_to_current_app(record))
+            .collect())
     }
 
-    /// Return received Payment Requests that need a local payer response.
+    /// Return received Payment Requests from currently authorized apps that need a response.
+    /// Counterparties whose registry cannot be fetched or validated are omitted.
     pub async fn actionable_received_payment_requests(&self) -> Result<Vec<PaymentRequestRecord>> {
-        self.list_payment_requests(PaymentRequestFilter {
-            local_role: Some(PaymentRequestLocalRole::Payer),
-            states: vec![
-                PaymentRequestLifecycleState::Proposed,
-                PaymentRequestLifecycleState::ProposalExpired,
-            ],
-            ..PaymentRequestFilter::default()
+        let records = self
+            .list_payment_requests(PaymentRequestFilter {
+                local_role: Some(PaymentRequestLocalRole::Payer),
+                states: vec![
+                    PaymentRequestLifecycleState::Proposed,
+                    PaymentRequestLifecycleState::ProposalExpired,
+                    PaymentRequestLifecycleState::Accepted,
+                    PaymentRequestLifecycleState::ActiveRecurring,
+                ],
+                ..PaymentRequestFilter::default()
+            })
+            .await?;
+        Ok(self
+            .filter_authorized_remote_payment_request_apps(records)
+            .await?
+            .into_iter()
+            .filter(|record| self.execution_available_to_current_app(record))
+            .collect())
+    }
+
+    fn execution_available_to_current_app(&self, record: &PaymentRequestRecord) -> bool {
+        record
+            .execution_claim_app_id
+            .as_ref()
+            .is_none_or(|app_id| app_id == &self.config.app_id)
+    }
+
+    async fn filter_authorized_remote_payment_request_apps(
+        &self,
+        records: Vec<PaymentRequestRecord>,
+    ) -> Result<Vec<PaymentRequestRecord>> {
+        let counterparties = records
+            .iter()
+            .filter(|record| remote_payment_request_app(record).is_some())
+            .map(|record| record.counterparty.clone())
+            .collect::<HashSet<_>>();
+        let mut authorized_by_counterparty = HashMap::new();
+        for counterparty in counterparties {
+            let authorized = match self
+                .authorized_payment_request_apps_for_peer(&counterparty)
+                .await
+            {
+                Ok(authorized) => authorized,
+                Err(PaykitSdkError::Transport { .. } | PaykitSdkError::Protocol { .. }) => None,
+                Err(err) => return Err(err),
+            };
+            authorized_by_counterparty.insert(counterparty, authorized);
+        }
+        Ok(records
+            .into_iter()
+            .filter(|record| {
+                let Some(app_id) = remote_payment_request_app(record) else {
+                    return record.local_role == Some(PaymentRequestLocalRole::Payee);
+                };
+                authorized_by_counterparty
+                    .get(&record.counterparty)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|app_ids| app_ids.contains(app_id))
+            })
+            .collect())
+    }
+
+    pub(super) async fn ensure_payment_request_origin_app_authorized(
+        &self,
+        counterparty: &PubkyPublicKey,
+        record: &PaymentRequestRecord,
+        action: &str,
+    ) -> Result<()> {
+        let proposal_app_id =
+            record
+                .proposal_app_id
+                .as_ref()
+                .ok_or_else(|| PaykitSdkError::Protocol {
+                    context: format!(
+                        "cannot {action}: Payment Request {} has no originating Paykit App",
+                        record.payment_request_id
+                    ),
+                    source: None,
+                })?;
+        if self
+            .authorized_payment_request_apps_for_peer(counterparty)
+            .await?
+            .is_some_and(|app_ids| app_ids.contains(proposal_app_id))
+        {
+            return Ok(());
+        }
+        Err(PaykitSdkError::Policy {
+            context: format!(
+                "cannot {action}: originating Paykit app '{}' is not currently authorized for Payment Requests",
+                proposal_app_id
+            ),
+            source: None,
         })
-        .await
+    }
+
+    pub(super) async fn authorized_payment_request_apps_for_peer(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<Option<Vec<paykit_lib::PaykitAppId>>> {
+        let context = self
+            .counterparty_app_authorization_context(counterparty)
+            .await?;
+        Ok(context.payment_request_apps)
     }
 
     async fn payment_request_counterparties(
         &self,
         received_only: bool,
-    ) -> Result<Vec<(PubkyPublicKey, PaykitReceiverPath)>> {
+    ) -> Result<Vec<PubkyPublicKey>> {
         self.storage
             .transaction(move |tx| {
                 let snapshot = tx.export_storage_state();
                 let mut counterparties = HashSet::new();
                 for item in snapshot.private_stream_items {
                     if is_payment_request_kind(item.parsed_kind.as_deref()) {
-                        counterparties.insert((item.counterparty, item.counterparty_receiver_path));
+                        counterparties.insert(item.counterparty);
                     }
                 }
                 if !received_only {
                     for outbound in snapshot.outbound_private_messages {
                         if is_payment_request_kind(Some(&outbound.kind)) {
-                            counterparties.insert((
-                                outbound.counterparty,
-                                outbound.counterparty_receiver_path,
-                            ));
+                            counterparties.insert(outbound.counterparty);
                         }
                     }
                 }
                 let mut counterparties = counterparties
                     .into_iter()
-                    .filter(|(counterparty, receiver_path)| {
+                    .filter(|counterparty| {
                         !snapshot
                             .linked_peers
-                            .get(&(counterparty.clone(), receiver_path.clone()))
+                            .get(counterparty)
                             .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
                     })
                     .collect::<Vec<_>>();
-                counterparties.sort_by(|(left_key, left_receiver), (right_key, right_receiver)| {
-                    left_key
-                        .as_str()
-                        .cmp(right_key.as_str())
-                        .then_with(|| left_receiver.as_str().cmp(right_receiver.as_str()))
-                });
-                Ok(counterparties)
-            })
-            .await
-    }
-
-    async fn payment_request_counterparties_for_counterparty(
-        &self,
-        counterparty: &PubkyPublicKey,
-        received_only: bool,
-    ) -> Result<Vec<(PubkyPublicKey, PaykitReceiverPath)>> {
-        self.storage
-            .transaction(move |tx| {
-                let snapshot = tx.export_storage_state();
-                let mut receiver_paths = HashSet::new();
-                for item in snapshot.private_stream_items {
-                    if &item.counterparty == counterparty
-                        && is_payment_request_kind(item.parsed_kind.as_deref())
-                    {
-                        receiver_paths.insert(item.counterparty_receiver_path);
-                    }
-                }
-                if !received_only {
-                    for outbound in snapshot.outbound_private_messages {
-                        if &outbound.counterparty == counterparty
-                            && is_payment_request_kind(Some(&outbound.kind))
-                        {
-                            receiver_paths.insert(outbound.counterparty_receiver_path);
-                        }
-                    }
-                }
-                let mut counterparties = receiver_paths
-                    .into_iter()
-                    .map(|receiver_path| (counterparty.clone(), receiver_path))
-                    .collect::<Vec<_>>();
-                counterparties.sort_by(|(_, left_receiver), (_, right_receiver)| {
-                    left_receiver.as_str().cmp(right_receiver.as_str())
-                });
+                counterparties.sort_by(|left, right| left.as_str().cmp(right.as_str()));
                 Ok(counterparties)
             })
             .await
@@ -264,17 +268,26 @@ where
     pub(super) async fn ensure_private_outbound_ready(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
-    ) -> Result<()> {
-        self.require_identity_and_session().await?;
-        self.ensure_peer_allows_private_automation(counterparty, counterparty_receiver_path)
+    ) -> Result<GuardedSessionAccess> {
+        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
+        let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
+            context: "no Pubky session available".into(),
+            source: None,
+        })?;
+        if !session_access.private_link_capable_for_capabilities(PAYKIT_SESSION_CAPABILITIES)? {
+            return Err(PaykitSdkError::Identity {
+                context: "local Pubky identity is not private-link-capable".into(),
+                source: None,
+            });
+        }
+        self.ensure_peer_allows_private_automation(counterparty)
             .await?;
 
         let has_active_link = self
             .storage
             .transaction(|tx| {
                 Ok(tx
-                    .encrypted_link_state(counterparty, counterparty_receiver_path)
+                    .encrypted_link_state(counterparty)
                     .and_then(|state| state.link_snapshot)
                     .is_some())
             })
@@ -288,7 +301,7 @@ where
             });
         }
 
-        Ok(())
+        Ok(session_access)
     }
 
     /// Queue a new Payment Request proposal and return local derived state.
@@ -297,46 +310,91 @@ where
     /// that the counterparty supports those extensions; they are not negotiated here.
     ///
     /// The returned record reflects the local outbound queue, not delivery or
-    /// counterparty processing.
+    /// counterparty processing. It is derived in the queue transaction, without
+    /// a fallible post-commit read.
     pub async fn propose_payment_request(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
         terms: PaymentRequestTerms,
     ) -> Result<PaymentRequestRecord> {
         let event = PaymentRequest::new(EventId::new_v4(), PaymentRequestId::new_v4(), terms);
-        let payment_request_id = event.payment_request_id().clone();
-        self.enqueue_raw_payment_request(
-            counterparty.clone(),
-            counterparty_receiver_path.clone(),
-            &event,
+        self.enqueue_raw_payment_request(counterparty, &event).await
+    }
+
+    /// Claim a received Payment Request before beginning payment preparation.
+    ///
+    /// The shared claim hides the work from other local Paykit Apps. It remains
+    /// through acceptance and may be explicitly released while payment remains
+    /// unresolved. Payment execution must wait for
+    /// [`Self::accept_payment_request`] to succeed when the request is still
+    /// proposed.
+    pub async fn claim_payment_request_for_execution(
+        &self,
+        counterparty: PubkyPublicKey,
+        payment_request_id: &PaymentRequestId,
+    ) -> Result<PaymentRequestRecord> {
+        let record = self
+            .load_payment_request_record(&counterparty, payment_request_id)
+            .await?;
+        require_role(
+            &record,
+            PaymentRequestLocalRole::Payer,
+            "claim Payment Request for execution",
+        )?;
+        self.ensure_payment_request_origin_app_authorized(
+            &counterparty,
+            &record,
+            "claim Payment Request for execution",
         )
         .await?;
-        self.load_payment_request_record(
-            &counterparty,
-            &counterparty_receiver_path,
-            &payment_request_id,
+        claim_payment_request_execution(
+            &self.storage,
+            counterparty,
+            &self.config.app_id,
+            payment_request_id,
+            self.clock.now(),
         )
         .await
     }
 
-    /// Queue acceptance for a received Payment Request and return local derived state.
+    /// Release this App's unresolved Payment Request execution claim.
     ///
-    /// The returned record reflects the local outbound queue, not delivery or
-    /// counterparty processing.
+    /// Releasing does not reject the request and makes it actionable to other
+    /// compatible local Paykit Apps again. The request's endpoint constraints
+    /// remain unchanged. One-time requests cannot be released after proof;
+    /// recurring requests retain completed billing-period proofs. Prepared,
+    /// Submitted, or Unknown accounting attempts must be reconciled before release.
+    pub async fn release_payment_request_execution_claim(
+        &self,
+        counterparty: PubkyPublicKey,
+        payment_request_id: &PaymentRequestId,
+    ) -> Result<PaymentRequestRecord> {
+        release_payment_request_execution_claim(
+            &self.storage,
+            counterparty,
+            &self.config.app_id,
+            payment_request_id,
+            self.clock.now(),
+        )
+        .await
+    }
+
+    /// Queue acceptance for a claimed received Payment Request.
+    ///
+    /// The current App must claim the request first. Success only queues acceptance;
+    /// accounting callers must still reserve payment and obtain a fresh handoff.
+    /// The execution claim remains until proof, cancellation, or an explicit release,
+    /// and longer while payment accounting has unresolved attempts or a canceled
+    /// request has successful payments awaiting proof.
+    /// The returned record does not imply delivery or counterparty processing.
     pub async fn accept_payment_request(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
         payment_request_id: &PaymentRequestId,
     ) -> Result<PaymentRequestRecord> {
         let (_, expected_identity) = self.load_session_access_and_refresh_identity().await?;
         let record = self
-            .load_payment_request_record(
-                &counterparty,
-                &counterparty_receiver_path,
-                payment_request_id,
-            )
+            .load_payment_request_record(&counterparty, payment_request_id)
             .await?;
         require_role(
             &record,
@@ -348,20 +406,21 @@ where
             &[PaymentRequestLifecycleState::Proposed],
             "accept Payment Request",
         )?;
+        self.ensure_payment_request_origin_app_authorized(
+            &counterparty,
+            &record,
+            "accept Payment Request",
+        )
+        .await?;
         let event = PaymentRequestAcceptance::new(EventId::new_v4(), payment_request_id.clone());
-        self.enqueue_manual_payment_request_response(
+        self.enqueue_raw_payment_request_response(
             counterparty.clone(),
-            counterparty_receiver_path.clone(),
-            paykit_lib::PaymentRequestEvent::Acceptance(event),
+            &PaymentRequestEvent::Acceptance(event),
             Some(expected_identity),
         )
         .await?;
-        self.load_payment_request_record(
-            &counterparty,
-            &counterparty_receiver_path,
-            payment_request_id,
-        )
-        .await
+        self.load_payment_request_record(&counterparty, payment_request_id)
+            .await
     }
 
     /// Queue rejection for a received Payment Request and return local derived state.
@@ -371,17 +430,12 @@ where
     pub async fn reject_payment_request(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
         payment_request_id: &PaymentRequestId,
         reason: Option<String>,
     ) -> Result<PaymentRequestRecord> {
         let (_, expected_identity) = self.load_session_access_and_refresh_identity().await?;
         let record = self
-            .load_payment_request_record(
-                &counterparty,
-                &counterparty_receiver_path,
-                payment_request_id,
-            )
+            .load_payment_request_record(&counterparty, payment_request_id)
             .await?;
         require_role(
             &record,
@@ -396,21 +450,22 @@ where
             ],
             "reject Payment Request",
         )?;
+        self.ensure_payment_request_origin_app_authorized(
+            &counterparty,
+            &record,
+            "reject Payment Request",
+        )
+        .await?;
         let event =
             PaymentRequestRejection::new(EventId::new_v4(), payment_request_id.clone(), reason);
-        self.enqueue_manual_payment_request_response(
+        self.enqueue_raw_payment_request_response(
             counterparty.clone(),
-            counterparty_receiver_path.clone(),
-            paykit_lib::PaymentRequestEvent::Rejection(event),
+            &PaymentRequestEvent::Rejection(event),
             Some(expected_identity),
         )
         .await?;
-        self.load_payment_request_record(
-            &counterparty,
-            &counterparty_receiver_path,
-            payment_request_id,
-        )
-        .await
+        self.load_payment_request_record(&counterparty, payment_request_id)
+            .await
     }
 
     /// Queue cancellation for a known non-terminal Payment Request and return local derived state.
@@ -420,17 +475,12 @@ where
     pub async fn cancel_payment_request(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
         payment_request_id: &PaymentRequestId,
         reason: Option<String>,
     ) -> Result<PaymentRequestRecord> {
         let (_, expected_identity) = self.load_session_access_and_refresh_identity().await?;
         let record = self
-            .load_payment_request_record(
-                &counterparty,
-                &counterparty_receiver_path,
-                payment_request_id,
-            )
+            .load_payment_request_record(&counterparty, payment_request_id)
             .await?;
         require_state(
             &record,
@@ -443,21 +493,31 @@ where
             ],
             "cancel Payment Request",
         )?;
+        if record.local_role == Some(PaymentRequestLocalRole::Payer) {
+            self.ensure_payment_request_origin_app_authorized(
+                &counterparty,
+                &record,
+                "cancel Payment Request",
+            )
+            .await?;
+        }
+        if record.local_role == Some(PaymentRequestLocalRole::Payee) {
+            require_payment_request_action_app(
+                &record,
+                &self.config.app_id,
+                "cancel Payment Request",
+            )?;
+        }
         let event =
             PaymentRequestCancellation::new(EventId::new_v4(), payment_request_id.clone(), reason);
-        self.enqueue_manual_payment_request_response(
+        self.enqueue_raw_payment_request_response(
             counterparty.clone(),
-            counterparty_receiver_path.clone(),
-            paykit_lib::PaymentRequestEvent::Cancellation(event),
+            &PaymentRequestEvent::Cancellation(event),
             Some(expected_identity),
         )
         .await?;
-        self.load_payment_request_record(
-            &counterparty,
-            &counterparty_receiver_path,
-            payment_request_id,
-        )
-        .await
+        self.load_payment_request_record(&counterparty, payment_request_id)
+            .await
     }
 
     /// Queue a Payment Proof for an accepted Payment Request and return local derived state.
@@ -476,19 +536,19 @@ where
     pub async fn submit_payment_proof(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
         payment_request_id: &PaymentRequestId,
         billing_period: Option<BillingPeriod>,
+        payment_app_id: paykit_lib::PaykitAppId,
         payment_endpoint_identifier: PaymentEndpointIdentifier,
         proof: JsonMap<String, JsonValue>,
     ) -> Result<PaymentRequestRecord> {
         self.submit_payment_proof_submission(
             counterparty,
-            counterparty_receiver_path,
             payment_request_id,
             PaymentProofSubmission {
                 conversion_quote_id: None,
                 billing_period,
+                payment_app_id,
                 payment_endpoint_identifier,
                 proof,
                 allowance_id: None,
@@ -503,7 +563,10 @@ where
     /// An unknown, ended, expired, or replaced Allowance may describe a historical
     /// payment; the SDK does not infer authority or update usage from this claim.
     /// Repeated or corrective proofs preserve evidence for the same occurrence
-    /// and do not imply another payment or settlement confirmation.
+    /// and do not imply another payment or settlement confirmation. Only that
+    /// occurrence's original proof sender may correct it, including after the
+    /// execution claim moves to another App.
+    /// Reporting evidence does not require the payee App to remain registered.
     ///
     /// A canceled request requires a recorded Acceptance and caller evidence
     /// that execution crossed its irreversible boundary before cancellation was
@@ -515,16 +578,11 @@ where
     pub async fn submit_payment_proof_submission(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
         payment_request_id: &PaymentRequestId,
         submission: PaymentProofSubmission,
     ) -> Result<PaymentRequestRecord> {
         let record = self
-            .load_payment_request_record(
-                &counterparty,
-                &counterparty_receiver_path,
-                payment_request_id,
-            )
+            .load_payment_request_record(&counterparty, payment_request_id)
             .await?;
         require_role(
             &record,
@@ -545,6 +603,7 @@ where
             payment_request_id.clone(),
             request.request().payment_reference().clone(),
             submission.billing_period,
+            submission.payment_app_id,
             submission.payment_endpoint_identifier,
             submission.proof,
         );
@@ -555,18 +614,10 @@ where
             event = event.with_conversion_quote_id(conversion_quote_id);
         }
         validate_proof_conversion(&record, &event, &request)?;
-        self.enqueue_raw_payment_proof(
-            counterparty.clone(),
-            counterparty_receiver_path.clone(),
-            &event,
-        )
-        .await?;
-        self.load_payment_request_record(
-            &counterparty,
-            &counterparty_receiver_path,
-            payment_request_id,
-        )
-        .await
+        self.enqueue_raw_payment_proof(counterparty.clone(), &event)
+            .await?;
+        self.load_payment_request_record(&counterparty, payment_request_id)
+            .await
     }
 
     /// Issue immutable rates for an accepted recurring request.
@@ -575,35 +626,28 @@ where
     pub async fn quote_payment_request(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
         payment_request_id: &PaymentRequestId,
         billing_period: BillingPeriod,
         rates: Vec<ConversionRate>,
         expires_at: String,
     ) -> Result<PaymentRequestRecord> {
-        self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_path)
-            .await?;
+        let _identity_guard = self.claim_identity_operation("quote Payment Request")?;
+        let _session_access = self.ensure_private_outbound_ready(&counterparty).await?;
         self.enqueue_payment_conversion_quote(
             &counterparty,
-            &counterparty_receiver_path,
             payment_request_id,
             billing_period,
             rates,
             expires_at,
         )
         .await?;
-        self.load_payment_request_record(
-            &counterparty,
-            &counterparty_receiver_path,
-            payment_request_id,
-        )
-        .await
+        self.load_payment_request_record(&counterparty, payment_request_id)
+            .await
     }
 
     pub(super) async fn enqueue_payment_conversion_quote(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
         payment_request_id: &PaymentRequestId,
         billing_period: BillingPeriod,
         rates: Vec<ConversionRate>,
@@ -615,18 +659,18 @@ where
                 // Sample time only after the storage adapter has acquired its
                 // transaction fence so a waiting quote cannot be backdated.
                 let now = clock.now();
-                let record = crate::domain::payment_requests::payment_request_records_in(
-                    tx,
-                    counterparty,
-                    counterparty_receiver_path,
-                    now,
-                )?
-                .into_iter()
-                .find(|record| record.payment_request_id == payment_request_id.as_str())
-                .ok_or_else(|| PaykitSdkError::Policy {
-                    context: "Payment Request was not found".into(),
-                    source: None,
-                })?;
+                let record =
+                    crate::domain::payment_requests::payment_request_records_from_transaction(
+                        tx,
+                        counterparty,
+                        now,
+                    )?
+                    .into_iter()
+                    .find(|record| record.payment_request_id == payment_request_id.as_str())
+                    .ok_or_else(|| PaykitSdkError::Policy {
+                        context: "Payment Request was not found".into(),
+                        source: None,
+                    })?;
                 require_role(
                     &record,
                     PaymentRequestLocalRole::Payee,
@@ -635,6 +679,11 @@ where
                 require_state(
                     &record,
                     &[PaymentRequestLifecycleState::ActiveRecurring],
+                    "quote Payment Request",
+                )?;
+                require_payment_request_action_app(
+                    &record,
+                    &self.config.app_id,
                     "quote Payment Request",
                 )?;
                 let request =
@@ -665,45 +714,43 @@ where
                 // Whole-second issuance matches the resolution of common payment timestamps.
                 quote.validate_for_request(&request)?;
                 let raw_json = paykit_lib::serialize_payment_request_event(
+                    &self.config.app_id,
                     &PaymentRequestEvent::ConversionQuote(quote),
                 )?;
-                let kind =
+                let (app_id, kind) =
                     crate::domain::outbound_private::validate_outbound_private_message(&raw_json)?;
-                tx.insert_outbound_private_message(crate::storage::NewOutboundPrivateMessage::new(
-                    counterparty.clone(),
-                    counterparty_receiver_path.clone(),
-                    kind,
-                    raw_json,
-                    now,
-                ));
+                crate::storage::require_paykit_app_capability(
+                    tx,
+                    &app_id,
+                    paykit_lib::PrivateMessageKind::PaymentConversionQuote,
+                )?;
+                tx.insert_outbound_private_message(
+                    crate::storage::NewOutboundPrivateMessage::new(
+                        counterparty.clone(),
+                        self.config.app_id.clone(),
+                        kind,
+                        raw_json,
+                        now,
+                    ),
+                )?;
                 Ok(())
             })
             .await
     }
 
-    async fn load_payment_request_record(
+    pub(super) async fn load_payment_request_record(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
         payment_request_id: &PaymentRequestId,
     ) -> Result<PaymentRequestRecord> {
-        let mut records = derive_payment_request_records(
-            &self.storage,
-            counterparty,
-            counterparty_receiver_path,
-            self.clock.now(),
-        )
-        .await?;
-        self.mark_recovery_required_payment_request_records(
-            counterparty,
-            counterparty_receiver_path,
-            &mut records,
-        )
-        .await?;
+        let mut records =
+            derive_payment_request_records(&self.storage, counterparty, self.clock.now()).await?;
+        self.mark_recovery_required_payment_request_records(counterparty, &mut records)
+            .await?;
         records
             .into_iter()
             .find(|record| record.payment_request_id == payment_request_id.as_str())
-            .ok_or_else(|| PaykitSdkError::Protocol {
+            .ok_or_else(|| PaykitSdkError::NotFound {
                 context: format!(
                     "Payment Request {} is not known for counterparty {}",
                     payment_request_id, counterparty
@@ -715,14 +762,13 @@ where
     async fn mark_recovery_required_payment_request_records(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
         records: &mut [PaymentRequestRecord],
     ) -> Result<()> {
         let recovery_required = self
             .storage
             .transaction(|tx| {
                 Ok(tx
-                    .linked_peer(counterparty, counterparty_receiver_path)
+                    .linked_peer(counterparty)
                     .is_some_and(|peer| peer.state == LinkedPeerState::RecoveryRequired))
             })
             .await?;
@@ -747,143 +793,72 @@ where
     pub(crate) async fn enqueue_raw_payment_request(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
         event: &PaymentRequest,
-    ) -> Result<OutboundPrivateMessageRecord> {
-        self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_path)
-            .await?;
+    ) -> Result<PaymentRequestRecord> {
+        self.ensure_private_outbound_ready(&counterparty).await?;
         enqueue_payment_request_message(
             &self.storage,
             counterparty,
-            counterparty_receiver_path,
+            &self.config.app_id,
             event,
             self.clock.now(),
         )
         .await
     }
 
+    async fn enqueue_raw_payment_request_response(
+        &self,
+        counterparty: PubkyPublicKey,
+        event: &PaymentRequestEvent,
+        expected_identity: Option<IdentityState>,
+    ) -> Result<OutboundPrivateMessageRecord> {
+        let _session = self.ensure_private_outbound_ready(&counterparty).await?;
+        crate::domain::payment_requests::enqueue_checked_payment_request_action_with_identity(
+            &self.storage,
+            counterparty,
+            &self.config.app_id,
+            event,
+            || self.clock.now(),
+            expected_identity,
+        )
+        .await
+    }
     #[cfg(test)]
     pub(crate) async fn enqueue_raw_payment_request_acceptance(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
         event: &PaymentRequestAcceptance,
     ) -> Result<OutboundPrivateMessageRecord> {
-        self.enqueue_manual_payment_request_response(
+        self.enqueue_raw_payment_request_response(
             counterparty,
-            counterparty_receiver_path,
-            paykit_lib::PaymentRequestEvent::Acceptance(event.clone()),
+            &PaymentRequestEvent::Acceptance(event.clone()),
             None,
         )
         .await
     }
 
-    async fn enqueue_manual_payment_request_response(
-        &self,
-        counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
-        event: paykit_lib::PaymentRequestEvent,
-        expected_identity: Option<IdentityState>,
-    ) -> Result<OutboundPrivateMessageRecord> {
-        let (_, current_identity) = self.load_session_access_and_refresh_identity().await?;
-        let validate_current_state = expected_identity.is_some();
-        let identity = expected_identity.unwrap_or(current_identity);
-        self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_path)
-            .await?;
-        let local = self.config.receiver_path.clone();
-        let now = self.clock.now();
-        let raw = paykit_lib::serialize_payment_request_event(&event)?;
-        let kind = crate::domain::outbound_private::validate_outbound_private_message(&raw)?;
-        self.storage
-            .transaction(move |tx| {
-                super::allowance_accounting::ensure_accounting_identity(tx, &identity)?;
-                if validate_current_state {
-                    let record = crate::domain::payment_requests::payment_request_records_in(
-                        tx,
-                        &counterparty,
-                        &counterparty_receiver_path,
-                        now,
-                    )?
-                    .into_iter()
-                    .find(|r| r.payment_request_id == event.payment_request_id().as_str())
-                    .ok_or_else(|| PaykitSdkError::Policy {
-                        context: "Payment Request changed before manual response".into(),
-                        source: None,
-                    })?;
-                    use PaymentRequestLifecycleState as State;
-                    match &event {
-                        paykit_lib::PaymentRequestEvent::Acceptance(_) => {
-                            require_role(
-                                &record,
-                                PaymentRequestLocalRole::Payer,
-                                "accept Payment Request",
-                            )?;
-                            require_state(&record, &[State::Proposed], "accept Payment Request")?;
-                        }
-                        paykit_lib::PaymentRequestEvent::Rejection(_) => {
-                            require_role(
-                                &record,
-                                PaymentRequestLocalRole::Payer,
-                                "reject Payment Request",
-                            )?;
-                            require_state(
-                                &record,
-                                &[State::Proposed, State::ProposalExpired],
-                                "reject Payment Request",
-                            )?;
-                        }
-                        paykit_lib::PaymentRequestEvent::Cancellation(_) => require_state(
-                            &record,
-                            &[
-                                State::Proposed,
-                                State::ProposalExpired,
-                                State::Accepted,
-                                State::ActiveRecurring,
-                                State::ProofSubmitted,
-                            ],
-                            "cancel Payment Request",
-                        )?,
-                        _ => unreachable!("Private helper only receives manual response events"),
-                    }
-                }
-                crate::domain::allowance_accounting::manual_response(
-                    tx,
-                    &local,
-                    crate::PaymentRequestScope {
-                        counterparty: counterparty.clone(),
-                        counterparty_receiver_path: counterparty_receiver_path.clone(),
-                        payment_request_id: event.payment_request_id().clone(),
-                    },
-                )?;
-                Ok(tx.insert_outbound_private_message(
-                    crate::storage::NewOutboundPrivateMessage::new(
-                        counterparty,
-                        counterparty_receiver_path,
-                        kind,
-                        raw,
-                        now,
-                    ),
-                ))
-            })
-            .await
-    }
-
     pub(crate) async fn enqueue_raw_payment_proof(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
         event: &PaymentProof,
     ) -> Result<OutboundPrivateMessageRecord> {
-        self.ensure_private_outbound_ready(&counterparty, &counterparty_receiver_path)
-            .await?;
-        enqueue_payment_proof_message(
+        self.ensure_private_outbound_ready(&counterparty).await?;
+        enqueue_checked_payment_request_action(
             &self.storage,
             counterparty,
-            counterparty_receiver_path,
-            event,
+            &self.config.app_id,
+            &PaymentRequestEvent::Proof(event.clone()),
             self.clock.now(),
         )
         .await
+    }
+}
+
+fn remote_payment_request_app(record: &PaymentRequestRecord) -> Option<&paykit_lib::PaykitAppId> {
+    match record.local_role {
+        Some(PaymentRequestLocalRole::Payer) => record.proposal_app_id.as_ref(),
+        Some(PaymentRequestLocalRole::Payee) => record.payer_app_id.as_ref(),
+        None => None,
     }
 }
 
@@ -905,6 +880,47 @@ fn require_role(
             ),
             source: None,
         })
+    }
+}
+
+fn require_payer_app(
+    record: &PaymentRequestRecord,
+    app_id: &paykit_lib::PaykitAppId,
+    action: &str,
+) -> Result<()> {
+    if record.payer_app_id.as_ref() == Some(app_id) {
+        return Ok(());
+    }
+    Err(PaykitSdkError::Policy {
+        context: format!("cannot {action}: another Paykit app owns the payer response"),
+        source: None,
+    })
+}
+
+fn require_payment_request_action_app(
+    record: &PaymentRequestRecord,
+    app_id: &paykit_lib::PaykitAppId,
+    action: &str,
+) -> Result<()> {
+    match record.local_role {
+        Some(PaymentRequestLocalRole::Payee) => {
+            if record.proposal_app_id.as_ref() == Some(app_id) {
+                Ok(())
+            } else {
+                Err(PaykitSdkError::Policy {
+                    context: format!("cannot {action}: another Paykit app created the request"),
+                    source: None,
+                })
+            }
+        }
+        Some(PaymentRequestLocalRole::Payer) if record.payer_app_id.is_some() => {
+            require_payer_app(record, app_id, action)
+        }
+        Some(PaymentRequestLocalRole::Payer) => Ok(()),
+        None => Err(PaykitSdkError::Policy {
+            context: format!("cannot {action}: local Payment Request role is unknown"),
+            source: None,
+        }),
     }
 }
 

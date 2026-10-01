@@ -1,6 +1,24 @@
 use super::*;
 use paykit_lib::{PaymentConversion, PaymentRequestTerms};
 
+#[tokio::test]
+async fn test_conversion_quote_requires_the_proposing_payee_app() {
+    let (storage, peer, request) = setup(PaymentRequestLocalRole::Payer).await;
+    let quote = quote("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103", &request);
+    let raw = serialize_payment_request_event(
+        &paykit_lib::PaykitAppId::new("other-app").unwrap(),
+        &PaymentRequestEvent::ConversionQuote(quote),
+    )
+    .unwrap();
+    persist_messages(&storage, peer.clone(), vec![raw]).await;
+    let record = payment_request_records(&storage, &peer, timestamp())
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(record.state, PaymentRequestLifecycleState::InvalidConflict);
+    assert!(record.conversion_quotes.is_empty());
+}
+
 fn recurring_request() -> PaymentRequest {
     let PaymentRequestEvent::Request(request) = parsed_event(request_raw(
         "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
@@ -36,7 +54,7 @@ fn recurring_request() -> PaymentRequest {
 }
 
 async fn setup(role: PaymentRequestLocalRole) -> (InMemoryStorage, PubkyPublicKey, PaymentRequest) {
-    let storage = InMemoryStorage::new();
+    let storage = registered_storage();
     let peer = counterparty();
     let request = recurring_request();
     send(
@@ -87,6 +105,7 @@ fn quoted_proof_for_period(
         request.payment_request_id().clone(),
         request.request().payment_reference().clone(),
         Some(billing_period),
+        paykit_lib::PaykitAppId::new("bitkit").unwrap(),
         PaymentEndpointIdentifier::new("usdt-arbitrum-address").unwrap(),
         Default::default(),
     )
@@ -109,9 +128,11 @@ async fn send_at(
     outbound: bool,
     recorded_at: DateTime<Utc>,
 ) {
-    let raw = serialize_payment_request_event(&event).unwrap();
+    let raw =
+        serialize_payment_request_event(&paykit_lib::PaykitAppId::new("bitkit").unwrap(), &event)
+            .unwrap();
     if outbound {
-        enqueue_untyped_private_message(storage, peer.clone(), receiver_path(), raw, recorded_at)
+        enqueue_untyped_private_message(storage, peer.clone(), raw, recorded_at)
             .await
             .unwrap();
     } else {
@@ -156,7 +177,7 @@ async fn test_conversion_quotes_keep_old_rates_for_delayed_proofs_and_replay() {
             role == PaymentRequestLocalRole::Payer,
         )
         .await;
-        let record = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
+        let record = payment_request_records(&storage, &peer, timestamp())
             .await
             .unwrap()
             .remove(0);
@@ -184,7 +205,7 @@ async fn test_conversion_quotes_keep_old_rates_for_delayed_proofs_and_replay() {
             role == PaymentRequestLocalRole::Payer,
         )
         .await;
-        let canceled = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
+        let canceled = payment_request_records(&storage, &peer, timestamp())
             .await
             .unwrap()
             .remove(0);
@@ -218,7 +239,7 @@ async fn test_conversion_quotes_ignore_cross_stream_clock_order() {
         )
         .await;
 
-        let record = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
+        let record = payment_request_records(&storage, &peer, timestamp())
             .await
             .unwrap()
             .remove(0);
@@ -270,7 +291,7 @@ async fn test_conversion_quote_rejects_payer_issuance_and_conflicting_identity()
             )
             .await;
         }
-        let record = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
+        let record = payment_request_records(&storage, &peer, timestamp())
             .await
             .unwrap()
             .remove(0);
@@ -300,7 +321,7 @@ async fn test_conversion_proof_cannot_select_another_period_or_unknown_quote() {
             )
         };
         send(&storage, &peer, PaymentRequestEvent::Proof(proof), false).await;
-        let record = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
+        let record = payment_request_records(&storage, &peer, timestamp())
             .await
             .unwrap()
             .remove(0);
@@ -322,7 +343,7 @@ async fn test_quote_delivery_recovery_preserves_prior_payment_evidence() {
     .await;
     let proof = quoted_proof(&request, &old);
     send(&storage, &peer, PaymentRequestEvent::Proof(proof), false).await;
-    let before = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
+    let before = payment_request_records(&storage, &peer, timestamp())
         .await
         .unwrap()
         .remove(0);
@@ -345,11 +366,7 @@ async fn test_quote_delivery_recovery_preserves_prior_payment_evidence() {
     .await;
     storage
         .transaction(|tx| {
-            let mut outbound = tx
-                .outbound_private_messages(&peer, &receiver_path())
-                .last()
-                .unwrap()
-                .clone();
+            let mut outbound = tx.outbound_private_messages(&peer).last().unwrap().clone();
             outbound.status = OutboundPrivateMessageStatus::RecoveryRequired;
             outbound.last_error = Some("Encrypted Link recovery is required".into());
             tx.save_outbound_private_message(outbound)?;
@@ -357,7 +374,7 @@ async fn test_quote_delivery_recovery_preserves_prior_payment_evidence() {
         })
         .await
         .unwrap();
-    let after = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
+    let after = payment_request_records(&storage, &peer, timestamp())
         .await
         .unwrap()
         .remove(0);
@@ -371,7 +388,7 @@ async fn test_cancellation_delivery_recovery_preserves_prior_payment_evidence() 
         PaymentRequestLocalRole::Payee,
         PaymentRequestLocalRole::Payer,
     ] {
-        let storage = InMemoryStorage::new();
+        let storage = registered_storage();
         let peer = counterparty();
         let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
         let proof_id = "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103";
@@ -402,7 +419,7 @@ async fn test_cancellation_delivery_recovery_preserves_prior_payment_evidence() 
         for (index, (sender, raw)) in events.into_iter().enumerate() {
             let at = timestamp() + ChronoDuration::minutes(index as i64);
             if sender == role {
-                enqueue_untyped_private_message(&storage, peer.clone(), receiver_path(), raw, at)
+                enqueue_untyped_private_message(&storage, peer.clone(), raw, at)
                     .await
                     .unwrap();
             } else {
@@ -412,11 +429,7 @@ async fn test_cancellation_delivery_recovery_preserves_prior_payment_evidence() 
         // The payee's cancellation or payer's proof can require delivery recovery.
         storage
             .transaction(|tx| {
-                let mut outbound = tx
-                    .outbound_private_messages(&peer, &receiver_path())
-                    .last()
-                    .unwrap()
-                    .clone();
+                let mut outbound = tx.outbound_private_messages(&peer).last().unwrap().clone();
                 outbound.status = OutboundPrivateMessageStatus::RecoveryRequired;
                 outbound.last_error = Some("Encrypted Link recovery is required".into());
                 tx.save_outbound_private_message(outbound)?;
@@ -424,7 +437,7 @@ async fn test_cancellation_delivery_recovery_preserves_prior_payment_evidence() 
             })
             .await
             .unwrap();
-        let record = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
+        let record = payment_request_records(&storage, &peer, timestamp())
             .await
             .unwrap()
             .remove(0);
@@ -461,7 +474,7 @@ async fn test_conversion_quote_rejects_payee_cancellation() {
         true,
     )
     .await;
-    let record = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
+    let record = payment_request_records(&storage, &peer, timestamp())
         .await
         .unwrap()
         .remove(0);
@@ -475,7 +488,7 @@ async fn test_conversion_quote_rejects_payee_cancellation() {
 
 #[tokio::test]
 async fn test_conversion_quote_requires_acceptance() {
-    let storage = InMemoryStorage::new();
+    let storage = registered_storage();
     let peer = counterparty();
     let request = recurring_request();
     send(
@@ -495,16 +508,15 @@ async fn test_conversion_quote_requires_acceptance() {
         false,
     )
     .await;
-    let record = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
+    let record = payment_request_records(&storage, &peer, timestamp())
         .await
         .unwrap()
         .remove(0);
     assert_eq!(record.state, PaymentRequestLifecycleState::InvalidConflict);
     assert!(record.invalid_reason.unwrap().contains("before acceptance"));
-    let inspection =
-        received_payment_request_records(&storage, &peer, &receiver_path(), timestamp())
-            .await
-            .unwrap()
-            .remove(0);
+    let inspection = received_payment_request_records(&storage, &peer, timestamp())
+        .await
+        .unwrap()
+        .remove(0);
     assert!(inspection.conversion_quotes.is_empty());
 }

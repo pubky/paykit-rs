@@ -1,13 +1,13 @@
 use chrono::{DateTime, Utc};
 use paykit_lib::{
     serialize_allowance_event, AllowanceAcceptance, AllowanceEnd, AllowanceEvent, AllowanceId,
-    AllowanceProposal, AllowanceRejection, AllowanceTerms, EventId,
+    AllowanceProposal, AllowanceRejection, AllowanceTerms, EventId, PaykitAppId,
 };
 
 use crate::{
     domain::linked_peers::require_private_automation_ready,
     storage::{NewOutboundPrivateMessage, StorageAdapter, StorageTransaction},
-    PaykitReceiverPath, PaykitSdkError, PubkyPublicKey, Result,
+    PaykitSdkError, PubkyPublicKey, Result,
 };
 
 use super::{
@@ -25,7 +25,7 @@ pub(crate) enum AllowanceResponse {
 pub(crate) async fn enqueue_allowance_proposal<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
-    counterparty_receiver_path: PaykitReceiverPath,
+    app_id: PaykitAppId,
     local_role: AllowanceLocalRole,
     terms: AllowanceTerms,
     now: DateTime<Utc>,
@@ -37,21 +37,14 @@ where
     let allowance_id = AllowanceId::new_v4();
     storage
         .transaction(move |tx| {
-            require_link_ready(tx, &counterparty, &counterparty_receiver_path)?;
+            require_link_ready(tx, &counterparty)?;
             let event = AllowanceEvent::Proposal(AllowanceProposal::new(
                 event_id,
                 allowance_id.clone(),
                 local_role.into(),
                 terms,
             ));
-            append_and_derive(
-                tx,
-                &counterparty,
-                &counterparty_receiver_path,
-                event,
-                &allowance_id,
-                now,
-            )
+            append_and_derive(tx, &counterparty, &app_id, event, &allowance_id, now)
         })
         .await
 }
@@ -59,7 +52,7 @@ where
 pub(crate) async fn enqueue_allowance_response<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
-    counterparty_receiver_path: PaykitReceiverPath,
+    app_id: PaykitAppId,
     allowance_id: AllowanceId,
     response: AllowanceResponse,
     now: DateTime<Utc>,
@@ -77,7 +70,6 @@ where
             let record = require_actionable_record(
                 tx,
                 &counterparty,
-                &counterparty_receiver_path,
                 &allowance_id,
                 action,
                 HistoryGate::Consistent,
@@ -100,14 +92,7 @@ where
                     proposal_event_id,
                 )?),
             };
-            append_and_derive(
-                tx,
-                &counterparty,
-                &counterparty_receiver_path,
-                event,
-                &allowance_id,
-                now,
-            )
+            append_and_derive(tx, &counterparty, &app_id, event, &allowance_id, now)
         })
         .await
 }
@@ -115,7 +100,7 @@ where
 pub(crate) async fn enqueue_allowance_end<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
-    counterparty_receiver_path: PaykitReceiverPath,
+    app_id: PaykitAppId,
     allowance_id: AllowanceId,
     now: DateTime<Utc>,
 ) -> Result<AllowanceRecord>
@@ -131,7 +116,6 @@ where
             let record = require_actionable_record(
                 tx,
                 &counterparty,
-                &counterparty_receiver_path,
                 &allowance_id,
                 "end Allowance",
                 HistoryGate::RecoverableOnly,
@@ -176,7 +160,7 @@ where
             append_and_derive(
                 tx,
                 &counterparty,
-                &counterparty_receiver_path,
+                &app_id,
                 event,
                 &allowance_id,
                 now,
@@ -192,21 +176,22 @@ where
 fn append_and_derive(
     tx: &mut dyn StorageTransaction,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_path: &PaykitReceiverPath,
+    app_id: &PaykitAppId,
     event: AllowanceEvent,
     allowance_id: &AllowanceId,
     now: DateTime<Utc>,
 ) -> Result<AllowanceRecord> {
-    let raw_json = serialize_allowance_event(&event)?;
+    crate::storage::require_paykit_app_capability(tx, app_id, event.kind())?;
+    let raw_json = serialize_allowance_event(app_id, &event)?;
     let kind = event.kind().as_str().to_owned();
     tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
         counterparty.clone(),
-        counterparty_receiver_path.clone(),
+        app_id.clone(),
         kind,
         raw_json,
         now,
-    ));
-    let history = AllowanceLinkHistory::load(tx, counterparty, counterparty_receiver_path);
+    ))?;
+    let history = AllowanceLinkHistory::load(tx, counterparty);
     derive_allowance_record(&history, allowance_id).ok_or_else(|| PaykitSdkError::Storage {
         context: "queued Allowance event was not present in derived state".into(),
         source: None,
@@ -227,35 +212,28 @@ enum HistoryGate {
 fn require_actionable_record(
     tx: &dyn StorageTransaction,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_path: &PaykitReceiverPath,
     allowance_id: &AllowanceId,
     action: &str,
     gate: HistoryGate,
 ) -> Result<AllowanceRecord> {
-    let history = AllowanceLinkHistory::load(tx, counterparty, counterparty_receiver_path);
+    let history = AllowanceLinkHistory::load(tx, counterparty);
     let record = derive_allowance_record(&history, allowance_id).ok_or_else(|| {
         PaykitSdkError::NotFound {
             context: format!(
-                "Allowance {allowance_id} is not known for counterparty {counterparty} on receiver {counterparty_receiver_path}"
+                "Allowance {allowance_id} is not known for counterparty {counterparty}"
             ),
             source: None,
         }
     })?;
-    require_link_ready(tx, counterparty, counterparty_receiver_path)?;
+    require_link_ready(tx, counterparty)?;
     require_history(&record, action, gate)?;
     Ok(record)
 }
 
-fn require_link_ready(
-    tx: &dyn StorageTransaction,
-    counterparty: &PubkyPublicKey,
-    counterparty_receiver_path: &PaykitReceiverPath,
-) -> Result<()> {
-    let peer_state = tx
-        .linked_peer(counterparty, counterparty_receiver_path)
-        .map(|peer| peer.state);
+fn require_link_ready(tx: &dyn StorageTransaction, counterparty: &PubkyPublicKey) -> Result<()> {
+    let peer_state = tx.linked_peer(counterparty).map(|peer| peer.state);
     let has_active_link = tx
-        .encrypted_link_state(counterparty, counterparty_receiver_path)
+        .encrypted_link_state(counterparty)
         .and_then(|state| state.link_snapshot)
         .is_some();
     require_private_automation_ready(peer_state, has_active_link, counterparty)

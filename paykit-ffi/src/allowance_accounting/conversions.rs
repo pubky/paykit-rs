@@ -2,7 +2,7 @@ use super::types::*;
 use crate::{
     conversions_common::parse_endpoint_identifier,
     errors::validation_error,
-    session::{app_public_key, parse_public_key, parse_receiver_path},
+    session::{app_public_key, parse_public_key},
     PaykitFfiError,
 };
 use chrono::{DateTime, Timelike, Utc};
@@ -45,8 +45,6 @@ impl TryFrom<FfiPaymentRequestScope> for sdk::PaymentRequestScope {
     fn try_from(value: FfiPaymentRequestScope) -> Result<Self, Self::Error> {
         Ok(Self {
             counterparty: parse_public_key(value.counterparty).map_err(|_| invalid_input())?,
-            counterparty_receiver_path: parse_receiver_path(value.counterparty_receiver_path)
-                .map_err(|_| invalid_input())?,
             payment_request_id: parse_request_id(value.payment_request_id)?,
         })
     }
@@ -78,11 +76,7 @@ impl TryFrom<FfiPaymentAccountingScope> for sdk::PaymentAccountingScope {
         Ok(Self {
             local_public_key: parse_public_key(value.local_public_key)
                 .map_err(|_| invalid_input())?,
-            local_receiver_path: parse_receiver_path(value.local_receiver_path)
-                .map_err(|_| invalid_input())?,
             counterparty: parse_public_key(value.counterparty).map_err(|_| invalid_input())?,
-            counterparty_receiver_path: parse_receiver_path(value.counterparty_receiver_path)
-                .map_err(|_| invalid_input())?,
             payment_request_id: parse_request_id(value.payment_request_id)?
                 .as_str()
                 .to_owned(),
@@ -95,9 +89,7 @@ impl TryFrom<sdk::PaymentAccountingScope> for FfiPaymentAccountingScope {
     fn try_from(value: sdk::PaymentAccountingScope) -> Result<Self, Self::Error> {
         Ok(Self {
             local_public_key: app_public_key(&value.local_public_key),
-            local_receiver_path: value.local_receiver_path.as_str().to_owned(),
             counterparty: app_public_key(&value.counterparty),
-            counterparty_receiver_path: value.counterparty_receiver_path.as_str().to_owned(),
             payment_request_id: value.payment_request_id,
         })
     }
@@ -330,11 +322,7 @@ impl TryFrom<FfiAllowanceWatermarkRecord> for sdk::AllowanceWatermarkRecord {
         Ok(Self {
             local_public_key: parse_public_key(value.local_public_key)
                 .map_err(|_| invalid_input())?,
-            local_receiver_path: parse_receiver_path(value.local_receiver_path)
-                .map_err(|_| invalid_input())?,
             counterparty: parse_public_key(value.counterparty).map_err(|_| invalid_input())?,
-            counterparty_receiver_path: parse_receiver_path(value.counterparty_receiver_path)
-                .map_err(|_| invalid_input())?,
             allowance_id: parse_allowance_id(value.allowance_id)?.as_str().to_owned(),
             evaluated_at: parse_time(value.evaluated_at)?,
         })
@@ -346,9 +334,7 @@ impl TryFrom<sdk::AllowanceWatermarkRecord> for FfiAllowanceWatermarkRecord {
     fn try_from(value: sdk::AllowanceWatermarkRecord) -> Result<Self, Self::Error> {
         Ok(Self {
             local_public_key: app_public_key(&value.local_public_key),
-            local_receiver_path: value.local_receiver_path.as_str().to_owned(),
             counterparty: app_public_key(&value.counterparty),
-            counterparty_receiver_path: value.counterparty_receiver_path.as_str().to_owned(),
             allowance_id: value.allowance_id,
             evaluated_at: value
                 .evaluated_at

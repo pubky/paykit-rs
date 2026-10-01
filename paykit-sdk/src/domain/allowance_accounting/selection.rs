@@ -2,19 +2,15 @@ use super::*;
 
 pub(crate) fn candidates(
     tx: &mut dyn StorageTransaction,
-    local: &PaykitReceiverPath,
     input: PaymentRequestScope,
     time: DateTime<Utc>,
 ) -> Result<Vec<AllowanceCandidate>> {
     validation::valid_time(time)?;
-    let scope = scope(tx, local, &input)?;
+    let scope = scope(tx, &input)?;
     let request = request(tx, &scope, time)?;
     let terms = request_terms(&request)?;
-    let records = crate::domain::allowances::allowance_records_in_transaction(
-        tx,
-        &scope.counterparty,
-        &scope.counterparty_receiver_path,
-    );
+    let records =
+        crate::domain::allowances::allowance_records_in_transaction(tx, &scope.counterparty);
     let mut state = tx.allowance_accounting_state();
     if let Some(state) = &state {
         validate_accounting(state)?;
@@ -81,13 +77,13 @@ fn accepted_allowance_terms(
 
 pub(crate) fn select(
     tx: &mut dyn StorageTransaction,
-    local: &PaykitReceiverPath,
+    app_id: &paykit_lib::PaykitAppId,
     input_scope: PaymentRequestScope,
     input: AllowanceSelectionInput,
     acceptance: Option<PaymentExecutionChecks>,
 ) -> Result<std::result::Result<AllowanceAssociationRecord, AllowanceAccountingBlock>> {
     validation::valid_time(input.trusted_time)?;
-    let scope = scope(tx, local, &input_scope)?;
+    let scope = scope(tx, &input_scope)?;
     let mut state = load(tx)?;
     ready(&state)?;
     let previous = watermark(
@@ -109,18 +105,29 @@ pub(crate) fn select(
             paykit_lib::EventId::new_v4(),
             input_scope.payment_request_id,
         );
-        let raw = paykit_lib::serialize_payment_request_event(
-            &paykit_lib::PaymentRequestEvent::Acceptance(event),
-        )
-        .map_err(|_| protocol("Could not encode Payment Request Acceptance"))?;
-        let kind = crate::domain::outbound_private::validate_outbound_private_message(&raw)?;
+        let event = paykit_lib::PaymentRequestEvent::Acceptance(event);
+        crate::storage::require_paykit_app_capability(
+            tx,
+            app_id,
+            paykit_lib::PrivateMessageKind::PaymentRequest,
+        )?;
+        crate::domain::payment_requests::require_current_payment_request_action(
+            tx,
+            &scope.counterparty,
+            app_id,
+            &event,
+            input.trusted_time,
+        )?;
+        let raw = paykit_lib::serialize_payment_request_event(app_id, &event)
+            .map_err(|_| protocol("Could not encode Payment Request Acceptance"))?;
+        let (_, kind) = crate::domain::outbound_private::validate_outbound_private_message(&raw)?;
         tx.insert_outbound_private_message(crate::storage::NewOutboundPrivateMessage::new(
             scope.counterparty.clone(),
-            scope.counterparty_receiver_path.clone(),
+            app_id.clone(),
             kind,
             raw,
             input.trusted_time,
-        ));
+        ))?;
     }
     save(tx, state)?;
     Ok(result)
@@ -217,7 +224,6 @@ fn select_checked(
 
 pub(crate) fn reassociate(
     tx: &mut dyn StorageTransaction,
-    local: &PaykitReceiverPath,
     input_scope: PaymentRequestScope,
     input: AllowanceReassociationInput,
 ) -> Result<std::result::Result<AllowanceAssociationRecord, AllowanceAccountingBlock>> {
@@ -229,7 +235,7 @@ pub(crate) fn reassociate(
             "Reassociation requires an explicitly authorized future boundary",
         ));
     }
-    let scope = scope(tx, local, &input_scope)?;
+    let scope = scope(tx, &input_scope)?;
     let mut state = load(tx)?;
     ready(&state)?;
     let previous = watermark(
@@ -295,12 +301,11 @@ pub(crate) fn reassociate(
 
 pub(crate) fn set_disposition(
     tx: &mut dyn StorageTransaction,
-    local: &PaykitReceiverPath,
     input: PaymentOccurrence,
     disposition: PaymentDisposition,
 ) -> Result<PaymentOccurrenceRecord> {
     validation::disposition(&disposition)?;
-    let key = key(tx, local, &input)?;
+    let key = key(tx, &input)?;
     let mut state = load(tx)?;
     if let Some(existing) = state.history.occurrences.iter_mut().find(|o| o.key == key) {
         if occupied(existing) {

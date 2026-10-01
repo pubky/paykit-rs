@@ -12,7 +12,6 @@ async fn accepted_allowance(allower: &TestUser, allowee: &TestUser) -> Allowance
         .sdk
         .propose_allowance(
             allowee.public_key.clone(),
-            allowee.receiver_path.clone(),
             AllowanceLocalRole::Allower,
             terms(),
         )
@@ -22,11 +21,7 @@ async fn accepted_allowance(allower: &TestUser, allowee: &TestUser) -> Allowance
     deliver(allower, allowee).await;
     allowee
         .sdk
-        .accept_allowance(
-            allower.public_key.clone(),
-            allower.receiver_path.clone(),
-            &id,
-        )
+        .accept_allowance(allower.public_key.clone(), &id)
         .await
         .unwrap();
     deliver(allowee, allower).await;
@@ -42,7 +37,6 @@ async fn accepted_request(
         .sdk
         .propose_payment_request(
             payer.public_key.clone(),
-            payer.receiver_path.clone(),
             PaymentRequestTerms::builder(
                 PaymentAmount::new("0.001", "btc").unwrap(),
                 PaymentReference::new("allowance-proof-invoice").unwrap(),
@@ -60,7 +54,12 @@ async fn accepted_request(
     deliver(payee, payer).await;
     payer
         .sdk
-        .accept_payment_request(payee.public_key.clone(), payee.receiver_path.clone(), &id)
+        .claim_payment_request_for_execution(payee.public_key.clone(), &id)
+        .await
+        .unwrap();
+    payer
+        .sdk
+        .accept_payment_request(payee.public_key.clone(), &id)
         .await
         .unwrap();
     deliver(payer, payee).await;
@@ -68,11 +67,14 @@ async fn accepted_request(
 }
 
 fn submission(
+    payee: &TestUser,
     allowance_id: &AllowanceId,
     period: Option<BillingPeriod>,
     evidence: &str,
 ) -> PaymentProofSubmission {
     PaymentProofSubmission {
+        payment_app_id: payee.app_id.clone(),
+
         conversion_quote_id: None,
         allowance_id: Some(allowance_id.clone()),
         billing_period: period,
@@ -92,7 +94,7 @@ async fn request_record(
 ) -> PaymentRequestRecord {
     local
         .sdk
-        .payment_requests_with(&peer.public_key, &peer.receiver_path)
+        .payment_requests_with(&peer.public_key)
         .await
         .unwrap()
         .into_iter()
@@ -118,9 +120,8 @@ async fn test_allowance_one_time_proof_attribution_survives_end_restore_and_corr
         .sdk
         .submit_payment_proof_submission(
             pair.bob.public_key.clone(),
-            pair.bob.receiver_path.clone(),
             &request_id,
-            submission(&allowance_id, None, "first"),
+            submission(&pair.bob, &allowance_id, None, "first"),
         )
         .await
         .unwrap();
@@ -142,11 +143,7 @@ async fn test_allowance_one_time_proof_attribution_survives_end_restore_and_corr
 
     pair.alice
         .sdk
-        .end_allowance(
-            pair.bob.public_key.clone(),
-            pair.bob.receiver_path.clone(),
-            &allowance_id,
-        )
+        .end_allowance(pair.bob.public_key.clone(), &allowance_id)
         .await
         .unwrap();
     deliver(&pair.alice, &pair.bob).await;
@@ -164,9 +161,8 @@ async fn test_allowance_one_time_proof_attribution_survives_end_restore_and_corr
         .sdk
         .submit_payment_proof_submission(
             restored_bob.public_key.clone(),
-            restored_bob.receiver_path.clone(),
             &request_id,
-            submission(&allowance_id, None, "corrected"),
+            submission(&pair.bob, &allowance_id, None, "corrected"),
         )
         .await
         .unwrap();
@@ -221,9 +217,8 @@ async fn test_allowance_recurring_proofs_retain_billing_periods_after_restore() 
         .sdk
         .submit_payment_proof_submission(
             pair.bob.public_key.clone(),
-            pair.bob.receiver_path.clone(),
             &request_id,
-            submission(&allowance_id, None, "missing-period"),
+            submission(&pair.bob, &allowance_id, None, "missing-period"),
         )
         .await;
     assert!(invalid.is_err());
@@ -241,9 +236,8 @@ async fn test_allowance_recurring_proofs_retain_billing_periods_after_restore() 
             .sdk
             .submit_payment_proof_submission(
                 pair.bob.public_key.clone(),
-                pair.bob.receiver_path.clone(),
                 &request_id,
-                submission(&allowance_id, Some(period.clone()), evidence),
+                submission(&pair.bob, &allowance_id, Some(period.clone()), evidence),
             )
             .await
             .unwrap();

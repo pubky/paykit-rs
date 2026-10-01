@@ -36,6 +36,10 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use super::*;
 
+fn app_id() -> PaykitAppId {
+    PaykitAppId::new("test-app").unwrap()
+}
+
 /// Single source of truth for how each `PrivateMessageKind` routes through the
 /// public Payment Request parser: `true` means
 /// `parse_payment_request_event_message` returns `Some`, `false` means the kind
@@ -152,9 +156,8 @@ fn payment_reference() -> impl Strategy<Value = PaymentReference> {
 
 /// Build a valid `PaymentEndpointIdentifier`.
 ///
-/// The `ep-` prefix guarantees the value never collides with a reserved
-/// identifier (`private`, `encrypted-link-recovery`) and is never a pure-dot
-/// path-traversal component.
+/// The `ep-` prefix guarantees the value never collides with the reserved
+/// `private` identifier and is never a pure-dot path-traversal component.
 fn payment_endpoint_identifier() -> impl Strategy<Value = PaymentEndpointIdentifier> {
     "ep-[a-zA-Z0-9]{1,12}(-[a-zA-Z0-9]{1,8}){0,2}"
         .prop_map(|s| PaymentEndpointIdentifier::new(s).expect("generated identifier is valid"))
@@ -281,7 +284,15 @@ fn payment_proof() -> impl Strategy<Value = PaymentProof> {
     )
         .prop_map(
             |(event_id, id, reference, billing_period, endpoint, proof)| {
-                PaymentProof::new(event_id, id, reference, billing_period, endpoint, proof)
+                PaymentProof::new(
+                    event_id,
+                    id,
+                    reference,
+                    billing_period,
+                    app_id(),
+                    endpoint,
+                    proof,
+                )
             },
         )
 }
@@ -350,6 +361,7 @@ fn exercise(raw_json: String) {
     let message = PrivateApplicationMessage {
         version: None,
         kind: None,
+        app_id: None,
         raw_json,
     };
     let _ = format!("{message:?}");
@@ -370,11 +382,12 @@ proptest! {
     /// Every construction-valid event survives serialize -> parse unchanged.
     #[test]
     fn valid_event_round_trips(event in payment_request_event()) {
-        let serialized = serialize_payment_request_event(&event)
+        let serialized = serialize_payment_request_event(&app_id(), &event)
             .expect("construction-valid events must serialize");
         let message = PrivateApplicationMessage {
             version: Some(1),
             kind: Some(event.kind().as_str().to_string()),
+            app_id: Some(app_id().as_str().to_string()),
             raw_json: serialized,
         };
         let parsed = parse_payment_request_event_message(&message)
@@ -420,6 +433,7 @@ fn test_payment_request_routing_covers_all_private_message_kinds() {
         let message = PrivateApplicationMessage {
             version: None,
             kind: None,
+            app_id: None,
             raw_json: format!(r#"{{"kind":"{}"}}"#, kind.as_str()),
         };
 

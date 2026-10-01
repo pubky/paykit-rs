@@ -2,7 +2,7 @@
 private func compileAllowanceBindingsSurface(
     sdk: PaykitSdkProtocol,
     counterparty: String,
-    receiverPath: String,
+    paymentAppId: String,
     allowanceId: String
 ) async throws {
     let amountRange = try AllowanceAmountRange(minimum: "1", maximum: "10")
@@ -27,7 +27,6 @@ private func compileAllowanceBindingsSurface(
     let termsProtocol: AllowanceTermsProtocol = terms
     let filter = AllowanceFilter(
         counterparty: counterparty,
-        counterpartyReceiverPath: receiverPath,
         localRole: .allower,
         states: [.proposed]
     )
@@ -36,34 +35,30 @@ private func compileAllowanceBindingsSurface(
     let listed: [AllowanceRecord] = try await sdk.listAllowances(filter: filter)
     let found: AllowanceRecord? = try await sdk.getAllowance(
         counterparty: counterparty,
-        counterpartyReceiverPath: receiverPath,
         allowanceId: allowanceId
     )
     let proposed: AllowanceRecord = try await sdk.proposeAllowance(
         counterparty: counterparty,
-        counterpartyReceiverPath: receiverPath,
         localRole: .allowee,
         terms: terms
     )
     let accepted: AllowanceRecord = try await sdk.acceptAllowance(
         counterparty: counterparty,
-        counterpartyReceiverPath: receiverPath,
         allowanceId: allowanceId
     )
     let rejected: AllowanceRecord = try await sdk.rejectAllowance(
         counterparty: counterparty,
-        counterpartyReceiverPath: receiverPath,
         allowanceId: allowanceId
     )
     let ended: AllowanceRecord = try await sdk.endAllowance(
         counterparty: counterparty,
-        counterpartyReceiverPath: receiverPath,
         allowanceId: allowanceId
     )
 
     let proof = try PrivateJsonObject(text: "{}")
     let automaticProof = PaymentProofSubmission(
         billingPeriod: nil,
+        paymentAppId: paymentAppId,
         paymentEndpointIdentifier: "btc-lightning-bolt11",
         allowanceId: allowanceId,
         conversionQuoteId: nil,
@@ -71,6 +66,7 @@ private func compileAllowanceBindingsSurface(
     )
     let manualProof = PaymentProofSubmission(
         billingPeriod: nil,
+        paymentAppId: paymentAppId,
         paymentEndpointIdentifier: "btc-lightning-bolt11",
         allowanceId: nil,
         conversionQuoteId: nil,
@@ -78,7 +74,6 @@ private func compileAllowanceBindingsSurface(
     )
     let requestWithProof = try await sdk.submitPaymentProof(
         counterparty: counterparty,
-        counterpartyReceiverPath: receiverPath,
         paymentRequestId: "550e8400-e29b-41d4-a716-446655440000",
         proof: automaticProof
     )
@@ -124,7 +119,6 @@ private func compileAllowanceBindingsSurface(
 private func compileAllowanceAccountingBindingsSurface(
     sdk: PaykitSdkProtocol,
     counterparty: String,
-    receiverPath: String,
     allowanceId: String,
     recoveredHistory: AllowanceAccountingHistory,
     preparedAttemptId: String
@@ -134,7 +128,6 @@ private func compileAllowanceAccountingBindingsSurface(
     let amountProtocol: AccountingAmountProtocol = amount
     let scope = PaymentRequestScope(
         counterparty: counterparty,
-        counterpartyReceiverPath: receiverPath,
         paymentRequestId: "550e8400-e29b-41d4-a716-446655440000"
     )
     let occurrence = PaymentOccurrence(request: scope, billingPeriod: nil)
@@ -199,6 +192,8 @@ private func compileAllowanceAccountingBindingsSurface(
     let blocked = PaymentAttemptDecision.blocked(reason: .sharedRule(code: "clock_rollback"))
     let ready = PaymentAttemptDecision.ready(attempt: reported)
     _ = (amountProtocol, amount.value(), amount.asset(), amount.description, amount.debugDescription,
+         scope.description, scope.debugDescription, recovered.description,
+         decisions.map { $0.description }, decisions.map { $0.debugDescription },
          recovered, candidates, association, accepted, deferred, manualOnly, replacement, reserved,
          manual, handoff, reported, failed, phases, modes, decisions, blocked, ready)
 }

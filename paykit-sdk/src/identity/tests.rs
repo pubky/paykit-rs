@@ -60,25 +60,65 @@ fn test_pubky_local_secret_key_returns_public_key() {
 }
 
 #[test]
-fn test_receiver_noise_secret_key_debug_is_redacted() {
-    let key = ReceiverNoiseSecretKey::new([7; 32]);
+fn test_shared_state_key_is_deterministic_and_separate_from_noise_key() {
+    let key = PubkyLocalSecretKey::new([9; 32]);
+    let paykit_key = key
+        .derive_paykit_identity_secret_key(INITIAL_PAYKIT_KEY_GENERATION)
+        .unwrap();
+    let next_paykit_key = key.derive_paykit_identity_secret_key(2).unwrap();
 
-    assert_eq!(format!("{key:?}"), "ReceiverNoiseSecretKey(<redacted>)");
+    assert_eq!(paykit_key.key_generation(), INITIAL_PAYKIT_KEY_GENERATION);
+    assert_eq!(paykit_key.shared_state_key(), paykit_key.shared_state_key());
+    assert_ne!(paykit_key.shared_state_key(), paykit_key.noise_secret_key());
+    assert_ne!(paykit_key.as_bytes(), key.as_bytes());
+    assert_ne!(paykit_key.as_bytes(), next_paykit_key.as_bytes());
+    assert_eq!(
+        next_paykit_key,
+        key.derive_paykit_identity_secret_key(2).unwrap()
+    );
+    assert!(key.derive_paykit_identity_secret_key(0).is_err());
 }
 
 #[test]
-fn test_receiver_noise_secret_key_returns_independent_public_key() {
-    let receiver_key = ReceiverNoiseSecretKey::new([7; 32]);
-    let identity_key = PubkyLocalSecretKey::new([8; 32]);
+fn test_paykit_identity_secret_validates_generation_and_redacts_debug() {
+    let key = PaykitIdentitySecretKey::new([7; 32], 2).unwrap();
 
-    assert_eq!(
-        receiver_key.public_key(),
-        pubky::Keypair::from_secret(&[7; 32]).public_key()
-    );
-    assert_ne!(
-        PubkyPublicKey::from_public_key(&receiver_key.public_key()),
-        identity_key.public_key()
-    );
+    assert_eq!(key.key_generation(), 2);
+    assert!(!format!("{key:?}").contains(&hex::encode([7; 32])));
+    assert!(PaykitIdentitySecretKey::new([7; 32], 0).is_err());
+}
+
+#[test]
+fn test_paykit_key_derivation_matches_spec_vectors() {
+    let root = PubkyLocalSecretKey::new([9; 32]);
+    for (generation, identity, noise, state) in [
+        (
+            1,
+            "5ac67d4f33e44a52a647e6515811095c128ef51f23010e6d841d41ba8c0743c4",
+            "0e00cd53a2a7156f7e9720c406d05332920d11164d913b717601bba0a13b6bfb",
+            "501c714e7f1b8f44b51177b410e328c7e9df7e392ca6a972cc02189de1e30764",
+        ),
+        (
+            2,
+            "f3a1d35856bb4bdf769d6cfb3c943debd3871a62d4c14e4d7b4a7755c7b965c4",
+            "4882e20c237469fddab74a9fdf9271c493bb1357b00d110e8b9b89a7e25f12a2",
+            "9b3008988de501585c74df37d0bc8602ac67ea61f4a2c05834cfd0595a79faa4",
+        ),
+    ] {
+        let key = root.derive_paykit_identity_secret_key(generation).unwrap();
+        assert_eq!(hex::encode(key.as_bytes()), identity);
+        assert_eq!(hex::encode(key.noise_secret_key()), noise);
+        assert_eq!(hex::encode(key.shared_state_key()), state);
+        let imported = PaykitIdentitySecretKey::new(*key.as_bytes(), generation).unwrap();
+        assert_eq!(key, imported);
+        assert!(imported.validate_pubky_derivation(Some(&root)).is_ok());
+        assert!(imported.validate_pubky_derivation(None).is_ok());
+    }
+    let other = PaykitIdentitySecretKey::new([7; 32], 2).unwrap();
+    assert!(other.validate_pubky_derivation(Some(&root)).is_err());
+    let mislabeled = root.derive_paykit_identity_secret_key(1).unwrap();
+    let mislabeled = PaykitIdentitySecretKey::new(*mislabeled.as_bytes(), 2).unwrap();
+    assert!(mislabeled.validate_pubky_derivation(Some(&root)).is_err());
 }
 
 #[test]
@@ -96,16 +136,14 @@ fn test_session_capabilities_cover_required_paykit_scopes() {
         .as_slice()
         .to_vec();
     let bitkit_namespace = pubky::Capabilities::builder()
-        .read_write("/pub/paykit/v0/paykit/wallet/")
-        .unwrap()
-        .read_write("/pub/paykit/v0/private/paykit/wallet/")
+        .read_write("/pub/paykit/")
         .unwrap()
         .read_write("/pub/bitkit.to/")
         .unwrap()
         .finish()
         .as_slice()
         .to_vec();
-    let bitkit_required = "/pub/paykit/v0/paykit/wallet/:rw,/pub/paykit/v0/private/paykit/wallet/:rw,/pub/bitkit.to/paykit/wallet/:rw";
+    let bitkit_required = "/pub/paykit/:rw,/pub/bitkit.to/:rw";
     let read_only = pubky::Capabilities::builder()
         .read("/pub/paykit/")
         .unwrap()
@@ -114,11 +152,6 @@ fn test_session_capabilities_cover_required_paykit_scopes() {
         .to_vec();
 
     assert!(validate_session_capabilities(&root, "/pub/paykit/:rw").is_ok());
-    assert!(validate_session_capabilities(
-        &paykit_only,
-        "/pub/paykit/v0/paykit/wallet/:rw,/pub/paykit/v0/private/paykit/wallet/:rw"
-    )
-    .is_ok());
     assert!(validate_session_capabilities(&root, bitkit_required).is_ok());
     assert!(validate_session_capabilities(&bitkit_namespace, bitkit_required).is_ok());
     assert!(validate_session_capabilities(&paykit_only, bitkit_required).is_err());

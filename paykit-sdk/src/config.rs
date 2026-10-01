@@ -1,14 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
-use paykit_lib::{PaykitReceiverPath, PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX};
-
-use crate::identity::PubkyPublicKey;
-
-/// Default namespace segment for SDK profile/contact public data.
-///
-/// This is SDK-level Paykit app data, not a core Paykit Protocol route.
-pub const DEFAULT_PROFILE_NAMESPACE: &str = "paykit";
+use paykit_lib::PaykitAppId;
 
 /// Policy for SDK-managed public Payment Endpoint cleanup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,236 +8,45 @@ pub const DEFAULT_PROFILE_NAMESPACE: &str = "paykit";
 pub enum EndpointManagementScope {
     /// Manage only endpoints previously published by the SDK.
     ManagedOnly,
-    /// Manage the full local Paykit public namespace.
-    FullPaykitNamespace,
-}
-
-/// Policy for public Encrypted Link recovery markers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub enum EncryptedLinkRecoveryMarkerPolicy {
-    /// Publish and observe minimal public recovery markers.
-    Enabled,
-    /// Do not use public recovery markers.
-    Disabled,
+    /// Manage the configured application's full public endpoint namespace.
+    FullAppEndpointNamespace,
 }
 
 /// Policy for publishing saved contacts to public Pubky storage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum PublicContactSharingPolicy {
-    /// Keep saved contacts only in local SDK storage. This is the default.
-    LocalOnly,
-    /// Allow explicit public contact marker publication in the configured namespace.
-    ConfiguredPublicNamespace,
+    /// Keep saved contacts only in private SDK state. This is the default.
+    PrivateOnly,
+    /// Allow explicit public contact marker publication.
+    Enabled,
 }
 
 /// Runtime configuration for Paykit SDK.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaykitSdkConfig {
-    /// Receiver folder for this app/runtime under `/pub/paykit/v0/{app}/{wallet|server}`.
-    pub receiver_path: PaykitReceiverPath,
-    /// Namespace segment for SDK profile/contact public data under `/pub/`.
-    ///
-    /// This is a local SDK convention for Paykit-facing profile, blob, and
-    /// public contact marker helpers. Pubky session permissions remain the
-    /// authority for what a caller can actually write. This does not change
-    /// core Paykit Protocol paths or split private runtime state.
-    #[serde(default = "default_profile_namespace")]
-    pub profile_namespace: String,
+    /// Application using this identity-wide Paykit runtime.
+    pub app_id: PaykitAppId,
     /// Public endpoint management scope.
     pub endpoint_management_scope: EndpointManagementScope,
-    /// Public recovery marker behavior.
-    #[serde(default = "default_encrypted_link_recovery_marker_policy")]
-    pub encrypted_link_recovery_markers: EncryptedLinkRecoveryMarkerPolicy,
     /// Public contact marker behavior.
     #[serde(default = "default_public_contact_sharing_policy")]
     pub public_contact_sharing: PublicContactSharingPolicy,
-    /// Time after which an in-progress peer link operation can be retried.
-    pub peer_link_operation_lease_timeout: Duration,
-    /// Time after which an in-progress outbound private send is considered stale.
-    ///
-    /// Stale `Sending` records can be reclaimed for retry by another worker.
-    pub outbound_private_send_lease_timeout: Duration,
-    /// Minimum delay before retrying a failed outbound private send.
-    #[serde(default = "default_outbound_private_retry_backoff")]
-    pub outbound_private_retry_backoff: Duration,
 }
 
 impl PaykitSdkConfig {
-    /// Build the default SDK policy for an explicit Paykit receiver path.
-    pub fn new(receiver_path: PaykitReceiverPath) -> Self {
-        Self {
-            receiver_path,
-            profile_namespace: DEFAULT_PROFILE_NAMESPACE.into(),
+    /// Create SDK configuration for one Paykit application.
+    pub fn new(app_id: impl Into<String>) -> crate::Result<Self> {
+        Ok(Self {
+            app_id: PaykitAppId::new(app_id.into()).map_err(crate::PaykitSdkError::from)?,
             endpoint_management_scope: EndpointManagementScope::ManagedOnly,
-            encrypted_link_recovery_markers: EncryptedLinkRecoveryMarkerPolicy::Enabled,
-            public_contact_sharing: PublicContactSharingPolicy::LocalOnly,
-            peer_link_operation_lease_timeout: Duration::from_secs(60),
-            outbound_private_send_lease_timeout: Duration::from_secs(60),
-            outbound_private_retry_backoff: Duration::from_secs(30),
-        }
+            public_contact_sharing: PublicContactSharingPolicy::PrivateOnly,
+        })
     }
-
-    /// Validate runtime configuration values.
-    pub fn validate(&self) -> crate::Result<()> {
-        validate_profile_namespace(&self.profile_namespace)?;
-        validate_runtime_duration(
-            "peer link operation lease timeout",
-            self.peer_link_operation_lease_timeout,
-        )?;
-        validate_runtime_duration(
-            "outbound private send lease timeout",
-            self.outbound_private_send_lease_timeout,
-        )?;
-        validate_runtime_duration(
-            "outbound private retry backoff",
-            self.outbound_private_retry_backoff,
-        )?;
-        Ok(())
-    }
-
-    /// Return the configured Paykit Profile path.
-    pub fn paykit_profile_path(&self) -> String {
-        self.paykit_profile_path_for_receiver(&self.receiver_path)
-    }
-
-    /// Return the Paykit Profile path for a receiver under this SDK namespace.
-    pub fn paykit_profile_path_for_receiver(&self, receiver_path: &PaykitReceiverPath) -> String {
-        format!("{}/profile.json", self.profile_receiver_path(receiver_path))
-    }
-
-    /// Return the configured Paykit Profile blob path prefix.
-    pub fn paykit_profile_blob_path_prefix(&self) -> String {
-        format!("{}/blobs/", self.profile_receiver_path(&self.receiver_path))
-    }
-
-    /// Return the configured public contact marker path prefix.
-    pub fn public_contact_path_prefix(&self) -> String {
-        format!(
-            "{}/contacts/",
-            self.profile_receiver_path(&self.receiver_path)
-        )
-    }
-
-    /// Return the configured public contact marker path for one contact.
-    pub fn public_contact_path(
-        &self,
-        public_key: &PubkyPublicKey,
-        receiver_path: &PaykitReceiverPath,
-    ) -> String {
-        format!(
-            "{}{}/{}.json",
-            self.public_contact_path_prefix(),
-            public_key.as_str(),
-            receiver_path.as_str()
-        )
-    }
-
-    /// Return the Pubky session capabilities required by this SDK configuration.
-    pub fn required_session_capabilities(&self) -> String {
-        let mut capabilities = vec![
-            format!("{PAYKIT_PATH_PREFIX}/{}/:rw", self.receiver_path),
-            format!("{PAYKIT_PRIVATE_PATH_PREFIX}/{}/:rw", self.receiver_path),
-        ];
-        if self.profile_namespace != DEFAULT_PROFILE_NAMESPACE {
-            capabilities.push(format!(
-                "/pub/{}/{}/:rw",
-                self.profile_namespace, self.receiver_path
-            ));
-        }
-        capabilities.join(",")
-    }
-
-    /// Return the receiver-scoped Receipt Location prefix.
-    pub fn receipt_path_prefix(&self) -> String {
-        format!(
-            "{PAYKIT_PRIVATE_PATH_PREFIX}/{}/receipts",
-            self.receiver_path
-        )
-    }
-
-    fn profile_receiver_path(&self, receiver_path: &PaykitReceiverPath) -> String {
-        if self.profile_namespace == DEFAULT_PROFILE_NAMESPACE {
-            return format!("{PAYKIT_PATH_PREFIX}/{receiver_path}");
-        }
-        format!("/pub/{}/{receiver_path}", self.profile_namespace)
-    }
-}
-
-fn validate_profile_namespace(namespace: &str) -> crate::Result<()> {
-    if namespace.is_empty() {
-        return Err(crate::PaykitSdkError::Policy {
-            context: "profile namespace must not be empty".into(),
-            source: None,
-        });
-    }
-    if namespace.len() > 128 {
-        return Err(crate::PaykitSdkError::Policy {
-            context: "profile namespace must not exceed 128 bytes".into(),
-            source: None,
-        });
-    }
-    if namespace.starts_with('.') || namespace.ends_with('.') {
-        return Err(crate::PaykitSdkError::Policy {
-            context: "profile namespace must not start or end with '.'".into(),
-            source: None,
-        });
-    }
-    if namespace == "pubky.app" {
-        return Err(crate::PaykitSdkError::Policy {
-            context: "profile namespace 'pubky.app' is reserved for Pubky app data".into(),
-            source: None,
-        });
-    }
-    if namespace
-        .chars()
-        .any(|ch| !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_'))
-    {
-        return Err(crate::PaykitSdkError::Policy {
-            context: "profile namespace may only contain ASCII letters, digits, '.', '-' and '_'"
-                .into(),
-            source: None,
-        });
-    }
-    Ok(())
-}
-
-fn validate_runtime_duration(label: &str, duration: Duration) -> crate::Result<()> {
-    if duration.is_zero() {
-        return Err(crate::PaykitSdkError::Policy {
-            context: format!("{label} must be greater than zero"),
-            source: None,
-        });
-    }
-    chrono::Duration::from_std(duration).map_err(|err| crate::PaykitSdkError::Policy {
-        context: format!("{label} must fit SDK runtime duration: {err}"),
-        source: None,
-    })?;
-    Ok(())
-}
-
-fn default_encrypted_link_recovery_marker_policy() -> EncryptedLinkRecoveryMarkerPolicy {
-    EncryptedLinkRecoveryMarkerPolicy::Enabled
 }
 
 fn default_public_contact_sharing_policy() -> PublicContactSharingPolicy {
-    PublicContactSharingPolicy::LocalOnly
-}
-
-fn default_profile_namespace() -> String {
-    DEFAULT_PROFILE_NAMESPACE.into()
-}
-
-fn default_outbound_private_retry_backoff() -> Duration {
-    Duration::from_secs(30)
-}
-
-#[cfg(test)]
-impl Default for PaykitSdkConfig {
-    fn default() -> Self {
-        Self::new(PaykitReceiverPath::new("test/wallet").expect("valid test receiver path"))
-    }
+    PublicContactSharingPolicy::PrivateOnly
 }
 
 #[cfg(test)]

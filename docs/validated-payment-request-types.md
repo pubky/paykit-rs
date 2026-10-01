@@ -2,7 +2,8 @@
 
 Payment Request domain types now validate before construction and expose
 read-only accessors. This is a Rust source API change; it preserves accepted
-wire values, protocol rules, and SDK backup record shapes. Swift and Kotlin
+wire validation rules. The shared-identity merge also adds required App ID
+attribution to private messages and Payment Proofs. Swift and Kotlin
 input records remain editable inputs and validate when converted into Rust
 domain values.
 
@@ -23,7 +24,8 @@ Build complete Payment Request terms before creating a proposal:
 ```rust
 use paykit_lib::{
     EventId, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
-    PaymentRequest, PaymentRequestId, PaymentRequestTerms,
+    PaymentRequest, PaymentRequestId, PaymentRequestTerms, PaykitAppId,
+    serialize_payment_request_event, PaymentRequestEvent,
 };
 
 let terms = PaymentRequestTerms::builder(
@@ -31,16 +33,21 @@ let terms = PaymentRequestTerms::builder(
     PaymentReference::new("invoice-1")?,
     vec![PaymentEndpointIdentifier::new("btc-lightning-bolt11")?],
 )
+.required_app_id(Some(PaykitAppId::new("merchant")?))
 .proposal_expires_at(None)
 .recurrence(None)
 .metadata(serde_json::Map::new())
 .build()?;
 let request = PaymentRequest::new(EventId::new_v4(), PaymentRequestId::new_v4(), terms);
+let raw = serialize_payment_request_event(
+    &PaykitAppId::new("merchant")?,
+    &PaymentRequestEvent::Request(request),
+)?;
 ```
 
 The builder requires amount, reference, and endpoint inputs. The optional
-builder methods accept an optional expiry, an optional validated recurrence,
-and a metadata map. `build()` rejects empty endpoint lists and invalid expiry
+builder methods accept an optional required payee App ID, expiry, validated
+recurrence, conversion terms, payment deadline, and a metadata map. `build()` rejects empty endpoint lists and invalid expiry
 syntax; it does not reject historical expiry times or duplicate endpoint
 identifiers that were already accepted by the protocol.
 
@@ -54,8 +61,11 @@ validated value.
 
 All Payment Request event constructors set their own version and kind.
 Read headers with `version()` and `kind()`; callers cannot override them.
-`PaymentProof::new` keeps its existing six validated-component arguments, and
-`with_allowance_id` adds optional attribution. `validate_for_request` is still
+`PaymentProof::new` takes seven validated components: Event ID, Request ID,
+Payment Reference, optional Billing Period, payment App ID, endpoint identifier,
+and proof data. The payment App ID identifies the payee App owning the selected
+endpoint; it is distinct from the sending App ID passed to event serializers.
+`with_allowance_id` and `with_conversion_quote_id` add optional attribution. `validate_for_request` is still
 required for stateless correlation with a particular Request. Valid component
 types do not establish consent, lifecycle eligibility, recurrence membership,
 settlement, or permission to pay.

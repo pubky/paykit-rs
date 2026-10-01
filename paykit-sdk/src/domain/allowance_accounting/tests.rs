@@ -4,12 +4,13 @@ use chrono::{Duration, TimeZone};
 
 mod manual_conversion;
 mod recovery_merge;
+mod shared_identity;
 
 fn time() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 15, 12, 0, 0).unwrap()
 }
-fn path() -> PaykitReceiverPath {
-    PaykitReceiverPath::new("bitkit/wallet").unwrap()
+fn app_id() -> paykit_lib::PaykitAppId {
+    paykit_lib::PaykitAppId::new("bitkit").unwrap()
 }
 fn public_key() -> crate::PubkyPublicKey {
     crate::PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
@@ -31,6 +32,7 @@ fn message(raw_json: String) -> paykit_lib::PrivateApplicationMessage {
     let value: serde_json::Value = serde_json::from_str(&raw_json).unwrap();
     paykit_lib::PrivateApplicationMessage {
         version: Some(1),
+        app_id: value["app_id"].as_str().map(str::to_owned),
         kind: value["kind"].as_str().map(str::to_owned),
         raw_json,
     }
@@ -44,40 +46,42 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
-        let storage = InMemoryStorage::new();
+        let storage = InMemoryStorage::with_registered_apps([app_id()]);
         let peer = public_key();
         let request_id = paykit_lib::PaymentRequestId::new_v4();
         let allowance = AllowanceId::new_v4();
         let proposal_id = new_id();
         let raw_allowance = format!(
-            r#"{{"version":1,"kind":"paykit.allowance_proposal","event_id":"{proposal_id}","allowance_id":"{}","proposer_role":"allower","terms":{{"asset":"btc","per_payment_amount":null,"period_limits":[],"lifetime_amount_limit":"1","active_from":null,"expires_at":null,"allowed_payment_endpoint_identifiers":null}}}}"#,
+            r#"{{"version":1,"app_id":"bitkit","kind":"paykit.allowance_proposal","event_id":"{proposal_id}","allowance_id":"{}","proposer_role":"allower","terms":{{"asset":"btc","per_payment_amount":null,"period_limits":[],"lifetime_amount_limit":"1","active_from":null,"expires_at":null,"allowed_payment_endpoint_identifiers":null}}}}"#,
             allowance.as_str()
         );
         let raw_acceptance = format!(
-            r#"{{"version":1,"kind":"paykit.allowance_acceptance","event_id":"{}","allowance_id":"{}","proposal_event_id":"{proposal_id}"}}"#,
+            r#"{{"version":1,"app_id":"bitkit","kind":"paykit.allowance_acceptance","event_id":"{}","allowance_id":"{}","proposal_event_id":"{proposal_id}"}}"#,
             new_id(),
             allowance.as_str()
         );
         let raw_request = format!(
-            r#"{{"version":1,"kind":"paykit.payment_request","event_id":"{}","payment_request_id":"{}","request":{{"amount":{{"value":"1","asset":"btc"}},"payment_reference":"test","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"metadata":{{}}}}}}"#,
+            r#"{{"version":1,"app_id":"bitkit","kind":"paykit.payment_request","event_id":"{}","payment_request_id":"{}","request":{{"amount":{{"value":"1","asset":"btc"}},"payment_reference":"test","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"required_app_id":null,"metadata":{{}}}}}}"#,
             new_id(),
             request_id.as_str()
         );
         storage
             .transaction(|tx| {
                 tx.save_identity_state(crate::IdentityState {
-                    local_pubky_public_key: Some(public_key()),
-                    local_receiver_noise_public_key: Some(public_key()),
+                    public_key: Some(public_key()),
                     initialized_at: time(),
-                    sign_out_generation: 0,
                 });
-                let mut linked =
-                    crate::domain::linked_peers::default_linked_peer(peer.clone(), path());
+                let mut linked = crate::domain::linked_peers::default_linked_peer(peer.clone());
                 linked.state = crate::LinkedPeerState::Linked;
                 tx.save_linked_peer(linked);
+                tx.save_authorized_paykit_apps(
+                    peer.clone(),
+                    [(app_id(), tx.paykit_app_capabilities(&app_id()).unwrap())]
+                        .into_iter()
+                        .collect(),
+                );
                 reconcile(
                     tx,
-                    &path(),
                     AllowanceAccountingReconciliation {
                         expected_revision: None,
                         history: Default::default(),
@@ -92,7 +96,6 @@ impl Fixture {
         crate::domain::outbound_private::enqueue_private_message(
             &storage,
             peer.clone(),
-            path(),
             raw_allowance,
             time(),
         )
@@ -101,7 +104,6 @@ impl Fixture {
         crate::domain::private_stream::persist_private_stream_batch(
             &storage,
             peer.clone(),
-            path(),
             vec![message(raw_acceptance), message(raw_request)],
             None,
             time(),
@@ -111,16 +113,16 @@ impl Fixture {
         let occurrence = PaymentOccurrence {
             request: PaymentRequestScope {
                 counterparty: peer,
-                counterparty_receiver_path: path(),
                 payment_request_id: request_id,
             },
             billing_period: None,
         };
+        claim(&storage, &occurrence).await;
         storage
             .transaction(|tx| {
                 select(
                     tx,
-                    &path(),
+                    &app_id(),
                     occurrence.request.clone(),
                     AllowanceSelectionInput {
                         allowance_id: allowance.clone(),
@@ -145,7 +147,7 @@ impl Fixture {
             .transaction(|tx| {
                 reserve(
                     tx,
-                    &path(),
+                    &app_id(),
                     self.occurrence.clone(),
                     Some(1),
                     checks(),
@@ -164,11 +166,64 @@ impl Fixture {
     }
 }
 
+async fn claim(storage: &InMemoryStorage, occurrence: &PaymentOccurrence) {
+    crate::domain::payment_requests::claim_payment_request_execution(
+        storage,
+        occurrence.request.counterparty.clone(),
+        &app_id(),
+        &occurrence.request.payment_request_id,
+        time(),
+    )
+    .await
+    .unwrap();
+}
+
 fn attempt(decision: PaymentAttemptDecision) -> PaymentAttemptRecord {
     match decision {
         PaymentAttemptDecision::Ready { attempt } => attempt,
         other => panic!("Expected Ready: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn test_candidate_evaluation_preserves_reconciliation_revision() {
+    let fixture = Fixture::new().await;
+    fixture
+        .storage
+        .transaction(|tx| {
+            let mut state = load(tx)?;
+            invalidate_accounting(&mut state);
+            tx.save_allowance_accounting_state(state);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let before = fixture.state();
+    let candidates = fixture
+        .storage
+        .transaction(|tx| candidates(tx, fixture.occurrence.request.clone(), time()))
+        .await
+        .unwrap();
+    assert!(!candidates.is_empty());
+    assert!(candidates.iter().all(
+        |candidate| candidate.blocked == Some(AllowanceAccountingBlock::ReconciliationRequired)
+    ));
+    assert_eq!(fixture.state(), before);
+    fixture
+        .storage
+        .transaction(|tx| {
+            reconcile(
+                tx,
+                AllowanceAccountingReconciliation {
+                    expected_revision: Some(before.revision),
+                    history: before.history,
+                    outcomes: vec![],
+                    trusted_time: time(),
+                },
+            )
+        })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -178,7 +233,7 @@ async fn test_accounting_atomic_manual_and_automatic_exclusion() {
         fixture.reserve(),
         fixture.storage.transaction(|tx| reserve(
             tx,
-            &path(),
+            &app_id(),
             fixture.occurrence.clone(),
             None,
             checks(),
@@ -202,13 +257,13 @@ async fn test_accounting_handoff_only_once_unknown_remains_reserved() {
     let prepared = attempt(fixture.reserve().await);
     let submitted = fixture
         .storage
-        .transaction(|tx| begin(tx, &path(), prepared.attempt_id.clone(), checks()))
+        .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id.clone(), checks()))
         .await
         .unwrap();
     assert_eq!(attempt(submitted).status, PaymentExecutionStatus::Submitted);
     let repeated = fixture
         .storage
-        .transaction(|tx| begin(tx, &path(), prepared.attempt_id.clone(), checks()))
+        .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id.clone(), checks()))
         .await
         .unwrap();
     assert!(matches!(
@@ -258,7 +313,7 @@ async fn test_accounting_explicit_failure_releases_but_success_never_does() {
     let next = attempt(fixture.reserve().await);
     fixture
         .storage
-        .transaction(|tx| begin(tx, &path(), next.attempt_id.clone(), checks()))
+        .transaction(|tx| begin(tx, &app_id(), next.attempt_id.clone(), checks()))
         .await
         .unwrap();
     fixture
@@ -302,7 +357,7 @@ async fn test_accounting_blocked_wallet_check_advances_watermark() {
         .transaction(|tx| {
             reserve(
                 tx,
-                &path(),
+                &app_id(),
                 fixture.occurrence.clone(),
                 Some(1),
                 rejected,
@@ -346,7 +401,6 @@ async fn test_accounting_current_ledger_survives_stale_restore_and_empty_reconci
         .transaction(|tx| {
             reconcile(
                 tx,
-                &path(),
                 AllowanceAccountingReconciliation {
                     expected_revision: Some(merged.revision),
                     history: Default::default(),
@@ -376,7 +430,9 @@ async fn test_accounting_noise_rotation_retains_evidence_and_invalidates_prepara
     fixture
         .storage
         .transaction(|tx| {
-            tx.clear_private_identity_scoped_state();
+            let mut accounting = tx.allowance_accounting_state().unwrap();
+            invalidate_accounting(&mut accounting);
+            tx.save_allowance_accounting_state(accounting);
             Ok(())
         })
         .await
@@ -398,7 +454,6 @@ async fn test_accounting_deferred_retries_and_sticky_manual_only() {
         .transaction(|tx| {
             set_disposition(
                 tx,
-                &path(),
                 fixture.occurrence.clone(),
                 PaymentDisposition::Deferred {
                     reason: "endpoint unavailable".into(),
@@ -412,7 +467,6 @@ async fn test_accounting_deferred_retries_and_sticky_manual_only() {
         .transaction(|tx| {
             set_disposition(
                 tx,
-                &path(),
                 fixture.occurrence.clone(),
                 PaymentDisposition::ManualOnly,
             )
@@ -423,7 +477,6 @@ async fn test_accounting_deferred_retries_and_sticky_manual_only() {
         .storage
         .transaction(|tx| set_disposition(
             tx,
-            &path(),
             fixture.occurrence.clone(),
             PaymentDisposition::Deferred {
                 reason: "retry".into()
@@ -472,7 +525,7 @@ async fn test_accounting_actual_decimal_equivalence_uses_shared_math() {
         .transaction(|tx| {
             reserve(
                 tx,
-                &path(),
+                &app_id(),
                 fixture.occurrence.clone(),
                 Some(1),
                 equivalent,
@@ -484,13 +537,7 @@ async fn test_accounting_actual_decimal_equivalence_uses_shared_math() {
     assert!(matches!(decision, PaymentAttemptDecision::Ready { .. }));
     let record = fixture
         .storage
-        .transaction(|tx| {
-            request(
-                tx,
-                &scope(tx, &path(), &fixture.occurrence.request)?,
-                time(),
-            )
-        })
+        .transaction(|tx| request(tx, &scope(tx, &fixture.occurrence.request)?, time()))
         .await
         .unwrap();
     let terms = request_terms(&record).unwrap();
@@ -516,19 +563,19 @@ async fn test_accounting_reservation_consumes_capacity_across_distinct_requests(
     crate::domain::private_stream::persist_private_stream_batch(
         &fixture.storage,
         second.request.counterparty.clone(),
-        path(),
         vec![message(raw.to_string())],
         None,
         time(),
     )
     .await
     .unwrap();
+    claim(&fixture.storage, &second).await;
     fixture
         .storage
         .transaction(|tx| {
             select(
                 tx,
-                &path(),
+                &app_id(),
                 second.request.clone(),
                 AllowanceSelectionInput {
                     allowance_id: fixture.allowance.clone(),
@@ -548,7 +595,7 @@ async fn test_accounting_reservation_consumes_capacity_across_distinct_requests(
         .transaction(|tx| {
             reserve(
                 tx,
-                &path(),
+                &app_id(),
                 second.clone(),
                 Some(1),
                 checks(),
@@ -568,7 +615,7 @@ async fn test_accounting_pending_execution_cannot_be_labeled_deferred() {
     let prepared = attempt(fixture.reserve().await);
     fixture
         .storage
-        .transaction(|tx| begin(tx, &path(), prepared.attempt_id, checks()))
+        .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id, checks()))
         .await
         .unwrap();
     for disposition in [
@@ -579,7 +626,7 @@ async fn test_accounting_pending_execution_cannot_be_labeled_deferred() {
     ] {
         assert!(fixture
             .storage
-            .transaction(|tx| set_disposition(tx, &path(), fixture.occurrence.clone(), disposition))
+            .transaction(|tx| set_disposition(tx, fixture.occurrence.clone(), disposition))
             .await
             .is_err());
     }
@@ -594,9 +641,7 @@ async fn test_accounting_restore_failure_is_atomic_and_missing_ledger_stays_bloc
     let fixture = Fixture::new().await;
     attempt(fixture.reserve().await);
     let before = fixture.storage.snapshot().unwrap();
-    let mut backup = crate::export_backup_state(&fixture.storage, path())
-        .await
-        .unwrap();
+    let mut backup = crate::export_backup_state(&fixture.storage).await.unwrap();
     backup
         .allowance_accounting
         .as_mut()
@@ -607,8 +652,9 @@ async fn test_accounting_restore_failure_is_atomic_and_missing_ledger_stays_bloc
     assert!(crate::backup::restore_backup_state_with_identity(
         &fixture.storage,
         backup,
-        path(),
-        None
+        None,
+        None,
+        time(),
     )
     .await
     .is_err());
@@ -619,7 +665,7 @@ async fn test_accounting_restore_failure_is_atomic_and_missing_ledger_stays_bloc
             tx.save_identity_state(before.identity_state.clone().unwrap());
             reserve(
                 tx,
-                &path(),
+                &app_id(),
                 fixture.occurrence.clone(),
                 Some(1),
                 checks(),
@@ -661,7 +707,6 @@ async fn test_accounting_reconciliation_requires_explicit_outcome_to_release_unk
         .transaction(|tx| {
             reconcile(
                 tx,
-                &path(),
                 AllowanceAccountingReconciliation {
                     expected_revision: Some(current.revision),
                     history: recovered,
@@ -682,7 +727,6 @@ async fn test_accounting_reconciliation_requires_explicit_outcome_to_release_unk
         .transaction(|tx| {
             reconcile(
                 tx,
-                &path(),
                 AllowanceAccountingReconciliation {
                     expected_revision: Some(revision),
                     history: Default::default(),
@@ -733,32 +777,27 @@ async fn test_accounting_noncanonical_restored_ids_cannot_bypass_occurrence_excl
 }
 
 #[tokio::test]
-async fn test_accounting_restore_identity_switch_does_not_merge_previous_payer() {
+async fn test_accounting_restore_rejects_identity_switch_without_erasing_ledger() {
     let fixture = Fixture::new().await;
     attempt(fixture.reserve().await);
     let other = InMemoryStorage::new();
     let identity = crate::IdentityState {
-        local_pubky_public_key: Some(public_key()),
-        local_receiver_noise_public_key: Some(public_key()),
+        public_key: Some(public_key()),
         initialized_at: time(),
-        sign_out_generation: 1,
     };
     other.save_identity_state(identity.clone()).await.unwrap();
-    let backup = crate::export_backup_state(&other, path()).await.unwrap();
-    crate::backup::restore_backup_state_with_identity(
+    let backup = crate::export_backup_state(&other).await.unwrap();
+    let before = fixture.storage.snapshot().unwrap();
+    assert!(crate::backup::restore_backup_state_with_identity(
         &fixture.storage,
         backup,
-        path(),
-        Some(identity.clone()),
+        Some(identity),
+        None,
+        time(),
     )
     .await
-    .unwrap();
-    let state = fixture.storage.snapshot().unwrap();
-    assert_eq!(
-        state.identity_state.unwrap().local_pubky_public_key,
-        identity.local_pubky_public_key
-    );
-    assert!(state.allowance_accounting.is_none());
+    .is_err());
+    assert_eq!(fixture.storage.snapshot().unwrap(), before);
 }
 
 #[tokio::test]
@@ -769,7 +808,7 @@ async fn test_accounting_reconciliation_rejects_foreign_retained_ledger() {
         .storage
         .transaction(|tx| {
             let mut identity = tx.load_identity_state().unwrap();
-            identity.local_pubky_public_key = Some(public_key());
+            identity.public_key = Some(public_key());
             tx.save_identity_state(identity);
             Ok(())
         })
@@ -780,7 +819,6 @@ async fn test_accounting_reconciliation_rejects_foreign_retained_ledger() {
         .storage
         .transaction(|tx| reconcile(
             tx,
-            &path(),
             AllowanceAccountingReconciliation {
                 expected_revision: Some(current.revision),
                 history: Default::default(),
@@ -810,14 +848,14 @@ async fn test_accounting_corrupt_loaded_history_fails_without_mutation_or_handof
     let before = fixture.storage.snapshot().unwrap();
     assert!(fixture
         .storage
-        .transaction(|tx| begin(tx, &path(), prepared.attempt_id, checks()))
+        .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id, checks()))
         .await
         .is_err());
     assert!(fixture
         .storage
         .transaction(|tx| select(
             tx,
-            &path(),
+            &app_id(),
             fixture.occurrence.request.clone(),
             AllowanceSelectionInput {
                 allowance_id: fixture.allowance.clone(),
@@ -837,7 +875,7 @@ async fn test_accounting_manual_response_revokes_prepared_but_retains_submitted_
     let prepared = attempt(fixture.reserve().await);
     fixture
         .storage
-        .transaction(|tx| manual_response(tx, &path(), fixture.occurrence.request.clone()))
+        .transaction(|tx| manual_response(tx, fixture.occurrence.request.clone()))
         .await
         .unwrap();
     assert_eq!(
@@ -847,7 +885,7 @@ async fn test_accounting_manual_response_revokes_prepared_but_retains_submitted_
     assert!(matches!(
         fixture
             .storage
-            .transaction(|tx| begin(tx, &path(), prepared.attempt_id, checks()))
+            .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id, checks()))
             .await
             .unwrap(),
         PaymentAttemptDecision::Blocked { .. }
@@ -863,12 +901,12 @@ async fn test_accounting_manual_response_revokes_prepared_but_retains_submitted_
     let prepared = attempt(fixture.reserve().await);
     fixture
         .storage
-        .transaction(|tx| begin(tx, &path(), prepared.attempt_id, checks()))
+        .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id, checks()))
         .await
         .unwrap();
     fixture
         .storage
-        .transaction(|tx| manual_response(tx, &path(), fixture.occurrence.request.clone()))
+        .transaction(|tx| manual_response(tx, fixture.occurrence.request.clone()))
         .await
         .unwrap();
     assert_eq!(
@@ -886,7 +924,6 @@ async fn test_accounting_successful_reconsideration_replaces_deferred_dispositio
             .transaction(|tx| {
                 set_disposition(
                     tx,
-                    &path(),
                     fixture.occurrence.clone(),
                     PaymentDisposition::Deferred {
                         reason: "temporary endpoint failure".into(),
@@ -900,7 +937,7 @@ async fn test_accounting_successful_reconsideration_replaces_deferred_dispositio
             .transaction(|tx| {
                 reserve(
                     tx,
-                    &path(),
+                    &app_id(),
                     fixture.occurrence.clone(),
                     Some(1),
                     checks(),

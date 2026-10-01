@@ -20,7 +20,7 @@ use crate::{
         EventDedupRecord, OutboundPrivateMessageRecord, PrivateStreamItemRecord, StorageAdapter,
         StorageState, StorageTransaction,
     },
-    PaykitReceiverPath, PubkyPublicKey, Result,
+    PubkyPublicKey, Result,
 };
 
 use super::{
@@ -33,7 +33,6 @@ use super::{
 /// append observe the same state.
 pub(super) struct AllowanceLinkHistory {
     counterparty: PubkyPublicKey,
-    counterparty_receiver_path: PaykitReceiverPath,
     /// Every inbound private stream item on the link.
     items: Vec<PrivateStreamItemRecord>,
     /// Outbound messages that still carry local intent. `Invalid` and
@@ -46,14 +45,10 @@ pub(super) struct AllowanceLinkHistory {
 }
 
 impl AllowanceLinkHistory {
-    pub(super) fn load(
-        tx: &dyn StorageTransaction,
-        counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
-    ) -> Self {
-        let items = tx.private_stream_items(counterparty, counterparty_receiver_path);
+    pub(super) fn load(tx: &dyn StorageTransaction, counterparty: &PubkyPublicKey) -> Self {
+        let items = tx.private_stream_items(counterparty);
         let outbound = tx
-            .outbound_private_messages(counterparty, counterparty_receiver_path)
+            .outbound_private_messages(counterparty)
             .into_iter()
             .filter(|message| {
                 !matches!(
@@ -67,16 +62,15 @@ impl AllowanceLinkHistory {
             .iter()
             .filter_map(|item| canonical_event_id(&item.raw_json))
             .filter_map(|event_id| {
-                tx.event_dedup_record(counterparty, counterparty_receiver_path, &event_id)
+                tx.event_dedup_record(counterparty, &event_id)
                     .map(|record| (event_id, record))
             })
             .collect();
         let link_recovery_required = tx
-            .linked_peer(counterparty, counterparty_receiver_path)
+            .linked_peer(counterparty)
             .is_some_and(|peer| peer.state == LinkedPeerState::RecoveryRequired);
         Self {
             counterparty: counterparty.clone(),
-            counterparty_receiver_path: counterparty_receiver_path.clone(),
             items,
             outbound,
             dedupe_records,
@@ -130,6 +124,7 @@ impl<'a> EventSource<'a> {
     fn message(self) -> PrivateApplicationMessage {
         match self {
             Self::Inbound(item) => PrivateApplicationMessage {
+                app_id: item.parsed_app_id.clone(),
                 version: item
                     .parsed_version
                     .and_then(|version| u8::try_from(version).ok()),
@@ -137,6 +132,7 @@ impl<'a> EventSource<'a> {
                 raw_json: item.raw_json.clone(),
             },
             Self::Outbound(message) => PrivateApplicationMessage {
+                app_id: Some(message.app_id.to_string()),
                 version: Some(1),
                 kind: Some(message.kind.clone()),
                 raw_json: message.raw_json.clone(),
@@ -176,7 +172,7 @@ struct InvalidEvidence<'a> {
 }
 
 /// Return exact link scopes containing recognized Allowance activity.
-pub(crate) fn allowance_scopes(state: &StorageState) -> Vec<(PubkyPublicKey, PaykitReceiverPath)> {
+pub(crate) fn allowance_scopes(state: &StorageState) -> Vec<PubkyPublicKey> {
     let mut scopes = HashSet::new();
     for item in &state.private_stream_items {
         if item
@@ -184,27 +180,16 @@ pub(crate) fn allowance_scopes(state: &StorageState) -> Vec<(PubkyPublicKey, Pay
             .as_deref()
             .is_some_and(is_allowance_kind)
         {
-            scopes.insert((
-                item.counterparty.clone(),
-                item.counterparty_receiver_path.clone(),
-            ));
+            scopes.insert(item.counterparty.clone());
         }
     }
     for message in &state.outbound_private_messages {
         if is_allowance_kind(&message.kind) {
-            scopes.insert((
-                message.counterparty.clone(),
-                message.counterparty_receiver_path.clone(),
-            ));
+            scopes.insert(message.counterparty.clone());
         }
     }
     let mut scopes = scopes.into_iter().collect::<Vec<_>>();
-    scopes.sort_by(|(left_key, left_path), (right_key, right_path)| {
-        left_key
-            .as_str()
-            .cmp(right_key.as_str())
-            .then_with(|| left_path.as_str().cmp(right_path.as_str()))
-    });
+    scopes.sort_by(|left, right| left.as_str().cmp(right.as_str()));
     scopes
 }
 
@@ -214,28 +199,20 @@ pub(crate) fn allowance_scopes(state: &StorageState) -> Vec<(PubkyPublicKey, Pay
 pub(crate) async fn allowance_records<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_path: &PaykitReceiverPath,
 ) -> Result<Vec<AllowanceRecord>>
 where
     S: StorageAdapter,
 {
     storage
-        .transaction(|tx| {
-            Ok(allowance_records_in_transaction(
-                tx,
-                counterparty,
-                counterparty_receiver_path,
-            ))
-        })
+        .transaction(|tx| Ok(allowance_records_in_transaction(tx, counterparty)))
         .await
 }
 
 pub(crate) fn allowance_records_in_transaction(
     tx: &dyn StorageTransaction,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_path: &PaykitReceiverPath,
 ) -> Vec<AllowanceRecord> {
-    let history = AllowanceLinkHistory::load(tx, counterparty, counterparty_receiver_path);
+    let history = AllowanceLinkHistory::load(tx, counterparty);
     derive_records(&history, None)
 }
 
@@ -243,7 +220,6 @@ pub(crate) fn allowance_records_in_transaction(
 pub(crate) async fn allowance_record<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
-    counterparty_receiver_path: &PaykitReceiverPath,
     allowance_id: &AllowanceId,
 ) -> Result<Option<AllowanceRecord>>
 where
@@ -251,7 +227,7 @@ where
 {
     storage
         .transaction(|tx| {
-            let history = AllowanceLinkHistory::load(tx, counterparty, counterparty_receiver_path);
+            let history = AllowanceLinkHistory::load(tx, counterparty);
             Ok(derive_allowance_record(&history, allowance_id))
         })
         .await
@@ -467,11 +443,7 @@ fn derive_allowance(
         .collect::<Vec<_>>();
     let (stored_proposal, proposal) = *proposals.first()?;
 
-    let mut record = AllowanceRecord::new(
-        history.counterparty.clone(),
-        history.counterparty_receiver_path.clone(),
-        allowance_id,
-    );
+    let mut record = AllowanceRecord::new(history.counterparty.clone(), allowance_id);
     for stored in &events {
         touch_record(&mut record, stored.source);
     }

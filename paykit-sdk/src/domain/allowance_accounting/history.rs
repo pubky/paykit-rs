@@ -43,7 +43,6 @@ pub(crate) fn merge_restored_accounting(
 
 pub(crate) fn reconcile(
     tx: &mut dyn StorageTransaction,
-    local: &PaykitReceiverPath,
     input: AllowanceAccountingReconciliation,
 ) -> Result<AllowanceAccountingState> {
     validation::valid_time(input.trusted_time)?;
@@ -60,22 +59,23 @@ pub(crate) fn reconcile(
     validate_accounting(&supplied)?;
     let identity = tx
         .load_identity_state()
-        .and_then(|i| i.local_pubky_public_key)
+        .and_then(|i| i.public_key)
         .ok_or_else(|| policy("Reconciliation requires an initialized identity"))?;
     if supplied
         .history
         .associations
         .iter()
-        .any(|a| a.request.local_public_key != identity || a.request.local_receiver_path != *local)
-        || supplied.history.occurrences.iter().any(|o| {
-            o.key.request.local_public_key != identity
-                || o.key.request.local_receiver_path != *local
-        })
+        .any(|a| a.request.local_public_key != identity)
+        || supplied
+            .history
+            .occurrences
+            .iter()
+            .any(|o| o.key.request.local_public_key != identity)
         || supplied
             .history
             .watermarks
             .iter()
-            .any(|w| w.local_public_key != identity || w.local_receiver_path != *local)
+            .any(|w| w.local_public_key != identity)
     {
         return Err(policy(
             "Reconciled accounting belongs to another payer scope",
@@ -88,9 +88,9 @@ pub(crate) fn reconcile(
         history: AllowanceAccountingHistory::default(),
     });
     validate_accounting(&state)?;
-    validation::payer_scope(&state, &identity, local)?;
+    validation::payer_scope(&state, &identity)?;
     merge(&mut state.history, supplied.history)?;
-    validation::payer_scope(&state, &identity, local)?;
+    validation::payer_scope(&state, &identity)?;
     if state
         .history
         .watermarks
@@ -116,6 +116,10 @@ pub(crate) fn reconcile(
     }
     state.requires_reconciliation = false;
     save(tx, state)?;
+    crate::domain::payment_requests::release_resolved_payment_execution_claims(
+        tx,
+        input.trusted_time,
+    )?;
     load(tx)
 }
 
@@ -126,6 +130,10 @@ pub(crate) fn report_outcome(
     let mut state = load(tx)?;
     let result = apply_outcome(&mut state, input)?;
     save(tx, state)?;
+    crate::domain::payment_requests::release_resolved_payment_execution_claims(
+        tx,
+        result.admitted_at,
+    )?;
     Ok(result)
 }
 
@@ -223,9 +231,7 @@ fn merge(
     for incoming in recovered.watermarks {
         if let Some(existing) = destination.watermarks.iter_mut().find(|w| {
             w.local_public_key == incoming.local_public_key
-                && w.local_receiver_path == incoming.local_receiver_path
                 && w.counterparty == incoming.counterparty
-                && w.counterparty_receiver_path == incoming.counterparty_receiver_path
                 && w.allowance_id == incoming.allowance_id
         }) {
             existing.evaluated_at = existing.evaluated_at.max(incoming.evaluated_at);

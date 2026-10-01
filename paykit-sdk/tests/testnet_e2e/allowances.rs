@@ -4,10 +4,7 @@ use paykit_sdk::{
     PaykitSdkError, PrivateStreamParseStatus,
 };
 
-use crate::harness::{
-    deliver, drive_recovery_to_linked, linked_two_party,
-    wait_until_marker_is_newer_than_observer_checkpoint, TestUser,
-};
+use crate::harness::{deliver, drive_recovery_to_linked, linked_two_party, TestUser};
 
 mod accounting;
 mod cancellation_restore;
@@ -28,11 +25,7 @@ async fn allowance(
 ) -> paykit_sdk::AllowanceRecord {
     local
         .sdk
-        .allowance_record(
-            &counterparty.public_key,
-            &counterparty.receiver_path,
-            allowance_id,
-        )
+        .allowance_record(&counterparty.public_key, allowance_id)
         .await
         .expect("Allowance lookup should succeed")
         .expect("Allowance should exist on this exact Encrypted Link")
@@ -70,7 +63,6 @@ async fn test_allowance_lifecycle_roundtrip_between_linked_peers() {
         .sdk
         .propose_allowance(
             pair.bob.public_key.clone(),
-            pair.bob.receiver_path.clone(),
             AllowanceLocalRole::Allower,
             terms(),
         )
@@ -86,11 +78,7 @@ async fn test_allowance_lifecycle_roundtrip_between_linked_peers() {
 
     pair.bob
         .sdk
-        .accept_allowance(
-            pair.alice.public_key.clone(),
-            pair.alice.receiver_path.clone(),
-            &accepted_allowance_id,
-        )
+        .accept_allowance(pair.alice.public_key.clone(), &accepted_allowance_id)
         .await
         .expect("Bob should queue the Allowance acceptance");
     deliver(&pair.bob, &pair.alice).await;
@@ -105,11 +93,7 @@ async fn test_allowance_lifecycle_roundtrip_between_linked_peers() {
 
     pair.alice
         .sdk
-        .end_allowance(
-            pair.bob.public_key.clone(),
-            pair.bob.receiver_path.clone(),
-            &accepted_allowance_id,
-        )
+        .end_allowance(pair.bob.public_key.clone(), &accepted_allowance_id)
         .await
         .expect("Alice should queue the Allowance End");
     deliver(&pair.alice, &pair.bob).await;
@@ -127,7 +111,6 @@ async fn test_allowance_lifecycle_roundtrip_between_linked_peers() {
         .sdk
         .propose_allowance(
             pair.alice.public_key.clone(),
-            pair.alice.receiver_path.clone(),
             AllowanceLocalRole::Allowee,
             terms(),
         )
@@ -137,11 +120,7 @@ async fn test_allowance_lifecycle_roundtrip_between_linked_peers() {
     deliver(&pair.bob, &pair.alice).await;
     pair.alice
         .sdk
-        .reject_allowance(
-            pair.bob.public_key.clone(),
-            pair.bob.receiver_path.clone(),
-            &rejected_allowance_id,
-        )
+        .reject_allowance(pair.bob.public_key.clone(), &rejected_allowance_id)
         .await
         .expect("Alice should queue the Allowance rejection");
     deliver(&pair.alice, &pair.bob).await;
@@ -163,7 +142,6 @@ async fn test_allowance_survives_restart_restore_and_link_recovery() {
         .sdk
         .propose_allowance(
             pair.bob.public_key.clone(),
-            pair.bob.receiver_path.clone(),
             AllowanceLocalRole::Allower,
             terms(),
         )
@@ -211,6 +189,22 @@ async fn test_allowance_survives_restart_restore_and_link_recovery() {
         .await
         .expect("Allowance backup restore should succeed");
     assert!(restore.recovery_required_peers.is_empty());
+    restored_bob
+        .sdk
+        .publish_paykit_app(
+            paykit_sdk::PaykitApp::new(
+                "Paykit Test App",
+                paykit_sdk::PaykitAppCapabilities {
+                    private_payments: true,
+                    payment_requests: true,
+                    receipts: true,
+                    outgoing_payments: true,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .expect("restored App should republish before creating new outbound events");
     let restored_backup = restored_bob
         .sdk
         .export_backup_state()
@@ -235,18 +229,9 @@ async fn test_allowance_survives_restart_restore_and_link_recovery() {
         AllowanceHistoryStatus::Consistent
     );
 
-    wait_until_marker_is_newer_than_observer_checkpoint(
-        &pair.alice,
-        &restored_bob.public_key,
-        &restored_bob.receiver_path,
-    )
-    .await;
     restored_bob
         .sdk
-        .publish_encrypted_link_recovery_marker(
-            pair.alice.public_key.clone(),
-            pair.alice.receiver_path.clone(),
-        )
+        .publish_encrypted_link_recovery_marker(pair.alice.public_key.clone())
         .await
         .expect("restored Bob should publish a recovery marker");
     assert_eq!(
@@ -258,10 +243,7 @@ async fn test_allowance_survives_restart_restore_and_link_recovery() {
     let observed = pair
         .alice
         .sdk
-        .observe_encrypted_link_recovery_marker(
-            restored_bob.public_key.clone(),
-            restored_bob.receiver_path.clone(),
-        )
+        .observe_encrypted_link_recovery_marker(restored_bob.public_key.clone())
         .await
         .expect("Alice should observe Bob's recovery marker");
     assert!(observed.remote_marker_changed);
@@ -274,11 +256,7 @@ async fn test_allowance_survives_restart_restore_and_link_recovery() {
 
     let blocked = restored_bob
         .sdk
-        .accept_allowance(
-            pair.alice.public_key.clone(),
-            pair.alice.receiver_path.clone(),
-            &allowance_id,
-        )
+        .accept_allowance(pair.alice.public_key.clone(), &allowance_id)
         .await
         .expect_err("Allowance commands must fail closed during link recovery");
     assert!(matches!(blocked, PaykitSdkError::RecoveryRequired { .. }));
@@ -294,11 +272,7 @@ async fn test_allowance_survives_restart_restore_and_link_recovery() {
 
     restored_bob
         .sdk
-        .accept_allowance(
-            pair.alice.public_key.clone(),
-            pair.alice.receiver_path.clone(),
-            &allowance_id,
-        )
+        .accept_allowance(pair.alice.public_key.clone(), &allowance_id)
         .await
         .expect("restored Bob should continue the Allowance lifecycle");
     deliver(&restored_bob, &pair.alice).await;

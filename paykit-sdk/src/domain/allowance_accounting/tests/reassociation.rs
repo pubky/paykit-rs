@@ -28,19 +28,19 @@ async fn recurring_fixture() -> Fixture {
     crate::domain::private_stream::persist_private_stream_batch(
         &fixture.storage,
         fixture.occurrence.request.counterparty.clone(),
-        path(),
         vec![message(raw.to_string())],
         None,
         time(),
     )
     .await
     .unwrap();
+    claim(&fixture.storage, &fixture.occurrence).await;
     fixture
         .storage
         .transaction(|tx| {
             select(
                 tx,
-                &path(),
+                &app_id(),
                 fixture.occurrence.request.clone(),
                 AllowanceSelectionInput {
                     allowance_id: fixture.allowance.clone(),
@@ -77,7 +77,6 @@ async fn replacement(fixture: &Fixture, changes: serde_json::Value, accepted: bo
     crate::domain::outbound_private::enqueue_private_message(
         &fixture.storage,
         fixture.occurrence.request.counterparty.clone(),
-        path(),
         raw.to_string(),
         time(),
     )
@@ -85,13 +84,12 @@ async fn replacement(fixture: &Fixture, changes: serde_json::Value, accepted: bo
     .unwrap();
     if accepted {
         let acceptance = serde_json::json!({
-            "version": 1, "kind": "paykit.allowance_acceptance", "event_id": new_id(),
+            "version": 1, "app_id": "bitkit", "kind": "paykit.allowance_acceptance", "event_id": new_id(),
             "allowance_id": id.as_str(), "proposal_event_id": proposal_id
         });
         crate::domain::private_stream::persist_private_stream_batch(
             &fixture.storage,
             fixture.occurrence.request.counterparty.clone(),
-            path(),
             vec![message(acceptance.to_string())],
             None,
             time(),
@@ -118,7 +116,7 @@ async fn authorize(
 ) -> std::result::Result<AllowanceAssociationRecord, AllowanceAccountingBlock> {
     fixture
         .storage
-        .transaction(|tx| reassociate(tx, &path(), fixture.occurrence.request.clone(), input))
+        .transaction(|tx| reassociate(tx, fixture.occurrence.request.clone(), input))
         .await
         .unwrap()
 }
@@ -148,7 +146,7 @@ async fn reserve_at(
         .transaction(|tx| {
             reserve(
                 tx,
-                &path(),
+                &app_id(),
                 occurrence(fixture, start),
                 Some(revision),
                 current_checks,
@@ -233,7 +231,7 @@ async fn test_reassociation_handoff_rechecks_replacement_expiry() {
     current_checks.trusted_time = boundary() + Duration::hours(1);
     let decision = fixture
         .storage
-        .transaction(|tx| begin(tx, &path(), prepared.attempt_id, current_checks))
+        .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id, current_checks))
         .await
         .unwrap();
     assert!(matches!(decision,
@@ -252,7 +250,7 @@ async fn test_reassociation_rejects_rollback_without_advancing_to_future_boundar
     let later = time() + Duration::hours(1);
     fixture
         .storage
-        .transaction(|tx| candidates(tx, &path(), fixture.occurrence.request.clone(), later))
+        .transaction(|tx| candidates(tx, fixture.occurrence.request.clone(), later))
         .await
         .unwrap();
     assert!(
@@ -332,7 +330,7 @@ async fn test_initial_selection_still_requires_current_activation() {
         .transaction(|tx| {
             select(
                 tx,
-                &path(),
+                &app_id(),
                 fixture.occurrence.request.clone(),
                 AllowanceSelectionInput {
                     allowance_id: replacement,

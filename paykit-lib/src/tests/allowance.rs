@@ -27,18 +27,34 @@ async fn test_allowance_send_helpers_preserve_fifo_event_order() {
     )
     .unwrap();
 
-    send_allowance_proposal(&mut setup.sender_link, &proposal)
-        .await
-        .unwrap();
-    send_allowance_acceptance(&mut setup.sender_link, &acceptance)
-        .await
-        .unwrap();
-    send_allowance_rejection(&mut setup.sender_link, &rejection)
-        .await
-        .unwrap();
-    send_allowance_end(&mut setup.sender_link, &end)
-        .await
-        .unwrap();
+    send_allowance_proposal(
+        &mut setup.sender_link,
+        &crate::PaykitAppId::new("bitkit").unwrap(),
+        &proposal,
+    )
+    .await
+    .unwrap();
+    send_allowance_acceptance(
+        &mut setup.sender_link,
+        &crate::PaykitAppId::new("bitkit").unwrap(),
+        &acceptance,
+    )
+    .await
+    .unwrap();
+    send_allowance_rejection(
+        &mut setup.sender_link,
+        &crate::PaykitAppId::new("bitkit").unwrap(),
+        &rejection,
+    )
+    .await
+    .unwrap();
+    send_allowance_end(
+        &mut setup.sender_link,
+        &crate::PaykitAppId::new("bitkit").unwrap(),
+        &end,
+    )
+    .await
+    .unwrap();
 
     let received = setup
         .receiver_link

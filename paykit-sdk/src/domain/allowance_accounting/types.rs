@@ -4,15 +4,13 @@ use paykit_lib::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{AmountRecord, PaykitReceiverPath, PubkyPublicKey};
+use crate::{AmountRecord, PubkyPublicKey};
 
 /// Exact remote Payment Request scope; the SDK supplies the current local identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaymentRequestScope {
     /// Authenticated counterparty.
     pub counterparty: PubkyPublicKey,
-    /// Counterparty runtime folder.
-    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Immutable Payment Request identifier.
     pub payment_request_id: PaymentRequestId,
 }
@@ -31,12 +29,8 @@ pub struct PaymentOccurrence {
 pub struct PaymentAccountingScope {
     /// Payer identity, taken from the SDK's identity state.
     pub local_public_key: PubkyPublicKey,
-    /// Payer runtime folder, taken from SDK configuration.
-    pub local_receiver_path: PaykitReceiverPath,
     /// Authenticated payee identity.
     pub counterparty: PubkyPublicKey,
-    /// Authenticated payee runtime folder.
-    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Stable Payment Request ID.
     pub payment_request_id: String,
 }
@@ -52,7 +46,7 @@ pub struct AccountingBillingPeriod {
 
 /// Payment dedupe identity shared by manual and automatic execution.
 ///
-/// Allowance ID deliberately does not participate in this key.
+/// Neither Allowance ID nor Paykit App ID participates in this key.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentOccurrenceKey {
     /// Exact payer, payee, and request scope.
@@ -165,12 +159,8 @@ pub struct AllowanceAssociationRecord {
 pub struct AllowanceWatermarkRecord {
     /// Local payer identity.
     pub local_public_key: PubkyPublicKey,
-    /// Local runtime folder.
-    pub local_receiver_path: PaykitReceiverPath,
     /// Remote Allowee identity.
     pub counterparty: PubkyPublicKey,
-    /// Remote runtime folder.
-    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Allowance whose usage and evaluation time are tracked.
     pub allowance_id: String,
     /// Latest trusted evaluation instant, including blocked evaluations.
@@ -188,12 +178,12 @@ pub struct AllowanceAccountingHistory {
     pub watermarks: Vec<AllowanceWatermarkRecord>,
 }
 
-/// Durable ledger coordinated by one SDK runtime and its wallet executor.
+/// Identity-wide durable ledger shared by authorized apps and their wallet executors.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AllowanceAccountingState {
     /// Monotonic local ledger revision for reconciliation compare-and-set.
     pub revision: u64,
-    /// Epoch invalidating prepared handoffs after restore or private-state loss.
+    /// Epoch invalidating prepared handoffs after restore, key rotation, or private-state loss.
     pub epoch: String,
     /// Automatic and manual admission remain blocked until complete reconciliation.
     pub requires_reconciliation: bool,

@@ -58,7 +58,7 @@ order and spelling, are:
 
 ```text
 EIP712Domain(string name,string version,uint256 chainId)
-RequestBinding(string payer,string payee,string payerReceiverPath,string payeeReceiverPath,string paymentRequestId,string paymentReference,string paymentEndpointIdentifier,string periodStartsAt,string periodEndsAt,string conversionQuoteId)
+RequestBinding(string payer,string payee,string paymentAppId,string paymentRequestId,string paymentReference,string paymentEndpointIdentifier,string periodStartsAt,string periodEndsAt,string conversionQuoteId)
 Erc20Payment(bytes32 transactionHash,uint256 receiptLogIndex,RequestBinding request)
 ```
 
@@ -69,7 +69,8 @@ Populate the binding from the authenticated Encrypted Link and immutable request
 never from unauthenticated claims in the proof:
 
 - `payer` and `payee`: canonical bare Pubky public key strings, without `pubky://`.
-- `payerReceiverPath` and `payeeReceiverPath`: the exact Paykit Receiver Paths.
+- `paymentAppId`: the Paykit App ID owning the selected endpoint, matching the
+  outer Payment Proof's `payment_app_id` and any app constraint in the request.
 - `paymentRequestId`: the canonical lowercase UUID-v4 Payment Request ID.
 - `paymentReference`: the exact accepted Payment Reference text.
 - `paymentEndpointIdentifier`: the selected accepted endpoint identifier.
@@ -79,7 +80,8 @@ never from unauthenticated claims in the proof:
   outer Payment Proof, or the empty string when no quote is selected.
 
 The transaction hash and receipt-relative index match the payload. The request
-ID plus parties/paths scopes immutable terms; a separate terms hash is not used.
+ID plus parties scopes immutable terms; the payment app and endpoint identify the
+selected receiving details. A separate terms hash is not used.
 This is a statement associating an executed transfer with a request, not an
 allowance, token approval or permission to execute another payment.
 

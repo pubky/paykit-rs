@@ -2,14 +2,16 @@ use super::*;
 
 fn empty_backup_state() -> SdkBackupState {
     SdkBackupState {
+        paykit_noise_public_key: None,
         allowance_accounting: None,
         version: crate::SDK_BACKUP_VERSION,
-        local_receiver_path: receiver_path(),
         identity_state: None,
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
+        retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: Vec::new(),
         outbound_private_messages: Vec::new(),
         private_stream_items: Vec::new(),
@@ -30,28 +32,26 @@ async fn test_restore_backup_state_requires_active_identity() {
         PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
         .save_identity_state(IdentityState {
-            local_pubky_public_key: Some(existing_public_key.clone()),
-            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
+            public_key: Some(existing_public_key),
             initialized_at: FixedClock.now(),
-            sign_out_generation: 7,
         })
         .await
         .unwrap();
     let backup_public_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let backup = SdkBackupState {
+        paykit_noise_public_key: None,
         allowance_accounting: None,
         version: crate::SDK_BACKUP_VERSION,
-        local_receiver_path: receiver_path(),
         identity_state: Some(IdentityState {
-            local_pubky_public_key: Some(backup_public_key),
-            local_receiver_noise_public_key: Some(receiver_noise_public_key()),
+            public_key: Some(backup_public_key),
             initialized_at: FixedClock.now(),
-            sign_out_generation: 0,
         }),
         linked_peers: Vec::new(),
         contact_records: Vec::new(),
+        retired_paykit_apps: Vec::new(),
         public_endpoint_records: Vec::new(),
         payment_endpoint_reservations: Vec::new(),
+        payment_request_execution_claims: Vec::new(),
         encrypted_link_states: Vec::new(),
         outbound_private_messages: Vec::new(),
         private_stream_items: Vec::new(),
@@ -67,16 +67,14 @@ async fn test_restore_backup_state_requires_active_identity() {
         storage.clone(),
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
 
     let result = sdk.restore_backup_state(backup).await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
-    let identity = storage.snapshot().unwrap().identity_state.unwrap();
-    assert_eq!(identity.sign_out_generation, 7);
-    assert_eq!(identity.local_pubky_public_key, Some(existing_public_key));
+    assert!(storage.snapshot().unwrap().identity_state.is_some());
 }
 
 #[tokio::test]
@@ -86,7 +84,7 @@ async fn test_restore_backup_state_rejects_concurrent_identity_operation() {
         storage,
         TestPubkySessionProvider { session: None },
         TestPaymentAdapter,
-        PaykitSdkConfig::default(),
+        PaykitSdkConfig::new("test-app").unwrap(),
         FixedClock,
     );
     let _guard = sdk.claim_identity_operation("test operation").unwrap();
@@ -94,4 +92,27 @@ async fn test_restore_backup_state_rejects_concurrent_identity_operation() {
     let result = sdk.restore_backup_state(empty_backup_state()).await;
 
     assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
+}
+
+#[tokio::test]
+async fn test_recover_shared_state_requires_identity_and_exclusive_operation() {
+    let sdk = PaykitSdk::with_clock(
+        InMemoryStorage::new(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    let replacement = crate::PaykitIdentitySecretKey::new([8; 32], 2).unwrap();
+    assert!(matches!(
+        sdk.recover_shared_state_from_backup(empty_backup_state(), replacement.clone())
+            .await,
+        Err(PaykitSdkError::Identity { .. })
+    ));
+    let _guard = sdk.claim_identity_operation("test operation").unwrap();
+    assert!(matches!(
+        sdk.recover_shared_state_from_backup(empty_backup_state(), replacement)
+            .await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
 }

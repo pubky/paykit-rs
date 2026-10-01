@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use paykit_sdk::{
     AllowanceAmountRangeRecord, AllowanceFilter, AllowanceHistoryStatus, AllowanceLifecycleState,
     AllowanceLocalRole, AllowancePeriodLimitRecord, AllowancePeriodRecord, AllowanceRecord,
-    AllowanceTermsRecord, OutboundPrivateMessageStatus, PaykitReceiverPath, PubkyPublicKey,
+    AllowanceTermsRecord, OutboundPrivateMessageStatus, PubkyPublicKey,
 };
 
 use super::*;
@@ -207,7 +207,6 @@ fn test_allowance_filter_parses_every_supported_constraint() {
     let counterparty = public_key();
     let filter = FfiAllowanceFilter {
         counterparty: Some(counterparty.to_app_key()),
-        counterparty_receiver_path: Some("bitkit/wallet".into()),
         local_role: Some(FfiAllowanceLocalRole::Allowee),
         states: vec![
             FfiAllowanceLifecycleState::Proposed,
@@ -221,7 +220,6 @@ fn test_allowance_filter_parses_every_supported_constraint() {
         parsed,
         AllowanceFilter {
             counterparty: Some(counterparty),
-            counterparty_receiver_path: Some(PaykitReceiverPath::new("bitkit/wallet").unwrap()),
             local_role: Some(AllowanceLocalRole::Allowee),
             states: vec![
                 AllowanceLifecycleState::Proposed,
@@ -345,7 +343,6 @@ fn test_allowance_id_rejects_invalid_platform_input_without_leaking_input() {
 fn test_allowance_record_conversion_preserves_lifecycle_evidence() {
     let record = AllowanceRecord {
         counterparty: public_key(),
-        counterparty_receiver_path: paykit_sdk::PaykitReceiverPath::new("bitkit/wallet").unwrap(),
         allowance_id: ALLOWANCE_ID.into(),
         local_role: Some(AllowanceLocalRole::Allower),
         state: AllowanceLifecycleState::Conflicted,
@@ -397,7 +394,6 @@ fn test_allowance_record_conversion_preserves_lifecycle_evidence() {
     let ffi = FfiAllowanceRecord::try_from(record).unwrap();
 
     assert_eq!(ffi.counterparty, public_key().to_app_key());
-    assert_eq!(ffi.counterparty_receiver_path, "bitkit/wallet");
     assert_eq!(ffi.allowance_id, ALLOWANCE_ID);
     assert_eq!(ffi.local_role, Some(FfiAllowanceLocalRole::Allower));
     assert_eq!(ffi.state, FfiAllowanceLifecycleState::Conflicted);

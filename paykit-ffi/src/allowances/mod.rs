@@ -324,8 +324,6 @@ impl FfiAllowanceTerms {
 pub struct FfiAllowanceFilter {
     /// Restrict results to one counterparty.
     pub counterparty: Option<String>,
-    /// Restrict results to one counterparty receiver/runtime folder.
-    pub counterparty_receiver_path: Option<String>,
     /// Restrict results to one local Allowance role.
     pub local_role: Option<FfiAllowanceLocalRole>,
     /// Restrict results to lifecycle states. Empty means all states.
@@ -337,8 +335,6 @@ pub struct FfiAllowanceFilter {
 pub struct FfiAllowanceRecord {
     /// Counterparty associated with the authenticated private history.
     pub counterparty: String,
-    /// Counterparty receiver/runtime folder associated with the history.
-    pub counterparty_receiver_path: String,
     /// Stable Allowance ID.
     pub allowance_id: String,
     /// Local role derived from the authenticated proposal source.
@@ -405,14 +401,12 @@ impl FfiPaykitSdk {
     pub async fn get_allowance(
         &self,
         counterparty: String,
-        counterparty_receiver_path: String,
         allowance_id: String,
     ) -> Result<Option<FfiAllowanceRecord>, PaykitFfiError> {
         let counterparty = crate::session::parse_public_key(counterparty)?;
-        let receiver_path = crate::session::parse_receiver_path(counterparty_receiver_path)?;
         let allowance_id = parse_allowance_id(allowance_id)?;
         self.runtime
-            .allowance_record(&counterparty, &receiver_path, &allowance_id)
+            .allowance_record(&counterparty, &allowance_id)
             .await?
             .map(TryInto::try_into)
             .transpose()
@@ -422,20 +416,13 @@ impl FfiPaykitSdk {
     pub async fn propose_allowance(
         &self,
         counterparty: String,
-        counterparty_receiver_path: String,
         local_role: FfiAllowanceLocalRole,
         terms: Arc<FfiAllowanceTerms>,
     ) -> Result<FfiAllowanceRecord, PaykitFfiError> {
         let counterparty = crate::session::parse_public_key(counterparty)?;
-        let receiver_path = crate::session::parse_receiver_path(counterparty_receiver_path)?;
         let local_role = local_role.try_into()?;
         self.runtime
-            .propose_allowance(
-                counterparty,
-                receiver_path,
-                local_role,
-                terms.domain_terms(),
-            )
+            .propose_allowance(counterparty, local_role, terms.domain_terms())
             .await?
             .try_into()
     }
@@ -444,14 +431,12 @@ impl FfiPaykitSdk {
     pub async fn accept_allowance(
         &self,
         counterparty: String,
-        counterparty_receiver_path: String,
         allowance_id: String,
     ) -> Result<FfiAllowanceRecord, PaykitFfiError> {
         let counterparty = crate::session::parse_public_key(counterparty)?;
-        let receiver_path = crate::session::parse_receiver_path(counterparty_receiver_path)?;
         let allowance_id = parse_allowance_id(allowance_id)?;
         self.runtime
-            .accept_allowance(counterparty, receiver_path, &allowance_id)
+            .accept_allowance(counterparty, &allowance_id)
             .await?
             .try_into()
     }
@@ -460,14 +445,12 @@ impl FfiPaykitSdk {
     pub async fn reject_allowance(
         &self,
         counterparty: String,
-        counterparty_receiver_path: String,
         allowance_id: String,
     ) -> Result<FfiAllowanceRecord, PaykitFfiError> {
         let counterparty = crate::session::parse_public_key(counterparty)?;
-        let receiver_path = crate::session::parse_receiver_path(counterparty_receiver_path)?;
         let allowance_id = parse_allowance_id(allowance_id)?;
         self.runtime
-            .reject_allowance(counterparty, receiver_path, &allowance_id)
+            .reject_allowance(counterparty, &allowance_id)
             .await?
             .try_into()
     }
@@ -476,14 +459,12 @@ impl FfiPaykitSdk {
     pub async fn end_allowance(
         &self,
         counterparty: String,
-        counterparty_receiver_path: String,
         allowance_id: String,
     ) -> Result<FfiAllowanceRecord, PaykitFfiError> {
         let counterparty = crate::session::parse_public_key(counterparty)?;
-        let receiver_path = crate::session::parse_receiver_path(counterparty_receiver_path)?;
         let allowance_id = parse_allowance_id(allowance_id)?;
         self.runtime
-            .end_allowance(counterparty, receiver_path, &allowance_id)
+            .end_allowance(counterparty, &allowance_id)
             .await?
             .try_into()
     }

@@ -7,12 +7,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc57 - Unreleased
+
 ### Added
 
-- Payment Request conversion terms, actual-payment deadlines, recurring payee
-  quotes with inclusive validity intervals, and quote selection on Payment Proofs.
-  Rust, Swift and Kotlin expose the terms and immutable quote history.
-- An ERC-20 signed payment proof profile and interoperability vectors.
+- An identity-wide Paykit App Registry with app-owned endpoints and
+  identity-wide payment preferences, replacing receiver folders and markers.
+- Encrypted Pubky-hosted SDK state shared by authorized apps, including Encrypted
+  Links, private messages, requests, and receipts. Swift and Kotlin expose the
+  shared-state constructors.
+- Delegated Paykit keys and key rotation that preserve identity history while
+  relinking counterparties.
+- Explicit backup recovery for missing or corrupt Pubky shared state using a
+  replacement Paykit key, with relinking and wallet reconciliation.
 - Added shared Allowance request matching, exact decimal arithmetic, anchored
   and rolling period calculations, and amount/count/lifetime limit evaluation.
 - Added durable SDK Allowance selection, automatic Acceptance, deferred and
@@ -46,14 +53,37 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Changed
 
-- Upgrade Pubky to 0.12 and Pubky Noise to 0.1.0-rc10. Encrypted Link
-  transport packets authenticate the message length and padding while retaining
-  the 1000-byte application payload limit. The transport format is incompatible
-  with earlier Noise releases; communicating peers must upgrade together.
+- Shared private state requires identity-wide `/pub/paykit/:rw` session scope.
+  Recovery marker exchange is mandatory; the recovery-marker opt-out is removed
+  from Rust, Swift, and Kotlin configuration.
+- Encrypted Link paths bind both peers' persistent recovery attempt IDs.
+  Snapshots retain those IDs, and recovery leaves retired streams untouched.
+  Markers remain after relinking; explicit removal requires a blocked peer.
+  Low-level handshake and outbox cleanup APIs take an `EncryptedLinkRecoveryContext`.
+- **Rust API:** `PAYKIT_PATH_PREFIX` includes its trailing slash;
+  `MAX_ENCRYPTED_RECEIPT_BYTES` is now `ENCRYPTED_RECEIPT_MAX_BYTES`.
+  `PaykitAppRegistry::set_noise_public_key` takes the key generation explicitly.
+- Counterparty APIs take Pubky identities instead of receiver paths. App Registry
+  APIs replace Receiver Markers; publishing and SDK configuration require an
+  explicit `PaykitAppId`. Private messages retain their source App ID while
+  links and private state are shared across the identity.
+- Storage transactions and backups retain the active Noise public key. Custom
+  adapters must implement its load/save methods atomically with private state,
+  and `renew_paykit_app_operation` must only extend the matching stored lease.
+- Upgrade Pubky to 0.14 and Pubky Noise to 0.1.0-rc11. Encrypted Link transport
+  packets authenticate the message length and padding while retaining the
+  1000-byte application payload limit. Communicating peers must use the same
+  transport format.
+- Use renewable WebDAV write locks for encrypted shared-state transactions and
+  App Registry, profile, and Payment Endpoint updates. Stale-edit checks compare
+  resource contents under the lock instead of relying on ETags.
+- Unconfirmed shared-state writes leave pending markers and trigger a five-minute
+  cooldown before the next state read. This reduces late-write risk but does not
+  replace homeserver commit-time lock enforcement.
 - **Protocol/API:** conversion/deadline terms and the
   `paykit.payment_conversion_quote` event require support from both peers.
   Callers must establish that support before opting in; the existing broad
-  receiver capabilities do not negotiate this extension. Old strict parsers
+  App Registry capabilities do not negotiate this extension. Old strict parsers
   reject these terms. Request/proof initializers and event matches must be
   updated with matching native bindings. No development-format migration is added.
 - Startup and backup restore refresh derived inbound parser metadata and add
@@ -62,8 +92,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   Payment Proofs during request derivation.
 - **Storage:** The unreleased SDK backup schema and both platform storage
   envelopes remain version 1 and may evolve directly during development. Previous
-  development data is unsupported; no migration is provided. Restore retains
-  newer same-payer accounting and requires complete wallet reconciliation; missing
+  development data is unsupported; no migration is provided. Restore cannot
+  replace live shared state and requires complete wallet reconciliation; missing
   history never implies zero usage. Custom storage adapters must persist the new
   accounting field and transaction methods atomically.
 - **Breaking (Rust API):** `AllowanceAcceptance::new`,
@@ -87,6 +117,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Fixed
 
+- Preserve allocated Noise slots through reservation expiry and backup recovery.
+- Serialize key rotation against active session operations and make callback
+  storage rotation retries idempotent. Restoring with a replacement key relinks
+  peers without discarding payment history.
+- Retire unsent private lists atomically with app removal, allow the recorded
+  payer app to cancel after one-time proof submission, and remove managed
+  endpoints whose replacement failed to publish.
+- Report private lists blocked behind failed sends, preserve queue errors during
+  cleanup, and isolate unavailable registries when listing history and requests.
 - Reject backup restores that would discard retained Payment Request lifecycle
   or conflict evidence, so received Cancellation cannot be undone by restoring
   an older backup and reconciling unchanged payment history.
@@ -96,6 +135,31 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   payment, and reuse of an Event ID with changed bytes still fails closed.
 - Kept the first crossing Payment Request Acceptance after payee cancellation;
   a second Acceptance now invalidates history without replacing the first.
+
+## [0.1.0-rc56] - 2026-09-28
+
+### Added
+
+- Payment Request conversion terms, payment deadlines, recurring payee quotes,
+  and quote selection on Payment Proofs, exposed through Rust, Swift, and Kotlin.
+- An ERC-20 EIP-712 payment-proof profile and interoperability vectors. This
+  specifies the proof format, not an EVM verifier.
+
+### Changed
+
+- New wire extensions require coordinated peer support. Persisted rc55 SDK state
+  is not supported by rc56.
+
+## [0.1.0-rc55] - 2026-09-15
+
+### Added
+
+- One-shot identity republishing through `PubkySessionBootstrap.republishIdentity`.
+  Rebroadcasts an existing signed record unchanged without a secret or session.
+
+### Fixed
+
+- Android builds no longer request the unavailable legacy SDK `tools` package.
 
 ## [0.1.0-rc54] - 2026-09-14
 
@@ -570,7 +634,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc51...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc56...HEAD
+[0.1.0-rc56]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc56
+[0.1.0-rc55]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc55
+[0.1.0-rc54]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc52...v0.1.0-rc54
+[0.1.0-rc52]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc51...v0.1.0-rc52
 [0.1.0-rc51]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc50...v0.1.0-rc51
 [0.1.0-rc50]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc49...v0.1.0-rc50
 [0.1.0-rc49]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc48...v0.1.0-rc49

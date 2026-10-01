@@ -9,7 +9,7 @@ where
 {
     /// Return Allowances matching a local SDK filter.
     ///
-    /// Results retain the exact counterparty and receiver path and are sorted
+    /// Results retain the exact counterparty identity and are sorted
     /// newest-first by local record time. Lifecycle state is not an
     /// eligibility or payment-authorization decision.
     ///
@@ -18,8 +18,8 @@ where
     /// not create a lifecycle record. If a Proposal is later available, earlier
     /// correlated invalid evidence is included in its history status.
     pub async fn list_allowances(&self, filter: AllowanceFilter) -> Result<Vec<AllowanceRecord>> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.local_pubky_public_key.is_none() {
+        let (_session_access, identity) = self.load_session_access_and_refresh_identity().await?;
+        if identity.public_key.is_none() {
             return Ok(Vec::new());
         }
         let scopes = self
@@ -27,21 +27,17 @@ where
             .transaction(|tx| {
                 let snapshot = tx.export_storage_state();
                 let mut scopes = Vec::new();
-                for (counterparty, receiver_path) in allowance_scopes(&snapshot) {
+                for counterparty in allowance_scopes(&snapshot) {
                     if filter
                         .counterparty
                         .as_ref()
                         .is_some_and(|expected| expected != &counterparty)
-                        || filter
-                            .counterparty_receiver_path
-                            .as_ref()
-                            .is_some_and(|expected| expected != &receiver_path)
                     {
                         continue;
                     }
                     let blocked = snapshot
                         .linked_peers
-                        .get(&(counterparty.clone(), receiver_path.clone()))
+                        .get(&counterparty)
                         .is_some_and(|peer| peer.state == LinkedPeerState::Blocked);
                     if blocked && filter.counterparty.is_some() {
                         return Err(PaykitSdkError::Policy {
@@ -50,16 +46,16 @@ where
                         });
                     }
                     if !blocked {
-                        scopes.push((counterparty, receiver_path));
+                        scopes.push(counterparty);
                     }
                 }
                 Ok(scopes)
             })
             .await?;
         let mut records = Vec::new();
-        for (counterparty, receiver_path) in scopes {
+        for counterparty in scopes {
             records.extend(
-                derive_allowance_records(&self.storage, &counterparty, &receiver_path)
+                derive_allowance_records(&self.storage, &counterparty)
                     .await?
                     .into_iter()
                     .filter(|record| filter.matches(record)),
@@ -78,22 +74,14 @@ where
     pub async fn allowance_record(
         &self,
         counterparty: &PubkyPublicKey,
-        counterparty_receiver_path: &PaykitReceiverPath,
         allowance_id: &AllowanceId,
     ) -> Result<Option<AllowanceRecord>> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.local_pubky_public_key.is_none() {
+        let (_session_access, identity) = self.load_session_access_and_refresh_identity().await?;
+        if identity.public_key.is_none() {
             return Ok(None);
         }
-        self.ensure_peer_not_blocked(counterparty, counterparty_receiver_path)
-            .await?;
-        derive_allowance_record(
-            &self.storage,
-            counterparty,
-            counterparty_receiver_path,
-            allowance_id,
-        )
-        .await
+        self.ensure_peer_not_blocked(counterparty).await?;
+        derive_allowance_record(&self.storage, counterparty, allowance_id).await
     }
 
     /// Queue a proposal with fresh Allowance and Event IDs.
@@ -104,15 +92,17 @@ where
     pub async fn propose_allowance(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
         local_role: AllowanceLocalRole,
         terms: AllowanceTerms,
     ) -> Result<AllowanceRecord> {
-        self.require_identity_and_session().await?;
+        let _identity_guard = self.claim_identity_operation("propose Allowance")?;
+        let _session_access = self
+            .load_session_access_for_initialized_identity("propose Allowance")
+            .await?;
         enqueue_allowance_proposal(
             &self.storage,
             counterparty,
-            counterparty_receiver_path,
+            self.config.app_id.clone(),
             local_role,
             terms,
             self.clock.now(),
@@ -128,14 +118,16 @@ where
     pub async fn accept_allowance(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
         allowance_id: &AllowanceId,
     ) -> Result<AllowanceRecord> {
-        self.require_identity_and_session().await?;
+        let _identity_guard = self.claim_identity_operation("accept Allowance")?;
+        let _session_access = self
+            .load_session_access_for_initialized_identity("accept Allowance")
+            .await?;
         enqueue_allowance_response(
             &self.storage,
             counterparty,
-            counterparty_receiver_path,
+            self.config.app_id.clone(),
             allowance_id.clone(),
             AllowanceResponse::Acceptance,
             self.clock.now(),
@@ -151,14 +143,16 @@ where
     pub async fn reject_allowance(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
         allowance_id: &AllowanceId,
     ) -> Result<AllowanceRecord> {
-        self.require_identity_and_session().await?;
+        let _identity_guard = self.claim_identity_operation("reject Allowance")?;
+        let _session_access = self
+            .load_session_access_for_initialized_identity("reject Allowance")
+            .await?;
         enqueue_allowance_response(
             &self.storage,
             counterparty,
-            counterparty_receiver_path,
+            self.config.app_id.clone(),
             allowance_id.clone(),
             AllowanceResponse::Rejection,
             self.clock.now(),
@@ -178,14 +172,16 @@ where
     pub async fn end_allowance(
         &self,
         counterparty: PubkyPublicKey,
-        counterparty_receiver_path: PaykitReceiverPath,
         allowance_id: &AllowanceId,
     ) -> Result<AllowanceRecord> {
-        self.require_identity_and_session().await?;
+        let _identity_guard = self.claim_identity_operation("end Allowance")?;
+        let _session_access = self
+            .load_session_access_for_initialized_identity("end Allowance")
+            .await?;
         enqueue_allowance_end(
             &self.storage,
             counterparty,
-            counterparty_receiver_path,
+            self.config.app_id.clone(),
             allowance_id.clone(),
             self.clock.now(),
         )

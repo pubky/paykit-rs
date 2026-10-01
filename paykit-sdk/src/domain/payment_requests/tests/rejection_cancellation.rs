@@ -12,7 +12,7 @@ async fn derive_history(
     local_role: PaymentRequestLocalRole,
     actions: Vec<(PaymentRequestLocalRole, String)>,
 ) -> PaymentRequestRecord {
-    let storage = InMemoryStorage::new();
+    let storage = registered_storage();
     let peer = counterparty();
     let proposal = (
         Payee,
@@ -21,20 +21,14 @@ async fn derive_history(
     for (index, (sender, raw)) in std::iter::once(proposal).chain(actions).enumerate() {
         let recorded_at = timestamp() + ChronoDuration::seconds(index as i64);
         if sender == local_role {
-            enqueue_untyped_private_message(
-                &storage,
-                peer.clone(),
-                receiver_path(),
-                raw,
-                recorded_at,
-            )
-            .await
-            .unwrap();
+            enqueue_untyped_private_message(&storage, peer.clone(), raw, recorded_at)
+                .await
+                .unwrap();
         } else {
             persist_messages_at(&storage, peer.clone(), vec![raw], recorded_at).await;
         }
     }
-    let mut records = payment_request_records(&storage, &peer, &receiver_path(), timestamp())
+    let mut records = payment_request_records(&storage, &peer, timestamp())
         .await
         .unwrap();
     assert_eq!(records.len(), 1);

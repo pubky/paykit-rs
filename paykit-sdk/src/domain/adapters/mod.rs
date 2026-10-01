@@ -3,11 +3,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt};
 
-use crate::{
-    identity::PubkyPublicKey, PaykitReceiverPath, PaykitSdkError, PubkySessionAccess, Result,
-};
+use crate::{identity::PubkyPublicKey, PaykitSdkError, PubkySessionAccess, Result};
+use paykit_lib::PaykitAppId;
 
-/// Provides live Pubky session access to one app-owned Paykit runtime.
+/// Provides one application's live access to an identity-wide Paykit runtime.
 ///
 /// The provider is the boundary where the app or bindings expose current Pubky
 /// access from platform storage and auth flows.
@@ -59,7 +58,6 @@ pub trait PaymentAdapter: Send + Sync {
     async fn current_private_receiving_details(
         &self,
         _counterparty: &PubkyPublicKey,
-        _counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Vec<PrivateReceivingDetail>> {
         Err(unsupported_operation("private receiving details"))
     }
@@ -83,7 +81,6 @@ pub trait PaymentAdapter: Send + Sync {
     async fn reserve_private_receiving_details(
         &self,
         _counterparty: &PubkyPublicKey,
-        _counterparty_receiver_path: &PaykitReceiverPath,
     ) -> Result<Option<Vec<PrivatePaymentEndpointReservation>>> {
         Ok(None)
     }
@@ -92,6 +89,8 @@ pub trait PaymentAdapter: Send + Sync {
     ///
     /// Adapters that return reservations must implement this explicitly so
     /// cleanup cannot silently succeed while backend reservations remain held.
+    /// Cancellation must be idempotent: after the adapter succeeds, a process
+    /// stop can make the SDK repeat the same cancellation during recovery.
     async fn cancel_private_receiving_detail_reservation(
         &self,
         _cancellation: &PrivatePaymentEndpointReservationCancellation,
@@ -191,8 +190,6 @@ pub struct PrivatePaymentEndpointReservationCancellation {
     pub reservation_id: String,
     /// Counterparty the reservation was intended for.
     pub counterparty: PubkyPublicKey,
-    /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Payment Endpoint Identifier.
     pub identifier: String,
     /// Hash of the reserved endpoint payload.
@@ -204,10 +201,10 @@ pub struct PrivatePaymentEndpointReservationCancellation {
 impl fmt::Debug for PrivatePaymentEndpointReservationCancellation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PrivatePaymentEndpointReservationCancellation")
-            .field("reservation_id", &self.reservation_id)
+            .field("reservation_id", &"<redacted>")
             .field("counterparty", &self.counterparty)
             .field("identifier", &self.identifier)
-            .field("payload_hash", &self.payload_hash)
+            .field("payload_hash", &"<redacted>")
             .field(
                 "attribution",
                 &format_args!("<redacted:{} fields>", self.attribution.len()),
@@ -219,7 +216,7 @@ impl fmt::Debug for PrivatePaymentEndpointReservationCancellation {
 impl fmt::Debug for PrivatePaymentEndpointReservation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PrivatePaymentEndpointReservation")
-            .field("reservation_id", &self.reservation_id)
+            .field("reservation_id", &"<redacted>")
             .field("receiving_detail", &self.receiving_detail)
             .field("expires_at", &self.expires_at)
             .field(
@@ -235,8 +232,8 @@ impl fmt::Debug for PrivatePaymentEndpointReservation {
 pub struct PublicPaymentEndpointCandidate {
     /// Counterparty that published the endpoint.
     pub counterparty: PubkyPublicKey,
-    /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_path: PaykitReceiverPath,
+    /// Application that published the endpoint.
+    pub app_id: PaykitAppId,
     /// Payment Endpoint Identifier string.
     pub identifier: String,
     /// Serialized endpoint payload.
@@ -247,10 +244,7 @@ impl fmt::Debug for PublicPaymentEndpointCandidate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PublicPaymentEndpointCandidate")
             .field("counterparty", &self.counterparty)
-            .field(
-                "counterparty_receiver_path",
-                &self.counterparty_receiver_path,
-            )
+            .field("app_id", &self.app_id)
             .field("identifier", &self.identifier)
             .field("payload", &redacted_payload(&self.payload))
             .finish()
@@ -262,8 +256,8 @@ impl fmt::Debug for PublicPaymentEndpointCandidate {
 pub struct PrivatePaymentEndpointCandidate {
     /// Counterparty that privately shared the endpoint.
     pub counterparty: PubkyPublicKey,
-    /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_path: PaykitReceiverPath,
+    /// Application that privately shared the endpoint.
+    pub app_id: PaykitAppId,
     /// Payment Endpoint Identifier string.
     pub identifier: String,
     /// Serialized endpoint payload.
@@ -274,10 +268,7 @@ impl fmt::Debug for PrivatePaymentEndpointCandidate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PrivatePaymentEndpointCandidate")
             .field("counterparty", &self.counterparty)
-            .field(
-                "counterparty_receiver_path",
-                &self.counterparty_receiver_path,
-            )
+            .field("app_id", &self.app_id)
             .field("identifier", &self.identifier)
             .field("payload", &redacted_payload(&self.payload))
             .finish()
@@ -298,8 +289,6 @@ pub struct PaymentAmountContext {
 pub struct PublicPaymentEndpointSelectionRequest {
     /// Counterparty being paid.
     pub counterparty: PubkyPublicKey,
-    /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Optional amount context.
     pub amount: Option<PaymentAmountContext>,
     /// Public candidate endpoints in SDK preference order.
@@ -311,8 +300,6 @@ pub struct PublicPaymentEndpointSelectionRequest {
 pub struct PrivatePaymentEndpointSelectionRequest {
     /// Counterparty being paid.
     pub counterparty: PubkyPublicKey,
-    /// Counterparty receiver/runtime folder.
-    pub counterparty_receiver_path: PaykitReceiverPath,
     /// Optional amount context.
     pub amount: Option<PaymentAmountContext>,
     /// Private candidate endpoints in SDK preference order.

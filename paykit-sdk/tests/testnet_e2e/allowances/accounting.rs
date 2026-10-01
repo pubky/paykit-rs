@@ -40,7 +40,6 @@ async fn accepted_allowance(payer: &TestUser, payee: &TestUser) -> AllowanceId {
         .sdk
         .propose_allowance(
             payee.public_key.clone(),
-            payee.receiver_path.clone(),
             AllowanceLocalRole::Allower,
             terms(),
         )
@@ -50,7 +49,7 @@ async fn accepted_allowance(payer: &TestUser, payee: &TestUser) -> AllowanceId {
     deliver(payer, payee).await;
     payee
         .sdk
-        .accept_allowance(payer.public_key.clone(), payer.receiver_path.clone(), &id)
+        .accept_allowance(payer.public_key.clone(), &id)
         .await
         .unwrap();
     deliver(payee, payer).await;
@@ -72,15 +71,20 @@ async fn proposed_request(
     .unwrap();
     let record = payee
         .sdk
-        .propose_payment_request(payer.public_key.clone(), payer.receiver_path.clone(), terms)
+        .propose_payment_request(payer.public_key.clone(), terms)
         .await
         .unwrap();
     deliver(payee, payer).await;
-    PaymentRequestScope {
+    let scope = PaymentRequestScope {
         counterparty: payee.public_key.clone(),
-        counterparty_receiver_path: payee.receiver_path.clone(),
         payment_request_id: PaymentRequestId::new(record.payment_request_id).unwrap(),
-    }
+    };
+    payer
+        .sdk
+        .claim_payment_request_for_execution(scope.counterparty.clone(), &scope.payment_request_id)
+        .await
+        .unwrap();
+    scope
 }
 
 fn ready(
@@ -181,7 +185,7 @@ async fn test_allowance_accounting_handoff_restart_and_stale_restore() {
     let received = pair
         .bob
         .sdk
-        .payment_requests_with(&pair.alice.public_key, &pair.alice.receiver_path)
+        .payment_requests_with(&pair.alice.public_key)
         .await
         .unwrap();
     assert_eq!(received[0].state, PaymentRequestLifecycleState::Accepted);
@@ -529,19 +533,15 @@ async fn test_allowance_accounting_manual_and_automatic_acceptance_interleave() 
             paykit_sdk::PaykitSdk::new(
                 pair.alice.storage.clone(),
                 PausedSessionProvider {
-                    inner: crate::harness::TestnetSessionProvider::new(
-                        pair.alice.access.clone(),
-                        pair.alice.session_secret.clone(),
-                    ),
+                    inner: crate::harness::TestnetSessionProvider::new(pair.alice.access.clone()),
                     loads: AtomicUsize::new(0),
                     pause,
                     entered: entered.clone(),
                     release: release.clone(),
                 },
                 pair.alice.adapter.clone(),
-                paykit_sdk::PaykitSdkConfig::new(pair.alice.receiver_path.clone()),
+                paykit_sdk::PaykitSdkConfig::new("bitkit").unwrap(),
             )
-            .unwrap()
         };
         let manual_sdk = runtime(pause_manual);
         let automatic_sdk = runtime(!pause_manual);
@@ -550,11 +550,7 @@ async fn test_allowance_accounting_manual_and_automatic_acceptance_interleave() 
                 entered.notified().await;
             }
             let result = manual_sdk
-                .accept_payment_request(
-                    scope.counterparty.clone(),
-                    scope.counterparty_receiver_path.clone(),
-                    &scope.payment_request_id,
-                )
+                .accept_payment_request(scope.counterparty.clone(), &scope.payment_request_id)
                 .await;
             if !pause_manual {
                 release.notify_one();
@@ -608,7 +604,7 @@ async fn test_allowance_accounting_manual_and_automatic_acceptance_interleave() 
         for (local, peer) in [(&pair.alice, &pair.bob), (&pair.bob, &pair.alice)] {
             let records = local
                 .sdk
-                .payment_requests_with(&peer.public_key, &peer.receiver_path)
+                .payment_requests_with(&peer.public_key)
                 .await
                 .unwrap();
             let record = records

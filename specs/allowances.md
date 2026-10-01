@@ -39,9 +39,12 @@ address, or other destination that economically benefits another party. Paykit
 authenticates who sent the request and shared the endpoint details; it does not
 determine the ultimate economic beneficiary of those details.
 
-An Allowance is bound to the exact two Paykit Receiver References that own its
+An Allowance is bound to the exact two Pubky identities that own its
 Encrypted Link. One is the Allower and the other is the Allowee. Moving a
-message to another link does not move its authority.
+message to another link does not move its authority. `app_id` attributes each
+message to its sending App; it does not partition Allowance authority by App.
+Removing an App does not revoke an accepted Allowance. Undelivered events still
+belong to their sending App and must satisfy its removal preconditions.
 
 Either party MAY propose exact terms. The proposal is authenticated consent by
 its sender. The recipient MAY accept or reject it, but authority exists only
@@ -70,6 +73,7 @@ Every message is one UTF-8 JSON object and has these rules:
 
 - `version` MUST be the JSON integer `1`.
 - `kind` MUST be exactly one kind above.
+- `app_id` MUST identify the sending Paykit App and be a valid App ID.
 - `event_id`, `allowance_id`, and all causal event references MUST be canonical
   lowercase, hyphenated UUID-v4 strings where present.
 - Every JSON object is closed: unknown fields are invalid.
@@ -258,6 +262,7 @@ numerically at or below that limit.
 {
   "version": 1,
   "kind": "paykit.allowance_proposal",
+  "app_id": "bitkit",
   "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d201",
   "allowance_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44",
   "proposer_role": "allower",
@@ -301,6 +306,7 @@ same sender is the original proposal, not another proposal.
 {
   "version": 1,
   "kind": "paykit.allowance_acceptance",
+  "app_id": "bitkit",
   "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d202",
   "allowance_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44",
   "proposal_event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d201"
@@ -326,6 +332,7 @@ Event ID for the current message is invalid rather than an exact replay.
 {
   "version": 1,
   "kind": "paykit.allowance_end",
+  "app_id": "bitkit",
   "event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d203",
   "allowance_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44",
   "proposal_event_id": "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d201",
@@ -493,7 +500,7 @@ has no separate recurrence permission.
 For a one-time request with a selected Allowance, a wallet MAY send the ordinary
 Payment Request Acceptance automatically after the applicable preflight checks.
 Any Payment Proof remains optional and follows the Payment Request rules. The
-semantic payment key is the exact Allower and Allowee Receiver References plus
+semantic payment key is the exact Allower and Allowee Pubky identities plus
 the Payment Request ID. That key may consume Allowance usage at most once for a
 successful or unresolved payment.
 
@@ -505,7 +512,7 @@ becomes due.
 
 For every Billing Period, the wallet scheduler supplies the eligible period and
 the wallet rechecks the pinned Allowance before automatic payment. The semantic
-payment key is the exact Allower and Allowee Receiver References, Payment
+payment key is the exact Allower and Allowee Pubky identities, Payment
 Request ID, and the validated `starts_at` and `ends_at` Billing Period instants.
 Equivalent timestamp spellings for the same instants MUST NOT create distinct
 keys. The Allowance does not calculate the schedule or prove that a Billing
@@ -639,7 +646,7 @@ The wallet/runtime MUST durably retain Request-to-Allowance associations,
 their revisions and reassociation authorizations, deferred and manual-only
 decisions, semantic payment keys, and usage reservations before automatic
 execution.
-Validated Encrypted Link recovery for the same Receiver References does not
+Validated Encrypted Link recovery for the same Pubky identities does not
 require fresh Allowance consent when the complete durable event history and
 wallet-owned state are retained.
 

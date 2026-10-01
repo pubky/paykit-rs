@@ -142,6 +142,8 @@ pub struct PaymentRequestTerms {
     pub(super) conversion: Option<PaymentConversion>,
     /// Optional deadline for actual payment, independent of proposal acceptance.
     pub(super) payment_deadline: Option<PaymentDeadline>,
+    /// Payee application whose Payment Endpoint must be paid, when constrained.
+    pub(super) required_app_id: Option<crate::PaykitAppId>,
     /// Application-specific JSON metadata.
     pub(super) metadata: JsonMap<String, JsonValue>,
 }
@@ -159,6 +161,7 @@ impl fmt::Debug for PaymentRequestTerms {
                 "accepted_payment_endpoint_identifiers",
                 &self.accepted_payment_endpoint_identifiers,
             )
+            .field("required_app_id", &self.required_app_id)
             .field(
                 "metadata",
                 &format_args!("<redacted:{} fields>", self.metadata.len()),
@@ -393,6 +396,8 @@ pub struct PaymentProof {
     pub(super) payment_reference: PaymentReference,
     /// Billing period. Required for recurring requests, `None` for one-time requests.
     pub(super) billing_period: Option<BillingPeriod>,
+    /// Application whose endpoint was used for the payment.
+    pub(super) payment_app_id: crate::PaykitAppId,
     /// Payment Endpoint Identifier used for the payment execution.
     pub(super) payment_endpoint_identifier: PaymentEndpointIdentifier,
     /// Optional Allowance used for this payment, scoped to the exact Encrypted Link.
@@ -412,6 +417,7 @@ impl fmt::Debug for PaymentProof {
             .field("payment_request_id", &self.payment_request_id)
             .field("payment_reference", &"<redacted>")
             .field("billing_period", &self.billing_period)
+            .field("payment_app_id", &self.payment_app_id)
             .field("allowance_id", &self.allowance_id)
             .field(
                 "payment_endpoint_identifier",
@@ -432,6 +438,7 @@ impl PaymentProof {
         payment_request_id: PaymentRequestId,
         payment_reference: PaymentReference,
         billing_period: Option<BillingPeriod>,
+        payment_app_id: crate::PaykitAppId,
         payment_endpoint_identifier: PaymentEndpointIdentifier,
         proof: JsonMap<String, JsonValue>,
     ) -> Self {
@@ -442,6 +449,7 @@ impl PaymentProof {
             payment_request_id,
             payment_reference,
             billing_period,
+            payment_app_id,
             payment_endpoint_identifier,
             allowance_id: None,
             conversion_quote_id: None,
@@ -509,6 +517,16 @@ impl PaymentProof {
             return Err(PaykitError::Validation(
                 "Payment Proof payment_endpoint_identifier is not accepted by Payment Request"
                     .into(),
+            ));
+        }
+        if request
+            .request
+            .required_app_id
+            .as_ref()
+            .is_some_and(|app_id| app_id != &self.payment_app_id)
+        {
+            return Err(PaykitError::Validation(
+                "Payment Proof payment_app_id does not match the Payment Request".into(),
             ));
         }
         self.validate_conversion(&request.request)?;
@@ -633,6 +651,8 @@ impl PaymentRequestEvent {
 pub struct PaymentRequestEventMessage {
     /// Private Message Kind selected from the message header.
     pub kind: PrivateMessageKind,
+    /// Application that created this event.
+    pub app_id: Option<crate::PaykitAppId>,
     /// Parsed top-level Event ID when present and valid.
     pub event_id: Option<EventId>,
     /// Parsed top-level Payment Request ID when present and valid.
@@ -649,6 +669,7 @@ impl fmt::Debug for PaymentRequestEventMessage {
         let parsed_kind = self.event.as_ref().ok().map(PaymentRequestEvent::kind);
         f.debug_struct("PaymentRequestEventMessage")
             .field("kind", &self.kind)
+            .field("app_id", &self.app_id)
             .field("event_id", &self.event_id)
             .field("payment_request_id", &self.payment_request_id)
             .field(
@@ -665,6 +686,11 @@ impl PaymentRequestEventMessage {
     /// Return the Private Message Kind for this event message.
     pub fn kind(&self) -> PrivateMessageKind {
         self.kind
+    }
+
+    /// Return the application that created this event, when valid.
+    pub fn app_id(&self) -> Option<&crate::PaykitAppId> {
+        self.app_id.as_ref()
     }
 
     /// Whether the recognized event message parsed successfully.
@@ -801,6 +827,10 @@ impl PaymentRequestTerms {
     /// Access the accepted Payment Endpoint Identifiers.
     pub fn accepted_payment_endpoint_identifiers(&self) -> &[PaymentEndpointIdentifier] {
         &self.accepted_payment_endpoint_identifiers
+    }
+    /// Access the optional payee App constraint.
+    pub fn required_app_id(&self) -> Option<&crate::PaykitAppId> {
+        self.required_app_id.as_ref()
     }
     /// Access the optional conversion policy.
     pub fn conversion(&self) -> Option<&PaymentConversion> {
@@ -940,6 +970,10 @@ impl PaymentProof {
     pub fn billing_period(&self) -> &Option<BillingPeriod> {
         &self.billing_period
     }
+    /// Access the payee App whose endpoint was used for payment.
+    pub fn payment_app_id(&self) -> &crate::PaykitAppId {
+        &self.payment_app_id
+    }
     /// Access the Payment Endpoint Identifier.
     pub fn payment_endpoint_identifier(&self) -> &PaymentEndpointIdentifier {
         &self.payment_endpoint_identifier
@@ -1018,6 +1052,7 @@ impl PaymentRequestTerms {
             amount,
             payment_reference,
             accepted_payment_endpoint_identifiers,
+            required_app_id: None,
             proposal_expires_at: None,
             recurrence: None,
             conversion: None,
@@ -1028,6 +1063,11 @@ impl PaymentRequestTerms {
 }
 
 impl PaymentRequestTermsBuilder {
+    /// Constrain payment to an endpoint owned by the specified payee App.
+    pub fn required_app_id(mut self, value: Option<crate::PaykitAppId>) -> Self {
+        self.0.required_app_id = value;
+        self
+    }
     /// Set the optional proposal expiry; past timestamps remain valid history.
     pub fn proposal_expires_at(mut self, value: Option<String>) -> Self {
         self.0.proposal_expires_at = value;
@@ -1061,254 +1101,4 @@ impl PaymentRequestTermsBuilder {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn request_terms() -> PaymentRequestTerms {
-        PaymentRequestTerms {
-            conversion: None,
-            payment_deadline: None,
-            amount: PaymentAmount::new("0.001", "btc").unwrap(),
-            payment_reference: PaymentReference::new("invoice-2026-0001").unwrap(),
-            proposal_expires_at: Some("2026-06-01T00:00:00Z".to_string()),
-            recurrence: None,
-            accepted_payment_endpoint_identifiers: vec![PaymentEndpointIdentifier::new(
-                "btc-lightning-bolt11",
-            )
-            .unwrap()],
-            metadata: JsonMap::new(),
-        }
-    }
-
-    #[test]
-    fn payment_request_terms_reject_empty_endpoint_list() {
-        let mut terms = request_terms();
-        terms.accepted_payment_endpoint_identifiers.clear();
-        let err = terms.validate().unwrap_err();
-        assert!(
-            matches!(err, PaykitError::Validation(ref msg) if msg.contains("must not be empty"))
-        );
-    }
-
-    #[test]
-    fn recurrence_rejects_non_utc_timestamp() {
-        let recurrence = Recurrence {
-            every: 1,
-            unit: RecurrenceUnit::Month,
-            starts_at: "2026-06-01T00:00:00+01:00".to_string(),
-            anchor: "2026-06-01T00:00:00Z".to_string(),
-            ends_at: None,
-        };
-        let err = recurrence.validate().unwrap_err();
-        assert!(matches!(err, PaykitError::Validation(ref msg) if msg.contains("Z suffix")));
-    }
-
-    fn recurrence_with_ends_at(ends_at: Option<&str>) -> Recurrence {
-        Recurrence {
-            every: 1,
-            unit: RecurrenceUnit::Month,
-            starts_at: "2026-07-01T00:00:00Z".to_string(),
-            anchor: "2026-07-01T00:00:00Z".to_string(),
-            ends_at: ends_at.map(str::to_string),
-        }
-    }
-
-    #[test]
-    fn recurrence_rejects_ends_at_before_starts_at() {
-        // specs/payment-requests.md: non-null ends_at MUST be after starts_at.
-        let recurrence = recurrence_with_ends_at(Some("2026-06-01T00:00:00Z"));
-        let err = recurrence.validate().unwrap_err();
-        assert!(
-            matches!(err, PaykitError::Validation(ref msg) if msg.contains("ends_at must be after starts_at"))
-        );
-    }
-
-    #[test]
-    fn recurrence_rejects_ends_at_equal_to_starts_at() {
-        let recurrence = recurrence_with_ends_at(Some("2026-07-01T00:00:00Z"));
-        let err = recurrence.validate().unwrap_err();
-        assert!(
-            matches!(err, PaykitError::Validation(ref msg) if msg.contains("ends_at must be after starts_at"))
-        );
-    }
-
-    #[test]
-    fn recurrence_accepts_ends_at_after_starts_at() {
-        let recurrence = recurrence_with_ends_at(Some("2026-08-01T00:00:00Z"));
-        recurrence.validate().unwrap();
-    }
-
-    #[test]
-    fn payment_reference_is_not_required_to_be_uuid() {
-        let terms = request_terms();
-        assert_eq!(terms.payment_reference.as_str(), "invoice-2026-0001");
-    }
-
-    #[test]
-    fn payment_request_event_debug_redacts_private_payloads() {
-        let request = PaymentRequest::new(
-            EventId::new_v4(),
-            PaymentRequestId::new_v4(),
-            PaymentRequestTerms {
-                conversion: None,
-                payment_deadline: None,
-                metadata: JsonMap::from_iter([(
-                    "note".to_string(),
-                    JsonValue::String("private request note".to_string()),
-                )]),
-                ..request_terms()
-            },
-        );
-        let proof = PaymentProof::new(
-            EventId::new_v4(),
-            request.payment_request_id.clone(),
-            request.request.payment_reference.clone(),
-            None,
-            request.request.accepted_payment_endpoint_identifiers[0].clone(),
-            JsonMap::from_iter([(
-                "preimage".to_string(),
-                JsonValue::String("private proof secret".to_string()),
-            )]),
-        );
-        let message = PaymentRequestEventMessage {
-            kind: PrivateMessageKind::PaymentProof,
-            event_id: Some(proof.event_id.clone()),
-            payment_request_id: Some(proof.payment_request_id.clone()),
-            raw_json: r#"{"proof":{"preimage":"raw proof secret"}}"#.to_string(),
-            event: Ok(PaymentRequestEvent::Proof(proof.clone())),
-        };
-
-        assert!(!format!("{request:?}").contains("invoice-2026-0001"));
-        assert!(!format!("{proof:?}").contains("invoice-2026-0001"));
-        assert!(!format!("{request:?}").contains("private request note"));
-        assert!(!format!("{proof:?}").contains("private proof secret"));
-        let debug = format!("{message:?}");
-        assert!(!debug.contains("raw proof secret"));
-        assert!(!debug.contains("private proof secret"));
-        assert!(debug.contains("<redacted:"));
-    }
-
-    fn payment_request() -> PaymentRequest {
-        PaymentRequest::new(
-            EventId::new_v4(),
-            PaymentRequestId::new_v4(),
-            request_terms(),
-        )
-    }
-
-    fn payment_proof_for(request: &PaymentRequest) -> PaymentProof {
-        PaymentProof::new(
-            EventId::new_v4(),
-            request.payment_request_id.clone(),
-            request.request.payment_reference.clone(),
-            None,
-            request.request.accepted_payment_endpoint_identifiers[0].clone(),
-            JsonMap::new(),
-        )
-    }
-
-    #[test]
-    fn payment_proof_validates_for_matching_one_time_request() {
-        let request = payment_request();
-        let proof = payment_proof_for(&request);
-        proof.validate_for_request(&request).unwrap();
-    }
-
-    #[test]
-    fn payment_proof_rejects_mismatched_reference() {
-        let request = payment_request();
-        let mut proof = payment_proof_for(&request);
-        proof.payment_reference = PaymentReference::new("other-reference").unwrap();
-        let err = proof.validate_for_request(&request).unwrap_err();
-        assert!(
-            matches!(err, PaykitError::Validation(ref msg) if msg.contains("payment_reference"))
-        );
-    }
-
-    #[test]
-    fn payment_proof_rejects_mismatched_request_id() {
-        let request = payment_request();
-        let mut proof = payment_proof_for(&request);
-        proof.payment_request_id = PaymentRequestId::new_v4();
-        let err = proof.validate_for_request(&request).unwrap_err();
-        assert!(
-            matches!(err, PaykitError::Validation(ref msg) if msg.contains("payment_request_id"))
-        );
-    }
-
-    #[test]
-    fn payment_proof_rejects_unaccepted_endpoint() {
-        let request = payment_request();
-        let mut proof = payment_proof_for(&request);
-        proof.payment_endpoint_identifier = PaymentEndpointIdentifier::new("btc-onchain").unwrap();
-        let err = proof.validate_for_request(&request).unwrap_err();
-        assert!(matches!(err, PaykitError::Validation(ref msg) if msg.contains("not accepted")));
-    }
-
-    #[test]
-    fn payment_proof_rejects_billing_period_for_one_time_request() {
-        let request = payment_request();
-        let mut proof = payment_proof_for(&request);
-        proof.billing_period = Some(BillingPeriod {
-            starts_at: "2026-06-01T00:00:00Z".to_string(),
-            ends_at: "2026-07-01T00:00:00Z".to_string(),
-        });
-        let err = proof.validate_for_request(&request).unwrap_err();
-        assert!(matches!(err, PaykitError::Validation(ref msg) if msg.contains("one-time")));
-    }
-
-    #[test]
-    fn payment_proof_rejects_invalid_billing_period_shape() {
-        let mut request = payment_request();
-        request.request.recurrence = Some(Recurrence {
-            every: 1,
-            unit: RecurrenceUnit::Month,
-            starts_at: "2026-06-01T00:00:00Z".to_string(),
-            anchor: "2026-06-01T00:00:00Z".to_string(),
-            ends_at: None,
-        });
-        let mut proof = payment_proof_for(&request);
-        proof.billing_period = Some(BillingPeriod {
-            starts_at: "2026-07-01T00:00:00Z".to_string(),
-            ends_at: "2026-06-01T00:00:00Z".to_string(),
-        });
-
-        let err = proof.validate_for_request(&request).unwrap_err();
-        assert!(
-            matches!(err, PaykitError::Validation(ref msg) if msg.contains("ends_at must be after starts_at"))
-        );
-    }
-
-    #[test]
-    fn payment_proof_requires_billing_period_for_recurring_request() {
-        let mut request = payment_request();
-        request.request.recurrence = Some(Recurrence {
-            every: 1,
-            unit: RecurrenceUnit::Month,
-            starts_at: "2026-06-01T00:00:00Z".to_string(),
-            anchor: "2026-06-01T00:00:00Z".to_string(),
-            ends_at: None,
-        });
-        let proof = payment_proof_for(&request);
-        let err = proof.validate_for_request(&request).unwrap_err();
-        assert!(matches!(err, PaykitError::Validation(ref msg) if msg.contains("required")));
-    }
-
-    #[test]
-    fn payment_proof_validates_for_recurring_request_with_billing_period() {
-        let mut request = payment_request();
-        request.request.recurrence = Some(Recurrence {
-            every: 1,
-            unit: RecurrenceUnit::Month,
-            starts_at: "2026-06-01T00:00:00Z".to_string(),
-            anchor: "2026-06-01T00:00:00Z".to_string(),
-            ends_at: None,
-        });
-        let mut proof = payment_proof_for(&request);
-        proof.billing_period = Some(BillingPeriod {
-            starts_at: "2026-06-01T00:00:00Z".to_string(),
-            ends_at: "2026-07-01T00:00:00Z".to_string(),
-        });
-        proof.validate_for_request(&request).unwrap();
-    }
-}
+mod tests;

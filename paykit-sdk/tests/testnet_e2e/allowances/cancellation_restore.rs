@@ -28,7 +28,6 @@ async fn accept_automatic_request(payer: &TestUser, payee: &TestUser) -> Payment
         .sdk
         .propose_allowance(
             payee.public_key.clone(),
-            payee.receiver_path.clone(),
             AllowanceLocalRole::Allower,
             terms(),
         )
@@ -38,11 +37,7 @@ async fn accept_automatic_request(payer: &TestUser, payee: &TestUser) -> Payment
     deliver(payer, payee).await;
     payee
         .sdk
-        .accept_allowance(
-            payer.public_key.clone(),
-            payer.receiver_path.clone(),
-            &allowance_id,
-        )
+        .accept_allowance(payer.public_key.clone(), &allowance_id)
         .await
         .unwrap();
     deliver(payee, payer).await;
@@ -50,7 +45,6 @@ async fn accept_automatic_request(payer: &TestUser, payee: &TestUser) -> Payment
         .sdk
         .propose_payment_request(
             payer.public_key.clone(),
-            payer.receiver_path.clone(),
             PaymentRequestTerms::builder(
                 checks().actual_amount,
                 PaymentReference::new("restore-cancellation").unwrap(),
@@ -74,9 +68,13 @@ async fn accept_automatic_request(payer: &TestUser, payee: &TestUser) -> Payment
         .unwrap();
     let scope = PaymentRequestScope {
         counterparty: payee.public_key.clone(),
-        counterparty_receiver_path: payee.receiver_path.clone(),
         payment_request_id: PaymentRequestId::new(request.payment_request_id).unwrap(),
     };
+    payer
+        .sdk
+        .claim_payment_request_for_execution(scope.counterparty.clone(), &scope.payment_request_id)
+        .await
+        .unwrap();
     let checks = checks();
     payer
         .sdk
@@ -103,7 +101,6 @@ async fn cancel_request(payer: &TestUser, payee: &TestUser, occurrence: &Payment
         .sdk
         .cancel_payment_request(
             payer.public_key.clone(),
-            payer.receiver_path.clone(),
             &occurrence.request.payment_request_id,
             None,
         )
@@ -112,7 +109,7 @@ async fn cancel_request(payer: &TestUser, payee: &TestUser, occurrence: &Payment
     deliver(payee, payer).await;
     let records = payer
         .sdk
-        .payment_requests_with(&payee.public_key, &payee.receiver_path)
+        .payment_requests_with(&payee.public_key)
         .await
         .unwrap();
     assert_eq!(records[0].state, PaymentRequestLifecycleState::Canceled);
@@ -202,10 +199,14 @@ async fn test_current_restore_retains_cancellation_after_reconciliation() {
     let occurrence = accept_automatic_request(&pair.alice, &pair.bob).await;
     cancel_request(&pair.alice, &pair.bob, &occurrence).await;
     let backup = pair.alice.sdk.export_backup_state().await.unwrap();
-    pair.alice.sdk.restore_backup_state(backup).await.unwrap();
-    reconcile_unchanged_history(&pair.alice).await;
+    let restored = pair
+        .alice
+        .restart_with_storage(InMemoryStorage::new())
+        .await;
+    restored.sdk.restore_backup_state(backup).await.unwrap();
+    reconcile_unchanged_history(&restored).await;
     assert_cancellation_blocks(
-        pair.alice
+        restored
             .sdk
             .reserve_automatic_payment(occurrence, 1, checks())
             .await

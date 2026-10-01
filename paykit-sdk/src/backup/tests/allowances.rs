@@ -11,26 +11,18 @@ const ALLOWANCE_ID: &str = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44";
 async fn persist_messages(
     storage: &InMemoryStorage,
     counterparty: &PubkyPublicKey,
-    receiver: PaykitReceiverPath,
     payloads: Vec<String>,
 ) {
     let messages = payloads
         .into_iter()
         .map(|raw| {
-            let (version, kind, _) = private_message_header(&raw).unwrap();
+            let (version, kind, _, _) = private_message_header(&raw);
             private_application_message_from_raw(raw, version, kind)
         })
         .collect();
-    persist_private_stream_batch(
-        storage,
-        counterparty.clone(),
-        receiver,
-        messages,
-        None,
-        timestamp(),
-    )
-    .await
-    .unwrap();
+    persist_private_stream_batch(storage, counterparty.clone(), messages, None, timestamp())
+        .await
+        .unwrap();
 }
 
 async fn current_backup(counterparty: &PubkyPublicKey, payloads: Vec<String>) -> SdkBackupState {
@@ -42,13 +34,19 @@ async fn current_backup(counterparty: &PubkyPublicKey, payloads: Vec<String>) ->
         })
         .await
         .unwrap();
-    persist_messages(&storage, counterparty, receiver_path(), payloads).await;
-    export_backup_state(&storage, receiver_path())
-        .await
-        .unwrap()
+    persist_messages(&storage, counterparty, payloads).await;
+    export_backup_state(&storage).await.unwrap()
 }
 
 async fn assert_rejected_without_destination_changes(backup: SdkBackupState, reason: &str) {
+    let empty = InMemoryStorage::new();
+    let error = restore_backup_state(&empty, backup.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, PaykitSdkError::Protocol { .. }), "{error}");
+    assert!(error.to_string().contains(reason), "{error}");
+    assert!(empty.snapshot().unwrap().private_stream_items.is_empty());
+
     let storage = InMemoryStorage::new();
     let existing_identity = backup.identity_state.clone().unwrap();
     storage
@@ -62,24 +60,15 @@ async fn assert_rejected_without_destination_changes(backup: SdkBackupState, rea
     persist_messages(
         &storage,
         &public_key(),
-        receiver_path(),
         vec![payment_request_json(SHARED_EVENT_ID)],
     )
     .await;
-    let before = export_backup_state(&storage, receiver_path())
-        .await
-        .unwrap();
+    let before = export_backup_state(&storage).await.unwrap();
 
     let error = restore_backup_state(&storage, backup).await.unwrap_err();
 
-    assert!(matches!(error, PaykitSdkError::Protocol { .. }));
-    assert!(error.to_string().contains(reason), "{error}");
-    assert_eq!(
-        export_backup_state(&storage, receiver_path())
-            .await
-            .unwrap(),
-        before
-    );
+    assert!(matches!(error, PaykitSdkError::Policy { .. }), "{error}");
+    assert_eq!(export_backup_state(&storage).await.unwrap(), before);
 }
 
 #[tokio::test]
@@ -100,16 +89,11 @@ async fn test_restore_allowance_current_format_roundtrips_without_reclassificati
         .await
         .unwrap();
 
-    let roundtrip = export_backup_state(&restored, receiver_path())
-        .await
-        .unwrap();
+    let roundtrip = export_backup_state(&restored).await.unwrap();
     assert_eq!(roundtrip, backup);
     let second = InMemoryStorage::new();
     restore_backup_state(&second, roundtrip).await.unwrap();
-    assert_eq!(
-        export_backup_state(&second, receiver_path()).await.unwrap(),
-        backup
-    );
+    assert_eq!(export_backup_state(&second).await.unwrap(), backup);
 }
 
 #[tokio::test]
@@ -185,16 +169,10 @@ async fn test_restore_allowance_preserves_current_unsupported_correlated_evidenc
             .await
             .unwrap();
 
-        assert_eq!(
-            export_backup_state(&storage, receiver_path())
-                .await
-                .unwrap(),
-            backup
-        );
+        assert_eq!(export_backup_state(&storage).await.unwrap(), backup);
         let record = allowance_record(
             &storage,
             &counterparty,
-            &receiver_path(),
             &AllowanceId::new(ALLOWANCE_ID).unwrap(),
         )
         .await
@@ -221,39 +199,27 @@ async fn test_restore_allowance_preserves_cross_kind_dedupe_and_exact_link_scope
     .await;
     let storage = InMemoryStorage::new();
     restore_backup_state(&storage, backup).await.unwrap();
+    let other_counterparty = public_key();
     persist_messages(
         &storage,
-        &counterparty,
-        other_receiver_path(),
+        &other_counterparty,
         vec![payment_request_json(SHARED_EVENT_ID)],
     )
     .await;
-    backup = export_backup_state(&storage, receiver_path())
-        .await
-        .unwrap();
+    backup = export_backup_state(&storage).await.unwrap();
     let restored = InMemoryStorage::new();
 
     restore_backup_state(&restored, backup.clone())
         .await
         .unwrap();
 
-    assert_eq!(
-        export_backup_state(&restored, receiver_path())
-            .await
-            .unwrap(),
-        backup
-    );
+    assert_eq!(export_backup_state(&restored).await.unwrap(), backup);
     let state = restored.snapshot().unwrap();
-    let dedupe = &state.event_dedup_records[&(
-        counterparty.clone(),
-        receiver_path(),
-        SHARED_EVENT_ID.into(),
-    )];
+    let dedupe = &state.event_dedup_records[&(counterparty.clone(), SHARED_EVENT_ID.into())];
     assert_eq!(dedupe.event_kind, "paykit.allowance_proposal");
     assert_eq!(dedupe.duplicate_stream_item_ids.len(), 1);
     assert_eq!(dedupe.conflicting_stream_item_ids.len(), 1);
-    let other =
-        &state.event_dedup_records[&(counterparty, other_receiver_path(), SHARED_EVENT_ID.into())];
+    let other = &state.event_dedup_records[&(other_counterparty, SHARED_EVENT_ID.into())];
     assert_eq!(other.event_kind, "paykit.payment_request");
     assert!(other.duplicate_stream_item_ids.is_empty());
     assert!(other.conflicting_stream_item_ids.is_empty());
@@ -284,10 +250,7 @@ async fn test_restore_allowance_rejects_receipt_index_for_conflicting_event() {
     assert!(backup.receipt_records.is_empty());
     let clean = InMemoryStorage::new();
     restore_backup_state(&clean, backup.clone()).await.unwrap();
-    assert_eq!(
-        export_backup_state(&clean, receiver_path()).await.unwrap(),
-        backup
-    );
+    assert_eq!(export_backup_state(&clean).await.unwrap(), backup);
 
     // A later conflicting Receipt Access must never acquire an authoritative
     // index during restore, even when its own payload and receipt scope are valid.
@@ -300,35 +263,29 @@ async fn test_restore_allowance_rejects_receipt_index_for_conflicting_event() {
     assert_rejected_without_destination_changes(backup, "authoritative").await;
 }
 
-async fn wrong_receiver_receipt_backup() -> SdkBackupState {
+async fn invalid_location_receipt_backup() -> SdkBackupState {
     current_backup(
         &public_key(),
         vec![
             allowance_event_json("paykit.allowance_proposal", SHARED_EVENT_ID),
-            crate::test_utils::receipt_access_json(SHARED_EVENT_ID, &other_receiver_path()),
+            invalid_location_receipt_json(),
         ],
     )
     .await
 }
 
 #[tokio::test]
-async fn test_restore_wrong_receiver_receipt_preserves_allowance_conflict() {
-    let backup = wrong_receiver_receipt_backup().await;
+async fn test_restore_invalid_location_receipt_preserves_allowance_conflict() {
+    let backup = invalid_location_receipt_backup().await;
     let counterparty = backup.private_stream_items[0].counterparty.clone();
     let restored = InMemoryStorage::new();
     restore_backup_state(&restored, backup.clone())
         .await
         .unwrap();
-    assert_eq!(
-        export_backup_state(&restored, receiver_path())
-            .await
-            .unwrap(),
-        backup
-    );
+    assert_eq!(export_backup_state(&restored).await.unwrap(), backup);
     let record = allowance_record(
         &restored,
         &counterparty,
-        &receiver_path(),
         &AllowanceId::new(ALLOWANCE_ID).unwrap(),
     )
     .await
@@ -344,22 +301,15 @@ async fn test_restore_wrong_receiver_receipt_preserves_allowance_conflict() {
 }
 
 #[tokio::test]
-async fn test_restore_wrong_receiver_receipt_requires_dedupe_atomically() {
-    let mut backup = current_backup(
-        &public_key(),
-        vec![crate::test_utils::receipt_access_json(
-            SHARED_EVENT_ID,
-            &other_receiver_path(),
-        )],
-    )
-    .await;
+async fn test_restore_invalid_location_receipt_requires_dedupe_atomically() {
+    let mut backup = current_backup(&public_key(), vec![invalid_location_receipt_json()]).await;
     backup.event_dedup_records.clear();
     assert_rejected_without_destination_changes(backup, "missing required Event dedupe").await;
 }
 
 #[tokio::test]
-async fn test_restore_wrong_receiver_receipt_requires_conflict_membership_atomically() {
-    let mut backup = wrong_receiver_receipt_backup().await;
+async fn test_restore_invalid_location_receipt_requires_conflict_membership_atomically() {
+    let mut backup = invalid_location_receipt_backup().await;
     backup.event_dedup_records[0]
         .conflicting_stream_item_ids
         .clear();
@@ -368,40 +318,31 @@ async fn test_restore_wrong_receiver_receipt_requires_conflict_membership_atomic
 }
 
 #[tokio::test]
-async fn test_restore_wrong_receiver_receipt_rejects_access_index_atomically() {
-    let mut backup = current_backup(
-        &public_key(),
-        vec![crate::test_utils::receipt_access_json(
-            SHARED_EVENT_ID,
-            &other_receiver_path(),
-        )],
-    )
-    .await;
+async fn test_restore_invalid_location_receipt_rejects_access_index_atomically() {
+    let mut backup = current_backup(&public_key(), vec![invalid_location_receipt_json()]).await;
     let item = &backup.private_stream_items[0];
-    let (version, kind, _) = private_message_header(&item.raw_json).unwrap();
-    let message = private_application_message_from_raw(item.raw_json.clone(), version, kind);
+    let valid_raw = crate::test_utils::receipt_access_json(SHARED_EVENT_ID);
+    let (version, kind, _, _) = private_message_header(&valid_raw);
+    let message = private_application_message_from_raw(valid_raw, version, kind);
     let parsed = paykit_lib::parse_receipt_access_event_message(&message).unwrap();
     backup
         .receipt_access_records
         .push(ReceiptAccessRecord::from_access(
             item.counterparty.clone(),
-            item.counterparty_receiver_path.clone(),
+            paykit_lib::PaykitAppId::new("bitkit").unwrap(),
+            false,
             item.stream_item_id,
             item.receive_batch_id,
             item.received_at,
             parsed.parsed_access().unwrap(),
         ));
-    assert_rejected_without_destination_changes(
-        backup,
-        "location does not match counterparty receiver",
-    )
-    .await;
+    assert_rejected_without_destination_changes(backup, "stream item is malformed").await;
 }
 
 #[tokio::test]
 async fn test_classification_refresh_preserves_receipt_evidence_and_cross_kind_conflicts() {
     let peer = public_key();
-    let receipt = crate::test_utils::receipt_access_json(SHARED_EVENT_ID, &receiver_path());
+    let receipt = invalid_location_receipt_json();
     let raw = allowance_event_json("paykit.allowance_proposal", SHARED_EVENT_ID);
     let original = current_backup(&peer, vec![receipt, raw.clone(), raw]).await;
     let mut backup = original.clone();
@@ -417,9 +358,7 @@ async fn test_classification_refresh_preserves_receipt_evidence_and_cross_kind_c
     restore_backup_state(&restored, backup.clone())
         .await
         .unwrap();
-    let actual = export_backup_state(&restored, receiver_path())
-        .await
-        .unwrap();
+    let actual = export_backup_state(&restored).await.unwrap();
     assert_eq!(actual, original);
 
     // Startup uses the same refresh without applying restore's transport recovery policy.
@@ -440,4 +379,10 @@ async fn test_classification_refresh_preserves_receipt_evidence_and_cross_kind_c
     assert_eq!(refreshed, restored.snapshot().unwrap());
 }
 
+fn invalid_location_receipt_json() -> String {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&crate::test_utils::receipt_access_json(SHARED_EVENT_ID)).unwrap();
+    value["location"] = serde_json::json!("/pub/paykit/v0/receipts/wrong");
+    serde_json::to_string(&value).unwrap()
+}
 mod restore_history;

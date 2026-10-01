@@ -1,6 +1,6 @@
 use tracing::instrument;
 
-use crate::{error::map_error, EncryptedLink, PrivateApplicationMessage, Result};
+use crate::{error::map_error, EncryptedLink, PaykitAppId, PrivateApplicationMessage, Result};
 
 use super::{
     types::{
@@ -33,6 +33,14 @@ pub fn parse_allowance_event_message(
     };
     Some(AllowanceEventMessage {
         kind,
+        app_id: serde_json::from_str::<serde_json::Value>(&message.raw_json)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("app_id")?
+                    .as_str()
+                    .and_then(|id| PaykitAppId::new(id).ok())
+            }),
         event_id,
         allowance_id,
         raw_json: message.raw_json.clone(),
@@ -44,8 +52,8 @@ pub fn parse_allowance_event_message(
 ///
 /// Serialization rejects a complete message larger than the single-message
 /// `pubky-noise` plaintext limit.
-pub fn serialize_allowance_event(event: &AllowanceEvent) -> Result<String> {
-    serialize_allowance_json(event)
+pub fn serialize_allowance_event(app_id: &PaykitAppId, event: &AllowanceEvent) -> Result<String> {
+    serialize_allowance_json(app_id, event)
 }
 
 /// Send a `paykit.allowance_proposal` Event Message.
@@ -56,11 +64,12 @@ pub fn serialize_allowance_event(event: &AllowanceEvent) -> Result<String> {
 #[instrument(skip(link, event))]
 pub async fn send_allowance_proposal(
     link: &mut EncryptedLink,
+    app_id: &PaykitAppId,
     event: &AllowanceProposal,
 ) -> Result<()> {
     send_json(
         link,
-        serialize_proposal_json(event),
+        serialize_proposal_json(app_id, event),
         "send_allowance_proposal",
     )
     .await
@@ -73,11 +82,12 @@ pub async fn send_allowance_proposal(
 #[instrument(skip(link, event))]
 pub async fn send_allowance_acceptance(
     link: &mut EncryptedLink,
+    app_id: &PaykitAppId,
     event: &AllowanceAcceptance,
 ) -> Result<()> {
     send_json(
         link,
-        serialize_acceptance_json(event),
+        serialize_acceptance_json(app_id, event),
         "send_allowance_acceptance",
     )
     .await
@@ -90,11 +100,12 @@ pub async fn send_allowance_acceptance(
 #[instrument(skip(link, event))]
 pub async fn send_allowance_rejection(
     link: &mut EncryptedLink,
+    app_id: &PaykitAppId,
     event: &AllowanceRejection,
 ) -> Result<()> {
     send_json(
         link,
-        serialize_rejection_json(event),
+        serialize_rejection_json(app_id, event),
         "send_allowance_rejection",
     )
     .await
@@ -105,8 +116,17 @@ pub async fn send_allowance_rejection(
 /// Call the appropriate withdrawal or accepted-authority validation helper on
 /// [`AllowanceEnd`] when the causal events are available.
 #[instrument(skip(link, event))]
-pub async fn send_allowance_end(link: &mut EncryptedLink, event: &AllowanceEnd) -> Result<()> {
-    send_json(link, serialize_end_json(event), "send_allowance_end").await
+pub async fn send_allowance_end(
+    link: &mut EncryptedLink,
+    app_id: &PaykitAppId,
+    event: &AllowanceEnd,
+) -> Result<()> {
+    send_json(
+        link,
+        serialize_end_json(app_id, event),
+        "send_allowance_end",
+    )
+    .await
 }
 
 async fn send_json(
@@ -133,8 +153,12 @@ mod tests {
 
     #[test]
     fn test_parser_uses_raw_json_kind_and_redacts_debug() {
-        let json = serialize_allowance_event(&proposal()).unwrap();
+        let json =
+            serialize_allowance_event(&crate::PaykitAppId::new("bitkit").unwrap(), &proposal())
+                .unwrap();
         let message = PrivateApplicationMessage {
+            app_id: Some("bitkit".into()),
+
             version: Some(1),
             kind: Some(PrivateMessageKind::ReceiptAccess.as_str().to_string()),
             raw_json: json,
@@ -150,9 +174,13 @@ mod tests {
 
     #[test]
     fn test_parser_preserves_malformed_recognized_message_for_audit() {
-        let valid = serialize_allowance_event(&proposal()).unwrap();
+        let valid =
+            serialize_allowance_event(&crate::PaykitAppId::new("bitkit").unwrap(), &proposal())
+                .unwrap();
         let raw_json = valid.replacen("{", "{\"private_sentinel\":true,", 1);
         let message = PrivateApplicationMessage {
+            app_id: Some("bitkit".into()),
+
             version: Some(1),
             kind: Some(PrivateMessageKind::AllowanceProposal.as_str().to_string()),
             raw_json: raw_json.clone(),
@@ -178,6 +206,8 @@ mod tests {
             proposal.allowance_id()
         );
         let message = PrivateApplicationMessage {
+            app_id: Some("bitkit".into()),
+
             version: Some(1),
             kind: Some(kind.as_str().to_string()),
             raw_json,
@@ -193,6 +223,8 @@ mod tests {
     #[test]
     fn test_parser_ignores_non_allowance_kinds() {
         let message = PrivateApplicationMessage {
+            app_id: Some("bitkit".into()),
+
             version: Some(1),
             kind: Some(PrivateMessageKind::PaymentRequest.as_str().to_string()),
             raw_json: format!(

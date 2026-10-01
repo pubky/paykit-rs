@@ -24,7 +24,6 @@ fn amount() -> Arc<FfiAccountingAmount> {
 fn scope() -> FfiPaymentRequestScope {
     FfiPaymentRequestScope {
         counterparty: KEY.into(),
-        counterparty_receiver_path: "bitkit/wallet".into(),
         payment_request_id: ID.into(),
     }
 }
@@ -42,9 +41,7 @@ fn ledger() -> sdk::AllowanceAccountingState {
     let scope: sdk::PaymentRequestScope = scope().try_into().unwrap();
     let request = sdk::PaymentAccountingScope {
         local_public_key: scope.counterparty.clone(),
-        local_receiver_path: scope.counterparty_receiver_path.clone(),
         counterparty: scope.counterparty,
-        counterparty_receiver_path: scope.counterparty_receiver_path,
         payment_request_id: ID.into(),
     };
     let now = conversions::parse_time(TIME.into()).unwrap();
@@ -117,9 +114,7 @@ fn ledger() -> sdk::AllowanceAccountingState {
             }],
             watermarks: vec![sdk::AllowanceWatermarkRecord {
                 local_public_key: request.local_public_key,
-                local_receiver_path: request.local_receiver_path,
                 counterparty: request.counterparty,
-                counterparty_receiver_path: request.counterparty_receiver_path,
                 allowance_id: ID.into(),
                 evaluated_at: now,
             }],
@@ -176,11 +171,6 @@ fn test_accounting_inputs_validate_scope_and_preserve_wallet_checks() {
         })
         .is_err());
     }
-    assert!(sdk::PaymentRequestScope::try_from(FfiPaymentRequestScope {
-        counterparty_receiver_path: "../private".into(),
-        ..scope()
-    })
-    .is_err());
     assert!(sdk::PaymentRequestScope::try_from(FfiPaymentRequestScope {
         counterparty: "private-key-input".into(),
         ..scope()
@@ -281,8 +271,18 @@ fn test_accounting_reconciliation_converts_complete_typed_history_and_outcomes()
 
 #[test]
 fn test_accounting_state_blob_round_trip_and_version_truncation_rejection() {
+    let mut accounting = ledger();
+    let occurrence = &mut accounting.history.occurrences[0];
+    occurrence.disposition = sdk::PaymentDisposition::Automatic;
+    occurrence
+        .attempts
+        .retain(|attempt| attempt.status == sdk::PaymentExecutionStatus::Succeeded);
     let state = StorageState {
-        allowance_accounting: Some(ledger()),
+        identity_state: Some(sdk::IdentityState {
+            public_key: Some(sdk::PubkyPublicKey::new(KEY).unwrap()),
+            initialized_at: conversions::parse_time(TIME.into()).unwrap(),
+        }),
+        allowance_accounting: Some(accounting),
         ..StorageState::default()
     };
     let bytes = encode_storage_state(&state).unwrap();
@@ -299,13 +299,15 @@ fn test_accounting_state_blob_round_trip_and_version_truncation_rejection() {
 #[test]
 fn test_accounting_backup_blob_round_trip_and_version_truncation_rejection() {
     let backup = sdk::SdkBackupState {
+        paykit_noise_public_key: None,
         version: sdk::SDK_BACKUP_VERSION,
-        local_receiver_path: sdk::PaykitReceiverPath::new("bitkit/wallet").unwrap(),
         identity_state: None,
         linked_peers: vec![],
         contact_records: vec![],
+        retired_paykit_apps: vec![],
         public_endpoint_records: vec![],
         payment_endpoint_reservations: vec![],
+        payment_request_execution_claims: vec![],
         encrypted_link_states: vec![],
         outbound_private_messages: vec![],
         private_stream_items: vec![],

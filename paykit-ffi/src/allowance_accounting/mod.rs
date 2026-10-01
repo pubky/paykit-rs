@@ -64,6 +64,7 @@ impl FfiPaykitSdk {
     }
 
     /// Select and queue automatic Acceptance after SDK validation. This does not reserve or execute a payment.
+    /// The current app must first claim the Payment Request for execution.
     pub async fn accept_payment_request_automatically(
         &self,
         scope: FfiPaymentRequestScope,

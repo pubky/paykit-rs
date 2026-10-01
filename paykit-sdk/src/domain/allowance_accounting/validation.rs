@@ -44,7 +44,6 @@ fn valid_scope(value: &PaymentAccountingScope) -> Result<()> {
     uuid(&value.payment_request_id)?;
     PaymentRequestId::new(value.payment_request_id.clone())
         .map_err(|_| protocol("Invalid accounting request ID"))?;
-    // Receiver paths and public keys are validated by their serde implementations.
     Ok(())
 }
 
@@ -210,9 +209,7 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
             .map_err(|_| protocol("Invalid watermark Allowance ID"))?;
         if state.history.watermarks[..index].iter().any(|other| {
             other.local_public_key == watermark.local_public_key
-                && other.local_receiver_path == watermark.local_receiver_path
                 && other.counterparty == watermark.counterparty
-                && other.counterparty_receiver_path == watermark.counterparty_receiver_path
                 && other.allowance_id == watermark.allowance_id
         }) {
             return Err(protocol("Duplicate accounting watermark"));
@@ -251,25 +248,25 @@ fn validate_attribution(
     }
 }
 
-pub(super) fn payer_scope(
+pub(crate) fn payer_scope(
     state: &AllowanceAccountingState,
     identity: &crate::PubkyPublicKey,
-    local: &PaykitReceiverPath,
 ) -> Result<()> {
     if state
         .history
         .associations
         .iter()
-        .any(|a| &a.request.local_public_key != identity || &a.request.local_receiver_path != local)
-        || state.history.occurrences.iter().any(|o| {
-            &o.key.request.local_public_key != identity
-                || &o.key.request.local_receiver_path != local
-        })
+        .any(|a| &a.request.local_public_key != identity)
+        || state
+            .history
+            .occurrences
+            .iter()
+            .any(|o| &o.key.request.local_public_key != identity)
         || state
             .history
             .watermarks
             .iter()
-            .any(|w| &w.local_public_key != identity || &w.local_receiver_path != local)
+            .any(|w| &w.local_public_key != identity)
     {
         return Err(protocol("Accounting belongs to another payer scope"));
     }

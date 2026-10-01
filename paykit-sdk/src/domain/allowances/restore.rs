@@ -4,13 +4,12 @@ use super::derivation::canonical_allowance_id;
 use crate::{
     domain::private_stream::{canonical_event_id, is_allowance_kind, is_payment_request_kind},
     storage::StorageState,
-    OutboundPrivateMessageStatus, PaykitReceiverPath, PaykitSdkError, PubkyPublicKey, Result,
+    OutboundPrivateMessageStatus, PaykitSdkError, PubkyPublicKey, Result,
 };
 
 #[derive(PartialEq, Eq, Hash)]
 struct Evidence<'a> {
     counterparty: &'a PubkyPublicKey,
-    receiver: &'a PaykitReceiverPath,
     outbound: bool,
     position: u64,
     raw: &'a str,
@@ -25,8 +24,8 @@ impl Evidence<'_> {
             || carries_payment_request_id(self.raw)
     }
 
-    fn event_key(&self) -> Option<(&PubkyPublicKey, &PaykitReceiverPath, String)> {
-        canonical_event_id(self.raw).map(|id| (self.counterparty, self.receiver, id))
+    fn event_key(&self) -> Option<(&PubkyPublicKey, String)> {
+        canonical_event_id(self.raw).map(|id| (self.counterparty, id))
     }
 }
 
@@ -80,7 +79,6 @@ fn evidence(state: &StorageState) -> Vec<Evidence<'_>> {
         .iter()
         .map(|item| Evidence {
             counterparty: &item.counterparty,
-            receiver: &item.counterparty_receiver_path,
             outbound: false,
             position: item.stream_item_id,
             raw: &item.raw_json,
@@ -99,7 +97,6 @@ fn evidence(state: &StorageState) -> Vec<Evidence<'_>> {
                 })
                 .map(|item| Evidence {
                     counterparty: &item.counterparty,
-                    receiver: &item.counterparty_receiver_path,
                     outbound: true,
                     position: item.outbound_message_id,
                     raw: &item.raw_json,

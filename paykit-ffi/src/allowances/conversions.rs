@@ -12,7 +12,7 @@ use paykit_sdk::{
 use crate::{
     conversions_common::parse_endpoint_identifier,
     errors::validation_error,
-    session::{app_public_key, parse_public_key, parse_receiver_path},
+    session::{app_public_key, parse_public_key},
     PaykitFfiError,
 };
 
@@ -93,10 +93,6 @@ impl TryFrom<FfiAllowanceFilter> for AllowanceFilter {
     fn try_from(value: FfiAllowanceFilter) -> Result<Self, Self::Error> {
         Ok(Self {
             counterparty: value.counterparty.map(parse_public_key).transpose()?,
-            counterparty_receiver_path: value
-                .counterparty_receiver_path
-                .map(parse_receiver_path)
-                .transpose()?,
             local_role: value.local_role.map(TryInto::try_into).transpose()?,
             states: value
                 .states
@@ -130,7 +126,6 @@ impl TryFrom<AllowanceRecord> for FfiAllowanceRecord {
     fn try_from(value: AllowanceRecord) -> Result<Self, Self::Error> {
         Ok(Self {
             counterparty: app_public_key(&value.counterparty),
-            counterparty_receiver_path: value.counterparty_receiver_path.to_string(),
             allowance_id: value.allowance_id,
             local_role: value.local_role.map(Into::into),
             state: value.state.into(),

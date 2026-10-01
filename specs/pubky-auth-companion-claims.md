@@ -113,7 +113,7 @@ Bitkit supplies these application-owned values:
 ```text
 query_parameter = "x-bitkit-claim"
 claim_type = "watch-only-account-v1"
-expected_capabilities = "/pub/paykit/v0/bitkit/server/:rw"
+expected_capabilities = "/pub/paykit/:rw"
 ```
 
 For version 1, Bitkit serializes `unsigned_payload` as:

@@ -10,8 +10,7 @@ async fn test_restore_preserves_newer_allowance_evidence_without_accounting() {
     );
     let unknown =
         format!(r#"{{"version":256,"kind":"paykit.future","allowance_id":"{ALLOWANCE_ID}"}}"#);
-    let conflicting_receipt =
-        crate::test_utils::receipt_access_json(SHARED_EVENT_ID, &other_receiver_path());
+    let conflicting_receipt = crate::test_utils::receipt_access_json(SHARED_EVENT_ID);
     for raw in [
         end,
         withdrawal,
@@ -26,14 +25,14 @@ async fn test_restore_preserves_newer_allowance_evidence_without_accounting() {
         restore_backup_state(&storage, backup.clone())
             .await
             .unwrap();
-        persist_messages(&storage, &peer, receiver_path(), vec![raw]).await;
+        persist_messages(&storage, &peer, vec![raw]).await;
         let before = storage.snapshot().unwrap();
         assert!(before.allowance_accounting.is_none());
         let error = restore_backup_state(&storage, backup).await.unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("discard retained Allowance or Payment Request history"),
+                .contains("cannot restore a backup over existing SDK-managed state"),
             "{error}"
         );
         assert_eq!(storage.snapshot().unwrap(), before);
@@ -56,14 +55,13 @@ async fn test_restore_evidence_requires_same_scope_direction_order_and_bytes() {
     let current = storage.snapshot().unwrap();
     let check = crate::domain::allowances::ensure_payment_lifecycle_history_retained;
     check(&current, &current).unwrap();
-    for mutation in 0..5 {
+    for mutation in 0..4 {
         let mut candidate = current.clone();
         let item = &mut candidate.private_stream_items[0];
         match mutation {
             0 => item.counterparty = public_key(),
-            1 => item.counterparty_receiver_path = other_receiver_path(),
-            2 => item.stream_item_id += 1,
-            3 => item.raw_json.push(' '),
+            1 => item.stream_item_id += 1,
+            2 => item.raw_json.push(' '),
             _ => {
                 let item = candidate.private_stream_items.pop().unwrap();
                 let mut outbound =
@@ -87,12 +85,12 @@ async fn test_restore_preserves_payment_request_lifecycle_evidence() {
         .unwrap()
         .to_owned();
     let cancellation = format!(
-        r#"{{"version":1,"kind":"paykit.payment_request_cancellation","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d299","payment_request_id":"{request_id}"}}"#
+        r#"{{"version":1,"app_id":"bitkit","kind":"paykit.payment_request_cancellation","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d299","payment_request_id":"{request_id}"}}"#
     );
     let malformed = cancellation.replace("\"version\":1", "\"version\":256");
     let unknown =
         format!(r#"{{"version":256,"kind":"paykit.future","payment_request_id":"{request_id}"}}"#);
-    let conflict = crate::test_utils::receipt_access_json(SHARED_EVENT_ID, &other_receiver_path());
+    let conflict = crate::test_utils::receipt_access_json(SHARED_EVENT_ID);
     let mut payloads = vec![cancellation, malformed, unknown, conflict];
     for kind in [
         "paykit.payment_request",
@@ -102,7 +100,9 @@ async fn test_restore_preserves_payment_request_lifecycle_evidence() {
         "paykit.payment_proof",
     ] {
         // A recognized malformed event without a Request ID is still retained.
-        payloads.push(format!(r#"{{"version":1,"kind":"{kind}"}}"#));
+        payloads.push(format!(
+            r#"{{"version":1,"app_id":"bitkit","kind":"{kind}"}}"#
+        ));
     }
     for raw in payloads {
         let backup = current_backup(&peer, vec![proposal.clone()]).await;
@@ -110,16 +110,19 @@ async fn test_restore_preserves_payment_request_lifecycle_evidence() {
         restore_backup_state(&storage, backup.clone())
             .await
             .unwrap();
-        persist_messages(&storage, &peer, receiver_path(), vec![raw]).await;
+        persist_messages(&storage, &peer, vec![raw]).await;
         let before = storage.snapshot().unwrap();
         assert!(before.allowance_accounting.is_none());
         let error = restore_backup_state(&storage, backup).await.unwrap_err();
-        assert!(error.to_string().contains("discard retained"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot restore a backup over existing SDK-managed state"),
+            "{error}"
+        );
         assert_eq!(storage.snapshot().unwrap(), before);
-        let current = export_backup_state(&storage, receiver_path())
-            .await
-            .unwrap();
-        restore_backup_state(&storage, current).await.unwrap();
+        let current = export_backup_state(&storage).await.unwrap();
+        assert!(restore_backup_state(&storage, current).await.is_err());
         assert_eq!(storage.snapshot().unwrap(), before);
     }
 }
@@ -132,14 +135,13 @@ async fn test_restore_payment_request_evidence_requires_same_scope_direction_ord
     restore_backup_state(&storage, backup).await.unwrap();
     let current = storage.snapshot().unwrap();
     let check = crate::domain::allowances::ensure_payment_lifecycle_history_retained;
-    for mutation in 0..5 {
+    for mutation in 0..4 {
         let mut candidate = current.clone();
         let item = &mut candidate.private_stream_items[0];
         match mutation {
             0 => item.counterparty = public_key(),
-            1 => item.counterparty_receiver_path = other_receiver_path(),
-            2 => item.stream_item_id += 1,
-            3 => item.raw_json.push(' '),
+            1 => item.stream_item_id += 1,
+            2 => item.raw_json.push(' '),
             _ => {
                 let item = candidate.private_stream_items.pop().unwrap();
                 let mut outbound =
@@ -154,14 +156,14 @@ async fn test_restore_payment_request_evidence_requires_same_scope_direction_ord
 }
 
 #[tokio::test]
-async fn test_restore_payment_request_conflicts_are_receiver_scoped() {
+async fn test_restore_payment_request_conflicts_are_identity_scoped() {
     let peer = public_key();
     let backup = current_backup(&peer, vec![payment_request_json(SHARED_EVENT_ID)]).await;
     let storage = InMemoryStorage::new();
     restore_backup_state(&storage, backup).await.unwrap();
     let restored = storage.snapshot().unwrap();
-    let raw = crate::test_utils::receipt_access_json(SHARED_EVENT_ID, &other_receiver_path());
-    persist_messages(&storage, &peer, other_receiver_path(), vec![raw]).await;
+    let raw = crate::test_utils::receipt_access_json(SHARED_EVENT_ID);
+    persist_messages(&storage, &public_key(), vec![raw]).await;
     let current = storage.snapshot().unwrap();
     let check = crate::domain::allowances::ensure_payment_lifecycle_history_retained;
     check(&current, &restored).unwrap();
@@ -170,7 +172,7 @@ async fn test_restore_payment_request_conflicts_are_receiver_scoped() {
         .private_stream_items
         .last_mut()
         .unwrap()
-        .counterparty_receiver_path = receiver_path();
+        .counterparty = peer;
     assert!(check(&conflicting, &restored).is_err());
 }
 
@@ -191,7 +193,7 @@ async fn test_restore_retains_outbound_payment_request_cancellation_intent() {
         let mut outbound = private_payment_list_outbound(peer.clone(), 0, "unused");
         outbound.kind = "paykit.payment_request_cancellation".into();
         outbound.raw_json = format!(
-            r#"{{"version":1,"kind":"paykit.payment_request_cancellation","event_id":"{SHARED_EVENT_ID}","payment_request_id":"550e8400-e29b-41d4-a716-446655440000"}}"#
+            r#"{{"version":1,"app_id":"bitkit","kind":"paykit.payment_request_cancellation","event_id":"{SHARED_EVENT_ID}","payment_request_id":"550e8400-e29b-41d4-a716-446655440000"}}"#
         );
         outbound.status = status;
         current.outbound_private_messages.push(outbound);

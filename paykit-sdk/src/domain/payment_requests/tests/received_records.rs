@@ -21,12 +21,12 @@ async fn test_received_payment_request_records_flag_inbound_acceptance_for_recei
     )
     .await;
 
-    let records =
-        received_payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
-            .await
-            .unwrap();
+    let records = received_payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
 
     assert_eq!(records.len(), 1);
+    assert_eq!(records[0].proposal_app_id.as_ref(), Some(&app_id()));
     assert_eq!(
         records[0].state,
         PaymentRequestLifecycleState::InvalidConflict
@@ -59,10 +59,9 @@ async fn test_received_payment_request_records_mark_proposal_expired() {
     )
     .await;
 
-    let records =
-        received_payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
-            .await
-            .unwrap();
+    let records = received_payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
 
     assert_eq!(
         records[0].state,
@@ -95,10 +94,9 @@ async fn test_received_payment_request_records_flag_inbound_proof_for_received_p
     )
     .await;
 
-    let records =
-        received_payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
-            .await
-            .unwrap();
+    let records = received_payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
 
     assert_eq!(
         records[0].state,
@@ -137,10 +135,9 @@ async fn test_received_payment_request_records_flag_event_id_conflict() {
     )
     .await;
 
-    let records =
-        received_payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
-            .await
-            .unwrap();
+    let records = received_payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
 
     assert_eq!(
         records[0].state,
@@ -167,10 +164,9 @@ async fn test_received_payment_request_records_flag_invalid_transition() {
     )
     .await;
 
-    let records =
-        received_payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
-            .await
-            .unwrap();
+    let records = received_payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
 
     assert_eq!(
         records[0].state,
@@ -201,10 +197,9 @@ async fn test_received_payment_request_records_preserve_first_invalid_reason() {
     )
     .await;
 
-    let records =
-        received_payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
-            .await
-            .unwrap();
+    let records = received_payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
 
     assert_eq!(
         records[0].state,
@@ -241,10 +236,9 @@ async fn test_received_payment_request_records_keep_invalid_before_later_proposa
     )
     .await;
 
-    let records =
-        received_payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
-            .await
-            .unwrap();
+    let records = received_payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
 
     assert_eq!(
         records[0].state,
@@ -278,16 +272,54 @@ async fn test_received_payment_request_records_derive_cancellation() {
     )
     .await;
 
-    let records =
-        received_payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
-            .await
-            .unwrap();
+    let records = received_payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
 
     assert_eq!(records[0].state, PaymentRequestLifecycleState::Canceled);
     assert_eq!(
         records[0].canceled_event_id.as_deref(),
         Some("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104")
     );
+}
+
+#[tokio::test]
+async fn test_received_payment_request_records_reject_cancellation_from_other_payee_app() {
+    let storage = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let request_id = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
+    persist_messages(
+        &storage,
+        counterparty.clone(),
+        vec![
+            request_raw(
+                "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+                request_id,
+                "invoice-2026-0001",
+                None,
+                None,
+            ),
+            cancellation_raw_for_app(
+                "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104",
+                request_id,
+                "other-app",
+            ),
+        ],
+    )
+    .await;
+
+    let records = received_payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        records[0].state,
+        PaymentRequestLifecycleState::InvalidConflict
+    );
+    assert!(records[0]
+        .invalid_reason
+        .as_ref()
+        .is_some_and(|reason| reason.contains("different payee application")));
 }
 
 #[tokio::test]
@@ -312,10 +344,9 @@ async fn test_received_payment_request_records_flag_second_cancellation() {
     )
     .await;
 
-    let records =
-        received_payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
-            .await
-            .unwrap();
+    let records = received_payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
 
     assert_eq!(
         records[0].state,
@@ -359,10 +390,9 @@ async fn test_received_payment_request_records_return_newest_first() {
     )
     .await;
 
-    let records =
-        received_payment_request_records(&storage, &counterparty, &receiver_path(), timestamp())
-            .await
-            .unwrap();
+    let records = received_payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
 
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].payment_request_id, newer_request_id);

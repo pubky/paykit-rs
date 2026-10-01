@@ -4,7 +4,7 @@ use serde_json::Value as JsonValue;
 use crate::{
     shared_wire::{deserialize_optional_no_null, RequiredNullable},
     validation::{invalid_plaintext_json, validate_wire_version_kind},
-    EventId, PaykitError, PaymentEndpointIdentifier, PrivateMessageKind, Result,
+    EventId, PaykitAppId, PaykitError, PaymentEndpointIdentifier, PrivateMessageKind, Result,
 };
 
 use super::types::{
@@ -64,6 +64,7 @@ struct TermsWire {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProposalWire {
+    app_id: PaykitAppId,
     version: u8,
     kind: String,
     event_id: String,
@@ -75,6 +76,7 @@ struct ProposalWire {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResponseWire {
+    app_id: PaykitAppId,
     version: u8,
     kind: String,
     event_id: String,
@@ -85,6 +87,7 @@ struct ResponseWire {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EndWire {
+    app_id: PaykitAppId,
     version: u8,
     kind: String,
     event_id: String,
@@ -231,9 +234,10 @@ impl From<&AllowanceTerms> for TermsWire {
     }
 }
 
-impl From<&AllowanceProposal> for ProposalWire {
-    fn from(event: &AllowanceProposal) -> Self {
+impl From<(&PaykitAppId, &AllowanceProposal)> for ProposalWire {
+    fn from((app_id, event): (&PaykitAppId, &AllowanceProposal)) -> Self {
         Self {
+            app_id: app_id.clone(),
             version: event.version(),
             kind: event.kind().as_str().to_string(),
             event_id: event.event_id().as_str().to_string(),
@@ -265,6 +269,7 @@ impl TryFrom<ProposalWire> for AllowanceProposal {
 
 impl ResponseWire {
     fn from_parts(
+        app_id: &PaykitAppId,
         version: u8,
         kind: PrivateMessageKind,
         event_id: &EventId,
@@ -272,6 +277,7 @@ impl ResponseWire {
         proposal_event_id: &EventId,
     ) -> Self {
         Self {
+            app_id: app_id.clone(),
             version,
             kind: kind.as_str().to_string(),
             event_id: event_id.as_str().to_string(),
@@ -281,9 +287,10 @@ impl ResponseWire {
     }
 }
 
-impl From<&AllowanceAcceptance> for ResponseWire {
-    fn from(event: &AllowanceAcceptance) -> Self {
+impl From<(&PaykitAppId, &AllowanceAcceptance)> for ResponseWire {
+    fn from((app_id, event): (&PaykitAppId, &AllowanceAcceptance)) -> Self {
         Self::from_parts(
+            app_id,
             event.version(),
             event.kind(),
             event.event_id(),
@@ -293,9 +300,10 @@ impl From<&AllowanceAcceptance> for ResponseWire {
     }
 }
 
-impl From<&AllowanceRejection> for ResponseWire {
-    fn from(event: &AllowanceRejection) -> Self {
+impl From<(&PaykitAppId, &AllowanceRejection)> for ResponseWire {
+    fn from((app_id, event): (&PaykitAppId, &AllowanceRejection)) -> Self {
         Self::from_parts(
+            app_id,
             event.version(),
             event.kind(),
             event.event_id(),
@@ -305,9 +313,10 @@ impl From<&AllowanceRejection> for ResponseWire {
     }
 }
 
-impl From<&AllowanceEnd> for EndWire {
-    fn from(event: &AllowanceEnd) -> Self {
+impl From<(&PaykitAppId, &AllowanceEnd)> for EndWire {
+    fn from((app_id, event): (&PaykitAppId, &AllowanceEnd)) -> Self {
         Self {
+            app_id: app_id.clone(),
             version: event.version(),
             kind: event.kind().as_str().to_string(),
             event_id: event.event_id().as_str().to_string(),
@@ -359,29 +368,41 @@ pub(super) fn parse_allowance_json(
     )
 }
 
-pub(super) fn serialize_allowance_json(event: &AllowanceEvent) -> Result<String> {
+pub(super) fn serialize_allowance_json(
+    app_id: &PaykitAppId,
+    event: &AllowanceEvent,
+) -> Result<String> {
     match event {
-        AllowanceEvent::Proposal(event) => serialize_proposal_json(event),
-        AllowanceEvent::Acceptance(event) => serialize_acceptance_json(event),
-        AllowanceEvent::Rejection(event) => serialize_rejection_json(event),
-        AllowanceEvent::End(event) => serialize_end_json(event),
+        AllowanceEvent::Proposal(event) => serialize_proposal_json(app_id, event),
+        AllowanceEvent::Acceptance(event) => serialize_acceptance_json(app_id, event),
+        AllowanceEvent::Rejection(event) => serialize_rejection_json(app_id, event),
+        AllowanceEvent::End(event) => serialize_end_json(app_id, event),
     }
 }
 
-pub(super) fn serialize_proposal_json(event: &AllowanceProposal) -> Result<String> {
-    serialize_wire_json(&ProposalWire::from(event))
+pub(super) fn serialize_proposal_json(
+    app_id: &PaykitAppId,
+    event: &AllowanceProposal,
+) -> Result<String> {
+    serialize_wire_json(&ProposalWire::from((app_id, event)))
 }
 
-pub(super) fn serialize_acceptance_json(event: &AllowanceAcceptance) -> Result<String> {
-    serialize_wire_json(&ResponseWire::from(event))
+pub(super) fn serialize_acceptance_json(
+    app_id: &PaykitAppId,
+    event: &AllowanceAcceptance,
+) -> Result<String> {
+    serialize_wire_json(&ResponseWire::from((app_id, event)))
 }
 
-pub(super) fn serialize_rejection_json(event: &AllowanceRejection) -> Result<String> {
-    serialize_wire_json(&ResponseWire::from(event))
+pub(super) fn serialize_rejection_json(
+    app_id: &PaykitAppId,
+    event: &AllowanceRejection,
+) -> Result<String> {
+    serialize_wire_json(&ResponseWire::from((app_id, event)))
 }
 
-pub(super) fn serialize_end_json(event: &AllowanceEnd) -> Result<String> {
-    serialize_wire_json(&EndWire::from(event))
+pub(super) fn serialize_end_json(app_id: &PaykitAppId, event: &AllowanceEnd) -> Result<String> {
+    serialize_wire_json(&EndWire::from((app_id, event)))
 }
 
 /// Serialize a wire shape to compact JSON, rejecting a message larger than the
@@ -577,6 +598,8 @@ mod tests {
 
     fn assert_malformed_proposal_preserves_correlation(raw_json: String) {
         let message = crate::PrivateApplicationMessage {
+            app_id: Some("bitkit".into()),
+
             version: Some(1),
             kind: Some(PrivateMessageKind::AllowanceProposal.as_str().into()),
             raw_json,
@@ -592,8 +615,14 @@ mod tests {
 
     #[test]
     fn test_allowance_proposal_rejects_positional_object_arrays() {
-        let original: JsonValue =
-            serde_json::from_str(&serialize_allowance_json(&full_proposal()).unwrap()).unwrap();
+        let original: JsonValue = serde_json::from_str(
+            &serialize_allowance_json(
+                &crate::PaykitAppId::new("bitkit").unwrap(),
+                &full_proposal(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         for (pointer, array) in [
             (
                 "/terms",
@@ -627,7 +656,11 @@ mod tests {
 
     #[test]
     fn test_allowance_proposal_preserves_duplicate_member_rejection() {
-        let compact = serialize_allowance_json(&full_proposal()).unwrap();
+        let compact = serialize_allowance_json(
+            &crate::PaykitAppId::new("bitkit").unwrap(),
+            &full_proposal(),
+        )
+        .unwrap();
         let original: JsonValue = serde_json::from_str(&compact).unwrap();
         for (pointer, field, different) in [
             ("", "proposer_role", serde_json::json!("allowee")),
@@ -662,8 +695,14 @@ mod tests {
 
     #[test]
     fn test_allowance_proposal_keeps_nullable_ranges_and_collection_arrays() {
-        let mut value: JsonValue =
-            serde_json::from_str(&serialize_allowance_json(&full_proposal()).unwrap()).unwrap();
+        let mut value: JsonValue = serde_json::from_str(
+            &serialize_allowance_json(
+                &crate::PaykitAppId::new("bitkit").unwrap(),
+                &full_proposal(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         value["terms"]["per_payment_amount"] = JsonValue::Null;
         value["terms"]["period_limits"] = serde_json::json!([]);
         assert!(parse_proposal_json(&value.to_string()).is_ok());
@@ -716,15 +755,35 @@ mod tests {
         ];
 
         for event in events {
-            let json = serialize_allowance_json(&event).unwrap();
+            let json =
+                serialize_allowance_json(&crate::PaykitAppId::new("bitkit").unwrap(), &event)
+                    .unwrap();
             let parsed = parse_json(event.kind(), &json).unwrap();
             assert_eq!(parsed, event);
+            let value: JsonValue = serde_json::from_str(&json).unwrap();
+            assert_eq!(value["app_id"], "bitkit");
+            for invalid_app in [
+                JsonValue::Null,
+                JsonValue::from("../other"),
+                JsonValue::from(""),
+            ] {
+                let mut invalid = value.clone();
+                invalid["app_id"] = invalid_app;
+                assert!(parse_json(event.kind(), &invalid.to_string()).is_err());
+            }
+            let mut missing = value;
+            missing.as_object_mut().unwrap().remove("app_id");
+            assert!(parse_json(event.kind(), &missing.to_string()).is_err());
         }
     }
 
     #[test]
     fn test_noncompact_json_parses_and_required_closed_fields_are_enforced() {
-        let compact = serialize_allowance_json(&full_proposal()).unwrap();
+        let compact = serialize_allowance_json(
+            &crate::PaykitAppId::new("bitkit").unwrap(),
+            &full_proposal(),
+        )
+        .unwrap();
         let value: JsonValue = serde_json::from_str(&compact).unwrap();
         let pretty = serde_json::to_string_pretty(&value).unwrap();
         assert_eq!(parse_proposal_json(&pretty).unwrap(), full_proposal());
@@ -788,8 +847,10 @@ mod tests {
             )
             .unwrap(),
         );
-        let mut end_value: JsonValue =
-            serde_json::from_str(&serialize_allowance_json(&end).unwrap()).unwrap();
+        let mut end_value: JsonValue = serde_json::from_str(
+            &serialize_allowance_json(&crate::PaykitAppId::new("bitkit").unwrap(), &end).unwrap(),
+        )
+        .unwrap();
         end_value
             .as_object_mut()
             .unwrap()
@@ -803,7 +864,11 @@ mod tests {
 
     #[test]
     fn test_wire_rejects_noncanonical_uuid_spelling() {
-        let json = serialize_allowance_json(&full_proposal()).unwrap();
+        let json = serialize_allowance_json(
+            &crate::PaykitAppId::new("bitkit").unwrap(),
+            &full_proposal(),
+        )
+        .unwrap();
         let uppercase = json.replace(EVENT_ID, &EVENT_ID.to_uppercase());
         assert!(parse_proposal_json(&uppercase).is_err());
         let simple = json.replace(EVENT_ID, &EVENT_ID.replace('-', ""));
@@ -822,7 +887,9 @@ mod tests {
             )
             .unwrap(),
         );
-        let json = serialize_allowance_json(&acceptance).unwrap();
+        let json =
+            serialize_allowance_json(&crate::PaykitAppId::new("bitkit").unwrap(), &acceptance)
+                .unwrap();
 
         // JSON kind says acceptance but the message was routed as a rejection.
         assert!(parse_json(PrivateMessageKind::AllowanceRejection, &json).is_err());
@@ -872,8 +939,11 @@ mod tests {
                 .unwrap(),
             ),
         ] {
-            let mut value: JsonValue =
-                serde_json::from_str(&serialize_allowance_json(&event).unwrap()).unwrap();
+            let mut value: JsonValue = serde_json::from_str(
+                &serialize_allowance_json(&crate::PaykitAppId::new("bitkit").unwrap(), &event)
+                    .unwrap(),
+            )
+            .unwrap();
             value["event_id"] = value["proposal_event_id"].clone();
             assert!(matches!(
                 parse_json(event.kind(), &serde_json::to_string(&value).unwrap()),
@@ -890,8 +960,11 @@ mod tests {
             )
             .unwrap(),
         );
-        let accepted_value: JsonValue =
-            serde_json::from_str(&serialize_allowance_json(&accepted_end).unwrap()).unwrap();
+        let accepted_value: JsonValue = serde_json::from_str(
+            &serialize_allowance_json(&crate::PaykitAppId::new("bitkit").unwrap(), &accepted_end)
+                .unwrap(),
+        )
+        .unwrap();
         for (target, source) in [
             ("event_id", "proposal_event_id"),
             ("event_id", "acceptance_event_id"),
@@ -911,7 +984,11 @@ mod tests {
 
     #[test]
     fn test_wire_rejects_invalid_term_boundaries() {
-        let json = serialize_allowance_json(&full_proposal()).unwrap();
+        let json = serialize_allowance_json(
+            &crate::PaykitAppId::new("bitkit").unwrap(),
+            &full_proposal(),
+        )
+        .unwrap();
         let value: JsonValue = serde_json::from_str(&json).unwrap();
 
         let mut reversed_range = value.clone();
@@ -955,7 +1032,11 @@ mod tests {
 
     #[test]
     fn test_wire_requires_amount_ceiling_or_expiry() {
-        let raw = serialize_allowance_json(&full_proposal()).unwrap();
+        let raw = serialize_allowance_json(
+            &crate::PaykitAppId::new("bitkit").unwrap(),
+            &full_proposal(),
+        )
+        .unwrap();
         let mut proposal: JsonValue = serde_json::from_str(&raw).unwrap();
         proposal["terms"] = serde_json::json!({
             "asset": "btc",
@@ -1001,7 +1082,8 @@ mod tests {
                 .build()
                 .unwrap();
             let event = AllowanceEvent::Proposal(proposal_with_terms(terms));
-            let raw = serialize_allowance_json(&event).unwrap();
+            let raw = serialize_allowance_json(&crate::PaykitAppId::new("bitkit").unwrap(), &event)
+                .unwrap();
             assert_eq!(parse_proposal_json(&raw).unwrap(), event);
         }
 
@@ -1026,12 +1108,17 @@ mod tests {
             )
         }
         fn unbounded_json(proposal: &AllowanceProposal) -> String {
-            serialize_wire_json_unbounded(&ProposalWire::from(proposal)).unwrap()
+            serialize_wire_json_unbounded(&ProposalWire::from((
+                &crate::PaykitAppId::new("bitkit").unwrap(),
+                proposal,
+            )))
+            .unwrap()
         }
 
         let base = unbounded_json(&proposal_with_lifetime_digits(1));
         let exact = proposal_with_lifetime_digits(1 + ALLOWANCE_V1_MESSAGE_MAX_LEN - base.len());
-        let exact_json = serialize_proposal_json(&exact).unwrap();
+        let exact_json =
+            serialize_proposal_json(&crate::PaykitAppId::new("bitkit").unwrap(), &exact).unwrap();
         assert_eq!(exact_json.len(), ALLOWANCE_V1_MESSAGE_MAX_LEN);
         assert!(parse_proposal_json(&exact_json).is_ok());
 
@@ -1039,7 +1126,10 @@ mod tests {
             proposal_with_lifetime_digits(2 + ALLOWANCE_V1_MESSAGE_MAX_LEN - base.len());
         let raw = unbounded_json(&too_large);
         assert_eq!(raw.len(), ALLOWANCE_V1_MESSAGE_MAX_LEN + 1);
-        assert!(serialize_proposal_json(&too_large).is_err());
+        assert!(
+            serialize_proposal_json(&crate::PaykitAppId::new("bitkit").unwrap(), &too_large)
+                .is_err()
+        );
         assert!(parse_proposal_json(&raw).is_err());
 
         let multibyte = proposal_with_terms(
@@ -1051,7 +1141,10 @@ mod tests {
         let multibyte_raw = unbounded_json(&multibyte);
         assert!(multibyte_raw.chars().count() <= ALLOWANCE_V1_MESSAGE_MAX_LEN);
         assert!(multibyte_raw.len() > ALLOWANCE_V1_MESSAGE_MAX_LEN);
-        assert!(serialize_proposal_json(&multibyte).is_err());
+        assert!(
+            serialize_proposal_json(&crate::PaykitAppId::new("bitkit").unwrap(), &multibyte)
+                .is_err()
+        );
         assert!(parse_proposal_json(&multibyte_raw).is_err());
     }
 

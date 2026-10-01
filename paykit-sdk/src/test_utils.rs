@@ -3,9 +3,15 @@ use paykit_lib::{serialize_allowance_event, AllowanceEvent, PrivateApplicationMe
 /// Wrap a typed Allowance event as the private message its intake would see.
 pub(crate) fn allowance_application_message(event: &AllowanceEvent) -> PrivateApplicationMessage {
     PrivateApplicationMessage {
+        app_id: Some("bitkit".into()),
+
         version: Some(1),
         kind: Some(event.kind().as_str().to_owned()),
-        raw_json: serialize_allowance_event(event).unwrap(),
+        raw_json: serialize_allowance_event(
+            &paykit_lib::PaykitAppId::new("bitkit").unwrap(),
+            event,
+        )
+        .unwrap(),
     }
 }
 
@@ -30,7 +36,7 @@ pub(crate) const ALLOWANCE_EVENT_FIXTURES: [(&str, &str); 4] = [
 
 pub(crate) fn allowance_event_json(kind: &str, event_id: &str) -> String {
     let common = format!(
-        r#""version":1,"kind":"{kind}","event_id":"{event_id}","allowance_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44""#
+        r#""version":1,"app_id":"bitkit","kind":"{kind}","event_id":"{event_id}","allowance_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44""#
     );
     match kind {
         "paykit.allowance_proposal" => format!(
@@ -50,20 +56,17 @@ pub(crate) fn allowance_event_json(kind: &str, event_id: &str) -> String {
 ///
 /// Its Event ID does not collide with [`ALLOWANCE_EVENT_FIXTURES`].
 pub(crate) fn malformed_allowance_event_json() -> String {
-    r#"{"version":1,"kind":"paykit.allowance_acceptance","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d205","allowance_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44"}"#
+    r#"{"version":1,"app_id":"bitkit","kind":"paykit.allowance_acceptance","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d205","allowance_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44"}"#
         .into()
 }
 
-/// Receipt Access with a valid location under the supplied receiver path.
-pub(crate) fn receipt_access_json(
-    event_id: &str,
-    receiver: &paykit_lib::PaykitReceiverPath,
-) -> String {
+/// Receipt Access with a valid identity-wide location.
+pub(crate) fn receipt_access_json(event_id: &str) -> String {
     let receipt_id = paykit_lib::ReceiptId::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
     serde_json::json!({
-        "version": 1, "kind": "paykit.receipt_access", "event_id": event_id,
+        "version": 1, "app_id": "bitkit", "kind": "paykit.receipt_access", "event_id": event_id,
         "receipt_id": receipt_id.as_str(), "payment_reference": "invoice-test",
-        "location": paykit_lib::ReceiptAccess::location(receiver, &receipt_id),
+        "location": paykit_lib::ReceiptAccess::location_for(&receipt_id),
         "key": paykit_lib::ReceiptDecryptionKey::generate().as_str(),
     })
     .to_string()
