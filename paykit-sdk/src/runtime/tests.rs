@@ -88,6 +88,10 @@ impl PubkySessionProvider for FailingPublicStorageProvider {
         Ok(None)
     }
 
+    #[allow(
+        deprecated,
+        reason = "AtomicUsize::try_update requires Rust 1.99, above our MSRV"
+    )]
     async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
         if self
             .successful_loads
