@@ -54,7 +54,7 @@ async fn test_remote_recovery_marker_observation_rejects_active_peer_lease() {
         )
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
+    assert!(result.unwrap_err().is_concurrent_update());
     let peer = crate::load_linked_peer(&storage, &counterparty)
         .await
         .unwrap()
@@ -334,7 +334,7 @@ async fn test_remote_recovery_marker_observation_rejects_active_handshake_lease(
         .await
         .unwrap_err();
 
-    assert!(matches!(error, PaykitSdkError::Policy { .. }));
+    assert!(error.is_concurrent_update());
     let peer = crate::load_linked_peer(&storage, &counterparty)
         .await
         .unwrap()

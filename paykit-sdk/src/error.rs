@@ -6,7 +6,7 @@ use thiserror::Error;
 #[derive(Error)]
 #[non_exhaustive]
 pub enum PaykitSdkError {
-    /// Another authorized client committed a newer shared-state revision.
+    /// Another client owns the peer operation or changed shared state.
     #[error("concurrent update: {context}")]
     ConcurrentUpdate {
         /// Human-readable retry context.
@@ -144,7 +144,7 @@ impl fmt::Debug for PaykitSdkError {
 }
 
 impl PaykitSdkError {
-    /// Return whether retrying after reloading shared state is appropriate.
+    /// Return whether retrying from current shared state after contention is appropriate.
     pub fn is_concurrent_update(&self) -> bool {
         matches!(self, Self::ConcurrentUpdate { .. })
     }

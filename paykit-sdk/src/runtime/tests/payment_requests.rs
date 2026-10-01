@@ -167,17 +167,18 @@ async fn test_operation_leases_start_when_storage_callback_runs() {
         assert_eq!(claimed_at, resumed_at);
         assert_eq!(expires_at, resumed_at + ChronoDuration::seconds(60));
 
-        let competing_claim = if let Some(counterparty) = counterparty {
-            sdk.claim_peer_link_operation(&counterparty)
+        if let Some(counterparty) = counterparty {
+            assert!(sdk
+                .claim_peer_link_operation(&counterparty)
                 .await
-                .map(|_| ())
+                .unwrap_err()
+                .is_concurrent_update());
         } else {
-            sdk.claim_paykit_app_operation().await.map(|_| ())
-        };
-        assert!(matches!(
-            competing_claim,
-            Err(PaykitSdkError::Policy { .. })
-        ));
+            assert!(matches!(
+                sdk.claim_paykit_app_operation().await,
+                Err(PaykitSdkError::Policy { .. })
+            ));
+        }
     }
 }
 

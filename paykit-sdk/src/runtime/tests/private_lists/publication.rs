@@ -227,7 +227,7 @@ async fn test_reservation_enqueue_does_not_cancel_when_peer_lease_is_busy() {
         )
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
+    assert!(result.unwrap_err().is_concurrent_update());
     assert!(canceled.lock().unwrap().is_empty());
 }
 
@@ -356,7 +356,7 @@ async fn test_enqueue_private_payment_list_waits_for_peer_operation_lease() {
         .enqueue_private_payment_list_from_receiving_details(counterparty)
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
+    assert!(result.unwrap_err().is_concurrent_update());
 }
 
 #[tokio::test]

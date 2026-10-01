@@ -483,11 +483,7 @@ async fn test_handshake_advancement_checks_peer_state_after_claiming_lease() {
         .sdk
         .advance_link_handshake(counterparty.clone())
         .await;
-    assert!(
-        matches!(result, Err(PaykitSdkError::Policy { ref context, .. })
-            if context.contains("peer link operation already in progress")),
-        "another app's recovery must be reported as contention: {result:?}"
-    );
+    assert!(result.unwrap_err().is_concurrent_update());
     pair.bitkit
         .storage
         .transaction(|tx| {
@@ -550,11 +546,7 @@ async fn test_private_receive_checks_peer_state_after_claiming_lease() {
         .sdk
         .receive_private_messages(counterparty.clone())
         .await;
-    assert!(
-        matches!(result, Err(PaykitSdkError::Policy { ref context, .. })
-            if context.contains("peer link operation already in progress")),
-        "another app's handshake must be reported as contention: {result:?}"
-    );
+    assert!(result.unwrap_err().is_concurrent_update());
     pair.bitkit
         .storage
         .transaction(|tx| {

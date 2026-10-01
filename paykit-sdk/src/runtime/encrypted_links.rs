@@ -821,7 +821,7 @@ where
             }
         })
         .await?
-        .ok_or_else(|| PaykitSdkError::Policy {
+        .ok_or_else(|| PaykitSdkError::ConcurrentUpdate {
             context: format!(
                 "peer link operation already in progress for counterparty {counterparty}"
             ),

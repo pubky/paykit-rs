@@ -1,6 +1,38 @@
 use super::*;
 
 #[tokio::test]
+async fn test_peer_operation_contention_preserves_lease_until_release() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("bitkit").unwrap(),
+        FixedClock,
+    );
+    let lease = sdk.claim_peer_link_operation(&counterparty).await.unwrap();
+    assert!(sdk
+        .claim_peer_link_operation(&counterparty)
+        .await
+        .unwrap_err()
+        .is_concurrent_update());
+    storage
+        .transaction(|tx| {
+            assert_eq!(
+                tx.peer_link_operation_lease(&counterparty),
+                Some(lease.clone())
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    sdk.release_peer_link_operation(&lease).await.unwrap();
+    let next = sdk.claim_peer_link_operation(&counterparty).await.unwrap();
+    assert_ne!(lease.lease_id, next.lease_id);
+}
+
+#[tokio::test]
 async fn test_peer_lease_cleanup_preserves_operation_result() {
     struct FailingCleanupStorage;
     #[async_trait]

@@ -724,6 +724,7 @@ where
                 )?))
             }
             Err(PaykitSdkError::Policy { .. })
+            | Err(PaykitSdkError::ConcurrentUpdate { .. })
             | Err(PaykitSdkError::RecoveryRequired { .. })
             | Err(PaykitSdkError::Transport { .. })
             | Err(PaykitSdkError::Protocol { .. }) => Ok(PrivateRecoveryOutcome::Pending),

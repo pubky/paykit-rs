@@ -545,7 +545,8 @@ where
                         Ok(failed)
                     }
                 })
-                .await?;
+                .await
+                .map_err(|_| PaykitSdkError::from(err))?;
             report.failed.push(OutboundPrivateSendFailure {
                 outbound_message_id: failed.outbound_message_id,
                 error,
@@ -562,7 +563,10 @@ where
         }
 
         let failed = mark_outbound_failed(sending, error.clone(), now);
-        let failed = self.save_outbound_with_lease(failed, lease).await?;
+        let failed = self
+            .save_outbound_with_lease(failed, lease)
+            .await
+            .map_err(|_| PaykitSdkError::from(err))?;
         report.failed.push(OutboundPrivateSendFailure {
             outbound_message_id: failed.outbound_message_id,
             error,

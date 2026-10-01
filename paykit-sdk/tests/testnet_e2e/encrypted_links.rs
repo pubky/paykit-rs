@@ -76,6 +76,212 @@ async fn test_link_handshake_two_party_reaches_linked() {
 }
 
 #[tokio::test]
+async fn test_private_send_preserves_failure_when_recording_contends() {
+    use paykit_sdk::{storage::PreparedOutboundPrivateSend, OutboundPrivateMessageStatus};
+
+    struct ContendedFailureStorage {
+        inner: InMemoryStorage,
+        rejected: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl StorageAdapter for ContendedFailureStorage {
+        async fn transaction_erased<'a>(
+            &self,
+            f: StorageTransactionCallback<'a>,
+        ) -> Result<Box<dyn Any + Send>> {
+            self.inner
+                .transaction_erased(Box::new(|tx| {
+                    let result = f(tx)?;
+                    if tx
+                        .export_storage_state()
+                        .outbound_private_messages
+                        .iter()
+                        .any(|message| {
+                            matches!(
+                                message.status,
+                                OutboundPrivateMessageStatus::Failed
+                                    | OutboundPrivateMessageStatus::RecoveryRequired
+                            )
+                        })
+                    {
+                        self.rejected.fetch_add(1, Ordering::SeqCst);
+                        return Err(PaykitSdkError::ConcurrentUpdate {
+                            context: "failure-recording write contended".into(),
+                            source: None,
+                        });
+                    }
+                    Ok(result)
+                }))
+                .await
+        }
+    }
+
+    let pair = linked_two_party().await;
+    pair.alice
+        .sdk
+        .clear_private_payment_list(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    let queued = pair.alice.storage.snapshot().unwrap();
+    let provider = TestnetSessionProvider::with_session_secret(
+        pair.alice.access.clone(),
+        pair.alice.session_secret.clone(),
+    );
+    // Keep the cached access so publication reaches the revoked test grant.
+    provider
+        .revoke_session_access(&pair.alice.access)
+        .await
+        .unwrap();
+
+    for malformed_packet in [false, true] {
+        let mut state = queued.clone();
+        if malformed_packet {
+            state.outbound_private_messages[0].prepared_send = Some(PreparedOutboundPrivateSend {
+                destination_path: "/not-this-link/0".into(),
+                ciphertext: Vec::new(),
+            });
+        }
+        let storage = InMemoryStorage::from_state(state);
+        let rejected = Arc::new(AtomicUsize::new(0));
+        let sdk = PaykitSdk::new(
+            ContendedFailureStorage {
+                inner: storage,
+                rejected: rejected.clone(),
+            },
+            provider.clone(),
+            pair.alice.adapter.clone(),
+            PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+        );
+        let error = sdk
+            .process_outbound_private_messages(pair.bob.public_key.clone())
+            .await
+            .unwrap_err();
+
+        assert!(
+            rejected.load(Ordering::SeqCst) > 0,
+            "failure recording must be reached"
+        );
+        assert!(
+            !error.is_concurrent_update(),
+            "send failure was hidden: {error:?}"
+        );
+        if malformed_packet {
+            assert!(
+                matches!(error, PaykitSdkError::Protocol { .. }),
+                "{error:?}"
+            );
+        } else {
+            assert!(
+                matches!(error, PaykitSdkError::Transport { .. }),
+                "{error:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_private_resolution_pending_retries_after_receive_contention() {
+    use paykit_sdk::{PrivatePaymentResolutionState, PrivatePaymentResolutionStatus};
+
+    struct CompetingReceiverStorage {
+        inner: InMemoryStorage,
+        counterparty: PubkyPublicKey,
+        observations: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl StorageAdapter for CompetingReceiverStorage {
+        async fn transaction_erased<'a>(
+            &self,
+            f: StorageTransactionCallback<'a>,
+        ) -> Result<Box<dyn Any + Send>> {
+            self.inner
+                .transaction_erased(Box::new(|tx| {
+                    let before = tx.peer_link_operation_lease(&self.counterparty);
+                    let result = f(tx)?;
+                    if before.is_some()
+                        && tx.peer_link_operation_lease(&self.counterparty).is_none()
+                        && self.observations.fetch_add(1, Ordering::SeqCst) == 1
+                    {
+                        // Resolution observes recovery markers twice before receiving.
+                        let now = chrono::Utc::now();
+                        assert!(tx
+                            .claim_peer_link_operation(
+                                &self.counterparty,
+                                now,
+                                now + chrono::Duration::minutes(1),
+                            )?
+                            .is_some());
+                    }
+                    Ok(result)
+                }))
+                .await
+        }
+    }
+
+    let pair = linked_two_party().await;
+    pair.bob
+        .adapter
+        .set_private_details(vec![crate::harness::private_receiving_detail(
+            "btc-lightning-bolt11",
+            "ln-private-bob",
+        )]);
+    pair.bob
+        .sdk
+        .enqueue_private_payment_list(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    pair.bob
+        .sdk
+        .process_outbound_private_messages(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::new(
+        CompetingReceiverStorage {
+            inner: pair.alice.storage.clone(),
+            counterparty: pair.bob.public_key.clone(),
+            observations: AtomicUsize::new(0),
+        },
+        TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    );
+    let pending = sdk
+        .resolve_private_contact_payment(pair.bob.public_key.clone(), None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        pending.state,
+        PrivatePaymentResolutionState::RecoveryPending
+    );
+    assert!(pending.payable_endpoints.is_empty());
+    pair.alice
+        .storage
+        .transaction(|tx| {
+            let lease = tx.peer_link_operation_lease(&pair.bob.public_key).unwrap();
+            assert_eq!(
+                tx.linked_peer(&pair.bob.public_key).unwrap().state,
+                LinkedPeerState::Linked
+            );
+            tx.release_peer_link_operation(&pair.bob.public_key, lease.lease_id);
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let retried = sdk
+        .resolve_private_contact_payment(pair.bob.public_key.clone(), None, None)
+        .await
+        .unwrap();
+    assert_eq!(retried.status, PrivatePaymentResolutionStatus::Payable);
+    assert_eq!(
+        retried.payable_endpoints[0].target.payload,
+        "ln-private-bob"
+    );
+}
+
+#[tokio::test]
 async fn test_advance_link_handshake_without_started_handshake_fails() {
     let testnet = build_testnet().await;
     let user = TestUser::sign_up(&testnet).await;
