@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::{collections::HashMap, fmt, sync::Arc};
 
 use paykit_lib::PaymentReference;
 use paykit_sdk::PaymentProofSubmission;
@@ -157,6 +157,9 @@ pub struct FfiPaymentRequestTerms {
     pub recurrence: Option<FfiPaymentRequestRecurrence>,
     /// Accepted Payment Endpoint Identifier strings.
     pub accepted_payment_endpoint_identifiers: Vec<String>,
+    /// Immutable request-bound Payment Endpoints owned by `required_app_id`.
+    /// When present, payment must not fall back outside this nonempty map.
+    pub payment_endpoints: Option<HashMap<String, String>>,
     /// Application that must handle this payment, when constrained.
     pub required_app_id: Option<String>,
     /// Optional immutable conversion policy.
@@ -179,6 +182,10 @@ impl fmt::Debug for FfiPaymentRequestTerms {
                 &self.accepted_payment_endpoint_identifiers,
             )
             .field("required_app_id", &self.required_app_id)
+            .field(
+                "payment_endpoints",
+                &self.payment_endpoints.as_ref().map(|_| "<redacted>"),
+            )
             .field("metadata", &self.metadata)
             .finish()
     }

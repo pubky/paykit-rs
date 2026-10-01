@@ -53,6 +53,7 @@ fn test_app_removal_does_not_claim_unanswered_identity_request() {
         PaymentRequestLifecycleState::Proposed,
     );
     request.terms = Some(PaymentRequestTermsRecord {
+        payment_endpoints: None,
         payment_deadline: None,
 
         conversion: None,
