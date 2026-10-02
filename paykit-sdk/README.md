@@ -396,11 +396,13 @@ recovery as pending. This can also block reads, and there is no fixed completion
 deadline. The cooldown adds no timed delay to normal successful writes,
 but cannot rule out a write completing after five
 minutes and does not replace the homeserver fix.
-Explicit PUT rejections for rate limiting (429) or storage quota (507) clear
-that attempt's pending marker without a cooldown, provided cleanup succeeds.
+Explicit PUT rejections for lock expiry (412), rate limiting (429), or storage
+quota (507) clear that attempt's pending marker without a cooldown, provided
+cleanup succeeds.
 Rate-limit errors remain transport errors; callers should back off before
-resuming from freshly loaded state. Timeouts and 5xx errors other than 507
-keep the pending marker because publication is uncertain.
+resuming from freshly loaded state. Any other failure, including timeouts,
+connection errors, and other 4xx/5xx responses, keeps the pending marker because
+publication is uncertain.
 Malformed pending markers block shared state instead of being ignored or
 deleted automatically. Investigate them with participating apps stopped before
 removing anything that could represent an unfinished write.
