@@ -57,12 +57,14 @@ load the native UniFFI library just to format keys.
   callbacks.
 - `paykitAppRegistry` — fetch an identity's public Paykit App Registry.
 - `paykitAuthorizerSessionCapabilities` — capability string for identity
-  authorizers; ordinary apps keep `/pub/paykit/:rw`.
+  authorizers: `/pub/paykit/:rw,/pub/paykit-authority/v0/current-key.json:rw`.
+  Ordinary apps keep `/pub/paykit/:rw`, without authority-path write access.
 - `publishPaykitNoiseKeyAuthorization` — sign and publish the active Noise key
   before private app publication or delegation. Requires the local Pubky secret
   and separate authority-path write access.
-- `paykitNoiseKeyAuthorization` — fetch and verify an identity's current Noise
-  key and generation. Registry key fields alone are not proof of authorization.
+- `paykitNoiseKeyAuthorization` — fetch and verify an identity's current signed
+  routing key, X25519 static key (`noiseStaticPublicKey`), and generation without
+  updating peer pins. Registry key fields are unsigned discovery metadata.
 - `publishPaykitApp` — publish this app's registry entry before endpoint sync.
 - `rotatePaykitIdentityKey` — re-encrypt shared state with the next Paykit key
   generation and require fresh Encrypted Links while preserving durable history.
@@ -98,6 +100,11 @@ Paykit-side workflow.
 - `PaykitSdk.*EncryptedLinkRecoveryMarker*` methods — inspect, publish,
   observe, and remove recovery markers. Active links retain their markers;
   explicit removal requires a blocked peer.
+
+The SDK checks signed local/peer routing and static keys, retains peer generation
+pins in shared state and backups, and fails closed without an unsigned registry
+fallback. See [Establish Encrypted Link](../specs/paykit-sdk.md#establish-encrypted-link)
+for setup, restore, and send/receive checks.
 
 Private operation errors expose stable category/code fields and redacted
 context. Raw diagnostic details require an explicit debug export method.
@@ -279,9 +286,9 @@ and per-Allowance watermarks. Treat every record and value accessed through
 native record descriptions are redacted. Explicitly accessed fields remain
 private data and must not be logged.
 
-The unreleased state and backup blob formats remain version 1 and may evolve
-directly during development. Previous development data is unsupported; no migration
-is provided. Decode failure never falls back to empty state. The platform
+The current state and backup blob formats remain version 1; see
+[supported persisted formats](../specs/paykit-sdk.md#backup-and-restore).
+Decode failure never falls back to empty state. The platform
 `saveStateBlobAtomically` callback must durably save the whole blob and enforce
 its expected revision before acknowledging success.
 Preserve opaque blobs with caller-managed encryption in storage and backups.
@@ -439,8 +446,9 @@ identity's key-management layer; a root-key holder can derive it for that
 generation.
 
 Persist the replacement key before calling `rotatePaykitIdentityKey`. If the
-call fails or is interrupted, retry with the same replacement: shared state may
-already use it even if the registry update has not completed.
+call fails or is interrupted, retry with the same current and replacement keys:
+shared state may already use the replacement even if the registry update or
+replacement authorization publication has not completed.
 
 `PaykitSdk.exportBackupString` and `restoreBackupString` are text-form
 wrappers for platforms that prefer a single encoded SDK backup string.
@@ -500,6 +508,9 @@ callback storage, `PublicOnly` permits public workflows and
 `PrivateLinkCapable` also permits Encrypted Link workflows. Pubky shared-state
 storage requires `PrivateLinkCapable` access because decrypting state requires
 the Paykit identity secret.
+
+`PrivateLinkCapable` reports key/session availability, not signed authorization;
+private setup also requires `publishPaykitNoiseKeyAuthorization` as described above.
 
 When callback storage is selected, `SdkStateBlobStore` must persist every blob
 save atomically. Every runtime for the same Pubky identity must resolve to the
@@ -626,17 +637,18 @@ sdk.restoreBackupString(backupText)
 Normal restore requires an otherwise empty SDK state backing. This prevents an older
 app backup from replacing newer state written by another app sharing the same
 identity. After restore, participating apps publish their App Registry entries
-again before creating new app-attributed work.
+again before creating new app-attributed work. Restored links retain peer pins
+and require the [signed-key checks](../specs/paykit-sdk.md#establish-encrypted-link).
 
 For missing or corrupt Pubky shared state, use
-`recoverSharedStateFromBackup(backupBlob, replacementKey)` with the current key
-and its successor. Persist the replacement key first and distribute it after
-success. Recovery preserves backup history, discards old Noise checkpoints and
-prepared sends, and requires relinking and wallet reconciliation. It rejects
-healthy state, unreadable generation headers, and unknown generations. Retry
-failures with the same keys and backup; valid already-recovered state is preserved.
-Corrupt replacement-generation state is rejected, not overwritten under keys
-that may already have been used. Data newer than the backup is lost.
+`recoverSharedStateFromBackup(backupBlob, replacementKey)` with a matching trusted
+backup, active `paykitAuthorizerSessionCapabilities()` session, Pubky identity
+secret, current Paykit key and its derived successor, and existing protected
+authorization. Missing, malformed, or conflicting authorization fails before
+replacement. Persist the replacement key first; recovery commits state, updates
+the App Registry, then publishes replacement authorization. See
+[Backup And Restore](../specs/paykit-sdk.md#backup-and-restore) for same-key retries,
+key distribution, relinking/reconciliation, and supported persisted formats.
 
 Use `exportBackupString` after SDK state changes when the app wants the user to
 recover Paykit private state after reinstall, sign-out, or device restore.

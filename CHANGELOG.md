@@ -21,7 +21,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 - Private app setup requires a published key authorization. Key rotation and
   shared-state recovery require the Pubky identity secret and separate authorizer
-  capabilities, and publish the replacement authorization after shared state.
+  capabilities plus an existing protected authorization. They commit replacement
+  state, update the App Registry, then publish replacement authorization.
+- rc59 persisted integration data is unsupported; rc60 testing requires fresh/reset
+  state, not in-place upgrade or migration. See [Backup And Restore](specs/paykit-sdk.md#backup-and-restore)
+  for all affected formats and the existing-authorization prerequisite.
 
 ## 0.1.0-rc59 - 2026-10-01
 
