@@ -6,6 +6,45 @@ use paykit_sdk::{
 use crate::harness::{linked_two_party, private_receiving_detail, two_party};
 
 #[tokio::test]
+async fn test_idle_private_receive_detects_remote_recovery_and_rotation() {
+    for rotate_key in [false, true] {
+        let pair = linked_two_party().await;
+        if rotate_key {
+            let replacement = pair
+                .alice
+                .access
+                .local_secret_key
+                .as_ref()
+                .unwrap()
+                .derive_paykit_identity_secret_key(2)
+                .unwrap();
+            pair.alice
+                .sdk
+                .rotate_paykit_identity_key(replacement)
+                .await
+                .unwrap();
+        } else {
+            pair.alice
+                .sdk
+                .publish_encrypted_link_recovery_marker(pair.bob.public_key.clone())
+                .await
+                .unwrap();
+        }
+        let error = pair
+            .bob
+            .sdk
+            .receive_private_messages(pair.alice.public_key.clone())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, PaykitSdkError::RecoveryRequired { .. }));
+        assert_eq!(
+            pair.bob.storage.snapshot().unwrap().linked_peers[&pair.alice.public_key].state,
+            LinkedPeerState::RecoveryRequired
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_private_payment_list_roundtrip_between_linked_peers() {
     let pair = linked_two_party().await;
     let before_receive = pair.bob.sdk.export_backup_state().await.unwrap();

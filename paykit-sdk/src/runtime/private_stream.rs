@@ -11,11 +11,41 @@ where
     ///
     /// This requires a stored Encrypted Link snapshot for the counterparty.
     /// Handshake establishment and recovery are separate workflows.
+    /// Empty inboxes are probed without acquiring a peer lease or writing state.
+    /// Concurrent link changes are observed on a subsequent poll unless a
+    /// message is available, in which case state is reloaded under the lease.
     pub async fn receive_private_messages(
         &self,
         counterparty: PubkyPublicKey,
     ) -> Result<PrivateStreamIntakeReport> {
         let (session_access, _) = self.private_link_session_access().await?;
+        let snapshot = self
+            .storage
+            .transaction(|tx| Ok(private_receive_snapshot(tx, &counterparty)))
+            .await?;
+        self.receive_private_messages_with_snapshot(counterparty, &session_access, snapshot)
+            .await
+    }
+
+    async fn receive_private_messages_with_snapshot(
+        &self,
+        counterparty: PubkyPublicKey,
+        session_access: &PubkySessionAccess,
+        snapshot: Option<paykit_lib::EncryptedLinkSnapshot>,
+    ) -> Result<PrivateStreamIntakeReport> {
+        if let Some(snapshot) = snapshot {
+            if self
+                .private_inbox_is_empty(&counterparty, session_access, &snapshot)
+                .await?
+            {
+                return Ok(PrivateStreamIntakeReport {
+                    receive_batch_id: None,
+                    stream_item_ids: Vec::new(),
+                    event_conflicts: Vec::new(),
+                });
+            }
+        }
+        // The probe grants no authority to receive. Reload under a fresh lease.
         let lease = self.claim_peer_link_operation(&counterparty).await?;
         let result = self
             .receive_private_messages_with_claim(counterparty, lease.clone(), session_access)
@@ -28,15 +58,48 @@ where
         &self,
     ) -> Result<Vec<PrivateStreamCounterpartyIntakeReport>> {
         let counterparties = self
-            .linked_peers()
-            .await?
-            .into_iter()
-            .filter(|record| record.state == LinkedPeerState::Linked)
-            .map(|record| record.counterparty)
-            .collect::<Vec<_>>();
+            .storage
+            .transaction(|tx| {
+                let mut peers = tx
+                    .export_storage_state()
+                    .linked_peers
+                    .into_values()
+                    .filter(|record| record.state == LinkedPeerState::Linked)
+                    .map(|record| {
+                        let snapshot = private_receive_snapshot(tx, &record.counterparty);
+                        (record.counterparty, snapshot)
+                    })
+                    .collect::<Vec<_>>();
+                peers.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
+                Ok(peers)
+            })
+            .await?;
+        if counterparties.is_empty() {
+            return Ok(Vec::new());
+        }
+        let session_access = match self.private_link_session_access().await {
+            Ok((access, _)) => access,
+            Err(error) => {
+                return Ok(counterparties
+                    .into_iter()
+                    .map(|(counterparty, _)| PrivateStreamCounterpartyIntakeReport {
+                        counterparty,
+                        report: None,
+                        error: Some(error.to_string()),
+                    })
+                    .collect());
+            }
+        };
         let mut reports = Vec::with_capacity(counterparties.len());
-        for counterparty in counterparties {
-            match self.receive_private_messages(counterparty.clone()).await {
+        for (counterparty, snapshot) in counterparties {
+            match self
+                .receive_private_messages_with_snapshot(
+                    counterparty.clone(),
+                    &session_access,
+                    snapshot,
+                )
+                .await
+            {
                 Ok(report) => reports.push(PrivateStreamCounterpartyIntakeReport {
                     counterparty,
                     report: Some(report),
@@ -52,11 +115,63 @@ where
         Ok(reports)
     }
 
+    async fn private_inbox_is_empty(
+        &self,
+        counterparty: &PubkyPublicKey,
+        session_access: &PubkySessionAccess,
+        snapshot: &paykit_lib::EncryptedLinkSnapshot,
+    ) -> Result<bool> {
+        let public_storage =
+            self.pubky
+                .load_public_storage()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no Pubky public storage available for private message lookup".into(),
+                    source: None,
+                })?;
+        let remote_public_key = counterparty.to_public_key()?;
+        let registry =
+            paykit_lib::get_paykit_app_registry(&public_storage, &remote_public_key).await?;
+        if registry
+            .as_ref()
+            .and_then(|registry| registry.noise_public_key())
+            != Some(snapshot.remote_noise_public_key())
+        {
+            return Ok(false);
+        }
+        let secret_key = session_access.paykit_noise_secret_key()?;
+        let marker = paykit_lib::fetch_encrypted_link_recovery_marker(
+            &public_storage,
+            &secret_key,
+            session_access.session.info().public_key(),
+            &remote_public_key,
+            snapshot.remote_noise_public_key(),
+        )
+        .await?;
+        if marker.is_some_and(|marker| {
+            Some(marker.attempt_id()) != snapshot.recovery_context().remote_attempt_id()
+        }) {
+            return Ok(false);
+        }
+        match snapshot
+            .has_pending_private_application_message(
+                &public_storage,
+                session_access.session.info().public_key(),
+                &secret_key,
+            )
+            .await
+        {
+            Ok(pending) => Ok(!pending),
+            Err(paykit_lib::PaykitError::Validation(_)) => Ok(false),
+            Err(err) => Err(err.into()),
+        }
+    }
+
     async fn receive_private_messages_with_claim(
         &self,
         counterparty: PubkyPublicKey,
         lease: PeerLinkOperationLease,
-        session_access: GuardedSessionAccess,
+        session_access: &PubkySessionAccess,
     ) -> Result<PrivateStreamIntakeReport> {
         self.ensure_peer_allows_private_automation(&counterparty)
             .await?;
@@ -66,7 +181,7 @@ where
         let remote_noise_public_key = authorization.noise_public_key().clone();
         self.observe_remote_recovery_marker_with_lease(
             &counterparty,
-            &session_access,
+            session_access,
             &lease,
             &remote_noise_public_key,
         )
@@ -112,7 +227,7 @@ where
             let _ = self
                 .publish_local_recovery_marker_with_key(
                     &counterparty,
-                    &session_access,
+                    session_access,
                     &lease,
                     &remote_noise_public_key,
                 )
@@ -138,7 +253,7 @@ where
                 let _ = self
                     .publish_local_recovery_marker_with_key(
                         &counterparty,
-                        &session_access,
+                        session_access,
                         &lease,
                         &remote_noise_public_key,
                     )
@@ -160,7 +275,7 @@ where
             let _ = self
                 .publish_local_recovery_marker_with_key(
                     &counterparty,
-                    &session_access,
+                    session_access,
                     &lease,
                     &remote_noise_public_key,
                 )
@@ -201,7 +316,7 @@ where
                 let _ = self
                     .publish_local_recovery_marker_with_key(
                         &counterparty,
-                        &session_access,
+                        session_access,
                         &lease,
                         &remote_noise_public_key,
                     )
@@ -229,7 +344,7 @@ where
                     let _ = self
                         .publish_local_recovery_marker_with_key(
                             &counterparty,
-                            &session_access,
+                            session_access,
                             &lease,
                             &remote_noise_public_key,
                         )
@@ -294,4 +409,23 @@ where
             }
         }
     }
+}
+
+fn private_receive_snapshot(
+    tx: &dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+) -> Option<paykit_lib::EncryptedLinkSnapshot> {
+    let peer = tx.linked_peer(counterparty)?;
+    if peer.state != LinkedPeerState::Linked {
+        return None;
+    }
+    let state = tx.encrypted_link_state(counterparty)?;
+    let snapshot =
+        paykit_lib::EncryptedLinkSnapshot::deserialize(state.link_snapshot.as_ref()?).ok()?;
+    if PubkyPublicKey::from_public_key(snapshot.recipient()) != *counterparty {
+        return None;
+    }
+    crate::domain::linked_peers::require_recovery_context(&peer, snapshot.recovery_context())
+        .ok()?;
+    Some(snapshot)
 }

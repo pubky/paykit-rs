@@ -2,7 +2,7 @@ use std::{
     any::Any,
     future::pending,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::{sync_channel, Receiver, SyncSender},
         Arc, Mutex,
     },
@@ -279,6 +279,76 @@ async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sig
         .unwrap();
     assert_eq!(after_sign_out, before_sign_out);
     assert_no_pending_shared_state_writes(&server_session).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_idle_private_receive_leaves_shared_blob_unchanged() {
+    struct CountedStorage {
+        inner: PubkySharedStateStorage,
+        transactions: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl StorageAdapter for CountedStorage {
+        async fn transaction_erased<'a>(
+            &self,
+            f: StorageTransactionCallback<'a>,
+        ) -> PaykitResult<Box<dyn Any + Send>> {
+            self.transactions.fetch_add(1, Ordering::SeqCst);
+            self.inner.transaction_erased(f).await
+        }
+    }
+
+    let pair = linked_homeserver_shared_pair().await;
+    let storage = pair.bitkit.access.session.storage();
+    let before = storage
+        .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    for user in [&pair.bitkit, &pair.server] {
+        let transactions = Arc::new(AtomicUsize::new(0));
+        let sdk = PaykitSdk::new(
+            CountedStorage {
+                inner: user.storage.clone(),
+                transactions: transactions.clone(),
+            },
+            TestnetSessionProvider::new(user.access.clone()),
+            user.adapter.clone(),
+            PaykitSdkConfig::new(user.app_id.clone()).unwrap(),
+        );
+        let report = sdk
+            .receive_private_messages(pair.bob.public_key.clone())
+            .await
+            .unwrap();
+        assert_eq!(report.receive_batch_id, None);
+        assert!(report.stream_item_ids.is_empty());
+        let single_transactions = transactions.swap(0, Ordering::SeqCst);
+        let reports = sdk
+            .receive_private_messages_from_linked_peers()
+            .await
+            .unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].report, Some(report));
+        assert!(reports[0].error.is_none());
+        let batch_transactions = transactions.load(Ordering::SeqCst);
+        assert!(single_transactions <= 2);
+        assert!(batch_transactions <= 2);
+        assert_no_pending_shared_state_writes(&user.access.session).await;
+    }
+    let after = storage
+        .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(
+        after, before,
+        "idle polling must not rewrite encrypted state"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

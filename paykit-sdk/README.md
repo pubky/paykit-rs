@@ -194,7 +194,10 @@ Common workflows:
   authorized app must persist it before private work resumes
 - call `receive_private_messages` before deriving Private Payment Lists,
   Payment Requests, Allowances, Receipt Access state, or resolving a private
-  contact payment when the freshest private endpoints matter
+  contact payment when the freshest private endpoints matter. Idle checks read
+  the peer's registry, recovery marker, and next message slot without claiming
+  a peer lease or rewriting shared state. Available messages and recovery work
+  still reload state under a lease before processing
 - use `propose_allowance`, `accept_allowance`, `reject_allowance`, and
   `end_allowance` for durable lifecycle intent; drain the normal outbound queue
   and use `allowance_record` or `list_allowances` for derived views
