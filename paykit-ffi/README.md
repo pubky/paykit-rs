@@ -56,8 +56,8 @@ load the native UniFFI library just to format keys.
 - `PaykitSdk.withPaymentAdapter` — create a runtime with payment adapter
   callbacks.
 - `paykitAppRegistry` — fetch an identity's public Paykit App Registry.
-- `paykitAuthorizerSessionCapabilities` — capability string for Bitkit/Ring
-  acting as the identity authorizer; ordinary apps keep `/pub/paykit/:rw`.
+- `paykitAuthorizerSessionCapabilities` — capability string for identity
+  authorizers; ordinary apps keep `/pub/paykit/:rw`.
 - `publishPaykitNoiseKeyAuthorization` — sign and publish the active Noise key
   before private app publication or delegation. Requires the local Pubky secret
   and separate authority-path write access.

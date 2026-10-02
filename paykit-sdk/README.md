@@ -38,9 +38,9 @@ identity-wide Paykit key material and a signed Noise key authorization.
 
 ### Noise Key Authorization
 
-Before private app publication, the identity authorizer (for example Bitkit or
-Ring) calls `publish_paykit_noise_key_authorization`. It needs the Pubky identity
-secret and `PAYKIT_AUTHORIZER_SESSION_CAPABILITIES`:
+Before private app publication, the identity authorizer calls
+`publish_paykit_noise_key_authorization`. It needs the Pubky identity secret
+and `PAYKIT_AUTHORIZER_SESSION_CAPABILITIES`:
 `/pub/paykit/:rw,/pub/paykit-authority/v0/current-key.json:rw`.
 Ordinary apps receive only the Paykit secret and `/pub/paykit/:rw`; they must
 never receive write access to the authority path.
