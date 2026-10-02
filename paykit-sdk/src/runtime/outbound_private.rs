@@ -297,7 +297,10 @@ where
         lease: &PeerLinkOperationLease,
         session_access: &PubkySessionAccess,
     ) -> Result<(paykit_lib::EncryptedLink, EncryptedLinkStateRecord)> {
-        let remote_noise_public_key = self.counterparty_noise_public_key(counterparty).await?;
+        let authorization = self
+            .counterparty_noise_key_authorization(counterparty)
+            .await?;
+        let remote_noise_public_key = authorization.noise_public_key().clone();
         self.observe_remote_recovery_marker_with_lease(
             counterparty,
             session_access,
@@ -368,7 +371,15 @@ where
             snapshot,
         )
         .await
-        {
+        .map_err(PaykitSdkError::from)
+        .and_then(|link| {
+            noise_key_authorization::validate_remote_static_key(
+                &authorization,
+                link.remote_static_public_key(),
+                true,
+            )?;
+            Ok(link)
+        }) {
             Ok(link) => link,
             Err(err) => {
                 self.mark_outbound_link_recovery_required(
@@ -378,7 +389,7 @@ where
                     &remote_noise_public_key,
                 )
                 .await?;
-                return Err(err.into());
+                return Err(err);
             }
         };
         Ok((link, stored_link_state))

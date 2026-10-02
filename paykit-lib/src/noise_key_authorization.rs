@@ -10,7 +10,7 @@ const VERSION: u8 = 1;
 const MAX_BYTES: usize = 4096;
 const SIGNING_DOMAIN: &[u8] = b"paykit.noise_key_authorization/v1\0";
 
-/// Pubky identity approval of one Noise key and generation.
+/// Pubky identity approval of Noise routing and handshake keys at one generation.
 ///
 /// Deserialization verifies the signature. Network readers must additionally
 /// check the expected owner. Freshness depends on the owner's homeserver;
@@ -20,15 +20,17 @@ const SIGNING_DOMAIN: &[u8] = b"paykit.noise_key_authorization/v1\0";
 pub struct PaykitNoiseKeyAuthorization {
     owner: PublicKey,
     noise_public_key: PublicKey,
+    noise_static_public_key: [u8; 32],
     key_generation: u64,
     signature: String,
 }
 
 impl PaykitNoiseKeyAuthorization {
     /// Sign with the Pubky identity key, never with delegated Paykit key material.
+    /// Both public keys are derived from the supplied Noise static secret.
     pub fn sign(
         identity: &pubky::Keypair,
-        noise_public_key: PublicKey,
+        noise_secret_key: &[u8; 32],
         key_generation: u64,
     ) -> Result<Self> {
         if key_generation == 0 {
@@ -37,10 +39,18 @@ impl PaykitNoiseKeyAuthorization {
             ));
         }
         let owner = identity.public_key();
-        let signature = identity.sign(&signing_bytes(&owner, &noise_public_key, key_generation));
+        let noise_public_key = pubky::Keypair::from_secret(noise_secret_key).public_key();
+        let noise_static_public_key = pubky_noise::derive_static_public_key(noise_secret_key);
+        let signature = identity.sign(&signing_bytes(
+            &owner,
+            &noise_public_key,
+            &noise_static_public_key,
+            key_generation,
+        ));
         Ok(Self {
             owner,
             noise_public_key,
+            noise_static_public_key,
             key_generation,
             signature: STANDARD.encode(signature.to_bytes()),
         })
@@ -51,9 +61,14 @@ impl PaykitNoiseKeyAuthorization {
         &self.owner
     }
 
-    /// Noise key approved for this identity.
+    /// Ed25519 routing key approved for this identity.
     pub fn noise_public_key(&self) -> &PublicKey {
         &self.noise_public_key
+    }
+
+    /// X25519 static key that the Noise handshake peer must present.
+    pub fn noise_static_public_key(&self) -> &[u8; 32] {
+        &self.noise_static_public_key
     }
 
     /// Monotonically increasing Paykit key generation.
@@ -67,7 +82,8 @@ impl PaykitNoiseKeyAuthorization {
         if self.owner != previous.owner
             || self.key_generation < previous.key_generation
             || (self.key_generation == previous.key_generation
-                && self.noise_public_key != previous.noise_public_key)
+                && (self.noise_public_key != previous.noise_public_key
+                    || self.noise_static_public_key != previous.noise_static_public_key))
         {
             return Err(invalid_data(
                 "Paykit Noise key authorization conflicts with the previously verified key",
@@ -79,11 +95,17 @@ impl PaykitNoiseKeyAuthorization {
 }
 
 // Fixed-width fields avoid JSON serialization or separator ambiguities.
-fn signing_bytes(owner: &PublicKey, noise: &PublicKey, generation: u64) -> Vec<u8> {
+fn signing_bytes(
+    owner: &PublicKey,
+    noise: &PublicKey,
+    noise_static: &[u8; 32],
+    generation: u64,
+) -> Vec<u8> {
     [
         SIGNING_DOMAIN,
         owner.as_bytes(),
         noise.as_bytes(),
+        noise_static,
         &generation.to_be_bytes(),
     ]
     .concat()
@@ -96,6 +118,7 @@ struct AuthorizationWire {
     kind: String,
     owner: PublicKey,
     noise_public_key: PublicKey,
+    noise_static_public_key: String,
     key_generation: u64,
     signature: String,
 }
@@ -107,6 +130,7 @@ impl From<PaykitNoiseKeyAuthorization> for AuthorizationWire {
             kind: KIND.into(),
             owner: record.owner,
             noise_public_key: record.noise_public_key,
+            noise_static_public_key: hex::encode(record.noise_static_public_key),
             key_generation: record.key_generation,
             signature: record.signature,
         }
@@ -123,6 +147,9 @@ impl TryFrom<AuthorizationWire> for PaykitNoiseKeyAuthorization {
                 None,
             ));
         }
+        let mut noise_static_public_key = [0; 32];
+        hex::decode_to_slice(&wire.noise_static_public_key, &mut noise_static_public_key)
+            .map_err(|err| invalid_data("invalid Noise static public key", Some(err.into())))?;
         let bytes = STANDARD.decode(&wire.signature).map_err(|err| {
             invalid_data(
                 "invalid Paykit Noise key authorization signature",
@@ -137,7 +164,12 @@ impl TryFrom<AuthorizationWire> for PaykitNoiseKeyAuthorization {
         })?;
         wire.owner
             .verify(
-                &signing_bytes(&wire.owner, &wire.noise_public_key, wire.key_generation),
+                &signing_bytes(
+                    &wire.owner,
+                    &wire.noise_public_key,
+                    &noise_static_public_key,
+                    wire.key_generation,
+                ),
                 &signature,
             )
             .map_err(|err| {
@@ -149,6 +181,7 @@ impl TryFrom<AuthorizationWire> for PaykitNoiseKeyAuthorization {
         Ok(Self {
             owner: wire.owner,
             noise_public_key: wire.noise_public_key,
+            noise_static_public_key,
             key_generation: wire.key_generation,
             signature: wire.signature,
         })

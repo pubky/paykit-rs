@@ -303,7 +303,10 @@ where
         max_advance_steps: u32,
         lease: PeerLinkOperationLease,
     ) -> Result<LinkedPeerHandshakeReport> {
-        let remote_noise_public_key = self.counterparty_noise_public_key(&counterparty).await?;
+        let authorization = self
+            .counterparty_noise_key_authorization(&counterparty)
+            .await?;
+        let remote_noise_public_key = authorization.noise_public_key().clone();
         {
             let (session_access, _) = self.private_link_session_access().await?;
             self.observe_remote_recovery_marker_with_lease(
@@ -432,7 +435,7 @@ where
                 .advance_link_handshake_with_claim(
                     counterparty.clone(),
                     lease.clone(),
-                    Some(&remote_noise_public_key),
+                    Some(&authorization),
                 )
                 .await
             {
@@ -468,7 +471,7 @@ where
         &self,
         counterparty: PubkyPublicKey,
         lease: PeerLinkOperationLease,
-        remote_noise_public_key: Option<&paykit_lib::PublicKey>,
+        authorization: Option<&paykit_lib::PaykitNoiseKeyAuthorization>,
     ) -> Result<LinkedPeerHandshakeReport> {
         self.ensure_peer_not_recovery_required_or_blocked(&counterparty)
             .await?;
@@ -482,14 +485,17 @@ where
                 source: None,
             });
         };
-        let fetched_key;
-        let remote_noise_public_key = match remote_noise_public_key {
-            Some(key) => key,
+        let fetched_authorization;
+        let authorization = match authorization {
+            Some(authorization) => authorization,
             None => {
-                fetched_key = self.counterparty_noise_public_key(&counterparty).await?;
-                &fetched_key
+                fetched_authorization = self
+                    .counterparty_noise_key_authorization(&counterparty)
+                    .await?;
+                &fetched_authorization
             }
         };
+        let remote_noise_public_key = authorization.noise_public_key();
         let (changed, role) = {
             let (session_access, _) = self.private_link_session_access().await?;
             let role = stored_link_state
@@ -556,7 +562,7 @@ where
                 counterparty.clone(),
                 snapshot_bytes,
                 &lease,
-                remote_noise_public_key,
+                authorization,
             )
             .await
         {
@@ -576,7 +582,7 @@ where
             handshake_role,
             stored_link_state.generation,
             lease.clone(),
-            remote_noise_public_key,
+            authorization,
         )
         .await
     }
@@ -604,14 +610,14 @@ where
         counterparty: PubkyPublicKey,
         snapshot_bytes: &[u8],
         lease: &PeerLinkOperationLease,
-        remote_noise_public_key: &paykit_lib::PublicKey,
+        authorization: &paykit_lib::PaykitNoiseKeyAuthorization,
     ) -> Result<(GuardedSessionAccess, paykit_lib::EncryptedLinkHandshake)> {
         let (session_access, secret_key) = self.private_link_session_access().await?;
         let remote_public_key = counterparty.to_public_key()?;
         let snapshot = paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(snapshot_bytes)?;
         self.require_snapshot_recovery_context(&counterparty, snapshot.recovery_context(), lease)
             .await?;
-        if snapshot.remote_noise_public_key() != remote_noise_public_key {
+        if snapshot.remote_noise_public_key() != authorization.noise_public_key() {
             return Err(PaykitSdkError::RecoveryRequired {
                 context: format!("counterparty {counterparty} rotated its Paykit identity key"),
                 source: None,
@@ -625,6 +631,11 @@ where
             snapshot,
         )
         .await?;
+        noise_key_authorization::validate_remote_static_key(
+            authorization,
+            handshake.remote_static_public_key(),
+            false,
+        )?;
         // Keep rotation excluded until advancement and its durable checkpoint finish.
         Ok((session_access, handshake))
     }
@@ -643,15 +654,32 @@ where
         handshake_role: EncryptedLinkHandshakeRole,
         expected_generation: u64,
         lease: PeerLinkOperationLease,
-        remote_noise_public_key: &paykit_lib::PublicKey,
+        authorization: &paykit_lib::PaykitNoiseKeyAuthorization,
     ) -> Result<LinkedPeerHandshakeReport> {
         let counterparty = lease.counterparty.clone();
         self.require_current_peer_link_operation(&lease, &session_access)
             .await?;
-        let progress = match paykit_lib::advance_handshake(handshake).await {
+        let progress = match paykit_lib::advance_handshake(handshake)
+            .await
+            .map_err(PaykitSdkError::from)
+            .and_then(|progress| {
+                let (actual, complete) = match &progress {
+                    paykit_lib::HandshakeProgress::Pending(handshake) => {
+                        (handshake.remote_static_public_key(), false)
+                    }
+                    paykit_lib::HandshakeProgress::Complete(link) => {
+                        (link.remote_static_public_key(), true)
+                    }
+                };
+                noise_key_authorization::validate_remote_static_key(
+                    authorization,
+                    actual,
+                    complete,
+                )?;
+                Ok(progress)
+            }) {
             Ok(progress) => progress,
             Err(err) => {
-                let err = PaykitSdkError::from(err);
                 if Self::link_handshake_error_requires_recovery(&err) {
                     self.mark_link_recovery_required(&counterparty, lease, Some(&session_access))
                         .await?;
@@ -665,7 +693,7 @@ where
                 &counterparty,
                 &session_access,
                 &lease,
-                remote_noise_public_key,
+                authorization.noise_public_key(),
             )
             .await?
         {
@@ -971,12 +999,23 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<paykit_lib::PublicKey> {
+        Ok(self
+            .counterparty_noise_key_authorization(counterparty)
+            .await?
+            .noise_public_key()
+            .clone())
+    }
+
+    pub(super) async fn counterparty_noise_key_authorization(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<paykit_lib::PaykitNoiseKeyAuthorization> {
         let authorization = self
             .paykit_noise_key_authorization(counterparty.clone())
             .await?;
         self.pin_counterparty_noise_key_authorization(counterparty, &authorization)
             .await?;
-        Ok(authorization.noise_public_key().clone())
+        Ok(authorization)
     }
 }
 

@@ -3452,6 +3452,7 @@ dependencies = [
  "blake3",
  "chacha20poly1305",
  "chrono",
+ "hex",
  "proptest",
  "pubky",
  "pubky-noise",
@@ -4028,9 +4029,8 @@ dependencies = [
 
 [[package]]
 name = "pubky-noise"
-version = "0.1.0-rc11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e314e7716f68f48f5438650ed958753bc18ff5aca70bc46c1e3e77be3b7bae6"
+version = "0.1.0-rc12"
+source = "git+https://github.com/pubky/pubky-noise?rev=e89837a2368e1ad423d27addef021d60651c3fad#e89837a2368e1ad423d27addef021d60651c3fad"
 dependencies = [
  "chacha20poly1305",
  "curve25519-dalek 5.0.0",

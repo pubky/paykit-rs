@@ -61,8 +61,10 @@ pub struct FfiPaykitAppRegistry {
 pub struct FfiPaykitNoiseKeyAuthorization {
     /// Pubky identity that signed the authorization.
     pub owner: String,
-    /// Authorized Noise public key as raw z32 text.
+    /// Authorized Ed25519 routing key as raw z32 text.
     pub noise_public_key: String,
+    /// Authorized X25519 handshake static key as hexadecimal text.
+    pub noise_static_public_key: String,
     /// Authorized Paykit key generation.
     pub key_generation: u64,
 }
@@ -72,6 +74,7 @@ impl From<paykit_lib::PaykitNoiseKeyAuthorization> for FfiPaykitNoiseKeyAuthoriz
         Self {
             owner: value.owner().to_string(),
             noise_public_key: value.noise_public_key().z32(),
+            noise_static_public_key: hex::encode(value.noise_static_public_key()),
             key_generation: value.key_generation(),
         }
     }

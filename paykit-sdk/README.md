@@ -45,9 +45,11 @@ and `PAYKIT_AUTHORIZER_SESSION_CAPABILITIES`:
 Ordinary apps receive only the Paykit secret and `/pub/paykit/:rw`; they must
 never receive write access to the authority path.
 
-The signed record binds the Pubky identity, Noise public key, and key generation.
+The signed record binds the Pubky identity, Ed25519 routing key, X25519 handshake
+static key (`noise_static_public_key`, hex-encoded), and key generation.
 Encrypted Link operations verify it instead of trusting the App Registry's key
-fields, including when restoring a saved link. Verified peer generations are
+fields. The peer's actual Noise static key must match before a completed or
+restored link can carry private messages. Verified peer generations are
 retained in shared state and backups; lower generations and different keys at
 the same generation are rejected. Missing or invalid records stop private
 communication, without an unsigned fallback.

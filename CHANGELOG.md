@@ -14,6 +14,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Identity-signed Noise key authorization outside delegated Paykit write scopes.
 - SDK verification and persisted peer-generation checks for new and restored
   Encrypted Links, with authorizer publication APIs in Swift and Kotlin.
+- Verify each handshake peer's X25519 static key against its signed authorization,
+  including on snapshot restore, using Pubky Noise's remote-key API.
 
 ### Changed
 

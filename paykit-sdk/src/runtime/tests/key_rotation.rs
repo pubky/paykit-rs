@@ -6,6 +6,26 @@ fn key(byte: u8, generation: u64) -> crate::PaykitIdentitySecretKey {
 }
 
 #[test]
+fn test_noise_authorization_requires_the_expected_handshake_static_key() {
+    use crate::runtime::noise_key_authorization::validate_remote_static_key;
+
+    let authorization =
+        paykit_lib::PaykitNoiseKeyAuthorization::sign(&pubky::Keypair::random(), &[7; 32], 1)
+            .unwrap();
+    for complete in [false, true] {
+        assert!(validate_remote_static_key(
+            &authorization,
+            Some(authorization.noise_static_public_key()),
+            complete
+        )
+        .is_ok());
+        assert!(validate_remote_static_key(&authorization, Some(&[0; 32]), complete).is_err());
+    }
+    assert!(validate_remote_static_key(&authorization, None, false).is_ok());
+    assert!(validate_remote_static_key(&authorization, None, true).is_err());
+}
+
+#[test]
 fn test_replacement_key_requires_new_material_and_next_generation() {
     let current = key(7, 3);
 
@@ -67,7 +87,7 @@ async fn test_key_rotation_preserves_history_and_resets_private_link_state() {
     let counterparty = PubkyPublicKey::from_public_key(&counterparty_keypair.public_key());
     let authorization = paykit_lib::PaykitNoiseKeyAuthorization::sign(
         &counterparty_keypair,
-        pubky::Keypair::random().public_key(),
+        &pubky::Keypair::random().secret_key(),
         4,
     )
     .unwrap();

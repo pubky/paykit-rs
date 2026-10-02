@@ -92,7 +92,7 @@ pub(super) fn sign_authorization(
     key.validate_pubky_derivation(Some(identity))?;
     Ok(PaykitNoiseKeyAuthorization::sign(
         &identity.keypair(),
-        crate::storage::paykit_noise_public_key(key).to_public_key()?,
+        &key.noise_secret_key(),
         key.key_generation(),
     )?)
 }
@@ -135,10 +135,29 @@ pub(super) fn validate_key(
     if record.key_generation() != key.key_generation()
         || *record.noise_public_key()
             != crate::storage::paykit_noise_public_key(key).to_public_key()?
+        || *record.noise_static_public_key()
+            != pubky_noise::derive_static_public_key(&key.noise_secret_key())
     {
         return Err(authorization_error(
             "Paykit key does not match the identity's current signed authorization",
         ));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_remote_static_key(
+    authorization: &PaykitNoiseKeyAuthorization,
+    actual: Option<&[u8]>,
+    handshake_complete: bool,
+) -> Result<()> {
+    if actual.is_some_and(|key| key != authorization.noise_static_public_key())
+        || (handshake_complete && actual.is_none())
+    {
+        return Err(paykit_lib::PaykitError::InvalidData {
+            context: "Noise handshake peer does not match its identity-signed static key".into(),
+            source: None,
+        }
+        .into());
     }
     Ok(())
 }

@@ -11739,9 +11739,13 @@ public struct PaykitNoiseKeyAuthorization {
      */
     public var owner: String
     /**
-     * Authorized Noise public key as raw z32 text.
+     * Authorized Ed25519 routing key as raw z32 text.
      */
     public var noisePublicKey: String
+    /**
+     * Authorized X25519 handshake static key as hexadecimal text.
+     */
+    public var noiseStaticPublicKey: String
     /**
      * Authorized Paykit key generation.
      */
@@ -11754,13 +11758,17 @@ public struct PaykitNoiseKeyAuthorization {
          * Pubky identity that signed the authorization.
          */owner: String,
         /**
-         * Authorized Noise public key as raw z32 text.
+         * Authorized Ed25519 routing key as raw z32 text.
          */noisePublicKey: String,
+        /**
+         * Authorized X25519 handshake static key as hexadecimal text.
+         */noiseStaticPublicKey: String,
         /**
          * Authorized Paykit key generation.
          */keyGeneration: UInt64) {
         self.owner = owner
         self.noisePublicKey = noisePublicKey
+        self.noiseStaticPublicKey = noiseStaticPublicKey
         self.keyGeneration = keyGeneration
     }
 }
@@ -11778,6 +11786,9 @@ extension PaykitNoiseKeyAuthorization: Equatable, Hashable {
         if lhs.noisePublicKey != rhs.noisePublicKey {
             return false
         }
+        if lhs.noiseStaticPublicKey != rhs.noiseStaticPublicKey {
+            return false
+        }
         if lhs.keyGeneration != rhs.keyGeneration {
             return false
         }
@@ -11787,6 +11798,7 @@ extension PaykitNoiseKeyAuthorization: Equatable, Hashable {
     public func hash(into hasher: inout Hasher) {
         hasher.combine(owner)
         hasher.combine(noisePublicKey)
+        hasher.combine(noiseStaticPublicKey)
         hasher.combine(keyGeneration)
     }
 }
@@ -11804,6 +11816,7 @@ public struct FfiConverterTypePaykitNoiseKeyAuthorization: FfiConverterRustBuffe
             try PaykitNoiseKeyAuthorization(
                 owner: FfiConverterString.read(from: &buf),
                 noisePublicKey: FfiConverterString.read(from: &buf),
+                noiseStaticPublicKey: FfiConverterString.read(from: &buf),
                 keyGeneration: FfiConverterUInt64.read(from: &buf)
         )
     }
@@ -11811,6 +11824,7 @@ public struct FfiConverterTypePaykitNoiseKeyAuthorization: FfiConverterRustBuffe
     public static func write(_ value: PaykitNoiseKeyAuthorization, into buf: inout [UInt8]) {
         FfiConverterString.write(value.owner, into: &buf)
         FfiConverterString.write(value.noisePublicKey, into: &buf)
+        FfiConverterString.write(value.noiseStaticPublicKey, into: &buf)
         FfiConverterUInt64.write(value.keyGeneration, into: &buf)
     }
 }

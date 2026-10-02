@@ -55,7 +55,7 @@
 - **Related terms**: Paykit App, Paykit App ID, Pubky Routing
 
 ### Paykit Noise Key Authorization
-- **Definition**: An identity-signed record approving the current Noise public key and Paykit key generation. Stored at `/pub/paykit-authority/v0/current-key.json`, outside ordinary Paykit write capabilities. The App Registry's key fields are discovery metadata, not authorization.
+- **Definition**: An identity-signed record approving the current Noise routing key, X25519 handshake static key, and Paykit key generation. Stored at `/pub/paykit-authority/v0/current-key.json`, outside ordinary Paykit write capabilities. The App Registry's key fields are discovery metadata, not authorization.
 - **Related terms**: Paykit Identity Secret, Paykit App Registry, Encrypted Link
 
 ### Paykit Identity Secret

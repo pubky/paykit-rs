@@ -42,6 +42,12 @@ pub struct EncryptedLinkHandshake {
 }
 
 impl EncryptedLinkHandshake {
+    /// X25519 static key learned from the peer, once its handshake message arrives.
+    /// The caller must authenticate this key before trusting the completed link.
+    pub fn remote_static_public_key(&self) -> Option<&[u8]> {
+        self.encryptor.remote_static_public_key()
+    }
+
     /// Set the maximum number of consecutive automatic recovery attempts
     /// before [`advance_handshake`] gives up and returns
     /// [`PaykitError::Transport`].
@@ -113,7 +119,9 @@ pub enum HandshakeProgress {
 ///
 /// `sender_secret_key` is the local Noise secret, not the Pubky identity secret.
 /// `receiver_identity_public_key` selects the counterparty's homeserver, while
-/// `receiver_noise_public_key` is its authenticated App Registry Noise key.
+/// `receiver_noise_public_key` is its authorized Ed25519 routing key.
+/// Authenticate [`EncryptedLink::remote_static_public_key`] against the signed
+/// X25519 key before using the completed link; routing keys alone do not authenticate it.
 /// `recovery_context` selects the current pair of recovery attempts; both peers
 /// must use the same IDs in opposite local/remote order.
 /// Session creation, capability scope, and key rotation remain the caller's responsibility.
@@ -180,7 +188,9 @@ pub fn initiate_encrypted_link(
 ///
 /// `receiver_secret_key` is the local Noise secret, not the Pubky identity secret.
 /// `sender_identity_public_key` selects the counterparty's homeserver, while
-/// `sender_noise_public_key` is its authenticated App Registry Noise key.
+/// `sender_noise_public_key` is its authorized Ed25519 routing key.
+/// Authenticate [`EncryptedLink::remote_static_public_key`] against the signed
+/// X25519 key before using the completed link; routing keys alone do not authenticate it.
 /// `recovery_context` must mirror the initiator's current recovery attempt IDs.
 /// Session creation, capability scope, and key rotation remain the caller's responsibility.
 ///
