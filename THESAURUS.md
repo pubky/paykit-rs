@@ -54,6 +54,10 @@
 - **Synonyms to AVOID**: receiver registry, receiver index
 - **Related terms**: Paykit App, Paykit App ID, Pubky Routing
 
+### Paykit Noise Key Authorization
+- **Definition**: An identity-signed record approving the current Noise public key and Paykit key generation. Stored at `/pub/paykit-authority/v0/current-key.json`, outside ordinary Paykit write capabilities. The App Registry's key fields are discovery metadata, not authorization.
+- **Related terms**: Paykit Identity Secret, Paykit App Registry, Encrypted Link
+
 ### Paykit Identity Secret
 - **Definition**: Rotatable identity-wide secret material from which Paykit derives separate Noise and shared-state encryption keys. A holder of the Pubky identity secret can derive any generation; authorized apps may instead receive only the current generation from the identity's key-management layer.
 - **NOT**: The Pubky identity secret, an Encrypted Link snapshot, or an app-specific payment key.

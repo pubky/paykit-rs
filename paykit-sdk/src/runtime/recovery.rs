@@ -395,22 +395,17 @@ where
                 })?;
         let secret_key = session_access.paykit_noise_secret_key()?;
         let remote_public_key = counterparty.to_public_key()?;
-        let remote_registry =
-            paykit_lib::get_paykit_app_registry(&public_storage, &remote_public_key)
-                .await?
-                .ok_or_else(|| PaykitSdkError::NotFound {
-                    context: format!("counterparty {counterparty} has no Paykit App Registry"),
-                    source: None,
-                })?;
-        let Some(remote_noise_public_key) = remote_registry.noise_public_key() else {
-            return Ok(false);
-        };
+        let authorization =
+            noise_key_authorization::require_authorization(&public_storage, &remote_public_key)
+                .await?;
+        self.pin_counterparty_noise_key_authorization(counterparty, &authorization)
+            .await?;
         let Some(marker) = paykit_lib::fetch_encrypted_link_recovery_marker(
             &public_storage,
             &secret_key,
             session_access.session.info().public_key(),
             &remote_public_key,
-            remote_noise_public_key,
+            authorization.noise_public_key(),
         )
         .await?
         else {
@@ -569,6 +564,7 @@ fn recovery_peer_or_default(
         local_recovery_marker_last_error: None,
         remote_recovery_attempt_id: None,
         remote_recovery_marker_observed_at: None,
+        noise_key_authorization: None,
     })
 }
 

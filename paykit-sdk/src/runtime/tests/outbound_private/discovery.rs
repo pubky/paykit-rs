@@ -178,6 +178,7 @@ async fn test_pending_outbound_private_counterparties_includes_cleanup_only_work
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
                 Ok(())
             }
@@ -336,6 +337,7 @@ async fn test_pending_outbound_private_counterparties_skips_recovery_required_pe
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
                 tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                     counterparty,
@@ -383,6 +385,7 @@ async fn test_pending_outbound_private_counterparties_skips_linking_peer() {
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
                 tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
                     counterparty,

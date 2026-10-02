@@ -45,6 +45,7 @@ async fn test_initialize_without_live_session_preserves_identity_scoped_state() 
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
                 tx.save_public_endpoint_record(PublicEndpointRecord {
                     app_id: app_id(),
@@ -321,6 +322,7 @@ async fn test_forget_session_access_preserves_identity_scoped_state() {
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
                 tx.save_public_endpoint_record(PublicEndpointRecord {
                     app_id: app_id(),

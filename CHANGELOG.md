@@ -7,6 +7,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc60 - Unreleased
+
+### Added
+
+- Identity-signed Noise key authorization outside delegated Paykit write scopes.
+- SDK verification and persisted peer-generation checks for new and restored
+  Encrypted Links, with authorizer publication APIs in Swift and Kotlin.
+
+### Changed
+
+- Private app setup requires a published key authorization. Key rotation and
+  shared-state recovery require the Pubky identity secret and separate authorizer
+  capabilities, and publish the replacement authorization after shared state.
+
 ## 0.1.0-rc59 - 2026-10-01
 
 ### Fixed

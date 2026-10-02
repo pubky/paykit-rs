@@ -17,7 +17,7 @@ use paykit_sdk::{
     PrivateReceivingDetail, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
     PubkySessionBootstrap, PubkySessionProvider, PublicPaymentEndpointCandidate,
     PublicPaymentEndpointSelectionRequest, PublicReceivingDetail, Result,
-    PAYKIT_SESSION_CAPABILITIES,
+    PAYKIT_AUTHORIZER_SESSION_CAPABILITIES, PAYKIT_SESSION_CAPABILITIES,
 };
 use pubky_testnet::{
     docker_postgres::DockerPostgres, pubky::Keypair, pubky_homeserver::ConfigToml, EphemeralTestnet,
@@ -325,7 +325,7 @@ impl TestUser {
                 &secret_key,
                 &homeserver_public_key,
                 None,
-                PAYKIT_SESSION_CAPABILITIES,
+                PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
             )
             .await
             .expect("testnet sign-up should succeed");
@@ -350,6 +350,7 @@ impl TestUser {
             report.capability,
             paykit_sdk::PubkyIdentityCapability::PrivateLinkCapable
         );
+        sdk.publish_paykit_noise_key_authorization().await.unwrap();
         sdk.publish_paykit_app(
             PaykitApp::new(
                 "Paykit Test App",

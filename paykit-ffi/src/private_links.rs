@@ -734,6 +734,7 @@ mod tests {
             local_recovery_marker_last_error: Some("publish failed".into()),
             remote_recovery_attempt_id: None,
             remote_recovery_marker_observed_at: None,
+            noise_key_authorization: None,
         };
 
         let ffi = FfiLinkedPeerRecord::from(record);

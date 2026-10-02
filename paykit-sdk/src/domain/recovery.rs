@@ -115,6 +115,7 @@ mod tests {
             local_recovery_marker_last_error: Some(sentinel.to_string()),
             remote_recovery_attempt_id: None,
             remote_recovery_marker_observed_at: None,
+            noise_key_authorization: None,
         };
 
         let report = EncryptedLinkRecoveryMarkerReport::from_peer(&peer, true);

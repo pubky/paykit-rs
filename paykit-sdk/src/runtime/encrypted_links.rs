@@ -905,6 +905,8 @@ where
             source: None,
         })?;
         let secret_key = session_access.paykit_noise_secret_key()?;
+        self.validate_local_noise_key_authorization(&session_access)
+            .await?;
         Ok((session_access, secret_key))
     }
 
@@ -912,32 +914,12 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<paykit_lib::PublicKey> {
-        let public_storage =
-            self.pubky
-                .load_public_storage()
-                .await?
-                .ok_or_else(|| PaykitSdkError::Identity {
-                    context: "no Pubky public storage available for Paykit App Registry lookup"
-                        .into(),
-                    source: None,
-                })?;
-        let counterparty_public_key = counterparty.to_public_key()?;
-        let registry =
-            paykit_lib::get_paykit_app_registry(&public_storage, &counterparty_public_key)
-                .await?
-                .ok_or_else(|| PaykitSdkError::NotFound {
-                    context: format!("counterparty {counterparty} has no Paykit App Registry"),
-                    source: None,
-                })?;
-        registry
-            .noise_public_key()
-            .cloned()
-            .ok_or_else(|| PaykitSdkError::NotFound {
-                context: format!(
-                    "counterparty {counterparty} has not initialized its Paykit Noise key"
-                ),
-                source: None,
-            })
+        let authorization = self
+            .paykit_noise_key_authorization(counterparty.clone())
+            .await?;
+        self.pin_counterparty_noise_key_authorization(counterparty, &authorization)
+            .await?;
+        Ok(authorization.noise_public_key().clone())
     }
 
     pub(super) async fn snapshot_uses_current_counterparty_noise_key(

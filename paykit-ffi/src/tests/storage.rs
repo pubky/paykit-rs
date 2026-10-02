@@ -471,6 +471,7 @@ async fn test_storage_and_backup_blobs_round_trip_private_sync_records() {
             local_recovery_marker_last_error: None,
             remote_recovery_attempt_id: None,
             remote_recovery_marker_observed_at: None,
+            noise_key_authorization: None,
         },
     )]);
     assert_round_trip("linked_peer", &state);

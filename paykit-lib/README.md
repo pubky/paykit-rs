@@ -144,6 +144,14 @@ private message. `PaykitAppRegistry` is one public identity-wide record at
 capabilities, the current identity-wide Noise public key and key generation,
 and optional default-app preferences. It is not private SDK state.
 
+The registry does not authorize its Noise key. The identity signs a
+`PaykitNoiseKeyAuthorization` at `/pub/paykit-authority/v0/current-key.json`,
+outside `/pub/paykit/:rw`. `get_paykit_noise_key_authorization` verifies the
+signature and expected owner. Low-level link callers must use that key and
+retain the highest observed generation, including before snapshot restore;
+the SDK handles these checks. Publishing requires an authorizer session with
+separate write permission. Freshness relies on the homeserver, with no expiry.
+
 Registries are bounded to 64 KiB, 64 applications, and 256 endpoint-specific
 defaults so remote data cannot trigger unbounded parsing or endpoint lookups.
 

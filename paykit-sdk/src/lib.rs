@@ -99,13 +99,15 @@ pub use identity::{
 };
 pub use paykit_lib::INITIAL_PAYKIT_KEY_GENERATION;
 #[doc(inline)]
-pub use paykit_lib::{PaykitApp, PaykitAppCapabilities, PaykitAppId, PaykitAppRegistry};
+pub use paykit_lib::{
+    PaykitApp, PaykitAppCapabilities, PaykitAppId, PaykitAppRegistry, PaykitNoiseKeyAuthorization,
+};
 #[doc(inline)]
 pub use pubky_session::{
     parse_pubky_auth_url, parse_pubky_resource, resolve_pubky_url, PubkyAuthCompanionClaim,
     PubkyAuthCompanionClaimApprovalError, PubkyAuthDetails, PubkyAuthRequest, PubkyAuthRequestKind,
     PubkyAuthRequestState, PubkyResourceRef, PubkySessionBootstrap, PubkySessionBootstrapResult,
-    PubkySessionSecret, PAYKIT_SESSION_CAPABILITIES,
+    PubkySessionSecret, PAYKIT_AUTHORIZER_SESSION_CAPABILITIES, PAYKIT_SESSION_CAPABILITIES,
 };
 #[doc(inline)]
 pub use runtime::{Clock, PaykitAppRemovalBlockers, PaykitSdk, SystemClock};

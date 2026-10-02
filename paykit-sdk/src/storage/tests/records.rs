@@ -96,6 +96,7 @@ fn test_sensitive_storage_debug_is_redacted() {
         local_recovery_marker_last_error: Some("linked-peer-error-secret".into()),
         remote_recovery_attempt_id: None,
         remote_recovery_marker_observed_at: None,
+        noise_key_authorization: None,
     };
     let contact_public_key = counterparty();
     let contact = ContactRecord {
@@ -162,6 +163,7 @@ async fn test_transaction_commits_records() {
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
                 tx.save_public_endpoint_record(public_endpoint_record("btc-lightning-bolt11"));
                 tx.save_payment_endpoint_reservation(payment_endpoint_reservation_record(

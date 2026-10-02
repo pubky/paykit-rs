@@ -22,6 +22,10 @@ use crate::{
 
 /// Default Pubky capabilities needed for Paykit public storage writes.
 pub const PAYKIT_SESSION_CAPABILITIES: &str = "/pub/paykit/:rw";
+/// Paykit access plus permission to publish identity-signed Noise key authorization.
+/// Only identity authorizers should request this scope, not delegated Paykit apps.
+pub const PAYKIT_AUTHORIZER_SESSION_CAPABILITIES: &str =
+    "/pub/paykit/:rw,/pub/paykit-authority/v0/current-key.json:rw";
 
 const GRANT_REVOCATION_MAX_ATTEMPTS: usize = 4;
 

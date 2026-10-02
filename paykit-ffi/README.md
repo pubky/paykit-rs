@@ -56,9 +56,19 @@ load the native UniFFI library just to format keys.
 - `PaykitSdk.withPaymentAdapter` — create a runtime with payment adapter
   callbacks.
 - `paykitAppRegistry` — fetch an identity's public Paykit App Registry.
+- `paykitAuthorizerSessionCapabilities` — capability string for Bitkit/Ring
+  acting as the identity authorizer; ordinary apps keep `/pub/paykit/:rw`.
+- `publishPaykitNoiseKeyAuthorization` — sign and publish the active Noise key
+  before private app publication or delegation. Requires the local Pubky secret
+  and separate authority-path write access.
+- `paykitNoiseKeyAuthorization` — fetch and verify an identity's current Noise
+  key and generation. Registry key fields alone are not proof of authorization.
 - `publishPaykitApp` — publish this app's registry entry before endpoint sync.
 - `rotatePaykitIdentityKey` — re-encrypt shared state with the next Paykit key
   generation and require fresh Encrypted Links while preserving durable history.
+  Requires authorizer access and publishes the replacement signed key; retry
+  interruptions with the same keys. Shared-state backup recovery has the same
+  authorizer requirement.
 - `removePaykitApp` — remove this app's public Payment Endpoints and registry
   entry after its active Payment Requests and pending private financial work
   are complete.

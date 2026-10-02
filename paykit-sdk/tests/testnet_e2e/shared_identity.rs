@@ -22,7 +22,7 @@ use paykit_sdk::{
     PrivatePaymentEndpointReservation, PrivateReceivingDetail, PubkyIdentityCapability,
     PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess, PubkySessionBootstrap,
     PubkySharedStateStorage, ReceiptDraftBuilder, ReceiptIssuanceStatus, Result as PaykitResult,
-    StorageAdapter, PAYKIT_SESSION_CAPABILITIES,
+    StorageAdapter, PAYKIT_AUTHORIZER_SESSION_CAPABILITIES, PAYKIT_SESSION_CAPABILITIES,
 };
 use serde_json::Map as JsonMap;
 use tokio::sync::oneshot;
@@ -38,7 +38,12 @@ async fn test_independent_apps_register_concurrently_without_lost_updates() {
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
     let bitkit_result = session_bootstrap(&testnet, "bitkit.test")
-        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .sign_up(
+            &secret,
+            &homeserver,
+            None,
+            PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        )
         .await
         .unwrap();
     let server_result = session_bootstrap(&testnet, "paykit-server.test")
@@ -61,6 +66,10 @@ async fn test_independent_apps_register_concurrently_without_lost_updates() {
     );
     bitkit.initialize().await.unwrap();
     server.initialize().await.unwrap();
+    bitkit
+        .publish_paykit_noise_key_authorization()
+        .await
+        .unwrap();
 
     let (bitkit_registry, server_registry) = tokio::join!(
         bitkit.publish_paykit_app(test_app("Bitkit")),
@@ -127,7 +136,12 @@ async fn test_unchanged_app_publication_initializes_noise_key() {
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
     let result = session_bootstrap(&testnet, "bitkit.test")
-        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .sign_up(
+            &secret,
+            &homeserver,
+            None,
+            PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        )
         .await
         .unwrap();
     let storage = InMemoryStorage::new();
@@ -163,6 +177,10 @@ async fn test_unchanged_app_publication_initializes_noise_key() {
         PaykitSdkConfig::new("bitkit").unwrap(),
     );
     private_capable.initialize().await.unwrap();
+    private_capable
+        .publish_paykit_noise_key_authorization()
+        .await
+        .unwrap();
     let published = private_capable.publish_paykit_app(app).await.unwrap();
     assert!(published.noise_public_key().is_some());
     assert_eq!(published.key_generation(), 3);
@@ -182,7 +200,12 @@ async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sig
     let bitkit_result =
         PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap(), "paykit-sdk.test")
             .unwrap()
-            .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+            .sign_up(
+                &secret,
+                &homeserver,
+                None,
+                PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+            )
             .await
             .unwrap();
     let bitkit_session_secret = bitkit_result
@@ -215,6 +238,10 @@ async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sig
         PaykitSdkConfig::new("bitkit").unwrap(),
     );
     bitkit.initialize().await.unwrap();
+    bitkit
+        .publish_paykit_noise_key_authorization()
+        .await
+        .unwrap();
     bitkit.publish_paykit_app(test_app("Bitkit")).await.unwrap();
     assert_no_pending_shared_state_writes(&access.session).await;
 
@@ -350,7 +377,12 @@ async fn test_same_app_devices_serialize_public_endpoint_sync() {
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
     let first_result = session_bootstrap(&testnet, "bitkit-first.test")
-        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .sign_up(
+            &secret,
+            &homeserver,
+            None,
+            PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        )
         .await
         .expect("the first Bitkit device should sign up");
     let second_result = session_bootstrap(&testnet, "bitkit-second.test")
@@ -698,7 +730,12 @@ async fn test_paykit_identity_key_rotation_rekeys_shared_state_and_registry() {
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
     let access = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap(), "paykit-sdk.test")
         .unwrap()
-        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .sign_up(
+            &secret,
+            &homeserver,
+            None,
+            PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        )
         .await
         .unwrap()
         .access;
@@ -723,6 +760,7 @@ async fn test_paykit_identity_key_rotation_rekeys_shared_state_and_registry() {
         .public_key
         .clone()
         .expect("initialized SDK should report its identity");
+    sdk.publish_paykit_noise_key_authorization().await.unwrap();
     sdk.publish_paykit_app(test_app("Bitkit")).await.unwrap();
 
     let invalid = paykit_sdk::PaykitIdentitySecretKey::new([42; 32], 2).unwrap();
@@ -1094,7 +1132,12 @@ async fn test_pubky_shared_state_waits_for_abandoned_write_before_reading() {
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
     let access = session_bootstrap(&testnet, "bitkit.test")
-        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .sign_up(
+            &secret,
+            &homeserver,
+            None,
+            PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        )
         .await
         .unwrap()
         .access;
@@ -1281,7 +1324,12 @@ async fn test_pubky_shared_state_does_not_write_when_marker_publication_is_rejec
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
     let access = session_bootstrap(&testnet, "bitkit.test")
-        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .sign_up(
+            &secret,
+            &homeserver,
+            None,
+            PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        )
         .await
         .unwrap()
         .access;
@@ -1384,7 +1432,12 @@ async fn test_pubky_shared_state_rejects_a_competing_writer_until_lock_release()
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
     let access = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap(), "paykit-sdk.test")
         .unwrap()
-        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .sign_up(
+            &secret,
+            &homeserver,
+            None,
+            PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        )
         .await
         .unwrap()
         .access;
@@ -1482,7 +1535,12 @@ async fn test_pubky_shared_state_rejects_a_missing_previously_observed_resource(
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
     let access = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap(), "paykit-sdk.test")
         .unwrap()
-        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .sign_up(
+            &secret,
+            &homeserver,
+            None,
+            PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        )
         .await
         .unwrap()
         .access;
@@ -2037,6 +2095,16 @@ impl SharedStateTestUser {
         sdk.initialize()
             .await
             .expect("shared-state SDK initialization should succeed");
+        if paykit_lib::get_paykit_noise_key_authorization(
+            &access.outbox_client.public_storage(),
+            access.session.info().public_key(),
+        )
+        .await
+        .unwrap()
+        .is_none()
+        {
+            sdk.publish_paykit_noise_key_authorization().await.unwrap();
+        }
         sdk.publish_paykit_app(test_app(display_name))
             .await
             .expect("shared-state Paykit app publication should succeed");
@@ -2129,7 +2197,12 @@ async fn homeserver_shared_pair() -> HomeserverSharedPair {
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
     let bitkit_result = session_bootstrap(&testnet, "bitkit.test")
-        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .sign_up(
+            &secret,
+            &homeserver,
+            None,
+            PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        )
         .await
         .expect("shared identity sign-up should succeed");
     let server_result = session_bootstrap(&testnet, "paykit-server.test")

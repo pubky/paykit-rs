@@ -34,7 +34,36 @@ aggregated across apps when resolving a private payment.
 
 Public-only apps may publish registry entries and public Payment Endpoints
 before the identity-wide Noise key is initialized. Private capabilities require
-identity-wide Paykit key material and initialize the registry's Noise key.
+identity-wide Paykit key material and a signed Noise key authorization.
+
+### Noise Key Authorization
+
+Before private app publication, the identity authorizer (for example Bitkit or
+Ring) calls `publish_paykit_noise_key_authorization`. It needs the Pubky identity
+secret and `PAYKIT_AUTHORIZER_SESSION_CAPABILITIES`:
+`/pub/paykit/:rw,/pub/paykit-authority/v0/current-key.json:rw`.
+Ordinary apps receive only the Paykit secret and `/pub/paykit/:rw`; they must
+never receive write access to the authority path.
+
+The signed record binds the Pubky identity, Noise public key, and key generation.
+Encrypted Link operations verify it instead of trusting the App Registry's key
+fields, including when restoring a saved link. Verified peer generations are
+retained in shared state and backups; lower generations and different keys at
+the same generation are rejected. Missing or invalid records stop private
+communication, without an unsigned fallback.
+
+Key rotation and explicit shared-state recovery require the authorizer. They
+commit replacement-key state, update the registry, then publish the signed key.
+Retry interrupted operations with the same current and replacement keys.
+Delegated apps can resume once given the replacement key. Ordinary app-registry
+updates do not require a signature.
+
+There is no expiry. Freshness relies on the homeserver serving the current record
+and enforcing the separate capability, and on its commit-time lock fencing.
+Generation pins detect previously observed rollbacks, not a stale first read or
+a rollback of shared state itself. Revoking a device also requires revoking its
+Pubky grant and distributing replacement keys only to remaining apps. Rotation
+does not revoke a holder of the Pubky identity secret.
 
 Multiple app processes using the same identity must also use the same durable
 SDK state. The SDK ships `PubkySharedStateStorage`, which stores that logical

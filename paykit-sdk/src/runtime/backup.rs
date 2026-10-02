@@ -42,15 +42,16 @@ where
 
     /// Recover missing or corrupt Pubky shared state from a trusted backup.
     ///
-    /// Requires the current Paykit key and its successor. Persist the replacement
-    /// securely first; after success, distribute it to authorized apps. Healthy
+    /// Requires the Pubky identity secret, authorizer capabilities, and the current
+    /// Paykit key and its successor. Persist the replacement securely first;
+    /// after success, distribute it to authorized apps. Healthy
     /// state, unreadable generation headers, and unexpected generations are rejected.
     /// Only corrupt current-generation state can be replaced. All old Noise snapshots and
     /// prepared sends are discarded, and execution requires wallet reconciliation.
     /// Data newer than the backup cannot be recovered by this operation.
     ///
-    /// State commits before App Registry publication. Retry failures with the
-    /// exact same keys and backup: committed replacement-key state is preserved,
+    /// State commits before App Registry and signed key publication. Retry with
+    /// the exact same keys and backup: committed replacement-key state is preserved,
     /// even if another app has progressed it. Corrupt replacement-generation state
     /// is rejected, not reset under keys that may already have been used.
     pub async fn recover_shared_state_from_backup(
@@ -70,6 +71,12 @@ where
                 })?;
         current_key.validate_successor(&replacement_key)?;
         replacement_key.validate_pubky_derivation(access.local_secret_key.as_ref())?;
+        let authorization = noise_key_authorization::validate_rotation_authorization(
+            &access,
+            &current_key,
+            &replacement_key,
+        )
+        .await?;
         let identity = self.restore_validation_identity(&access)?;
         let owner = access.public_key()?;
         let replacement_noise = crate::storage::paykit_noise_public_key(&replacement_key);
@@ -99,16 +106,19 @@ where
             crate::storage::paykit_noise_public_key(&current_key).to_public_key()?;
         let replacement_noise =
             crate::storage::paykit_noise_public_key(&replacement_key).to_public_key()?;
-        self.update_paykit_app_registry_for_key_rotation(&access, |registry| {
-            key_rotation::apply_registry_key_rotation(
-                registry,
-                &current_key,
-                &replacement_key,
-                &current_noise,
-                &replacement_noise,
-            )
-        })
-        .await
+        let registry = self
+            .update_paykit_app_registry_for_key_rotation(&access, |registry| {
+                key_rotation::apply_registry_key_rotation(
+                    registry,
+                    &current_key,
+                    &replacement_key,
+                    &current_noise,
+                    &replacement_noise,
+                )
+            })
+            .await?;
+        paykit_lib::publish_paykit_noise_key_authorization(&access.session, &authorization).await?;
+        Ok(registry)
     }
 
     async fn validate_backup_restore_session(

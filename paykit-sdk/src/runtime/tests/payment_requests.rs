@@ -252,6 +252,7 @@ async fn test_payment_requests_with_marks_recovery_required_peer_state() {
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
                 Ok(())
             }
@@ -315,6 +316,7 @@ async fn test_list_payment_requests_filters_across_counterparties() {
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
                 Ok(())
             }
@@ -507,6 +509,7 @@ async fn test_list_payment_requests_counterparty_filter_preserves_blocked_error(
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
                 Ok(())
             }

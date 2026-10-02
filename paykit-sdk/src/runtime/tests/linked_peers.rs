@@ -22,6 +22,7 @@ async fn test_linked_peers_lists_tracked_peers() {
                         local_recovery_marker_last_error: None,
                         remote_recovery_attempt_id: None,
                         remote_recovery_marker_observed_at: None,
+                        noise_key_authorization: None,
                     });
                 }
                 Ok(())
