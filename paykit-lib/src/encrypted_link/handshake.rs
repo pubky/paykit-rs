@@ -42,7 +42,8 @@ pub struct EncryptedLinkHandshake {
 }
 
 impl EncryptedLinkHandshake {
-    /// X25519 static key learned from the peer, once its handshake message arrives.
+    /// X25519 static key authenticated by the completed Noise handshake.
+    /// Returns `None` while the handshake is incomplete.
     /// The caller must authenticate this key before trusting the completed link.
     pub fn remote_static_public_key(&self) -> Option<&[u8]> {
         self.encryptor.remote_static_public_key()
