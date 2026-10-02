@@ -23,19 +23,11 @@ where
             .paykit_identity_secret_key()
             .ok_or_else(|| authorization_error("no Paykit identity key"))?;
         let record = sign_authorization(&access, &key)?;
-        self.storage
-            .transaction(|tx| {
-                crate::storage::bind_paykit_noise_key(
-                    tx,
-                    crate::storage::paykit_noise_public_key(&key),
-                )
-            })
-            .await?;
         paykit_lib::publish_paykit_noise_key_authorization(&access.session, &record).await?;
         Ok(record)
     }
 
-    /// Fetch an identity-signed Noise key. Missing or invalid records fail closed.
+    /// Fetch an identity-signed Noise key. Missing records return `NotFound`.
     ///
     /// Returns the homeserver's current record, without modifying local state.
     /// Encrypted Link operations additionally pin peer generations in shared state.
@@ -59,11 +51,7 @@ where
         let key = access
             .paykit_identity_secret_key()
             .ok_or_else(|| authorization_error("no Paykit identity key"))?;
-        let record = require_authorization(
-            &access.outbox_client.public_storage(),
-            access.session.info().public_key(),
-        )
-        .await?;
+        let record = require_local_authorization(access).await?;
         validate_key(&record, &key)
     }
 
@@ -118,7 +106,26 @@ pub(super) async fn require_authorization(
         storage, owner,
     ))
     .await?
-    .ok_or_else(|| authorization_error("missing signed Paykit Noise key authorization"))
+    .ok_or_else(|| PaykitSdkError::NotFound {
+        context: format!("no signed Paykit Noise key authorization for {owner}"),
+        source: None,
+    })
+}
+
+async fn require_local_authorization(
+    access: &PubkySessionAccess,
+) -> Result<PaykitNoiseKeyAuthorization> {
+    require_authorization(
+        &access.outbox_client.public_storage(),
+        access.session.info().public_key(),
+    )
+    .await
+    .map_err(|err| match err {
+        PaykitSdkError::NotFound { .. } => {
+            authorization_error("missing local signed Paykit Noise key authorization")
+        }
+        err => err,
+    })
 }
 
 pub(super) fn validate_key(
@@ -143,11 +150,7 @@ pub(super) async fn validate_rotation_authorization(
     replacement: &crate::PaykitIdentitySecretKey,
 ) -> Result<PaykitNoiseKeyAuthorization> {
     let replacement_record = sign_authorization(access, replacement)?;
-    let current_record = require_authorization(
-        &access.outbox_client.public_storage(),
-        access.session.info().public_key(),
-    )
-    .await?;
+    let current_record = require_local_authorization(access).await?;
     if current_record.key_generation() == replacement.key_generation() {
         validate_key(&current_record, replacement)?;
     } else {

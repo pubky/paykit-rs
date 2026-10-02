@@ -358,7 +358,12 @@ async fn test_recovery_required_peer_allows_relink_attempt() {
     );
 
     let result = sdk
-        .start_link_handshake_with_claim(counterparty, EncryptedLinkHandshakeRole::Initiator, lease)
+        .start_link_handshake_with_claim(
+            counterparty,
+            EncryptedLinkHandshakeRole::Initiator,
+            lease,
+            &pubky::Keypair::random().public_key(),
+        )
         .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));

@@ -60,8 +60,14 @@ where
     ) -> Result<PrivateStreamIntakeReport> {
         self.ensure_peer_allows_private_automation(&counterparty)
             .await?;
-        self.observe_remote_recovery_marker_with_lease(&counterparty, &session_access, &lease)
-            .await?;
+        let remote_noise_public_key = self.counterparty_noise_public_key(&counterparty).await?;
+        self.observe_remote_recovery_marker_with_lease(
+            &counterparty,
+            &session_access,
+            &lease,
+            &remote_noise_public_key,
+        )
+        .await?;
         self.ensure_peer_allows_private_automation(&counterparty)
             .await?;
         let secret_key = session_access.paykit_noise_secret_key()?;
@@ -101,7 +107,12 @@ where
             )
             .await?;
             let _ = self
-                .publish_local_recovery_marker_with_session(&counterparty, &session_access, &lease)
+                .publish_local_recovery_marker_with_key(
+                    &counterparty,
+                    &session_access,
+                    &lease,
+                    &remote_noise_public_key,
+                )
                 .await;
             return Err(PaykitSdkError::RecoveryRequired {
                 context: format!(
@@ -122,10 +133,11 @@ where
                 )
                 .await?;
                 let _ = self
-                    .publish_local_recovery_marker_with_session(
+                    .publish_local_recovery_marker_with_key(
                         &counterparty,
                         &session_access,
                         &lease,
+                        &remote_noise_public_key,
                     )
                     .await;
                 return Err(err.into());
@@ -133,13 +145,7 @@ where
         };
         self.require_snapshot_recovery_context(&counterparty, snapshot.recovery_context(), &lease)
             .await?;
-        if !self
-            .snapshot_uses_current_counterparty_noise_key(
-                &counterparty,
-                snapshot.remote_noise_public_key(),
-            )
-            .await?
-        {
+        if snapshot.remote_noise_public_key() != &remote_noise_public_key {
             let now = self.clock.now();
             mark_recovery_required_with_lease(
                 &self.storage,
@@ -149,7 +155,12 @@ where
             )
             .await?;
             let _ = self
-                .publish_local_recovery_marker_with_session(&counterparty, &session_access, &lease)
+                .publish_local_recovery_marker_with_key(
+                    &counterparty,
+                    &session_access,
+                    &lease,
+                    &remote_noise_public_key,
+                )
                 .await;
             return Err(PaykitSdkError::RecoveryRequired {
                 context: format!("counterparty {counterparty} rotated its Paykit identity key"),
@@ -177,10 +188,11 @@ where
                 )
                 .await?;
                 let _ = self
-                    .publish_local_recovery_marker_with_session(
+                    .publish_local_recovery_marker_with_key(
                         &counterparty,
                         &session_access,
                         &lease,
+                        &remote_noise_public_key,
                     )
                     .await;
                 return Err(err.into());
@@ -204,10 +216,11 @@ where
                     )
                     .await?;
                     let _ = self
-                        .publish_local_recovery_marker_with_session(
+                        .publish_local_recovery_marker_with_key(
                             &counterparty,
                             &session_access,
                             &lease,
+                            &remote_noise_public_key,
                         )
                         .await;
                     return Err(err.into());

@@ -3,7 +3,77 @@ use paykit_lib::{
     get_paykit_noise_key_authorization, PaykitNoiseKeyAuthorization,
     PAYKIT_NOISE_KEY_AUTHORIZATION_PATH,
 };
-use paykit_sdk::{PaykitSdk, PaykitSdkConfig, StorageAdapter, PAYKIT_SESSION_CAPABILITIES};
+use paykit_sdk::{
+    PaykitSdk, PaykitSdkConfig, PaykitSdkError, StorageAdapter, PAYKIT_SESSION_CAPABILITIES,
+};
+
+#[tokio::test]
+async fn test_public_only_contact_does_not_require_noise_authorization() {
+    let testnet = build_testnet().await;
+    let alice = TestUser::sign_up(&testnet).await;
+    let bob = TestUser::sign_up(&testnet).await;
+    let (_, revision) = paykit_lib::get_paykit_app_registry_with_revision(
+        &bob.access.outbox_client.public_storage(),
+        &bob.public_key.to_public_key().unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let registry = paykit_lib::PaykitAppRegistry::new(None);
+    paykit_lib::update_paykit_app_registry(&bob.access.session, &registry, &revision)
+        .await
+        .unwrap();
+    let remote = bob.access.session.storage();
+    remote
+        .delete(PAYKIT_NOISE_KEY_AUTHORIZATION_PATH)
+        .await
+        .unwrap();
+
+    assert!(alice
+        .sdk
+        .current_private_payment_lists(&bob.public_key)
+        .await
+        .unwrap()
+        .is_empty());
+    let report = alice
+        .sdk
+        .observe_encrypted_link_recovery_marker(bob.public_key.clone())
+        .await
+        .unwrap();
+    assert!(!report.remote_marker_changed);
+    assert!(report.remote_attempt_id.is_none());
+    assert!(matches!(
+        alice
+            .sdk
+            .paykit_noise_key_authorization(bob.public_key.clone())
+            .await,
+        Err(PaykitSdkError::NotFound { .. })
+    ));
+    assert!(matches!(
+        alice
+            .sdk
+            .ensure_link_with_peer(bob.public_key.clone(), 0)
+            .await,
+        Err(PaykitSdkError::NotFound { .. })
+    ));
+
+    remote
+        .put(PAYKIT_NOISE_KEY_AUTHORIZATION_PATH, "invalid")
+        .await
+        .unwrap();
+    assert!(matches!(
+        alice
+            .sdk
+            .current_private_payment_lists(&bob.public_key)
+            .await,
+        Err(PaykitSdkError::Protocol { .. })
+    ));
+    assert!(alice
+        .sdk
+        .observe_encrypted_link_recovery_marker(bob.public_key.clone())
+        .await
+        .is_err());
+}
 
 #[tokio::test]
 async fn test_delegated_access_cannot_replace_authorization_or_rotate_keys() {
@@ -81,11 +151,19 @@ async fn test_links_require_authorization_and_pin_verified_generations() {
         .delete(PAYKIT_NOISE_KEY_AUTHORIZATION_PATH)
         .await
         .unwrap();
-    assert!(alice
-        .sdk
-        .ensure_link_with_peer(bob.public_key.clone(), 0)
-        .await
-        .is_err());
+    assert!(matches!(
+        alice
+            .sdk
+            .ensure_link_with_peer(bob.public_key.clone(), 0)
+            .await,
+        Err(PaykitSdkError::NotFound { .. })
+    ));
+    assert!(matches!(
+        bob.sdk
+            .ensure_link_with_peer(alice.public_key.clone(), 0)
+            .await,
+        Err(PaykitSdkError::Identity { .. })
+    ));
     bob.sdk
         .publish_paykit_noise_key_authorization()
         .await

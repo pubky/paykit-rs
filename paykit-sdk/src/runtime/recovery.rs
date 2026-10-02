@@ -260,8 +260,24 @@ where
         session_access: &PubkySessionAccess,
         lease: &PeerLinkOperationLease,
     ) -> Result<EncryptedLinkRecoveryMarkerReport> {
-        let secret_key = session_access.paykit_noise_secret_key()?;
         let remote_noise_public_key = self.counterparty_noise_public_key(counterparty).await?;
+        self.publish_local_recovery_marker_with_key(
+            counterparty,
+            session_access,
+            lease,
+            &remote_noise_public_key,
+        )
+        .await
+    }
+
+    pub(super) async fn publish_local_recovery_marker_with_key(
+        &self,
+        counterparty: &PubkyPublicKey,
+        session_access: &PubkySessionAccess,
+        lease: &PeerLinkOperationLease,
+        remote_noise_public_key: &paykit_lib::PublicKey,
+    ) -> Result<EncryptedLinkRecoveryMarkerReport> {
+        let secret_key = session_access.paykit_noise_secret_key()?;
         let now = self.clock.now();
         let marker = self
             .retry_storage_transaction(|| {
@@ -306,7 +322,7 @@ where
             &secret_key,
             session_access.session.info().public_key(),
             &counterparty.to_public_key()?,
-            &remote_noise_public_key,
+            remote_noise_public_key,
         );
         let publication: Result<()> =
             paykit_lib::with_write_lock(&session_access.session, &path, |lock| async move {
@@ -368,9 +384,22 @@ where
         session_access: &PubkySessionAccess,
     ) -> Result<EncryptedLinkRecoveryMarkerReport> {
         let lease = self.claim_peer_link_operation(counterparty).await?;
-        let result = self
-            .observe_remote_recovery_marker_with_lease(counterparty, session_access, &lease)
-            .await;
+        let result = async {
+            self.ensure_peer_not_blocked(counterparty).await?;
+            let remote_key = match self.counterparty_noise_public_key(counterparty).await {
+                Ok(key) => key,
+                Err(PaykitSdkError::NotFound { .. }) => return Ok(false),
+                Err(err) => return Err(err),
+            };
+            self.observe_remote_recovery_marker_with_lease(
+                counterparty,
+                session_access,
+                &lease,
+                &remote_key,
+            )
+            .await
+        }
+        .await;
         let changed = self.finish_peer_link_operation(lease, result).await?;
         self.recovery_marker_report_or_default(counterparty, changed)
             .await
@@ -381,6 +410,7 @@ where
         counterparty: &PubkyPublicKey,
         session_access: &PubkySessionAccess,
         lease: &PeerLinkOperationLease,
+        remote_noise_public_key: &paykit_lib::PublicKey,
     ) -> Result<bool> {
         self.ensure_peer_not_blocked(counterparty).await?;
         self.require_current_peer_link_operation(lease, session_access)
@@ -395,17 +425,12 @@ where
                 })?;
         let secret_key = session_access.paykit_noise_secret_key()?;
         let remote_public_key = counterparty.to_public_key()?;
-        let authorization =
-            noise_key_authorization::require_authorization(&public_storage, &remote_public_key)
-                .await?;
-        self.pin_counterparty_noise_key_authorization(counterparty, &authorization)
-            .await?;
         let Some(marker) = paykit_lib::fetch_encrypted_link_recovery_marker(
             &public_storage,
             &secret_key,
             session_access.session.info().public_key(),
             &remote_public_key,
-            authorization.noise_public_key(),
+            remote_noise_public_key,
         )
         .await?
         else {

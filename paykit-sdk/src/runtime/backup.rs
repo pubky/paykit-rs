@@ -42,10 +42,11 @@ where
 
     /// Recover missing or corrupt Pubky shared state from a trusted backup.
     ///
-    /// Requires the Pubky identity secret, authorizer capabilities, and the current
-    /// Paykit key and its successor. Persist the replacement securely first;
-    /// after success, distribute it to authorized apps. Healthy
-    /// state, unreadable generation headers, and unexpected generations are rejected.
+    /// Requires the Pubky identity secret, authorizer capabilities, the protected
+    /// current-key authorization, and the current Paykit key and its successor.
+    /// Persist the replacement securely first; after success, distribute it to
+    /// authorized apps. Healthy state, unreadable generation headers, and unexpected
+    /// generations are rejected.
     /// Only corrupt current-generation state can be replaced. All old Noise snapshots and
     /// prepared sends are discarded, and execution requires wallet reconciliation.
     /// Data newer than the backup cannot be recovered by this operation.
