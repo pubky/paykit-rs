@@ -22,11 +22,10 @@ use paykit_sdk::{
 use pubky_testnet::{
     docker_postgres::DockerPostgres, pubky::Keypair, pubky_homeserver::ConfigToml, EphemeralTestnet,
 };
-use tokio::sync::{oneshot, Mutex as TokioMutex, OnceCell, Semaphore, SemaphorePermit};
+use tokio::sync::{oneshot, Mutex as TokioMutex, Semaphore, SemaphorePermit};
 
 const TEST_CLIENT_ID: &str = "paykit-sdk.test";
 
-static SHARED_POSTGRES: OnceCell<DockerPostgres> = OnceCell::const_new();
 static TESTNET_BUILD_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 static TESTNET_CONCURRENCY: Semaphore = Semaphore::const_new(2);
 
@@ -41,16 +40,6 @@ impl Deref for TestnetInstance {
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
-}
-
-async fn shared_postgres() -> &'static DockerPostgres {
-    SHARED_POSTGRES
-        .get_or_init(|| async {
-            DockerPostgres::start()
-                .await
-                .expect("failed to start Docker Postgres")
-        })
-        .await
 }
 
 pub async fn build_testnet() -> TestnetInstance {
@@ -73,7 +62,7 @@ async fn build_testnet_with_config(config: ConfigToml) -> TestnetInstance {
     let builder = if std::env::var_os("TEST_PUBKY_CONNECTION_STRING").is_some() {
         EphemeralTestnet::builder()
     } else {
-        let postgres = shared_postgres()
+        let postgres = DockerPostgres::shared()
             .await
             .connection_string()
             .expect("Docker Postgres connection string should be valid");
