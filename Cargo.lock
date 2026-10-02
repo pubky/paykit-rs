@@ -3480,6 +3480,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "crypto_secretbox",
+ "futures-util",
  "hex",
  "http-relay",
  "mainline",

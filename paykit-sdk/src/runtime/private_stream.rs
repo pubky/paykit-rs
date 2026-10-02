@@ -1,4 +1,12 @@
 use super::*;
+use futures_util::{stream, StreamExt};
+
+const PRIVATE_INBOX_PROBE_CONCURRENCY: usize = 4;
+
+struct PrivateReceiveSnapshot {
+    link: paykit_lib::EncryptedLinkSnapshot,
+    authorization: paykit_lib::PaykitNoiseKeyAuthorization,
+}
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
@@ -18,32 +26,30 @@ where
         &self,
         counterparty: PubkyPublicKey,
     ) -> Result<PrivateStreamIntakeReport> {
-        let (session_access, _) = self.private_link_session_access().await?;
-        let snapshot = self
-            .storage
-            .transaction(|tx| Ok(private_receive_snapshot(tx, &counterparty)))
+        let (session_access, snapshots) = self.private_receive_context(Some(&counterparty)).await?;
+        let snapshot = snapshots
+            .into_iter()
+            .next()
+            .and_then(|(_, snapshot)| snapshot);
+        let empty = self
+            .private_inbox_is_empty(&counterparty, &session_access, snapshot.as_ref())
             .await?;
-        self.receive_private_messages_with_snapshot(counterparty, &session_access, snapshot)
+        self.receive_probed_private_messages(counterparty, &session_access, empty)
             .await
     }
 
-    async fn receive_private_messages_with_snapshot(
+    async fn receive_probed_private_messages(
         &self,
         counterparty: PubkyPublicKey,
         session_access: &PubkySessionAccess,
-        snapshot: Option<paykit_lib::EncryptedLinkSnapshot>,
+        empty: bool,
     ) -> Result<PrivateStreamIntakeReport> {
-        if let Some(snapshot) = snapshot {
-            if self
-                .private_inbox_is_empty(&counterparty, session_access, &snapshot)
-                .await?
-            {
-                return Ok(PrivateStreamIntakeReport {
-                    receive_batch_id: None,
-                    stream_item_ids: Vec::new(),
-                    event_conflicts: Vec::new(),
-                });
-            }
+        if empty {
+            return Ok(PrivateStreamIntakeReport {
+                receive_batch_id: None,
+                stream_item_ids: Vec::new(),
+                event_conflicts: Vec::new(),
+            });
         }
         // The probe grants no authority to receive. Reload under a fresh lease.
         let lease = self.claim_peer_link_operation(&counterparty).await?;
@@ -57,32 +63,16 @@ where
     pub async fn receive_private_messages_from_linked_peers(
         &self,
     ) -> Result<Vec<PrivateStreamCounterpartyIntakeReport>> {
-        let counterparties = self
-            .storage
-            .transaction(|tx| {
-                let mut peers = tx
-                    .export_storage_state()
-                    .linked_peers
-                    .into_values()
-                    .filter(|record| record.state == LinkedPeerState::Linked)
-                    .map(|record| {
-                        let snapshot = private_receive_snapshot(tx, &record.counterparty);
-                        (record.counterparty, snapshot)
-                    })
-                    .collect::<Vec<_>>();
-                peers.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
-                Ok(peers)
-            })
-            .await?;
-        if counterparties.is_empty() {
-            return Ok(Vec::new());
-        }
-        let session_access = match self.private_link_session_access().await {
-            Ok((access, _)) => access,
+        let (session_access, counterparties) = match self.private_receive_context(None).await {
+            Ok(context) => context,
             Err(error) => {
+                let counterparties = self
+                    .storage
+                    .transaction(|tx| Ok(linked_counterparties(tx)))
+                    .await?;
                 return Ok(counterparties
                     .into_iter()
-                    .map(|(counterparty, _)| PrivateStreamCounterpartyIntakeReport {
+                    .map(|counterparty| PrivateStreamCounterpartyIntakeReport {
                         counterparty,
                         report: None,
                         error: Some(error.to_string()),
@@ -91,15 +81,31 @@ where
             }
         };
         let mut reports = Vec::with_capacity(counterparties.len());
-        for (counterparty, snapshot) in counterparties {
-            match self
-                .receive_private_messages_with_snapshot(
-                    counterparty.clone(),
-                    &session_access,
-                    snapshot,
-                )
-                .await
-            {
+        let mut probes = stream::iter(counterparties)
+            .map(|(counterparty, snapshot)| {
+                let session_access = &session_access;
+                async move {
+                    let empty = self
+                        .private_inbox_is_empty(&counterparty, session_access, snapshot.as_ref())
+                        .await;
+                    (counterparty, empty)
+                }
+            })
+            .buffer_unordered(PRIVATE_INBOX_PROBE_CONCURRENCY);
+        while let Some((counterparty, empty)) = probes.next().await {
+            // Only advisory reads run concurrently. Receive commits stay serialized.
+            let result = match empty {
+                Ok(empty) => {
+                    self.receive_probed_private_messages(
+                        counterparty.clone(),
+                        &session_access,
+                        empty,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+            match result {
                 Ok(report) => reports.push(PrivateStreamCounterpartyIntakeReport {
                     counterparty,
                     report: Some(report),
@@ -112,15 +118,48 @@ where
                 }),
             }
         }
+        reports.sort_by(|left, right| left.counterparty.as_str().cmp(right.counterparty.as_str()));
         Ok(reports)
+    }
+
+    async fn private_receive_context(
+        &self,
+        counterparty: Option<&PubkyPublicKey>,
+    ) -> Result<(
+        GuardedSessionAccess,
+        Vec<(PubkyPublicKey, Option<PrivateReceiveSnapshot>)>,
+    )> {
+        let (access, _, peers) = self
+            .load_session_access_and_refresh_identity_with(|tx| {
+                let peers = counterparty
+                    .map_or_else(|| linked_counterparties(tx), |peer| vec![peer.clone()]);
+                Ok(peers
+                    .into_iter()
+                    .map(|peer| {
+                        let snapshot = private_receive_snapshot(tx, &peer);
+                        (peer, snapshot)
+                    })
+                    .collect())
+            })
+            .await?;
+        let access = access.ok_or_else(|| PaykitSdkError::Identity {
+            context: "no Pubky session available".into(),
+            source: None,
+        })?;
+        access.paykit_noise_secret_key()?;
+        self.validate_local_noise_key_authorization(&access).await?;
+        Ok((access, peers.expect("active session reads peer state")))
     }
 
     async fn private_inbox_is_empty(
         &self,
         counterparty: &PubkyPublicKey,
         session_access: &PubkySessionAccess,
-        snapshot: &paykit_lib::EncryptedLinkSnapshot,
+        snapshot: Option<&PrivateReceiveSnapshot>,
     ) -> Result<bool> {
+        let Some(snapshot) = snapshot else {
+            return Ok(false);
+        };
         let public_storage =
             self.pubky
                 .load_public_storage()
@@ -130,15 +169,13 @@ where
                     source: None,
                 })?;
         let remote_public_key = counterparty.to_public_key()?;
-        let registry =
-            paykit_lib::get_paykit_app_registry(&public_storage, &remote_public_key).await?;
-        if registry
-            .as_ref()
-            .and_then(|registry| registry.noise_public_key())
-            != Some(snapshot.remote_noise_public_key())
-        {
+        let authorization =
+            noise_key_authorization::require_authorization(&public_storage, &remote_public_key)
+                .await?;
+        if authorization != snapshot.authorization {
             return Ok(false);
         }
+        let snapshot = &snapshot.link;
         let secret_key = session_access.paykit_noise_secret_key()?;
         let marker = paykit_lib::fetch_encrypted_link_recovery_marker(
             &public_storage,
@@ -414,7 +451,7 @@ where
 fn private_receive_snapshot(
     tx: &dyn StorageTransaction,
     counterparty: &PubkyPublicKey,
-) -> Option<paykit_lib::EncryptedLinkSnapshot> {
+) -> Option<PrivateReceiveSnapshot> {
     let peer = tx.linked_peer(counterparty)?;
     if peer.state != LinkedPeerState::Linked {
         return None;
@@ -427,5 +464,24 @@ fn private_receive_snapshot(
     }
     crate::domain::linked_peers::require_recovery_context(&peer, snapshot.recovery_context())
         .ok()?;
-    Some(snapshot)
+    let authorization = peer.noise_key_authorization?;
+    if snapshot.remote_noise_public_key() != authorization.noise_public_key() {
+        return None;
+    }
+    Some(PrivateReceiveSnapshot {
+        link: snapshot,
+        authorization,
+    })
+}
+
+fn linked_counterparties(tx: &dyn StorageTransaction) -> Vec<PubkyPublicKey> {
+    let mut peers = tx
+        .export_storage_state()
+        .linked_peers
+        .into_values()
+        .filter(|peer| peer.state == LinkedPeerState::Linked)
+        .map(|peer| peer.counterparty)
+        .collect::<Vec<_>>();
+    peers.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    peers
 }

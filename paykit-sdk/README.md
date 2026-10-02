@@ -194,10 +194,13 @@ Common workflows:
   authorized app must persist it before private work resumes
 - call `receive_private_messages` before deriving Private Payment Lists,
   Payment Requests, Allowances, Receipt Access state, or resolving a private
-  contact payment when the freshest private endpoints matter. Idle checks read
-  the peer's registry, recovery marker, and next message slot without claiming
-  a peer lease or rewriting shared state. Available messages and recovery work
-  still reload state under a lease before processing
+  contact payment when the freshest private endpoints matter. Idle checks verify
+  signed key authorization, recovery markers, and the next message slot without
+  claiming a peer lease or rewriting shared state. Batch intake shares one state
+  read and probes up to four peers concurrently. Available messages and recovery
+  still reload state under a lease and are processed one peer at a time
+- list saved Payment Requests with `payment_requests` or `list_payment_requests`;
+  all counterparties and filters use one shared-state read, without network intake
 - use `propose_allowance`, `accept_allowance`, `reject_allowance`, and
   `end_allowance` for durable lifecycle intent; drain the normal outbound queue
   and use `allowance_record` or `list_allowances` for derived views

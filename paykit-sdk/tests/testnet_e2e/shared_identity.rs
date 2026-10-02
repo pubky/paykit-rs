@@ -282,7 +282,7 @@ async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sig
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_idle_private_receive_leaves_shared_blob_unchanged() {
+async fn test_idle_polling_reads_shared_state_once_without_rewriting_it() {
     struct CountedStorage {
         inner: PubkySharedStateStorage,
         transactions: Arc<AtomicUsize>,
@@ -300,6 +300,21 @@ async fn test_idle_private_receive_leaves_shared_blob_unchanged() {
     }
 
     let pair = linked_homeserver_shared_pair().await;
+    pair.bob
+        .sdk
+        .propose_payment_request(pair.bitkit.public_key.clone(), recurring_request_terms())
+        .await
+        .unwrap();
+    pair.bob
+        .sdk
+        .process_outbound_private_messages(pair.bitkit.public_key.clone())
+        .await
+        .unwrap();
+    pair.bitkit
+        .sdk
+        .receive_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
     let storage = pair.bitkit.access.session.storage();
     let before = storage
         .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
@@ -333,9 +348,13 @@ async fn test_idle_private_receive_leaves_shared_blob_unchanged() {
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].report, Some(report));
         assert!(reports[0].error.is_none());
-        let batch_transactions = transactions.load(Ordering::SeqCst);
-        assert!(single_transactions <= 2);
-        assert!(batch_transactions <= 2);
+        let batch_transactions = transactions.swap(0, Ordering::SeqCst);
+        assert_eq!(single_transactions, 1);
+        assert_eq!(batch_transactions, 1);
+        let requests = sdk.payment_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].counterparty, pair.bob.public_key);
+        assert_eq!(transactions.load(Ordering::SeqCst), 1);
         assert_no_pending_shared_state_writes(&user.access.session).await;
     }
     let after = storage

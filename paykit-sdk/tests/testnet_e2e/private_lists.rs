@@ -1,9 +1,129 @@
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+use std::time::Duration;
+
+use async_trait::async_trait;
 use paykit_sdk::{
-    LinkedPeerState, OutboundPrivateMessageStatus, PaykitSdkError,
-    PrivatePaymentEndpointReservation, PrivatePaymentListReservationUpdate, StorageAdapter,
+    LinkedPeerState, OutboundPrivateMessageStatus, PaykitSdk, PaykitSdkConfig, PaykitSdkError,
+    PrivatePaymentEndpointReservation, PrivatePaymentListReservationUpdate, PubkySessionAccess,
+    PubkySessionProvider, Result as PaykitResult, StorageAdapter,
+};
+use tokio::sync::{Notify, Semaphore};
+
+use crate::harness::{
+    build_testnet, drive_link_to_linked, linked_two_party, private_receiving_detail, two_party,
+    TestUser,
 };
 
-use crate::harness::{linked_two_party, private_receiving_detail, two_party};
+#[tokio::test]
+async fn test_private_inbox_probes_are_bounded_and_isolate_a_slow_failed_peer() {
+    struct GatedPublicStorage {
+        access: PubkySessionAccess,
+        calls: Arc<AtomicUsize>,
+        started: Arc<Notify>,
+        first: Arc<Semaphore>,
+        rest: Arc<Semaphore>,
+    }
+
+    #[async_trait]
+    impl PubkySessionProvider for GatedPublicStorage {
+        async fn load_session_access(&self) -> PaykitResult<Option<PubkySessionAccess>> {
+            Ok(Some(self.access.clone()))
+        }
+
+        async fn clear_session_access(&self) -> PaykitResult<()> {
+            unreachable!("inbox polling must not sign out")
+        }
+
+        async fn load_public_storage(&self) -> PaykitResult<Option<pubky::PublicStorage>> {
+            let index = self.calls.fetch_add(1, Ordering::SeqCst);
+            self.started.notify_one();
+            if index == 0 {
+                self.first.acquire().await.unwrap().forget();
+                return Err(PaykitSdkError::Transport {
+                    context: "peer lookup unavailable".into(),
+                    source: None,
+                });
+            }
+            self.rest.acquire().await.unwrap().forget();
+            Ok(Some(self.access.outbox_client.public_storage()))
+        }
+    }
+
+    let testnet = build_testnet().await;
+    let alice = TestUser::sign_up(&testnet).await;
+    for _ in 0..5 {
+        let peer = TestUser::sign_up(&testnet).await;
+        alice
+            .sdk
+            .initiate_link_with_peer(peer.public_key.clone())
+            .await
+            .unwrap();
+        peer.sdk
+            .accept_link_with_peer(alice.public_key.clone())
+            .await
+            .unwrap();
+        drive_link_to_linked(&alice, &peer).await;
+    }
+    let before = alice.storage.snapshot().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(Notify::new());
+    let first = Arc::new(Semaphore::new(0));
+    let rest = Arc::new(Semaphore::new(0));
+    let sdk = PaykitSdk::new(
+        alice.storage.clone(),
+        GatedPublicStorage {
+            access: alice.access.clone(),
+            calls: calls.clone(),
+            started: started.clone(),
+            first: first.clone(),
+            rest: rest.clone(),
+        },
+        alice.adapter.clone(),
+        PaykitSdkConfig::new(alice.app_id.clone()).unwrap(),
+    );
+    let mut receive = Box::pin(sdk.receive_private_messages_from_linked_peers());
+    for expected in [4, 5] {
+        tokio::select! {
+            result = &mut receive => panic!("batch finished before releasing the slow peer: {result:?}"),
+            ready = tokio::time::timeout(Duration::from_secs(10), async {
+                while calls.load(Ordering::SeqCst) < expected {
+                    started.notified().await;
+                }
+            }) => ready.expect("other peer probes must progress while the first is stalled"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), expected);
+        rest.add_permits(4);
+    }
+    first.add_permits(1);
+    let reports = tokio::time::timeout(Duration::from_secs(10), receive)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reports.len(), 5);
+    assert_eq!(
+        reports
+            .iter()
+            .filter(|report| report.error.is_some())
+            .count(),
+        1
+    );
+    assert!(reports[0]
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("peer lookup unavailable"));
+    assert!(reports[1..].iter().all(|report| report
+        .report
+        .as_ref()
+        .is_some_and(|intake| intake.stream_item_ids.is_empty())));
+    assert!(reports
+        .windows(2)
+        .all(|pair| pair[0].counterparty.as_str() < pair[1].counterparty.as_str()));
+    assert_eq!(alice.storage.snapshot().unwrap(), before);
+}
 
 #[tokio::test]
 async fn test_idle_private_receive_detects_remote_recovery_and_rotation() {

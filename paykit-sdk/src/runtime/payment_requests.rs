@@ -1,5 +1,8 @@
 use super::*;
-use crate::domain::payment_requests::validate_proof_conversion;
+use crate::domain::payment_requests::{
+    payment_request_records_from_transaction, received_payment_request_records_from_transaction,
+    validate_proof_conversion,
+};
 use crate::domain::private_stream::is_payment_request_kind;
 use paykit_lib::{ConversionRate, PaymentConversionQuote, PaymentRequestEvent};
 
@@ -65,37 +68,20 @@ where
         &self,
         filter: PaymentRequestFilter,
     ) -> Result<Vec<PaymentRequestRecord>> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
+        let (_, identity, records) = self
+            .load_session_access_and_refresh_identity_with(|tx| {
+                filtered_payment_request_records(tx, &filter, self.clock.now())
+            })
+            .await?;
         if identity.public_key.is_none() {
             return Ok(Vec::new());
         }
-        let now = self.clock.now();
-
-        let counterparties = if let Some(counterparty) = &filter.counterparty {
-            self.ensure_peer_not_blocked(counterparty).await?;
-            vec![counterparty.clone()]
-        } else {
-            self.payment_request_counterparties(filter.received_only)
-                .await?
-        };
-
-        let mut records = Vec::new();
-        for counterparty in counterparties {
-            let mut peer_records = if filter.received_only {
-                derive_received_payment_request_records(&self.storage, &counterparty, now).await?
-            } else {
-                derive_payment_request_records(&self.storage, &counterparty, now).await?
-            };
-            self.mark_recovery_required_payment_request_records(&counterparty, &mut peer_records)
-                .await?;
-            records.extend(
-                peer_records
-                    .into_iter()
-                    .filter(|record| filter.matches(record)),
-            );
+        if let Some(records) = records {
+            return Ok(records);
         }
-        sort_payment_requests_newest_first(&mut records);
-        Ok(records)
+        self.storage
+            .transaction(|tx| filtered_payment_request_records(tx, &filter, self.clock.now()))
+            .await
     }
 
     /// Return all Payment Requests across non-blocked counterparties.
@@ -228,41 +214,6 @@ where
             .counterparty_app_authorization_context(counterparty)
             .await?;
         Ok(context.payment_request_apps)
-    }
-
-    async fn payment_request_counterparties(
-        &self,
-        received_only: bool,
-    ) -> Result<Vec<PubkyPublicKey>> {
-        self.storage
-            .transaction(move |tx| {
-                let snapshot = tx.export_storage_state();
-                let mut counterparties = HashSet::new();
-                for item in snapshot.private_stream_items {
-                    if is_payment_request_kind(item.parsed_kind.as_deref()) {
-                        counterparties.insert(item.counterparty);
-                    }
-                }
-                if !received_only {
-                    for outbound in snapshot.outbound_private_messages {
-                        if is_payment_request_kind(Some(&outbound.kind)) {
-                            counterparties.insert(outbound.counterparty);
-                        }
-                    }
-                }
-                let mut counterparties = counterparties
-                    .into_iter()
-                    .filter(|counterparty| {
-                        !snapshot
-                            .linked_peers
-                            .get(counterparty)
-                            .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
-                    })
-                    .collect::<Vec<_>>();
-                counterparties.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-                Ok(counterparties)
-            })
-            .await
     }
 
     pub(super) async fn ensure_private_outbound_ready(
@@ -775,18 +726,7 @@ where
         if !recovery_required {
             return Ok(());
         }
-        for record in records {
-            if matches!(
-                record.state,
-                PaymentRequestLifecycleState::Proposed
-                    | PaymentRequestLifecycleState::ProposalExpired
-                    | PaymentRequestLifecycleState::Accepted
-                    | PaymentRequestLifecycleState::ProofSubmitted
-                    | PaymentRequestLifecycleState::ActiveRecurring
-            ) {
-                record.state = PaymentRequestLifecycleState::RecoveryRequired;
-            }
-        }
+        mark_payment_requests_recovery_required(records);
         Ok(())
     }
 
@@ -939,6 +879,87 @@ fn require_state(
             ),
             source: None,
         })
+    }
+}
+
+fn filtered_payment_request_records(
+    tx: &dyn StorageTransaction,
+    filter: &PaymentRequestFilter,
+    now: DateTime<Utc>,
+) -> Result<Vec<PaymentRequestRecord>> {
+    let counterparties = if let Some(counterparty) = &filter.counterparty {
+        if tx
+            .linked_peer(counterparty)
+            .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
+        {
+            return Err(PaykitSdkError::Policy {
+                context: format!("counterparty {counterparty} is blocked"),
+                source: None,
+            });
+        }
+        vec![counterparty.clone()]
+    } else {
+        let snapshot = tx.export_storage_state();
+        let mut peers = HashSet::new();
+        for item in snapshot.private_stream_items {
+            if is_payment_request_kind(item.parsed_kind.as_deref()) {
+                peers.insert(item.counterparty);
+            }
+        }
+        if !filter.received_only {
+            for outbound in snapshot.outbound_private_messages {
+                if is_payment_request_kind(Some(&outbound.kind)) {
+                    peers.insert(outbound.counterparty);
+                }
+            }
+        }
+        let mut peers = peers
+            .into_iter()
+            .filter(|peer| {
+                !snapshot
+                    .linked_peers
+                    .get(peer)
+                    .is_some_and(|record| record.state == LinkedPeerState::Blocked)
+            })
+            .collect::<Vec<_>>();
+        peers.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        peers
+    };
+    let mut records = Vec::new();
+    for peer in counterparties {
+        let mut peer_records = if filter.received_only {
+            received_payment_request_records_from_transaction(tx, &peer, now)?
+        } else {
+            payment_request_records_from_transaction(tx, &peer, now)?
+        };
+        if tx
+            .linked_peer(&peer)
+            .is_some_and(|record| record.state == LinkedPeerState::RecoveryRequired)
+        {
+            mark_payment_requests_recovery_required(&mut peer_records);
+        }
+        records.extend(
+            peer_records
+                .into_iter()
+                .filter(|record| filter.matches(record)),
+        );
+    }
+    sort_payment_requests_newest_first(&mut records);
+    Ok(records)
+}
+
+fn mark_payment_requests_recovery_required(records: &mut [PaymentRequestRecord]) {
+    for record in records {
+        if matches!(
+            record.state,
+            PaymentRequestLifecycleState::Proposed
+                | PaymentRequestLifecycleState::ProposalExpired
+                | PaymentRequestLifecycleState::Accepted
+                | PaymentRequestLifecycleState::ProofSubmitted
+                | PaymentRequestLifecycleState::ActiveRecurring
+        ) {
+            record.state = PaymentRequestLifecycleState::RecoveryRequired;
+        }
     }
 }
 
