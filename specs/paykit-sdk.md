@@ -307,8 +307,10 @@ publication, and attempted send. Event Message history and deduplication records
 are not pruned, so the 64 MiB limit still applies to growing payment history.
 
 Before each state PUT, the adapter publishes an empty, uniquely named marker
-under `/pub/paykit/v0/shared-state-writes/`. A confirmed PUT or definitive lock
-rejection removes its marker; uncertain writes and cancellation leave it.
+under `/pub/paykit/v0/shared-state-writes/`. A confirmed PUT or an explicit PUT
+rejection for lock expiry (412), rate limiting (429), or storage quota (507)
+removes that attempt's marker, provided cleanup succeeds. All other failures
+are treated as uncertain writes; these and cancellation leave the marker.
 Marker cleanup failure does not undo a confirmed commit. A transaction finding
 pending markers holds and renews the state lock for five minutes, removes the
 observed markers, then loads fresh state. Read-only transactions and key rotation

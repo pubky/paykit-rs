@@ -63,7 +63,7 @@ pub async fn build_testnet_with_admin() -> TestnetInstance {
     build_testnet_with_config(config).await
 }
 
-async fn build_testnet_with_config(config: ConfigToml) -> TestnetInstance {
+pub async fn build_testnet_with_config(config: ConfigToml) -> TestnetInstance {
     let permit = TESTNET_CONCURRENCY
         .acquire()
         .await
