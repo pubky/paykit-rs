@@ -152,6 +152,7 @@ fn test_restore_reconciliation_preserves_active_link_checkpoint() {
             local_recovery_marker_last_error: None,
             remote_recovery_attempt_id: None,
             remote_recovery_marker_observed_at: None,
+            noise_key_authorization: None,
         },
     )]);
     let link_states = std::collections::HashMap::from([(
@@ -216,6 +217,7 @@ fn test_restore_reconciliation_preserves_existing_recovery_required_peer() {
             local_recovery_marker_last_error: None,
             remote_recovery_attempt_id: None,
             remote_recovery_marker_observed_at: None,
+            noise_key_authorization: None,
         },
     )]);
     let link_states = std::collections::HashMap::from([(
@@ -255,6 +257,7 @@ fn test_restore_reconciliation_marks_missing_checkpoint_recovery_required() {
             local_recovery_marker_last_error: None,
             remote_recovery_attempt_id: None,
             remote_recovery_marker_observed_at: None,
+            noise_key_authorization: None,
         },
     )]);
     let link_states = std::collections::HashMap::from([(
@@ -294,6 +297,7 @@ fn test_restore_reconciliation_marks_missing_link_state_recovery_required() {
             local_recovery_marker_last_error: None,
             remote_recovery_attempt_id: None,
             remote_recovery_marker_observed_at: None,
+            noise_key_authorization: None,
         },
     )]);
     let link_states = std::collections::HashMap::new();
@@ -327,6 +331,7 @@ async fn test_restore_backup_state_rejects_local_recovery_marker_without_created
             local_recovery_marker_last_error: None,
             remote_recovery_attempt_id: None,
             remote_recovery_marker_observed_at: None,
+            noise_key_authorization: None,
         }],
         contact_records: Vec::new(),
         retired_paykit_apps: Vec::new(),
@@ -370,6 +375,7 @@ async fn test_restore_backup_state_rejects_invalid_remote_recovery_attempt_id() 
             local_recovery_marker_last_error: None,
             remote_recovery_attempt_id: Some("not-a-uuid".into()),
             remote_recovery_marker_observed_at: Some(timestamp()),
+            noise_key_authorization: None,
         }],
         contact_records: Vec::new(),
         retired_paykit_apps: Vec::new(),

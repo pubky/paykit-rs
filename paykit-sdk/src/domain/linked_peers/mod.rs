@@ -127,6 +127,7 @@ pub(crate) fn default_linked_peer(counterparty: PubkyPublicKey) -> LinkedPeerRec
         local_recovery_marker_last_error: None,
         remote_recovery_attempt_id: None,
         remote_recovery_marker_observed_at: None,
+        noise_key_authorization: None,
     }
 }
 

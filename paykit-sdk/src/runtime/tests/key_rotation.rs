@@ -6,6 +6,26 @@ fn key(byte: u8, generation: u64) -> crate::PaykitIdentitySecretKey {
 }
 
 #[test]
+fn test_noise_authorization_requires_the_expected_handshake_static_key() {
+    use crate::runtime::noise_key_authorization::validate_remote_static_key;
+
+    let authorization =
+        paykit_lib::PaykitNoiseKeyAuthorization::sign(&pubky::Keypair::random(), &[7; 32], 1)
+            .unwrap();
+    for complete in [false, true] {
+        assert!(validate_remote_static_key(
+            &authorization,
+            Some(authorization.noise_static_public_key()),
+            complete
+        )
+        .is_ok());
+        assert!(validate_remote_static_key(&authorization, Some(&[0; 32]), complete).is_err());
+    }
+    assert!(validate_remote_static_key(&authorization, None, false).is_ok());
+    assert!(validate_remote_static_key(&authorization, None, true).is_err());
+}
+
+#[test]
 fn test_replacement_key_requires_new_material_and_next_generation() {
     let current = key(7, 3);
 
@@ -63,7 +83,14 @@ async fn test_key_rotation_rejects_live_peer_lease_atomically() {
 #[tokio::test]
 async fn test_key_rotation_preserves_history_and_resets_private_link_state() {
     let owner = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let counterparty_keypair = pubky::Keypair::random();
+    let counterparty = PubkyPublicKey::from_public_key(&counterparty_keypair.public_key());
+    let authorization = paykit_lib::PaykitNoiseKeyAuthorization::sign(
+        &counterparty_keypair,
+        &pubky::Keypair::random().secret_key(),
+        4,
+    )
+    .unwrap();
     let storage = registered_test_storage();
     let raw_event = r#"{"version":1,"kind":"paykit.payment_request_cancellation","app_id":"bitkit","event_id":"650e8400-e29b-41d4-a716-446655440000","payment_request_id":"550e8400-e29b-41d4-a716-446655440000"}"#;
     storage
@@ -99,6 +126,7 @@ async fn test_key_rotation_preserves_history_and_resets_private_link_state() {
                     local_recovery_marker_last_error: Some("old-error".into()),
                     remote_recovery_attempt_id: Some("old-remote".into()),
                     remote_recovery_marker_observed_at: Some(FixedClock.now()),
+                    noise_key_authorization: Some(authorization.clone()),
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty: counterparty.clone(),
@@ -162,6 +190,13 @@ async fn test_key_rotation_preserves_history_and_resets_private_link_state() {
     assert_eq!(peer.failure_count, 0);
     assert!(peer.local_recovery_attempt_id.is_none());
     assert!(peer.remote_recovery_attempt_id.is_none());
+    assert_eq!(
+        peer.noise_key_authorization
+            .as_ref()
+            .unwrap()
+            .key_generation(),
+        4
+    );
     assert_eq!(
         state.outbound_private_messages[0].status,
         OutboundPrivateMessageStatus::RecoveryRequired

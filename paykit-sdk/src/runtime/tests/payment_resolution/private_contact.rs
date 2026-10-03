@@ -328,6 +328,7 @@ async fn test_resolve_private_contact_payment_does_not_use_cached_list_while_lin
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
                 Ok(())
             }
@@ -394,6 +395,7 @@ async fn test_recover_private_candidates_reports_pending_for_linking_peer() {
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
                 Ok(())
             }

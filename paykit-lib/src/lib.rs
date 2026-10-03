@@ -10,6 +10,7 @@ mod encrypted_link_recovery;
 mod error;
 mod event;
 mod noise_key;
+mod noise_key_authorization;
 mod payment_amount;
 mod payment_endpoint;
 mod payment_reference;
@@ -70,6 +71,11 @@ pub use event::EventId;
 #[doc(inline)]
 pub use noise_key::{derive_paykit_noise_public_key, derive_paykit_noise_secret_key};
 #[doc(inline)]
+pub use noise_key_authorization::{
+    get_paykit_noise_key_authorization, publish_paykit_noise_key_authorization,
+    PaykitNoiseKeyAuthorization,
+};
+#[doc(inline)]
 pub use payment_amount::PaymentAmount;
 #[doc(inline)]
 pub use payment_endpoint::{
@@ -105,8 +111,9 @@ pub use pubky_routing::{
     content_revision, delete_resource_if_revision, fetch_payment_endpoint_revision,
     fetch_resource_revision, is_write_conflict, list_payment_endpoint_identifiers,
     put_resource_if_revision, with_write_lock, PAYKIT_APP_REGISTRY_PATH,
-    PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX, PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX,
-    PAYKIT_SHARED_STATE_PATH, PAYKIT_SHARED_STATE_WRITE_PATH_PREFIX,
+    PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX, PAYKIT_NOISE_KEY_AUTHORIZATION_PATH,
+    PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX, PAYKIT_SHARED_STATE_PATH,
+    PAYKIT_SHARED_STATE_WRITE_PATH_PREFIX,
 };
 #[doc(inline)]
 pub use receipt::{

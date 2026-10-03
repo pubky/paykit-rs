@@ -7,6 +7,26 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc60 - Unreleased
+
+### Added
+
+- Identity-signed Noise key authorization outside delegated Paykit write scopes.
+- SDK verification and persisted peer-generation checks for new and restored
+  Encrypted Links, with authorizer publication APIs in Swift and Kotlin.
+- Verify each handshake peer's X25519 static key against its signed authorization,
+  including on snapshot restore, using Pubky Noise's remote-key API.
+
+### Changed
+
+- Private app setup requires a published key authorization. Key rotation and
+  shared-state recovery require the Pubky identity secret and separate authorizer
+  capabilities plus an existing protected authorization. They commit replacement
+  state, update the App Registry, then publish replacement authorization.
+- rc59 persisted integration data is unsupported; rc60 testing requires fresh/reset
+  state, not in-place upgrade or migration. See [Backup And Restore](specs/paykit-sdk.md#backup-and-restore)
+  for all affected formats and the existing-authorization prerequisite.
+
 ## 0.1.0-rc59 - 2026-10-01
 
 ### Fixed

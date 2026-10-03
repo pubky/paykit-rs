@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::*;
 use pubky::{ClientId, Pubky, PubkySession, PublicKey};
 use pubky_testnet::{docker_postgres::DockerPostgres, pubky::Keypair, EphemeralTestnet};
-use tokio::sync::{Mutex as TokioMutex, OnceCell};
+use tokio::sync::Mutex as TokioMutex;
 
 mod allowance;
 mod encrypted_link;
@@ -18,18 +18,7 @@ mod routing_tracing;
 
 const TEST_CLIENT_ID: &str = "paykit-lib.test";
 
-static SHARED_POSTGRES: OnceCell<DockerPostgres> = OnceCell::const_new();
 static TESTNET_BUILD_LOCK: TokioMutex<()> = TokioMutex::const_new(());
-
-async fn shared_postgres() -> &'static DockerPostgres {
-    SHARED_POSTGRES
-        .get_or_init(|| async {
-            DockerPostgres::start()
-                .await
-                .expect("failed to start Docker Postgres")
-        })
-        .await
-}
 
 async fn build_testnet() -> EphemeralTestnet {
     let _guard = TESTNET_BUILD_LOCK.lock().await;
@@ -37,7 +26,7 @@ async fn build_testnet() -> EphemeralTestnet {
     let builder = if std::env::var_os("TEST_PUBKY_CONNECTION_STRING").is_some() {
         EphemeralTestnet::builder()
     } else {
-        let postgres = shared_postgres()
+        let postgres = DockerPostgres::shared()
             .await
             .connection_string()
             .expect("Docker Postgres connection string should be valid");

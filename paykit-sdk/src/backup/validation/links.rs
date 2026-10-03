@@ -122,6 +122,7 @@ fn restored_peer_record(
         local_recovery_marker_last_error: None,
         remote_recovery_attempt_id: None,
         remote_recovery_marker_observed_at: None,
+        noise_key_authorization: None,
     }
 }
 
@@ -202,6 +203,15 @@ pub(in crate::backup) fn validate_linked_peer_records(
     records: &HashMap<PubkyPublicKey, LinkedPeerRecord>,
 ) -> Result<()> {
     for record in records.values() {
+        if let Some(authorization) = &record.noise_key_authorization {
+            if authorization.owner() != &record.counterparty.to_public_key()? {
+                return Err(PaykitSdkError::Protocol {
+                    context: "stored Noise key authorization belongs to another counterparty"
+                        .into(),
+                    source: None,
+                });
+            }
+        }
         validate_recovery_marker_fields(
             &record.counterparty,
             "local Encrypted Link recovery marker",

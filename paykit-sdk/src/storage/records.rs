@@ -19,6 +19,8 @@ use crate::{
 /// Durable Linked Peer state.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkedPeerRecord {
+    /// Highest verified identity-signed Noise key authorization for this peer.
+    pub noise_key_authorization: Option<paykit_lib::PaykitNoiseKeyAuthorization>,
     /// Counterparty public key.
     pub counterparty: PubkyPublicKey,
     /// Current local relationship/link state.

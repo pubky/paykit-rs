@@ -47,6 +47,7 @@ async fn test_transaction_rolls_back_on_error() {
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
 
                 Err(PaykitSdkError::Storage {

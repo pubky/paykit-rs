@@ -34,7 +34,23 @@ aggregated across apps when resolving a private payment.
 
 Public-only apps may publish registry entries and public Payment Endpoints
 before the identity-wide Noise key is initialized. Private capabilities require
-identity-wide Paykit key material and initialize the registry's Noise key.
+identity-wide Paykit key material and a signed Noise key authorization.
+
+### Noise Key Authorization
+
+Before private app publication or delegation, the identity authorizer calls
+`publish_paykit_noise_key_authorization`. It needs the current Paykit key,
+the Pubky identity secret, and `PAYKIT_AUTHORIZER_SESSION_CAPABILITIES`:
+`/pub/paykit/:rw,/pub/paykit-authority/v0/current-key.json:rw`.
+Ordinary apps receive only the Paykit secret and `/pub/paykit/:rw`; they must
+never receive write access to the authority path.
+
+Encrypted Links trust the identity-signed routing/static keys and generation,
+not unsigned App Registry key fields. The SDK pins peer authorizations in shared
+state and backups and checks authenticated static keys before completed or
+restored links carry messages. Missing, malformed, or conflicting authorization
+fails closed. See the [Shared Identity Model](../specs/paykit-sdk.md#shared-identity-model)
+for publication, generation, and trust rules.
 
 Multiple app processes using the same identity must also use the same durable
 SDK state. The SDK ships `PubkySharedStateStorage`, which stores that logical
@@ -112,7 +128,7 @@ let sdk = PaykitSdk::new(storage, pubky, payment, config);
 let status = sdk.initialize().await?;
 
 if status.capability == paykit_sdk::PubkyIdentityCapability::PrivateLinkCapable {
-    // Private Paykit workflows can run for linked peers.
+    // Private workflows also require current signed Noise key authorization.
 }
 # Ok(())
 # }
@@ -435,20 +451,19 @@ publish their App Registry entries again after restore. Restore preserves
 terminal invalid and recovery-required outbound private records for audit,
 while pending, sending, failed, sent, and superseded outbound records are
 validated before restore.
-Restored Encrypted Link checkpoints resume when they are valid. Missing or
-unsafe checkpoints mark affected peers recovery-required so private automation
-pauses until relink.
+Restore retains peer authorization pins; checkpoints resume only after the
+[current signed-key checks](../specs/paykit-sdk.md#establish-encrypted-link).
+Missing or unsafe checkpoints pause private automation until relink.
 
 For missing or corrupt Pubky shared state, use
-`recover_shared_state_from_backup(backup, replacement_key)` with the current key
-and its successor. Persist the replacement key first, then distribute it after
-recovery. This preserves backup history but discards old Noise checkpoints and
-prepared sends; links must recover and payments require wallet reconciliation.
-It rejects healthy state, unreadable generation headers, and unknown generations.
-Retry an interrupted recovery with the same keys and backup; valid committed
-replacement state is preserved. Corrupt replacement-generation state is rejected,
-not overwritten under keys that may already have been used.
-Data newer than the backup cannot be recovered.
+`recover_shared_state_from_backup(backup, replacement_key)` with a matching
+trusted backup, active `PAYKIT_AUTHORIZER_SESSION_CAPABILITIES` session, Pubky
+identity secret, current Paykit key and its derived successor, and existing
+protected authorization. Missing, malformed, or conflicting authorization fails
+before replacement. Persist the replacement key first; recovery commits state,
+updates the App Registry, then publishes replacement authorization. See
+[Backup And Restore](../specs/paykit-sdk.md#backup-and-restore) for same-key retries,
+key distribution, relinking/reconciliation, and supported persisted formats.
 
 Losing the durable SDK state without a backup means losing access to private
 Paykit runtime state. Public Paykit data can be rediscovered from Pubky, but

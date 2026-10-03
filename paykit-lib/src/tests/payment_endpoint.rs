@@ -188,7 +188,10 @@ async fn test_write_lock_is_renewed_and_released_after_failure() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(error, PaykitError::Validation(_)));
+    assert!(
+        matches!(error, PaykitError::Validation(_)),
+        "expected operation validation error, got {error:?}"
+    );
     let lock = setup
         .session
         .storage()

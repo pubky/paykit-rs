@@ -547,7 +547,8 @@ where
                 });
             }
         };
-        self.validate_local_registry_noise_key(session_access, &mut registry)?;
+        self.validate_local_registry_noise_key(session_access, &mut registry)
+            .await?;
         Ok(registry)
     }
 
@@ -617,7 +618,8 @@ where
             };
             let unchanged = registry.clone();
             if validate_local_noise_key {
-                self.validate_local_registry_noise_key(session_access, &mut registry)?;
+                self.validate_local_registry_noise_key(session_access, &mut registry)
+                    .await?;
             }
             update(&mut registry)?;
             if let Some(lease) = app_lease {
@@ -663,12 +665,14 @@ where
         unreachable!("bounded App Registry update loop always returns")
     }
 
-    fn validate_local_registry_noise_key(
+    async fn validate_local_registry_noise_key(
         &self,
         session_access: &PubkySessionAccess,
         registry: &mut paykit_lib::PaykitAppRegistry,
     ) -> Result<()> {
         if let Some(secret) = session_access.paykit_identity_secret_key() {
+            self.validate_local_noise_key_authorization(session_access)
+                .await?;
             let local_noise_public_key =
                 pubky::Keypair::from_secret(&secret.noise_secret_key()).public_key();
             registry

@@ -28,6 +28,7 @@ fn test_public_only_backup_records_do_not_require_private_capability() {
         local_recovery_marker_last_error: None,
         remote_recovery_attempt_id: None,
         remote_recovery_marker_observed_at: None,
+        noise_key_authorization: None,
     });
     assert!(backup.has_private_state());
 }
@@ -217,6 +218,7 @@ async fn test_restore_backup_state_marks_missing_link_checkpoint_recovery_requir
             local_recovery_marker_last_error: None,
             remote_recovery_attempt_id: None,
             remote_recovery_marker_observed_at: None,
+            noise_key_authorization: None,
         }],
         contact_records: Vec::new(),
         retired_paykit_apps: Vec::new(),

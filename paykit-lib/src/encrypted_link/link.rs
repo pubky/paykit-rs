@@ -120,6 +120,12 @@ pub struct EncryptedLink {
 }
 
 impl EncryptedLink {
+    /// X25519 static key authenticated by the Noise transcript.
+    /// The caller must bind this key to the expected identity, including after restore.
+    pub fn remote_static_public_key(&self) -> Option<&[u8]> {
+        self.encryptor.remote_static_public_key()
+    }
+
     pub(super) fn from_parts(
         encryptor: pubky_noise::PubkyNoiseEncryptor,
         recipient: PublicKey,
