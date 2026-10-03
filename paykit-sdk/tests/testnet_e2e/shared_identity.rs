@@ -19,14 +19,14 @@ use paykit_sdk::{
     storage::StorageTransactionCallback, Clock, ContactUpdate, InMemoryStorage, LinkedPeerState,
     OutboundPrivateMessageStatus, PaykitApp, PaykitAppCapabilities, PaykitAppId, PaykitSdk,
     PaykitSdkConfig, PaykitSdkError, PaymentRequestLifecycleState,
-    PrivatePaymentEndpointReservation, PrivateReceivingDetail, PubkyIdentityCapability,
-    PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess, PubkySessionBootstrap,
-    PubkySessionProvider, PubkySharedStateStorage, ReceiptDraftBuilder, ReceiptIssuanceStatus,
+    PrivatePaymentEndpointReservation, PrivatePaymentListReservationUpdate, PrivateReceivingDetail,
+    PubkyIdentityCapability, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
+    PubkySessionBootstrap, PubkySharedStateStorage, ReceiptDraftBuilder, ReceiptIssuanceStatus,
     Result as PaykitResult, StorageAdapter, PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
     PAYKIT_SESSION_CAPABILITIES,
 };
 use serde_json::Map as JsonMap;
-use tokio::sync::{oneshot, Semaphore};
+use tokio::sync::oneshot;
 
 use crate::harness::{
     app_id, build_testnet, build_testnet_with_admin, linked_two_party, private_receiving_detail,
@@ -1912,110 +1912,137 @@ async fn test_pubky_shared_state_rejects_a_missing_previously_observed_resource(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_outbound_peers_progress_independently_with_shared_state() {
-    struct PausedFirstSession {
-        access: PubkySessionAccess,
-        calls: AtomicUsize,
-        resume: Arc<Semaphore>,
+async fn test_outbound_batches_deliver_with_slow_shared_state() {
+    #[derive(Clone)]
+    struct TransactionClock {
+        started: chrono::DateTime<Utc>,
+        elapsed: Arc<AtomicUsize>,
+    }
+
+    impl Clock for TransactionClock {
+        fn now(&self) -> chrono::DateTime<Utc> {
+            self.started + chrono::Duration::seconds(self.elapsed.load(Ordering::SeqCst) as i64)
+        }
+    }
+
+    struct TimedStorage {
+        inner: PubkySharedStateStorage,
+        clock: TransactionClock,
     }
 
     #[async_trait]
-    impl PubkySessionProvider for PausedFirstSession {
-        async fn load_session_access(&self) -> PaykitResult<Option<PubkySessionAccess>> {
-            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                self.resume.acquire().await.unwrap().forget();
-            }
-            Ok(Some(self.access.clone()))
-        }
-
-        async fn load_public_storage(&self) -> PaykitResult<Option<pubky::PublicStorage>> {
-            Ok(Some(self.access.outbox_client.public_storage()))
-        }
-
-        async fn clear_session_access(&self) -> PaykitResult<()> {
-            unreachable!("sending must not sign out")
+    impl StorageAdapter for TimedStorage {
+        async fn transaction_erased<'a>(
+            &self,
+            f: StorageTransactionCallback<'a>,
+        ) -> PaykitResult<Box<dyn Any + Send>> {
+            self.inner
+                .transaction_erased(Box::new(|tx| {
+                    self.clock.elapsed.fetch_add(3, Ordering::SeqCst);
+                    f(tx)
+                }))
+                .await
         }
     }
 
     let pair = linked_homeserver_shared_pair().await;
-    let charlie = TestUser::sign_up(&pair._testnet).await;
-    pair.bitkit
-        .sdk
-        .initiate_link_with_peer(charlie.public_key.clone())
-        .await
-        .unwrap();
-    charlie
-        .sdk
-        .accept_link_with_peer(pair.bitkit.public_key.clone())
-        .await
-        .unwrap();
-    drive_shared_link_to_linked(&pair.bitkit, &charlie).await;
+    let mut additional_peers = Vec::new();
+    for _ in 0..3 {
+        let peer = TestUser::sign_up(&pair._testnet).await;
+        pair.bitkit
+            .sdk
+            .initiate_link_with_peer(peer.public_key.clone())
+            .await
+            .unwrap();
+        peer.sdk
+            .accept_link_with_peer(pair.bitkit.public_key.clone())
+            .await
+            .unwrap();
+        drive_shared_link_to_linked(&pair.bitkit, &peer).await;
+        additional_peers.push(peer);
+    }
 
-    let mut peers = [&pair.bob, &charlie];
+    let mut peers = vec![&pair.bob];
+    peers.extend(&additional_peers);
     peers.sort_by(|left, right| left.public_key.as_str().cmp(right.public_key.as_str()));
     let mut expected = Vec::new();
-    for peer in peers {
-        let mut ids = Vec::new();
-        for _ in 0..2 {
-            let request = pair
-                .bitkit
-                .sdk
-                .propose_payment_request(peer.public_key.clone(), recurring_request_terms())
-                .await
-                .unwrap();
-            ids.push(request.last_outbound_message_id.unwrap());
-        }
-        expected.push(ids);
+    for peer in &peers {
+        let request = pair
+            .bitkit
+            .sdk
+            .propose_payment_request(peer.public_key.clone(), recurring_request_terms())
+            .await
+            .unwrap();
+        expected.push(vec![request.last_outbound_message_id.unwrap()]);
     }
 
-    let resume = Arc::new(Semaphore::new(0));
-    let sdk = PaykitSdk::new(
-        pair.bitkit.storage.clone(),
-        PausedFirstSession {
-            access: pair.bitkit.access.clone(),
-            calls: AtomicUsize::new(0),
-            resume: resume.clone(),
+    let clock = TransactionClock {
+        started: Utc::now(),
+        elapsed: Arc::new(AtomicUsize::new(0)),
+    };
+    let sdk = PaykitSdk::with_clock(
+        TimedStorage {
+            inner: pair.bitkit.storage.clone(),
+            clock: clock.clone(),
         },
+        TestnetSessionProvider::new(pair.bitkit.access.clone()),
         pair.bitkit.adapter.clone(),
         PaykitSdkConfig::new(pair.bitkit.app_id.clone()).unwrap(),
+        clock,
     );
-    let mut send = Box::pin(sdk.process_pending_private_messages());
-    tokio::select! {
-        result = &mut send => panic!("batch completed with a paused peer: {result:?}"),
-        ready = tokio::time::timeout(Duration::from_secs(30), async {
-            loop {
-                let state = pair.bitkit.storage_state().await;
-                let sent = state.outbound_private_messages.iter().filter(|message| {
-                    message.counterparty == peers[1].public_key
-                        && message.status == OutboundPrivateMessageStatus::Sent
-                }).count();
-                if sent == 2 { break; }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }) => ready.expect("the other peer must send while the first is paused"),
-    }
-    resume.add_permits(1);
-    let reports = tokio::time::timeout(Duration::from_secs(30), send)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(reports.len(), 2);
-    for ((report, peer), expected) in reports.into_iter().zip(peers).zip(expected) {
+    let reports = sdk.process_pending_private_messages().await.unwrap();
+    assert_eq!(reports.len(), peers.len());
+    for ((report, peer), expected) in reports.into_iter().zip(&peers).zip(expected) {
         assert_eq!(report.counterparty, peer.public_key);
-        assert!(report.error.is_none(), "{report:?}");
-        assert_eq!(report.report.unwrap().sent, expected);
+        assert!(report.error.is_none(), "{:?}", report.error);
+        let report = report.report.unwrap();
+        assert_eq!(report.sent, expected);
+        assert!(report.failed.is_empty());
         let received = peer
             .sdk
             .receive_private_messages(pair.bitkit.public_key.clone())
             .await
             .unwrap();
-        assert_eq!(received.stream_item_ids.len(), 2);
+        assert_eq!(received.stream_item_ids.len(), 1);
     }
-    assert!(sdk
-        .process_pending_private_messages()
+    let updates = peers
+        .iter()
+        .map(|peer| PrivatePaymentListReservationUpdate {
+            counterparty: peer.public_key.clone(),
+            reservations: Vec::new(),
+        })
+        .collect();
+    let cleared = sdk
+        .sync_private_payment_lists_with_reservations_and_process_outbound(updates, false)
         .await
-        .unwrap()
-        .is_empty());
+        .unwrap();
+    assert_eq!(cleared.cleared.len(), peers.len());
+    assert!(cleared.failed_to_queue.is_empty());
+    assert!(cleared.failed_to_deliver.is_empty(), "{cleared:?}");
+    for peer in peers {
+        let received = peer
+            .sdk
+            .receive_private_messages(pair.bitkit.public_key.clone())
+            .await
+            .unwrap();
+        assert!(!received.stream_item_ids.is_empty());
+        let lists = peer
+            .sdk
+            .current_private_payment_lists(&pair.bitkit.public_key)
+            .await
+            .unwrap();
+        assert!(lists.iter().any(|list| {
+            list.app_id == pair.bitkit.app_id && list.payment_endpoints.is_empty()
+        }));
+        assert_eq!(
+            peer.sdk
+                .received_payment_requests_from(&pair.bitkit.public_key)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
     assert_no_pending_shared_state_writes(&pair.bitkit.access.session).await;
 }
 

@@ -1,7 +1,5 @@
-use super::outbound_private::OUTBOUND_PEER_CONCURRENCY;
 use super::payment_resolution::filter_private_views_by_authorized_apps;
 use super::*;
-use futures_util::{stream, StreamExt};
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
@@ -501,22 +499,19 @@ where
 
         queued_counterparties.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         queued_counterparties.dedup();
-        let deliveries = stream::iter(queued_counterparties)
-            .map(|counterparty| async move {
-                let result = async {
-                    if !self.private_list_delivery_ready(&counterparty).await? {
-                        return Ok(None);
-                    }
-                    self.process_outbound_private_messages(counterparty.clone())
-                        .await
-                        .map(Some)
+        let mut deliveries = Vec::with_capacity(queued_counterparties.len());
+        for counterparty in queued_counterparties {
+            let result = async {
+                if !self.private_list_delivery_ready(&counterparty).await? {
+                    return Ok(None);
                 }
-                .await;
-                (counterparty, result)
-            })
-            .buffered(OUTBOUND_PEER_CONCURRENCY)
-            .collect::<Vec<_>>()
+                self.process_outbound_private_messages(counterparty.clone())
+                    .await
+                    .map(Some)
+            }
             .await;
+            deliveries.push((counterparty, result));
+        }
         for (counterparty, result) in deliveries {
             match result {
                 Ok(None) => continue,
