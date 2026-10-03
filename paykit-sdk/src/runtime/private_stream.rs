@@ -1,7 +1,7 @@
 use super::*;
 use futures_util::{stream, StreamExt};
 
-const PRIVATE_INBOX_PROBE_CONCURRENCY: usize = 4;
+const PRIVATE_INBOX_PROBE_CONCURRENCY: usize = 16;
 
 struct PrivateReceiveSnapshot {
     link: paykit_lib::EncryptedLinkSnapshot,
@@ -177,27 +177,28 @@ where
         }
         let snapshot = &snapshot.link;
         let secret_key = session_access.paykit_noise_secret_key()?;
-        let marker = paykit_lib::fetch_encrypted_link_recovery_marker(
-            &public_storage,
-            &secret_key,
-            session_access.session.info().public_key(),
-            &remote_public_key,
-            snapshot.remote_noise_public_key(),
-        )
-        .await?;
+        let session_info = session_access.session.info();
+        let (marker, pending) = tokio::join!(
+            paykit_lib::fetch_encrypted_link_recovery_marker(
+                &public_storage,
+                &secret_key,
+                session_info.public_key(),
+                &remote_public_key,
+                snapshot.remote_noise_public_key(),
+            ),
+            snapshot.has_pending_private_application_message(
+                &public_storage,
+                session_info.public_key(),
+                &secret_key,
+            ),
+        );
+        let marker = marker?;
         if marker.is_some_and(|marker| {
             Some(marker.attempt_id()) != snapshot.recovery_context().remote_attempt_id()
         }) {
             return Ok(false);
         }
-        match snapshot
-            .has_pending_private_application_message(
-                &public_storage,
-                session_access.session.info().public_key(),
-                &secret_key,
-            )
-            .await
-        {
+        match pending {
             Ok(pending) => Ok(!pending),
             Err(paykit_lib::PaykitError::Validation(_)) => Ok(false),
             Err(err) => Err(err.into()),

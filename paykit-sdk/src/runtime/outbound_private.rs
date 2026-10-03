@@ -1,4 +1,7 @@
 use super::*;
+use futures_util::{stream, StreamExt};
+
+const OUTBOUND_PEER_CONCURRENCY: usize = 4;
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
@@ -12,6 +15,36 @@ where
         &self,
         counterparty: PubkyPublicKey,
     ) -> Result<OutboundPrivateSendReport> {
+        let has_work = self
+            .storage
+            .transaction(|tx| {
+                if !tx
+                    .queued_outbound_private_messages(&counterparty)
+                    .is_empty()
+                {
+                    return Ok(true);
+                }
+                let outbound = tx
+                    .outbound_private_messages(&counterparty)
+                    .into_iter()
+                    .map(|message| (message.outbound_message_id, message))
+                    .collect();
+                Ok(tx
+                    .payment_endpoint_reservations(&counterparty)
+                    .iter()
+                    .any(|reservation| {
+                        reservation.app_id == self.config.app_id
+                            && terminal_private_list_reservation_needs_cleanup(
+                                reservation,
+                                &outbound,
+                            )
+                    }))
+            })
+            .await?;
+        if !has_work {
+            return Ok(OutboundPrivateSendReport::default());
+        }
+
         let lease = self.claim_peer_link_operation(&counterparty).await?;
         let result = async {
             let mut report = OutboundPrivateSendReport::default();
@@ -105,28 +138,33 @@ where
     }
 
     /// Process queued outbound private messages for every pending counterparty.
+    /// Different peers may progress concurrently; each peer's messages stay ordered.
     pub async fn process_pending_private_messages(
         &self,
     ) -> Result<Vec<OutboundPrivateCounterpartySendReport>> {
         let counterparties = self.pending_outbound_private_counterparties().await?;
-        let mut reports = Vec::with_capacity(counterparties.len());
-        for counterparty in counterparties {
-            match self
-                .process_outbound_private_messages(counterparty.clone())
-                .await
-            {
-                Ok(report) => reports.push(OutboundPrivateCounterpartySendReport {
-                    counterparty,
-                    report: Some(report),
-                    error: None,
-                }),
-                Err(err) => reports.push(OutboundPrivateCounterpartySendReport {
-                    counterparty,
-                    report: None,
-                    error: Some(err.to_string()),
-                }),
-            }
-        }
+        let mut reports = stream::iter(counterparties)
+            .map(|counterparty| async move {
+                match self
+                    .process_outbound_private_messages(counterparty.clone())
+                    .await
+                {
+                    Ok(report) => OutboundPrivateCounterpartySendReport {
+                        counterparty,
+                        report: Some(report),
+                        error: None,
+                    },
+                    Err(err) => OutboundPrivateCounterpartySendReport {
+                        counterparty,
+                        report: None,
+                        error: Some(err.to_string()),
+                    },
+                }
+            })
+            .buffer_unordered(OUTBOUND_PEER_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        reports.sort_by(|left, right| left.counterparty.as_str().cmp(right.counterparty.as_str()));
         Ok(reports)
     }
 

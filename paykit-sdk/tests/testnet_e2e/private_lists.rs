@@ -54,7 +54,7 @@ async fn test_private_inbox_probes_are_bounded_and_isolate_a_slow_failed_peer() 
 
     let testnet = build_testnet().await;
     let alice = TestUser::sign_up(&testnet).await;
-    for _ in 0..5 {
+    for _ in 0..17 {
         let peer = TestUser::sign_up(&testnet).await;
         alice
             .sdk
@@ -85,7 +85,7 @@ async fn test_private_inbox_probes_are_bounded_and_isolate_a_slow_failed_peer() 
         PaykitSdkConfig::new(alice.app_id.clone()).unwrap(),
     );
     let mut receive = Box::pin(sdk.receive_private_messages_from_linked_peers());
-    for expected in [4, 5] {
+    for expected in [16, 17] {
         tokio::select! {
             result = &mut receive => panic!("batch finished before releasing the slow peer: {result:?}"),
             ready = tokio::time::timeout(Duration::from_secs(10), async {
@@ -95,14 +95,14 @@ async fn test_private_inbox_probes_are_bounded_and_isolate_a_slow_failed_peer() 
             }) => ready.expect("other peer probes must progress while the first is stalled"),
         }
         assert_eq!(calls.load(Ordering::SeqCst), expected);
-        rest.add_permits(4);
+        rest.add_permits(16);
     }
     first.add_permits(1);
     let reports = tokio::time::timeout(Duration::from_secs(10), receive)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(reports.len(), 5);
+    assert_eq!(reports.len(), 17);
     assert_eq!(
         reports
             .iter()

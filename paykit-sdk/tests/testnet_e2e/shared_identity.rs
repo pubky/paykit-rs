@@ -21,11 +21,12 @@ use paykit_sdk::{
     PaykitSdkConfig, PaykitSdkError, PaymentRequestLifecycleState,
     PrivatePaymentEndpointReservation, PrivateReceivingDetail, PubkyIdentityCapability,
     PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess, PubkySessionBootstrap,
-    PubkySharedStateStorage, ReceiptDraftBuilder, ReceiptIssuanceStatus, Result as PaykitResult,
-    StorageAdapter, PAYKIT_AUTHORIZER_SESSION_CAPABILITIES, PAYKIT_SESSION_CAPABILITIES,
+    PubkySessionProvider, PubkySharedStateStorage, ReceiptDraftBuilder, ReceiptIssuanceStatus,
+    Result as PaykitResult, StorageAdapter, PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+    PAYKIT_SESSION_CAPABILITIES,
 };
 use serde_json::Map as JsonMap;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Semaphore};
 
 use crate::harness::{
     app_id, build_testnet, build_testnet_with_admin, linked_two_party, private_receiving_detail,
@@ -315,6 +316,11 @@ async fn test_idle_polling_reads_shared_state_once_without_rewriting_it() {
         .receive_private_messages(pair.bob.public_key.clone())
         .await
         .unwrap();
+    pair.bitkit
+        .sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
     let storage = pair.bitkit.access.session.storage();
     let before = storage
         .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
@@ -351,6 +357,12 @@ async fn test_idle_polling_reads_shared_state_once_without_rewriting_it() {
         let batch_transactions = transactions.swap(0, Ordering::SeqCst);
         assert_eq!(single_transactions, 1);
         assert_eq!(batch_transactions, 1);
+        let sent = sdk
+            .process_outbound_private_messages(pair.bob.public_key.clone())
+            .await
+            .unwrap();
+        assert!(sent.attempted.is_empty());
+        assert_eq!(transactions.swap(0, Ordering::SeqCst), 1);
         let requests = sdk.payment_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].counterparty, pair.bob.public_key);
@@ -1670,6 +1682,114 @@ async fn test_pubky_shared_state_rejects_a_missing_previously_observed_resource(
         PaykitSdkError::Storage { context, .. }
             if context.contains("previously observed Pubky shared state is missing")
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_outbound_peers_progress_independently_with_shared_state() {
+    struct PausedFirstSession {
+        access: PubkySessionAccess,
+        calls: AtomicUsize,
+        resume: Arc<Semaphore>,
+    }
+
+    #[async_trait]
+    impl PubkySessionProvider for PausedFirstSession {
+        async fn load_session_access(&self) -> PaykitResult<Option<PubkySessionAccess>> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.resume.acquire().await.unwrap().forget();
+            }
+            Ok(Some(self.access.clone()))
+        }
+
+        async fn load_public_storage(&self) -> PaykitResult<Option<pubky::PublicStorage>> {
+            Ok(Some(self.access.outbox_client.public_storage()))
+        }
+
+        async fn clear_session_access(&self) -> PaykitResult<()> {
+            unreachable!("sending must not sign out")
+        }
+    }
+
+    let pair = linked_homeserver_shared_pair().await;
+    let charlie = TestUser::sign_up(&pair._testnet).await;
+    pair.bitkit
+        .sdk
+        .initiate_link_with_peer(charlie.public_key.clone())
+        .await
+        .unwrap();
+    charlie
+        .sdk
+        .accept_link_with_peer(pair.bitkit.public_key.clone())
+        .await
+        .unwrap();
+    drive_shared_link_to_linked(&pair.bitkit, &charlie).await;
+
+    let mut peers = [&pair.bob, &charlie];
+    peers.sort_by(|left, right| left.public_key.as_str().cmp(right.public_key.as_str()));
+    let mut expected = Vec::new();
+    for peer in peers {
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let request = pair
+                .bitkit
+                .sdk
+                .propose_payment_request(peer.public_key.clone(), recurring_request_terms())
+                .await
+                .unwrap();
+            ids.push(request.last_outbound_message_id.unwrap());
+        }
+        expected.push(ids);
+    }
+
+    let resume = Arc::new(Semaphore::new(0));
+    let sdk = PaykitSdk::new(
+        pair.bitkit.storage.clone(),
+        PausedFirstSession {
+            access: pair.bitkit.access.clone(),
+            calls: AtomicUsize::new(0),
+            resume: resume.clone(),
+        },
+        pair.bitkit.adapter.clone(),
+        PaykitSdkConfig::new(pair.bitkit.app_id.clone()).unwrap(),
+    );
+    let mut send = Box::pin(sdk.process_pending_private_messages());
+    tokio::select! {
+        result = &mut send => panic!("batch completed with a paused peer: {result:?}"),
+        ready = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let state = pair.bitkit.storage_state().await;
+                let sent = state.outbound_private_messages.iter().filter(|message| {
+                    message.counterparty == peers[1].public_key
+                        && message.status == OutboundPrivateMessageStatus::Sent
+                }).count();
+                if sent == 2 { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }) => ready.expect("the other peer must send while the first is paused"),
+    }
+    resume.add_permits(1);
+    let reports = tokio::time::timeout(Duration::from_secs(30), send)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reports.len(), 2);
+    for ((report, peer), expected) in reports.into_iter().zip(peers).zip(expected) {
+        assert_eq!(report.counterparty, peer.public_key);
+        assert!(report.error.is_none(), "{report:?}");
+        assert_eq!(report.report.unwrap().sent, expected);
+        let received = peer
+            .sdk
+            .receive_private_messages(pair.bitkit.public_key.clone())
+            .await
+            .unwrap();
+        assert_eq!(received.stream_item_ids.len(), 2);
+    }
+    assert!(sdk
+        .process_pending_private_messages()
+        .await
+        .unwrap()
+        .is_empty());
+    assert_no_pending_shared_state_writes(&pair.bitkit.access.session).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
