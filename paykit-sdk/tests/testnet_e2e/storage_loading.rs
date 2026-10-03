@@ -344,7 +344,12 @@ async fn test_shared_state_rate_limit_keeps_previous_state_without_cooldown() {
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
     let access = session_bootstrap(&testnet, "storage-loading.test")
-        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .sign_up(
+            &secret,
+            &homeserver,
+            None,
+            paykit_sdk::PAYKIT_SESSION_CAPABILITIES,
+        )
         .await
         .unwrap()
         .access;
