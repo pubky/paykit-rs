@@ -7,6 +7,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc62 - 2026-10-03
+
 ### Fixed
 
 - Process outbound peer batches sequentially so shared-state contention cannot
