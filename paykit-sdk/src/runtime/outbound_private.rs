@@ -24,21 +24,22 @@ where
                 {
                     return Ok(true);
                 }
+                let reservations = tx
+                    .payment_endpoint_reservations(&counterparty)
+                    .into_iter()
+                    .filter(|reservation| reservation.app_id == self.config.app_id)
+                    .collect::<Vec<_>>();
+                if reservations.is_empty() {
+                    return Ok(false);
+                }
                 let outbound = tx
                     .outbound_private_messages(&counterparty)
                     .into_iter()
                     .map(|message| (message.outbound_message_id, message))
                     .collect();
-                Ok(tx
-                    .payment_endpoint_reservations(&counterparty)
-                    .iter()
-                    .any(|reservation| {
-                        reservation.app_id == self.config.app_id
-                            && terminal_private_list_reservation_needs_cleanup(
-                                reservation,
-                                &outbound,
-                            )
-                    }))
+                Ok(reservations.iter().any(|reservation| {
+                    terminal_private_list_reservation_needs_cleanup(reservation, &outbound)
+                }))
             })
             .await?;
         if !has_work {

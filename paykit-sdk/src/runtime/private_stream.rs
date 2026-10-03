@@ -81,7 +81,7 @@ where
             }
         };
         let mut reports = Vec::with_capacity(counterparties.len());
-        let mut probes = stream::iter(counterparties)
+        let probes = stream::iter(counterparties)
             .map(|(counterparty, snapshot)| {
                 let session_access = &session_access;
                 async move {
@@ -91,9 +91,11 @@ where
                     (counterparty, empty)
                 }
             })
-            .buffer_unordered(PRIVATE_INBOX_PROBE_CONCURRENCY);
-        while let Some((counterparty, empty)) = probes.next().await {
-            // Only advisory reads run concurrently. Receive commits stay serialized.
+            .buffer_unordered(PRIVATE_INBOX_PROBE_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        // Finish polling every probe before a serialized receive can block it.
+        for (counterparty, empty) in probes {
             let result = match empty {
                 Ok(empty) => {
                     self.receive_probed_private_messages(

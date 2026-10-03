@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use paykit_sdk::{
-    LinkedPeerState, OutboundPrivateMessageStatus, PaykitSdk, PaykitSdkConfig, PaykitSdkError,
+    storage::StorageTransactionCallback, InMemoryStorage, LinkedPeerState,
+    OutboundPrivateMessageStatus, PaykitSdk, PaykitSdkConfig, PaykitSdkError,
     PrivatePaymentEndpointReservation, PrivatePaymentListReservationUpdate, PubkySessionAccess,
     PubkySessionProvider, Result as PaykitResult, StorageAdapter,
 };
@@ -123,6 +124,119 @@ async fn test_private_inbox_probes_are_bounded_and_isolate_a_slow_failed_peer() 
         .windows(2)
         .all(|pair| pair[0].counterparty.as_str() < pair[1].counterparty.as_str()));
     assert_eq!(alice.storage.snapshot().unwrap(), before);
+}
+
+#[tokio::test]
+async fn test_recovery_intake_does_not_interrupt_other_probes() {
+    struct NotifyingPublicStorage {
+        access: PubkySessionAccess,
+        completed: Arc<Semaphore>,
+    }
+
+    #[async_trait]
+    impl PubkySessionProvider for NotifyingPublicStorage {
+        async fn load_session_access(&self) -> PaykitResult<Option<PubkySessionAccess>> {
+            Ok(Some(self.access.clone()))
+        }
+
+        async fn clear_session_access(&self) -> PaykitResult<()> {
+            unreachable!("inbox polling must not sign out")
+        }
+
+        async fn load_public_storage(&self) -> PaykitResult<Option<pubky::PublicStorage>> {
+            self.completed.add_permits(1);
+            Ok(Some(self.access.outbox_client.public_storage()))
+        }
+    }
+
+    struct GatedReceiveStorage {
+        inner: InMemoryStorage,
+        calls: AtomicUsize,
+        completed: Arc<Semaphore>,
+    }
+
+    #[async_trait]
+    impl StorageAdapter for GatedReceiveStorage {
+        async fn transaction_erased<'a>(
+            &self,
+            f: StorageTransactionCallback<'a>,
+        ) -> PaykitResult<Box<dyn std::any::Any + Send>> {
+            // Delay the first receive transaction until the other probe completes.
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                self.completed.acquire().await.unwrap().forget();
+            }
+            self.inner.transaction_erased(f).await
+        }
+    }
+
+    let testnet = build_testnet().await;
+    let alice = TestUser::sign_up(&testnet).await;
+    let mut peers = Vec::new();
+    for _ in 0..2 {
+        let peer = TestUser::sign_up(&testnet).await;
+        alice
+            .sdk
+            .initiate_link_with_peer(peer.public_key.clone())
+            .await
+            .unwrap();
+        peer.sdk
+            .accept_link_with_peer(alice.public_key.clone())
+            .await
+            .unwrap();
+        drive_link_to_linked(&alice, &peer).await;
+        peer.adapter
+            .set_private_details(vec![private_receiving_detail(
+                "btc-lightning-bolt11",
+                "ln-private-peer",
+            )]);
+        peer.sdk
+            .enqueue_private_payment_list(alice.public_key.clone())
+            .await
+            .unwrap();
+        let sent = peer
+            .sdk
+            .process_outbound_private_messages(alice.public_key.clone())
+            .await
+            .unwrap();
+        assert_eq!(sent.sent.len(), 1);
+        peers.push(peer.public_key);
+    }
+    peers.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    alice
+        .storage
+        .transaction(|tx| {
+            let mut state = tx.encrypted_link_state(&peers[0]).unwrap();
+            state.link_snapshot = None;
+            tx.save_encrypted_link_state(state);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let completed = Arc::new(Semaphore::new(0));
+    let sdk = PaykitSdk::new(
+        GatedReceiveStorage {
+            inner: alice.storage.clone(),
+            calls: AtomicUsize::new(0),
+            completed: completed.clone(),
+        },
+        NotifyingPublicStorage {
+            access: alice.access.clone(),
+            completed,
+        },
+        alice.adapter.clone(),
+        PaykitSdkConfig::new(alice.app_id.clone()).unwrap(),
+    );
+    let reports = tokio::time::timeout(
+        Duration::from_secs(10),
+        sdk.receive_private_messages_from_linked_peers(),
+    )
+    .await
+    .expect("a receive must not stop another probe from progressing")
+    .unwrap();
+    assert_eq!(reports.len(), 2);
+    assert!(reports[0].error.is_some());
+    assert!(reports[1].error.is_none());
+    assert_eq!(reports[1].report.as_ref().unwrap().stream_item_ids.len(), 1);
 }
 
 #[tokio::test]
