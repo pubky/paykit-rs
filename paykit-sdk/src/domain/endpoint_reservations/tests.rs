@@ -576,7 +576,7 @@ async fn test_unattempted_superseded_reservation_cancellations() {
     .await
     .unwrap();
 
-    let cancellations = unattempted_superseded_reservation_cancellations(&storage, &counterparty)
+    let cancellations = terminal_private_list_reservation_cancellations(&storage, &counterparty)
         .await
         .unwrap();
 
@@ -633,7 +633,7 @@ async fn test_unattempted_superseded_reservation_cancellations_skip_attempted_li
     .await
     .unwrap();
 
-    let cancellations = unattempted_superseded_reservation_cancellations(&storage, &counterparty)
+    let cancellations = terminal_private_list_reservation_cancellations(&storage, &counterparty)
         .await
         .unwrap();
 

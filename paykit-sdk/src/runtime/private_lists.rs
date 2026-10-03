@@ -499,27 +499,23 @@ where
 
         queued_counterparties.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         queued_counterparties.dedup();
+        let mut deliveries = Vec::with_capacity(queued_counterparties.len());
         for counterparty in queued_counterparties {
-            match self.private_list_delivery_ready(&counterparty).await {
-                Ok(true) => {}
-                Ok(false) => continue,
-                Err(err) => {
-                    report
-                        .failed_to_deliver
-                        .push(PrivatePaymentListDeliveryFailure {
-                            counterparty,
-                            outbound_message_id: None,
-                            reservation_id: None,
-                            error: err.to_string(),
-                        });
-                    continue;
+            let result = async {
+                if !self.private_list_delivery_ready(&counterparty).await? {
+                    return Ok(None);
                 }
+                self.process_outbound_private_messages(counterparty.clone())
+                    .await
+                    .map(Some)
             }
-            match self
-                .process_outbound_private_messages(counterparty.clone())
-                .await
-            {
-                Ok(send_report) => {
+            .await;
+            deliveries.push((counterparty, result));
+        }
+        for (counterparty, result) in deliveries {
+            match result {
+                Ok(None) => continue,
+                Ok(Some(send_report)) => {
                     let queued_message_ids = if send_report.failed.is_empty() {
                         HashSet::new()
                     } else {
@@ -555,7 +551,14 @@ where
     }
 
     async fn ensure_private_list_queue_allowed(&self, counterparty: &PubkyPublicKey) -> Result<()> {
-        let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
+        let (session_access, identity, readiness) = self
+            .load_session_access_and_refresh_identity_with(|tx| {
+                Ok(Self::private_queue_readiness_in_transaction(
+                    tx,
+                    counterparty,
+                ))
+            })
+            .await?;
         if identity.public_key.is_none() {
             return Err(PaykitSdkError::Identity {
                 context: "local Pubky identity is not initialized".into(),
@@ -568,7 +571,9 @@ where
                 source: None,
             });
         }
-        self.private_queue_readiness(counterparty).await.map(|_| ())
+        readiness
+            .expect("active session loads queue readiness")
+            .map(|_| ())
     }
 
     async fn private_list_delivery_ready(&self, counterparty: &PubkyPublicKey) -> Result<bool> {

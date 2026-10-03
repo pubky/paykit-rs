@@ -1,6 +1,6 @@
 [package]
 name = "paykit-lib"
-version = "0.1.0-rc60"
+version = "0.1.0-rc62"
 authors = ["denys@synonym.to"]
 description = "Paykit library implementation"
 license = "MIT"

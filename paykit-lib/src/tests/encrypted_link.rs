@@ -873,6 +873,36 @@ fn test_encrypted_link_snapshot_deserialize_rejects_reserved_noise_nonce() {
 }
 
 #[tokio::test]
+async fn test_private_message_probe_rejects_exhausted_receive_cursors() {
+    let mut builder = pubky::PubkyHttpClient::builder();
+    builder
+        .pkarr(|pkarr| {
+            pkarr
+                .no_default_network()
+                .relays(&["http://127.0.0.1:1"])
+                .unwrap()
+        })
+        .request_timeout(std::time::Duration::from_millis(100));
+    let storage = pubky::Pubky::with_client(builder.build().unwrap()).public_storage();
+    let identity = Keypair::random().public_key();
+    for (read_counter, receiving_nonce) in [(u32::MAX - 1, 0), (3, u64::MAX - 1)] {
+        let mut state = transport_snapshot_state_with_nonces(0, receiving_nonce);
+        state.read_counter = read_counter;
+        let mut bytes = state.serialize();
+        bytes.extend_from_slice(&Keypair::random().public_key().as_inner().to_bytes());
+        bytes.extend_from_slice(&[0; 72]);
+        let snapshot = EncryptedLinkSnapshot::deserialize(&bytes).unwrap();
+
+        assert!(matches!(
+            snapshot
+                .has_pending_private_application_message(&storage, &identity, &[2; 32])
+                .await,
+            Err(PaykitError::Validation(_))
+        ));
+    }
+}
+
+#[tokio::test]
 async fn test_malformed_private_application_message_packet_is_rejected() {
     let mut setup = PrivateTestSetup::new().await;
     let mut receiver_link = setup.receiver_link;

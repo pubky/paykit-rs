@@ -41,9 +41,9 @@ use crate::{
         PAYKIT_PROFILE_PATH, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
     },
     domain::endpoint_reservations::{
-        expired_outbound_reservation_cancellations, invalid_private_list_reservation_cancellations,
+        expired_outbound_reservation_cancellations,
         queue_private_payment_list_with_reservations_with_link_lease, reservation_payload_hash,
-        unattempted_superseded_reservation_cancellations,
+        terminal_private_list_reservation_cancellations,
         PaymentEndpointReservationCancellationRecord, PrivatePaymentListQueuePolicy,
     },
     domain::endpoints::{
@@ -61,12 +61,11 @@ use crate::{
         LinkedPeerState,
     },
     domain::outbound_private::{
-        claim_next_outbound_private_message_with_peer_lease, mark_outbound_failed,
-        mark_outbound_invalid, mark_outbound_recovery_required, mark_outbound_sent,
-        queued_outbound_private_messages, validate_queued_outbound_private_message,
-        OutboundPrivateCounterpartySendReport, OutboundPrivateMessageStatus,
-        OutboundPrivateSendFailure, OutboundPrivateSendReport, RecoveryMarkerPublishFailure,
-        ReservationCleanupFailure,
+        mark_outbound_failed, mark_outbound_invalid, mark_outbound_recovery_required,
+        mark_outbound_sent, queued_outbound_private_messages,
+        validate_queued_outbound_private_message, OutboundPrivateCounterpartySendReport,
+        OutboundPrivateMessageStatus, OutboundPrivateSendFailure, OutboundPrivateSendReport,
+        RecoveryMarkerPublishFailure, ReservationCleanupFailure,
     },
     domain::payment_requests::{
         claim_payment_request_execution, enqueue_checked_payment_request_action,
@@ -414,6 +413,16 @@ where
     async fn load_session_access_and_refresh_identity(
         &self,
     ) -> Result<(Option<GuardedSessionAccess>, IdentityState)> {
+        let (access, identity, _) = self
+            .load_session_access_and_refresh_identity_with(|_| Ok(()))
+            .await?;
+        Ok((access, identity))
+    }
+
+    async fn load_session_access_and_refresh_identity_with<T: Send + 'static>(
+        &self,
+        read: impl FnOnce(&dyn StorageTransaction) -> Result<T> + Send,
+    ) -> Result<(Option<GuardedSessionAccess>, IdentityState, Option<T>)> {
         let session_guard = Arc::clone(&self.session_operation_gate).read_owned().await;
         let session = self.pubky.load_session_access().await?;
         let now = self.clock.now();
@@ -428,7 +437,7 @@ where
                 });
 
             self.cache_identity_state(state.clone());
-            return Ok((None, state));
+            return Ok((None, state, None));
         };
 
         let required_capabilities = PAYKIT_SESSION_CAPABILITIES;
@@ -438,14 +447,14 @@ where
             .paykit_identity_secret_key()
             .as_ref()
             .map(crate::storage::paykit_noise_public_key);
-        let state = self
+        let (state, value) = self
             .storage
             .transaction(move |tx| {
                 let state = bind_storage_to_identity(tx, public_key, now)?;
                 if let Some(noise_public_key) = noise_public_key {
                     crate::storage::bind_paykit_noise_key(tx, noise_public_key)?;
                 }
-                Ok(state)
+                Ok((state, read(tx)?))
             })
             .await?;
 
@@ -456,6 +465,7 @@ where
                 _guard: session_guard,
             }),
             state,
+            Some(value),
         ))
     }
 

@@ -83,54 +83,28 @@ where
         Err(err)
     }
 
-    pub(super) async fn cancel_unattempted_superseded_reservations(
-        &self,
-        counterparty: &PubkyPublicKey,
-        lease: Option<&PeerLinkOperationLease>,
-        app_lease: Option<&PaykitAppOperationLease>,
-    ) -> Vec<ReservationCleanupFailure> {
-        let cancellations =
-            match unattempted_superseded_reservation_cancellations(&self.storage, counterparty)
-                .await
-            {
-                Ok(cancellations) => cancellations,
-                Err(err) => {
-                    return vec![ReservationCleanupFailure {
-                        reservation_id: None,
-                        error: err.to_string(),
-                    }];
-                }
-            };
-        self.cancel_reservation_records(cancellations, lease, app_lease)
-            .await
-    }
-
     pub(super) async fn cancel_terminal_private_list_reservations(
         &self,
         counterparty: &PubkyPublicKey,
         lease: Option<&PeerLinkOperationLease>,
         app_lease: Option<&PaykitAppOperationLease>,
     ) -> Vec<ReservationCleanupFailure> {
-        let mut failures = self
-            .cancel_unattempted_superseded_reservations(counterparty, lease, app_lease)
-            .await;
-        let cancellations =
-            match invalid_private_list_reservation_cancellations(&self.storage, counterparty).await
-            {
-                Ok(cancellations) => cancellations,
-                Err(err) => {
-                    failures.push(ReservationCleanupFailure {
-                        reservation_id: None,
-                        error: err.to_string(),
-                    });
-                    return failures;
-                }
-            };
-        failures.extend(
-            self.cancel_reservation_records(cancellations, lease, app_lease)
-                .await,
-        );
-        failures
+        let cancellations = match terminal_private_list_reservation_cancellations(
+            &self.storage,
+            counterparty,
+        )
+        .await
+        {
+            Ok(cancellations) => cancellations,
+            Err(err) => {
+                return vec![ReservationCleanupFailure {
+                    reservation_id: None,
+                    error: err.to_string(),
+                }];
+            }
+        };
+        self.cancel_reservation_records(cancellations, lease, app_lease)
+            .await
     }
 
     pub(super) async fn cancel_reservation_records(

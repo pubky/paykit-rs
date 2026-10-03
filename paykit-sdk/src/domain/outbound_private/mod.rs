@@ -236,30 +236,6 @@ where
         .await
 }
 
-pub(crate) async fn claim_next_outbound_private_message_with_peer_lease<S>(
-    storage: &S,
-    counterparty: &PubkyPublicKey,
-    now: DateTime<Utc>,
-    stale_before: DateTime<Utc>,
-    failed_retry_after: DateTime<Utc>,
-    lease: PeerLinkOperationLease,
-) -> Result<Option<OutboundPrivateMessageRecord>>
-where
-    S: StorageAdapter,
-{
-    storage
-        .transaction(move |tx| {
-            require_peer_link_operation_lease(tx, &lease)?;
-            Ok(tx.claim_next_outbound_private_message(
-                counterparty,
-                now,
-                stale_before,
-                failed_retry_after,
-            ))
-        })
-        .await
-}
-
 pub(crate) fn mark_outbound_sent(
     mut record: OutboundPrivateMessageRecord,
     now: DateTime<Utc>,

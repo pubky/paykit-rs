@@ -15,7 +15,7 @@ use crate::{
     storage::{
         require_paykit_app_capability, require_peer_link_operation_lease,
         NewOutboundPrivateMessage, OutboundPrivateMessageRecord, PaymentEndpointReservationRecord,
-        PeerLinkOperationLease, StorageAdapter,
+        PeerLinkOperationLease, StorageAdapter, StorageTransaction,
     },
     PaykitSdkError, PubkyPublicKey, Result,
 };
@@ -53,11 +53,11 @@ where
         .await
 }
 
-/// Load reservation cancellations for superseded Private Payment Lists that were never attempted.
+/// Load reservation cancellations for invalid or unattempted superseded Private Payment Lists.
 ///
-/// Attempted private lists are left for adapter expiry or explicit cleanup because
+/// Attempted superseded lists are left for adapter expiry or explicit cleanup because
 /// the SDK cannot prove the counterparty did not receive their reserved details.
-pub(crate) async fn unattempted_superseded_reservation_cancellations<S>(
+pub(crate) async fn terminal_private_list_reservation_cancellations<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
 ) -> Result<Vec<PaymentEndpointReservationCancellationRecord>>
@@ -66,58 +66,45 @@ where
 {
     storage
         .transaction(|tx| {
-            let outbound = tx.outbound_private_messages(counterparty);
-            let superseded_unattempted = outbound
-                .iter()
-                .filter(|message| {
-                    message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
-                        && message.status == OutboundPrivateMessageStatus::Superseded
-                        && message.last_attempt_at.is_none()
-                })
-                .map(|message| message.outbound_message_id)
-                .collect::<std::collections::HashSet<_>>();
-
-            let cancellations = tx
-                .payment_endpoint_reservations(counterparty)
-                .into_iter()
-                .filter(|record| superseded_unattempted.contains(&record.outbound_message_id))
-                .map(cancellation_record_from_reservation_record)
-                .collect();
-            Ok(cancellations)
+            Ok(terminal_private_list_reservation_cancellations_in_transaction(tx, counterparty))
         })
         .await
 }
 
-/// Load reservation cancellations for invalid Private Payment Lists that can no
-/// longer use their linked reservations.
-pub(crate) async fn invalid_private_list_reservation_cancellations<S>(
-    storage: &S,
+pub(crate) fn terminal_private_list_reservation_cancellations_in_transaction(
+    tx: &dyn StorageTransaction,
     counterparty: &PubkyPublicKey,
-) -> Result<Vec<PaymentEndpointReservationCancellationRecord>>
-where
-    S: StorageAdapter,
-{
-    storage
-        .transaction(|tx| {
-            let outbound = tx.outbound_private_messages(counterparty);
-            let invalid_private_lists = outbound
-                .iter()
-                .filter(|message| {
-                    message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
-                        && message.status == OutboundPrivateMessageStatus::Invalid
-                })
-                .map(|message| message.outbound_message_id)
-                .collect::<std::collections::HashSet<_>>();
-
-            let cancellations = tx
-                .payment_endpoint_reservations(counterparty)
-                .into_iter()
-                .filter(|record| invalid_private_lists.contains(&record.outbound_message_id))
-                .map(cancellation_record_from_reservation_record)
-                .collect();
-            Ok(cancellations)
-        })
-        .await
+) -> Vec<PaymentEndpointReservationCancellationRecord> {
+    let reservations = tx.payment_endpoint_reservations(counterparty);
+    if reservations.is_empty() {
+        return Vec::new();
+    }
+    let outbound = tx
+        .outbound_private_messages(counterparty)
+        .into_iter()
+        .map(|message| (message.outbound_message_id, message))
+        .collect::<HashMap<_, _>>();
+    let mut superseded = Vec::new();
+    let mut invalid = Vec::new();
+    for record in reservations {
+        let Some(message) = outbound.get(&record.outbound_message_id) else {
+            continue;
+        };
+        if message.kind != PrivateMessageKind::PrivatePaymentList.as_str() {
+            continue;
+        }
+        match message.status {
+            OutboundPrivateMessageStatus::Superseded if message.last_attempt_at.is_none() => {
+                superseded.push(cancellation_record_from_reservation_record(record));
+            }
+            OutboundPrivateMessageStatus::Invalid => {
+                invalid.push(cancellation_record_from_reservation_record(record));
+            }
+            _ => {}
+        }
+    }
+    superseded.extend(invalid);
+    superseded
 }
 
 /// Load reservation cancellations for one outbound Private Payment List if any linked

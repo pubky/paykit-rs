@@ -45,7 +45,8 @@ use derivation::recurrence_unit_to_str;
 pub(crate) use derivation::{
     payment_proof_allowed_states, payment_request_records,
     payment_request_records_from_transaction, received_payment_request_records,
-    request_from_record, validate_proof_conversion,
+    received_payment_request_records_from_transaction, request_from_record,
+    validate_proof_conversion,
 };
 
 /// Local role for one Payment Request.

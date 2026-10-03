@@ -19,36 +19,42 @@ where
     S: StorageAdapter,
 {
     storage
-        .transaction(|tx| {
-            let items = tx.private_stream_items(counterparty);
-            let outbound = tx.outbound_private_messages(counterparty);
-            let outbound_carriers = outbound_event_carriers(&outbound);
-            let mut dedupe_records = HashMap::new();
-            for item in &items {
-                let Some(message) = payment_request_message_from_item(item) else {
-                    continue;
-                };
-                let Some(parsed) = parse_payment_request_event_message(&message) else {
-                    continue;
-                };
-                let Some(event_id) = parsed.event_id() else {
-                    continue;
-                };
-                if let Some(record) = tx.event_dedup_record(counterparty, event_id.as_str()) {
-                    dedupe_records.insert(event_id.as_str().to_owned(), record);
-                }
-            }
-            let mut records = derive_received_payment_request_records(
-                counterparty.clone(),
-                items,
-                dedupe_records,
-                outbound_carriers,
-                now,
-            )?;
-            apply_execution_claims(tx, &mut records);
-            Ok(records)
-        })
+        .transaction(|tx| received_payment_request_records_from_transaction(tx, counterparty, now))
         .await
+}
+
+pub(crate) fn received_payment_request_records_from_transaction(
+    tx: &dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    now: DateTime<Utc>,
+) -> Result<Vec<PaymentRequestRecord>> {
+    let items = tx.private_stream_items(counterparty);
+    let outbound = tx.outbound_private_messages(counterparty);
+    let outbound_carriers = outbound_event_carriers(&outbound);
+    let mut dedupe_records = HashMap::new();
+    for item in &items {
+        let Some(message) = payment_request_message_from_item(item) else {
+            continue;
+        };
+        let Some(parsed) = parse_payment_request_event_message(&message) else {
+            continue;
+        };
+        let Some(event_id) = parsed.event_id() else {
+            continue;
+        };
+        if let Some(record) = tx.event_dedup_record(counterparty, event_id.as_str()) {
+            dedupe_records.insert(event_id.as_str().to_owned(), record);
+        }
+    }
+    let mut records = derive_received_payment_request_records(
+        counterparty.clone(),
+        items,
+        dedupe_records,
+        outbound_carriers,
+        now,
+    )?;
+    apply_execution_claims(tx, &mut records);
+    Ok(records)
 }
 
 /// Derive local Payment Request records for one counterparty.

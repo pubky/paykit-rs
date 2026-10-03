@@ -1,6 +1,6 @@
 [package]
 name = "paykit-sdk"
-version = "0.1.0-rc60"
+version = "0.1.0-rc62"
 authors = ["ben@synonym.to", "denys@synonym.to"]
 description = "Stateful Paykit SDK runtime"
 license = "MIT"
@@ -22,8 +22,9 @@ blake3 = "1"
 chacha20poly1305 = { version = "0.10", features = ["std"] }
 chrono = { version = "0.4.44", default-features = false, features = ["clock", "serde", "std"] }
 crypto_secretbox = "0.1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 hex = "0.4"
-paykit-lib = { path = "../paykit-lib", version = "0.1.0-rc60" }
+paykit-lib = { path = "../paykit-lib", version = "0.1.0-rc62" }
 postcard = { version = "1.1.3", features = ["use-std"] }
 pubky = "0.14.0"
 pubky-noise = { version = "=0.1.0-rc12", git = "https://github.com/pubky/pubky-noise", rev = "42e00f2223a500d99b15eb084ed004a95cdeea7b" }

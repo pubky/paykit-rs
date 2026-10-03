@@ -184,6 +184,15 @@ async fn test_restored_link_rejects_substituted_static_key_before_send_or_receiv
                 .await
                 .unwrap_err()
         } else {
+            attacker.handle_handshake().await.unwrap();
+            attacker.transition_transport().unwrap();
+            let prepared = attacker.prepare_send(b"unauthorized message").unwrap();
+            bob.access
+                .session
+                .storage()
+                .put(prepared.destination_path(), prepared.ciphertext().to_vec())
+                .await
+                .unwrap();
             alice
                 .sdk
                 .receive_private_messages(bob.public_key.clone())
