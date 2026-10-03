@@ -7,7 +7,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-## 0.1.0-rc60 - Unreleased
+## 0.1.0-rc61 - 2026-10-03
+
+### Changed
+
+- Combine shared-state checks for private message sends, receives, and Payment
+  Request preparation while preserving durable ciphertext and peer leases.
+- Deliver private-list updates to independent peers concurrently, with ordered
+  messages per peer and reservation expiry checked after cleanup.
+
+## 0.1.0-rc60 - 2026-10-03
 
 ### Added
 
