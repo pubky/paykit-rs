@@ -19,6 +19,122 @@ use crate::harness::{
 };
 
 #[tokio::test]
+async fn test_outbound_reservation_expiry_is_rechecked_after_cleanup() {
+    use chrono::{DateTime, Utc};
+    use std::sync::atomic::AtomicBool;
+
+    #[derive(Clone)]
+    struct CleanupClock {
+        cleanup_started: Arc<AtomicBool>,
+        started_at: DateTime<Utc>,
+    }
+    impl paykit_sdk::Clock for CleanupClock {
+        fn now(&self) -> DateTime<Utc> {
+            self.started_at
+                + chrono::Duration::seconds(if self.cleanup_started.load(Ordering::SeqCst) {
+                    2
+                } else {
+                    0
+                })
+        }
+    }
+    struct CleanupStorage {
+        inner: InMemoryStorage,
+        counterparty: paykit_sdk::PubkyPublicKey,
+        cleanup_started: Arc<AtomicBool>,
+    }
+    #[async_trait]
+    impl StorageAdapter for CleanupStorage {
+        async fn transaction_erased<'a>(
+            &self,
+            f: StorageTransactionCallback<'a>,
+        ) -> PaykitResult<Box<dyn std::any::Any + Send>> {
+            self.inner
+                .transaction(|tx| {
+                    let result = f(tx)?;
+                    if tx
+                        .payment_endpoint_reservations(&self.counterparty)
+                        .iter()
+                        .any(|record| record.cancellation_started_at.is_some())
+                    {
+                        self.cleanup_started.store(true, Ordering::SeqCst);
+                    }
+                    Ok(result)
+                })
+                .await
+        }
+    }
+
+    let pair = linked_two_party().await;
+    let started_at = Utc::now();
+    let mut messages = Vec::new();
+    for reservation_id in ["earlier", "latest"] {
+        messages.push(
+            pair.alice
+                .sdk
+                .enqueue_private_payment_list_with_reservations(
+                    pair.bob.public_key.clone(),
+                    vec![PrivatePaymentEndpointReservation {
+                        reservation_id: reservation_id.into(),
+                        receiving_detail: private_receiving_detail(
+                            "btc-lightning-bolt11",
+                            reservation_id,
+                        ),
+                        expires_at: Some(started_at + chrono::Duration::seconds(1)),
+                        attribution: Default::default(),
+                    }],
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    pair.alice
+        .storage
+        .transaction(|tx| {
+            let mut earlier = messages[0].clone();
+            earlier.status = OutboundPrivateMessageStatus::Pending;
+            earlier.last_error = None;
+            tx.save_outbound_private_message(earlier)
+        })
+        .await
+        .unwrap();
+    let cleanup_started = Arc::new(AtomicBool::new(false));
+    let sdk = PaykitSdk::with_clock(
+        CleanupStorage {
+            inner: pair.alice.storage.clone(),
+            counterparty: pair.bob.public_key.clone(),
+            cleanup_started: cleanup_started.clone(),
+        },
+        crate::harness::TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+        CleanupClock {
+            cleanup_started: cleanup_started.clone(),
+            started_at,
+        },
+    );
+    let report = sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    assert!(cleanup_started.load(Ordering::SeqCst));
+    assert!(report.sent.is_empty());
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(
+        report.failed[0].outbound_message_id,
+        messages[1].outbound_message_id
+    );
+    assert!(pair
+        .bob
+        .sdk
+        .receive_private_messages(pair.alice.public_key.clone())
+        .await
+        .unwrap()
+        .stream_item_ids
+        .is_empty());
+}
+
+#[tokio::test]
 async fn test_private_inbox_probes_are_bounded_and_isolate_a_slow_failed_peer() {
     struct GatedPublicStorage {
         access: PubkySessionAccess,

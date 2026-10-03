@@ -412,8 +412,19 @@ where
         lease: &PeerLinkOperationLease,
         remote_noise_public_key: &paykit_lib::PublicKey,
     ) -> Result<bool> {
-        self.ensure_peer_not_blocked(counterparty).await?;
-        self.require_current_peer_link_operation(lease, session_access)
+        self.storage
+            .transaction(|tx| {
+                if tx
+                    .linked_peer(counterparty)
+                    .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
+                {
+                    return Err(PaykitSdkError::Policy {
+                        context: format!("counterparty {counterparty} is blocked"),
+                        source: None,
+                    });
+                }
+                self.require_current_peer_link_operation_in_transaction(tx, lease, session_access)
+            })
             .await?;
         let public_storage =
             self.pubky

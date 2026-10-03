@@ -316,7 +316,7 @@ async fn test_private_list_clear_and_app_publication_transaction_counts() {
         .await
         .unwrap();
     let clear_transactions = transactions.swap(0, Ordering::SeqCst);
-    assert_eq!(clear_transactions, 29);
+    assert_eq!(clear_transactions, 19);
     assert_eq!(cleared.cleared.len(), 1);
     assert!(cleared.failed_to_queue.is_empty());
     assert!(cleared.failed_to_deliver.is_empty());
@@ -343,6 +343,37 @@ async fn test_private_list_clear_and_app_publication_transaction_counts() {
     assert!(lists
         .iter()
         .any(|list| list.app_id == pair.bitkit.app_id && list.payment_endpoints.is_empty()));
+
+    let proposal = sdk
+        .propose_payment_request(pair.bob.public_key.clone(), recurring_request_terms())
+        .await
+        .unwrap();
+    let proposal_transactions = transactions.swap(0, Ordering::SeqCst);
+    assert_eq!(proposal_transactions, 2);
+    let sent = sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    let send_transactions = transactions.swap(0, Ordering::SeqCst);
+    assert!(
+        send_transactions <= 13,
+        "request send used {send_transactions} transactions"
+    );
+    assert_eq!(sent.sent.len(), 1);
+    assert!(sent.failed.is_empty());
+    pair.bob
+        .sdk
+        .receive_private_messages(pair.bitkit.public_key.clone())
+        .await
+        .unwrap();
+    assert!(pair
+        .bob
+        .sdk
+        .received_payment_requests_from(&pair.bitkit.public_key)
+        .await
+        .unwrap()
+        .iter()
+        .any(|request| request.payment_request_id == proposal.payment_request_id));
 
     sdk.publish_paykit_app(test_app("Bitkit")).await.unwrap();
     let unchanged_transactions = transactions.swap(0, Ordering::SeqCst);
@@ -372,7 +403,7 @@ async fn test_private_list_clear_and_app_publication_transaction_counts() {
     );
     assert!(state.paykit_app_operation_leases.is_empty());
     assert_no_pending_shared_state_writes(&pair.bitkit.access.session).await;
-    eprintln!("shared-state transactions: clear={clear_transactions}, unchanged publication={unchanged_transactions}, downgrade={downgrade_transactions}");
+    eprintln!("shared-state transactions: clear={clear_transactions}, proposal={proposal_transactions}, send={send_transactions}, unchanged publication={unchanged_transactions}, downgrade={downgrade_transactions}");
 }
 
 #[tokio::test]

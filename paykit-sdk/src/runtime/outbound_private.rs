@@ -1,7 +1,8 @@
 use super::*;
+use crate::domain::endpoint_reservations::terminal_private_list_reservation_cancellations_in_transaction;
 use futures_util::{stream, StreamExt};
 
-const OUTBOUND_PEER_CONCURRENCY: usize = 4;
+pub(super) const OUTBOUND_PEER_CONCURRENCY: usize = 4;
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
@@ -15,54 +16,68 @@ where
         &self,
         counterparty: PubkyPublicKey,
     ) -> Result<OutboundPrivateSendReport> {
-        let has_work = self
-            .storage
-            .transaction(|tx| {
-                if !tx
-                    .queued_outbound_private_messages(&counterparty)
-                    .is_empty()
-                {
-                    return Ok(true);
+        let lease_timeout = ChronoDuration::from_std(PEER_LINK_OPERATION_LEASE_TIMEOUT)
+            .expect("fixed peer link lease timeout must fit chrono duration");
+        let work = self
+            .retry_storage_transaction(|| {
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    let has_queued = !tx
+                        .queued_outbound_private_messages(&counterparty)
+                        .is_empty();
+                    if !has_queued
+                        && !tx
+                            .payment_endpoint_reservations(&counterparty)
+                            .iter()
+                            .any(|reservation| reservation.app_id == self.config.app_id)
+                    {
+                        return Ok(None);
+                    }
+                    let cancellations =
+                        terminal_private_list_reservation_cancellations_in_transaction(
+                            tx,
+                            &counterparty,
+                        )
+                        .into_iter()
+                        .filter(|record| record.app_id == self.config.app_id)
+                        .collect::<Vec<_>>();
+                    if !has_queued && cancellations.is_empty() {
+                        return Ok(None);
+                    }
+                    let now = self.clock.now();
+                    let lease =
+                        tx.claim_peer_link_operation(&counterparty, now, now + lease_timeout)?;
+                    let readiness =
+                        super::encrypted_links::require_peer_not_recovery_required_or_blocked(
+                            tx.linked_peer(&counterparty).map(|peer| peer.state),
+                            &counterparty,
+                        );
+                    Ok(Some((lease, has_queued, cancellations, readiness)))
                 }
-                let reservations = tx
-                    .payment_endpoint_reservations(&counterparty)
-                    .into_iter()
-                    .filter(|reservation| reservation.app_id == self.config.app_id)
-                    .collect::<Vec<_>>();
-                if reservations.is_empty() {
-                    return Ok(false);
-                }
-                let outbound = tx
-                    .outbound_private_messages(&counterparty)
-                    .into_iter()
-                    .map(|message| (message.outbound_message_id, message))
-                    .collect();
-                Ok(reservations.iter().any(|reservation| {
-                    terminal_private_list_reservation_needs_cleanup(reservation, &outbound)
-                }))
             })
             .await?;
-        if !has_work {
+        let Some((lease, has_queued, cancellations, readiness)) = work else {
             return Ok(OutboundPrivateSendReport::default());
-        }
+        };
+        let lease = lease.ok_or_else(|| PaykitSdkError::ConcurrentUpdate {
+            context: format!(
+                "peer link operation already in progress for counterparty {counterparty}"
+            ),
+            source: None,
+        })?;
 
-        let lease = self.claim_peer_link_operation(&counterparty).await?;
         let result = async {
             let mut report = OutboundPrivateSendReport::default();
             report.reservation_cleanup_failures.extend(
-                self.cancel_terminal_private_list_reservations(&counterparty, Some(&lease), None)
+                self.cancel_reservation_records(cancellations, Some(&lease), None)
                     .await,
             );
-            let queued = queued_outbound_private_messages(&self.storage, &counterparty).await?;
-            if queued.is_empty() {
+            if !has_queued {
                 return Ok(report);
             }
 
-            self.ensure_peer_not_recovery_required_or_blocked(&counterparty)
-                .await?;
+            readiness?;
             let (session_access, _) = self.private_link_session_access().await?;
-            self.ensure_peer_allows_private_automation(&counterparty)
-                .await?;
             self.process_outbound_private_messages_with_claim(
                 counterparty,
                 report,
@@ -185,24 +200,29 @@ where
 
         loop {
             let now = self.clock.now().max(started_at);
-            let sending = claim_next_outbound_private_message_with_peer_lease(
-                &self.storage,
-                &counterparty,
-                now,
-                stale_before,
-                failed_retry_after,
-                lease.clone(),
-            )
-            .await?;
-            let Some(sending) = sending else {
-                report.reservation_cleanup_failures.extend(
-                    self.cancel_terminal_private_list_reservations(
+            let (sending, cancellations) = self
+                .storage
+                .transaction(|tx| {
+                    crate::storage::require_peer_link_operation_lease(tx, &lease)?;
+                    let sending = tx.claim_next_outbound_private_message(
                         &counterparty,
-                        Some(&lease),
-                        None,
-                    )
+                        now,
+                        stale_before,
+                        failed_retry_after,
+                    );
+                    let cancellations =
+                        terminal_private_list_reservation_cancellations_in_transaction(
+                            tx,
+                            &counterparty,
+                        );
+                    Ok((sending, cancellations))
+                })
+                .await?;
+            report.reservation_cleanup_failures.extend(
+                self.cancel_reservation_records(cancellations, Some(&lease), None)
                     .await,
-                );
+            );
+            let Some(sending) = sending else {
                 break;
             };
             report.attempted.push(sending.outbound_message_id);
@@ -212,7 +232,13 @@ where
                 .as_ref()
                 .map(|_| sending.outbound_message_id);
             let Some(sending) = self
-                .claimed_message_ready_for_send(&counterparty, sending, &lease, &mut report, now)
+                .claimed_message_ready_for_send(
+                    &counterparty,
+                    sending,
+                    &lease,
+                    &mut report,
+                    self.clock.now().max(started_at),
+                )
                 .await?
             else {
                 if let Some(message_id) = prepared_message_id {
@@ -287,10 +313,6 @@ where
                     break;
                 }
             }
-            report.reservation_cleanup_failures.extend(
-                self.cancel_terminal_private_list_reservations(&counterparty, Some(&lease), None)
-                    .await,
-            );
         }
 
         Ok(report)
@@ -347,17 +369,18 @@ where
             &remote_noise_public_key,
         )
         .await?;
-        let (peer_state, stored_link_state) = self
+        let (peer, stored_link_state) = self
             .storage
             .transaction(|tx| {
+                crate::storage::require_peer_link_operation_lease(tx, lease)?;
                 Ok((
-                    tx.linked_peer(counterparty).map(|peer| peer.state),
+                    tx.linked_peer(counterparty),
                     tx.encrypted_link_state(counterparty),
                 ))
             })
             .await?;
         require_private_automation_ready(
-            peer_state,
+            peer.as_ref().map(|peer| peer.state.clone()),
             stored_link_state
                 .as_ref()
                 .is_some_and(|state| state.link_snapshot.is_some()),
@@ -398,8 +421,10 @@ where
                 return Err(err.into());
             }
         };
-        self.require_snapshot_recovery_context(counterparty, snapshot.recovery_context(), lease)
-            .await?;
+        crate::domain::linked_peers::require_recovery_context(
+            &peer.expect("private automation requires a linked peer"),
+            snapshot.recovery_context(),
+        )?;
         if snapshot.remote_noise_public_key() != &remote_noise_public_key {
             self.mark_outbound_link_recovery_required(
                 counterparty,

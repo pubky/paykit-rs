@@ -220,7 +220,16 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<GuardedSessionAccess> {
-        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
+        let (session_access, _, readiness) = self
+            .load_session_access_and_refresh_identity_with(|tx| {
+                Ok(require_private_automation_ready(
+                    tx.linked_peer(counterparty).map(|peer| peer.state),
+                    tx.encrypted_link_state(counterparty)
+                        .is_some_and(|state| state.link_snapshot.is_some()),
+                    counterparty,
+                ))
+            })
+            .await?;
         let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky session available".into(),
             source: None,
@@ -231,26 +240,7 @@ where
                 source: None,
             });
         }
-        self.ensure_peer_allows_private_automation(counterparty)
-            .await?;
-
-        let has_active_link = self
-            .storage
-            .transaction(|tx| {
-                Ok(tx
-                    .encrypted_link_state(counterparty)
-                    .and_then(|state| state.link_snapshot)
-                    .is_some())
-            })
-            .await?;
-        if !has_active_link {
-            return Err(PaykitSdkError::RecoveryRequired {
-                context: format!(
-                    "no active Encrypted Link snapshot for counterparty {counterparty}"
-                ),
-                source: None,
-            });
-        }
+        readiness.expect("active session loads outbound readiness")?;
 
         Ok(session_access)
     }

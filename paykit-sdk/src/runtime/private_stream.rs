@@ -226,7 +226,24 @@ where
             &remote_noise_public_key,
         )
         .await?;
-        self.ensure_peer_allows_private_automation(&counterparty)
+        let (peer, stored_link_state) = self
+            .storage
+            .transaction(|tx| {
+                crate::storage::require_peer_link_operation_lease(tx, &lease)?;
+                let peer = tx.linked_peer(&counterparty);
+                let state = tx.encrypted_link_state(&counterparty);
+                require_private_automation_ready(
+                    peer.as_ref().map(|peer| peer.state.clone()),
+                    state
+                        .as_ref()
+                        .is_some_and(|state| state.link_snapshot.is_some()),
+                    &counterparty,
+                )?;
+                Ok((
+                    peer.expect("private automation requires a linked peer"),
+                    state,
+                ))
+            })
             .await?;
         let secret_key = session_access.paykit_noise_secret_key()?;
         let remote_public_key = counterparty.to_public_key()?;
@@ -247,11 +264,8 @@ where
                 }
             };
 
-        let mut stored_link_state = self
-            .storage
-            .transaction(|tx| Ok(tx.encrypted_link_state(&counterparty)))
-            .await?
-            .ok_or_else(|| PaykitSdkError::RecoveryRequired {
+        let mut stored_link_state =
+            stored_link_state.ok_or_else(|| PaykitSdkError::RecoveryRequired {
                 context: format!("no Encrypted Link state for counterparty {counterparty}"),
                 source: None,
             })?;
@@ -301,8 +315,7 @@ where
                 return Err(err.into());
             }
         };
-        self.require_snapshot_recovery_context(&counterparty, snapshot.recovery_context(), &lease)
-            .await?;
+        crate::domain::linked_peers::require_recovery_context(&peer, snapshot.recovery_context())?;
         if snapshot.remote_noise_public_key() != &remote_noise_public_key {
             let now = self.clock.now();
             mark_recovery_required_with_lease(

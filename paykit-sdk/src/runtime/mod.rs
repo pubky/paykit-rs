@@ -61,12 +61,11 @@ use crate::{
         LinkedPeerState,
     },
     domain::outbound_private::{
-        claim_next_outbound_private_message_with_peer_lease, mark_outbound_failed,
-        mark_outbound_invalid, mark_outbound_recovery_required, mark_outbound_sent,
-        queued_outbound_private_messages, validate_queued_outbound_private_message,
-        OutboundPrivateCounterpartySendReport, OutboundPrivateMessageStatus,
-        OutboundPrivateSendFailure, OutboundPrivateSendReport, RecoveryMarkerPublishFailure,
-        ReservationCleanupFailure,
+        mark_outbound_failed, mark_outbound_invalid, mark_outbound_recovery_required,
+        mark_outbound_sent, queued_outbound_private_messages,
+        validate_queued_outbound_private_message, OutboundPrivateCounterpartySendReport,
+        OutboundPrivateMessageStatus, OutboundPrivateSendFailure, OutboundPrivateSendReport,
+        RecoveryMarkerPublishFailure, ReservationCleanupFailure,
     },
     domain::payment_requests::{
         claim_payment_request_execution, enqueue_checked_payment_request_action,
