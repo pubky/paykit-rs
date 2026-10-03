@@ -346,15 +346,26 @@ where
             &remote_noise_public_key,
         )
         .await?;
-        self.ensure_peer_allows_private_automation(counterparty)
+        let (peer_state, stored_link_state) = self
+            .storage
+            .transaction(|tx| {
+                Ok((
+                    tx.linked_peer(counterparty).map(|peer| peer.state),
+                    tx.encrypted_link_state(counterparty),
+                ))
+            })
             .await?;
+        require_private_automation_ready(
+            peer_state,
+            stored_link_state
+                .as_ref()
+                .is_some_and(|state| state.link_snapshot.is_some()),
+            counterparty,
+        )?;
         let secret_key = session_access.paykit_noise_secret_key()?;
         let remote_public_key = counterparty.to_public_key()?;
-        let stored_link_state = self
-            .storage
-            .transaction(|tx| Ok(tx.encrypted_link_state(counterparty)))
-            .await?
-            .ok_or_else(|| PaykitSdkError::RecoveryRequired {
+        let stored_link_state =
+            stored_link_state.ok_or_else(|| PaykitSdkError::RecoveryRequired {
                 context: format!("no Encrypted Link state for counterparty {counterparty}"),
                 source: None,
             })?;

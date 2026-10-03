@@ -41,9 +41,9 @@ use crate::{
         PAYKIT_PROFILE_PATH, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
     },
     domain::endpoint_reservations::{
-        expired_outbound_reservation_cancellations, invalid_private_list_reservation_cancellations,
+        expired_outbound_reservation_cancellations,
         queue_private_payment_list_with_reservations_with_link_lease, reservation_payload_hash,
-        unattempted_superseded_reservation_cancellations,
+        terminal_private_list_reservation_cancellations,
         PaymentEndpointReservationCancellationRecord, PrivatePaymentListQueuePolicy,
     },
     domain::endpoints::{

@@ -282,24 +282,220 @@ async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sig
     assert_no_pending_shared_state_writes(&server_session).await;
 }
 
+struct CountedStorage {
+    inner: PubkySharedStateStorage,
+    transactions: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl StorageAdapter for CountedStorage {
+    async fn transaction_erased<'a>(
+        &self,
+        f: StorageTransactionCallback<'a>,
+    ) -> PaykitResult<Box<dyn Any + Send>> {
+        self.transactions.fetch_add(1, Ordering::SeqCst);
+        self.inner.transaction_erased(f).await
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_idle_polling_reads_shared_state_once_without_rewriting_it() {
-    struct CountedStorage {
-        inner: PubkySharedStateStorage,
-        transactions: Arc<AtomicUsize>,
+async fn test_private_list_clear_and_app_publication_transaction_counts() {
+    let pair = linked_homeserver_shared_pair().await;
+    let transactions = Arc::new(AtomicUsize::new(0));
+    let sdk = PaykitSdk::new(
+        CountedStorage {
+            inner: pair.bitkit.storage.clone(),
+            transactions: transactions.clone(),
+        },
+        TestnetSessionProvider::new(pair.bitkit.access.clone()),
+        pair.bitkit.adapter.clone(),
+        PaykitSdkConfig::new(pair.bitkit.app_id.clone()).unwrap(),
+    );
+    let cleared = sdk
+        .clear_private_payment_list_and_process_outbound(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    let clear_transactions = transactions.swap(0, Ordering::SeqCst);
+    assert_eq!(clear_transactions, 29);
+    assert_eq!(cleared.cleared.len(), 1);
+    assert!(cleared.failed_to_queue.is_empty());
+    assert!(cleared.failed_to_deliver.is_empty());
+    let state = pair.bitkit.storage_state().await;
+    let sent = state
+        .outbound_private_messages
+        .iter()
+        .find(|message| Some(message.outbound_message_id) == cleared.cleared[0].outbound_message_id)
+        .unwrap();
+    assert_eq!(sent.status, OutboundPrivateMessageStatus::Sent);
+    assert!(sent.prepared_send.is_none());
+    assert!(state.peer_link_operation_leases.is_empty());
+    pair.bob
+        .sdk
+        .receive_private_messages(pair.bitkit.public_key.clone())
+        .await
+        .unwrap();
+    let lists = pair
+        .bob
+        .sdk
+        .current_private_payment_lists(&pair.bitkit.public_key)
+        .await
+        .unwrap();
+    assert!(lists
+        .iter()
+        .any(|list| list.app_id == pair.bitkit.app_id && list.payment_endpoints.is_empty()));
+
+    sdk.publish_paykit_app(test_app("Bitkit")).await.unwrap();
+    let unchanged_transactions = transactions.swap(0, Ordering::SeqCst);
+    assert_eq!(unchanged_transactions, 7);
+    let mut capabilities = test_app("Bitkit").capabilities();
+    capabilities.private_payments = false;
+    let registry = sdk
+        .publish_paykit_app(PaykitApp::new("Bitkit", capabilities).unwrap())
+        .await
+        .unwrap();
+    let downgrade_transactions = transactions.swap(0, Ordering::SeqCst);
+    assert_eq!(downgrade_transactions, 8);
+    assert_eq!(
+        registry
+            .apps()
+            .get(&pair.bitkit.app_id)
+            .unwrap()
+            .capabilities(),
+        capabilities
+    );
+    let state = pair.bitkit.storage_state().await;
+    assert_eq!(
+        state
+            .registered_paykit_app_capabilities
+            .get(&pair.bitkit.app_id),
+        Some(&capabilities)
+    );
+    assert!(state.paykit_app_operation_leases.is_empty());
+    assert_no_pending_shared_state_writes(&pair.bitkit.access.session).await;
+    eprintln!("shared-state transactions: clear={clear_transactions}, unchanged publication={unchanged_transactions}, downgrade={downgrade_transactions}");
+}
+
+#[tokio::test]
+async fn test_app_publication_rechecks_registry_and_authorization_after_staging() {
+    struct ChangedAfterStagingStorage {
+        inner: InMemoryStorage,
+        access: PubkySessionAccess,
+        remove_authorization: bool,
+        staged_changes: Arc<AtomicUsize>,
     }
 
     #[async_trait]
-    impl StorageAdapter for CountedStorage {
+    impl StorageAdapter for ChangedAfterStagingStorage {
         async fn transaction_erased<'a>(
             &self,
             f: StorageTransactionCallback<'a>,
         ) -> PaykitResult<Box<dyn Any + Send>> {
-            self.transactions.fetch_add(1, Ordering::SeqCst);
-            self.inner.transaction_erased(f).await
+            let mut staged = false;
+            let result = self
+                .inner
+                .transaction_erased(Box::new(|tx| {
+                    let previous = tx.paykit_app_capabilities(&app_id("bitkit"));
+                    let result = f(tx)?;
+                    staged = previous.is_some_and(|capabilities| capabilities.receipts)
+                        && tx
+                            .paykit_app_capabilities(&app_id("bitkit"))
+                            .is_some_and(|capabilities| !capabilities.receipts);
+                    Ok(result)
+                }))
+                .await?;
+            if staged {
+                self.staged_changes.fetch_add(1, Ordering::SeqCst);
+                if self.remove_authorization {
+                    self.access
+                        .session
+                        .storage()
+                        .delete(paykit_lib::PAYKIT_NOISE_KEY_AUTHORIZATION_PATH)
+                        .await
+                        .unwrap();
+                } else {
+                    let (mut registry, revision) =
+                        paykit_lib::get_paykit_app_registry_with_revision(
+                            &self.access.outbox_client.public_storage(),
+                            self.access.session.info().public_key(),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    registry
+                        .register_app(app_id("other"), test_app("Other"))
+                        .unwrap();
+                    paykit_lib::update_paykit_app_registry(
+                        &self.access.session,
+                        &registry,
+                        &revision,
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+            Ok(result)
         }
     }
 
+    let testnet = build_testnet().await;
+    for remove_authorization in [false, true] {
+        let user = TestUser::sign_up_with_app(&testnet, app_id("bitkit")).await;
+        let staged_changes = Arc::new(AtomicUsize::new(0));
+        let sdk = PaykitSdk::new(
+            ChangedAfterStagingStorage {
+                inner: user.storage.clone(),
+                access: user.access.clone(),
+                remove_authorization,
+                staged_changes: staged_changes.clone(),
+            },
+            TestnetSessionProvider::new(user.access.clone()),
+            user.adapter.clone(),
+            PaykitSdkConfig::new(user.app_id.clone()).unwrap(),
+        );
+        let mut capabilities = test_app("Bitkit").capabilities();
+        capabilities.receipts = false;
+        let result = sdk
+            .publish_paykit_app(PaykitApp::new("Bitkit", capabilities).unwrap())
+            .await;
+        assert_eq!(staged_changes.load(Ordering::SeqCst), 1);
+        let registry = user
+            .sdk
+            .paykit_app_registry(user.public_key.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        if remove_authorization {
+            assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+            assert!(
+                registry
+                    .apps()
+                    .get(&user.app_id)
+                    .unwrap()
+                    .capabilities()
+                    .receipts
+            );
+        } else {
+            assert_eq!(result.unwrap(), registry);
+            assert_eq!(
+                registry.apps().get(&app_id("other")),
+                Some(&test_app("Other"))
+            );
+            assert_eq!(
+                registry.apps().get(&user.app_id).unwrap().capabilities(),
+                capabilities
+            );
+        }
+        let state = user.storage.snapshot().unwrap();
+        assert_eq!(
+            state.registered_paykit_app_capabilities.get(&user.app_id),
+            Some(&capabilities)
+        );
+        assert!(state.paykit_app_operation_leases.is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_idle_polling_reads_shared_state_once_without_rewriting_it() {
     let pair = linked_homeserver_shared_pair().await;
     pair.bob
         .sdk
