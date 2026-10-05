@@ -1,4 +1,5 @@
 use super::private_stream::PrivateInboxCheckpoint;
+use super::recovery::RecoveryObservationCheckpoint;
 use super::*;
 use crate::PaymentAmountContext;
 use std::future::Future;
@@ -259,7 +260,8 @@ where
                     tx.encrypted_link_state(&counterparty)
                         .is_some_and(|state| state.link_snapshot.is_some()),
                     &counterparty,
-                ))
+                )
+                .map(|()| RecoveryObservationCheckpoint::load(tx, &counterparty)))
             })
             .await?;
         let private_live = session_access
@@ -271,11 +273,15 @@ where
             .unwrap_or(false);
         let mut state = PrivatePaymentResolutionState::NoPrivateEndpoint;
         let mut private_allowed = identity.public_key.is_some();
+        let mut recovery_checkpoint = None;
 
         if private_allowed {
             private_allowed = if private_live {
                 match readiness.expect("active session loads private resolution readiness") {
-                    Ok(()) => true,
+                    Ok(checkpoint) => {
+                        recovery_checkpoint = checkpoint;
+                        true
+                    }
                     Err(PaykitSdkError::RecoveryRequired { .. }) => {
                         state = PrivatePaymentResolutionState::RecoveryPending;
                         false
@@ -291,13 +297,14 @@ where
         // A remote recovery marker can change while the local inbox checkpoint remains current.
         if private_allowed && private_live {
             match self
-                .observe_remote_recovery_marker_for_cached_private_state(
+                .observe_remote_recovery_marker_from_checkpoint(
                     &counterparty,
-                    session_access.as_ref(),
+                    session_access.as_ref().expect("live private session"),
+                    recovery_checkpoint,
                 )
                 .await
             {
-                Ok(()) => {}
+                Ok(_) => {}
                 Err(PaykitSdkError::RecoveryRequired { .. }) => {
                     state = PrivatePaymentResolutionState::RecoveryPending;
                     private_allowed = false;
@@ -656,16 +663,14 @@ where
         Option<OutboundPrivateSendReport>,
         Option<PrivateInboxCheckpoint>,
     )> {
-        let mut link_report = None;
+        let link_report = self
+            .ensure_link_with_peer_if_available(counterparty.clone(), max_advance_steps)
+            .await?;
         let mut receive_report = None;
         let mut outbound_report = None;
         let mut inbox = None;
 
-        if self.private_payment_preparation_is_available().await? {
-            link_report = Some(
-                self.ensure_link_with_peer(counterparty.clone(), max_advance_steps)
-                    .await?,
-            );
+        if link_report.is_some() {
             for _ in 0..PREPARE_PRIVATE_PAYMENT_SYNC_ROUND_LIMIT {
                 let outbound = self
                     .process_outbound_private_messages(counterparty.clone())
@@ -733,17 +738,6 @@ where
             ),
             source: None,
         })
-    }
-
-    async fn private_payment_preparation_is_available(&self) -> Result<bool> {
-        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
-        session_access
-            .as_ref()
-            .map(|session| {
-                session.private_link_capable_for_capabilities(PAYKIT_SESSION_CAPABILITIES)
-            })
-            .transpose()
-            .map(|capable| capable.unwrap_or(false))
     }
 
     async fn cached_private_resolution_allowed_for_peer(

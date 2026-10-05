@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::PublicEndpointRecord;
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
@@ -10,19 +11,21 @@ where
     /// Publish current public receiving details and remove stale SDK-managed endpoints.
     pub async fn sync_public_endpoints(&self) -> Result<EndpointSyncReport> {
         let _identity_guard = self.claim_identity_operation("sync public endpoints")?;
-        let (session_access, _, lease) = self
+        let (session_access, _, publication) = self
             .load_session_access_and_refresh_identity_with(|tx| {
-                self.claim_paykit_app_operation_in_transaction(tx, false)
+                let lease = self.claim_paykit_app_operation_in_transaction(tx, false)?;
+                crate::storage::require_paykit_app_active(tx, &self.config.app_id)?;
+                Ok((lease, tx.public_endpoint_records()))
             })
             .await?;
         let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky session available".into(),
             source: None,
         })?;
-        let lease = lease.expect("active session claims App operation");
+        let (lease, records) = publication.expect("active session loads App publication state");
         let result = async {
             let details = self.payment.current_public_receiving_details().await?;
-            self.sync_public_endpoints_with_lease(details, &lease, &session_access)
+            self.sync_public_endpoints_with_lease(details, records, &lease, &session_access)
                 .await
         }
         .await;
@@ -35,18 +38,20 @@ where
         details: Vec<PublicReceivingDetail>,
     ) -> Result<EndpointSyncReport> {
         let _identity_guard = self.claim_identity_operation("sync public endpoints")?;
-        let (session_access, _, lease) = self
+        let (session_access, _, publication) = self
             .load_session_access_and_refresh_identity_with(|tx| {
-                self.claim_paykit_app_operation_in_transaction(tx, false)
+                let lease = self.claim_paykit_app_operation_in_transaction(tx, false)?;
+                crate::storage::require_paykit_app_active(tx, &self.config.app_id)?;
+                Ok((lease, tx.public_endpoint_records()))
             })
             .await?;
         let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky session available".into(),
             source: None,
         })?;
-        let lease = lease.expect("active session claims App operation");
+        let (lease, records) = publication.expect("active session loads App publication state");
         let result = self
-            .sync_public_endpoints_with_lease(details, &lease, &session_access)
+            .sync_public_endpoints_with_lease(details, records, &lease, &session_access)
             .await;
         self.finish_paykit_app_operation(lease, result).await
     }
@@ -54,21 +59,11 @@ where
     async fn sync_public_endpoints_with_lease(
         &self,
         details: Vec<PublicReceivingDetail>,
+        records: Vec<PublicEndpointRecord>,
         lease: &PaykitAppOperationLease,
         session_access: &GuardedSessionAccess,
     ) -> Result<EndpointSyncReport> {
         validate_public_endpoint_count(details.len())?;
-        let records = self
-            .retry_storage_transaction(|| {
-                let app_id = self.config.app_id.clone();
-                let lease = lease.clone();
-                move |tx| {
-                    crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
-                    crate::storage::require_paykit_app_active(tx, &app_id)?;
-                    Ok(tx.public_endpoint_records())
-                }
-            })
-            .await?;
         let registry = paykit_lib::get_paykit_app_registry(
             &session_access.outbox_client.public_storage(),
             session_access.session.info().public_key(),

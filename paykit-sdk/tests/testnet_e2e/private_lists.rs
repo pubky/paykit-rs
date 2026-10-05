@@ -1,5 +1,5 @@
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 use std::time::Duration;
@@ -698,13 +698,14 @@ async fn test_payment_preparation_refreshes_an_empty_private_list() {
         local: &'a TestUser,
         remote: &'a TestUser,
         session_loads: AtomicUsize,
+        marker_published: Arc<AtomicBool>,
     }
     #[async_trait]
     impl PubkySessionProvider for RecoverAtResolution<'_> {
         async fn load_session_access(&self) -> PaykitResult<Option<PubkySessionAccess>> {
-            // Availability, link preparation and receive load sessions first;
+            // Link preparation and receive load sessions first;
             // the next load starts resolution after the empty inbox probe.
-            if self.session_loads.fetch_add(1, Ordering::SeqCst) == 3 {
+            if self.session_loads.fetch_add(1, Ordering::SeqCst) == 2 {
                 let before = self.local.storage.snapshot()?;
                 assert!(before.peer_link_operation_leases.is_empty());
                 self.remote
@@ -712,6 +713,7 @@ async fn test_payment_preparation_refreshes_an_empty_private_list() {
                     .publish_encrypted_link_recovery_marker(self.local.public_key.clone())
                     .await?;
                 assert_eq!(self.local.storage.snapshot()?, before);
+                self.marker_published.store(true, Ordering::SeqCst);
             }
             Ok(Some(self.local.access.clone()))
         }
@@ -736,12 +738,14 @@ async fn test_payment_preparation_refreshes_an_empty_private_list() {
         }
     }
 
+    let marker_published = Arc::new(AtomicBool::new(false));
     let sdk = PaykitSdk::new(
         pair.bob.storage.clone(),
         RecoverAtResolution {
             local: &pair.bob,
             remote: &pair.alice,
             session_loads: AtomicUsize::new(0),
+            marker_published: marker_published.clone(),
         },
         NoWalletSelection,
         PaykitSdkConfig::new(pair.bob.app_id.clone()).unwrap(),
@@ -758,6 +762,7 @@ async fn test_payment_preparation_refreshes_an_empty_private_list() {
     .await
     .unwrap()
     .unwrap();
+    assert!(marker_published.load(Ordering::SeqCst));
     assert!(recovered.receive_report.unwrap().stream_item_ids.is_empty());
     assert_eq!(
         recovered.resolution.state,

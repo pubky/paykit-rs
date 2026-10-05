@@ -498,14 +498,14 @@ async fn test_shared_operations_transaction_counts() {
         .unwrap();
     assert_eq!(endpoints.published.len(), 1);
     assert!(endpoints.failed.is_empty());
-    assert_eq!(transactions.swap(0, Ordering::SeqCst), 7);
+    assert_eq!(transactions.swap(0, Ordering::SeqCst), 6);
     let removed = sdk
         .sync_public_endpoints_with_receiving_details(Vec::new())
         .await
         .unwrap();
     assert_eq!(removed.removed.len(), 1);
     assert!(removed.failed.is_empty());
-    assert_eq!(transactions.swap(0, Ordering::SeqCst), 6);
+    assert_eq!(transactions.swap(0, Ordering::SeqCst), 5);
     let cleared = sdk
         .clear_private_payment_list_and_process_outbound(pair.bob.public_key.clone())
         .await
@@ -1077,6 +1077,15 @@ async fn test_idle_polling_reads_shared_state_once_without_rewriting_it() {
             .unwrap();
         assert!(sent.attempted.is_empty());
         assert_eq!(transactions.swap(0, Ordering::SeqCst), 1);
+        let prepared = sdk
+            .prepare_and_resolve_private_contact_payment(pair.bob.public_key.clone(), None, None, 1)
+            .await
+            .unwrap();
+        assert_eq!(prepared.link_report.unwrap().state, LinkedPeerState::Linked);
+        assert!(prepared.outbound_report.unwrap().attempted.is_empty());
+        assert!(prepared.receive_report.unwrap().stream_item_ids.is_empty());
+        assert!(prepared.resolution.payable_endpoints.is_empty());
+        assert_eq!(transactions.swap(0, Ordering::SeqCst), 7);
         let requests = sdk.payment_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].counterparty, pair.bob.public_key);

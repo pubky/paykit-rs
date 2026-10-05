@@ -1,9 +1,28 @@
+use super::recovery::RecoveryObservationCheckpoint;
 use super::*;
 
 struct PendingHandshake {
     snapshot: paykit_lib::EncryptedLinkHandshakeSnapshot,
     report: LinkedPeerHandshakeReport,
     authorization: paykit_lib::PaykitNoiseKeyAuthorization,
+}
+
+struct HandshakeCheckpoint {
+    pending: Option<PendingHandshake>,
+    linked: bool,
+    recovery: Option<RecoveryObservationCheckpoint>,
+}
+
+impl HandshakeCheckpoint {
+    fn load(tx: &dyn StorageTransaction, counterparty: &PubkyPublicKey) -> Self {
+        Self {
+            pending: pending_handshake(tx, counterparty),
+            linked: tx
+                .linked_peer(counterparty)
+                .is_some_and(|peer| peer.state == LinkedPeerState::Linked),
+            recovery: RecoveryObservationCheckpoint::load(tx, counterparty),
+        }
+    }
 }
 
 enum HandshakeProbe {
@@ -301,7 +320,47 @@ where
         counterparty: PubkyPublicKey,
         max_advance_steps: u32,
     ) -> Result<LinkedPeerHandshakeReport> {
-        let authorization = match self.probe_link_handshake(&counterparty).await? {
+        let probe = self.probe_link_handshake(&counterparty).await?;
+        self.ensure_link_with_peer_from_probe(counterparty, max_advance_steps, probe)
+            .await
+    }
+
+    pub(super) async fn ensure_link_with_peer_if_available(
+        &self,
+        counterparty: PubkyPublicKey,
+        max_advance_steps: u32,
+    ) -> Result<Option<LinkedPeerHandshakeReport>> {
+        let (access, _, checkpoint) = self
+            .load_session_access_and_refresh_identity_with(|tx| {
+                Ok(HandshakeCheckpoint::load(tx, &counterparty))
+            })
+            .await?;
+        let Some(access) = access else {
+            return Ok(None);
+        };
+        if !access.private_link_capable_for_capabilities(PAYKIT_SESSION_CAPABILITIES)? {
+            return Ok(None);
+        }
+        let probe = self
+            .probe_link_handshake_from_checkpoint(
+                &counterparty,
+                &access,
+                checkpoint.expect("active session loads handshake checkpoint"),
+            )
+            .await?;
+        drop(access);
+        self.ensure_link_with_peer_from_probe(counterparty, max_advance_steps, probe)
+            .await
+            .map(Some)
+    }
+
+    async fn ensure_link_with_peer_from_probe(
+        &self,
+        counterparty: PubkyPublicKey,
+        max_advance_steps: u32,
+        probe: HandshakeProbe,
+    ) -> Result<LinkedPeerHandshakeReport> {
+        let authorization = match probe {
             HandshakeProbe::Idle(report) => return Ok(report),
             HandshakeProbe::Reload(authorization) => authorization.map(|value| *value),
         };
@@ -383,36 +442,42 @@ where
     async fn probe_link_handshake(&self, counterparty: &PubkyPublicKey) -> Result<HandshakeProbe> {
         let (access, _, checkpoint) = self
             .load_session_access_and_refresh_identity_with(|tx| {
-                Ok((
-                    pending_handshake(tx, counterparty),
-                    tx.linked_peer(counterparty)
-                        .is_some_and(|peer| peer.state == LinkedPeerState::Linked),
-                ))
+                Ok(HandshakeCheckpoint::load(tx, counterparty))
             })
             .await?;
-        let Some((pending, linked)) = checkpoint else {
+        let Some(checkpoint) = checkpoint else {
             return Ok(HandshakeProbe::Reload(None));
         };
         let access = access.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky session available".into(),
             source: None,
         })?;
-        if linked {
+        self.probe_link_handshake_from_checkpoint(counterparty, &access, checkpoint)
+            .await
+    }
+
+    async fn probe_link_handshake_from_checkpoint(
+        &self,
+        counterparty: &PubkyPublicKey,
+        access: &GuardedSessionAccess,
+        checkpoint: HandshakeCheckpoint,
+    ) -> Result<HandshakeProbe> {
+        if checkpoint.linked {
             require_distinct_link_identity(&access.public_key()?, counterparty)?;
-            self.validate_local_noise_key_authorization(&access).await?;
-            if let Some((_, state)) = self
-                .unchanged_link_checkpoint(counterparty, &access)
+            self.validate_local_noise_key_authorization(access).await?;
+            if let Some(current) = self
+                .unchanged_link_checkpoint(counterparty, access, checkpoint.recovery)
                 .await?
             {
                 return Ok(HandshakeProbe::Idle(LinkedPeerHandshakeReport {
                     counterparty: counterparty.clone(),
                     state: LinkedPeerState::Linked,
-                    generation: state.generation,
+                    generation: current.link_state.generation,
                     handshake_role: None,
                 }));
             }
         }
-        let Some(pending) = pending else {
+        let Some(pending) = checkpoint.pending else {
             return Ok(HandshakeProbe::Reload(None));
         };
         let secret_key = access.paykit_noise_secret_key()?;
@@ -423,7 +488,7 @@ where
         else {
             return Ok(HandshakeProbe::Reload(None));
         };
-        self.validate_local_noise_key_authorization(&access).await?;
+        self.validate_local_noise_key_authorization(access).await?;
         let public_storage =
             self.pubky
                 .load_public_storage()

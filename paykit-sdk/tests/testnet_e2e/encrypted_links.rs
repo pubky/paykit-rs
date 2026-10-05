@@ -370,6 +370,44 @@ impl StorageAdapter for PausedLinkCheckpointStorage {
     }
 }
 
+#[tokio::test]
+async fn test_link_probe_rejects_a_changed_checkpoint_after_public_reads() {
+    let pair = linked_two_party().await;
+    let (checkpoint_ready, checkpoint_reached) = oneshot::channel();
+    let (resume_checkpoint, checkpoint_resume) = oneshot::channel();
+    let sdk = PaykitSdk::new(
+        PausedLinkCheckpointStorage {
+            inner: pair.alice.storage.clone(),
+            counterparty: pair.bob.public_key.clone(),
+            pause: Mutex::new(Some((checkpoint_ready, checkpoint_resume))),
+            checkpoint: LinkCheckpoint::Linked,
+        },
+        TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    );
+    let probe = sdk.ensure_link_with_peer(pair.bob.public_key.clone(), 1);
+    let block = async {
+        checkpoint_reached.await.unwrap();
+        pair.alice
+            .sdk
+            .block_peer(pair.bob.public_key.clone())
+            .await
+            .unwrap();
+        resume_checkpoint.send(()).unwrap();
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(probe, block)
+    })
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
+    assert_eq!(
+        pair.alice.storage.snapshot().unwrap().linked_peers[&pair.bob.public_key].state,
+        LinkedPeerState::Blocked
+    );
+}
+
 struct CountingSessionProvider {
     inner: TestnetSessionProvider,
     loads: Arc<AtomicUsize>,

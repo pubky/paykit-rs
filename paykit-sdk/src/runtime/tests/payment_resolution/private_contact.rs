@@ -118,6 +118,19 @@ async fn test_resolve_private_contact_payment_uses_authorized_cache_without_live
     assert_eq!(result.state, PrivatePaymentResolutionState::Available);
     assert_eq!(result.private_payment_list_version, Some(0));
     assert_eq!(result.payable_endpoints[0].endpoint.payload, "ln-private");
+    let prepared = sdk
+        .prepare_and_resolve_private_contact_payment(counterparty.clone(), None, None, 1)
+        .await
+        .unwrap();
+    assert!(prepared.link_report.is_none());
+    assert!(prepared.receive_report.is_none());
+    assert!(prepared.outbound_report.is_none());
+    assert_eq!(prepared.resolution.status, result.status);
+    assert_eq!(prepared.resolution.state, result.state);
+    assert_eq!(
+        prepared.resolution.payable_endpoints[0].endpoint.payload,
+        "ln-private"
+    );
     assert_eq!(
         sdk.current_private_payment_lists(&counterparty)
             .await
