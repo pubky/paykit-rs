@@ -265,24 +265,26 @@ where
             HandshakeProbe::Idle(report) => return Ok(report),
             HandshakeProbe::Reload(authorization) => authorization.map(|value| *value),
         };
-        let (session_access, _) = self.private_link_session_access().await?;
-        drop(session_access);
-        let lease = self.claim_peer_link_operation(&counterparty).await?;
-        // Keep the nested handshake future off the caller's stack.
-        let result = Box::pin(async {
-            if let Some(authorization) = &authorization {
-                self.pin_counterparty_noise_key_authorization(&counterparty, authorization)
-                    .await?;
-            }
-            self.advance_link_handshake_with_claim(
-                counterparty,
-                lease.clone(),
-                authorization.as_ref(),
-            )
-            .await
-        })
-        .await;
-        self.finish_peer_link_operation(lease, result).await
+        self.with_storage_operation(Box::pin(async {
+            let (session_access, _) = self.private_link_session_access().await?;
+            drop(session_access);
+            let lease = self.claim_peer_link_operation(&counterparty).await?;
+            let result = Box::pin(async {
+                if let Some(authorization) = &authorization {
+                    self.pin_counterparty_noise_key_authorization(&counterparty, authorization)
+                        .await?;
+                }
+                self.advance_link_handshake_with_claim(
+                    counterparty,
+                    lease.clone(),
+                    authorization.as_ref(),
+                )
+                .await
+            })
+            .await;
+            self.finish_peer_link_operation(lease, result).await
+        }))
+        .await
     }
 
     /// Ensure an Encrypted Link is started or advanced for one counterparty.
@@ -303,70 +305,79 @@ where
             HandshakeProbe::Idle(report) => return Ok(report),
             HandshakeProbe::Reload(authorization) => authorization.map(|value| *value),
         };
-        let (role, lease, initial) = self
-            .with_storage_operation(Box::pin(async {
-                let (session_access, _) = self.private_link_session_access().await?;
-                let local_public_key = session_access.public_key()?;
-                require_distinct_link_identity(&local_public_key, &counterparty)?;
-                let role = deterministic_handshake_role(&local_public_key, &counterparty);
-                let lease = self.claim_peer_link_operation(&counterparty).await?;
-                let initial = self
-                    .prepare_link_handshake_with_claim(
-                        counterparty.clone(),
-                        role,
-                        lease.clone(),
-                        authorization,
-                    )
-                    .await;
-                Ok((role, lease, initial))
-            }))
-            .await?;
-        let result = Box::pin(async {
-            let (mut report, authorization) = initial?;
-            for _ in 0..max_advance_steps {
-                if report.state == LinkedPeerState::Linked {
-                    return Ok(report);
-                }
-                report = self
-                    .with_storage_operation(Box::pin(async {
-                        match self
-                            .advance_link_handshake_with_claim(
-                                counterparty.clone(),
-                                lease.clone(),
-                                Some(&authorization),
-                            )
-                            .await
-                        {
-                            Ok(report) => Ok(report),
-                            Err(err) if Self::link_handshake_error_requires_recovery(&err) => {
-                                let recovery_required = self
-                                    .storage
-                                    .transaction(|tx| {
-                                        Ok(tx.linked_peer(&counterparty).is_some_and(|peer| {
-                                            peer.state == LinkedPeerState::RecoveryRequired
-                                        }))
-                                    })
-                                    .await?;
-                                if !recovery_required {
-                                    return Err(err);
-                                }
-                                self.start_link_handshake_with_claim(
+        let operation = Box::pin(async {
+            let (role, lease, initial) = self
+                .with_storage_operation(Box::pin(async {
+                    let (session_access, _) = self.private_link_session_access().await?;
+                    let local_public_key = session_access.public_key()?;
+                    require_distinct_link_identity(&local_public_key, &counterparty)?;
+                    let role = deterministic_handshake_role(&local_public_key, &counterparty);
+                    let lease = self.claim_peer_link_operation(&counterparty).await?;
+                    let initial = self
+                        .prepare_link_handshake_with_claim(
+                            counterparty.clone(),
+                            role,
+                            lease.clone(),
+                            authorization,
+                        )
+                        .await;
+                    Ok((role, lease, initial))
+                }))
+                .await?;
+            let result = Box::pin(async {
+                let (mut report, authorization) = initial?;
+                for _ in 0..max_advance_steps {
+                    if report.state == LinkedPeerState::Linked {
+                        return Ok(report);
+                    }
+                    report = self
+                        .with_storage_operation(Box::pin(async {
+                            match self
+                                .advance_link_handshake_with_claim(
                                     counterparty.clone(),
-                                    role,
                                     lease.clone(),
-                                    authorization.noise_public_key(),
+                                    Some(&authorization),
                                 )
                                 .await
+                            {
+                                Ok(report) => Ok(report),
+                                Err(err) if Self::link_handshake_error_requires_recovery(&err) => {
+                                    let recovery_required = self
+                                        .storage
+                                        .transaction(|tx| {
+                                            Ok(tx.linked_peer(&counterparty).is_some_and(|peer| {
+                                                peer.state == LinkedPeerState::RecoveryRequired
+                                            }))
+                                        })
+                                        .await?;
+                                    if !recovery_required {
+                                        return Err(err);
+                                    }
+                                    self.start_link_handshake_with_claim(
+                                        counterparty.clone(),
+                                        role,
+                                        lease.clone(),
+                                        authorization.noise_public_key(),
+                                    )
+                                    .await
+                                }
+                                Err(err) => Err(err),
                             }
-                            Err(err) => Err(err),
-                        }
-                    }))
-                    .await?;
-            }
-            Ok(report)
-        })
-        .await;
-        self.finish_peer_link_operation(lease, result).await
+                        }))
+                        .await?;
+                }
+                Ok(report)
+            })
+            .await;
+            self.finish_peer_link_operation(lease, result).await
+        });
+        // Reuse one lock/load for a single step, but let other apps access shared
+        // state between steps in a multi-step call. Each checkpoint stays durable.
+        if max_advance_steps <= 1 {
+            self.with_storage_operation(operation).await
+        } else {
+            operation.await
+        }
     }
 
     async fn probe_link_handshake(&self, counterparty: &PubkyPublicKey) -> Result<HandshakeProbe> {
@@ -844,18 +855,21 @@ where
         counterparty: PubkyPublicKey,
         role: EncryptedLinkHandshakeRole,
     ) -> Result<LinkedPeerHandshakeReport> {
-        {
-            let (session_access, _) = self.private_link_session_access().await?;
-            require_distinct_link_identity(&session_access.public_key()?, &counterparty)?;
-        }
-        let lease = self.claim_peer_link_operation(&counterparty).await?;
-        let result = async {
-            let remote_key = self.counterparty_noise_public_key(&counterparty).await?;
-            self.start_link_handshake_with_claim(counterparty, role, lease.clone(), &remote_key)
-                .await
-        }
-        .await;
-        self.finish_peer_link_operation(lease, result).await
+        self.with_storage_operation(Box::pin(async {
+            {
+                let (session_access, _) = self.private_link_session_access().await?;
+                require_distinct_link_identity(&session_access.public_key()?, &counterparty)?;
+            }
+            let lease = self.claim_peer_link_operation(&counterparty).await?;
+            let result = async {
+                let remote_key = self.counterparty_noise_public_key(&counterparty).await?;
+                self.start_link_handshake_with_claim(counterparty, role, lease.clone(), &remote_key)
+                    .await
+            }
+            .await;
+            self.finish_peer_link_operation(lease, result).await
+        }))
+        .await
     }
 
     pub(super) async fn start_link_handshake_with_claim(
