@@ -8,7 +8,7 @@ use chrono::{TimeZone, Utc};
 use paykit_sdk::storage::{
     PaymentEndpointReservationRecord, PeerLinkOperationLease, PublicEndpointRecord,
 };
-use paykit_sdk::storage::{StorageAdapter, StorageState};
+use paykit_sdk::storage::{PubkySharedStateStorage, StorageAdapter, StorageState};
 use paykit_sdk::PaykitSdkError;
 use paykit_sdk::{
     ContactRecord, IdentityState, LinkedPeerState, OutboundPrivateMessageStatus, PaykitAppId,
@@ -19,9 +19,45 @@ use sha2::{Digest, Sha256};
 use crate::errors::storage_error;
 use crate::storage::{
     decode_backup_state, decode_storage_state, encode_backup_state, encode_storage_state,
-    FfiSdkStorage,
+    FfiSdkStorage, FfiSdkStorageAdapter,
 };
 use crate::*;
+
+struct NoSessionProvider;
+
+impl FfiSdkPubkySessionProvider for NoSessionProvider {
+    fn load_session_access(&self) -> Result<Option<Arc<FfiPubkySessionAccess>>, PaykitFfiError> {
+        Ok(None)
+    }
+
+    fn public_storage_available(&self) -> Result<bool, PaykitFfiError> {
+        Ok(false)
+    }
+
+    fn clear_session_access(&self) -> Result<(), PaykitFfiError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_shared_storage_operation_requires_active_session() {
+    let config = default_pubky_client_config();
+    let storage = FfiSdkStorageAdapter::PubkyShared(PubkySharedStateStorage::new(
+        FfiSdkPubkySessionProviderAdapter::new(
+            Arc::new(NoSessionProvider),
+            pubky_from_config(&config).unwrap(),
+            config,
+        ),
+    ));
+
+    let error = storage.with_operation(async { Ok(()) }).await.unwrap_err();
+
+    assert!(matches!(
+        error,
+        PaykitSdkError::Identity { context, .. }
+            if context.contains("requires an active session")
+    ));
+}
 
 fn next_test_revision(current: Option<&str>) -> String {
     let next = current
@@ -722,24 +758,6 @@ async fn test_encoded_state_blob_snapshot_store_supports_repeated_transactions()
         }
     }
 
-    struct NoSessionProvider;
-
-    impl FfiSdkPubkySessionProvider for NoSessionProvider {
-        fn load_session_access(
-            &self,
-        ) -> Result<Option<Arc<FfiPubkySessionAccess>>, PaykitFfiError> {
-            Ok(None)
-        }
-
-        fn public_storage_available(&self) -> Result<bool, PaykitFfiError> {
-            Ok(false)
-        }
-
-        fn clear_session_access(&self) -> Result<(), PaykitFfiError> {
-            Ok(())
-        }
-    }
-
     let store = Arc::new(EncodedSnapshotStore::default());
     store
         .save_state_blob_atomically(
@@ -755,20 +773,35 @@ async fn test_encoded_state_blob_snapshot_store_supports_repeated_transactions()
         default_config("bitkit".into()).unwrap(),
     )
     .unwrap();
-    let storage = FfiSdkStorage {
+    let storage = FfiSdkStorageAdapter::Callback(FfiSdkStorage {
         store,
         transaction_lock: Arc::new(Mutex::new(())),
-    };
+    });
     let before = sdk.backup_state_revision().await.unwrap();
 
-    storage
-        .transaction_erased(Box::new(|tx| {
-            tx.allocate_receive_batch_id()?;
-            Ok(Box::new(()) as Box<dyn Any + Send>)
-        }))
+    let error = storage
+        .with_operation(async {
+            let batch_id = storage
+                .transaction(|tx| tx.allocate_receive_batch_id())
+                .await?;
+            assert_eq!(batch_id, 0);
+            Err::<(), _>(PaykitSdkError::Policy {
+                context: "operation stopped after commit".into(),
+                source: None,
+            })
+        })
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(matches!(error, PaykitSdkError::Policy { context, .. }
+        if context == "operation stopped after commit"));
     assert_ne!(sdk.backup_state_revision().await.unwrap(), before);
+    assert_eq!(
+        storage
+            .transaction(|tx| Ok(tx.export_storage_state().next_receive_batch_id))
+            .await
+            .unwrap(),
+        1
+    );
     let before = sdk.backup_state_revision().await.unwrap();
     let revision = sdk.state_revision().unwrap();
     let peer = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
