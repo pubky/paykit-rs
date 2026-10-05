@@ -230,10 +230,15 @@ impl PubkySharedStateStorage {
                     write_error,
                 ))
             }
-            Err(write_error) => Err(shared_write_error(
-                "write encrypted Pubky shared state could not be confirmed",
-                write_error,
-            )),
+            Err(write_error) => {
+                tracing::warn!(
+                    "shared-state commit could not be confirmed; retaining write marker"
+                );
+                Err(shared_write_error(
+                    "write encrypted Pubky shared state could not be confirmed",
+                    write_error,
+                ))
+            }
         }
     }
 }
@@ -563,7 +568,13 @@ async fn wait_for_pending_writes(session: &pubky::PubkySession) -> Result<()> {
         if !waited {
             // Keep the state lock throughout the wait. Cancellation leaves the
             // markers intact so the next app waits afresh, without clock skew.
+            tracing::warn!(
+                pending_writes = pending.len(),
+                cooldown_seconds = UNCERTAIN_WRITE_COOLDOWN.as_secs(),
+                "waiting under shared-state lock for uncertain writes"
+            );
             tokio::time::sleep(UNCERTAIN_WRITE_COOLDOWN).await;
+            tracing::info!("shared-state uncertain-write cooldown completed");
             waited = true;
         }
         for path in pending {
@@ -578,10 +589,13 @@ async fn remove_pending_write(storage: &pubky::SessionStorage, path: &str) -> Re
             Ok(_) => return Ok(()),
             Err(error) if is_not_found(&error) => return Ok(()),
             Err(error) if attempt == 2 => {
+                tracing::warn!(
+                    "pending shared-state write marker could not be removed; next operation will wait"
+                );
                 return Err(shared_write_error(
                     "remove pending Pubky shared-state write",
                     error,
-                ))
+                ));
             }
             Err(_) => tokio::time::sleep(Duration::from_millis(100 * (attempt + 1))).await,
         }

@@ -45,32 +45,37 @@ where
         &self,
         allow_unpublished: bool,
     ) -> Result<PaykitAppOperationLease> {
+        self.retry_storage_transaction(|| {
+            move |tx| self.claim_paykit_app_operation_in_transaction(tx, allow_unpublished)
+        })
+        .await
+    }
+
+    pub(super) fn claim_paykit_app_operation_in_transaction(
+        &self,
+        tx: &mut dyn StorageTransaction,
+        allow_unpublished: bool,
+    ) -> Result<PaykitAppOperationLease> {
         let timeout = ChronoDuration::from_std(PAYKIT_APP_OPERATION_LEASE_TIMEOUT)
             .expect("fixed Paykit App operation lease timeout must fit chrono duration");
-        let app_id = self.config.app_id.clone();
-        self.retry_storage_transaction(|| {
-            let app_id = app_id.clone();
-            move |tx| {
-                if !allow_unpublished
-                    && !tx.paykit_app_is_registered(&app_id)
-                    && !tx.paykit_app_is_retired(&app_id)
-                {
-                    return Err(PaykitSdkError::Policy {
-                        context: format!(
-                            "Paykit app '{app_id}' must be published before claiming shared work"
-                        ),
-                        source: None,
-                    });
-                }
-                let now = self.clock.now();
-                tx.claim_paykit_app_operation(&app_id, now, now + timeout)
-            }
-        })
-        .await?
-        .ok_or_else(|| PaykitSdkError::Policy {
-            context: format!("Paykit App operation already in progress for '{app_id}'"),
-            source: None,
-        })
+        let app_id = &self.config.app_id;
+        if !allow_unpublished
+            && !tx.paykit_app_is_registered(app_id)
+            && !tx.paykit_app_is_retired(app_id)
+        {
+            return Err(PaykitSdkError::Policy {
+                context: format!(
+                    "Paykit app '{app_id}' must be published before claiming shared work"
+                ),
+                source: None,
+            });
+        }
+        let now = self.clock.now();
+        tx.claim_paykit_app_operation(app_id, now, now + timeout)?
+            .ok_or_else(|| PaykitSdkError::Policy {
+                context: format!("Paykit App operation already in progress for '{app_id}'"),
+                source: None,
+            })
     }
 
     pub(super) async fn release_paykit_app_operation(

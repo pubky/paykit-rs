@@ -22,8 +22,9 @@ use paykit_sdk::{
     PaymentRequestLifecycleState, PrivatePaymentEndpointReservation,
     PrivatePaymentListReservationUpdate, PrivateReceivingDetail, PubkyIdentityCapability,
     PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess, PubkySessionBootstrap,
-    PubkySharedStateStorage, ReceiptDraftBuilder, ReceiptIssuanceStatus, Result as PaykitResult,
-    StorageAdapter, PAYKIT_AUTHORIZER_SESSION_CAPABILITIES, PAYKIT_SESSION_CAPABILITIES,
+    PubkySharedStateStorage, PublicReceivingDetail, ReceiptDraftBuilder, ReceiptIssuanceStatus,
+    Result as PaykitResult, StorageAdapter, PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+    PAYKIT_SESSION_CAPABILITIES,
 };
 use serde_json::Map as JsonMap;
 use tokio::sync::oneshot;
@@ -290,6 +291,7 @@ async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sig
 struct CountedStorage {
     inner: PubkySharedStateStorage,
     transactions: Arc<AtomicUsize>,
+    reject_next_transaction: Arc<AtomicBool>,
 }
 
 #[async_trait]
@@ -306,6 +308,12 @@ impl StorageAdapter for CountedStorage {
         f: StorageTransactionCallback<'a>,
     ) -> PaykitResult<Box<dyn Any + Send>> {
         self.transactions.fetch_add(1, Ordering::SeqCst);
+        if self.reject_next_transaction.swap(false, Ordering::SeqCst) {
+            return Err(PaykitSdkError::ConcurrentUpdate {
+                context: "shared-state transaction conflict".into(),
+                source: None,
+            });
+        }
         self.inner.transaction_erased(f).await
     }
 }
@@ -457,18 +465,43 @@ async fn test_wallet_reservation_cleanup_does_not_hold_shared_state_lock() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_private_list_clear_and_app_publication_transaction_counts() {
+async fn test_shared_operations_transaction_counts() {
     let pair = linked_homeserver_shared_pair().await;
     let transactions = Arc::new(AtomicUsize::new(0));
+    let reject_next_transaction = Arc::new(AtomicBool::new(false));
     let sdk = PaykitSdk::new(
         CountedStorage {
             inner: pair.bitkit.storage.clone(),
             transactions: transactions.clone(),
+            reject_next_transaction: reject_next_transaction.clone(),
         },
         TestnetSessionProvider::new(pair.bitkit.access.clone()),
         pair.bitkit.adapter.clone(),
         PaykitSdkConfig::new(pair.bitkit.app_id.clone()).unwrap(),
     );
+    let identity = sdk.initialize().await.unwrap();
+    assert_eq!(identity.public_key.as_ref(), Some(&pair.bitkit.public_key));
+    assert_eq!(transactions.swap(0, Ordering::SeqCst), 1);
+    sdk.contact_records().await.unwrap();
+    assert_eq!(transactions.swap(0, Ordering::SeqCst), 1);
+    reject_next_transaction.store(true, Ordering::SeqCst);
+    let endpoints = sdk
+        .sync_public_endpoints_with_receiving_details(vec![PublicReceivingDetail {
+            identifier: "btc-onchain".into(),
+            payload: "receiving-address".into(),
+        }])
+        .await
+        .unwrap();
+    assert_eq!(endpoints.published.len(), 1);
+    assert!(endpoints.failed.is_empty());
+    assert_eq!(transactions.swap(0, Ordering::SeqCst), 7);
+    let removed = sdk
+        .sync_public_endpoints_with_receiving_details(Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(removed.removed.len(), 1);
+    assert!(removed.failed.is_empty());
+    assert_eq!(transactions.swap(0, Ordering::SeqCst), 6);
     let cleared = sdk
         .clear_private_payment_list_and_process_outbound(pair.bob.public_key.clone())
         .await
@@ -727,6 +760,7 @@ async fn test_idle_polling_reads_shared_state_once_without_rewriting_it() {
             CountedStorage {
                 inner: user.storage.clone(),
                 transactions: transactions.clone(),
+                reject_next_transaction: Arc::new(AtomicBool::new(false)),
             },
             TestnetSessionProvider::new(user.access.clone()),
             user.adapter.clone(),

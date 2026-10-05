@@ -10,16 +10,16 @@ where
     /// Save or update a Contact Record.
     pub async fn save_contact(&self, update: ContactUpdate) -> Result<ContactRecord> {
         update.validate()?;
-        let local_public_key = self.require_initialized_identity("save contact").await?;
-        if update.public_key == local_public_key {
-            return Err(PaykitSdkError::Policy {
-                context: "cannot save the local Paykit identity as a contact".into(),
-                source: None,
-            });
-        }
         let now = self.clock.now();
         self.storage
             .transaction(move |tx| {
+                let local_public_key = initialized_identity_in_transaction(tx, "save contact")?;
+                if update.public_key == local_public_key {
+                    return Err(PaykitSdkError::Policy {
+                        context: "cannot save the local Paykit identity as a contact".into(),
+                        source: None,
+                    });
+                }
                 let existing = tx.contact_record(&update.public_key);
                 let record = ContactRecord::from_update(update, existing, now);
                 tx.save_contact_record(record.clone());
@@ -33,17 +33,21 @@ where
         &self,
         public_key: &PubkyPublicKey,
     ) -> Result<Option<ContactRecord>> {
-        self.require_initialized_identity("load contact").await?;
         self.storage
-            .transaction(|tx| Ok(tx.contact_record(public_key)))
+            .transaction(|tx| {
+                initialized_identity_in_transaction(tx, "load contact")?;
+                Ok(tx.contact_record(public_key))
+            })
             .await
     }
 
     /// List Contact Records.
     pub async fn contact_records(&self) -> Result<Vec<ContactRecord>> {
-        self.require_initialized_identity("list contacts").await?;
         self.storage
-            .transaction(|tx| Ok(tx.contact_records()))
+            .transaction(|tx| {
+                initialized_identity_in_transaction(tx, "list contacts")?;
+                Ok(tx.contact_records())
+            })
             .await
     }
 
@@ -52,9 +56,9 @@ where
         &self,
         public_key: &PubkyPublicKey,
     ) -> Result<Option<ContactRecord>> {
-        self.require_initialized_identity("remove contact").await?;
         self.storage
             .transaction(|tx| {
+                initialized_identity_in_transaction(tx, "remove contact")?;
                 let Some(existing) = tx.contact_record(public_key) else {
                     return Ok(None);
                 };

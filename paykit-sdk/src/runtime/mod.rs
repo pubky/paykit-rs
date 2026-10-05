@@ -391,12 +391,11 @@ where
     /// metadata without creating or refreshing shared state.
     pub async fn initialize(&self) -> Result<IdentityStatus> {
         let _identity_guard = self.claim_identity_operation("initialize")?;
-        let (session, state) = self.load_session_access_and_refresh_identity().await?;
-        if session.is_some() {
-            self.storage
-                .transaction(crate::backup::refresh_stored_message_classification)
-                .await?;
-        }
+        let (session, state, _) = self
+            .load_session_access_and_refresh_identity_with(
+                crate::backup::refresh_stored_message_classification,
+            )
+            .await?;
         let live_session_available = session.is_some();
         let required_capabilities = PAYKIT_SESSION_CAPABILITIES;
         let private_link_capable = session
@@ -487,7 +486,7 @@ where
 
     async fn load_session_access_and_refresh_identity_with<T: Send + 'static>(
         &self,
-        read: impl FnOnce(&dyn StorageTransaction) -> Result<T> + Send,
+        operation: impl Fn(&mut dyn StorageTransaction) -> Result<T> + Send + Sync,
     ) -> Result<(Option<GuardedSessionAccess>, IdentityState, Option<T>)> {
         let session_guard = self.session_read_guard().await?;
         let session = self.pubky.load_session_access().await?;
@@ -514,13 +513,17 @@ where
             .as_ref()
             .map(crate::storage::paykit_noise_public_key);
         let (state, value) = self
-            .storage
-            .transaction(move |tx| {
-                let state = bind_storage_to_identity(tx, public_key, now)?;
-                if let Some(noise_public_key) = noise_public_key {
-                    crate::storage::bind_paykit_noise_key(tx, noise_public_key)?;
+            .retry_storage_transaction(|| {
+                let public_key = public_key.clone();
+                let noise_public_key = noise_public_key.clone();
+                let operation = &operation;
+                move |tx| {
+                    let state = bind_storage_to_identity(tx, public_key, now)?;
+                    if let Some(noise_public_key) = noise_public_key {
+                        crate::storage::bind_paykit_noise_key(tx, noise_public_key)?;
+                    }
+                    Ok((state, operation(tx)?))
                 }
-                Ok((state, read(tx)?))
             })
             .await?;
 
@@ -537,14 +540,7 @@ where
 
     async fn require_initialized_identity(&self, context: &str) -> Result<PubkyPublicKey> {
         self.storage
-            .transaction(|tx| {
-                tx.load_identity_state()
-                    .and_then(|state| state.public_key)
-                    .ok_or_else(|| PaykitSdkError::Identity {
-                        context: format!("cannot {context} without an initialized Pubky identity"),
-                        source: None,
-                    })
-            })
+            .transaction(|tx| initialized_identity_in_transaction(tx, context))
             .await
     }
 
@@ -553,31 +549,32 @@ where
         context: &str,
     ) -> Result<GuardedSessionAccess> {
         let session_guard = self.session_read_guard().await?;
-        let expected_public_key = self.require_initialized_identity(context).await?;
-        let session_access =
-            self.pubky
-                .load_session_access()
-                .await?
-                .ok_or_else(|| PaykitSdkError::Identity {
+        let session_access = self.pubky.load_session_access().await?;
+        let session_access = self
+            .storage
+            .transaction(move |tx| {
+                let expected_public_key = initialized_identity_in_transaction(tx, context)?;
+                let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
                     context: format!("cannot {context} without an active Pubky session"),
                     source: None,
                 })?;
-        let actual_public_key = session_access.public_key()?;
-        if actual_public_key != expected_public_key {
-            return Err(PaykitSdkError::Identity {
-                context: format!(
-                    "cannot {context} because active Pubky session does not match initialized identity"
-                ),
-                source: None,
-            });
-        }
-        session_access.validate_for_capabilities(PAYKIT_SESSION_CAPABILITIES)?;
-        if let Some(key) = session_access.paykit_identity_secret_key() {
-            let public_key = crate::storage::paykit_noise_public_key(&key);
-            self.storage
-                .transaction(move |tx| crate::storage::bind_paykit_noise_key(tx, public_key))
-                .await?;
-        }
+                let actual_public_key = session_access.public_key()?;
+                if actual_public_key != expected_public_key {
+                    return Err(PaykitSdkError::Identity {
+                        context: format!(
+                            "cannot {context} because active Pubky session does not match initialized identity"
+                        ),
+                        source: None,
+                    });
+                }
+                session_access.validate_for_capabilities(PAYKIT_SESSION_CAPABILITIES)?;
+                if let Some(key) = session_access.paykit_identity_secret_key() {
+                    let public_key = crate::storage::paykit_noise_public_key(&key);
+                    crate::storage::bind_paykit_noise_key(tx, public_key)?;
+                }
+                Ok(session_access)
+            })
+            .await?;
         Ok(GuardedSessionAccess {
             access: session_access,
             _guard: session_guard,
@@ -641,6 +638,18 @@ where
             })
             .await
     }
+}
+
+fn initialized_identity_in_transaction(
+    tx: &dyn StorageTransaction,
+    context: &str,
+) -> Result<PubkyPublicKey> {
+    tx.load_identity_state()
+        .and_then(|state| state.public_key)
+        .ok_or_else(|| PaykitSdkError::Identity {
+            context: format!("cannot {context} without an initialized Pubky identity"),
+            source: None,
+        })
 }
 
 fn bind_storage_to_identity(

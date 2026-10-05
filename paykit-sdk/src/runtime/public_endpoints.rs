@@ -10,12 +10,16 @@ where
     /// Publish current public receiving details and remove stale SDK-managed endpoints.
     pub async fn sync_public_endpoints(&self) -> Result<EndpointSyncReport> {
         let _identity_guard = self.claim_identity_operation("sync public endpoints")?;
-        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
+        let (session_access, _, lease) = self
+            .load_session_access_and_refresh_identity_with(|tx| {
+                self.claim_paykit_app_operation_in_transaction(tx, false)
+            })
+            .await?;
         let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky session available".into(),
             source: None,
         })?;
-        let lease = self.claim_paykit_app_operation().await?;
+        let lease = lease.expect("active session claims App operation");
         let result = async {
             let details = self.payment.current_public_receiving_details().await?;
             self.sync_public_endpoints_with_lease(details, &lease, &session_access)
@@ -31,12 +35,16 @@ where
         details: Vec<PublicReceivingDetail>,
     ) -> Result<EndpointSyncReport> {
         let _identity_guard = self.claim_identity_operation("sync public endpoints")?;
-        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
+        let (session_access, _, lease) = self
+            .load_session_access_and_refresh_identity_with(|tx| {
+                self.claim_paykit_app_operation_in_transaction(tx, false)
+            })
+            .await?;
         let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky session available".into(),
             source: None,
         })?;
-        let lease = self.claim_paykit_app_operation().await?;
+        let lease = lease.expect("active session claims App operation");
         let result = self
             .sync_public_endpoints_with_lease(details, &lease, &session_access)
             .await;
@@ -50,15 +58,17 @@ where
         session_access: &GuardedSessionAccess,
     ) -> Result<EndpointSyncReport> {
         validate_public_endpoint_count(details.len())?;
-        self.retry_storage_transaction(|| {
-            let app_id = self.config.app_id.clone();
-            let lease = lease.clone();
-            move |tx| {
-                crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
-                crate::storage::require_paykit_app_active(tx, &app_id)
-            }
-        })
-        .await?;
+        let records = self
+            .retry_storage_transaction(|| {
+                let app_id = self.config.app_id.clone();
+                let lease = lease.clone();
+                move |tx| {
+                    crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
+                    crate::storage::require_paykit_app_active(tx, &app_id)?;
+                    Ok(tx.public_endpoint_records())
+                }
+            })
+            .await?;
         let registry = paykit_lib::get_paykit_app_registry(
             &session_access.outbox_client.public_storage(),
             session_access.session.info().public_key(),
@@ -95,9 +105,7 @@ where
         let mut failed_removals = Vec::new();
         let removal_candidates = match self.config.endpoint_management_scope {
             EndpointManagementScope::ManagedOnly => {
-                let records = self
-                    .retry_storage_transaction(|| |tx| Ok(tx.public_endpoint_records()))
-                    .await?
+                let records = records
                     .into_iter()
                     .filter(|record| {
                         record.app_id == self.config.app_id
@@ -141,9 +149,7 @@ where
                     .iter()
                     .map(|identifier| identifier.as_str().to_owned())
                     .collect::<HashSet<_>>();
-                already_removed = self
-                    .retry_storage_transaction(|| |tx| Ok(tx.public_endpoint_records()))
-                    .await?
+                already_removed = records
                     .into_iter()
                     .filter(|record| {
                         record.app_id == self.config.app_id
