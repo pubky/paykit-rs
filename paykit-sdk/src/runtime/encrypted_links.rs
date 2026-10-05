@@ -381,18 +381,40 @@ where
     }
 
     async fn probe_link_handshake(&self, counterparty: &PubkyPublicKey) -> Result<HandshakeProbe> {
-        let (access, _, pending) = self
+        let (access, _, checkpoint) = self
             .load_session_access_and_refresh_identity_with(|tx| {
-                Ok(pending_handshake(tx, counterparty))
+                Ok((
+                    pending_handshake(tx, counterparty),
+                    tx.linked_peer(counterparty)
+                        .is_some_and(|peer| peer.state == LinkedPeerState::Linked),
+                ))
             })
             .await?;
-        let Some(pending) = pending.flatten() else {
+        let Some((pending, linked)) = checkpoint else {
             return Ok(HandshakeProbe::Reload(None));
         };
         let access = access.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky session available".into(),
             source: None,
         })?;
+        if linked {
+            require_distinct_link_identity(&access.public_key()?, counterparty)?;
+            self.validate_local_noise_key_authorization(&access).await?;
+            if let Some((_, state)) = self
+                .unchanged_link_checkpoint(counterparty, &access)
+                .await?
+            {
+                return Ok(HandshakeProbe::Idle(LinkedPeerHandshakeReport {
+                    counterparty: counterparty.clone(),
+                    state: LinkedPeerState::Linked,
+                    generation: state.generation,
+                    handshake_role: None,
+                }));
+            }
+        }
+        let Some(pending) = pending else {
+            return Ok(HandshakeProbe::Reload(None));
+        };
         let secret_key = access.paykit_noise_secret_key()?;
         let session_info = access.session.info();
         let Ok(Some(read_path)) = pending

@@ -209,15 +209,28 @@ async fn test_private_resolution_pending_retries_after_receive_contention() {
             &self,
             f: StorageTransactionCallback<'a>,
         ) -> Result<Box<dyn Any + Send>> {
-            self.inner
+            let mut contended = false;
+            let result = self
+                .inner
                 .transaction_erased(Box::new(|tx| {
-                    let before = tx.peer_link_operation_lease(&self.counterparty);
+                    let before = tx.private_stream_items(&self.counterparty).len();
                     let result = f(tx)?;
-                    if before.is_some()
-                        && tx.peer_link_operation_lease(&self.counterparty).is_none()
-                        && self.observations.fetch_add(1, Ordering::SeqCst) == 1
+                    if tx.private_stream_items(&self.counterparty).len() > before
+                        && self.observations.fetch_add(1, Ordering::SeqCst) == 0
                     {
-                        // Resolution observes recovery markers twice before receiving.
+                        contended = true;
+                        return Err(PaykitSdkError::ConcurrentUpdate {
+                            context: "receive checkpoint contended".into(),
+                            source: None,
+                        });
+                    }
+                    Ok(result)
+                }))
+                .await;
+            if contended {
+                // Another receiver owns the peer before the checkpoint is retried.
+                self.inner
+                    .transaction(|tx| {
                         let now = chrono::Utc::now();
                         assert!(tx
                             .claim_peer_link_operation(
@@ -226,10 +239,11 @@ async fn test_private_resolution_pending_retries_after_receive_contention() {
                                 now + chrono::Duration::minutes(1),
                             )?
                             .is_some());
-                    }
-                    Ok(result)
-                }))
-                .await
+                        Ok(())
+                    })
+                    .await?;
+            }
+            result
         }
     }
 

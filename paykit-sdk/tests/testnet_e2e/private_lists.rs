@@ -654,6 +654,161 @@ async fn test_idle_private_receive_detects_remote_recovery_and_rotation() {
 }
 
 #[tokio::test]
+async fn test_payment_preparation_refreshes_an_empty_private_list() {
+    let pair = linked_two_party().await;
+    let empty = pair
+        .bob
+        .sdk
+        .prepare_and_resolve_private_contact_payment(pair.alice.public_key.clone(), None, None, 1)
+        .await
+        .unwrap();
+    assert!(empty.resolution.payable_endpoints.is_empty());
+    assert!(empty.receive_report.unwrap().stream_item_ids.is_empty());
+
+    pair.alice
+        .adapter
+        .set_private_details(vec![private_receiving_detail(
+            "btc-lightning-bolt11",
+            "ln-private-alice",
+        )]);
+    pair.alice
+        .sdk
+        .enqueue_private_payment_list(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    pair.alice
+        .sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    let prepared = pair
+        .bob
+        .sdk
+        .prepare_and_resolve_private_contact_payment(pair.alice.public_key.clone(), None, None, 1)
+        .await
+        .unwrap();
+    assert!(!prepared.receive_report.unwrap().stream_item_ids.is_empty());
+    assert_eq!(prepared.resolution.payable_endpoints.len(), 1);
+    assert_eq!(
+        prepared.resolution.payable_endpoints[0].endpoint.payload,
+        "ln-private-alice"
+    );
+
+    struct RecoverAtResolution<'a> {
+        local: &'a TestUser,
+        remote: &'a TestUser,
+        session_loads: AtomicUsize,
+    }
+    #[async_trait]
+    impl PubkySessionProvider for RecoverAtResolution<'_> {
+        async fn load_session_access(&self) -> PaykitResult<Option<PubkySessionAccess>> {
+            // Availability, link preparation and receive load sessions first;
+            // the next load starts resolution after the empty inbox probe.
+            if self.session_loads.fetch_add(1, Ordering::SeqCst) == 3 {
+                let before = self.local.storage.snapshot()?.encrypted_link_states
+                    [&self.remote.public_key]
+                    .clone();
+                self.local
+                    .sdk
+                    .enqueue_private_payment_list(self.remote.public_key.clone())
+                    .await?;
+                let sent = self
+                    .local
+                    .sdk
+                    .process_outbound_private_messages(self.remote.public_key.clone())
+                    .await?;
+                assert!(!sent.sent.is_empty());
+                assert_ne!(
+                    self.local.storage.snapshot()?.encrypted_link_states[&self.remote.public_key],
+                    before
+                );
+                self.remote
+                    .sdk
+                    .publish_encrypted_link_recovery_marker(self.local.public_key.clone())
+                    .await?;
+            }
+            Ok(Some(self.local.access.clone()))
+        }
+
+        async fn load_public_storage(&self) -> PaykitResult<Option<pubky::PublicStorage>> {
+            Ok(Some(self.local.access.outbox_client.public_storage()))
+        }
+
+        async fn clear_session_access(&self) -> PaykitResult<()> {
+            unreachable!("payment preparation must not sign out")
+        }
+    }
+
+    struct NoWalletSelection;
+    #[async_trait]
+    impl paykit_sdk::PaymentAdapter for NoWalletSelection {
+        async fn select_private_payment_endpoints(
+            &self,
+            _request: &paykit_sdk::PrivatePaymentEndpointSelectionRequest,
+        ) -> PaykitResult<Vec<paykit_sdk::PrivatePaymentEndpointCandidate>> {
+            panic!("recovery must be observed before cached endpoints reach the wallet")
+        }
+    }
+
+    pair.bob
+        .adapter
+        .set_private_details(vec![private_receiving_detail(
+            "btc-lightning-bolt11",
+            "ln-private-bob",
+        )]);
+    let sdk = PaykitSdk::new(
+        pair.bob.storage.clone(),
+        RecoverAtResolution {
+            local: &pair.bob,
+            remote: &pair.alice,
+            session_loads: AtomicUsize::new(0),
+        },
+        NoWalletSelection,
+        PaykitSdkConfig::new(pair.bob.app_id.clone()).unwrap(),
+    );
+    let recovered = tokio::time::timeout(
+        Duration::from_secs(30),
+        sdk.prepare_and_resolve_private_contact_payment(
+            pair.alice.public_key.clone(),
+            None,
+            None,
+            1,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(recovered.receive_report.unwrap().stream_item_ids.is_empty());
+    assert_eq!(
+        recovered.resolution.state,
+        paykit_sdk::PrivatePaymentResolutionState::RecoveryPending
+    );
+    assert!(recovered.resolution.payable_endpoints.is_empty());
+    let local = pair.bob.storage.snapshot().unwrap();
+    let remote = pair.alice.storage.snapshot().unwrap();
+    let peer = &local.linked_peers[&pair.alice.public_key];
+    assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
+    assert!(peer.remote_recovery_attempt_id.is_some());
+    assert_eq!(
+        peer.remote_recovery_attempt_id,
+        remote.linked_peers[&pair.bob.public_key].local_recovery_attempt_id
+    );
+
+    pair.bob
+        .sdk
+        .block_peer(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    let error = pair
+        .bob
+        .sdk
+        .prepare_and_resolve_private_contact_payment(pair.alice.public_key.clone(), None, None, 1)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, PaykitSdkError::Policy { .. }));
+}
+
+#[tokio::test]
 async fn test_private_payment_list_roundtrip_between_linked_peers() {
     let pair = linked_two_party().await;
     let before_receive = pair.bob.sdk.export_backup_state().await.unwrap();

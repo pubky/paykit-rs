@@ -290,6 +290,7 @@ async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sig
 
 struct CountedStorage {
     inner: PubkySharedStateStorage,
+    operations: Arc<AtomicUsize>,
     transactions: Arc<AtomicUsize>,
     reject_next_transaction: Arc<AtomicBool>,
 }
@@ -300,6 +301,7 @@ impl StorageAdapter for CountedStorage {
         &self,
         operation: StorageOperation<'a>,
     ) -> PaykitResult<Box<dyn Any + Send>> {
+        self.operations.fetch_add(1, Ordering::SeqCst);
         self.inner.run_operation_erased(operation).await
     }
 
@@ -467,11 +469,13 @@ async fn test_wallet_reservation_cleanup_does_not_hold_shared_state_lock() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_shared_operations_transaction_counts() {
     let pair = linked_homeserver_shared_pair().await;
+    let operations = Arc::new(AtomicUsize::new(0));
     let transactions = Arc::new(AtomicUsize::new(0));
     let reject_next_transaction = Arc::new(AtomicBool::new(false));
     let sdk = PaykitSdk::new(
         CountedStorage {
             inner: pair.bitkit.storage.clone(),
+            operations: operations.clone(),
             transactions: transactions.clone(),
             reject_next_transaction: reject_next_transaction.clone(),
         },
@@ -626,6 +630,90 @@ async fn test_shared_operations_transaction_counts() {
     assert!(state.paykit_app_operation_leases.is_empty());
     assert_no_pending_shared_state_writes(&pair.bitkit.access.session).await;
     eprintln!("shared-state transactions: clear={clear_transactions}, proposal={proposal_transactions}, send={send_transactions}, unchanged publication={unchanged_transactions}, downgrade={downgrade_transactions}");
+
+    let bob_key = pair
+        .bob
+        .access
+        .local_secret_key
+        .as_ref()
+        .unwrap()
+        .derive_paykit_identity_secret_key(paykit_sdk::INITIAL_PAYKIT_KEY_GENERATION)
+        .unwrap();
+    let local_key = pair
+        .secret
+        .derive_paykit_identity_secret_key(paykit_sdk::INITIAL_PAYKIT_KEY_GENERATION)
+        .unwrap();
+    let before_observation = pair.bitkit.storage_state().await;
+    let observed_marker = paykit_lib::EncryptedLinkRecoveryMarker::new(
+        before_observation.linked_peers[&pair.bob.public_key]
+            .remote_recovery_attempt_id
+            .clone()
+            .unwrap(),
+        Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    )
+    .unwrap();
+    paykit_lib::publish_encrypted_link_recovery_marker(
+        &pair.bob.access.session,
+        &paykit_lib::derive_paykit_noise_secret_key(bob_key.as_bytes()),
+        &pair.bitkit.public_key.to_public_key().unwrap(),
+        &paykit_lib::derive_paykit_noise_public_key(local_key.as_bytes()),
+        &observed_marker,
+    )
+    .await
+    .unwrap();
+    let revision = pair.bitkit.storage.last_revision().unwrap();
+    for marker_present in [true, false] {
+        if !marker_present {
+            paykit_lib::remove_encrypted_link_recovery_marker(
+                &pair.bob.access.session,
+                &paykit_lib::derive_paykit_noise_secret_key(bob_key.as_bytes()),
+                &pair.bitkit.public_key.to_public_key().unwrap(),
+                &paykit_lib::derive_paykit_noise_public_key(local_key.as_bytes()),
+            )
+            .await
+            .unwrap();
+        }
+        for _ in 0..2 {
+            operations.store(0, Ordering::SeqCst);
+            let report = sdk
+                .observe_encrypted_link_recovery_marker(pair.bob.public_key.clone())
+                .await
+                .unwrap();
+            assert_eq!(report.state, LinkedPeerState::Linked);
+            assert!(!report.remote_marker_changed);
+            let observation_transactions = transactions.swap(0, Ordering::SeqCst);
+            assert_eq!(operations.swap(0, Ordering::SeqCst), 0);
+            assert_eq!(pair.bitkit.storage_state().await, before_observation);
+            assert_eq!(pair.bitkit.storage.last_revision().unwrap(), revision);
+            assert!(
+                observation_transactions <= 3,
+                "unchanged observation used {observation_transactions} transactions"
+            );
+            for ensure in [true, false] {
+                let report = if ensure {
+                    sdk.ensure_link_with_peer(pair.bob.public_key.clone(), 1)
+                        .await
+                } else {
+                    sdk.advance_link_handshake(pair.bob.public_key.clone())
+                        .await
+                }
+                .unwrap();
+                assert_eq!(report.state, LinkedPeerState::Linked);
+                assert_eq!(
+                    report.generation,
+                    before_observation.encrypted_link_states[&pair.bob.public_key].generation
+                );
+                let link_transactions = transactions.swap(0, Ordering::SeqCst);
+                assert_eq!(operations.swap(0, Ordering::SeqCst), 0);
+                assert_eq!(pair.bitkit.storage_state().await, before_observation);
+                assert_eq!(pair.bitkit.storage.last_revision().unwrap(), revision);
+                assert!(
+                    link_transactions <= 3,
+                    "linked check used {link_transactions} transactions"
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -951,6 +1039,7 @@ async fn test_idle_polling_reads_shared_state_once_without_rewriting_it() {
         let sdk = PaykitSdk::new(
             CountedStorage {
                 inner: user.storage.clone(),
+                operations: Arc::new(AtomicUsize::new(0)),
                 transactions: transactions.clone(),
                 reject_next_transaction: Arc::new(AtomicBool::new(false)),
             },

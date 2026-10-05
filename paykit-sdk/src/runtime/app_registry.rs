@@ -154,6 +154,16 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<CounterpartyAppAuthorizationContext> {
+        self.counterparty_app_authorization_context_with(counterparty, |_| Ok(()))
+            .await
+            .map(|(context, ())| context)
+    }
+
+    pub(super) async fn counterparty_app_authorization_context_with<T: Send + 'static>(
+        &self,
+        counterparty: &PubkyPublicKey,
+        read: impl FnOnce(&dyn StorageTransaction) -> Result<T> + Send,
+    ) -> Result<(CounterpartyAppAuthorizationContext, T)> {
         if let Some(public_storage) = self.pubky.load_public_storage().await? {
             let registry = paykit_lib::get_paykit_app_registry(
                 &public_storage,
@@ -175,7 +185,8 @@ where
             let payment_request_apps =
                 authorized_app_ids(&apps, |capabilities| capabilities.payment_requests);
             let receipt_apps = authorized_app_ids(&apps, |capabilities| capabilities.receipts);
-            self.storage
+            let value = self
+                .storage
                 .transaction({
                     let counterparty = counterparty.clone();
                     move |tx| {
@@ -185,18 +196,21 @@ where
                         {
                             tx.save_authorized_paykit_apps(counterparty, apps);
                         }
-                        Ok(())
+                        read(tx)
                     }
                 })
                 .await?;
-            Ok(CounterpartyAppAuthorizationContext {
-                registry,
-                private_apps: Some(private_apps),
-                payment_request_apps: Some(payment_request_apps),
-                receipt_apps: Some(receipt_apps),
-            })
+            Ok((
+                CounterpartyAppAuthorizationContext {
+                    registry,
+                    private_apps: Some(private_apps),
+                    payment_request_apps: Some(payment_request_apps),
+                    receipt_apps: Some(receipt_apps),
+                },
+                value,
+            ))
         } else {
-            self.cached_counterparty_app_authorization_context(counterparty)
+            self.cached_counterparty_app_authorization_context_with(counterparty, read)
                 .await
         }
     }
@@ -205,22 +219,35 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<CounterpartyAppAuthorizationContext> {
-        let apps = self
+        self.cached_counterparty_app_authorization_context_with(counterparty, |_| Ok(()))
+            .await
+            .map(|(context, ())| context)
+    }
+
+    pub(super) async fn cached_counterparty_app_authorization_context_with<T: Send + 'static>(
+        &self,
+        counterparty: &PubkyPublicKey,
+        read: impl FnOnce(&dyn StorageTransaction) -> Result<T> + Send,
+    ) -> Result<(CounterpartyAppAuthorizationContext, T)> {
+        let (apps, value) = self
             .storage
-            .transaction(|tx| Ok(tx.authorized_paykit_apps(counterparty)))
+            .transaction(|tx| Ok((tx.authorized_paykit_apps(counterparty), read(tx)?)))
             .await?;
-        Ok(CounterpartyAppAuthorizationContext {
-            registry: None,
-            private_apps: apps
-                .as_ref()
-                .map(|apps| authorized_app_ids(apps, |capabilities| capabilities.private_payments)),
-            payment_request_apps: apps
-                .as_ref()
-                .map(|apps| authorized_app_ids(apps, |capabilities| capabilities.payment_requests)),
-            receipt_apps: apps
-                .as_ref()
-                .map(|apps| authorized_app_ids(apps, |capabilities| capabilities.receipts)),
-        })
+        Ok((
+            CounterpartyAppAuthorizationContext {
+                registry: None,
+                private_apps: apps.as_ref().map(|apps| {
+                    authorized_app_ids(apps, |capabilities| capabilities.private_payments)
+                }),
+                payment_request_apps: apps.as_ref().map(|apps| {
+                    authorized_app_ids(apps, |capabilities| capabilities.payment_requests)
+                }),
+                receipt_apps: apps
+                    .as_ref()
+                    .map(|apps| authorized_app_ids(apps, |capabilities| capabilities.receipts)),
+            },
+            value,
+        ))
     }
 
     pub(super) async fn authorized_receipt_apps_for_peer(

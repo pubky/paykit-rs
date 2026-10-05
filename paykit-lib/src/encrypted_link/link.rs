@@ -705,18 +705,9 @@ async fn restore_encrypted_link_inner(
         remote_identity_public_key.clone(),
     )
     .await
-    .map_err(|err| {
-        let context = format!("failed to restore Encrypted Link: {err:?}");
-        let source = anyhow::anyhow!("pubky-noise restore failed: {err:?}");
-        match err {
-            pubky_noise::PubkyNoiseError::HomeserverResponseError => {
-                PaykitError::Transport { context, source }
-            }
-            _ => PaykitError::InvalidData {
-                context,
-                source: Some(source),
-            },
-        }
+    .map_err(|err| PaykitError::InvalidData {
+        context: format!("failed to restore Encrypted Link: {err:?}"),
+        source: Some(anyhow::anyhow!("pubky-noise restore failed: {err:?}")),
     })?;
 
     debug!("Encrypted Link restored successfully");
