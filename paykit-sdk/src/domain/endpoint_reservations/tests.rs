@@ -664,26 +664,27 @@ async fn test_expired_outbound_reservation_cancellations() {
     .await
     .unwrap();
 
-    assert!(expired_outbound_reservation_cancellations(
-        &storage,
-        &counterparty,
-        outbound.outbound_message_id,
-        timestamp()
-    )
-    .await
-    .unwrap()
-    .is_empty());
-    let cancellations = expired_outbound_reservation_cancellations(
-        &storage,
-        &counterparty,
-        outbound.outbound_message_id,
-        timestamp() + chrono::Duration::seconds(6),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(cancellations.len(), 1);
-    assert_eq!(cancellations[0].cancellation.reservation_id, "res-1");
+    storage
+        .transaction(|tx| {
+            assert!(expired_outbound_reservation_cancellations_in_transaction(
+                tx,
+                &counterparty,
+                outbound.outbound_message_id,
+                timestamp()
+            )
+            .is_empty());
+            let cancellations = expired_outbound_reservation_cancellations_in_transaction(
+                tx,
+                &counterparty,
+                outbound.outbound_message_id,
+                timestamp() + chrono::Duration::seconds(6),
+            );
+            assert_eq!(cancellations.len(), 1);
+            assert_eq!(cancellations[0].cancellation.reservation_id, "res-1");
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

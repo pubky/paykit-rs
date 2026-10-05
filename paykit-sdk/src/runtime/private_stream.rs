@@ -8,6 +8,13 @@ struct PrivateReceiveSnapshot {
     authorization: paykit_lib::PaykitNoiseKeyAuthorization,
 }
 
+struct PrivateReceiveLink {
+    link: paykit_lib::EncryptedLink,
+    state: EncryptedLinkStateRecord,
+    authorized_receipt_apps: Option<Vec<paykit_lib::PaykitAppId>>,
+    remote_noise_public_key: paykit_lib::PublicKey,
+}
+
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
     S: StorageAdapter,
@@ -41,7 +48,7 @@ where
     async fn receive_probed_private_messages(
         &self,
         counterparty: PubkyPublicKey,
-        session_access: &PubkySessionAccess,
+        session_access: &GuardedSessionAccess,
         empty: bool,
     ) -> Result<PrivateStreamIntakeReport> {
         if empty {
@@ -207,12 +214,12 @@ where
         }
     }
 
-    async fn receive_private_messages_with_claim(
+    async fn restore_private_receive_link(
         &self,
         counterparty: PubkyPublicKey,
         lease: PeerLinkOperationLease,
         session_access: &PubkySessionAccess,
-    ) -> Result<PrivateStreamIntakeReport> {
+    ) -> Result<PrivateReceiveLink> {
         self.ensure_peer_allows_private_automation(&counterparty)
             .await?;
         let authorization = self
@@ -264,7 +271,7 @@ where
                 }
             };
 
-        let mut stored_link_state =
+        let stored_link_state =
             stored_link_state.ok_or_else(|| PaykitSdkError::RecoveryRequired {
                 context: format!("no Encrypted Link state for counterparty {counterparty}"),
                 source: None,
@@ -339,7 +346,7 @@ where
             });
         }
 
-        let mut link = match paykit_lib::restore_encrypted_link(
+        let link = match paykit_lib::restore_encrypted_link(
             session_access.session.clone(),
             secret_key,
             &remote_public_key,
@@ -377,6 +384,35 @@ where
                 return Err(err);
             }
         };
+        Ok(PrivateReceiveLink {
+            link,
+            state: stored_link_state,
+            authorized_receipt_apps,
+            remote_noise_public_key,
+        })
+    }
+
+    async fn receive_private_messages_with_claim(
+        &self,
+        counterparty: PubkyPublicKey,
+        lease: PeerLinkOperationLease,
+        session_access: &GuardedSessionAccess,
+    ) -> Result<PrivateStreamIntakeReport> {
+        let PrivateReceiveLink {
+            mut link,
+            state: mut stored_link_state,
+            authorized_receipt_apps,
+            remote_noise_public_key,
+        } = self
+            .with_guarded_storage_operation(
+                Arc::clone(&session_access._guard),
+                Box::pin(self.restore_private_receive_link(
+                    counterparty.clone(),
+                    lease.clone(),
+                    session_access,
+                )),
+            )
+            .await?;
         let mut aggregate: Option<PrivateStreamIntakeReport> = None;
         for _ in 0..paykit_lib::PRIVATE_APPLICATION_MESSAGE_RECEIVE_LIMIT {
             let prepared = match link.prepare_next_private_application_message().await {

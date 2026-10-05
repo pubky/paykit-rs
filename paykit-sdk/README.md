@@ -54,8 +54,11 @@ for publication, generation, and trust rules.
 
 Multiple app processes using the same identity must also use the same durable
 SDK state. The SDK ships `PubkySharedStateStorage`, which stores that logical
-state as one encrypted Pubky resource and holds a renewable WebDAV write lock
-across each read-modify-write transaction. Separate local state blobs are only
+state as one encrypted Pubky resource. Bounded SDK operations reuse a renewable
+WebDAV write lock and the latest decrypted state across their transactions.
+Each changed transaction is durably saved before returning; an operation error
+does not roll back earlier checkpoints. Locks are released between outbound
+messages and before wallet callbacks. Separate local state blobs are only
 suitable when one process owns the runtime. Private sends durably couple the exact prepared
 ciphertext with the advanced Encrypted Link snapshot before publication.
 

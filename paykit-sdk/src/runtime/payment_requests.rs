@@ -725,14 +725,17 @@ where
         counterparty: PubkyPublicKey,
         event: &PaymentRequest,
     ) -> Result<PaymentRequestRecord> {
-        self.ensure_private_outbound_ready(&counterparty).await?;
-        enqueue_payment_request_message(
-            &self.storage,
-            counterparty,
-            &self.config.app_id,
-            event,
-            self.clock.now(),
-        )
+        self.with_storage_operation(Box::pin(async {
+            self.ensure_private_outbound_ready(&counterparty).await?;
+            enqueue_payment_request_message(
+                &self.storage,
+                counterparty,
+                &self.config.app_id,
+                event,
+                self.clock.now(),
+            )
+            .await
+        }))
         .await
     }
 
@@ -742,15 +745,18 @@ where
         event: &PaymentRequestEvent,
         expected_identity: Option<IdentityState>,
     ) -> Result<OutboundPrivateMessageRecord> {
-        let _session = self.ensure_private_outbound_ready(&counterparty).await?;
-        crate::domain::payment_requests::enqueue_checked_payment_request_action_with_identity(
-            &self.storage,
-            counterparty,
-            &self.config.app_id,
-            event,
-            || self.clock.now(),
-            expected_identity,
-        )
+        self.with_storage_operation(Box::pin(async {
+            let _session = self.ensure_private_outbound_ready(&counterparty).await?;
+            crate::domain::payment_requests::enqueue_checked_payment_request_action_with_identity(
+                &self.storage,
+                counterparty,
+                &self.config.app_id,
+                event,
+                || self.clock.now(),
+                expected_identity,
+            )
+            .await
+        }))
         .await
     }
     #[cfg(test)]

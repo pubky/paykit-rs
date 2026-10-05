@@ -41,7 +41,7 @@ use crate::{
         PAYKIT_PROFILE_PATH, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
     },
     domain::endpoint_reservations::{
-        expired_outbound_reservation_cancellations,
+        expired_outbound_reservation_cancellations_in_transaction,
         queue_private_payment_list_with_reservations_with_link_lease, reservation_payload_hash,
         terminal_private_list_reservation_cancellations,
         PaymentEndpointReservationCancellationRecord, PrivatePaymentListQueuePolicy,
@@ -52,13 +52,12 @@ use crate::{
         EndpointSyncReport,
     },
     domain::linked_peers::{
-        default_linked_peer, load_encrypted_link_state,
-        mark_recovery_required_for_marker_in_transaction, mark_recovery_required_in_transaction,
-        mark_recovery_required_with_lease, requeue_recovery_required_outbound_messages,
-        require_private_automation_ready, save_link_handshake_state_if_generation_with_lease,
-        save_link_handshake_state_with_lease, save_linked_peer_link_state_if_generation_with_lease,
-        save_linked_peer_state_with_lease, EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport,
-        LinkedPeerState,
+        default_linked_peer, mark_recovery_required_for_marker_in_transaction,
+        mark_recovery_required_in_transaction, mark_recovery_required_with_lease,
+        requeue_recovery_required_outbound_messages, require_private_automation_ready,
+        save_link_handshake_state_if_generation_with_lease, save_link_handshake_state_with_lease,
+        save_linked_peer_link_state_if_generation_with_lease, save_linked_peer_state_with_lease,
+        EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport, LinkedPeerState,
     },
     domain::outbound_private::{
         mark_outbound_failed, mark_outbound_invalid, mark_outbound_recovery_required,
@@ -206,7 +205,16 @@ struct RuntimeOperationGuard {
 
 struct GuardedSessionAccess {
     access: PubkySessionAccess,
-    _guard: OwnedRwLockReadGuard<()>,
+    _guard: Arc<OwnedRwLockReadGuard<()>>,
+}
+
+struct SessionOperation {
+    gate: Arc<RwLock<()>>,
+    guard: Arc<OwnedRwLockReadGuard<()>>,
+}
+
+tokio::task_local! {
+    static SESSION_OPERATION: SessionOperation;
 }
 
 impl Deref for GuardedSessionAccess {
@@ -260,6 +268,13 @@ where
     }
 
     fn claim_identity_operation(&self, context: &str) -> Result<RuntimeOperationGuard> {
+        if self.active_session_guard().is_some() || crate::storage::shared_state_operation_active()
+        {
+            return Err(PaykitSdkError::Policy {
+                context: format!("cannot {context} inside a session-backed storage operation"),
+                source: None,
+            });
+        }
         let mut in_progress =
             self.identity_operation_in_progress
                 .lock()
@@ -279,6 +294,57 @@ where
         Ok(RuntimeOperationGuard {
             in_progress: Arc::clone(&self.identity_operation_in_progress),
         })
+    }
+
+    fn active_session_guard(&self) -> Option<Arc<OwnedRwLockReadGuard<()>>> {
+        SESSION_OPERATION
+            .try_with(|operation| {
+                Arc::ptr_eq(&operation.gate, &self.session_operation_gate)
+                    .then(|| Arc::clone(&operation.guard))
+            })
+            .ok()
+            .flatten()
+    }
+
+    async fn session_read_guard(&self) -> Result<Arc<OwnedRwLockReadGuard<()>>> {
+        if let Some(guard) = self.active_session_guard() {
+            return Ok(guard);
+        }
+        if crate::storage::shared_state_operation_active() {
+            return Err(PaykitSdkError::Policy {
+                context: "SDK session access must precede shared-state access".into(),
+                source: None,
+            });
+        }
+        Ok(Arc::new(
+            Arc::clone(&self.session_operation_gate).read_owned().await,
+        ))
+    }
+
+    async fn with_storage_operation<T: Send + 'static>(
+        &self,
+        operation: std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + '_>>,
+    ) -> Result<T> {
+        let guard = self.session_read_guard().await?;
+        self.with_guarded_storage_operation(guard, operation).await
+    }
+
+    async fn with_guarded_storage_operation<T: Send + 'static>(
+        &self,
+        guard: Arc<OwnedRwLockReadGuard<()>>,
+        operation: std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + '_>>,
+    ) -> Result<T> {
+        // Acquire the session gate before storage. Nested session reads reuse
+        // this guard so a waiting sign-out cannot deadlock the operation.
+        SESSION_OPERATION
+            .scope(
+                SessionOperation {
+                    gate: Arc::clone(&self.session_operation_gate),
+                    guard,
+                },
+                self.storage.with_operation(operation),
+            )
+            .await
     }
 
     fn cached_identity_state(&self) -> Option<IdentityState> {
@@ -423,7 +489,7 @@ where
         &self,
         read: impl FnOnce(&dyn StorageTransaction) -> Result<T> + Send,
     ) -> Result<(Option<GuardedSessionAccess>, IdentityState, Option<T>)> {
-        let session_guard = Arc::clone(&self.session_operation_gate).read_owned().await;
+        let session_guard = self.session_read_guard().await?;
         let session = self.pubky.load_session_access().await?;
         let now = self.clock.now();
 
@@ -486,7 +552,7 @@ where
         &self,
         context: &str,
     ) -> Result<GuardedSessionAccess> {
-        let session_guard = Arc::clone(&self.session_operation_gate).read_owned().await;
+        let session_guard = self.session_read_guard().await?;
         let expected_public_key = self.require_initialized_identity(context).await?;
         let session_access =
             self.pubky
@@ -524,7 +590,7 @@ where
     /// metadata. Session-protected storage is not read, and an uninitialized
     /// runtime without local metadata returns `None`.
     pub async fn identity_status(&self) -> Result<Option<IdentityStatus>> {
-        let _session_guard = Arc::clone(&self.session_operation_gate).read_owned().await;
+        let _session_guard = self.session_read_guard().await?;
         let session = self.pubky.load_session_access().await?;
         if session.is_none() {
             return Ok(self

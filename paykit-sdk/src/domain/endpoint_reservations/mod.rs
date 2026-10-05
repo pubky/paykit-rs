@@ -109,38 +109,30 @@ pub(crate) fn terminal_private_list_reservation_cancellations_in_transaction(
 
 /// Load reservation cancellations for one outbound Private Payment List if any linked
 /// reservation expired before it was sent.
-pub(crate) async fn expired_outbound_reservation_cancellations<S>(
-    storage: &S,
+pub(crate) fn expired_outbound_reservation_cancellations_in_transaction(
+    tx: &dyn StorageTransaction,
     counterparty: &PubkyPublicKey,
     outbound_message_id: u64,
     now: DateTime<Utc>,
-) -> Result<Vec<PaymentEndpointReservationCancellationRecord>>
-where
-    S: StorageAdapter,
-{
-    storage
-        .transaction(|tx| {
-            let records = tx
-                .payment_endpoint_reservations(counterparty)
-                .into_iter()
-                .filter(|record| record.outbound_message_id == outbound_message_id)
-                .collect::<Vec<_>>();
-            let has_expired = records.iter().any(|record| {
-                record
-                    .expires_at
-                    .is_some_and(|expires_at| expires_at <= now)
-            });
-            let cancellations = if has_expired {
-                records
-                    .into_iter()
-                    .map(cancellation_record_from_reservation_record)
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            Ok(cancellations)
-        })
-        .await
+) -> Vec<PaymentEndpointReservationCancellationRecord> {
+    let records = tx
+        .payment_endpoint_reservations(counterparty)
+        .into_iter()
+        .filter(|record| record.outbound_message_id == outbound_message_id)
+        .collect::<Vec<_>>();
+    let has_expired = records.iter().any(|record| {
+        record
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= now)
+    });
+    if has_expired {
+        records
+            .into_iter()
+            .map(cancellation_record_from_reservation_record)
+            .collect()
+    } else {
+        Vec::new()
+    }
 }
 
 fn cancellation_record_from_reservation_record(
@@ -221,6 +213,32 @@ async fn queue_private_payment_list_with_reservations_inner<S>(
 where
     S: StorageAdapter,
 {
+    storage
+        .transaction(move |tx| {
+            if let Some(lease) = lease.as_ref() {
+                require_peer_link_operation_lease(tx, lease)?;
+            }
+            queue_private_payment_list_with_reservations_in_transaction(
+                tx,
+                counterparty,
+                app_id,
+                reservations,
+                now,
+                policy,
+            )
+        })
+        .await
+}
+
+/// Queue a complete list and its reservations in the caller's transaction.
+pub(crate) fn queue_private_payment_list_with_reservations_in_transaction(
+    tx: &mut dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    app_id: PaykitAppId,
+    reservations: Vec<PrivatePaymentEndpointReservation>,
+    now: DateTime<Utc>,
+    policy: PrivatePaymentListQueuePolicy,
+) -> Result<OutboundPrivateMessageRecord> {
     let (receiving_details, drafts) =
         build_reservation_records(counterparty, &app_id, reservations, now)?;
     let payment_endpoints = normalize_private_receiving_details(receiving_details)?;
@@ -229,99 +247,92 @@ where
     let (message_app_id, kind) = validate_outbound_private_message(&raw_json)?;
     let counterparty = counterparty.clone();
 
-    storage
-        .transaction(move |tx| {
-            if let Some(lease) = lease.as_ref() {
-                require_peer_link_operation_lease(tx, lease)?;
+    require_paykit_app_capability(tx, &message_app_id, PrivateMessageKind::PrivatePaymentList)?;
+    let mut checked_drafts = Vec::with_capacity(drafts.len());
+    for draft in drafts {
+        let existing = tx.payment_endpoint_reservation(
+            &draft.counterparty,
+            &draft.app_id,
+            &draft.reservation_id,
+        );
+        if let Some(existing) = existing.as_ref() {
+            if existing.cancellation_started_at.is_some() {
+                return Err(PaykitSdkError::Policy {
+                    context: format!(
+                        "Payment Endpoint Reservation id '{}' is being canceled",
+                        draft.reservation_id
+                    ),
+                    source: None,
+                });
             }
-            require_paykit_app_capability(
-                tx,
-                &message_app_id,
-                PrivateMessageKind::PrivatePaymentList,
-            )?;
-            let mut checked_drafts = Vec::with_capacity(drafts.len());
-            for draft in drafts {
-                let existing = tx.payment_endpoint_reservation(
-                    &draft.counterparty,
-                    &draft.app_id,
-                    &draft.reservation_id,
-                );
-                if let Some(existing) = existing.as_ref() {
-                    if existing.cancellation_started_at.is_some() {
-                        return Err(PaykitSdkError::Policy {
-                            context: format!(
-                                "Payment Endpoint Reservation id '{}' is being canceled",
-                                draft.reservation_id
-                            ),
-                            source: None,
-                        });
-                    }
-                    if !draft.matches_existing(existing) {
-                        return Err(PaykitSdkError::Protocol {
-                            context: format!(
-                                "Payment Endpoint Reservation id '{}' already exists with different details",
-                                draft.reservation_id
-                            ),
-                            source: None,
-                        });
-                    }
-                }
-                checked_drafts.push((draft, existing));
+            if !draft.matches_existing(existing) {
+                return Err(PaykitSdkError::Protocol {
+                    context: format!(
+                        "Payment Endpoint Reservation id '{}' already exists with different details",
+                        draft.reservation_id
+                    ),
+                    source: None,
+                });
             }
+        }
+        checked_drafts.push((draft, existing));
+    }
 
-            if let PrivatePaymentListQueuePolicy::Sync { sent_message_id } = policy {
-                // Pending, sending, and failed messages remain on the retry path, so
-                // they can be reused. A sent message is reusable only when this
-                // runtime witnessed its delivery on the current Encrypted Link.
-                let latest = tx
-                    .outbound_private_messages(&counterparty)
-                    .into_iter()
-                    .filter(|message| message.app_id == message_app_id
-                        && message.kind == PrivateMessageKind::PrivatePaymentList.as_str())
-                    .max_by_key(|message| message.outbound_message_id);
-                if let Some(message) = latest {
-                    let reusable = match message.status {
-                        OutboundPrivateMessageStatus::Pending
-                        | OutboundPrivateMessageStatus::Sending
-                        | OutboundPrivateMessageStatus::Failed => true,
-                        OutboundPrivateMessageStatus::Sent => sent_message_id == Some(message.outbound_message_id),
-                        _ => false,
-                    };
-                    let same_reservations = checked_drafts.iter().all(|(_, existing)| {
-                        existing.as_ref().is_some_and(|record| {
-                            record.outbound_message_id == message.outbound_message_id
-                                && record.expires_at.is_none_or(|expiry| expiry > now)
-                        })
-                    }) && tx
-                        .payment_endpoint_reservations(&counterparty)
-                        .iter()
-                        .filter(|record| record.outbound_message_id == message.outbound_message_id)
-                        .count()
-                        == checked_drafts.len();
-                    if reusable
-                        && same_reservations
-                        && parse_private_payment_list_json(&message.raw_json)
-                            .is_ok_and(|stored| stored == list)
-                    {
-                        return Ok(message);
-                    }
+    if let PrivatePaymentListQueuePolicy::Sync { sent_message_id } = policy {
+        // Pending, sending, and failed messages remain on the retry path, so
+        // they can be reused. A sent message is reusable only when this
+        // runtime witnessed its delivery on the current Encrypted Link.
+        let latest = tx
+            .outbound_private_messages(&counterparty)
+            .into_iter()
+            .filter(|message| {
+                message.app_id == message_app_id
+                    && message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
+            })
+            .max_by_key(|message| message.outbound_message_id);
+        if let Some(message) = latest {
+            let reusable = match message.status {
+                OutboundPrivateMessageStatus::Pending
+                | OutboundPrivateMessageStatus::Sending
+                | OutboundPrivateMessageStatus::Failed => true,
+                OutboundPrivateMessageStatus::Sent => {
+                    sent_message_id == Some(message.outbound_message_id)
                 }
+                _ => false,
+            };
+            let same_reservations = checked_drafts.iter().all(|(_, existing)| {
+                existing.as_ref().is_some_and(|record| {
+                    record.outbound_message_id == message.outbound_message_id
+                        && record.expires_at.is_none_or(|expiry| expiry > now)
+                })
+            }) && tx
+                .payment_endpoint_reservations(&counterparty)
+                .iter()
+                .filter(|record| record.outbound_message_id == message.outbound_message_id)
+                .count()
+                == checked_drafts.len();
+            if reusable
+                && same_reservations
+                && parse_private_payment_list_json(&message.raw_json)
+                    .is_ok_and(|stored| stored == list)
+            {
+                return Ok(message);
             }
+        }
+    }
 
-            let outbound = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
-                counterparty,
-                message_app_id,
-                kind,
-                raw_json,
-                now,
-            ))?;
-            for (draft, existing) in checked_drafts {
-                let record = draft.into_record(outbound.outbound_message_id, existing);
-                tx.save_payment_endpoint_reservation(record);
-            }
-            Ok(outbound)
-        })
-        .await
+    let outbound = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+        counterparty,
+        message_app_id,
+        kind,
+        raw_json,
+        now,
+    ))?;
+    for (draft, existing) in checked_drafts {
+        let record = draft.into_record(outbound.outbound_message_id, existing);
+        tx.save_payment_endpoint_reservation(record);
+    }
+    Ok(outbound)
 }
 
 #[derive(Clone)]

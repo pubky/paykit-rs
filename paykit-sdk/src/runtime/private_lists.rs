@@ -1,5 +1,7 @@
 use super::payment_resolution::filter_private_views_by_authorized_apps;
 use super::*;
+use crate::domain::endpoint_reservations::queue_private_payment_list_with_reservations_in_transaction;
+use futures_util::FutureExt;
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
@@ -92,9 +94,8 @@ where
     /// Enqueue a reservation-backed Private Payment List for one counterparty.
     ///
     /// An empty reservation list queues an empty Private Payment List. If a
-    /// non-empty reservation list fails after this operation acquires the peer
-    /// lease, the SDK asks the payment adapter to cancel any unpersisted
-    /// reservations.
+    /// non-empty reservation list fails, the SDK acquires the peer lease before
+    /// asking the payment adapter to cancel any unpersisted reservations.
     pub async fn enqueue_private_payment_list_with_reservations(
         &self,
         counterparty: PubkyPublicKey,
@@ -114,62 +115,79 @@ where
             .iter()
             .map(|reservation| reservation_cancellation(&counterparty, reservation))
             .collect::<Vec<_>>();
-        let lease = self.claim_peer_link_operation(&counterparty).await?;
-        let result = async {
-            self.ensure_private_list_queue_allowed(&counterparty)
-                .await?;
-            let policy = if reuse_unchanged {
-                PrivatePaymentListQueuePolicy::Sync {
-                    sent_message_id: self
-                        .published_private_payment_list_id(&counterparty)
-                        .await?,
-                }
-            } else {
-                PrivatePaymentListQueuePolicy::Always
-            };
-            queue_private_payment_list_with_reservations_with_link_lease(
-                &self.storage,
-                &counterparty,
-                self.config.app_id.clone(),
-                reservations,
-                self.clock.now(),
-                &lease,
-                policy,
-            )
-            .await
-        }
-        .await;
-        let result = match result {
-            Ok(record) => Ok(record),
-            Err(err) => {
-                self.cancel_reservations_and_return_queue_error(&cancellations, &counterparty, err)
+        let result = self
+            .with_storage_operation(Box::pin(async {
+                self.ensure_private_list_queue_allowed(&counterparty)
+                    .await?;
+                self.storage
+                    .transaction(|tx| {
+                        let now = self.clock.now();
+                        let lease_timeout =
+                            ChronoDuration::from_std(PEER_LINK_OPERATION_LEASE_TIMEOUT)
+                                .expect("fixed peer link lease timeout must fit chrono duration");
+                        let lease = tx
+                            .claim_peer_link_operation(&counterparty, now, now + lease_timeout)?
+                            .ok_or_else(|| PaykitSdkError::ConcurrentUpdate {
+                                context: format!(
+                                    "peer link operation already in progress for counterparty {counterparty}"
+                                ),
+                                source: None,
+                            })?;
+                        Self::private_queue_readiness_in_transaction(tx, &counterparty)?;
+                        let policy = if reuse_unchanged {
+                            PrivatePaymentListQueuePolicy::Sync {
+                                sent_message_id: self
+                                    .published_private_payment_list_id(tx, &counterparty),
+                            }
+                        } else {
+                            PrivatePaymentListQueuePolicy::Always
+                        };
+                        let record = queue_private_payment_list_with_reservations_in_transaction(
+                            tx,
+                            &counterparty,
+                            self.config.app_id.clone(),
+                            reservations,
+                            now,
+                            policy,
+                        )?;
+                        tx.release_peer_link_operation(&counterparty, lease.lease_id);
+                        Ok(record)
+                    })
                     .await
-            }
+            }))
+            .await;
+        let Err(err) = result else {
+            return result;
         };
+        if cancellations.is_empty() {
+            return Err(err);
+        }
+        // A failed commit may still have persisted the list. Take the peer lease
+        // before checking ownership and calling the wallet outside shared storage.
+        let Ok(lease) = self.claim_peer_link_operation(&counterparty).await else {
+            return Err(err);
+        };
+        let result = self
+            .cancel_reservations_and_return_queue_error(&cancellations, &counterparty, err)
+            .await;
         self.finish_peer_link_operation(lease, result).await
     }
 
-    async fn published_private_payment_list_id(
+    fn published_private_payment_list_id(
         &self,
+        tx: &dyn StorageTransaction,
         counterparty: &PubkyPublicKey,
-    ) -> Result<Option<u64>> {
-        let Some(snapshot) = load_encrypted_link_state(&self.storage, counterparty)
-            .await?
-            .and_then(|state| state.link_snapshot)
-        else {
-            return Ok(None);
-        };
+    ) -> Option<u64> {
+        let snapshot = tx
+            .encrypted_link_state(counterparty)
+            .and_then(|state| state.link_snapshot)?;
         // Only a delivery witnessed on the current Noise link can make a sent row
         // reusable. Corrupt snapshots fall through so the outbound worker can mark
         // the peer as requiring recovery.
-        let Some(link_id) = paykit_lib::EncryptedLinkSnapshot::deserialize(&snapshot)
+        let link_id = paykit_lib::EncryptedLinkSnapshot::deserialize(&snapshot)
             .ok()
-            .and_then(|snapshot| snapshot.link_id())
-        else {
-            return Ok(None);
-        };
-        Ok(self
-            .private_payment_list_publications
+            .and_then(|snapshot| snapshot.link_id())?;
+        self.private_payment_list_publications
             .lock()
             .ok()
             .and_then(|publications| {
@@ -177,7 +195,7 @@ where
                     .get(&(counterparty.clone(), self.config.app_id.clone()))
                     .filter(|publication| publication.link_id == link_id)
                     .map(|publication| publication.outbound_message_id)
-            }))
+            })
     }
 
     /// Enqueue an empty Private Payment List for one counterparty.
@@ -212,16 +230,16 @@ where
         &self,
         counterparty: PubkyPublicKey,
     ) -> Result<PrivatePaymentListDeliveryReport> {
-        // Keep the composed queue-and-send operation out of the caller's
-        // inline async state so driving it does not require a large stack.
-        Box::pin(self.sync_private_payment_lists_with_reservations(
+        // Bound the composed future's stack size and type depth for FFI callers.
+        self.sync_private_payment_lists_with_reservations(
             vec![PrivatePaymentListReservationUpdate {
                 counterparty,
                 reservations: Vec::new(),
             }],
             false,
             false,
-        ))
+        )
+        .boxed()
         .await
     }
 
@@ -371,13 +389,13 @@ where
         updates: Vec<PrivatePaymentListReservationUpdate>,
         clear_unlisted_linked_peers: bool,
     ) -> Result<PrivatePaymentListDeliveryReport> {
-        // Keep the composed queue-and-send operation out of the caller's
-        // inline async state so driving it does not require a large stack.
-        Box::pin(self.sync_private_payment_lists_with_reservations(
+        // Bound the composed future's stack size and type depth for FFI callers.
+        self.sync_private_payment_lists_with_reservations(
             updates,
             clear_unlisted_linked_peers,
             true,
-        ))
+        )
+        .boxed()
         .await
     }
 

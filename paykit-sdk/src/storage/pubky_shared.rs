@@ -12,7 +12,8 @@ use zeroize::Zeroizing;
 
 use super::{
     decode_storage_state_blob, encode_storage_state_blob, run_storage_state_transaction,
-    StorageAdapter, StorageKeyRotationCallback, StorageState, StorageTransactionCallback,
+    StorageAdapter, StorageKeyRotationCallback, StorageOperation, StorageState,
+    StorageTransactionCallback,
 };
 use crate::{
     validate_storage_state, PaykitIdentitySecretKey, PaykitSdkError, PubkyPublicKey,
@@ -50,12 +51,27 @@ struct EncryptedStateBlob {
     revision: String,
 }
 
+struct SharedStateOperation {
+    owner: Arc<Mutex<()>>,
+    access: PubkySessionAccess,
+    lock: pubky::StorageLock,
+    state: Mutex<Option<StorageState>>,
+}
+
+tokio::task_local! {
+    static SHARED_STATE_OPERATION: Arc<SharedStateOperation>;
+}
+
+pub(crate) fn shared_state_operation_active() -> bool {
+    SHARED_STATE_OPERATION.try_with(|_| ()).is_ok()
+}
+
 /// Encrypted identity-wide SDK state stored in Pubky.
 ///
-/// Each transaction reads the latest complete state, applies one SDK storage
-/// transaction, and replaces the encrypted resource when state changed. One
-/// instance serializes its own operations. Each transaction holds a renewed
-/// homeserver write lock from the initial read through publication.
+/// Each operation reads the latest complete state under a renewed homeserver
+/// write lock. Its transactions reuse that state and replace the encrypted
+/// resource whenever it changes, before returning. One instance serializes its
+/// own operations. State is never reused after releasing the homeserver lock.
 /// Encryption protects state contents and integrity, but not resource
 /// existence, size, update timing, or replay by the homeserver. Unconfirmed
 /// writes leave a remote marker; the next transaction waits five minutes under
@@ -71,6 +87,15 @@ pub struct PubkySharedStateStorage {
 }
 
 impl PubkySharedStateStorage {
+    fn active_operation(&self) -> Option<Arc<SharedStateOperation>> {
+        SHARED_STATE_OPERATION
+            .try_with(|operation| {
+                Arc::ptr_eq(&operation.owner, &self.transaction_lock).then(|| Arc::clone(operation))
+            })
+            .ok()
+            .flatten()
+    }
+
     /// Create encrypted Pubky-backed storage using the current live session.
     ///
     /// The provider must supply identity-wide Paykit key material, either
@@ -215,12 +240,55 @@ impl PubkySharedStateStorage {
 
 #[async_trait]
 impl StorageAdapter for PubkySharedStateStorage {
+    async fn run_operation_erased<'a>(
+        &self,
+        operation: StorageOperation<'a>,
+    ) -> Result<Box<dyn Any + Send>> {
+        if self.active_operation().is_some() {
+            return operation.await;
+        }
+        if shared_state_operation_active() {
+            return Err(PaykitSdkError::Policy {
+                context: "cannot nest operations for different shared-state adapters".into(),
+                source: None,
+            });
+        }
+        let _guard = self.transaction_lock.lock().await;
+        let access = self.load_access().await?;
+        let session = access.session.clone();
+        with_shared_state_lock(&session, |lock| async move {
+            wait_for_pending_writes(&access.session).await?;
+            let snapshot = self.load_remote_state(&access).await?;
+            if self.last_revision()?.is_some() && snapshot.revision.is_none() {
+                return Err(PaykitSdkError::Storage {
+                    context: "previously observed Pubky shared state is missing".into(),
+                    source: None,
+                });
+            }
+            self.record_revision(snapshot.revision)?;
+            let context = Arc::new(SharedStateOperation {
+                owner: Arc::clone(&self.transaction_lock),
+                access,
+                lock,
+                state: Mutex::new(Some(snapshot.state)),
+            });
+            SHARED_STATE_OPERATION.scope(context, operation).await
+        })
+        .await
+    }
+
     async fn recover_shared_state_from_backup(
         &self,
         current_key: PaykitIdentitySecretKey,
         replacement_key: PaykitIdentitySecretKey,
         state: super::ValidatedStorageState,
     ) -> Result<()> {
+        if shared_state_operation_active() {
+            return Err(PaykitSdkError::Policy {
+                context: "shared-state recovery requires a separate storage operation".into(),
+                source: None,
+            });
+        }
         current_key.validate_successor(&replacement_key)?;
         let state = state.into_storage_state();
         let _guard = self.transaction_lock.lock().await;
@@ -292,41 +360,44 @@ impl StorageAdapter for PubkySharedStateStorage {
         &self,
         f: StorageTransactionCallback<'a>,
     ) -> Result<Box<dyn Any + Send>> {
-        let _guard = self.transaction_lock.lock().await;
+        let Some(operation) = self.active_operation() else {
+            return self
+                .run_operation_erased(Box::pin(self.transaction_erased(f)))
+                .await;
+        };
+        let mut state = operation.state.lock().await;
         let access = self.load_access().await?;
-        let session = access.session.clone();
-        with_shared_state_lock(&session, |lock| async move {
-            wait_for_pending_writes(&access.session).await?;
-            let snapshot = self.load_remote_state(&access).await?;
-            if self.last_revision()?.is_some() && snapshot.revision.is_none() {
-                return Err(PaykitSdkError::Storage {
-                    context: "previously observed Pubky shared state is missing".into(),
-                    source: None,
-                });
-            }
-            self.record_revision(snapshot.revision.clone())?;
-            let initial_state = snapshot.state;
-            let (mut updated_state, result) =
-                run_storage_state_transaction(initial_state.clone(), f)?;
-
-            if updated_state == initial_state {
-                return Ok(result);
-            }
-            drop(initial_state);
-
-            // Validate before compaction so malformed evidence cannot disappear
-            // merely because a newer list supersedes it.
-            validate_storage_state(&updated_state).map_err(|_| PaykitSdkError::Storage {
-                context: "SDK state failed validation before Pubky storage write".into(),
+        if access.public_key()? != operation.access.public_key()?
+            || access.paykit_identity_secret_key() != operation.access.paykit_identity_secret_key()
+        {
+            return Err(PaykitSdkError::Identity {
+                context: "Pubky identity or Paykit key changed during storage operation".into(),
                 source: None,
-            })?;
-            super::compaction::compact_private_payment_lists(&mut updated_state);
-            let encrypted = encrypt_state(&access, &updated_state)?;
-            self.commit_encrypted_state(&access, &lock, encrypted)
-                .await?;
-            Ok(result)
-        })
-        .await
+            });
+        }
+        let initial_state = state.as_ref().ok_or_else(|| PaykitSdkError::Storage {
+            context: "shared-state operation cannot continue after an unconfirmed write".into(),
+            source: None,
+        })?;
+        let (mut updated_state, result) = run_storage_state_transaction(initial_state.clone(), f)?;
+        if &updated_state == initial_state {
+            return Ok(result);
+        }
+
+        // Validate before compaction so malformed evidence cannot disappear
+        // merely because a newer list supersedes it.
+        validate_storage_state(&updated_state).map_err(|_| PaykitSdkError::Storage {
+            context: "SDK state failed validation before Pubky storage write".into(),
+            source: None,
+        })?;
+        super::compaction::compact_private_payment_lists(&mut updated_state);
+        let encrypted = encrypt_state(&access, &updated_state)?;
+        // A failed or cancelled commit must not leave reusable stale state.
+        *state = None;
+        self.commit_encrypted_state(&access, &operation.lock, encrypted)
+            .await?;
+        *state = Some(updated_state);
+        Ok(result)
     }
 
     async fn rotate_paykit_identity_key_erased<'a>(
@@ -335,6 +406,12 @@ impl StorageAdapter for PubkySharedStateStorage {
         replacement_key: PaykitIdentitySecretKey,
         f: StorageKeyRotationCallback<'a>,
     ) -> Result<Box<dyn Any + Send>> {
+        if shared_state_operation_active() {
+            return Err(PaykitSdkError::Policy {
+                context: "Paykit key rotation requires a separate storage operation".into(),
+                source: None,
+            });
+        }
         current_key.validate_successor(&replacement_key)?;
         let _guard = self.transaction_lock.lock().await;
         let access = self.load_session_access().await?;

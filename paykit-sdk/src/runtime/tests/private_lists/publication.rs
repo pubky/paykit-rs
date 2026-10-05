@@ -180,7 +180,7 @@ async fn test_enqueue_private_payment_list_with_reservations_cancels_on_prefligh
 }
 
 #[tokio::test]
-async fn test_reservation_enqueue_does_not_cancel_when_peer_lease_is_busy() {
+async fn test_reservation_preflight_failure_does_not_cancel_when_peer_lease_is_busy() {
     let storage = registered_test_storage();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
@@ -227,7 +227,7 @@ async fn test_reservation_enqueue_does_not_cancel_when_peer_lease_is_busy() {
         )
         .await;
 
-    assert!(result.unwrap_err().is_concurrent_update());
+    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     assert!(canceled.lock().unwrap().is_empty());
 }
 

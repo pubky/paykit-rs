@@ -1,6 +1,23 @@
 use super::*;
 use crate::domain::endpoint_reservations::terminal_private_list_reservation_cancellations_in_transaction;
 
+enum PrivateSendPreparation {
+    Idle,
+    Skipped(Option<u64>),
+    Ready(
+        Box<OutboundPrivateMessageRecord>,
+        Option<Box<paykit_lib::PreparedPrivateApplicationMessageSend>>,
+    ),
+    Failed(Box<OutboundPrivateMessageRecord>, paykit_lib::PaykitError),
+}
+
+enum PrivateSendStep {
+    Idle,
+    Skipped(Option<u64>),
+    Sent { has_more: bool },
+    Failed(Box<OutboundPrivateMessageRecord>, paykit_lib::PaykitError),
+}
+
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
     S: StorageAdapter,
@@ -74,14 +91,8 @@ where
             }
 
             readiness?;
-            let (session_access, _) = self.private_link_session_access().await?;
-            self.process_outbound_private_messages_with_claim(
-                counterparty,
-                report,
-                lease.clone(),
-                session_access,
-            )
-            .await
+            self.process_outbound_private_messages_with_claim(counterparty, report, lease.clone())
+                .await
         }
         .await;
         self.finish_peer_link_operation(lease, result).await
@@ -182,59 +193,96 @@ where
         counterparty: PubkyPublicKey,
         mut report: OutboundPrivateSendReport,
         lease: PeerLinkOperationLease,
-        session_access: GuardedSessionAccess,
     ) -> Result<OutboundPrivateSendReport> {
-        let (mut link, mut link_state) = self
-            .restore_link_for_outbound_send(&counterparty, &lease, &session_access)
+        let (session_access, mut link, mut link_state) = self
+            .with_storage_operation(Box::pin(async {
+                let (session_access, _) = self.private_link_session_access().await?;
+                let (link, state) = self
+                    .restore_link_for_outbound_send(&counterparty, &lease, &session_access)
+                    .await?;
+                Ok((session_access, link, state))
+            }))
             .await?;
         // Freeze retry eligibility so each event is attempted at most once per run.
         let started_at = self.clock.now();
         let (stale_before, failed_retry_after) = self.outbound_retry_thresholds(started_at)?;
 
         loop {
-            let now = self.clock.now().max(started_at);
-            let (sending, cancellations) = self
-                .storage
-                .transaction(|tx| {
-                    crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                    let sending = tx.claim_next_outbound_private_message(
-                        &counterparty,
-                        now,
-                        stale_before,
-                        failed_retry_after,
-                    );
-                    let cancellations =
-                        terminal_private_list_reservation_cancellations_in_transaction(
-                            tx,
-                            &counterparty,
-                        );
-                    Ok((sending, cancellations))
-                })
+            let (step, cancellations) = self
+                .with_guarded_storage_operation(
+                    Arc::clone(&session_access._guard),
+                    Box::pin(async {
+                        let now = self.clock.now().max(started_at);
+                        let (preparation, mut cancellations) = self
+                            .storage
+                            .transaction(|tx| {
+                                crate::storage::require_peer_link_operation_lease(tx, &lease)?;
+                                let sending = tx.claim_next_outbound_private_message(
+                                    &counterparty,
+                                    now,
+                                    stale_before,
+                                    failed_retry_after,
+                                );
+                                let preparation = match sending {
+                                    Some(sending) => self.prepare_claimed_private_message(
+                                        tx,
+                                        &lease,
+                                        &mut link,
+                                        &mut link_state,
+                                        &mut report,
+                                        sending,
+                                    )?,
+                                    None => PrivateSendPreparation::Idle,
+                                };
+                                let cancellations =
+                                    terminal_private_list_reservation_cancellations_in_transaction(
+                                        tx,
+                                        &counterparty,
+                                    );
+                                Ok((preparation, cancellations))
+                            })
+                            .await?;
+                        let step = match preparation {
+                            PrivateSendPreparation::Ready(sending, prepared) => {
+                                // A failed or uncertain commit must never advance or publish Noise.
+                                if let Some(prepared) = prepared {
+                                    link.acknowledge_persisted_private_send(*prepared)?;
+                                }
+                                self.send_prepared_private_message(
+                                    &lease,
+                                    &link,
+                                    &mut report,
+                                    *sending,
+                                    &session_access,
+                                    (stale_before, failed_retry_after),
+                                )
+                                .await?
+                            }
+                            PrivateSendPreparation::Idle => PrivateSendStep::Idle,
+                            PrivateSendPreparation::Skipped(message_id) => {
+                                PrivateSendStep::Skipped(message_id)
+                            }
+                            PrivateSendPreparation::Failed(sending, error) => {
+                                PrivateSendStep::Failed(sending, error)
+                            }
+                        };
+                        if matches!(step, PrivateSendStep::Skipped(_)) {
+                            cancellations = self.storage.transaction(|tx| {
+                                Ok(terminal_private_list_reservation_cancellations_in_transaction(tx, &counterparty))
+                            }).await?;
+                        }
+                        Ok((step, cancellations))
+                    }),
+                )
                 .await?;
+            // Wallet callbacks run without the identity-wide lock.
             report.reservation_cleanup_failures.extend(
                 self.cancel_reservation_records(cancellations, Some(&lease), None)
                     .await,
             );
-            let Some(sending) = sending else {
-                break;
-            };
-            report.attempted.push(sending.outbound_message_id);
-
-            let prepared_message_id = sending
-                .prepared_send
-                .as_ref()
-                .map(|_| sending.outbound_message_id);
-            let Some(sending) = self
-                .claimed_message_ready_for_send(
-                    &counterparty,
-                    sending,
-                    &lease,
-                    &mut report,
-                    self.clock.now().max(started_at),
-                )
-                .await?
-            else {
-                if let Some(message_id) = prepared_message_id {
+            match step {
+                PrivateSendStep::Idle => break,
+                PrivateSendStep::Skipped(Some(message_id)) => {
                     self.record_outbound_recovery_marker_result(
                         &mut report,
                         &counterparty,
@@ -245,59 +293,12 @@ where
                     .await;
                     break;
                 }
-                continue;
-            };
-
-            let sending = if sending.prepared_send.is_some() {
-                sending
-            } else {
-                let prepared =
-                    match link.prepare_private_application_message_json(&sending.raw_json) {
-                        Ok(prepared) => prepared,
-                        Err(err) => {
-                            self.record_private_send_error(
-                                &counterparty,
-                                sending,
-                                err,
-                                &lease,
-                                &session_access,
-                                &mut report,
-                            )
-                            .await?;
-                            break;
-                        }
-                    };
-                self.persist_prepared_private_send(
-                    sending,
-                    &mut link,
-                    &mut link_state,
-                    &lease,
-                    prepared,
-                )
-                .await?
-            };
-            let prepared = sending
-                .prepared_send
-                .as_ref()
-                .expect("prepared send must be durable before publication");
-            self.require_current_peer_link_operation(&lease, &session_access)
-                .await?;
-            match link
-                .publish_prepared_private_application_message(
-                    &prepared.destination_path,
-                    &prepared.ciphertext,
-                )
-                .await
-            {
-                Ok(()) => {
-                    self.record_private_send_success(sending, &lease, &mut report)
-                        .await?;
-                }
-                Err(err) => {
+                PrivateSendStep::Skipped(None) => continue,
+                PrivateSendStep::Failed(sending, error) => {
                     self.record_private_send_error(
                         &counterparty,
-                        sending,
-                        err,
+                        *sending,
+                        error,
                         &lease,
                         &session_access,
                         &mut report,
@@ -305,44 +306,100 @@ where
                     .await?;
                     break;
                 }
+                PrivateSendStep::Sent { has_more: false } => break,
+                PrivateSendStep::Sent { has_more: true } => {}
             }
         }
 
         Ok(report)
     }
 
-    async fn persist_prepared_private_send(
+    fn prepare_claimed_private_message(
         &self,
-        mut sending: OutboundPrivateMessageRecord,
+        tx: &mut dyn StorageTransaction,
+        lease: &PeerLinkOperationLease,
         link: &mut paykit_lib::EncryptedLink,
         link_state: &mut EncryptedLinkStateRecord,
-        lease: &PeerLinkOperationLease,
-        prepared: paykit_lib::PreparedPrivateApplicationMessageSend,
-    ) -> Result<OutboundPrivateMessageRecord> {
+        report: &mut OutboundPrivateSendReport,
+        sending: OutboundPrivateMessageRecord,
+    ) -> Result<PrivateSendPreparation> {
+        report.attempted.push(sending.outbound_message_id);
+
+        let prepared_message_id = sending
+            .prepared_send
+            .as_ref()
+            .map(|_| sending.outbound_message_id);
+        let Some(sending) =
+            self.claimed_message_ready_for_send(tx, sending, lease, report, self.clock.now())?
+        else {
+            return Ok(PrivateSendPreparation::Skipped(prepared_message_id));
+        };
+
+        if sending.prepared_send.is_some() {
+            return Ok(PrivateSendPreparation::Ready(Box::new(sending), None));
+        }
+        let prepared = match link.prepare_private_application_message_json(&sending.raw_json) {
+            Ok(prepared) => prepared,
+            Err(err) => return Ok(PrivateSendPreparation::Failed(Box::new(sending), err)),
+        };
+        let mut sending = sending;
         sending.prepared_send = Some(crate::storage::PreparedOutboundPrivateSend {
             destination_path: prepared.destination_path().to_owned(),
             ciphertext: prepared.ciphertext().to_vec(),
         });
-        let now = self.clock.now();
         link_state.link_snapshot = Some(prepared.resulting_snapshot().serialize());
         link_state.handshake_snapshot = None;
         link_state.handshake_role = None;
         link_state.generation = link_state.generation.saturating_add(1);
-        link_state.checkpointed_at = now;
-        self.retry_storage_transaction(|| {
-            let sending = sending.clone();
-            let link_state = link_state.clone();
-            let lease = lease.clone();
-            move |tx| {
-                crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                tx.save_outbound_private_message(sending.clone())?;
-                tx.save_encrypted_link_state(link_state);
-                Ok(())
+        link_state.checkpointed_at = self.clock.now();
+        tx.save_outbound_private_message(sending.clone())?;
+        tx.save_encrypted_link_state(link_state.clone());
+        Ok(PrivateSendPreparation::Ready(
+            Box::new(sending),
+            Some(Box::new(prepared)),
+        ))
+    }
+
+    async fn send_prepared_private_message(
+        &self,
+        lease: &PeerLinkOperationLease,
+        link: &paykit_lib::EncryptedLink,
+        report: &mut OutboundPrivateSendReport,
+        sending: OutboundPrivateMessageRecord,
+        session_access: &PubkySessionAccess,
+        retry_thresholds: (DateTime<Utc>, DateTime<Utc>),
+    ) -> Result<PrivateSendStep> {
+        let message_id = sending.outbound_message_id;
+        let sending = self
+            .storage
+            .transaction(|tx| {
+                self.require_current_peer_link_operation_in_transaction(tx, lease, session_access)?;
+                // The reservation can expire while its prepared checkpoint is being saved.
+                self.claimed_message_ready_for_send(tx, sending, lease, report, self.clock.now())
+            })
+            .await?;
+        let Some(sending) = sending else {
+            return Ok(PrivateSendStep::Skipped(Some(message_id)));
+        };
+        let prepared = sending
+            .prepared_send
+            .as_ref()
+            .expect("prepared send must be durable before publication");
+        match link
+            .publish_prepared_private_application_message(
+                &prepared.destination_path,
+                &prepared.ciphertext,
+            )
+            .await
+        {
+            Ok(()) => {
+                let has_more = self
+                    .record_private_send_success(sending, lease, report, retry_thresholds)
+                    .await?;
+                Ok(PrivateSendStep::Sent { has_more })
             }
-        })
-        .await?;
-        link.acknowledge_persisted_private_send(prepared)?;
-        Ok(sending)
+            Err(error) => Ok(PrivateSendStep::Failed(Box::new(sending), error)),
+        }
     }
 
     async fn restore_link_for_outbound_send(
@@ -499,27 +556,25 @@ where
         Ok((now - lease_timeout, now - retry_backoff))
     }
 
-    pub(super) async fn claimed_message_ready_for_send(
+    pub(super) fn claimed_message_ready_for_send(
         &self,
-        counterparty: &PubkyPublicKey,
+        tx: &mut dyn StorageTransaction,
         sending: OutboundPrivateMessageRecord,
         lease: &PeerLinkOperationLease,
         report: &mut OutboundPrivateSendReport,
         now: DateTime<Utc>,
     ) -> Result<Option<OutboundPrivateMessageRecord>> {
+        crate::storage::require_peer_link_operation_lease(tx, lease)?;
+        let now = sending
+            .last_attempt_at
+            .map_or(now, |claimed_at| now.max(claimed_at));
         if let Err(err) = validate_queued_outbound_private_message(&sending) {
             let error = err.to_string();
-            let failed = self
-                .invalidate_outbound_with_lease(sending, error.clone(), lease)
-                .await?;
+            let failed = self.invalidate_outbound_in_transaction(tx, sending, error.clone())?;
             report.failed.push(OutboundPrivateSendFailure {
                 outbound_message_id: failed.outbound_message_id,
                 error,
             });
-            report.reservation_cleanup_failures.extend(
-                self.cancel_terminal_private_list_reservations(counterparty, Some(lease), None)
-                    .await,
-            );
             return Ok(None);
         }
 
@@ -527,59 +582,40 @@ where
             return Ok(Some(sending));
         }
 
-        let expired_releases = expired_outbound_reservation_cancellations(
-            &self.storage,
-            counterparty,
+        let expired_releases = expired_outbound_reservation_cancellations_in_transaction(
+            tx,
+            &sending.counterparty,
             sending.outbound_message_id,
             now,
-        )
-        .await?;
+        );
         if expired_releases.is_empty() {
             return Ok(Some(sending));
         }
 
         let error = "Payment Endpoint Reservation expired before private list send".to_owned();
-        let failed = self
-            .invalidate_outbound_with_lease(sending, error.clone(), lease)
-            .await?;
+        let failed = self.invalidate_outbound_in_transaction(tx, sending, error.clone())?;
         report.failed.push(OutboundPrivateSendFailure {
             outbound_message_id: failed.outbound_message_id,
             error,
         });
-        report.reservation_cleanup_failures.extend(
-            self.cancel_reservation_records(expired_releases, Some(lease), None)
-                .await,
-        );
-        report.reservation_cleanup_failures.extend(
-            self.cancel_terminal_private_list_reservations(counterparty, Some(lease), None)
-                .await,
-        );
         Ok(None)
     }
 
-    async fn invalidate_outbound_with_lease(
+    fn invalidate_outbound_in_transaction(
         &self,
+        tx: &mut dyn StorageTransaction,
         sending: OutboundPrivateMessageRecord,
         error: String,
-        lease: &PeerLinkOperationLease,
     ) -> Result<OutboundPrivateMessageRecord> {
         let now = self.clock.now();
         let requires_recovery = sending.prepared_send.is_some();
         let failed = mark_outbound_invalid(sending, error, now);
-        self.retry_storage_transaction(|| {
-            let failed = failed.clone();
-            let lease = lease.clone();
-            move |tx| {
-                crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                if requires_recovery {
-                    // The allocated Noise slot cannot be skipped on this link.
-                    mark_recovery_required_in_transaction(tx, &failed.counterparty, now)?;
-                }
-                tx.save_outbound_private_message(failed.clone())?;
-                Ok(failed)
-            }
-        })
-        .await
+        if requires_recovery {
+            // The allocated Noise slot cannot be skipped on this link.
+            mark_recovery_required_in_transaction(tx, &failed.counterparty, now)?;
+        }
+        tx.save_outbound_private_message(failed.clone())?;
+        Ok(failed)
     }
 
     async fn record_private_send_success(
@@ -587,10 +623,11 @@ where
         sending: OutboundPrivateMessageRecord,
         lease: &PeerLinkOperationLease,
         report: &mut OutboundPrivateSendReport,
-    ) -> Result<()> {
+        (stale_before, failed_retry_after): (DateTime<Utc>, DateTime<Utc>),
+    ) -> Result<bool> {
         let now = self.clock.now();
         let sent = mark_outbound_sent(sending, now);
-        let link_id = self
+        let (link_id, has_more) = self
             .retry_storage_transaction(|| {
                 let sent = sent.clone();
                 let lease = lease.clone();
@@ -599,13 +636,34 @@ where
                     tx.save_outbound_private_message(sent.clone())?;
                     // The prepared-send transaction already persisted the advanced
                     // snapshot. Read its link ID in the same transaction as Sent.
-                    Ok(tx
+                    let link_id = tx
                         .encrypted_link_state(&sent.counterparty)
                         .and_then(|state| state.link_snapshot)
                         .and_then(|snapshot| {
                             paykit_lib::EncryptedLinkSnapshot::deserialize(&snapshot).ok()
                         })
-                        .and_then(|snapshot| snapshot.link_id()))
+                        .and_then(|snapshot| snapshot.link_id());
+                    // Reuse the committed queue view instead of acquiring another lock
+                    // just to discover that this drain is complete.
+                    let queued = tx.queued_outbound_private_messages(&sent.counterparty);
+                    let registered_apps = queued
+                        .iter()
+                        .filter(|message| tx.paykit_app_is_registered(&message.app_id))
+                        .map(|message| message.app_id.clone())
+                        .collect();
+                    let retired_apps = queued
+                        .iter()
+                        .filter(|message| tx.paykit_app_is_retired(&message.app_id))
+                        .map(|message| message.app_id.clone())
+                        .collect();
+                    let has_more = outbound_private_queue_head_is_claimable(
+                        &queued,
+                        &registered_apps,
+                        &retired_apps,
+                        stale_before,
+                        failed_retry_after,
+                    );
+                    Ok((link_id, has_more))
                 }
             })
             .await?;
@@ -623,7 +681,7 @@ where
             }
         }
         report.sent.push(sent.outbound_message_id);
-        Ok(())
+        Ok(has_more)
     }
 
     async fn record_private_send_error(

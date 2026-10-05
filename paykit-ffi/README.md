@@ -487,7 +487,8 @@ Apps that share one identity-wide Pubky state can instead construct the handle
 with `withPaymentAdapterAndPubkySharedState`. This mode does not use
 `SdkStateBlobStore` callbacks. It requires active session access with current
 Paykit identity key material for every operation. Independent runtimes use
-renewable homeserver write locks across each state transaction. After contention
+renewable homeserver write locks across bounded groups of state transactions.
+Each changed transaction is durably saved before returning. After contention
 or an uncertain result, inspect durable request/payment records and resume
 existing work; a multi-step operation may already have committed intent.
 Apps with shared keys and write access are mutually trusted; App IDs do not

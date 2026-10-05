@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use paykit_sdk::{
-    storage::StorageTransactionCallback, InMemoryStorage, LinkedPeerState,
-    OutboundPrivateMessageStatus, PaykitSdk, PaykitSdkConfig, PaykitSdkError,
-    PrivatePaymentEndpointReservation, PrivatePaymentListReservationUpdate, PubkySessionAccess,
-    PubkySessionProvider, Result as PaykitResult, StorageAdapter,
+    storage::{StorageOperation, StorageTransactionCallback},
+    InMemoryStorage, LinkedPeerState, OutboundPrivateMessageStatus, PaykitSdk, PaykitSdkConfig,
+    PaykitSdkError, PrivatePaymentEndpointReservation, PrivatePaymentListReservationUpdate,
+    PubkySessionAccess, PubkySessionProvider, Result as PaykitResult, StorageAdapter,
 };
 use tokio::sync::{Notify, Semaphore};
 
@@ -19,97 +19,87 @@ use crate::harness::{
 };
 
 #[tokio::test]
-async fn test_outbound_reservation_expiry_is_rechecked_after_cleanup() {
+async fn test_outbound_reservation_expiry_is_rechecked_before_publication() {
     use chrono::{DateTime, Utc};
     use std::sync::atomic::AtomicBool;
 
     #[derive(Clone)]
-    struct CleanupClock {
-        cleanup_started: Arc<AtomicBool>,
+    struct ClaimClock {
+        claimed: Arc<AtomicBool>,
         started_at: DateTime<Utc>,
     }
-    impl paykit_sdk::Clock for CleanupClock {
+    impl paykit_sdk::Clock for ClaimClock {
         fn now(&self) -> DateTime<Utc> {
             self.started_at
-                + chrono::Duration::seconds(if self.cleanup_started.load(Ordering::SeqCst) {
+                + chrono::Duration::seconds(if self.claimed.load(Ordering::SeqCst) {
                     2
                 } else {
                     0
                 })
         }
     }
-    struct CleanupStorage {
+    struct ClaimStorage {
         inner: InMemoryStorage,
         counterparty: paykit_sdk::PubkyPublicKey,
-        cleanup_started: Arc<AtomicBool>,
+        claimed: Arc<AtomicBool>,
+        prepared_path: Arc<std::sync::Mutex<Option<String>>>,
     }
     #[async_trait]
-    impl StorageAdapter for CleanupStorage {
+    impl StorageAdapter for ClaimStorage {
         async fn transaction_erased<'a>(
             &self,
             f: StorageTransactionCallback<'a>,
         ) -> PaykitResult<Box<dyn std::any::Any + Send>> {
-            self.inner
-                .transaction(|tx| {
-                    let result = f(tx)?;
-                    if tx
-                        .payment_endpoint_reservations(&self.counterparty)
-                        .iter()
-                        .any(|record| record.cancellation_started_at.is_some())
-                    {
-                        self.cleanup_started.store(true, Ordering::SeqCst);
-                    }
-                    Ok(result)
+            let result = self.inner.transaction_erased(f).await?;
+            if let Some(message) = self
+                .inner
+                .snapshot()?
+                .outbound_private_messages
+                .iter()
+                .find(|message| {
+                    message.counterparty == self.counterparty
+                        && message.status == OutboundPrivateMessageStatus::Sending
                 })
-                .await
+            {
+                self.claimed.store(true, Ordering::SeqCst);
+                if let Some(prepared) = &message.prepared_send {
+                    *self.prepared_path.lock().unwrap() = Some(prepared.destination_path.clone());
+                }
+            }
+            Ok(result)
         }
     }
 
     let pair = linked_two_party().await;
     let started_at = Utc::now();
-    let mut messages = Vec::new();
-    for reservation_id in ["earlier", "latest"] {
-        messages.push(
-            pair.alice
-                .sdk
-                .enqueue_private_payment_list_with_reservations(
-                    pair.bob.public_key.clone(),
-                    vec![PrivatePaymentEndpointReservation {
-                        reservation_id: reservation_id.into(),
-                        receiving_detail: private_receiving_detail(
-                            "btc-lightning-bolt11",
-                            reservation_id,
-                        ),
-                        expires_at: Some(started_at + chrono::Duration::seconds(1)),
-                        attribution: Default::default(),
-                    }],
-                )
-                .await
-                .unwrap(),
-        );
-    }
-    pair.alice
-        .storage
-        .transaction(|tx| {
-            let mut earlier = messages[0].clone();
-            earlier.status = OutboundPrivateMessageStatus::Pending;
-            earlier.last_error = None;
-            tx.save_outbound_private_message(earlier)
-        })
+    let message = pair
+        .alice
+        .sdk
+        .enqueue_private_payment_list_with_reservations(
+            pair.bob.public_key.clone(),
+            vec![PrivatePaymentEndpointReservation {
+                reservation_id: "invoice-1".into(),
+                receiving_detail: private_receiving_detail("btc-lightning-bolt11", "ln-reserved"),
+                expires_at: Some(started_at + chrono::Duration::seconds(1)),
+                attribution: Default::default(),
+            }],
+        )
         .await
         .unwrap();
-    let cleanup_started = Arc::new(AtomicBool::new(false));
+    let claimed = Arc::new(AtomicBool::new(false));
+    let prepared_path = Arc::new(std::sync::Mutex::new(None));
     let sdk = PaykitSdk::with_clock(
-        CleanupStorage {
+        ClaimStorage {
             inner: pair.alice.storage.clone(),
             counterparty: pair.bob.public_key.clone(),
-            cleanup_started: cleanup_started.clone(),
+            claimed: claimed.clone(),
+            prepared_path: prepared_path.clone(),
         },
         crate::harness::TestnetSessionProvider::new(pair.alice.access.clone()),
         pair.alice.adapter.clone(),
         PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
-        CleanupClock {
-            cleanup_started: cleanup_started.clone(),
+        ClaimClock {
+            claimed: claimed.clone(),
             started_at,
         },
     );
@@ -117,21 +107,204 @@ async fn test_outbound_reservation_expiry_is_rechecked_after_cleanup() {
         .process_outbound_private_messages(pair.bob.public_key.clone())
         .await
         .unwrap();
-    assert!(cleanup_started.load(Ordering::SeqCst));
+    assert!(claimed.load(Ordering::SeqCst));
+    assert_eq!(report.attempted, vec![message.outbound_message_id]);
     assert!(report.sent.is_empty());
     assert_eq!(report.failed.len(), 1);
     assert_eq!(
         report.failed[0].outbound_message_id,
-        messages[1].outbound_message_id
+        message.outbound_message_id
     );
+    assert!(report.failed[0].error.contains("expired"));
+    assert!(report.reservation_cleanup_failures.is_empty());
+    let state = pair.alice.storage.snapshot().unwrap();
+    let invalid = state
+        .outbound_private_messages
+        .iter()
+        .find(|record| record.outbound_message_id == message.outbound_message_id)
+        .unwrap();
+    assert_eq!(invalid.last_attempt_at, Some(started_at));
+    assert_eq!(invalid.status, OutboundPrivateMessageStatus::Invalid);
+    assert!(invalid.prepared_send.is_none());
+    assert!(state.payment_endpoint_reservations.is_empty());
+    assert!(state.peer_link_operation_leases.is_empty());
+    let path = prepared_path
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the expired send was prepared");
+    assert!(matches!(
+        pair.alice.access.session.storage().get(&path).await,
+        Err(pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }))
+            if status == pubky::StatusCode::NOT_FOUND || status == pubky::StatusCode::GONE
+    ));
+    // The committed Noise slot cannot be skipped after the reservation expires.
+    assert_eq!(
+        state.linked_peers[&pair.bob.public_key].state,
+        LinkedPeerState::RecoveryRequired
+    );
+    assert!(matches!(
+        pair.bob
+            .sdk
+            .receive_private_messages(pair.alice.public_key.clone())
+            .await
+            .unwrap_err(),
+        PaykitSdkError::RecoveryRequired { .. }
+    ));
     assert!(pair
         .bob
-        .sdk
-        .receive_private_messages(pair.alice.public_key.clone())
-        .await
+        .storage
+        .snapshot()
         .unwrap()
-        .stream_item_ids
+        .private_stream_items
         .is_empty());
+}
+
+#[tokio::test]
+async fn test_reservation_queue_commits_atomically_and_preserves_persisted_reservations_on_error() {
+    struct InterruptedOperationStorage {
+        inner: InMemoryStorage,
+        fail_before_commit: Option<bool>,
+        writes: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl StorageAdapter for InterruptedOperationStorage {
+        async fn run_operation_erased<'a>(
+            &self,
+            operation: StorageOperation<'a>,
+        ) -> PaykitResult<Box<dyn std::any::Any + Send>> {
+            let result = operation.await?;
+            if self.fail_before_commit == Some(false) {
+                return Err(PaykitSdkError::Transport {
+                    context: "injected storage operation failure".into(),
+                    source: None,
+                });
+            }
+            Ok(result)
+        }
+
+        async fn transaction_erased<'a>(
+            &self,
+            f: StorageTransactionCallback<'a>,
+        ) -> PaykitResult<Box<dyn std::any::Any + Send>> {
+            let before = self.inner.snapshot()?;
+            let message_count = before.outbound_private_messages.len();
+            let result = self
+                .inner
+                .transaction_erased(Box::new(move |tx| {
+                    let result = f(tx)?;
+                    if self.fail_before_commit == Some(true)
+                        && tx.export_storage_state().outbound_private_messages.len() > message_count
+                    {
+                        return Err(PaykitSdkError::Transport {
+                            context: "injected storage operation failure".into(),
+                            source: None,
+                        });
+                    }
+                    Ok(result)
+                }))
+                .await?;
+            if self.inner.snapshot()? != before {
+                self.writes.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(result)
+        }
+    }
+
+    for (fail_before_commit, peer_busy) in [
+        (None, false),
+        (Some(true), false),
+        (Some(false), false),
+        (None, true),
+    ] {
+        let pair = linked_two_party().await;
+        if peer_busy {
+            pair.alice
+                .storage
+                .transaction(|tx| {
+                    let now = chrono::Utc::now();
+                    tx.claim_peer_link_operation(
+                        &pair.bob.public_key,
+                        now,
+                        now + chrono::Duration::minutes(1),
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        let (mut cancelled, resume) = pair.alice.adapter.pause_next_reservation_cancellation();
+        resume.send(()).unwrap();
+        let writes = Arc::new(AtomicUsize::new(0));
+        let sdk = PaykitSdk::new(
+            InterruptedOperationStorage {
+                inner: pair.alice.storage.clone(),
+                fail_before_commit,
+                writes: writes.clone(),
+            },
+            crate::harness::TestnetSessionProvider::new(pair.alice.access.clone()),
+            pair.alice.adapter.clone(),
+            PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+        );
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            sdk.enqueue_private_payment_list_with_reservations(
+                pair.bob.public_key.clone(),
+                vec![PrivatePaymentEndpointReservation {
+                    reservation_id: "invoice-1".into(),
+                    receiving_detail: private_receiving_detail(
+                        "btc-lightning-bolt11",
+                        "ln-reserved",
+                    ),
+                    expires_at: None,
+                    attribution: Default::default(),
+                }],
+            ),
+        )
+        .await
+        .unwrap();
+
+        if peer_busy {
+            assert!(result.unwrap_err().is_concurrent_update());
+            assert_eq!(writes.load(Ordering::SeqCst), 0);
+            assert!(matches!(
+                cancelled.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            let state = pair.alice.storage.snapshot().unwrap();
+            assert_eq!(state.peer_link_operation_leases.len(), 1);
+            assert!(state.payment_endpoint_reservations.is_empty());
+            assert!(state.outbound_private_messages.is_empty());
+            continue;
+        } else if fail_before_commit.is_some() {
+            assert!(
+                matches!(result, Err(PaykitSdkError::Transport { context, .. })
+                if context == "injected storage operation failure")
+            );
+        } else {
+            result.unwrap();
+            assert_eq!(writes.load(Ordering::SeqCst), 1);
+        }
+        let state = pair.alice.storage.snapshot().unwrap();
+        assert!(state.peer_link_operation_leases.is_empty());
+        if fail_before_commit == Some(true) {
+            assert_eq!(cancelled.try_recv(), Ok(()));
+            assert!(state.payment_endpoint_reservations.is_empty());
+            assert!(state.outbound_private_messages.is_empty());
+        } else {
+            assert!(matches!(
+                cancelled.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            assert_eq!(state.payment_endpoint_reservations.len(), 1);
+            assert_eq!(state.outbound_private_messages.len(), 1);
+            assert_eq!(
+                state.outbound_private_messages[0].status,
+                OutboundPrivateMessageStatus::Pending
+            );
+        }
+    }
 }
 
 #[tokio::test]

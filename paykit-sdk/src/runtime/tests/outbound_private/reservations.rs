@@ -73,14 +73,14 @@ async fn test_expired_private_reservation_recovers_only_after_allocating_noise_s
         );
         let mut report = OutboundPrivateSendReport::default();
 
-        assert!(sdk
-            .claimed_message_ready_for_send(
-                &counterparty,
+        assert!(storage
+            .transaction(|tx| sdk.claimed_message_ready_for_send(
+                tx,
                 sending,
                 &lease,
                 &mut report,
-                FixedClock.now()
-            )
+                FixedClock.now() - ChronoDuration::seconds(5)
+            ))
             .await
             .unwrap()
             .is_none());
