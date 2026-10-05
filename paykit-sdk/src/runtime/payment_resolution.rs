@@ -1,6 +1,11 @@
-use super::private_stream::PrivateInboxCheckpoint;
+use super::encrypted_links::require_distinct_link_identity;
+use super::private_stream::{
+    private_receive_snapshot, PrivateInboxCheckpoint, PrivateReceiveSnapshot,
+};
 use super::recovery::RecoveryObservationCheckpoint;
 use super::*;
+use crate::domain::endpoint_reservations::terminal_private_list_reservation_cancellations_in_transaction;
+use crate::storage::PrivateStreamItemRecord;
 use crate::PaymentAmountContext;
 use std::future::Future;
 
@@ -21,6 +26,52 @@ const PUBLIC_PAYMENT_RESOLUTION_MAX_ENDPOINTS: usize = 256;
 const PUBLIC_PAYMENT_RESOLUTION_MAX_REQUESTS: usize =
     PUBLIC_PAYMENT_RESOLUTION_MAX_ENDPOINTS + paykit_lib::PAYKIT_APP_REGISTRY_MAX_APPS;
 const PUBLIC_PAYMENT_RESOLUTION_MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+
+struct PrivatePreparationCheckpoint {
+    recovery: RecoveryObservationCheckpoint,
+    receive: PrivateReceiveSnapshot,
+    items: Vec<PrivateStreamItemRecord>,
+    outbound: Vec<OutboundPrivateMessageRecord>,
+    reservations: Vec<crate::storage::PaymentEndpointReservationRecord>,
+}
+
+impl PrivatePreparationCheckpoint {
+    fn load(
+        tx: &dyn StorageTransaction,
+        counterparty: &PubkyPublicKey,
+        app_id: &paykit_lib::PaykitAppId,
+    ) -> Option<Self> {
+        if !tx.queued_outbound_private_messages(counterparty).is_empty()
+            || terminal_private_list_reservation_cancellations_in_transaction(tx, counterparty)
+                .iter()
+                .any(|record| &record.app_id == app_id)
+        {
+            return None;
+        }
+        Some(Self {
+            recovery: RecoveryObservationCheckpoint::load(tx, counterparty)?,
+            receive: private_receive_snapshot(tx, counterparty)?,
+            items: tx.private_stream_items(counterparty),
+            outbound: tx.outbound_private_messages(counterparty),
+            reservations: tx.payment_endpoint_reservations(counterparty),
+        })
+    }
+}
+
+struct PrivateResolutionProjection {
+    context: super::app_registry::CounterpartyAppAuthorizationContext,
+    items: Vec<PrivateStreamItemRecord>,
+    state: PrivatePaymentResolutionState,
+    private_allowed: bool,
+    private_live: bool,
+    inbox_is_current: bool,
+}
+
+enum PrivatePreparationOutcome {
+    Prepare,
+    Resolve(u64, Box<PrivateInboxCheckpoint>),
+    Project(u64, Box<PrivateResolutionProjection>),
+}
 
 #[derive(Default)]
 struct PublicPaymentCandidateLoad {
@@ -397,6 +448,40 @@ where
             state = PrivatePaymentResolutionState::RecoveryPending;
         }
         private_allowed = allowed;
+
+        self.resolve_private_contact_payment_from_projection(
+            counterparty,
+            amount,
+            after_private_payment_list_version,
+            payment_request_terms,
+            PrivateResolutionProjection {
+                context,
+                items,
+                state,
+                private_allowed,
+                private_live,
+                inbox_is_current,
+            },
+        )
+        .await
+    }
+
+    async fn resolve_private_contact_payment_from_projection(
+        &self,
+        counterparty: PubkyPublicKey,
+        amount: Option<PaymentAmountContext>,
+        after_private_payment_list_version: Option<u64>,
+        payment_request_terms: Option<PaymentRequestTermsRecord>,
+        projection: PrivateResolutionProjection,
+    ) -> Result<PrivateContactPaymentResolution> {
+        let PrivateResolutionProjection {
+            context,
+            items,
+            mut state,
+            private_allowed,
+            private_live,
+            inbox_is_current,
+        } = projection;
         let (app_registry, authorized_private_apps) = (context.registry, context.private_apps);
 
         if let Some((terms, endpoints)) = payment_request_terms.as_ref().and_then(|terms| {
@@ -623,6 +708,51 @@ where
         after_private_payment_list_version: Option<u64>,
         max_advance_steps: u32,
     ) -> Result<PreparedPrivateContactPayment> {
+        let prepared = match self
+            .unchanged_private_contact_preparation(&counterparty)
+            .await?
+        {
+            PrivatePreparationOutcome::Prepare => None,
+            PrivatePreparationOutcome::Resolve(generation, inbox) => Some((
+                generation,
+                self.resolve_private_contact_payment_with_terms(
+                    counterparty.clone(),
+                    amount.clone(),
+                    after_private_payment_list_version,
+                    None,
+                    Some(&inbox),
+                )
+                .await?,
+            )),
+            PrivatePreparationOutcome::Project(generation, projection) => Some((
+                generation,
+                self.resolve_private_contact_payment_from_projection(
+                    counterparty.clone(),
+                    amount.clone(),
+                    after_private_payment_list_version,
+                    None,
+                    *projection,
+                )
+                .await?,
+            )),
+        };
+        if let Some((generation, resolution)) = prepared {
+            return Ok(PreparedPrivateContactPayment {
+                resolution,
+                link_report: Some(LinkedPeerHandshakeReport {
+                    counterparty,
+                    state: LinkedPeerState::Linked,
+                    generation,
+                    handshake_role: None,
+                }),
+                receive_report: Some(PrivateStreamIntakeReport {
+                    receive_batch_id: None,
+                    stream_item_ids: Vec::new(),
+                    event_conflicts: Vec::new(),
+                }),
+                outbound_report: Some(OutboundPrivateSendReport::default()),
+            });
+        }
         let (link_report, receive_report, outbound_report, inbox) = self
             .prepare_private_contact_payment(&counterparty, max_advance_steps)
             .await?;
@@ -643,6 +773,101 @@ where
             receive_report,
             outbound_report,
         })
+    }
+
+    async fn unchanged_private_contact_preparation(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<PrivatePreparationOutcome> {
+        let (access, _, checkpoint) = self
+            .load_session_access_and_refresh_identity_with(|tx| {
+                Ok(PrivatePreparationCheckpoint::load(
+                    tx,
+                    counterparty,
+                    &self.config.app_id,
+                ))
+            })
+            .await?;
+        let Some(access) = access else {
+            return Ok(PrivatePreparationOutcome::Prepare);
+        };
+        if !access.private_link_capable_for_capabilities(PAYKIT_SESSION_CAPABILITIES)? {
+            return Ok(PrivatePreparationOutcome::Prepare);
+        }
+        let Some(checkpoint) = checkpoint.flatten() else {
+            return Ok(PrivatePreparationOutcome::Prepare);
+        };
+        require_distinct_link_identity(&access.public_key()?, counterparty)?;
+        self.validate_local_noise_key_authorization(&access).await?;
+        if !self
+            .observe_link_checkpoint(counterparty, &access, Some(&checkpoint.recovery))
+            .await?
+        {
+            return Ok(PrivatePreparationOutcome::Prepare);
+        }
+        let PrivatePreparationCheckpoint {
+            recovery,
+            receive,
+            items,
+            outbound,
+            reservations,
+        } = checkpoint;
+        let Some(inbox) = self
+            .probe_empty_private_inbox(counterparty, &access, receive)
+            .await?
+        else {
+            return Ok(PrivatePreparationOutcome::Prepare);
+        };
+        // The post-inbox authorization and marker reads remain mandatory.
+        let observed = match self
+            .observe_link_checkpoint(counterparty, &access, Some(&recovery))
+            .await
+        {
+            Ok(observed) => observed,
+            Err(PaykitSdkError::RecoveryRequired { .. }) => false,
+            Err(error) => return Err(error),
+        };
+        let observation = if observed {
+            Some(
+                self.fetch_counterparty_app_authorization(counterparty)
+                    .await,
+            )
+        } else {
+            None
+        };
+        self.storage
+            .transaction(|tx| {
+                if RecoveryObservationCheckpoint::load(tx, counterparty).as_ref() != Some(&recovery)
+                    || tx.private_stream_items(counterparty) != items
+                    || tx.outbound_private_messages(counterparty) != outbound
+                    || tx.payment_endpoint_reservations(counterparty) != reservations
+                    || !inbox.is_current(tx)
+                {
+                    return Ok(PrivatePreparationOutcome::Prepare);
+                }
+                let generation = recovery.link_state.generation;
+                let Some(observation) = observation else {
+                    // Late remote changes belong to resolution, not handshake preparation.
+                    return Ok(PrivatePreparationOutcome::Resolve(
+                        generation,
+                        Box::new(inbox),
+                    ));
+                };
+                // A stale speculative registry error must not bypass preparation.
+                let context = observation?.apply(tx, counterparty);
+                Ok(PrivatePreparationOutcome::Project(
+                    generation,
+                    Box::new(PrivateResolutionProjection {
+                        context,
+                        items: tx.private_stream_items(counterparty),
+                        state: PrivatePaymentResolutionState::NoPrivateEndpoint,
+                        private_allowed: true,
+                        private_live: true,
+                        inbox_is_current: inbox.is_current(tx),
+                    }),
+                ))
+            })
+            .await
     }
 
     /// Prepare private state, then resolve endpoints permitted by a Payment Request.

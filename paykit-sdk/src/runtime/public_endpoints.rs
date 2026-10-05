@@ -1,6 +1,11 @@
 use super::*;
 use crate::storage::PublicEndpointRecord;
 
+struct PublicEndpointSyncResult {
+    report: EndpointSyncReport,
+    lease_released: bool,
+}
+
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
     S: StorageAdapter,
@@ -29,7 +34,7 @@ where
                 .await
         }
         .await;
-        self.finish_paykit_app_operation(lease, result).await
+        self.finish_public_endpoint_sync(lease, result).await
     }
 
     /// Publish explicit public receiving details and remove stale SDK-managed endpoints.
@@ -53,7 +58,24 @@ where
         let result = self
             .sync_public_endpoints_with_lease(details, records, &lease, &session_access)
             .await;
-        self.finish_paykit_app_operation(lease, result).await
+        self.finish_public_endpoint_sync(lease, result).await
+    }
+
+    async fn finish_public_endpoint_sync(
+        &self,
+        lease: PaykitAppOperationLease,
+        result: Result<PublicEndpointSyncResult>,
+    ) -> Result<EndpointSyncReport> {
+        match result {
+            Ok(PublicEndpointSyncResult {
+                report,
+                lease_released: true,
+            }) => Ok(report),
+            result => {
+                self.finish_paykit_app_operation(lease, result.map(|result| result.report))
+                    .await
+            }
+        }
     }
 
     async fn sync_public_endpoints_with_lease(
@@ -62,7 +84,7 @@ where
         records: Vec<PublicEndpointRecord>,
         lease: &PaykitAppOperationLease,
         session_access: &GuardedSessionAccess,
-    ) -> Result<EndpointSyncReport> {
+    ) -> Result<PublicEndpointSyncResult> {
         validate_public_endpoint_count(details.len())?;
         let registry = paykit_lib::get_paykit_app_registry(
             &session_access.outbox_client.public_storage(),
@@ -267,7 +289,12 @@ where
         );
 
         // Remove stale endpoints first so replacement at the limit stays discoverable.
-        for (identifier_text, previous_payload, revision) in removal_candidates {
+        let mut lease_released = false;
+        let mut removal_candidates = removal_candidates.into_iter().peekable();
+        while let Some((identifier_text, previous_payload, revision)) = removal_candidates.next() {
+            let completes_removal = removal_candidates.peek().is_none()
+                && desired_entries.is_empty()
+                && report.failed.is_empty();
             let identifier = paykit_lib::PaymentEndpointIdentifier::new(&identifier_text)?;
             self.with_guarded_storage_operation(
                 Arc::clone(&session_access._guard),
@@ -289,10 +316,17 @@ where
                                 move |tx| {
                                     crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
                                     tx.save_public_endpoint_record(record);
+                                    if completes_removal {
+                                        tx.release_paykit_app_operation(
+                                            &lease.app_id,
+                                            lease.lease_id,
+                                        );
+                                    }
                                     Ok(())
                                 }
                             })
                             .await?;
+                            lease_released = completes_removal;
                             report.removed.push(EndpointSyncChange {
                                 identifier: identifier_text,
                                 status: PublicationStatus::Removed,
@@ -417,7 +451,10 @@ where
             }
         }
 
-        Ok(report)
+        Ok(PublicEndpointSyncResult {
+            report,
+            lease_released,
+        })
     }
 
     async fn publish_public_endpoint_if_current(

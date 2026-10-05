@@ -476,6 +476,256 @@ async fn test_private_resolution_rechecks_checkpoint_before_app_authorization() 
 }
 
 #[tokio::test]
+async fn test_contact_preparation_rechecks_local_inputs_before_resolution() {
+    use paykit_sdk::{OutboundPrivateMessageStatus, PrivatePaymentEndpointReservation};
+
+    let pair = linked_two_party().await;
+    pair.bob
+        .sdk
+        .enqueue_private_payment_list_with_receiving_details(
+            pair.alice.public_key.clone(),
+            vec![private_receiving_detail(
+                "btc-lightning-bolt11",
+                "ln-private-bob",
+            )],
+        )
+        .await
+        .unwrap();
+    pair.bob
+        .sdk
+        .process_outbound_private_messages(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    pair.alice
+        .sdk
+        .receive_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    let version = pair
+        .alice
+        .sdk
+        .resolve_private_contact_payment(pair.bob.public_key.clone(), None, None)
+        .await
+        .unwrap()
+        .private_payment_list_version;
+    let mut initial = pair.alice.storage.snapshot().unwrap();
+    let authorized_apps = initial
+        .authorized_paykit_apps
+        .remove(&pair.bob.public_key)
+        .unwrap();
+
+    for change in [
+        "unchanged",
+        "consumed",
+        "registry-error",
+        "lease",
+        "blocked",
+        "local-key",
+        "snapshot",
+        "queued",
+        "cleanup",
+        "cancel",
+        "incoming",
+    ] {
+        let storage = InMemoryStorage::from_state(initial.clone());
+        let (ready, reached) = oneshot::channel();
+        let (resume, paused) = oneshot::channel();
+        let sdk = PaykitSdk::new(
+            storage.clone(),
+            PausedPublicReadProvider {
+                inner: TestnetSessionProvider::new(pair.alice.access.clone()),
+                public_reads: AtomicUsize::new(0),
+                // Initial recovery, inbox probe, and final recovery precede the registry.
+                pause_after: 5,
+                fail_paused_read: !matches!(change, "unchanged" | "consumed" | "cancel"),
+                pause: Mutex::new(Some((ready, paused))),
+            },
+            pair.alice.adapter.clone(),
+            PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+        );
+        let other = PaykitSdk::new(
+            storage.clone(),
+            TestnetSessionProvider::new(pair.alice.access.clone()),
+            pair.alice.adapter.clone(),
+            PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+        );
+        let mut prepare = Box::pin(sdk.prepare_and_resolve_private_contact_payment(
+            pair.bob.public_key.clone(),
+            None,
+            if change == "consumed" { version } else { None },
+            1,
+        ));
+        tokio::select! {
+            reached = tokio::time::timeout(Duration::from_secs(30), reached) =>
+                reached.expect("preparation should reach registry lookup").unwrap(),
+            result = &mut prepare => panic!("preparation did not pause: {change}: {result:?}"),
+        }
+        assert_eq!(storage.snapshot().unwrap(), initial, "{change}");
+        if change == "cancel" {
+            drop(prepare);
+            assert_eq!(storage.snapshot().unwrap(), initial);
+            continue;
+        }
+        let mut queued_id = None;
+        match change {
+            "queued" => {
+                queued_id = Some(
+                    other
+                        .clear_private_payment_list(pair.bob.public_key.clone())
+                        .await
+                        .unwrap()
+                        .outbound_message_id,
+                );
+            }
+            "cleanup" => {
+                let mut record = other
+                    .enqueue_private_payment_list_with_reservations(
+                        pair.bob.public_key.clone(),
+                        vec![PrivatePaymentEndpointReservation {
+                            reservation_id: "obsolete-invoice".into(),
+                            receiving_detail: private_receiving_detail(
+                                "btc-lightning-bolt11",
+                                "ln-obsolete",
+                            ),
+                            expires_at: None,
+                            attribution: Default::default(),
+                        }],
+                    )
+                    .await
+                    .unwrap();
+                record.status = OutboundPrivateMessageStatus::Invalid;
+                storage
+                    .transaction(|tx| tx.save_outbound_private_message(record))
+                    .await
+                    .unwrap();
+            }
+            "incoming" => {
+                pair.bob
+                    .sdk
+                    .enqueue_private_payment_list_with_receiving_details(
+                        pair.alice.public_key.clone(),
+                        vec![private_receiving_detail(
+                            "btc-lightning-bolt11",
+                            "ln-current-bob",
+                        )],
+                    )
+                    .await
+                    .unwrap();
+                pair.bob
+                    .sdk
+                    .process_outbound_private_messages(pair.alice.public_key.clone())
+                    .await
+                    .unwrap();
+                let received = other
+                    .receive_private_messages(pair.bob.public_key.clone())
+                    .await
+                    .unwrap();
+                assert_eq!(received.stream_item_ids.len(), 1);
+            }
+            _ => storage
+                .transaction(|tx| {
+                    let mut peer = tx.linked_peer(&pair.bob.public_key).unwrap();
+                    match change {
+                        "lease" => {
+                            let now = chrono::Utc::now();
+                            tx.claim_peer_link_operation(
+                                &pair.bob.public_key,
+                                now,
+                                now + chrono::Duration::minutes(1),
+                            )?
+                            .unwrap();
+                        }
+                        "blocked" => peer.state = LinkedPeerState::Blocked,
+                        "local-key" => tx.save_paykit_noise_public_key(
+                            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()),
+                        ),
+                        "snapshot" => {
+                            let mut link = tx.encrypted_link_state(&pair.bob.public_key).unwrap();
+                            link.generation += 1;
+                            tx.save_encrypted_link_state(link);
+                        }
+                        _ => {}
+                    }
+                    tx.save_linked_peer(peer);
+                    Ok(())
+                })
+                .await
+                .unwrap(),
+        }
+        let mut expected = storage.snapshot().unwrap();
+        resume.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(30), prepare)
+            .await
+            .unwrap();
+        if matches!(change, "registry-error" | "lease" | "blocked" | "local-key") {
+            let error = result.unwrap_err();
+            assert_eq!(
+                error
+                    .to_string()
+                    .contains("injected registry lookup failure"),
+                change == "registry-error",
+                "{change}: {error:?}"
+            );
+            match change {
+                "lease" => assert!(error.is_concurrent_update()),
+                "blocked" => assert!(matches!(error, PaykitSdkError::Policy { .. })),
+                "local-key" => assert!(matches!(error, PaykitSdkError::Identity { .. })),
+                _ => {}
+            }
+        } else {
+            let prepared = result.unwrap();
+            assert_eq!(prepared.link_report.unwrap().state, LinkedPeerState::Linked);
+            assert!(prepared.receive_report.unwrap().stream_item_ids.is_empty());
+            let sent = prepared.outbound_report.unwrap();
+            if let Some(queued_id) = queued_id {
+                assert_eq!(sent.sent, vec![queued_id]);
+            } else {
+                assert!(sent.attempted.is_empty());
+            }
+            assert!(sent.reservation_cleanup_failures.is_empty());
+            if change == "consumed" {
+                assert_eq!(
+                    prepared.resolution.status,
+                    paykit_sdk::PrivatePaymentResolutionStatus::WaitingForUpdatedPaymentList
+                );
+                assert!(prepared.resolution.payable_endpoints.is_empty());
+            } else {
+                assert_eq!(prepared.resolution.payable_endpoints.len(), 1);
+                assert_eq!(
+                    prepared.resolution.payable_endpoints[0].endpoint.payload,
+                    if change == "incoming" {
+                        "ln-current-bob"
+                    } else {
+                        "ln-private-bob"
+                    }
+                );
+            }
+            expected
+                .authorized_paykit_apps
+                .insert(pair.bob.public_key.clone(), authorized_apps.clone());
+        }
+        let after = storage.snapshot().unwrap();
+        if change == "queued" {
+            let message = after
+                .outbound_private_messages
+                .iter()
+                .find(|message| Some(message.outbound_message_id) == queued_id)
+                .unwrap();
+            assert_eq!(message.status, OutboundPrivateMessageStatus::Sent);
+            assert!(message.prepared_send.is_none());
+            assert!(after.peer_link_operation_leases.is_empty());
+        } else {
+            if change == "cleanup" {
+                assert!(after.payment_endpoint_reservations.is_empty());
+                expected.payment_endpoint_reservations.clear();
+            }
+            expected.next_peer_link_operation_lease_id = after.next_peer_link_operation_lease_id;
+            assert_eq!(after, expected, "{change}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_published_events_survive_relink_and_lost_confirmations() {
     let mut pair = linked_two_party().await;
     let request = pair

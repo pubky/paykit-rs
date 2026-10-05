@@ -4,7 +4,7 @@ use futures_util::{stream, StreamExt};
 
 const PRIVATE_INBOX_PROBE_CONCURRENCY: usize = 16;
 
-struct PrivateReceiveSnapshot {
+pub(super) struct PrivateReceiveSnapshot {
     link: paykit_lib::EncryptedLinkSnapshot,
     state: EncryptedLinkStateRecord,
     authorization: paykit_lib::PaykitNoiseKeyAuthorization,
@@ -25,6 +25,31 @@ pub(super) struct PrivateInboxCheckpoint {
 }
 
 impl PrivateInboxCheckpoint {
+    fn from_probe(
+        session_access: &PubkySessionAccess,
+        probe: &PrivateInboxProbe,
+    ) -> Result<Option<Self>> {
+        let PrivateInboxProbe::Empty(snapshot) = probe else {
+            return Ok(None);
+        };
+        if snapshot.has_peer_lease {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            identity: session_access.public_key()?,
+            local_noise_public_key: crate::storage::paykit_noise_public_key(
+                &session_access.paykit_identity_secret_key().ok_or_else(|| {
+                    PaykitSdkError::Identity {
+                        context: "private receive requires the Paykit identity key".into(),
+                        source: None,
+                    }
+                })?,
+            ),
+            state: snapshot.state.clone(),
+            authorization: snapshot.authorization.clone(),
+        }))
+    }
+
     pub(super) fn is_current(&self, tx: &dyn StorageTransaction) -> bool {
         tx.load_identity_state()
             .and_then(|state| state.public_key)
@@ -82,28 +107,25 @@ where
         let probe = self
             .probe_private_inbox(&counterparty, &session_access, snapshot)
             .await?;
-        let checkpoint = match &probe {
-            PrivateInboxProbe::Empty(snapshot) if !snapshot.has_peer_lease => {
-                Some(PrivateInboxCheckpoint {
-                    identity: session_access.public_key()?,
-                    local_noise_public_key: crate::storage::paykit_noise_public_key(
-                        &session_access.paykit_identity_secret_key().ok_or_else(|| {
-                            PaykitSdkError::Identity {
-                                context: "private receive requires the Paykit identity key".into(),
-                                source: None,
-                            }
-                        })?,
-                    ),
-                    state: snapshot.state.clone(),
-                    authorization: snapshot.authorization.clone(),
-                })
-            }
-            _ => None,
-        };
+        let checkpoint = PrivateInboxCheckpoint::from_probe(&session_access, &probe)?;
         let report = self
             .receive_probed_private_messages(counterparty, &session_access, probe)
             .await?;
         Ok((report, checkpoint))
+    }
+
+    pub(super) async fn probe_empty_private_inbox(
+        &self,
+        counterparty: &PubkyPublicKey,
+        session_access: &GuardedSessionAccess,
+        snapshot: PrivateReceiveSnapshot,
+    ) -> Result<Option<PrivateInboxCheckpoint>> {
+        self.validate_local_noise_key_authorization(session_access)
+            .await?;
+        let probe = self
+            .probe_private_inbox(counterparty, session_access, Some(snapshot))
+            .await?;
+        PrivateInboxCheckpoint::from_probe(session_access, &probe)
     }
 
     async fn receive_probed_private_messages(
@@ -708,7 +730,7 @@ fn cache_private_receive_authorization(
     })
 }
 
-fn private_receive_snapshot(
+pub(super) fn private_receive_snapshot(
     tx: &dyn StorageTransaction,
     counterparty: &PubkyPublicKey,
 ) -> Option<PrivateReceiveSnapshot> {

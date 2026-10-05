@@ -818,15 +818,19 @@ async fn test_payment_preparation_refreshes_an_empty_private_list() {
     struct RecoverAtResolution<'a> {
         local: &'a TestUser,
         remote: &'a TestUser,
-        session_loads: AtomicUsize,
+        public_reads: AtomicUsize,
         marker_published: Arc<AtomicBool>,
     }
     #[async_trait]
     impl PubkySessionProvider for RecoverAtResolution<'_> {
         async fn load_session_access(&self) -> PaykitResult<Option<PubkySessionAccess>> {
-            // Link preparation and receive load sessions first;
-            // the next load starts resolution after the empty inbox probe.
-            if self.session_loads.fetch_add(1, Ordering::SeqCst) == 2 {
+            Ok(Some(self.local.access.clone()))
+        }
+
+        async fn load_public_storage(&self) -> PaykitResult<Option<pubky::PublicStorage>> {
+            // Initial recovery uses two handles; the inbox probe uses the third.
+            // The next public read starts post-inbox authorization and recovery.
+            if self.public_reads.fetch_add(1, Ordering::SeqCst) == 3 {
                 let before = self.local.storage.snapshot()?;
                 assert!(before.peer_link_operation_leases.is_empty());
                 self.remote
@@ -836,10 +840,6 @@ async fn test_payment_preparation_refreshes_an_empty_private_list() {
                 assert_eq!(self.local.storage.snapshot()?, before);
                 self.marker_published.store(true, Ordering::SeqCst);
             }
-            Ok(Some(self.local.access.clone()))
-        }
-
-        async fn load_public_storage(&self) -> PaykitResult<Option<pubky::PublicStorage>> {
             Ok(Some(self.local.access.outbox_client.public_storage()))
         }
 
@@ -865,7 +865,7 @@ async fn test_payment_preparation_refreshes_an_empty_private_list() {
         RecoverAtResolution {
             local: &pair.bob,
             remote: &pair.alice,
-            session_loads: AtomicUsize::new(0),
+            public_reads: AtomicUsize::new(0),
             marker_published: marker_published.clone(),
         },
         NoWalletSelection,

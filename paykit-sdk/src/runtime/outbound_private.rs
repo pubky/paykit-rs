@@ -24,6 +24,11 @@ struct PrivateSendDrainResult {
     lease_released: bool,
 }
 
+pub(super) enum PrivateSendReadiness {
+    Queued,
+    PrivatePaymentList,
+}
+
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
     S: StorageAdapter,
@@ -36,12 +41,31 @@ where
         &self,
         counterparty: PubkyPublicKey,
     ) -> Result<OutboundPrivateSendReport> {
+        self.process_outbound_private_messages_with_readiness(
+            counterparty,
+            PrivateSendReadiness::Queued,
+        )
+        .await
+    }
+
+    pub(super) async fn process_outbound_private_messages_with_readiness(
+        &self,
+        counterparty: PubkyPublicKey,
+        readiness: PrivateSendReadiness,
+    ) -> Result<OutboundPrivateSendReport> {
         let lease_timeout = ChronoDuration::from_std(PEER_LINK_OPERATION_LEASE_TIMEOUT)
             .expect("fixed peer link lease timeout must fit chrono duration");
         let work = self
             .retry_storage_transaction(|| {
                 let counterparty = counterparty.clone();
+                let readiness = &readiness;
                 move |tx| {
+                    if matches!(readiness, PrivateSendReadiness::PrivatePaymentList)
+                        && Self::private_queue_readiness_in_transaction(tx, &counterparty)?
+                            == PrivateQueueReadiness::PendingHandshake
+                    {
+                        return Ok(None);
+                    }
                     let has_queued = !tx
                         .queued_outbound_private_messages(&counterparty)
                         .is_empty();

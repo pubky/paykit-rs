@@ -494,31 +494,59 @@ where
         project: impl FnOnce(&mut dyn StorageTransaction, RecoveryObservationCheckpoint, U) -> Result<T>
             + Send,
     ) -> Result<Option<T>> {
+        if !self
+            .observe_link_checkpoint(counterparty, session_access, checkpoint.as_ref())
+            .await?
+        {
+            return Ok(None);
+        }
+        let checkpoint = checkpoint.expect("a current observation requires a checkpoint");
+
+        // Defer lookup errors to projection: a changed checkpoint must take recovery first.
+        let loaded = load.await;
+        // Projection and authorization writes require the exact public-lookup checkpoint.
+        self.storage
+            .transaction(|tx| {
+                let current = RecoveryObservationCheckpoint::load(tx, counterparty);
+                match current.filter(|current| current == &checkpoint) {
+                    Some(current) => project(tx, current, loaded).map(Some),
+                    None => Ok(None),
+                }
+            })
+            .await
+    }
+
+    pub(super) async fn observe_link_checkpoint(
+        &self,
+        counterparty: &PubkyPublicKey,
+        session_access: &GuardedSessionAccess,
+        checkpoint: Option<&RecoveryObservationCheckpoint>,
+    ) -> Result<bool> {
         let local_public_key = session_access.public_key()?;
         let secret_key = session_access.paykit_noise_secret_key()?;
         let local_noise_public_key =
             PubkyPublicKey::from_public_key(&pubky::Keypair::from_secret(&secret_key).public_key());
         let Some(checkpoint) = checkpoint else {
-            return Ok(None);
+            return Ok(false);
         };
         if checkpoint.local_public_key != local_public_key
             || checkpoint.local_noise_public_key != local_noise_public_key
         {
-            return Ok(None);
+            return Ok(false);
         }
         let authorization = match self
             .paykit_noise_key_authorization(counterparty.clone())
             .await
         {
             Ok(authorization) => authorization,
-            Err(PaykitSdkError::NotFound { .. }) => return Ok(None),
+            Err(PaykitSdkError::NotFound { .. }) => return Ok(false),
             Err(err) => return Err(err),
         };
         if checkpoint.peer.noise_key_authorization.as_ref() != Some(&authorization) {
-            return Ok(None);
+            return Ok(false);
         }
         let Some(public_storage) = self.pubky.load_public_storage().await? else {
-            return Ok(None);
+            return Ok(false);
         };
         if let Some(marker) = paykit_lib::fetch_encrypted_link_recovery_marker(
             &public_storage,
@@ -534,27 +562,10 @@ where
                 counterparty,
                 marker.attempt_id(),
             )? {
-                return Ok(None);
+                return Ok(false);
             }
         }
-
-        // Defer lookup errors to projection: a changed checkpoint must take recovery first.
-        let loaded = load.await;
-        // Projection and authorization writes require the exact public-lookup checkpoint.
-        self.storage
-            .transaction(|tx| {
-                let current = recovery_observation_checkpoint(
-                    tx,
-                    counterparty,
-                    &local_public_key,
-                    &local_noise_public_key,
-                );
-                match current.filter(|current| current == &checkpoint) {
-                    Some(current) => project(tx, current, loaded).map(Some),
-                    None => Ok(None),
-                }
-            })
-            .await
+        Ok(true)
     }
 
     pub(super) async fn observe_remote_recovery_marker_with_lease(

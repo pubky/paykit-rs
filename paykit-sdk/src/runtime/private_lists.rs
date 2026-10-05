@@ -1,3 +1,4 @@
+use super::outbound_private::PrivateSendReadiness;
 use super::payment_resolution::filter_private_views_by_authorized_apps;
 use super::*;
 use crate::domain::endpoint_reservations::queue_private_payment_list_with_reservations_in_transaction;
@@ -519,21 +520,17 @@ where
         queued_counterparties.dedup();
         let mut deliveries = Vec::with_capacity(queued_counterparties.len());
         for counterparty in queued_counterparties {
-            let result = async {
-                if !self.private_list_delivery_ready(&counterparty).await? {
-                    return Ok(None);
-                }
-                self.process_outbound_private_messages(counterparty.clone())
-                    .await
-                    .map(Some)
-            }
-            .await;
+            let result = self
+                .process_outbound_private_messages_with_readiness(
+                    counterparty.clone(),
+                    PrivateSendReadiness::PrivatePaymentList,
+                )
+                .await;
             deliveries.push((counterparty, result));
         }
         for (counterparty, result) in deliveries {
             match result {
-                Ok(None) => continue,
-                Ok(Some(send_report)) => {
+                Ok(send_report) => {
                     let queued_message_ids = if send_report.failed.is_empty() {
                         HashSet::new()
                     } else {
@@ -592,12 +589,6 @@ where
         readiness
             .expect("active session loads queue readiness")
             .map(|_| ())
-    }
-
-    async fn private_list_delivery_ready(&self, counterparty: &PubkyPublicKey) -> Result<bool> {
-        self.private_queue_readiness(counterparty)
-            .await
-            .map(|readiness| readiness == PrivateQueueReadiness::Ready)
     }
 
     async fn linked_private_counterparties_not_in(

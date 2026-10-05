@@ -93,6 +93,124 @@ async fn test_sync_public_endpoints_publishes_and_removes_managed_endpoints() {
 }
 
 #[tokio::test]
+async fn test_public_removal_releases_lease_at_confirmed_checkpoint() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct RemovalCheckpointStorage {
+        inner: paykit_sdk::InMemoryStorage,
+        fault: &'static str,
+        checkpoint_reached: AtomicBool,
+        later_transactions: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageAdapter for RemovalCheckpointStorage {
+        async fn transaction_erased<'a>(
+            &self,
+            f: paykit_sdk::storage::StorageTransactionCallback<'a>,
+        ) -> paykit_sdk::Result<Box<dyn std::any::Any + Send>> {
+            if self.checkpoint_reached.load(Ordering::SeqCst) {
+                self.later_transactions.fetch_add(1, Ordering::SeqCst);
+            }
+            let mut checkpoint = false;
+            let result = self
+                .inner
+                .transaction_erased(Box::new(|tx| {
+                    let pending = tx
+                        .public_endpoint_records()
+                        .iter()
+                        .any(|record| record.status == PublicationStatus::PendingRemoval);
+                    let result = f(tx)?;
+                    checkpoint = pending
+                        && tx
+                            .public_endpoint_records()
+                            .iter()
+                            .all(|record| record.status == PublicationStatus::Removed);
+                    if checkpoint {
+                        self.checkpoint_reached.store(true, Ordering::SeqCst);
+                        assert!(tx
+                            .export_storage_state()
+                            .paykit_app_operation_leases
+                            .is_empty());
+                        if self.fault == "rejected" {
+                            return Err(PaykitSdkError::Storage {
+                                context: "removal checkpoint rejected".into(),
+                                source: None,
+                            });
+                        }
+                    }
+                    Ok(result)
+                }))
+                .await?;
+            if checkpoint && self.fault == "unconfirmed" {
+                return Err(PaykitSdkError::Storage {
+                    context: "removal checkpoint response lost".into(),
+                    source: None,
+                });
+            }
+            Ok(result)
+        }
+    }
+
+    let testnet = build_testnet().await;
+    let user = TestUser::sign_up(&testnet).await;
+    for fault in ["none", "rejected", "unconfirmed"] {
+        user.sdk
+            .sync_public_endpoints_with_receiving_details(vec![public_receiving_detail(
+                "btc-onchain",
+                "receiving-address",
+            )])
+            .await
+            .unwrap();
+        let storage = Arc::new(RemovalCheckpointStorage {
+            inner: paykit_sdk::InMemoryStorage::from_state(user.storage.snapshot().unwrap()),
+            fault,
+            checkpoint_reached: false.into(),
+            later_transactions: 0.into(),
+        });
+        let sdk = paykit_sdk::PaykitSdk::new(
+            storage.clone(),
+            crate::harness::TestnetSessionProvider::new(user.access.clone()),
+            user.adapter.clone(),
+            paykit_sdk::PaykitSdkConfig::new(user.app_id.clone()).unwrap(),
+        );
+
+        let result = sdk
+            .sync_public_endpoints_with_receiving_details(Vec::new())
+            .await;
+
+        assert!(storage.checkpoint_reached.load(Ordering::SeqCst));
+        if fault == "none" {
+            let report = result.unwrap();
+            assert_eq!(report.removed.len(), 1);
+            assert!(report.failed.is_empty());
+        } else {
+            assert!(matches!(result, Err(PaykitSdkError::Storage { .. })));
+        }
+        assert_eq!(
+            storage.later_transactions.load(Ordering::SeqCst),
+            usize::from(fault != "none"),
+        );
+        let state = storage.inner.snapshot().unwrap();
+        assert!(state.paykit_app_operation_leases.is_empty());
+        assert_eq!(
+            state
+                .public_endpoint_records
+                .values()
+                .next()
+                .unwrap()
+                .status,
+            if fault == "rejected" {
+                PublicationStatus::PendingRemoval
+            } else {
+                PublicationStatus::Removed
+            },
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_managed_endpoint_removal_uses_published_payload_after_failed_update() {
     let testnet = build_testnet().await;
     let user = TestUser::sign_up(&testnet).await;

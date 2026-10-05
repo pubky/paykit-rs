@@ -55,6 +55,7 @@ where
         require_private_automation_ready(peer_state, has_active_link, counterparty)
     }
 
+    #[cfg(test)]
     pub(super) async fn private_queue_readiness(
         &self,
         counterparty: &PubkyPublicKey,

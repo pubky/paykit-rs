@@ -505,13 +505,13 @@ async fn test_shared_operations_transaction_counts() {
         .unwrap();
     assert_eq!(removed.removed.len(), 1);
     assert!(removed.failed.is_empty());
-    assert_eq!(transactions.swap(0, Ordering::SeqCst), 5);
+    assert_eq!(transactions.swap(0, Ordering::SeqCst), 4);
     let cleared = sdk
         .clear_private_payment_list_and_process_outbound(pair.bob.public_key.clone())
         .await
         .unwrap();
     let clear_transactions = transactions.swap(0, Ordering::SeqCst);
-    assert_eq!(clear_transactions, 13);
+    assert_eq!(clear_transactions, 12);
     assert_eq!(cleared.cleared.len(), 1);
     assert!(cleared.failed_to_queue.is_empty());
     assert!(cleared.failed_to_deliver.is_empty());
@@ -1085,7 +1085,7 @@ async fn test_idle_polling_reads_shared_state_once_without_rewriting_it() {
         assert!(prepared.outbound_report.unwrap().attempted.is_empty());
         assert!(prepared.receive_report.unwrap().stream_item_ids.is_empty());
         assert!(prepared.resolution.payable_endpoints.is_empty());
-        assert_eq!(transactions.swap(0, Ordering::SeqCst), 6);
+        assert_eq!(transactions.swap(0, Ordering::SeqCst), 2);
         let requests = sdk.payment_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].counterparty, pair.bob.public_key);

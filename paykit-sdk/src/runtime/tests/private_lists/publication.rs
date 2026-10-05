@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::outbound_private::PrivateSendReadiness;
 
 #[test]
 fn test_private_payment_list_delivery_futures_stay_stack_bounded() {
@@ -22,6 +23,90 @@ fn test_private_payment_list_delivery_futures_stay_stack_bounded() {
     const MAX_INLINE_FUTURE_SIZE: usize = 16 * 1024;
     assert!(std::mem::size_of_val(&sync) <= MAX_INLINE_FUTURE_SIZE);
     assert!(std::mem::size_of_val(&clear) <= MAX_INLINE_FUTURE_SIZE);
+}
+
+#[tokio::test]
+async fn test_private_list_delivery_preflight_preserves_unready_work() {
+    for state in [
+        LinkedPeerState::Linking,
+        LinkedPeerState::Blocked,
+        LinkedPeerState::RecoveryRequired,
+    ] {
+        let storage = registered_test_storage();
+        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        seed_private_capable_identity_and_handshake(&storage, counterparty.clone()).await;
+        queue_private_payment_list_with_reservations(
+            &storage,
+            &counterparty,
+            app_id(),
+            vec![PrivatePaymentEndpointReservation {
+                reservation_id: "reservation-1".into(),
+                receiving_detail: PrivateReceivingDetail {
+                    identifier: "btc-lightning-bolt11".into(),
+                    payload: "ln-reserved".into(),
+                },
+                expires_at: None,
+                attribution: HashMap::new(),
+            }],
+            FixedClock.now(),
+        )
+        .await
+        .unwrap();
+        queue_private_payment_list_with_reservations(
+            &storage,
+            &counterparty,
+            app_id(),
+            Vec::new(),
+            FixedClock.now(),
+        )
+        .await
+        .unwrap();
+        storage
+            .transaction(|tx| {
+                let mut peer = tx.linked_peer(&counterparty).unwrap();
+                peer.state = state.clone();
+                tx.save_linked_peer(peer);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let before = storage.snapshot().unwrap();
+        let canceled = Arc::new(Mutex::new(Vec::new()));
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            InvalidReservedPrivateListPaymentAdapter {
+                canceled: canceled.clone(),
+            },
+            PaykitSdkConfig::new("bitkit").unwrap(),
+            FixedClock,
+        );
+
+        let result = sdk
+            .process_outbound_private_messages_with_readiness(
+                counterparty,
+                PrivateSendReadiness::PrivatePaymentList,
+            )
+            .await;
+
+        match state {
+            LinkedPeerState::Linking => {
+                let report = result.unwrap();
+                assert!(report.sent.is_empty());
+                assert!(report.failed.is_empty());
+                assert!(report.reservation_cleanup_failures.is_empty());
+            }
+            LinkedPeerState::Blocked => {
+                assert!(matches!(result, Err(PaykitSdkError::Policy { .. })))
+            }
+            _ => assert!(matches!(
+                result,
+                Err(PaykitSdkError::RecoveryRequired { .. })
+            )),
+        }
+        assert_eq!(storage.snapshot().unwrap(), before);
+        assert!(canceled.lock().unwrap().is_empty());
+    }
 }
 
 #[tokio::test]
