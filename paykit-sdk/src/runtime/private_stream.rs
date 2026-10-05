@@ -8,6 +8,7 @@ struct PrivateReceiveSnapshot {
     link: paykit_lib::EncryptedLinkSnapshot,
     state: EncryptedLinkStateRecord,
     authorization: paykit_lib::PaykitNoiseKeyAuthorization,
+    has_peer_lease: bool,
 }
 
 enum PrivateInboxProbe {
@@ -230,6 +231,9 @@ where
             return Ok(PrivateInboxProbe::Reload);
         }
         match pending {
+            // Read-only empty probes can coexist with a lease. Actual receives
+            // must claim it, including reclaiming an expired record.
+            Ok(true) if snapshot.has_peer_lease => Ok(PrivateInboxProbe::Reload),
             Ok(true) => Ok(PrivateInboxProbe::Ready(Box::new(snapshot))),
             Ok(false) => Ok(PrivateInboxProbe::Empty),
             Err(paykit_lib::PaykitError::Validation(_)) => Ok(PrivateInboxProbe::Reload),
@@ -656,9 +660,6 @@ fn private_receive_snapshot(
     tx: &dyn StorageTransaction,
     counterparty: &PubkyPublicKey,
 ) -> Option<PrivateReceiveSnapshot> {
-    if tx.peer_link_operation_lease(counterparty).is_some() {
-        return None;
-    }
     let peer = tx.linked_peer(counterparty)?;
     if peer.state != LinkedPeerState::Linked {
         return None;
@@ -679,6 +680,7 @@ fn private_receive_snapshot(
         link: snapshot,
         state,
         authorization,
+        has_peer_lease: tx.peer_link_operation_lease(counterparty).is_some(),
     })
 }
 
@@ -695,9 +697,9 @@ fn require_private_receive_checkpoint(
         });
     }
     let current = private_receive_snapshot(tx, &state.counterparty);
-    if current
-        .is_none_or(|current| current.state != *state || current.authorization != *authorization)
-    {
+    if current.is_none_or(|current| {
+        current.has_peer_lease || current.state != *state || current.authorization != *authorization
+    }) {
         return Err(PaykitSdkError::ConcurrentUpdate {
             context: "Encrypted Link changed during private receive; retry from current state"
                 .into(),

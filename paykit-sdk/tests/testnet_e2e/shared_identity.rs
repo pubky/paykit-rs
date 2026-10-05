@@ -1001,6 +1001,106 @@ async fn test_idle_polling_reads_shared_state_once_without_rewriting_it() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_private_inbox_probe_preserves_existing_peer_leases() {
+    let pair = linked_homeserver_shared_pair().await;
+    let counterparty = &pair.bob.public_key;
+    let storage = pair.bitkit.access.session.storage();
+    for expired in [false, true] {
+        let lease = pair
+            .bitkit
+            .storage
+            .transaction(|tx| {
+                let now = Utc::now() - chrono::Duration::minutes(if expired { 2 } else { 0 });
+                let expires_at = now + chrono::Duration::minutes(1);
+                Ok(tx
+                    .claim_peer_link_operation(counterparty, now, expires_at)?
+                    .unwrap())
+            })
+            .await
+            .unwrap();
+        let before = storage
+            .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let report = pair
+            .server
+            .sdk
+            .receive_private_messages(counterparty.clone())
+            .await
+            .unwrap();
+        assert!(report.stream_item_ids.is_empty());
+        let reports = pair
+            .server
+            .sdk
+            .receive_private_messages_from_linked_peers()
+            .await
+            .unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].report, Some(report));
+        assert!(reports[0].error.is_none());
+        let after = storage
+            .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(
+            before, after,
+            "an empty probe must not change the lease or shared state"
+        );
+
+        pair.bob
+            .sdk
+            .propose_payment_request(pair.bitkit.public_key.clone(), recurring_request_terms())
+            .await
+            .unwrap();
+        pair.bob
+            .sdk
+            .process_outbound_private_messages(pair.bitkit.public_key.clone())
+            .await
+            .unwrap();
+        if !expired {
+            let error = pair
+                .server
+                .sdk
+                .receive_private_messages(counterparty.clone())
+                .await
+                .unwrap_err();
+            assert!(error.is_concurrent_update());
+            pair.bitkit
+                .storage
+                .transaction(|tx| {
+                    assert_eq!(
+                        tx.peer_link_operation_lease(counterparty),
+                        Some(lease.clone())
+                    );
+                    tx.release_peer_link_operation(counterparty, lease.lease_id);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        let report = pair
+            .server
+            .sdk
+            .receive_private_messages(counterparty.clone())
+            .await
+            .unwrap();
+        assert_eq!(report.stream_item_ids.len(), 1);
+        assert!(pair
+            .server
+            .storage_state()
+            .await
+            .peer_link_operation_leases
+            .is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_shared_state_compacts_private_lists_without_changing_read_only_state() {
     let pair = linked_homeserver_shared_pair().await;
     for user in [&pair.bitkit, &pair.server] {
