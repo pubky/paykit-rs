@@ -55,7 +55,27 @@ struct SharedStateOperation {
     owner: Arc<Mutex<()>>,
     access: PubkySessionAccess,
     lock: pubky::StorageLock,
-    state: Mutex<Option<StorageState>>,
+    state: Mutex<std::result::Result<StorageState, InvalidatedSharedState>>,
+}
+
+enum InvalidatedSharedState {
+    LockLost,
+    UnconfirmedWrite,
+}
+
+impl InvalidatedSharedState {
+    fn error(&self) -> PaykitSdkError {
+        match self {
+            Self::LockLost => PaykitSdkError::ConcurrentUpdate {
+                context: "Pubky shared-state lock lost; restart the storage operation".into(),
+                source: None,
+            },
+            Self::UnconfirmedWrite => PaykitSdkError::Storage {
+                context: "shared-state operation cannot continue after an unconfirmed write".into(),
+                source: None,
+            },
+        }
+    }
 }
 
 tokio::task_local! {
@@ -277,7 +297,7 @@ impl StorageAdapter for PubkySharedStateStorage {
                 owner: Arc::clone(&self.transaction_lock),
                 access,
                 lock,
-                state: Mutex::new(Some(snapshot.state)),
+                state: Mutex::new(Ok(snapshot.state)),
             });
             SHARED_STATE_OPERATION.scope(context, operation).await
         })
@@ -382,10 +402,7 @@ impl StorageAdapter for PubkySharedStateStorage {
                 source: None,
             });
         }
-        let initial_state = state.as_ref().ok_or_else(|| PaykitSdkError::Storage {
-            context: "shared-state operation cannot continue after an unconfirmed write".into(),
-            source: None,
-        })?;
+        let initial_state = state.as_ref().map_err(InvalidatedSharedState::error)?;
         let (mut updated_state, result) = run_storage_state_transaction(initial_state.clone(), f)?;
         if &updated_state == initial_state {
             return Ok(result);
@@ -400,10 +417,17 @@ impl StorageAdapter for PubkySharedStateStorage {
         super::compaction::compact_private_payment_lists(&mut updated_state);
         let encrypted = encrypt_state(&access, &updated_state)?;
         // A failed or cancelled commit must not leave reusable stale state.
-        *state = None;
-        self.commit_encrypted_state(&access, &operation.lock, encrypted)
-            .await?;
-        *state = Some(updated_state);
+        *state = Err(InvalidatedSharedState::UnconfirmedWrite);
+        if let Err(error) = self
+            .commit_encrypted_state(&access, &operation.lock, encrypted)
+            .await
+        {
+            if error.is_concurrent_update() {
+                *state = Err(InvalidatedSharedState::LockLost);
+            }
+            return Err(error);
+        }
+        *state = Ok(updated_state);
         Ok(result)
     }
 
@@ -956,6 +980,16 @@ mod tests {
             decrypt_state_with_key(&key, &identity, &encrypted).unwrap(),
             state
         );
+    }
+
+    #[test]
+    fn test_invalidated_state_distinguishes_lock_loss_from_uncertain_writes() {
+        assert!(InvalidatedSharedState::LockLost
+            .error()
+            .is_concurrent_update());
+        let error = InvalidatedSharedState::UnconfirmedWrite.error();
+        assert!(matches!(error, PaykitSdkError::Storage { .. }));
+        assert!(!error.is_concurrent_update());
     }
 
     #[test]

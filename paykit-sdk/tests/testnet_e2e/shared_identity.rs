@@ -539,6 +539,13 @@ async fn test_shared_operations_transaction_counts() {
         .iter()
         .any(|list| list.app_id == pair.bitkit.app_id && list.payment_endpoints.is_empty()));
 
+    reject_next_transaction.store(true, Ordering::SeqCst);
+    let conflict = sdk
+        .propose_payment_request(pair.bob.public_key.clone(), recurring_request_terms())
+        .await
+        .unwrap_err();
+    assert!(conflict.is_concurrent_update());
+    assert_eq!(transactions.swap(0, Ordering::SeqCst), 1);
     let proposal = sdk
         .propose_payment_request(pair.bob.public_key.clone(), recurring_request_terms())
         .await

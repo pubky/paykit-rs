@@ -82,7 +82,9 @@ pub trait StorageAdapter: Send + Sync {
     /// and its latest state for this future, so it must not wait on spawned tasks
     /// that access the same storage. Same-adapter nesting is supported on the
     /// same task. Do not call SDK methods from a storage operation: the SDK
-    /// must acquire its session guard before entering shared storage.
+    /// must acquire its session guard before entering shared storage. A write
+    /// conflict must exit the operation before retrying with fresh state;
+    /// earlier committed transactions are not replayed automatically.
     async fn run_operation_erased<'a>(
         &self,
         operation: StorageOperation<'a>,
@@ -263,7 +265,9 @@ where
     for attempt in 0..CONCURRENT_UPDATE_MAX_ATTEMPTS {
         match storage.transaction(operation()).await {
             Err(err)
-                if err.is_concurrent_update() && attempt + 1 < CONCURRENT_UPDATE_MAX_ATTEMPTS =>
+                if err.is_concurrent_update()
+                    && !shared_state_operation_active()
+                    && attempt + 1 < CONCURRENT_UPDATE_MAX_ATTEMPTS =>
             {
                 tokio::time::sleep(std::time::Duration::from_millis(25 * (attempt as u64 + 1)))
                     .await;
