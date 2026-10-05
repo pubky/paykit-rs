@@ -312,6 +312,47 @@ fn test_restore_reconciliation_marks_missing_link_state_recovery_required() {
 }
 
 #[tokio::test]
+async fn test_restore_backup_state_rejects_noise_key_authorization_for_another_counterparty() {
+    let storage = InMemoryStorage::new();
+    let local_identity = identity(public_key());
+    storage
+        .save_identity_state(local_identity.clone())
+        .await
+        .unwrap();
+    let before = storage.snapshot().unwrap();
+    let counterparty = public_key();
+    let signer = pubky::Keypair::random();
+    let authorization =
+        paykit_lib::PaykitNoiseKeyAuthorization::sign(&signer, &[7; 32], 1).unwrap();
+    assert_ne!(
+        authorization.owner(),
+        &counterparty.to_public_key().unwrap()
+    );
+    let mut backup = empty_backup(local_identity);
+    backup.linked_peers.push(LinkedPeerRecord {
+        counterparty,
+        state: LinkedPeerState::RecoveryRequired,
+        last_sync_at: Some(timestamp()),
+        last_private_receive_at: None,
+        failure_count: 0,
+        local_recovery_attempt_id: None,
+        local_recovery_marker_created_at: None,
+        local_recovery_marker_last_error: None,
+        remote_recovery_attempt_id: None,
+        remote_recovery_marker_observed_at: None,
+        noise_key_authorization: Some(authorization),
+    });
+    // Deserialization verifies the signature before restore checks its owner.
+    let backup = serde_json::from_slice(&serde_json::to_vec(&backup).unwrap()).unwrap();
+
+    let error = restore_backup_state(&storage, backup).await.unwrap_err();
+
+    assert!(matches!(error, PaykitSdkError::Protocol { context, .. }
+        if context.contains("Noise key authorization belongs to another counterparty")));
+    assert_eq!(storage.snapshot().unwrap(), before);
+}
+
+#[tokio::test]
 async fn test_restore_backup_state_rejects_local_recovery_marker_without_created_at() {
     let storage = InMemoryStorage::new();
     let counterparty = public_key();
