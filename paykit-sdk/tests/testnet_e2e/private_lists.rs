@@ -705,27 +705,13 @@ async fn test_payment_preparation_refreshes_an_empty_private_list() {
             // Availability, link preparation and receive load sessions first;
             // the next load starts resolution after the empty inbox probe.
             if self.session_loads.fetch_add(1, Ordering::SeqCst) == 3 {
-                let before = self.local.storage.snapshot()?.encrypted_link_states
-                    [&self.remote.public_key]
-                    .clone();
-                self.local
-                    .sdk
-                    .enqueue_private_payment_list(self.remote.public_key.clone())
-                    .await?;
-                let sent = self
-                    .local
-                    .sdk
-                    .process_outbound_private_messages(self.remote.public_key.clone())
-                    .await?;
-                assert!(!sent.sent.is_empty());
-                assert_ne!(
-                    self.local.storage.snapshot()?.encrypted_link_states[&self.remote.public_key],
-                    before
-                );
+                let before = self.local.storage.snapshot()?;
+                assert!(before.peer_link_operation_leases.is_empty());
                 self.remote
                     .sdk
                     .publish_encrypted_link_recovery_marker(self.local.public_key.clone())
                     .await?;
+                assert_eq!(self.local.storage.snapshot()?, before);
             }
             Ok(Some(self.local.access.clone()))
         }
@@ -750,12 +736,6 @@ async fn test_payment_preparation_refreshes_an_empty_private_list() {
         }
     }
 
-    pair.bob
-        .adapter
-        .set_private_details(vec![private_receiving_detail(
-            "btc-lightning-bolt11",
-            "ln-private-bob",
-        )]);
     let sdk = PaykitSdk::new(
         pair.bob.storage.clone(),
         RecoverAtResolution {

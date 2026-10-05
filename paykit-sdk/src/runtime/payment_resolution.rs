@@ -288,7 +288,8 @@ where
             };
         }
 
-        if private_allowed && private_live && prepared_inbox.is_none() {
+        // A remote recovery marker can change while the local inbox checkpoint remains current.
+        if private_allowed && private_live {
             match self
                 .observe_remote_recovery_marker_for_cached_private_state(
                     &counterparty,
@@ -345,8 +346,7 @@ where
             )
             .await?
         };
-        // The inbox probe already checked recovery and authorization. Reuse those
-        // reads only while its checkpoint remains current; otherwise resolve afresh.
+        // Reuse the empty inbox result only while its local checkpoint remains current.
         if prepared_inbox.is_some() && !inbox_is_current {
             return Box::pin(self.resolve_private_contact_payment_with_terms(
                 counterparty,
