@@ -24,6 +24,8 @@ use crate::harness::{
 struct PausedPublicReadProvider {
     inner: TestnetSessionProvider,
     public_reads: AtomicUsize,
+    pause_after: usize,
+    fail_paused_read: bool,
     pause: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
 }
 
@@ -34,8 +36,7 @@ impl PubkySessionProvider for PausedPublicReadProvider {
     }
 
     async fn load_public_storage(&self) -> paykit_sdk::Result<Option<pubky::PublicStorage>> {
-        // Pause after the first lookup so another operation can change the checkpoint.
-        let pause = if self.public_reads.fetch_add(1, Ordering::SeqCst) == 1 {
+        let pause = if self.public_reads.fetch_add(1, Ordering::SeqCst) == self.pause_after {
             self.pause.lock().unwrap().take()
         } else {
             None
@@ -43,6 +44,12 @@ impl PubkySessionProvider for PausedPublicReadProvider {
         if let Some((ready, resume)) = pause {
             ready.send(()).expect("receive observer should remain live");
             resume.await.expect("receive should be released");
+            if self.fail_paused_read {
+                return Err(PaykitSdkError::RecoveryRequired {
+                    context: "injected registry lookup failure".into(),
+                    source: None,
+                });
+            }
         }
         self.inner.load_public_storage().await
     }
@@ -83,6 +90,8 @@ async fn test_private_receive_rejects_a_changed_checkpoint_before_commit() {
             PausedPublicReadProvider {
                 inner: TestnetSessionProvider::new(pair.alice.access.clone()),
                 public_reads: AtomicUsize::new(0),
+                pause_after: 1,
+                fail_paused_read: false,
                 pause: Mutex::new(Some((ready, paused))),
             },
             pair.alice.adapter.clone(),
@@ -231,6 +240,8 @@ async fn test_recovery_observation_rechecks_state_after_public_lookup() {
                 PausedPublicReadProvider {
                     inner: TestnetSessionProvider::new(pair.alice.access.clone()),
                     public_reads: AtomicUsize::new(0),
+                    pause_after: 1,
+                    fail_paused_read: false,
                     pause: Mutex::new(Some((ready, paused))),
                 },
                 pair.alice.adapter.clone(),
@@ -323,6 +334,144 @@ async fn test_recovery_observation_rechecks_state_after_public_lookup() {
                 "{change}"
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn test_private_resolution_rechecks_checkpoint_before_app_authorization() {
+    let pair = linked_two_party().await;
+    pair.bob
+        .sdk
+        .enqueue_private_payment_list_with_receiving_details(
+            pair.alice.public_key.clone(),
+            vec![private_receiving_detail(
+                "btc-lightning-bolt11",
+                "ln-private-bob",
+            )],
+        )
+        .await
+        .unwrap();
+    pair.bob
+        .sdk
+        .process_outbound_private_messages(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    pair.alice
+        .sdk
+        .receive_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    let mut initial = pair.alice.storage.snapshot().unwrap();
+    let authorized_apps = initial.authorized_paykit_apps[&pair.bob.public_key].clone();
+    initial.authorized_paykit_apps.remove(&pair.bob.public_key);
+
+    for change in [
+        "unchanged",
+        "registry-error",
+        "lease",
+        "recovery",
+        "snapshot",
+        "cancel",
+    ] {
+        let storage = InMemoryStorage::from_state(initial.clone());
+        let (ready, reached) = oneshot::channel();
+        let (resume, paused) = oneshot::channel();
+        let sdk = PaykitSdk::new(
+            storage.clone(),
+            PausedPublicReadProvider {
+                inner: TestnetSessionProvider::new(pair.alice.access.clone()),
+                public_reads: AtomicUsize::new(0),
+                // Noise authorization and the final recovery marker precede the registry.
+                pause_after: 2,
+                fail_paused_read: !matches!(change, "unchanged" | "cancel"),
+                pause: Mutex::new(Some((ready, paused))),
+            },
+            pair.alice.adapter.clone(),
+            PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+        );
+        let mut resolve =
+            Box::pin(sdk.resolve_private_contact_payment(pair.bob.public_key.clone(), None, None));
+        tokio::select! {
+            reached = tokio::time::timeout(Duration::from_secs(30), reached) =>
+                reached.expect("resolution should reach registry lookup").unwrap(),
+            result = &mut resolve => panic!("resolution did not pause: {result:?}"),
+        }
+        assert_eq!(storage.snapshot().unwrap(), initial);
+        if change == "cancel" {
+            drop(resolve);
+            assert_eq!(storage.snapshot().unwrap(), initial);
+            continue;
+        }
+        storage
+            .transaction(|tx| {
+                let mut peer = tx.linked_peer(&pair.bob.public_key).unwrap();
+                match change {
+                    "lease" => {
+                        let now = chrono::Utc::now();
+                        tx.claim_peer_link_operation(
+                            &pair.bob.public_key,
+                            now,
+                            now + chrono::Duration::minutes(1),
+                        )?
+                        .unwrap();
+                    }
+                    "recovery" => peer.state = LinkedPeerState::RecoveryRequired,
+                    "snapshot" => {
+                        let mut link = tx.encrypted_link_state(&pair.bob.public_key).unwrap();
+                        link.generation += 1;
+                        tx.save_encrypted_link_state(link);
+                    }
+                    "unchanged" | "registry-error" => {}
+                    _ => unreachable!(),
+                }
+                tx.save_linked_peer(peer);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut expected = storage.snapshot().unwrap();
+        resume.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(30), resolve)
+            .await
+            .unwrap();
+        match change {
+            "unchanged" | "snapshot" | "recovery" => {
+                let resolution = result.unwrap();
+                if change == "recovery" {
+                    assert_eq!(
+                        resolution.state,
+                        paykit_sdk::PrivatePaymentResolutionState::RecoveryPending
+                    );
+                    assert!(resolution.payable_endpoints.is_empty());
+                } else {
+                    assert_eq!(resolution.payable_endpoints.len(), 1);
+                    assert_eq!(
+                        resolution.payable_endpoints[0].endpoint.payload,
+                        "ln-private-bob"
+                    );
+                }
+                expected
+                    .authorized_paykit_apps
+                    .insert(pair.bob.public_key.clone(), authorized_apps.clone());
+            }
+            _ => {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    error
+                        .to_string()
+                        .contains("injected registry lookup failure"),
+                    change == "registry-error",
+                    "{change}: {error:?}"
+                );
+                if change == "lease" {
+                    assert!(error.is_concurrent_update());
+                }
+            }
+        }
+        let after = storage.snapshot().unwrap();
+        // Recovery fallback can allocate and release a lease without changing live state.
+        expected.next_peer_link_operation_lease_id = after.next_peer_link_operation_lease_id;
+        assert_eq!(after, expected, "{change}");
     }
 }
 

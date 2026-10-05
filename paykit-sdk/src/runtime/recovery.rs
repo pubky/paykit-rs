@@ -475,6 +475,25 @@ where
         session_access: &GuardedSessionAccess,
         checkpoint: Option<RecoveryObservationCheckpoint>,
     ) -> Result<Option<RecoveryObservationCheckpoint>> {
+        self.unchanged_link_checkpoint_with(
+            counterparty,
+            session_access,
+            checkpoint,
+            async {},
+            |_, checkpoint, ()| Ok(checkpoint),
+        )
+        .await
+    }
+
+    pub(super) async fn unchanged_link_checkpoint_with<T: Send + 'static, U: Send>(
+        &self,
+        counterparty: &PubkyPublicKey,
+        session_access: &GuardedSessionAccess,
+        checkpoint: Option<RecoveryObservationCheckpoint>,
+        load: impl std::future::Future<Output = U> + Send,
+        project: impl FnOnce(&mut dyn StorageTransaction, RecoveryObservationCheckpoint, U) -> Result<T>
+            + Send,
+    ) -> Result<Option<T>> {
         let local_public_key = session_access.public_key()?;
         let secret_key = session_access.paykit_noise_secret_key()?;
         let local_noise_public_key =
@@ -519,7 +538,9 @@ where
             }
         }
 
-        // A read-only report still requires the exact checkpoint used for the public lookup.
+        // Defer lookup errors to projection: a changed checkpoint must take recovery first.
+        let loaded = load.await;
+        // Projection and authorization writes require the exact public-lookup checkpoint.
         self.storage
             .transaction(|tx| {
                 let current = recovery_observation_checkpoint(
@@ -528,7 +549,10 @@ where
                     &local_public_key,
                     &local_noise_public_key,
                 );
-                Ok(current.filter(|current| current == &checkpoint))
+                match current.filter(|current| current == &checkpoint) {
+                    Some(current) => project(tx, current, loaded).map(Some),
+                    None => Ok(None),
+                }
             })
             .await
     }

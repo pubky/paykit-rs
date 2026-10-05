@@ -15,7 +15,13 @@ enum PrivateSendStep {
     Idle,
     Skipped(Option<u64>),
     Sent { has_more: bool },
+    Complete,
     Failed(Box<OutboundPrivateMessageRecord>, paykit_lib::PaykitError),
+}
+
+struct PrivateSendDrainResult {
+    report: OutboundPrivateSendReport,
+    lease_released: bool,
 }
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
@@ -87,7 +93,10 @@ where
                     .await,
             );
             if !has_queued {
-                return Ok(report);
+                return Ok(PrivateSendDrainResult {
+                    report,
+                    lease_released: false,
+                });
             }
 
             readiness?;
@@ -95,7 +104,16 @@ where
                 .await
         }
         .await;
-        self.finish_peer_link_operation(lease, result).await
+        match result {
+            Ok(PrivateSendDrainResult {
+                report,
+                lease_released: true,
+            }) => Ok(report),
+            result => {
+                self.finish_peer_link_operation(lease, result.map(|result| result.report))
+                    .await
+            }
+        }
     }
 
     /// List counterparties with queued private messages ready for retry.
@@ -193,7 +211,7 @@ where
         counterparty: PubkyPublicKey,
         mut report: OutboundPrivateSendReport,
         lease: PeerLinkOperationLease,
-    ) -> Result<OutboundPrivateSendReport> {
+    ) -> Result<PrivateSendDrainResult> {
         let (session_access, mut link, mut link_state) = self
             .with_storage_operation(Box::pin(async {
                 let (session_access, _) = self.private_link_session_access().await?;
@@ -276,10 +294,12 @@ where
                 )
                 .await?;
             // Wallet callbacks run without the identity-wide lock.
-            report.reservation_cleanup_failures.extend(
-                self.cancel_reservation_records(cancellations, Some(&lease), None)
-                    .await,
-            );
+            if !matches!(step, PrivateSendStep::Complete) {
+                report.reservation_cleanup_failures.extend(
+                    self.cancel_reservation_records(cancellations, Some(&lease), None)
+                        .await,
+                );
+            }
             match step {
                 PrivateSendStep::Idle => break,
                 PrivateSendStep::Skipped(Some(message_id)) => {
@@ -308,10 +328,19 @@ where
                 }
                 PrivateSendStep::Sent { has_more: false } => break,
                 PrivateSendStep::Sent { has_more: true } => {}
+                PrivateSendStep::Complete => {
+                    return Ok(PrivateSendDrainResult {
+                        report,
+                        lease_released: true,
+                    });
+                }
             }
         }
 
-        Ok(report)
+        Ok(PrivateSendDrainResult {
+            report,
+            lease_released: false,
+        })
     }
 
     fn prepare_claimed_private_message(
@@ -393,10 +422,8 @@ where
             .await
         {
             Ok(()) => {
-                let has_more = self
-                    .record_private_send_success(sending, lease, report, retry_thresholds)
-                    .await?;
-                Ok(PrivateSendStep::Sent { has_more })
+                self.record_private_send_success(sending, lease, report, retry_thresholds)
+                    .await
             }
             Err(error) => Ok(PrivateSendStep::Failed(Box::new(sending), error)),
         }
@@ -625,10 +652,10 @@ where
         lease: &PeerLinkOperationLease,
         report: &mut OutboundPrivateSendReport,
         (stale_before, failed_retry_after): (DateTime<Utc>, DateTime<Utc>),
-    ) -> Result<bool> {
+    ) -> Result<PrivateSendStep> {
         let now = self.clock.now();
         let sent = mark_outbound_sent(sending, now);
-        let (link_id, has_more) = self
+        let (link_id, step) = self
             .retry_storage_transaction(|| {
                 let sent = sent.clone();
                 let lease = lease.clone();
@@ -664,7 +691,20 @@ where
                         stale_before,
                         failed_retry_after,
                     );
-                    Ok((link_id, has_more))
+                    let step = if !has_more
+                        && terminal_private_list_reservation_cancellations_in_transaction(
+                            tx,
+                            &sent.counterparty,
+                        )
+                        .is_empty()
+                    {
+                        // No lease-dependent work remains after this committed checkpoint.
+                        tx.release_peer_link_operation(&lease.counterparty, lease.lease_id);
+                        PrivateSendStep::Complete
+                    } else {
+                        PrivateSendStep::Sent { has_more }
+                    };
+                    Ok((link_id, step))
                 }
             })
             .await?;
@@ -682,7 +722,7 @@ where
             }
         }
         report.sent.push(sent.outbound_message_id);
-        Ok(has_more)
+        Ok(step)
     }
 
     async fn record_private_send_error(

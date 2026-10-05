@@ -484,7 +484,8 @@ async fn test_private_inbox_probes_are_bounded_and_isolate_a_slow_failed_peer() 
             .iter()
             .filter(|report| report.error.is_some())
             .count(),
-        1
+        1,
+        "unexpected peer intake errors: {reports:?}"
     );
     assert!(reports[0]
         .error
@@ -650,6 +651,126 @@ async fn test_idle_private_receive_detects_remote_recovery_and_rotation() {
             pair.bob.storage.snapshot().unwrap().linked_peers[&pair.alice.public_key].state,
             LinkedPeerState::RecoveryRequired
         );
+    }
+}
+
+#[tokio::test]
+async fn test_payment_preparation_consumes_confirmations_before_retrying_events() {
+    use paykit_lib::{
+        PaymentAmount, PaymentEndpointIdentifier, PaymentReference, PaymentRequestId,
+        PaymentRequestTerms,
+    };
+
+    for request_bound in [false, true] {
+        let pair = linked_two_party().await;
+        let alice = &pair.alice;
+        let bob = &pair.bob;
+        let terms = PaymentRequestTerms::builder(
+            PaymentAmount::new("0.001", "btc").unwrap(),
+            PaymentReference::new("payment-preparation").unwrap(),
+            vec![PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap()],
+        )
+        .build()
+        .unwrap();
+        let original = alice
+            .sdk
+            .propose_payment_request(bob.public_key.clone(), terms.clone())
+            .await
+            .unwrap();
+        let original_id = original.proposal_outbound_message_id.unwrap();
+        alice
+            .sdk
+            .process_outbound_private_messages(bob.public_key.clone())
+            .await
+            .unwrap();
+        bob.sdk
+            .receive_private_messages(alice.public_key.clone())
+            .await
+            .unwrap();
+        let incoming = bob
+            .sdk
+            .propose_payment_request(alice.public_key.clone(), terms.clone())
+            .await
+            .unwrap();
+        bob.sdk
+            .process_outbound_private_messages(alice.public_key.clone())
+            .await
+            .unwrap();
+
+        let pending = alice
+            .sdk
+            .propose_payment_request(bob.public_key.clone(), terms)
+            .await
+            .unwrap();
+        alice
+            .storage
+            .transaction(|tx| {
+                let mut original = tx
+                    .outbound_private_messages(&bob.public_key)
+                    .into_iter()
+                    .find(|message| message.outbound_message_id == original_id)
+                    .unwrap();
+                assert_eq!(original.status, OutboundPrivateMessageStatus::Sent);
+                assert!(original.confirmed_at.is_none());
+                assert!(original.prepared_send.is_none());
+                original.last_attempt_at =
+                    Some(original.last_attempt_at.unwrap() - chrono::Duration::minutes(1));
+                tx.save_outbound_private_message(original)
+            })
+            .await
+            .unwrap();
+
+        let prepared = if request_bound {
+            alice
+                .sdk
+                .prepare_and_resolve_private_payment_request(
+                    bob.public_key.clone(),
+                    &PaymentRequestId::new(incoming.payment_request_id).unwrap(),
+                    None,
+                    1,
+                )
+                .await
+        } else {
+            alice
+                .sdk
+                .prepare_and_resolve_private_contact_payment(bob.public_key.clone(), None, None, 1)
+                .await
+        }
+        .unwrap();
+        assert_eq!(prepared.receive_report.unwrap().stream_item_ids.len(), 2);
+        let sent = prepared.outbound_report.unwrap();
+        assert!(!sent.attempted.contains(&original_id));
+        assert!(sent
+            .sent
+            .contains(&pending.proposal_outbound_message_id.unwrap()));
+        assert_eq!(sent.attempted.len(), 2);
+        assert_eq!(sent.sent.len(), 2);
+        assert!(sent.failed.is_empty());
+        let state = alice.storage.snapshot().unwrap();
+        let original = state
+            .outbound_private_messages
+            .iter()
+            .find(|message| message.outbound_message_id == original_id)
+            .unwrap();
+        assert_eq!(original.attempt_count, 1);
+        assert!(original.confirmed_at.is_some());
+        assert!(state.peer_link_operation_leases.is_empty());
+
+        let received = bob
+            .sdk
+            .receive_private_messages(alice.public_key.clone())
+            .await
+            .unwrap();
+        assert_eq!(received.stream_item_ids.len(), 2);
+        let state = bob.storage.snapshot().unwrap();
+        let incoming = state
+            .outbound_private_messages
+            .iter()
+            .find(|message| {
+                Some(message.outbound_message_id) == incoming.proposal_outbound_message_id
+            })
+            .unwrap();
+        assert!(incoming.confirmed_at.is_some());
     }
 }
 

@@ -511,7 +511,7 @@ async fn test_shared_operations_transaction_counts() {
         .await
         .unwrap();
     let clear_transactions = transactions.swap(0, Ordering::SeqCst);
-    assert_eq!(clear_transactions, 14);
+    assert_eq!(clear_transactions, 13);
     assert_eq!(cleared.cleared.len(), 1);
     assert!(cleared.failed_to_queue.is_empty());
     assert!(cleared.failed_to_deliver.is_empty());
@@ -558,7 +558,7 @@ async fn test_shared_operations_transaction_counts() {
         .unwrap();
     let send_transactions = transactions.swap(0, Ordering::SeqCst);
     assert!(
-        send_transactions <= 11,
+        send_transactions <= 10,
         "request send used {send_transactions} transactions"
     );
     assert_eq!(sent.sent.len(), 1);
@@ -1085,7 +1085,7 @@ async fn test_idle_polling_reads_shared_state_once_without_rewriting_it() {
         assert!(prepared.outbound_report.unwrap().attempted.is_empty());
         assert!(prepared.receive_report.unwrap().stream_item_ids.is_empty());
         assert!(prepared.resolution.payable_endpoints.is_empty());
-        assert_eq!(transactions.swap(0, Ordering::SeqCst), 7);
+        assert_eq!(transactions.swap(0, Ordering::SeqCst), 6);
         let requests = sdk.payment_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].counterparty, pair.bob.public_key);
@@ -2924,6 +2924,7 @@ async fn test_private_sends_survive_restart_at_checkpoint_and_publish_boundaries
         PrivateOperationCrashPoint::PreparedStateRejected,
         PrivateOperationCrashPoint::PreparedStateCommitted,
         PrivateOperationCrashPoint::CiphertextPublished,
+        PrivateOperationCrashPoint::SentCheckpointCommitted,
     ] {
         assert_private_send_survives_restart(&pair, crash_point).await;
         pair.bob
@@ -2937,6 +2938,65 @@ async fn test_private_sends_survive_restart_at_checkpoint_and_publish_boundaries
             .await
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn test_private_send_retains_lease_for_pending_reservation_cleanup() {
+    let pair = linked_homeserver_shared_pair().await;
+    let obsolete = pair
+        .bitkit
+        .sdk
+        .enqueue_private_payment_list_with_reservations(
+            pair.bob.public_key.clone(),
+            vec![PrivatePaymentEndpointReservation {
+                reservation_id: "obsolete-invoice".into(),
+                receiving_detail: private_receiving_detail("btc-lightning-bolt11", "ln-obsolete"),
+                expires_at: None,
+                attribution: Default::default(),
+            }],
+        )
+        .await
+        .unwrap();
+    pair.bitkit
+        .storage
+        .transaction(|tx| {
+            let mut obsolete = obsolete.clone();
+            obsolete.status = OutboundPrivateMessageStatus::Invalid;
+            obsolete.last_error = Some("invalid invoice".into());
+            tx.save_outbound_private_message(obsolete)
+        })
+        .await
+        .unwrap();
+    pair.bitkit.adapter.set_fail_reservation_cancellation(true);
+    let request = pair
+        .bitkit
+        .sdk
+        .propose_payment_request(pair.bob.public_key.clone(), recurring_request_terms())
+        .await
+        .unwrap();
+    let (sdk, reached) = pair.bitkit.crashable_sdk(
+        PrivateOperationCrashPoint::SentCheckpointCommitted,
+        Utc::now(),
+    );
+    let counterparty = pair.bob.public_key.clone();
+    let send =
+        tokio::spawn(async move { sdk.process_outbound_private_messages(counterparty).await });
+    tokio::time::timeout(Duration::from_secs(10), reached)
+        .await
+        .unwrap()
+        .unwrap();
+    send.abort();
+    assert!(send.await.unwrap_err().is_cancelled());
+
+    let state = wait_for_shared_state_after_crash(&pair.bitkit.storage).await;
+    assert!(state.outbound_private_messages.iter().any(|message| {
+        Some(message.outbound_message_id) == request.proposal_outbound_message_id
+            && message.status == OutboundPrivateMessageStatus::Sent
+    }));
+    assert_eq!(state.payment_endpoint_reservations.len(), 1);
+    assert!(state
+        .peer_link_operation_leases
+        .contains_key(&pair.bob.public_key));
 }
 
 #[tokio::test]
@@ -3333,7 +3393,7 @@ impl SharedStateTestUser {
         let sdk = PaykitSdk::with_clock(
             storage,
             provider,
-            TestnetPaymentAdapter::default(),
+            self.adapter.clone(),
             PaykitSdkConfig::new(self.app_id.clone()).unwrap(),
             FixedTestClock(now),
         );
@@ -3467,6 +3527,7 @@ async fn assert_private_send_survives_restart(
     let initial_link =
         pair.bitkit.storage_state().await.encrypted_link_states[&pair.bob.public_key].clone();
     let rejected = crash_point == PrivateOperationCrashPoint::PreparedStateRejected;
+    let completed = crash_point == PrivateOperationCrashPoint::SentCheckpointCommitted;
     let request = pair
         .bitkit
         .sdk
@@ -3502,15 +3563,24 @@ async fn assert_private_send_survives_restart(
         crashed_message.status,
         if rejected {
             OutboundPrivateMessageStatus::Pending
+        } else if completed {
+            OutboundPrivateMessageStatus::Sent
         } else {
             OutboundPrivateMessageStatus::Sending
         }
     );
-    assert_eq!(crashed_message.prepared_send.is_some(), !rejected);
+    assert_eq!(
+        crashed_message.prepared_send.is_some(),
+        !rejected && !completed
+    );
     assert_eq!(crashed_message.attempt_count, if rejected { 0 } else { 1 });
-    assert!(crashed_state
-        .peer_link_operation_leases
-        .contains_key(&pair.bob.public_key));
+    assert_eq!(
+        crashed_state
+            .peer_link_operation_leases
+            .contains_key(&pair.bob.public_key),
+        !completed,
+        "Sent and the final lease release must commit together"
+    );
     let crashed_link = crashed_state
         .encrypted_link_states
         .get(&pair.bob.public_key)
@@ -3534,7 +3604,8 @@ async fn assert_private_send_survives_restart(
         | PrivateOperationCrashPoint::PreparedStateCommitted => {
             assert!(received_before_restart.stream_item_ids.is_empty());
         }
-        PrivateOperationCrashPoint::CiphertextPublished => {
+        PrivateOperationCrashPoint::CiphertextPublished
+        | PrivateOperationCrashPoint::SentCheckpointCommitted => {
             assert_eq!(received_before_restart.stream_item_ids.len(), 1);
         }
         PrivateOperationCrashPoint::PrivateReceiveCheckpointCommitted => {
@@ -3544,13 +3615,18 @@ async fn assert_private_send_survives_restart(
 
     let restarted = pair
         .bitkit
-        .restarted_sdk(crash_time + chrono::Duration::seconds(61));
+        .restarted_sdk(crash_time + chrono::Duration::seconds(if completed { 1 } else { 61 }));
     let report = restarted
         .process_outbound_private_messages(pair.bob.public_key.clone())
         .await
         .expect("the restarted application should reclaim and finish the prepared send");
-    assert_eq!(report.attempted, vec![outbound_message_id]);
-    assert_eq!(report.sent, vec![outbound_message_id]);
+    let expected_messages = if completed {
+        Vec::new()
+    } else {
+        vec![outbound_message_id]
+    };
+    assert_eq!(report.attempted, expected_messages);
+    assert_eq!(report.sent, expected_messages);
 
     let received_after_restart = pair
         .bob
@@ -3563,7 +3639,8 @@ async fn assert_private_send_survives_restart(
         | PrivateOperationCrashPoint::PreparedStateCommitted => {
             assert_eq!(received_after_restart.stream_item_ids.len(), 1);
         }
-        PrivateOperationCrashPoint::CiphertextPublished => {
+        PrivateOperationCrashPoint::CiphertextPublished
+        | PrivateOperationCrashPoint::SentCheckpointCommitted => {
             assert!(received_after_restart.stream_item_ids.is_empty());
         }
         PrivateOperationCrashPoint::PrivateReceiveCheckpointCommitted => {
@@ -3589,7 +3666,10 @@ async fn assert_private_send_survives_restart(
         .find(|message| message.outbound_message_id == outbound_message_id)
         .expect("the completed outbound record should remain durable");
     assert_eq!(final_message.status, OutboundPrivateMessageStatus::Sent);
-    assert_eq!(final_message.attempt_count, if rejected { 1 } else { 2 });
+    assert_eq!(
+        final_message.attempt_count,
+        if rejected || completed { 1 } else { 2 }
+    );
     assert!(final_message.prepared_send.is_none());
     assert!(final_state.peer_link_operation_leases.is_empty());
     let final_link = final_state
@@ -3729,6 +3809,7 @@ enum PrivateOperationCrashPoint {
     PreparedStateRejected,
     PreparedStateCommitted,
     CiphertextPublished,
+    SentCheckpointCommitted,
     PrivateReceiveCheckpointCommitted,
 }
 
@@ -3819,7 +3900,11 @@ impl StorageAdapter for OneShotCrashStorage {
                     observed_receive.store(true, Ordering::SeqCst);
                 }
                 if result.is_ok()
-                    && crash_point == PrivateOperationCrashPoint::CiphertextPublished
+                    && matches!(
+                        crash_point,
+                        PrivateOperationCrashPoint::CiphertextPublished
+                            | PrivateOperationCrashPoint::SentCheckpointCommitted
+                    )
                     && after.outbound_private_messages.iter().any(|message| {
                         message.status == OutboundPrivateMessageStatus::Sent
                             && before.outbound_private_messages.iter().any(|previous| {
@@ -3830,17 +3915,21 @@ impl StorageAdapter for OneShotCrashStorage {
                     })
                 {
                     observed_sent.store(true, Ordering::SeqCst);
-                    // Keep the prepared send durable without committing its acknowledgement.
-                    return Err(PaykitSdkError::Storage {
-                        context: "injected interruption after ciphertext publication".into(),
-                        source: None,
-                    });
+                    if crash_point == PrivateOperationCrashPoint::CiphertextPublished {
+                        // Keep the prepared send durable without committing its acknowledgement.
+                        return Err(PaykitSdkError::Storage {
+                            context: "injected interruption after ciphertext publication".into(),
+                            source: None,
+                        });
+                    }
                 }
                 result
             }))
             .await;
 
-        if sent_in_transaction.load(Ordering::SeqCst) {
+        if sent_in_transaction.load(Ordering::SeqCst)
+            && (crash_point == PrivateOperationCrashPoint::CiphertextPublished || result.is_ok())
+        {
             self.stop_at_crash_boundary().await;
         }
         if prepared_in_transaction.load(Ordering::SeqCst)

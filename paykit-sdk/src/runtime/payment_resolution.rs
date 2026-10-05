@@ -294,31 +294,10 @@ where
             };
         }
 
-        // A remote recovery marker can change while the local inbox checkpoint remains current.
-        if private_allowed && private_live {
-            match self
-                .observe_remote_recovery_marker_from_checkpoint(
-                    &counterparty,
-                    session_access.as_ref().expect("live private session"),
-                    recovery_checkpoint,
-                )
-                .await
-            {
-                Ok(_) => {}
-                Err(PaykitSdkError::RecoveryRequired { .. }) => {
-                    state = PrivatePaymentResolutionState::RecoveryPending;
-                    private_allowed = false;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-
-        drop(session_access);
-
         let needs_private_lists = payment_request_terms
             .as_ref()
             .is_none_or(|terms| terms.payment_endpoints.is_none());
-        let read_private_state = |tx: &dyn StorageTransaction| {
+        let read_private_state = |tx: &dyn StorageTransaction, private_allowed| {
             let allowed = if private_allowed && private_live {
                 let peer_state = tx.linked_peer(&counterparty).map(|peer| peer.state);
                 let has_link = tx
@@ -343,7 +322,57 @@ where
                 allowed && prepared_inbox.is_some_and(|checkpoint| checkpoint.is_current(tx)),
             ))
         };
-        let (context, (allowed, items, inbox_is_current)) = if private_live {
+
+        let mut projection = None;
+        // A remote recovery marker can change while the local inbox checkpoint remains current.
+        if private_allowed && private_live {
+            let access = session_access.as_ref().expect("live private session");
+            let observation = async {
+                let projection = self
+                    .unchanged_link_checkpoint_with(
+                        &counterparty,
+                        access,
+                        recovery_checkpoint,
+                        self.fetch_counterparty_app_authorization(&counterparty),
+                        |tx, _, observation| {
+                            // Registry failures propagate separately from recovery observation.
+                            let observation = match observation {
+                                Ok(observation) => observation,
+                                Err(error) => return Ok(Err(error)),
+                            };
+                            let context = observation.apply(tx, &counterparty);
+                            Ok(Ok((context, read_private_state(tx, true)?)))
+                        },
+                    )
+                    .await?;
+                if projection.is_none() {
+                    self.observe_remote_recovery_marker_from_checkpoint(
+                        &counterparty,
+                        access,
+                        None,
+                    )
+                    .await?;
+                }
+                Ok(projection)
+            }
+            .await;
+            match observation {
+                Ok(value) => projection = value.transpose()?,
+                Err(PaykitSdkError::RecoveryRequired { .. }) => {
+                    state = PrivatePaymentResolutionState::RecoveryPending;
+                    private_allowed = false;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        drop(session_access);
+
+        let read_private_state =
+            |tx: &dyn StorageTransaction| read_private_state(tx, private_allowed);
+        let (context, (allowed, items, inbox_is_current)) = if let Some(projection) = projection {
+            projection
+        } else if private_live {
             self.counterparty_app_authorization_context_with(&counterparty, read_private_state)
                 .await?
         } else {
@@ -672,17 +701,18 @@ where
 
         if link_report.is_some() {
             for _ in 0..PREPARE_PRIVATE_PAYMENT_SYNC_ROUND_LIMIT {
-                let outbound = self
-                    .process_outbound_private_messages(counterparty.clone())
-                    .await?;
-                let outbound_progress = outbound_report_made_progress(&outbound);
-                merge_outbound_report(&mut outbound_report, outbound);
-
+                // Consume available confirmations before retrying published events.
                 let (received, checkpoint) = self
                     .receive_private_messages_with_checkpoint(counterparty.clone())
                     .await?;
                 let receive_progress = receive_report_made_progress(&received);
                 merge_receive_report(&mut receive_report, received);
+
+                let outbound = self
+                    .process_outbound_private_messages(counterparty.clone())
+                    .await?;
+                let outbound_progress = outbound_report_made_progress(&outbound);
+                merge_outbound_report(&mut outbound_report, outbound);
 
                 if !outbound_progress && !receive_progress {
                     inbox = checkpoint;

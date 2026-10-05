@@ -51,6 +51,54 @@ pub(super) struct CounterpartyAppAuthorizationContext {
     pub(super) receipt_apps: Option<Vec<paykit_lib::PaykitAppId>>,
 }
 
+pub(super) enum CounterpartyAppAuthorizationObservation {
+    Public(Option<Box<paykit_lib::PaykitAppRegistry>>),
+    Cached,
+}
+
+impl CounterpartyAppAuthorizationObservation {
+    pub(super) fn apply(
+        self,
+        tx: &mut dyn StorageTransaction,
+        counterparty: &PubkyPublicKey,
+    ) -> CounterpartyAppAuthorizationContext {
+        let (registry, apps) = match self {
+            Self::Public(registry) => {
+                let apps = registry
+                    .as_ref()
+                    .map(|registry| {
+                        registry
+                            .apps()
+                            .iter()
+                            .map(|(app_id, app)| (app_id.clone(), app.capabilities()))
+                            .collect::<HashMap<_, _>>()
+                    })
+                    .unwrap_or_default();
+                if tx
+                    .load_identity_state()
+                    .is_some_and(|state| state.public_key.is_some())
+                {
+                    tx.save_authorized_paykit_apps(counterparty.clone(), apps.clone());
+                }
+                (registry.map(|registry| *registry), Some(apps))
+            }
+            Self::Cached => (None, tx.authorized_paykit_apps(counterparty)),
+        };
+        CounterpartyAppAuthorizationContext {
+            registry,
+            private_apps: apps
+                .as_ref()
+                .map(|apps| authorized_app_ids(apps, |capabilities| capabilities.private_payments)),
+            payment_request_apps: apps
+                .as_ref()
+                .map(|apps| authorized_app_ids(apps, |capabilities| capabilities.payment_requests)),
+            receipt_apps: apps
+                .as_ref()
+                .map(|apps| authorized_app_ids(apps, |capabilities| capabilities.receipts)),
+        }
+    }
+}
+
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
     S: StorageAdapter,
@@ -164,54 +212,29 @@ where
         counterparty: &PubkyPublicKey,
         read: impl FnOnce(&dyn StorageTransaction) -> Result<T> + Send,
     ) -> Result<(CounterpartyAppAuthorizationContext, T)> {
+        let observation = self
+            .fetch_counterparty_app_authorization(counterparty)
+            .await?;
+        self.storage
+            .transaction(|tx| Ok((observation.apply(tx, counterparty), read(tx)?)))
+            .await
+    }
+
+    pub(super) async fn fetch_counterparty_app_authorization(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<CounterpartyAppAuthorizationObservation> {
         if let Some(public_storage) = self.pubky.load_public_storage().await? {
             let registry = paykit_lib::get_paykit_app_registry(
                 &public_storage,
                 &counterparty.to_public_key()?,
             )
             .await?;
-            let apps = registry
-                .as_ref()
-                .map(|registry| {
-                    registry
-                        .apps()
-                        .iter()
-                        .map(|(app_id, app)| (app_id.clone(), app.capabilities()))
-                        .collect::<HashMap<_, _>>()
-                })
-                .unwrap_or_default();
-            let private_apps =
-                authorized_app_ids(&apps, |capabilities| capabilities.private_payments);
-            let payment_request_apps =
-                authorized_app_ids(&apps, |capabilities| capabilities.payment_requests);
-            let receipt_apps = authorized_app_ids(&apps, |capabilities| capabilities.receipts);
-            let value = self
-                .storage
-                .transaction({
-                    let counterparty = counterparty.clone();
-                    move |tx| {
-                        if tx
-                            .load_identity_state()
-                            .is_some_and(|state| state.public_key.is_some())
-                        {
-                            tx.save_authorized_paykit_apps(counterparty, apps);
-                        }
-                        read(tx)
-                    }
-                })
-                .await?;
-            Ok((
-                CounterpartyAppAuthorizationContext {
-                    registry,
-                    private_apps: Some(private_apps),
-                    payment_request_apps: Some(payment_request_apps),
-                    receipt_apps: Some(receipt_apps),
-                },
-                value,
+            Ok(CounterpartyAppAuthorizationObservation::Public(
+                registry.map(Box::new),
             ))
         } else {
-            self.cached_counterparty_app_authorization_context_with(counterparty, read)
-                .await
+            Ok(CounterpartyAppAuthorizationObservation::Cached)
         }
     }
 
@@ -229,25 +252,14 @@ where
         counterparty: &PubkyPublicKey,
         read: impl FnOnce(&dyn StorageTransaction) -> Result<T> + Send,
     ) -> Result<(CounterpartyAppAuthorizationContext, T)> {
-        let (apps, value) = self
-            .storage
-            .transaction(|tx| Ok((tx.authorized_paykit_apps(counterparty), read(tx)?)))
-            .await?;
-        Ok((
-            CounterpartyAppAuthorizationContext {
-                registry: None,
-                private_apps: apps.as_ref().map(|apps| {
-                    authorized_app_ids(apps, |capabilities| capabilities.private_payments)
-                }),
-                payment_request_apps: apps.as_ref().map(|apps| {
-                    authorized_app_ids(apps, |capabilities| capabilities.payment_requests)
-                }),
-                receipt_apps: apps
-                    .as_ref()
-                    .map(|apps| authorized_app_ids(apps, |capabilities| capabilities.receipts)),
-            },
-            value,
-        ))
+        self.storage
+            .transaction(|tx| {
+                Ok((
+                    CounterpartyAppAuthorizationObservation::Cached.apply(tx, counterparty),
+                    read(tx)?,
+                ))
+            })
+            .await
     }
 
     pub(super) async fn authorized_receipt_apps_for_peer(
