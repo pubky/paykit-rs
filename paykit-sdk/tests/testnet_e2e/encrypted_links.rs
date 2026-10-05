@@ -53,6 +53,19 @@ async fn test_link_handshake_two_party_reaches_linked() {
         Some(EncryptedLinkHandshakeRole::Responder)
     );
 
+    let before = pair.bob.storage.snapshot().unwrap();
+    let waiting = pair
+        .bob
+        .sdk
+        .ensure_link_with_peer(pair.alice.public_key.clone(), 1)
+        .await
+        .unwrap();
+    let after = pair.bob.storage.snapshot().unwrap();
+    assert_eq!(waiting, accepted);
+    assert_eq!(after.encrypted_link_states, before.encrypted_link_states);
+    assert_eq!(after.linked_peers, before.linked_peers);
+    assert!(after.peer_link_operation_leases.is_empty());
+
     drive_link_to_linked(&pair.alice, &pair.bob).await;
 
     let peers = pair

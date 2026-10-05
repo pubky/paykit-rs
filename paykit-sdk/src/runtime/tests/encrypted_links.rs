@@ -427,10 +427,9 @@ async fn test_ensure_link_recovery_required_ignores_stale_link_snapshot() {
     );
 
     let result = sdk
-        .ensure_link_with_peer_with_claim(
+        .prepare_link_handshake_with_claim(
             counterparty.clone(),
             EncryptedLinkHandshakeRole::Initiator,
-            0,
             lease,
         )
         .await;
@@ -505,10 +504,9 @@ async fn test_ensure_link_recovery_required_ignores_stale_handshake_snapshot() {
     );
 
     let result = sdk
-        .ensure_link_with_peer_with_claim(
+        .prepare_link_handshake_with_claim(
             counterparty.clone(),
             EncryptedLinkHandshakeRole::Responder,
-            0,
             lease,
         )
         .await;

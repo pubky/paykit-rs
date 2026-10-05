@@ -245,8 +245,8 @@ where
                     source: None,
                 });
             }
-            if record.state == LinkedPeerState::Linked
-                && state == LinkedPeerState::Linked
+            if matches!(state, LinkedPeerState::Linking | LinkedPeerState::Linked)
+                && record.state == state
                 && record.failure_count == 0
             {
                 return Ok(record);
@@ -576,10 +576,11 @@ where
                 .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
             ensure_not_blocked(&peer)?;
 
-            if let Some(existing) = tx.encrypted_link_state(&counterparty) {
+            let existing = tx.encrypted_link_state(&counterparty);
+            if let Some(existing) = existing.as_ref() {
                 if existing.generation != expected_generation {
                     let report =
-                        report_current_link_state(counterparty.clone(), &mut peer, &existing, now);
+                        report_current_link_state(counterparty.clone(), &mut peer, existing, now);
                     tx.save_linked_peer(peer);
                     return Ok(report);
                 }
@@ -589,6 +590,21 @@ where
                 let snapshot =
                     paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(&handshake_snapshot)?;
                 require_recovery_context(&peer, snapshot.recovery_context())?;
+            }
+            // Waiting for the peer is not a new handshake checkpoint.
+            if let Some(existing) = existing.filter(|existing| {
+                peer.state == LinkedPeerState::Linking
+                    && peer.failure_count == 0
+                    && existing.link_snapshot.is_none()
+                    && existing.handshake_role == Some(handshake_role)
+                    && existing.handshake_snapshot.as_deref() == Some(handshake_snapshot.as_slice())
+            }) {
+                return Ok(LinkedPeerHandshakeReport {
+                    counterparty,
+                    state: peer.state,
+                    generation: existing.generation,
+                    handshake_role: existing.handshake_role,
+                });
             }
             peer.state = LinkedPeerState::Linking;
             peer.last_sync_at = Some(now);

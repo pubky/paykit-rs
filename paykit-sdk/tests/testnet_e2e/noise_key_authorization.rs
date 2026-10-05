@@ -359,6 +359,12 @@ async fn test_links_require_authorization_and_pin_verified_generations() {
             .await,
         Err(PaykitSdkError::NotFound { .. })
     ));
+    assert!(alice
+        .storage
+        .snapshot()
+        .unwrap()
+        .peer_link_operation_leases
+        .is_empty());
     assert!(matches!(
         bob.sdk
             .ensure_link_with_peer(alice.public_key.clone(), 0)

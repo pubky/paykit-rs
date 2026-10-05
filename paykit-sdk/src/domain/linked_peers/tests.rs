@@ -208,6 +208,54 @@ async fn test_save_link_handshake_state_marks_peer_linking() {
         .unwrap();
     assert_eq!(link_state.handshake_snapshot, Some(vec![1, 2, 3]));
     assert!(link_state.link_snapshot.is_none());
+
+    let unchanged = save_linked_peer_state(
+        &storage,
+        counterparty.clone(),
+        LinkedPeerState::Linking,
+        timestamp() + chrono::Duration::minutes(2),
+    )
+    .await
+    .unwrap();
+    assert_eq!(unchanged, peer);
+
+    let unchanged = save_link_handshake_state_if_generation(
+        &storage,
+        counterparty.clone(),
+        EncryptedLinkHandshakeRole::Initiator,
+        vec![1, 2, 3],
+        report.generation,
+        timestamp() + chrono::Duration::minutes(2),
+    )
+    .await
+    .unwrap();
+    assert_eq!(unchanged, report);
+    assert_eq!(
+        load_encrypted_link_state(&storage, &counterparty)
+            .await
+            .unwrap(),
+        Some(link_state)
+    );
+
+    let advanced = save_link_handshake_state_if_generation(
+        &storage,
+        counterparty.clone(),
+        EncryptedLinkHandshakeRole::Initiator,
+        vec![4, 5, 6],
+        report.generation,
+        timestamp() + chrono::Duration::minutes(3),
+    )
+    .await
+    .unwrap();
+    assert_eq!(advanced.generation, report.generation + 1);
+    assert_eq!(
+        load_encrypted_link_state(&storage, &counterparty)
+            .await
+            .unwrap()
+            .unwrap()
+            .handshake_snapshot,
+        Some(vec![4, 5, 6])
+    );
 }
 
 #[tokio::test]
