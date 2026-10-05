@@ -30,7 +30,7 @@ where
         if private_live {
             self.observe_remote_recovery_marker_for_cached_private_state(
                 counterparty,
-                session_access.as_deref(),
+                session_access.as_ref(),
             )
             .await?;
         }

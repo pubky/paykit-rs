@@ -360,7 +360,7 @@ where
     pub(super) async fn observe_remote_recovery_marker_for_cached_private_state(
         &self,
         counterparty: &PubkyPublicKey,
-        session_access: Option<&PubkySessionAccess>,
+        session_access: Option<&GuardedSessionAccess>,
     ) -> Result<()> {
         let session_access = match session_access {
             Some(session_access) => session_access,
@@ -381,28 +381,34 @@ where
     pub(super) async fn observe_remote_recovery_marker_with_session(
         &self,
         counterparty: &PubkyPublicKey,
-        session_access: &PubkySessionAccess,
+        session_access: &GuardedSessionAccess,
     ) -> Result<EncryptedLinkRecoveryMarkerReport> {
-        let lease = self.claim_peer_link_operation(counterparty).await?;
-        let result = async {
-            self.ensure_peer_not_blocked(counterparty).await?;
-            let remote_key = match self.counterparty_noise_public_key(counterparty).await {
-                Ok(key) => key,
-                Err(PaykitSdkError::NotFound { .. }) => return Ok(false),
-                Err(err) => return Err(err),
-            };
-            self.observe_remote_recovery_marker_with_lease(
-                counterparty,
-                session_access,
-                &lease,
-                &remote_key,
-            )
-            .await
-        }
-        .await;
-        let changed = self.finish_peer_link_operation(lease, result).await?;
-        self.recovery_marker_report_or_default(counterparty, changed)
-            .await
+        self.with_guarded_storage_operation(
+            Arc::clone(&session_access._guard),
+            Box::pin(async {
+                let lease = self.claim_peer_link_operation(counterparty).await?;
+                let result = async {
+                    self.ensure_peer_not_blocked(counterparty).await?;
+                    let remote_key = match self.counterparty_noise_public_key(counterparty).await {
+                        Ok(key) => key,
+                        Err(PaykitSdkError::NotFound { .. }) => return Ok(false),
+                        Err(err) => return Err(err),
+                    };
+                    self.observe_remote_recovery_marker_with_lease(
+                        counterparty,
+                        session_access,
+                        &lease,
+                        &remote_key,
+                    )
+                    .await
+                }
+                .await;
+                let changed = self.finish_peer_link_operation(lease, result).await?;
+                self.recovery_marker_report_or_default(counterparty, changed)
+                    .await
+            }),
+        )
+        .await
     }
 
     pub(super) async fn observe_remote_recovery_marker_with_lease(
