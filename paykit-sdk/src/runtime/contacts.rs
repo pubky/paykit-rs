@@ -20,10 +20,43 @@ where
                         source: None,
                     });
                 }
-                let existing = tx.contact_record(&update.public_key);
-                let record = ContactRecord::from_update(update, existing, now);
-                tx.save_contact_record(record.clone());
-                Ok(record)
+                Ok(save_contact_in_transaction(tx, update, now))
+            })
+            .await
+    }
+
+    /// Save or update Contact Records in one atomic storage transaction.
+    ///
+    /// All updates and the initialized identity are checked before any record
+    /// changes. Records are returned in input order. Duplicate keys are applied
+    /// in that order, so the last update wins in storage; each returned record
+    /// reflects its corresponding update. All records use one operation timestamp.
+    /// An empty batch still requires an initialized identity and leaves stored
+    /// state unchanged.
+    ///
+    /// Existing profile and Public Contact Marker metadata is preserved. This
+    /// does not publish markers or unblock peers.
+    pub async fn save_contacts(&self, updates: Vec<ContactUpdate>) -> Result<Vec<ContactRecord>> {
+        for update in &updates {
+            update.validate()?;
+        }
+        let now = self.clock.now();
+        self.storage
+            .transaction(move |tx| {
+                let local_public_key = initialized_identity_in_transaction(tx, "save contacts")?;
+                if updates
+                    .iter()
+                    .any(|update| update.public_key == local_public_key)
+                {
+                    return Err(PaykitSdkError::Policy {
+                        context: "cannot save the local Paykit identity as a contact".into(),
+                        source: None,
+                    });
+                }
+                Ok(updates
+                    .into_iter()
+                    .map(|update| save_contact_in_transaction(tx, update, now))
+                    .collect())
             })
             .await
     }
@@ -349,6 +382,17 @@ where
             })
             .await
     }
+}
+
+fn save_contact_in_transaction(
+    tx: &mut dyn StorageTransaction,
+    update: ContactUpdate,
+    now: DateTime<Utc>,
+) -> ContactRecord {
+    let existing = tx.contact_record(&update.public_key);
+    let record = ContactRecord::from_update(update, existing, now);
+    tx.save_contact_record(record.clone());
+    record
 }
 
 fn require_pending_contact_marker(

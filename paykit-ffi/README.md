@@ -418,6 +418,12 @@ bootstrap.approveAuthWithCompanionClaim(
 - `PaykitSdk.saveContact`, `contactRecord`, `contactRecords`, and
   `removeContact` — manage Contact Records. Each contact is one Pubky
   identity.
+- `PaykitSdk.saveContacts(updates)` — save a batch in one atomic storage
+  transaction after validating every update and the initialized identity. Results
+  follow input order; duplicate keys are applied in order, with the last update
+  winning in storage. Existing profile and Public Contact Marker metadata is
+  preserved. Marker publication and unblocking peers remain separate operations.
+  An empty batch still requires an initialized identity and leaves state unchanged.
 - `PaykitSdk.fetchPubkyProfile` and bounded `fetchPubkyFollows` — read Pubky
   app profile and follow data.
 - `PaykitSdk.resolveProfile` and `currentProfile` — resolve profile display

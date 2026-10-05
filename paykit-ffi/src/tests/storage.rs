@@ -40,6 +40,118 @@ impl FfiSdkPubkySessionProvider for NoSessionProvider {
 }
 
 #[tokio::test]
+async fn test_save_contacts_validates_batch_before_atomic_write() {
+    struct ContactStore {
+        snapshot: Mutex<FfiSdkStateBlobSnapshot>,
+    }
+
+    impl FfiSdkStateBlobStore for ContactStore {
+        fn load_state_blob(&self) -> Result<Option<FfiSdkStateBlobSnapshot>, PaykitFfiError> {
+            Ok(Some(self.snapshot.lock().unwrap().clone()))
+        }
+
+        fn save_state_blob_atomically(
+            &self,
+            blob: Arc<FfiSdkStateBlob>,
+            expected_revision: Option<String>,
+        ) -> Result<String, PaykitFfiError> {
+            let mut snapshot = self.snapshot.lock().unwrap();
+            assert_eq!(
+                expected_revision.as_deref(),
+                Some(snapshot.revision.as_str())
+            );
+            let revision = next_test_revision(Some(&snapshot.revision));
+            *snapshot = FfiSdkStateBlobSnapshot {
+                blob,
+                revision: revision.clone(),
+            };
+            Ok(revision)
+        }
+    }
+
+    let state = outbound_state(&[], 0);
+    let store = Arc::new(ContactStore {
+        snapshot: Mutex::new(FfiSdkStateBlobSnapshot {
+            blob: Arc::new(FfiSdkStateBlob::new(encode_storage_state(&state).unwrap())),
+            revision: "revision-0".into(),
+        }),
+    });
+    let sdk = FfiPaykitSdk::new(
+        store.clone(),
+        Arc::new(NoSessionProvider),
+        default_config("bitkit".into()).unwrap(),
+    )
+    .unwrap();
+    let first = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let second = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    for invalid in [
+        FfiContactUpdate {
+            public_key: "not-a-public-key".into(),
+            label: None,
+        },
+        FfiContactUpdate {
+            public_key: second.to_app_key(),
+            label: Some("x".repeat(129)),
+        },
+    ] {
+        let result = sdk
+            .save_contacts(vec![
+                FfiContactUpdate {
+                    public_key: first.to_app_key(),
+                    label: Some("Must not be saved".into()),
+                },
+                invalid,
+            ])
+            .await;
+        assert!(result.is_err());
+        let snapshot = store.load_state_blob().unwrap().unwrap();
+        assert_eq!(snapshot.revision, "revision-0");
+        assert_eq!(
+            decode_storage_state(&snapshot.blob.export_bytes()).unwrap(),
+            state
+        );
+    }
+
+    let records = sdk
+        .save_contacts(vec![
+            FfiContactUpdate {
+                public_key: first.as_str().into(),
+                label: Some("First update".into()),
+            },
+            FfiContactUpdate {
+                public_key: second.to_app_key(),
+                label: None,
+            },
+            FfiContactUpdate {
+                public_key: first.to_app_key(),
+                label: Some("Last update".into()),
+            },
+        ])
+        .await
+        .unwrap();
+
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0].public_key, first.to_app_key());
+    assert_eq!(records[1].public_key, second.to_app_key());
+    assert_eq!(records[2].public_key, first.to_app_key());
+    assert_eq!(records[0].label.as_deref(), Some("First update"));
+    assert_eq!(records[2].label.as_deref(), Some("Last update"));
+    let snapshot = store.load_state_blob().unwrap().unwrap();
+    assert_eq!(snapshot.revision, "revision-1");
+    let stored = decode_storage_state(&snapshot.blob.export_bytes()).unwrap();
+    assert_eq!(stored.contact_records.len(), 2);
+    assert_eq!(
+        stored.contact_records[&first].label.as_deref(),
+        Some("Last update")
+    );
+    assert!(sdk.save_contacts(Vec::new()).await.unwrap().is_empty());
+    assert_eq!(
+        store.load_state_blob().unwrap().unwrap().revision,
+        "revision-1"
+    );
+}
+
+#[tokio::test]
 async fn test_shared_storage_operation_requires_active_session() {
     let config = default_pubky_client_config();
     let storage = FfiSdkStorageAdapter::PubkyShared(PubkySharedStateStorage::new(

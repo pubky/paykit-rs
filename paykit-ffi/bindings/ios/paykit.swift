@@ -2309,6 +2309,17 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func saveContact(update: ContactUpdate) async throws  -> ContactRecord
 
     /**
+     * Save or update Contact Records in one atomic storage transaction.
+     *
+     * All updates are validated before any record changes. Records are returned
+     * in input order, including duplicates; the last update for a key wins in
+     * storage. An empty batch still requires an initialized identity and leaves
+     * stored state unchanged. Existing profile and Public Contact Marker metadata
+     * is preserved; marker publication and unblocking peers remain separate.
+     */
+    func saveContacts(updates: [ContactUpdate]) async throws  -> [ContactRecord]
+
+    /**
      * Persist the wallet-selected candidate under the expected association revision.
      */
     func selectAllowance(scope: PaymentRequestScope, selection: AllowanceSelectionInput) async throws  -> AllowanceAssociationRecord
@@ -4698,6 +4709,32 @@ open func saveContact(update: ContactUpdate)async throws  -> ContactRecord  {
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeContactRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Save or update Contact Records in one atomic storage transaction.
+     *
+     * All updates are validated before any record changes. Records are returned
+     * in input order, including duplicates; the last update for a key wins in
+     * storage. An empty batch still requires an initialized identity and leaves
+     * stored state unchanged. Existing profile and Public Contact Marker metadata
+     * is preserved; marker publication and unblocking peers remain separate.
+     */
+open func saveContacts(updates: [ContactUpdate])async throws  -> [ContactRecord]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_save_contacts(
+                    self.uniffiClonePointer(),
+                    FfiConverterSequenceTypeContactUpdate.lower(updates)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeContactRecord.lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -23557,6 +23594,31 @@ fileprivate struct FfiConverterSequenceTypeContactRecord: FfiConverterRustBuffer
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeContactUpdate: FfiConverterRustBuffer {
+    typealias SwiftType = [ContactUpdate]
+
+    public static func write(_ value: [ContactUpdate], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeContactUpdate.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ContactUpdate] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ContactUpdate]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeContactUpdate.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeConversionRate: FfiConverterRustBuffer {
     typealias SwiftType = [ConversionRate]
 
@@ -25133,6 +25195,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contact() != 1121) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contacts() != 6516) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_select_allowance() != 13682) {
