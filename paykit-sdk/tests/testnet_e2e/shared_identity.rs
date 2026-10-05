@@ -566,6 +566,33 @@ async fn test_shared_operations_transaction_counts() {
         .iter()
         .any(|request| request.payment_request_id == proposal.payment_request_id));
 
+    pair.bob
+        .sdk
+        .clear_private_payment_list(pair.bitkit.public_key.clone())
+        .await
+        .unwrap();
+    pair.bob
+        .sdk
+        .process_outbound_private_messages(pair.bitkit.public_key.clone())
+        .await
+        .unwrap();
+    let received = sdk
+        .receive_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    // One read, authorization-cache update, then one atomic commit per message.
+    assert_eq!(
+        transactions.swap(0, Ordering::SeqCst),
+        2 + received.stream_item_ids.len()
+    );
+    assert!(!received.stream_item_ids.is_empty());
+    assert!(pair
+        .bitkit
+        .storage_state()
+        .await
+        .peer_link_operation_leases
+        .is_empty());
+
     let before_publication = pair.bitkit.storage_state().await;
     let revision = pair.bitkit.storage.last_revision().unwrap();
     sdk.publish_paykit_app(test_app("Bitkit")).await.unwrap();

@@ -34,17 +34,16 @@ impl StorageAdapter for PausedRestoreStorage {
         f: StorageTransactionCallback<'a>,
     ) -> paykit_sdk::Result<Box<dyn Any + Send>> {
         let result = self.inner.transaction_erased(f).await?;
-        // These restore-state reads follow authorization and recovery-marker preflight.
-        let peer = if self.receive {
-            result
-                .downcast_ref::<(LinkedPeerRecord, Option<EncryptedLinkStateRecord>)>()
-                .map(|(peer, _)| peer)
+        // Receipt authorization is cached after the receive probe, before transcript restore.
+        let should_pause = if self.receive {
+            result.is::<()>()
         } else {
             result
                 .downcast_ref::<(Option<LinkedPeerRecord>, Option<EncryptedLinkStateRecord>)>()
                 .and_then(|(peer, _)| peer.as_ref())
+                .is_some_and(|peer| peer.counterparty == self.counterparty)
         };
-        let pause = if peer.is_some_and(|peer| peer.counterparty == self.counterparty) {
+        let pause = if should_pause {
             self.pause.lock().unwrap().take()
         } else {
             None
@@ -168,13 +167,15 @@ async fn assert_restore_transport_failure_preserves_state(receive: bool) {
         }
         result = &mut operation => panic!("restore did not pause: {result:?}"),
     }
-    assert!(pair
-        .alice
-        .storage
-        .snapshot()
-        .unwrap()
-        .peer_link_operation_leases
-        .contains_key(&pair.bob.public_key));
+    assert_eq!(
+        pair.alice
+            .storage
+            .snapshot()
+            .unwrap()
+            .peer_link_operation_leases
+            .contains_key(&pair.bob.public_key),
+        !receive
+    );
     let server = pair._testnet.homeserver_app().client_server();
     server.shutdown();
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -212,6 +213,124 @@ async fn assert_restore_transport_failure_preserves_state(receive: bool) {
     );
     assert_eq!(after.private_stream_items, before.private_stream_items);
     assert_eq!(after.event_dedup_records, before.event_dedup_records);
+}
+
+#[tokio::test]
+async fn test_private_receive_rejects_a_changed_checkpoint_before_commit() {
+    let pair = linked_two_party().await;
+    pair.bob
+        .sdk
+        .clear_private_payment_list(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    pair.bob
+        .sdk
+        .process_outbound_private_messages(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    let initial = pair.alice.storage.snapshot().unwrap();
+
+    for change in [
+        "receive",
+        "lease",
+        "blocked",
+        "recovery",
+        "authorization",
+        "local-key",
+    ] {
+        let storage = InMemoryStorage::from_state(initial.clone());
+        let (ready, reached) = oneshot::channel();
+        let (resume, paused) = oneshot::channel();
+        let sdk = PaykitSdk::new(
+            PausedRestoreStorage {
+                inner: storage.clone(),
+                counterparty: pair.bob.public_key.clone(),
+                receive: true,
+                pause: Mutex::new(Some((ready, paused))),
+            },
+            TestnetSessionProvider::new(pair.alice.access.clone()),
+            pair.alice.adapter.clone(),
+            PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+        );
+        let receive = sdk.receive_private_messages(pair.bob.public_key.clone());
+        tokio::pin!(receive);
+        tokio::select! {
+            reached = tokio::time::timeout(Duration::from_secs(30), reached) =>
+                reached.expect("read-only preparation should reach restore").unwrap(),
+            result = &mut receive => panic!("receive did not pause: {result:?}"),
+        }
+        assert!(storage
+            .snapshot()
+            .unwrap()
+            .peer_link_operation_leases
+            .is_empty());
+        if change == "receive" {
+            let other = PaykitSdk::new(
+                storage.clone(),
+                TestnetSessionProvider::new(pair.alice.access.clone()),
+                pair.alice.adapter.clone(),
+                PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+            );
+            let committed = other
+                .receive_private_messages(pair.bob.public_key.clone())
+                .await
+                .unwrap();
+            assert_eq!(committed.stream_item_ids.len(), 1);
+        } else {
+            storage
+                .transaction(|tx| {
+                    let mut peer = tx.linked_peer(&pair.bob.public_key).unwrap();
+                    match change {
+                        "lease" => {
+                            let now = chrono::Utc::now();
+                            tx.claim_peer_link_operation(
+                                &pair.bob.public_key,
+                                now,
+                                now + chrono::Duration::minutes(1),
+                            )?
+                            .unwrap();
+                        }
+                        "blocked" => peer.state = LinkedPeerState::Blocked,
+                        "recovery" => peer.remote_recovery_attempt_id = Some("new-recovery".into()),
+                        "authorization" => {
+                            let identity = pair.bob.access.local_secret_key.as_ref().unwrap();
+                            let key = identity.derive_paykit_identity_secret_key(2).unwrap();
+                            peer.noise_key_authorization = Some(
+                                paykit_lib::PaykitNoiseKeyAuthorization::sign(
+                                    &pubky::Keypair::from_secret(identity.as_bytes()),
+                                    &paykit_lib::derive_paykit_noise_secret_key(key.as_bytes()),
+                                    key.key_generation(),
+                                )
+                                .unwrap(),
+                            );
+                        }
+                        "local-key" => tx.save_paykit_noise_public_key(
+                            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()),
+                        ),
+                        _ => unreachable!(),
+                    }
+                    tx.save_linked_peer(peer);
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        let changed = storage.snapshot().unwrap();
+        resume.send(()).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(30), receive)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            if change == "local-key" {
+                matches!(error, PaykitSdkError::Identity { .. })
+            } else {
+                error.is_concurrent_update()
+            },
+            "unexpected {change} result: {error:?}",
+        );
+        assert_eq!(storage.snapshot().unwrap(), changed, "{change}");
+    }
 }
 
 #[tokio::test]

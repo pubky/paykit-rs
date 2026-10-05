@@ -200,8 +200,10 @@ Common workflows:
   contact payment when the freshest private endpoints matter. Idle checks verify
   signed key authorization, recovery markers, and the next message slot without
   claiming a peer lease or rewriting shared state. Batch intake shares one state
-  read and probes up to sixteen peers concurrently. Available messages and recovery
-  still reload state under a lease and are processed one peer at a time
+  read and probes up to sixteen peers concurrently. Available messages are prepared
+  read-only, then committed atomically with their checkpoint only if the link and
+  authorization remain current and no peer lease intervenes. Recovery reloads state
+  under a lease; message processing remains one peer at a time
 - list saved Payment Requests with `payment_requests` or `list_payment_requests`;
   all counterparties and filters use one shared-state read, without network intake
 - use `propose_allowance`, `accept_allowance`, `reject_allowance`, and

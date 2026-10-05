@@ -1,18 +1,26 @@
 use super::*;
+use crate::domain::private_stream::persist_private_stream_batch_in_transaction;
 use futures_util::{stream, StreamExt};
 
 const PRIVATE_INBOX_PROBE_CONCURRENCY: usize = 16;
 
 struct PrivateReceiveSnapshot {
     link: paykit_lib::EncryptedLinkSnapshot,
+    state: EncryptedLinkStateRecord,
     authorization: paykit_lib::PaykitNoiseKeyAuthorization,
+}
+
+enum PrivateInboxProbe {
+    Empty,
+    Ready(Box<PrivateReceiveSnapshot>),
+    Reload,
 }
 
 struct PrivateReceiveLink {
     link: paykit_lib::EncryptedLink,
     state: EncryptedLinkStateRecord,
     authorized_receipt_apps: Option<Vec<paykit_lib::PaykitAppId>>,
-    remote_noise_public_key: paykit_lib::PublicKey,
+    authorization: paykit_lib::PaykitNoiseKeyAuthorization,
 }
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
@@ -27,8 +35,8 @@ where
     /// This requires a stored Encrypted Link snapshot for the counterparty.
     /// Handshake establishment and recovery are separate workflows.
     /// Empty inboxes are probed without acquiring a peer lease or writing state.
-    /// Concurrent link changes are observed on a subsequent poll unless a
-    /// message is available, in which case state is reloaded under the lease.
+    /// Available messages are prepared read-only and committed only while the
+    /// original link checkpoint remains current and no peer operation holds a lease.
     pub async fn receive_private_messages(
         &self,
         counterparty: PubkyPublicKey,
@@ -38,10 +46,10 @@ where
             .into_iter()
             .next()
             .and_then(|(_, snapshot)| snapshot);
-        let empty = self
-            .private_inbox_is_empty(&counterparty, &session_access, snapshot.as_ref())
+        let probe = self
+            .probe_private_inbox(&counterparty, &session_access, snapshot)
             .await?;
-        self.receive_probed_private_messages(counterparty, &session_access, empty)
+        self.receive_probed_private_messages(counterparty, &session_access, probe)
             .await
     }
 
@@ -49,16 +57,30 @@ where
         &self,
         counterparty: PubkyPublicKey,
         session_access: &GuardedSessionAccess,
-        empty: bool,
+        probe: PrivateInboxProbe,
     ) -> Result<PrivateStreamIntakeReport> {
-        if empty {
-            return Ok(PrivateStreamIntakeReport {
-                receive_batch_id: None,
-                stream_item_ids: Vec::new(),
-                event_conflicts: Vec::new(),
-            });
+        match probe {
+            PrivateInboxProbe::Empty => {
+                return Ok(PrivateStreamIntakeReport {
+                    receive_batch_id: None,
+                    stream_item_ids: Vec::new(),
+                    event_conflicts: Vec::new(),
+                })
+            }
+            PrivateInboxProbe::Ready(snapshot) => {
+                if let Some(report) = Box::pin(self.receive_private_messages_from_snapshot(
+                    counterparty.clone(),
+                    session_access,
+                    *snapshot,
+                ))
+                .await?
+                {
+                    return Ok(report);
+                }
+            }
+            PrivateInboxProbe::Reload => {}
         }
-        // The probe grants no authority to receive. Reload under a fresh lease.
+        // Recovery decisions require a fresh read under the peer lease.
         let lease = self.claim_peer_link_operation(&counterparty).await?;
         let result = self
             .receive_private_messages_with_claim(counterparty, lease.clone(), session_access)
@@ -92,23 +114,23 @@ where
             .map(|(counterparty, snapshot)| {
                 let session_access = &session_access;
                 async move {
-                    let empty = self
-                        .private_inbox_is_empty(&counterparty, session_access, snapshot.as_ref())
+                    let probe = self
+                        .probe_private_inbox(&counterparty, session_access, snapshot)
                         .await;
-                    (counterparty, empty)
+                    (counterparty, probe)
                 }
             })
             .buffer_unordered(PRIVATE_INBOX_PROBE_CONCURRENCY)
             .collect::<Vec<_>>()
             .await;
         // Finish polling every probe before a serialized receive can block it.
-        for (counterparty, empty) in probes {
-            let result = match empty {
-                Ok(empty) => {
+        for (counterparty, probe) in probes {
+            let result = match probe {
+                Ok(probe) => {
                     self.receive_probed_private_messages(
                         counterparty.clone(),
                         &session_access,
-                        empty,
+                        probe,
                     )
                     .await
                 }
@@ -160,14 +182,14 @@ where
         Ok((access, peers.expect("active session reads peer state")))
     }
 
-    async fn private_inbox_is_empty(
+    async fn probe_private_inbox(
         &self,
         counterparty: &PubkyPublicKey,
         session_access: &PubkySessionAccess,
-        snapshot: Option<&PrivateReceiveSnapshot>,
-    ) -> Result<bool> {
+        snapshot: Option<PrivateReceiveSnapshot>,
+    ) -> Result<PrivateInboxProbe> {
         let Some(snapshot) = snapshot else {
-            return Ok(false);
+            return Ok(PrivateInboxProbe::Reload);
         };
         let public_storage =
             self.pubky
@@ -182,9 +204,9 @@ where
             noise_key_authorization::require_authorization(&public_storage, &remote_public_key)
                 .await?;
         if authorization != snapshot.authorization {
-            return Ok(false);
+            return Ok(PrivateInboxProbe::Reload);
         }
-        let snapshot = &snapshot.link;
+        let link = &snapshot.link;
         let secret_key = session_access.paykit_noise_secret_key()?;
         let session_info = session_access.session.info();
         let (marker, pending) = tokio::join!(
@@ -193,9 +215,9 @@ where
                 &secret_key,
                 session_info.public_key(),
                 &remote_public_key,
-                snapshot.remote_noise_public_key(),
+                link.remote_noise_public_key(),
             ),
-            snapshot.has_pending_private_application_message(
+            link.has_pending_private_application_message(
                 &public_storage,
                 session_info.public_key(),
                 &secret_key,
@@ -203,14 +225,79 @@ where
         );
         let marker = marker?;
         if marker.is_some_and(|marker| {
-            Some(marker.attempt_id()) != snapshot.recovery_context().remote_attempt_id()
+            Some(marker.attempt_id()) != link.recovery_context().remote_attempt_id()
         }) {
-            return Ok(false);
+            return Ok(PrivateInboxProbe::Reload);
         }
         match pending {
-            Ok(pending) => Ok(!pending),
-            Err(paykit_lib::PaykitError::Validation(_)) => Ok(false),
+            Ok(true) => Ok(PrivateInboxProbe::Ready(Box::new(snapshot))),
+            Ok(false) => Ok(PrivateInboxProbe::Empty),
+            Err(paykit_lib::PaykitError::Validation(_)) => Ok(PrivateInboxProbe::Reload),
             Err(err) => Err(err.into()),
+        }
+    }
+
+    async fn receive_private_messages_from_snapshot(
+        &self,
+        counterparty: PubkyPublicKey,
+        session_access: &GuardedSessionAccess,
+        snapshot: PrivateReceiveSnapshot,
+    ) -> Result<Option<PrivateStreamIntakeReport>> {
+        let authorized_receipt_apps = self.private_receive_receipt_apps(&counterparty).await?;
+        let link = match paykit_lib::restore_encrypted_link(
+            session_access.session.clone(),
+            session_access.paykit_noise_secret_key()?,
+            &counterparty.to_public_key()?,
+            session_access.outbox_client.clone(),
+            snapshot.link,
+        )
+        .await
+        {
+            Ok(link) => link,
+            Err(err @ paykit_lib::PaykitError::Transport { .. }) => return Err(err.into()),
+            Err(_) => return Ok(None),
+        };
+        if noise_key_authorization::validate_remote_static_key(
+            &snapshot.authorization,
+            link.remote_static_public_key(),
+            true,
+        )
+        .is_err()
+        {
+            return Ok(None);
+        }
+        self.receive_private_messages_with_link(
+            counterparty,
+            None,
+            session_access,
+            PrivateReceiveLink {
+                link,
+                state: snapshot.state,
+                authorized_receipt_apps,
+                authorization: snapshot.authorization,
+            },
+        )
+        .await
+    }
+
+    async fn private_receive_receipt_apps(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<Option<Vec<paykit_lib::PaykitAppId>>> {
+        match self.authorized_receipt_apps_for_peer(counterparty).await {
+            Ok(app_ids) => Ok(app_ids),
+            Err(_) => {
+                self.storage
+                    .transaction(|tx| {
+                        Ok(tx.authorized_paykit_apps(counterparty).map(|apps| {
+                            apps.into_iter()
+                                .filter(|(_, capabilities)| capabilities.receipts)
+                                .map(|(app_id, _)| app_id)
+                                .collect()
+                        }))
+                    })
+                    .await
+            }
         }
     }
 
@@ -254,22 +341,7 @@ where
             .await?;
         let secret_key = session_access.paykit_noise_secret_key()?;
         let remote_public_key = counterparty.to_public_key()?;
-        let authorized_receipt_apps =
-            match self.authorized_receipt_apps_for_peer(&counterparty).await {
-                Ok(app_ids) => app_ids,
-                Err(_) => {
-                    self.storage
-                        .transaction(|tx| {
-                            Ok(tx.authorized_paykit_apps(&counterparty).map(|apps| {
-                                apps.into_iter()
-                                    .filter(|(_, capabilities)| capabilities.receipts)
-                                    .map(|(app_id, _)| app_id)
-                                    .collect()
-                            }))
-                        })
-                        .await?
-                }
-            };
+        let authorized_receipt_apps = self.private_receive_receipt_apps(&counterparty).await?;
 
         let stored_link_state =
             stored_link_state.ok_or_else(|| PaykitSdkError::RecoveryRequired {
@@ -389,7 +461,7 @@ where
             link,
             state: stored_link_state,
             authorized_receipt_apps,
-            remote_noise_public_key,
+            authorization,
         })
     }
 
@@ -399,12 +471,7 @@ where
         lease: PeerLinkOperationLease,
         session_access: &GuardedSessionAccess,
     ) -> Result<PrivateStreamIntakeReport> {
-        let PrivateReceiveLink {
-            mut link,
-            state: mut stored_link_state,
-            authorized_receipt_apps,
-            remote_noise_public_key,
-        } = self
+        let link = self
             .with_guarded_storage_operation(
                 Arc::clone(&session_access._guard),
                 Box::pin(self.restore_private_receive_link(
@@ -414,6 +481,28 @@ where
                 )),
             )
             .await?;
+        Ok(self
+            .receive_private_messages_with_link(counterparty, Some(lease), session_access, link)
+            .await?
+            .expect("leased receive handles recovery directly"))
+    }
+
+    async fn receive_private_messages_with_link(
+        &self,
+        counterparty: PubkyPublicKey,
+        lease: Option<PeerLinkOperationLease>,
+        session_access: &GuardedSessionAccess,
+        received_link: PrivateReceiveLink,
+    ) -> Result<Option<PrivateStreamIntakeReport>> {
+        let PrivateReceiveLink {
+            mut link,
+            state: mut stored_link_state,
+            authorized_receipt_apps,
+            authorization,
+        } = received_link;
+        let local_noise_public_key = PubkyPublicKey::from_public_key(
+            &pubky::Keypair::from_secret(&session_access.paykit_noise_secret_key()?).public_key(),
+        );
         let mut aggregate: Option<PrivateStreamIntakeReport> = None;
         for _ in 0..paykit_lib::PRIVATE_APPLICATION_MESSAGE_RECEIVE_LIMIT {
             let prepared = match link.prepare_next_private_application_message().await {
@@ -423,6 +512,10 @@ where
                     if err.is_non_retryable_private_receive_error()
                         || matches!(err, paykit_lib::PaykitError::InvalidData { .. }) =>
                 {
+                    let Some(lease) = lease.as_ref() else {
+                        // The speculative read cannot authorize recovery of possibly newer state.
+                        return Ok(None);
+                    };
                     let now = self.clock.now();
                     mark_recovery_required_with_lease(
                         &self.storage,
@@ -435,8 +528,8 @@ where
                         .publish_local_recovery_marker_with_key(
                             &counterparty,
                             session_access,
-                            &lease,
-                            &remote_noise_public_key,
+                            lease,
+                            authorization.noise_public_key(),
                         )
                         .await;
                     return Err(err.into());
@@ -452,22 +545,40 @@ where
                 generation: stored_link_state.generation.saturating_add(1),
                 checkpointed_at: now,
             };
-            let report = persist_private_stream_batch_write(
-                &self.storage,
-                PrivateStreamBatchWrite {
-                    counterparty: counterparty.clone(),
-                    confirmation_app_id: self.config.app_id.clone(),
-                    messages: vec![prepared.message().clone()],
-                    link_state: Some(next_link_state.clone()),
-                    authorized_receipt_apps: authorized_receipt_apps.clone(),
-                    link_lease: Some(lease.clone()),
-                    receive_batch_id: aggregate
-                        .as_ref()
-                        .and_then(|report| report.receive_batch_id),
-                    received_at: now,
-                },
-            )
-            .await?;
+            let write = PrivateStreamBatchWrite {
+                counterparty: counterparty.clone(),
+                confirmation_app_id: self.config.app_id.clone(),
+                messages: vec![prepared.message().clone()],
+                link_state: Some(next_link_state.clone()),
+                authorized_receipt_apps: authorized_receipt_apps.clone(),
+                link_lease: lease.clone(),
+                receive_batch_id: aggregate
+                    .as_ref()
+                    .and_then(|report| report.receive_batch_id),
+                received_at: now,
+            };
+            let report = self
+                .retry_storage_transaction(|| {
+                    let write = write.clone();
+                    let stored_link_state = &stored_link_state;
+                    let authorization = &authorization;
+                    let local_noise_public_key = &local_noise_public_key;
+                    move |tx| {
+                        if write.link_lease.is_none() {
+                            if let Err(error) = require_private_receive_checkpoint(
+                                tx,
+                                stored_link_state,
+                                authorization,
+                                local_noise_public_key,
+                            ) {
+                                // A stale preparation needs a new receive, not a storage retry.
+                                return Ok(Err(error));
+                            }
+                        }
+                        persist_private_stream_batch_in_transaction(tx, write).map(Ok)
+                    }
+                })
+                .await??;
             link.acknowledge_persisted_private_receive(prepared)?;
             stored_link_state = next_link_state;
             match aggregate.as_mut() {
@@ -480,23 +591,27 @@ where
         }
 
         match aggregate {
-            Some(report) => Ok(report),
-            None => {
-                persist_private_stream_batch_write(
-                    &self.storage,
-                    PrivateStreamBatchWrite {
-                        counterparty,
-                        confirmation_app_id: self.config.app_id.clone(),
-                        messages: Vec::new(),
-                        link_state: None,
-                        authorized_receipt_apps,
-                        link_lease: Some(lease),
-                        receive_batch_id: None,
-                        received_at: self.clock.now(),
-                    },
-                )
-                .await
-            }
+            Some(report) => Ok(Some(report)),
+            None if lease.is_none() => Ok(Some(PrivateStreamIntakeReport {
+                receive_batch_id: None,
+                stream_item_ids: Vec::new(),
+                event_conflicts: Vec::new(),
+            })),
+            None => persist_private_stream_batch_write(
+                &self.storage,
+                PrivateStreamBatchWrite {
+                    counterparty,
+                    confirmation_app_id: self.config.app_id.clone(),
+                    messages: Vec::new(),
+                    link_state: None,
+                    authorized_receipt_apps,
+                    link_lease: lease,
+                    receive_batch_id: None,
+                    received_at: self.clock.now(),
+                },
+            )
+            .await
+            .map(Some),
         }
     }
 }
@@ -505,6 +620,9 @@ fn private_receive_snapshot(
     tx: &dyn StorageTransaction,
     counterparty: &PubkyPublicKey,
 ) -> Option<PrivateReceiveSnapshot> {
+    if tx.peer_link_operation_lease(counterparty).is_some() {
+        return None;
+    }
     let peer = tx.linked_peer(counterparty)?;
     if peer.state != LinkedPeerState::Linked {
         return None;
@@ -523,8 +641,34 @@ fn private_receive_snapshot(
     }
     Some(PrivateReceiveSnapshot {
         link: snapshot,
+        state,
         authorization,
     })
+}
+
+fn require_private_receive_checkpoint(
+    tx: &dyn StorageTransaction,
+    state: &EncryptedLinkStateRecord,
+    authorization: &paykit_lib::PaykitNoiseKeyAuthorization,
+    local_noise_public_key: &PubkyPublicKey,
+) -> Result<()> {
+    if tx.paykit_noise_public_key().as_ref() != Some(local_noise_public_key) {
+        return Err(PaykitSdkError::Identity {
+            context: "Paykit identity key changed during private receive".into(),
+            source: None,
+        });
+    }
+    let current = private_receive_snapshot(tx, &state.counterparty);
+    if current
+        .is_none_or(|current| current.state != *state || current.authorization != *authorization)
+    {
+        return Err(PaykitSdkError::ConcurrentUpdate {
+            context: "Encrypted Link changed during private receive; retry from current state"
+                .into(),
+            source: None,
+        });
+    }
+    Ok(())
 }
 
 fn linked_counterparties(tx: &dyn StorageTransaction) -> Vec<PubkyPublicKey> {
