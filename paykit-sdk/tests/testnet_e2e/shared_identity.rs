@@ -915,6 +915,12 @@ async fn test_same_app_devices_serialize_public_endpoint_sync() {
         loaded
             .await
             .expect("the first sync should hold the shared App lease");
+        let records = first
+            .storage
+            .transaction(|tx| Ok(tx.public_endpoint_records()))
+            .await
+            .expect("wallet callbacks must leave shared storage accessible");
+        assert!(records.is_empty());
         let result = second.sdk.sync_public_endpoints().await;
         let _ = resume.send(());
         result
@@ -941,6 +947,15 @@ async fn test_same_app_devices_serialize_public_endpoint_sync() {
             .get(&PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap())
             .map(|payload| payload.as_str()),
         Some("second-device")
+    );
+
+    let records = second.storage_state().await.public_endpoint_records;
+    let unchanged = second.sdk.sync_public_endpoints().await.unwrap();
+    assert_eq!(unchanged.published.len(), 1);
+    assert!(unchanged.failed.is_empty());
+    assert_eq!(
+        second.storage_state().await.public_endpoint_records,
+        records
     );
 
     first.adapter.set_public_details(Vec::new());
