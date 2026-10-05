@@ -580,10 +580,10 @@ async fn test_shared_operations_transaction_counts() {
         .receive_private_messages(pair.bob.public_key.clone())
         .await
         .unwrap();
-    // One read, authorization-cache update, then one atomic commit per message.
+    // One read, then authorization and checkpoint commit together per message.
     assert_eq!(
         transactions.swap(0, Ordering::SeqCst),
-        2 + received.stream_item_ids.len()
+        1 + received.stream_item_ids.len()
     );
     assert!(!received.stream_item_ids.is_empty());
     assert!(pair

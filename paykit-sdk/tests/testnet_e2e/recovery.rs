@@ -6,11 +6,14 @@ use paykit_sdk::{
     storage::{EncryptedLinkStateRecord, LinkedPeerRecord, StorageTransactionCallback},
     InMemoryStorage, LinkedPeerState, OutboundPrivateMessageStatus, PaykitSdk, PaykitSdkConfig,
     PaykitSdkError, PaymentRequestLifecycleState, PrivatePaymentListReservationUpdate,
-    PubkyPublicKey, StorageAdapter,
+    PubkyPublicKey, PubkySessionAccess, PubkySessionProvider, StorageAdapter,
 };
 use std::{
     any::Any,
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::oneshot;
@@ -23,7 +26,6 @@ use crate::harness::{
 struct PausedRestoreStorage {
     inner: InMemoryStorage,
     counterparty: PubkyPublicKey,
-    receive: bool,
     pause: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
 }
 
@@ -34,15 +36,10 @@ impl StorageAdapter for PausedRestoreStorage {
         f: StorageTransactionCallback<'a>,
     ) -> paykit_sdk::Result<Box<dyn Any + Send>> {
         let result = self.inner.transaction_erased(f).await?;
-        // Receipt authorization is cached after the receive probe, before transcript restore.
-        let should_pause = if self.receive {
-            result.is::<()>()
-        } else {
-            result
-                .downcast_ref::<(Option<LinkedPeerRecord>, Option<EncryptedLinkStateRecord>)>()
-                .and_then(|(peer, _)| peer.as_ref())
-                .is_some_and(|peer| peer.counterparty == self.counterparty)
-        };
+        let should_pause = result
+            .downcast_ref::<(Option<LinkedPeerRecord>, Option<EncryptedLinkStateRecord>)>()
+            .and_then(|(peer, _)| peer.as_ref())
+            .is_some_and(|peer| peer.counterparty == self.counterparty);
         let pause = if should_pause {
             self.pause.lock().unwrap().take()
         } else {
@@ -53,6 +50,37 @@ impl StorageAdapter for PausedRestoreStorage {
             resume.await.expect("restore should be released");
         }
         Ok(result)
+    }
+}
+
+struct PausedReceiveProvider {
+    inner: TestnetSessionProvider,
+    public_reads: AtomicUsize,
+    pause: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+}
+
+#[async_trait::async_trait]
+impl PubkySessionProvider for PausedReceiveProvider {
+    async fn load_session_access(&self) -> paykit_sdk::Result<Option<PubkySessionAccess>> {
+        self.inner.load_session_access().await
+    }
+
+    async fn load_public_storage(&self) -> paykit_sdk::Result<Option<pubky::PublicStorage>> {
+        // The inbox probe is first; registry lookup precedes transcript restore.
+        let pause = if self.public_reads.fetch_add(1, Ordering::SeqCst) == 1 {
+            self.pause.lock().unwrap().take()
+        } else {
+            None
+        };
+        if let Some((ready, resume)) = pause {
+            ready.send(()).expect("receive observer should remain live");
+            resume.await.expect("receive should be released");
+        }
+        self.inner.load_public_storage().await
+    }
+
+    async fn clear_session_access(&self) -> paykit_sdk::Result<()> {
+        self.inner.clear_session_access().await
     }
 }
 
@@ -138,14 +166,18 @@ async fn assert_restore_transport_failure_preserves_state(receive: bool) {
 
     let (ready, reached) = oneshot::channel();
     let (resume, paused) = oneshot::channel();
+    let mut pause = Some((ready, paused));
     let sdk = PaykitSdk::new(
         PausedRestoreStorage {
             inner: pair.alice.storage.clone(),
             counterparty: pair.bob.public_key.clone(),
-            receive,
-            pause: Mutex::new(Some((ready, paused))),
+            pause: Mutex::new(if receive { None } else { pause.take() }),
         },
-        TestnetSessionProvider::new(pair.alice.access.clone()),
+        PausedReceiveProvider {
+            inner: TestnetSessionProvider::new(pair.alice.access.clone()),
+            public_reads: AtomicUsize::new(0),
+            pause: Mutex::new(pause),
+        },
         pair.alice.adapter.clone(),
         PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
     );
@@ -242,13 +274,12 @@ async fn test_private_receive_rejects_a_changed_checkpoint_before_commit() {
         let (ready, reached) = oneshot::channel();
         let (resume, paused) = oneshot::channel();
         let sdk = PaykitSdk::new(
-            PausedRestoreStorage {
-                inner: storage.clone(),
-                counterparty: pair.bob.public_key.clone(),
-                receive: true,
+            storage.clone(),
+            PausedReceiveProvider {
+                inner: TestnetSessionProvider::new(pair.alice.access.clone()),
+                public_reads: AtomicUsize::new(0),
                 pause: Mutex::new(Some((ready, paused))),
             },
-            TestnetSessionProvider::new(pair.alice.access.clone()),
             pair.alice.adapter.clone(),
             PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
         );

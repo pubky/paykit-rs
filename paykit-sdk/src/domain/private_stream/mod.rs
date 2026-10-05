@@ -6,6 +6,9 @@ use sha2::{Digest, Sha256};
 
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+use crate::storage::{retry_storage_transaction, StorageAdapter};
+
 use crate::{
     domain::{
         outbound_private::OutboundPrivateMessageStatus,
@@ -15,9 +18,9 @@ use crate::{
         receipts::ReceiptAccessRecord,
     },
     storage::{
-        require_peer_link_operation_lease, retry_storage_transaction, EncryptedLinkStateRecord,
-        EventDedupRecord, NewPrivateStreamItem, NewPrivateStreamItemDetails,
-        OutboundPrivateMessageRecord, PeerLinkOperationLease, StorageAdapter,
+        require_peer_link_operation_lease, EncryptedLinkStateRecord, EventDedupRecord,
+        NewPrivateStreamItem, NewPrivateStreamItemDetails, OutboundPrivateMessageRecord,
+        PeerLinkOperationLease,
     },
     PaykitSdkError, PubkyPublicKey, Result,
 };
@@ -203,6 +206,7 @@ where
 }
 
 /// Persist stream items and their resulting Encrypted Link checkpoint.
+#[cfg(test)]
 pub(crate) async fn persist_private_stream_batch_write<S>(
     storage: &S,
     write: PrivateStreamBatchWrite,

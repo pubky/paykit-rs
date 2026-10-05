@@ -15,8 +15,94 @@ use tokio::sync::{Notify, Semaphore};
 
 use crate::harness::{
     build_testnet, drive_link_to_linked, linked_two_party, private_receiving_detail, two_party,
-    TestUser,
+    TestUser, TestnetSessionProvider,
 };
+
+#[tokio::test]
+async fn test_private_receive_refreshes_cached_app_authorization() {
+    let pair = linked_two_party().await;
+    pair.bob
+        .sdk
+        .clear_private_payment_list(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    pair.bob
+        .sdk
+        .process_outbound_private_messages(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    let registry = pair
+        .alice
+        .sdk
+        .paykit_app_registry(pair.bob.public_key.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let current_apps = registry
+        .apps()
+        .iter()
+        .map(|(id, app)| (id.clone(), app.capabilities()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let cached_apps = std::collections::HashMap::from([(
+        paykit_lib::PaykitAppId::new("old-app").unwrap(),
+        paykit_lib::PaykitAppCapabilities {
+            private_payments: true,
+            payment_requests: true,
+            receipts: true,
+            outgoing_payments: true,
+        },
+    )]);
+    let initial = pair.alice.storage.snapshot().unwrap();
+    for registry_state in ["available", "unreadable", "missing"] {
+        let remote = pair.bob.access.session.storage();
+        match registry_state {
+            "unreadable" => {
+                remote
+                    .put(
+                        paykit_lib::PAYKIT_APP_REGISTRY_PATH,
+                        b"invalid registry".to_vec(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            "missing" => {
+                remote
+                    .delete(paykit_lib::PAYKIT_APP_REGISTRY_PATH)
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
+        let storage = InMemoryStorage::from_state(initial.clone());
+        storage
+            .transaction(|tx| {
+                tx.save_authorized_paykit_apps(pair.bob.public_key.clone(), cached_apps.clone());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let sdk = PaykitSdk::new(
+            storage.clone(),
+            TestnetSessionProvider::new(pair.alice.access.clone()),
+            pair.alice.adapter.clone(),
+            PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+        );
+        let received = sdk
+            .receive_private_messages(pair.bob.public_key.clone())
+            .await
+            .unwrap();
+        assert_eq!(received.stream_item_ids.len(), 1);
+        let expected = match registry_state {
+            "available" => current_apps.clone(),
+            "unreadable" => cached_apps.clone(),
+            _ => std::collections::HashMap::new(),
+        };
+        assert_eq!(
+            storage.snapshot().unwrap().authorized_paykit_apps[&pair.bob.public_key],
+            expected
+        );
+    }
+}
 
 #[tokio::test]
 async fn test_outbound_reservation_expiry_is_rechecked_before_publication() {

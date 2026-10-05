@@ -19,7 +19,7 @@ enum PrivateInboxProbe {
 struct PrivateReceiveLink {
     link: paykit_lib::EncryptedLink,
     state: EncryptedLinkStateRecord,
-    authorized_receipt_apps: Option<Vec<paykit_lib::PaykitAppId>>,
+    authorized_apps: Option<HashMap<paykit_lib::PaykitAppId, paykit_lib::PaykitAppCapabilities>>,
     authorization: paykit_lib::PaykitNoiseKeyAuthorization,
 }
 
@@ -243,7 +243,7 @@ where
         session_access: &GuardedSessionAccess,
         snapshot: PrivateReceiveSnapshot,
     ) -> Result<Option<PrivateStreamIntakeReport>> {
-        let authorized_receipt_apps = self.private_receive_receipt_apps(&counterparty).await?;
+        let authorized_apps = self.private_receive_authorized_apps(&counterparty).await;
         let link = match paykit_lib::restore_encrypted_link(
             session_access.session.clone(),
             session_access.paykit_noise_secret_key()?,
@@ -273,32 +273,32 @@ where
             PrivateReceiveLink {
                 link,
                 state: snapshot.state,
-                authorized_receipt_apps,
+                authorized_apps,
                 authorization: snapshot.authorization,
             },
         )
         .await
     }
 
-    async fn private_receive_receipt_apps(
+    async fn private_receive_authorized_apps(
         &self,
         counterparty: &PubkyPublicKey,
-    ) -> Result<Option<Vec<paykit_lib::PaykitAppId>>> {
-        match self.authorized_receipt_apps_for_peer(counterparty).await {
-            Ok(app_ids) => Ok(app_ids),
-            Err(_) => {
-                self.storage
-                    .transaction(|tx| {
-                        Ok(tx.authorized_paykit_apps(counterparty).map(|apps| {
-                            apps.into_iter()
-                                .filter(|(_, capabilities)| capabilities.receipts)
-                                .map(|(app_id, _)| app_id)
-                                .collect()
-                        }))
+    ) -> Option<HashMap<paykit_lib::PaykitAppId, paykit_lib::PaykitAppCapabilities>> {
+        // A failed lookup keeps cached authorization; a missing registry clears it.
+        self.paykit_app_registry(counterparty.clone())
+            .await
+            .ok()
+            .map(|registry| {
+                registry
+                    .map(|registry| {
+                        registry
+                            .apps()
+                            .iter()
+                            .map(|(id, app)| (id.clone(), app.capabilities()))
+                            .collect()
                     })
-                    .await
-            }
-        }
+                    .unwrap_or_default()
+            })
     }
 
     async fn restore_private_receive_link(
@@ -341,7 +341,7 @@ where
             .await?;
         let secret_key = session_access.paykit_noise_secret_key()?;
         let remote_public_key = counterparty.to_public_key()?;
-        let authorized_receipt_apps = self.private_receive_receipt_apps(&counterparty).await?;
+        let authorized_apps = self.private_receive_authorized_apps(&counterparty).await;
 
         let stored_link_state =
             stored_link_state.ok_or_else(|| PaykitSdkError::RecoveryRequired {
@@ -460,7 +460,7 @@ where
         Ok(PrivateReceiveLink {
             link,
             state: stored_link_state,
-            authorized_receipt_apps,
+            authorized_apps,
             authorization,
         })
     }
@@ -497,7 +497,7 @@ where
         let PrivateReceiveLink {
             mut link,
             state: mut stored_link_state,
-            authorized_receipt_apps,
+            mut authorized_apps,
             authorization,
         } = received_link;
         let local_noise_public_key = PubkyPublicKey::from_public_key(
@@ -550,7 +550,7 @@ where
                 confirmation_app_id: self.config.app_id.clone(),
                 messages: vec![prepared.message().clone()],
                 link_state: Some(next_link_state.clone()),
-                authorized_receipt_apps: authorized_receipt_apps.clone(),
+                authorized_receipt_apps: None,
                 link_lease: lease.clone(),
                 receive_batch_id: aggregate
                     .as_ref()
@@ -559,7 +559,8 @@ where
             };
             let report = self
                 .retry_storage_transaction(|| {
-                    let write = write.clone();
+                    let mut write = write.clone();
+                    let authorized_apps = &authorized_apps;
                     let stored_link_state = &stored_link_state;
                     let authorization = &authorization;
                     let local_noise_public_key = &local_noise_public_key;
@@ -575,10 +576,16 @@ where
                                 return Ok(Err(error));
                             }
                         }
+                        write.authorized_receipt_apps = cache_private_receive_authorization(
+                            tx,
+                            &write.counterparty,
+                            authorized_apps.as_ref(),
+                        );
                         persist_private_stream_batch_in_transaction(tx, write).map(Ok)
                     }
                 })
                 .await??;
+            authorized_apps = None;
             link.acknowledge_persisted_private_receive(prepared)?;
             stored_link_state = next_link_state;
             match aggregate.as_mut() {
@@ -597,23 +604,52 @@ where
                 stream_item_ids: Vec::new(),
                 event_conflicts: Vec::new(),
             })),
-            None => persist_private_stream_batch_write(
-                &self.storage,
-                PrivateStreamBatchWrite {
-                    counterparty,
-                    confirmation_app_id: self.config.app_id.clone(),
-                    messages: Vec::new(),
-                    link_state: None,
-                    authorized_receipt_apps,
-                    link_lease: lease,
-                    receive_batch_id: None,
-                    received_at: self.clock.now(),
-                },
-            )
-            .await
-            .map(Some),
+            None => self
+                .retry_storage_transaction(|| {
+                    let counterparty = counterparty.clone();
+                    let lease = lease.clone();
+                    let authorized_apps = &authorized_apps;
+                    move |tx| {
+                        let authorized_receipt_apps = cache_private_receive_authorization(
+                            tx,
+                            &counterparty,
+                            authorized_apps.as_ref(),
+                        );
+                        persist_private_stream_batch_in_transaction(
+                            tx,
+                            PrivateStreamBatchWrite {
+                                counterparty,
+                                confirmation_app_id: self.config.app_id.clone(),
+                                messages: Vec::new(),
+                                link_state: None,
+                                authorized_receipt_apps,
+                                link_lease: lease,
+                                receive_batch_id: None,
+                                received_at: self.clock.now(),
+                            },
+                        )
+                    }
+                })
+                .await
+                .map(Some),
         }
     }
+}
+
+fn cache_private_receive_authorization(
+    tx: &mut dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    fetched_apps: Option<&HashMap<paykit_lib::PaykitAppId, paykit_lib::PaykitAppCapabilities>>,
+) -> Option<Vec<paykit_lib::PaykitAppId>> {
+    if let Some(apps) = fetched_apps {
+        tx.save_authorized_paykit_apps(counterparty.clone(), apps.clone());
+    }
+    tx.authorized_paykit_apps(counterparty).map(|apps| {
+        apps.into_iter()
+            .filter(|(_, capabilities)| capabilities.receipts)
+            .map(|(id, _)| id)
+            .collect()
+    })
 }
 
 fn private_receive_snapshot(
