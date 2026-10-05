@@ -927,6 +927,7 @@ async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
             .advance_link_handshake(pair.bob.public_key.clone())
             .await
             .unwrap();
+        let before_sync = pair.alice.storage.snapshot().unwrap();
         let unchanged = pair
             .alice
             .sdk
@@ -939,6 +940,7 @@ async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
         assert_eq!(unchanged.queued, first.queued);
         assert!(unchanged.failed_to_queue.is_empty());
         assert!(unchanged.failed_to_deliver.is_empty());
+        assert_eq!(pair.alice.storage.snapshot().unwrap(), before_sync);
         let intake = pair
             .bob
             .sdk
@@ -959,6 +961,66 @@ async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
             pair.bob.sdk.export_backup_state().await.unwrap(),
             bob_backup
         );
+    }
+
+    for expired in [false, true] {
+        let lease = pair
+            .alice
+            .storage
+            .transaction(|tx| {
+                let now = chrono::Utc::now();
+                tx.claim_peer_link_operation(
+                    &pair.bob.public_key,
+                    now - chrono::Duration::minutes(1),
+                    if expired {
+                        now
+                    } else {
+                        now + chrono::Duration::minutes(1)
+                    },
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let mut expected = pair.alice.storage.snapshot().unwrap();
+        let report = pair
+            .alice
+            .sdk
+            .sync_private_payment_lists_with_reservations_and_process_outbound(
+                vec![update.clone()],
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(report.failed_to_deliver.is_empty());
+        if expired {
+            assert_eq!(report.queued, first.queued);
+            assert!(report.failed_to_queue.is_empty());
+            // Lease ownership is ID-based, so the expired handle must no longer be stored.
+            assert_eq!(
+                expected
+                    .peer_link_operation_leases
+                    .remove(&pair.bob.public_key),
+                Some(lease.clone())
+            );
+        } else {
+            assert!(report.queued.is_empty());
+            assert_eq!(report.failed_to_queue.len(), 1);
+            assert!(report.failed_to_queue[0]
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("peer link operation already in progress"));
+        }
+        assert_eq!(pair.alice.storage.snapshot().unwrap(), expected);
+        pair.alice
+            .storage
+            .transaction(|tx| {
+                tx.release_peer_link_operation(&pair.bob.public_key, lease.lease_id);
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     pair.bob

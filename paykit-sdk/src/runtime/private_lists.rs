@@ -122,17 +122,19 @@ where
                 self.storage
                     .transaction(|tx| {
                         let now = self.clock.now();
-                        let lease_timeout =
-                            ChronoDuration::from_std(PEER_LINK_OPERATION_LEASE_TIMEOUT)
-                                .expect("fixed peer link lease timeout must fit chrono duration");
-                        let lease = tx
-                            .claim_peer_link_operation(&counterparty, now, now + lease_timeout)?
-                            .ok_or_else(|| PaykitSdkError::ConcurrentUpdate {
-                                context: format!(
-                                    "peer link operation already in progress for counterparty {counterparty}"
-                                ),
-                                source: None,
-                            })?;
+                        // The transaction serializes queueing. Remove expired leases so
+                        // their ID-based handles cannot authorize later writes.
+                        if let Some(lease) = tx.peer_link_operation_lease(&counterparty) {
+                            if lease.expires_at > now {
+                                return Err(PaykitSdkError::ConcurrentUpdate {
+                                    context: format!(
+                                        "peer link operation already in progress for counterparty {counterparty}"
+                                    ),
+                                    source: None,
+                                });
+                            }
+                            tx.release_peer_link_operation(&counterparty, lease.lease_id);
+                        }
                         Self::private_queue_readiness_in_transaction(tx, &counterparty)?;
                         let policy = if reuse_unchanged {
                             PrivatePaymentListQueuePolicy::Sync {
@@ -142,16 +144,14 @@ where
                         } else {
                             PrivatePaymentListQueuePolicy::Always
                         };
-                        let record = queue_private_payment_list_with_reservations_in_transaction(
+                        queue_private_payment_list_with_reservations_in_transaction(
                             tx,
                             &counterparty,
                             self.config.app_id.clone(),
                             reservations,
                             now,
                             policy,
-                        )?;
-                        tx.release_peer_link_operation(&counterparty, lease.lease_id);
-                        Ok(record)
+                        )
                     })
                     .await
             }))

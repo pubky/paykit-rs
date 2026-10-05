@@ -684,9 +684,19 @@ where
         counterparty: &PubkyPublicKey,
         payment_request_id: &PaymentRequestId,
     ) -> Result<PaymentRequestRecord> {
-        let mut records =
-            derive_payment_request_records(&self.storage, counterparty, self.clock.now()).await?;
-        self.mark_recovery_required_payment_request_records(counterparty, &mut records)
+        let records = self
+            .storage
+            .transaction(|tx| {
+                let mut records =
+                    payment_request_records_from_transaction(tx, counterparty, self.clock.now())?;
+                if tx
+                    .linked_peer(counterparty)
+                    .is_some_and(|peer| peer.state == LinkedPeerState::RecoveryRequired)
+                {
+                    mark_payment_requests_recovery_required(&mut records);
+                }
+                Ok(records)
+            })
             .await?;
         records
             .into_iter()

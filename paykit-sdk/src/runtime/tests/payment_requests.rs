@@ -287,6 +287,14 @@ async fn test_payment_requests_with_marks_recovery_required_peer_state() {
         records[0].state,
         PaymentRequestLifecycleState::RecoveryRequired
     );
+    let record = sdk
+        .load_payment_request_record(
+            &counterparty,
+            &PaymentRequestId::new(&records[0].payment_request_id).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(record, records[0]);
 }
 
 #[tokio::test]
