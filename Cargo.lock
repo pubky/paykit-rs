@@ -4032,7 +4032,7 @@ dependencies = [
 [[package]]
 name = "pubky-noise"
 version = "0.1.0-rc12"
-source = "git+https://github.com/pubky/pubky-noise?rev=1eb285e03e642c61a4468f8f89baf8456b94faec#1eb285e03e642c61a4468f8f89baf8456b94faec"
+source = "git+https://github.com/pubky/pubky-noise?rev=b61c334072ab1b6c06924653a1744132266be891#b61c334072ab1b6c06924653a1744132266be891"
 dependencies = [
  "chacha20poly1305",
  "curve25519-dalek 5.0.0",

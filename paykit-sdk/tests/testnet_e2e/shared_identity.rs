@@ -1318,6 +1318,88 @@ async fn test_same_app_devices_serialize_public_endpoint_sync() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_idle_handshake_probe_preserves_shared_state() {
+    let pair = homeserver_shared_pair().await;
+    let counterparty = &pair.bob.public_key;
+    let expected = pair
+        .bitkit
+        .sdk
+        .accept_link_with_peer(counterparty.clone())
+        .await
+        .unwrap();
+    let lease = pair
+        .bitkit
+        .storage
+        .transaction(|tx| {
+            let now = Utc::now();
+            Ok(tx
+                .claim_peer_link_operation(counterparty, now, now + chrono::Duration::minutes(1))?
+                .unwrap())
+        })
+        .await
+        .unwrap();
+    let storage = pair.bitkit.access.session.storage();
+    let before = storage
+        .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(
+        pair.server
+            .sdk
+            .ensure_link_with_peer(counterparty.clone(), 1)
+            .await
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        pair.server
+            .sdk
+            .advance_link_handshake(counterparty.clone())
+            .await
+            .unwrap(),
+        expected
+    );
+    let after = storage
+        .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(before, after, "idle polls must not change state or leases");
+
+    pair.bob
+        .sdk
+        .initiate_link_with_peer(pair.bitkit.public_key.clone())
+        .await
+        .unwrap();
+    pair.bob
+        .sdk
+        .advance_link_handshake(pair.bitkit.public_key.clone())
+        .await
+        .unwrap();
+    assert!(pair
+        .server
+        .sdk
+        .advance_link_handshake(counterparty.clone())
+        .await
+        .unwrap_err()
+        .is_concurrent_update());
+    pair.bitkit
+        .storage
+        .transaction(|tx| {
+            tx.release_peer_link_operation(counterparty, lease.lease_id);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    drive_shared_link_to_linked(&pair.bitkit, &pair.bob).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_handshake_advancement_checks_peer_state_after_claiming_lease() {
     let pair = homeserver_shared_pair().await;
     let counterparty = &pair.bob.public_key;

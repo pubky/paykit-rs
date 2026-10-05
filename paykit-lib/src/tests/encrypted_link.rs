@@ -305,6 +305,30 @@ async fn test_handshake_restore_and_complete() {
         responder_handshake,
     } = InProgressHandshakeSetup::new().await;
 
+    for (handshake, reads) in [(&initiator_handshake, false), (&responder_handshake, true)] {
+        let config = handshake.config();
+        let snapshot = handshake.snapshot().unwrap();
+        let path = snapshot
+            .next_handshake_read_path(
+                config.local_session.info().public_key(),
+                &config.pubky_root_keypair.secret_key(),
+            )
+            .unwrap();
+        assert_eq!(path.is_some(), reads);
+        if let Some(path) = path {
+            assert!(!config
+                .outbox_client
+                .public_storage()
+                .exists(path)
+                .await
+                .unwrap());
+        }
+        assert!(matches!(
+            snapshot.next_handshake_read_path(config.local_session.info().public_key(), &[0; 32],),
+            Err(PaykitError::Validation(_))
+        ));
+    }
+
     // Set a non-default value before snapshotting to verify restore resets
     // this knob back to the default.
     initiator_handshake.set_max_recovery_attempts(99);
@@ -316,6 +340,22 @@ async fn test_handshake_restore_and_complete() {
             panic!("initiator handshake unexpectedly completed in one step")
         }
     };
+    let config = responder_handshake.config();
+    let path = responder_handshake
+        .snapshot()
+        .unwrap()
+        .next_handshake_read_path(
+            config.local_session.info().public_key(),
+            &config.pubky_root_keypair.secret_key(),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(config
+        .outbox_client
+        .public_storage()
+        .exists(path)
+        .await
+        .unwrap());
     let responder_handshake = match advance_handshake(responder_handshake).await.unwrap() {
         HandshakeProgress::Pending(h) => h,
         HandshakeProgress::Complete(_) => {

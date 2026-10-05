@@ -27,7 +27,7 @@ hex = "0.4"
 paykit-lib = { path = "../paykit-lib", version = "0.1.0-rc62" }
 postcard = { version = "1.1.3", features = ["use-std"] }
 pubky = "0.14.0"
-pubky-noise = { version = "=0.1.0-rc12", git = "https://github.com/pubky/pubky-noise", rev = "1eb285e03e642c61a4468f8f89baf8456b94faec" }
+pubky-noise = { version = "=0.1.0-rc12", git = "https://github.com/pubky/pubky-noise", rev = "b61c334072ab1b6c06924653a1744132266be891" }
 reqwest = { version = "0.13", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

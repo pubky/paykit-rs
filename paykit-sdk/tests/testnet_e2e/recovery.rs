@@ -549,7 +549,7 @@ async fn test_handshake_rechecks_marker_after_advancement() {
         }
 
         async fn load_public_storage(&self) -> paykit_sdk::Result<Option<pubky::PublicStorage>> {
-            // Authorization and the initial marker lookup precede advancement.
+            // The probe and initial marker lookup precede advancement.
             // Publish before the marker recheck, before the completed link is saved.
             if self.reads.fetch_add(1, Ordering::SeqCst) == 2 {
                 self.remote

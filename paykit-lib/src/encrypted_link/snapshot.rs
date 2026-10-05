@@ -308,4 +308,44 @@ impl EncryptedLinkHandshakeSnapshot {
     pub fn recovery_context(&self) -> &EncryptedLinkRecoveryContext {
         &self.recovery_context
     }
+
+    /// Return the next remote handshake resource without restoring Noise.
+    ///
+    /// `None` means local work is required, not that the handshake is idle. The
+    /// returned path includes the counterparty identity and can be checked with
+    /// `PublicStorage::exists` after validating authorization and recovery state.
+    /// This advisory lookup neither authenticates a transcript nor advances it.
+    /// Before advancing, reload authoritative state under the ordinary lease.
+    /// Session authorization and key rotation remain the caller's responsibility.
+    pub fn next_handshake_read_path(
+        &self,
+        local_identity_public_key: &PublicKey,
+        local_noise_secret_key: &[u8; 32],
+    ) -> Result<Option<String>> {
+        if self.state.phase != pubky_noise::snow_crypto::NoisePhase::HandShake
+            || self.state.static_secret.as_ref() != Some(local_noise_secret_key)
+        {
+            return Err(PaykitError::Validation(
+                "snapshot cannot advance with the supplied Noise key".into(),
+            ));
+        }
+        let slot =
+            self.state
+                .next_handshake_read_slot()
+                .map_err(|err| PaykitError::InvalidData {
+                    context: format!("invalid Encrypted Link Handshake cursor: {err:?}"),
+                    source: None,
+                })?;
+        let Some(slot) = slot else {
+            return Ok(None);
+        };
+        let (_, read_path) = super::paths::compute_private_payment_paths(
+            local_noise_secret_key,
+            local_identity_public_key,
+            &self.recipient,
+            &self.remote_noise_public_key,
+            &self.recovery_context,
+        );
+        Ok(Some(format!("{}/{read_path}/{slot}", self.recipient)))
+    }
 }

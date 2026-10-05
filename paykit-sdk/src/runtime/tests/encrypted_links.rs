@@ -431,6 +431,7 @@ async fn test_ensure_link_recovery_required_ignores_stale_link_snapshot() {
             counterparty.clone(),
             EncryptedLinkHandshakeRole::Initiator,
             lease,
+            None,
         )
         .await;
 
@@ -508,6 +509,7 @@ async fn test_ensure_link_recovery_required_ignores_stale_handshake_snapshot() {
             counterparty.clone(),
             EncryptedLinkHandshakeRole::Responder,
             lease,
+            None,
         )
         .await;
 

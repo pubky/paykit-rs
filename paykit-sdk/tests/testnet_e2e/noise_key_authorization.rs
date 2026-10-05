@@ -375,9 +375,10 @@ async fn test_links_require_authorization_and_pin_verified_generations() {
         .publish_paykit_noise_key_authorization()
         .await
         .unwrap();
+    // A waiting responder must still observe authorization changes.
     alice
         .sdk
-        .ensure_link_with_peer(bob.public_key.clone(), 0)
+        .accept_link_with_peer(bob.public_key.clone())
         .await
         .unwrap();
     let pinned = alice
@@ -440,6 +441,11 @@ async fn test_links_require_authorization_and_pin_verified_generations() {
     assert!(alice
         .sdk
         .ensure_link_with_peer(bob.public_key.clone(), 0)
+        .await
+        .is_err());
+    assert!(alice
+        .sdk
+        .advance_link_handshake(bob.public_key.clone())
         .await
         .is_err());
     let after = alice
