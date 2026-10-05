@@ -234,11 +234,19 @@ where
             context: "publishing a Paykit app requires an active Pubky session".into(),
             source: None,
         })?;
-        let app_lease = self.claim_paykit_app_publication_operation().await?;
-        let result = self
-            .publish_paykit_app_inner(app, &app_lease, &session)
-            .await;
-        self.finish_paykit_app_operation(app_lease, result).await
+        // Publication has no wallet callbacks. Keep its durable transactions
+        // under one storage lock; registry writes never acquire shared storage.
+        self.with_guarded_storage_operation(
+            Arc::clone(&session._guard),
+            Box::pin(async {
+                let app_lease = self.claim_paykit_app_publication_operation().await?;
+                let result = self
+                    .publish_paykit_app_inner(app, &app_lease, &session)
+                    .await;
+                self.finish_paykit_app_operation(app_lease, result).await
+            }),
+        )
+        .await
     }
 
     async fn publish_paykit_app_inner(

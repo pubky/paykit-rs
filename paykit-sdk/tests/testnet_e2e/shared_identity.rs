@@ -90,8 +90,8 @@ async fn test_independent_apps_register_concurrently_without_lost_updates() {
 
 #[tokio::test]
 async fn test_failed_app_publication_keeps_capability_restrictions_until_republished() {
-    let testnet = build_testnet().await;
-    let user = TestUser::sign_up_with_app(&testnet, app_id("bitkit")).await;
+    let pair = homeserver_shared_pair().await;
+    let user = &pair.bitkit;
     let mut capabilities = test_app("Bitkit").capabilities();
     capabilities.receipts = false;
     let app = PaykitApp::new("Bitkit", capabilities).unwrap();
@@ -113,6 +113,11 @@ async fn test_failed_app_publication_keeps_capability_restrictions_until_republi
         Some(capabilities),
         "publication failure must not restore wider capabilities"
     );
+    assert!(user
+        .storage_state()
+        .await
+        .paykit_app_operation_leases
+        .is_empty());
     remote.unlock(&lock).await.unwrap();
 
     let registry = user.sdk.publish_paykit_app(app).await.unwrap();
@@ -346,6 +351,10 @@ async fn test_shared_storage_operation_keeps_committed_transactions_after_error(
                 Err(PaykitSdkError::Policy { .. })
             ));
             assert!(matches!(
+                pair.bitkit.sdk.publish_paykit_app(test_app("Bitkit")).await,
+                Err(PaykitSdkError::Policy { .. })
+            ));
+            assert!(matches!(
                 pair.server.storage.load_identity_state().await,
                 Err(PaykitSdkError::Policy { .. })
             ));
@@ -558,7 +567,7 @@ async fn test_private_list_clear_and_app_publication_transaction_counts() {
 #[tokio::test]
 async fn test_app_publication_rechecks_registry_and_authorization_after_staging() {
     struct ChangedAfterStagingStorage {
-        inner: InMemoryStorage,
+        inner: PubkySharedStateStorage,
         access: PubkySessionAccess,
         remove_authorization: bool,
         staged_changes: Arc<AtomicUsize>,
@@ -566,6 +575,13 @@ async fn test_app_publication_rechecks_registry_and_authorization_after_staging(
 
     #[async_trait]
     impl StorageAdapter for ChangedAfterStagingStorage {
+        async fn run_operation_erased<'a>(
+            &self,
+            operation: StorageOperation<'a>,
+        ) -> PaykitResult<Box<dyn Any + Send>> {
+            self.inner.run_operation_erased(operation).await
+        }
+
         async fn transaction_erased<'a>(
             &self,
             f: StorageTransactionCallback<'a>,
@@ -617,9 +633,9 @@ async fn test_app_publication_rechecks_registry_and_authorization_after_staging(
         }
     }
 
-    let testnet = build_testnet().await;
     for remove_authorization in [false, true] {
-        let user = TestUser::sign_up_with_app(&testnet, app_id("bitkit")).await;
+        let pair = homeserver_shared_pair().await;
+        let user = &pair.bitkit;
         let staged_changes = Arc::new(AtomicUsize::new(0));
         let sdk = PaykitSdk::new(
             ChangedAfterStagingStorage {
@@ -665,7 +681,7 @@ async fn test_app_publication_rechecks_registry_and_authorization_after_staging(
                 capabilities
             );
         }
-        let state = user.storage.snapshot().unwrap();
+        let state = user.storage_state().await;
         assert_eq!(
             state.registered_paykit_app_capabilities.get(&user.app_id),
             Some(&capabilities)
