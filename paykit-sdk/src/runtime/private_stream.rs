@@ -364,6 +364,7 @@ where
             Ok(link)
         }) {
             Ok(link) => link,
+            Err(err @ PaykitSdkError::Transport { .. }) => return Err(err),
             Err(err) => {
                 let now = self.clock.now();
                 mark_recovery_required_with_lease(

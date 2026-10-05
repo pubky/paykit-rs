@@ -359,10 +359,16 @@ async fn test_handshake_restore_and_complete() {
         DEFAULT_MAX_RECOVERY_ATTEMPTS
     );
 
-    let (mut initiator_link, mut responder_link) = tokio::join!(
-        drive_handshake_to_completion(restored_initiator),
-        drive_handshake_to_completion(restored_responder),
-    );
+    let HandshakeProgress::Complete(mut initiator_link) =
+        advance_handshake(restored_initiator).await.unwrap()
+    else {
+        panic!("initiator must complete when it sends the final handshake message");
+    };
+    let HandshakeProgress::Complete(mut responder_link) =
+        advance_handshake(restored_responder).await.unwrap()
+    else {
+        panic!("responder must complete when it receives the final handshake message");
+    };
 
     let mut payment_endpoints = HashMap::new();
     payment_endpoints.insert(

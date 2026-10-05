@@ -3,15 +3,216 @@ use paykit_lib::{
     PaymentRequestTerms,
 };
 use paykit_sdk::{
-    InMemoryStorage, LinkedPeerState, PaykitSdk, PaykitSdkConfig, PaykitSdkError,
-    PaymentRequestLifecycleState, PrivatePaymentListReservationUpdate, StorageAdapter,
+    storage::{EncryptedLinkStateRecord, LinkedPeerRecord, StorageTransactionCallback},
+    InMemoryStorage, LinkedPeerState, OutboundPrivateMessageStatus, PaykitSdk, PaykitSdkConfig,
+    PaykitSdkError, PaymentRequestLifecycleState, PrivatePaymentListReservationUpdate,
+    PubkyPublicKey, StorageAdapter,
 };
-use std::time::{Duration, Instant};
+use std::{
+    any::Any,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
+use tokio::sync::oneshot;
 
 use crate::harness::{
-    drive_link_to_linked, linked_two_party, private_receiving_detail, two_party,
+    deliver, drive_link_to_linked, linked_two_party, private_receiving_detail, two_party,
     TestnetSessionProvider,
 };
+
+struct PausedRestoreStorage {
+    inner: InMemoryStorage,
+    counterparty: PubkyPublicKey,
+    receive: bool,
+    pause: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+}
+
+#[async_trait::async_trait]
+impl StorageAdapter for PausedRestoreStorage {
+    async fn transaction_erased<'a>(
+        &self,
+        f: StorageTransactionCallback<'a>,
+    ) -> paykit_sdk::Result<Box<dyn Any + Send>> {
+        let result = self.inner.transaction_erased(f).await?;
+        // These restore-state reads follow authorization and recovery-marker preflight.
+        let peer = if self.receive {
+            result
+                .downcast_ref::<(LinkedPeerRecord, Option<EncryptedLinkStateRecord>)>()
+                .map(|(peer, _)| peer)
+        } else {
+            result
+                .downcast_ref::<(Option<LinkedPeerRecord>, Option<EncryptedLinkStateRecord>)>()
+                .and_then(|(peer, _)| peer.as_ref())
+        };
+        let pause = if peer.is_some_and(|peer| peer.counterparty == self.counterparty) {
+            self.pause.lock().unwrap().take()
+        } else {
+            None
+        };
+        if let Some((ready, resume)) = pause {
+            ready.send(()).expect("restore observer should remain live");
+            resume.await.expect("restore should be released");
+        }
+        Ok(result)
+    }
+}
+
+#[tokio::test]
+async fn test_private_send_restore_transport_failure_preserves_state() {
+    assert_restore_transport_failure_preserves_state(false).await;
+}
+
+#[tokio::test]
+async fn test_private_receive_restore_transport_failure_preserves_state() {
+    assert_restore_transport_failure_preserves_state(true).await;
+}
+
+async fn assert_restore_transport_failure_preserves_state(receive: bool) {
+    let pair = linked_two_party().await;
+    for (sender, receiver) in [(&pair.alice, &pair.bob), (&pair.bob, &pair.alice)] {
+        sender
+            .sdk
+            .clear_private_payment_list(receiver.public_key.clone())
+            .await
+            .unwrap();
+        deliver(sender, receiver).await;
+        sender
+            .sdk
+            .propose_payment_request(
+                receiver.public_key.clone(),
+                PaymentRequestTerms::builder(
+                    PaymentAmount::new("0.001", "btc").unwrap(),
+                    PaymentReference::new("restore-outage").unwrap(),
+                    vec![PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap()],
+                )
+                .build()
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    let sent = pair
+        .bob
+        .sdk
+        .process_outbound_private_messages(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(sent.sent.len(), 1);
+    assert!(sent.failed.is_empty());
+
+    let before = pair.alice.storage.snapshot().unwrap();
+    let link = &before.encrypted_link_states[&pair.bob.public_key];
+    let bytes = link.link_snapshot.as_ref().unwrap();
+    let snapshot = paykit_lib::EncryptedLinkSnapshot::deserialize(bytes).unwrap();
+    let noise = pubky_noise::serializer::PubkyNoiseSessionState::deserialize(
+        &bytes[..pubky_noise::serializer::SESSION_STATE_V1_LEN],
+    )
+    .unwrap();
+    assert!(noise.sending_nonce > 0 && noise.receiving_nonce > 0);
+    assert!(noise.write_counter > noise.counter && noise.read_counter > noise.counter);
+    assert!(link.generation > 0);
+    assert_eq!(
+        before.linked_peers[&pair.bob.public_key].state,
+        LinkedPeerState::Linked
+    );
+    assert!(before.outbound_private_messages.iter().any(|message| {
+        message.kind == paykit_lib::PrivateMessageKind::PaymentRequest.as_str()
+            && message.status == OutboundPrivateMessageStatus::Pending
+            && message.attempt_count == 0
+    }));
+    let key = pair
+        .alice
+        .access
+        .local_secret_key
+        .as_ref()
+        .unwrap()
+        .derive_paykit_identity_secret_key(paykit_sdk::INITIAL_PAYKIT_KEY_GENERATION)
+        .unwrap();
+    assert!(snapshot
+        .has_pending_private_application_message(
+            &pair.alice.access.outbox_client.public_storage(),
+            pair.alice.access.session.info().public_key(),
+            &paykit_lib::derive_paykit_noise_secret_key(key.as_bytes()),
+        )
+        .await
+        .unwrap());
+
+    let (ready, reached) = oneshot::channel();
+    let (resume, paused) = oneshot::channel();
+    let sdk = PaykitSdk::new(
+        PausedRestoreStorage {
+            inner: pair.alice.storage.clone(),
+            counterparty: pair.bob.public_key.clone(),
+            receive,
+            pause: Mutex::new(Some((ready, paused))),
+        },
+        TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    );
+    let operation = async {
+        if receive {
+            sdk.receive_private_messages(pair.bob.public_key.clone())
+                .await
+                .map(|_| ())
+        } else {
+            sdk.process_outbound_private_messages(pair.bob.public_key.clone())
+                .await
+                .map(|_| ())
+        }
+    };
+    tokio::pin!(operation);
+    tokio::select! {
+        reached = tokio::time::timeout(Duration::from_secs(30), reached) => {
+            reached.expect("restore checkpoint timed out").unwrap();
+        }
+        result = &mut operation => panic!("restore did not pause: {result:?}"),
+    }
+    assert!(pair
+        .alice
+        .storage
+        .snapshot()
+        .unwrap()
+        .peer_link_operation_leases
+        .contains_key(&pair.bob.public_key));
+    let server = pair._testnet.homeserver_app().client_server();
+    server.shutdown();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for endpoint in [
+            server.icann_http_url_string(),
+            server.pubky_tls_ip_url_ring(),
+        ] {
+            let url = url::Url::parse(&endpoint).unwrap();
+            let address = (url.host_str().unwrap(), url.port().unwrap());
+            while tokio::net::TcpStream::connect(address).await.is_ok() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    })
+    .await
+    .expect("homeserver listeners should close");
+    resume.send(()).unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(30), operation)
+        .await
+        .expect("restore failure should be bounded")
+        .expect_err("offline transcript restore must fail");
+    assert!(
+        matches!(&error, PaykitSdkError::Transport { context, .. }
+            if context.contains("failed to restore Encrypted Link")),
+        "unexpected restore error: {error:?}"
+    );
+
+    let after = pair.alice.storage.snapshot().unwrap();
+    assert!(after.peer_link_operation_leases.is_empty());
+    assert_eq!(after.linked_peers, before.linked_peers);
+    assert_eq!(after.encrypted_link_states, before.encrypted_link_states);
+    assert_eq!(
+        after.outbound_private_messages,
+        before.outbound_private_messages
+    );
+    assert_eq!(after.private_stream_items, before.private_stream_items);
+    assert_eq!(after.event_dedup_records, before.event_dedup_records);
+}
 
 #[tokio::test]
 async fn test_published_events_survive_relink_and_lost_confirmations() {

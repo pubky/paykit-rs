@@ -267,6 +267,11 @@ pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<
 
     // Process the next handshake step.
     match handshake.encryptor.handle_handshake().await {
+        Ok(pubky_noise::HandshakeResult::Pending)
+            if handshake.encryptor.is_handshake_complete() =>
+        {
+            finish_handshake(handshake)
+        }
         Ok(pubky_noise::HandshakeResult::Pending) => {
             debug!("handshake step pending (waiting for counterparty)");
             handshake.recovery_attempts = 0;
@@ -337,9 +342,7 @@ fn handshake_error(context: &str, err: pubky_noise::PubkyNoiseError) -> PaykitEr
     let source = anyhow::anyhow!("pubky-noise handshake failed: {err:?}");
     match err {
         pubky_noise::PubkyNoiseError::HomeserverResponseError
-        | pubky_noise::PubkyNoiseError::HomeserverWriteError
-        // Replay errors also cover transient HTTP failures in pubky-noise.
-        | pubky_noise::PubkyNoiseError::RestoreBackupReplayError => {
+        | pubky_noise::PubkyNoiseError::HomeserverWriteError => {
             PaykitError::Transport { context, source }
         }
         _ => PaykitError::InvalidData {
@@ -489,12 +492,18 @@ mod tests {
         for error in [
             pubky_noise::PubkyNoiseError::HomeserverResponseError,
             pubky_noise::PubkyNoiseError::HomeserverWriteError,
-            pubky_noise::PubkyNoiseError::RestoreBackupReplayError,
         ] {
             assert!(matches!(
                 handshake_error("handshake failed", error),
                 PaykitError::Transport { .. }
             ));
         }
+        assert!(matches!(
+            handshake_error(
+                "handshake replay failed",
+                pubky_noise::PubkyNoiseError::RestoreBackupReplayError,
+            ),
+            PaykitError::InvalidData { .. }
+        ));
     }
 }

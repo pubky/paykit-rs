@@ -506,6 +506,7 @@ where
             Ok(link)
         }) {
             Ok(link) => link,
+            Err(err @ PaykitSdkError::Transport { .. }) => return Err(err),
             Err(err) => {
                 self.mark_outbound_link_recovery_required(
                     counterparty,
