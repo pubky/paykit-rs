@@ -566,9 +566,13 @@ async fn test_shared_operations_transaction_counts() {
         .iter()
         .any(|request| request.payment_request_id == proposal.payment_request_id));
 
+    let before_publication = pair.bitkit.storage_state().await;
+    let revision = pair.bitkit.storage.last_revision().unwrap();
     sdk.publish_paykit_app(test_app("Bitkit")).await.unwrap();
     let unchanged_transactions = transactions.swap(0, Ordering::SeqCst);
-    assert_eq!(unchanged_transactions, 7);
+    assert_eq!(unchanged_transactions, 2);
+    assert_eq!(pair.bitkit.storage.last_revision().unwrap(), revision);
+    assert_eq!(pair.bitkit.storage_state().await, before_publication);
     let mut capabilities = test_app("Bitkit").capabilities();
     capabilities.private_payments = false;
     let registry = sdk
@@ -595,6 +599,167 @@ async fn test_shared_operations_transaction_counts() {
     assert!(state.paykit_app_operation_leases.is_empty());
     assert_no_pending_shared_state_writes(&pair.bitkit.access.session).await;
     eprintln!("shared-state transactions: clear={clear_transactions}, proposal={proposal_transactions}, send={send_transactions}, unchanged publication={unchanged_transactions}, downgrade={downgrade_transactions}");
+}
+
+#[tokio::test]
+async fn test_unchanged_app_publication_rechecks_local_work() {
+    struct ChangedAppStorage {
+        inner: InMemoryStorage,
+        app_id: PaykitAppId,
+        counterparty: PubkyPublicKey,
+        request_id: String,
+        change: &'static str,
+        transactions: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl StorageAdapter for ChangedAppStorage {
+        async fn transaction_erased<'a>(
+            &self,
+            f: StorageTransactionCallback<'a>,
+        ) -> PaykitResult<Box<dyn Any + Send>> {
+            let transaction = self.transactions.fetch_add(1, Ordering::SeqCst);
+            let before_refresh = matches!(self.change, "active lease" | "expired lease");
+            self.inner
+                .transaction_erased(Box::new(move |tx| {
+                    // InMemoryStorage does not lock across the registry reads.
+                    if transaction == usize::from(!before_refresh) {
+                        let now = Utc::now();
+                        match self.change {
+                            "active lease" | "expired lease" | "completed lease" => {
+                                let expires_at = if self.change == "expired lease" {
+                                    now - chrono::Duration::seconds(1)
+                                } else {
+                                    now + chrono::Duration::seconds(60)
+                                };
+                                let lease = tx
+                                    .claim_paykit_app_operation(&self.app_id, now, expires_at)?
+                                    .unwrap();
+                                if self.change == "completed lease" {
+                                    tx.release_paykit_app_operation(&self.app_id, lease.lease_id);
+                                }
+                            }
+                            "retired" => tx.retire_paykit_app(self.app_id.clone()),
+                            "capabilities" => {
+                                let mut capabilities =
+                                    tx.paykit_app_capabilities(&self.app_id).unwrap();
+                                capabilities.receipts = false;
+                                tx.save_paykit_app_capabilities(&self.app_id, capabilities);
+                            }
+                            "recovery" => {
+                                let mut message =
+                                    tx.outbound_private_messages(&self.counterparty)[0].clone();
+                                message.status = OutboundPrivateMessageStatus::RecoveryRequired;
+                                tx.save_outbound_private_message(message)?;
+                            }
+                            "execution" => tx.save_payment_request_execution_claim(
+                                paykit_sdk::storage::PaymentRequestExecutionClaim {
+                                    counterparty: self.counterparty.clone(),
+                                    payment_request_id: self.request_id.clone(),
+                                    app_id: self.app_id.clone(),
+                                    claimed_at: now,
+                                },
+                            ),
+                            _ => unreachable!(),
+                        }
+                    }
+                    f(tx)
+                }))
+                .await
+        }
+    }
+
+    let pair = linked_two_party().await;
+    let request = pair
+        .bob
+        .sdk
+        .propose_payment_request(pair.alice.public_key.clone(), recurring_request_terms())
+        .await
+        .unwrap();
+    pair.bob
+        .sdk
+        .cancel_payment_request(
+            pair.alice.public_key.clone(),
+            &PaymentRequestId::new(request.payment_request_id.clone()).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+    crate::harness::deliver(&pair.bob, &pair.alice).await;
+    let before = pair.alice.storage.snapshot().unwrap();
+    assert!(!before.outbound_private_messages.is_empty());
+    assert!(before.payment_request_execution_claims.is_empty());
+    let app = test_app("Paykit Test App");
+    for change in [
+        "active lease",
+        "expired lease",
+        "retired",
+        "capabilities",
+        "recovery",
+        "execution",
+        "completed lease",
+    ] {
+        let storage = InMemoryStorage::from_state(before.clone());
+        let sdk = PaykitSdk::new(
+            ChangedAppStorage {
+                inner: storage.clone(),
+                app_id: pair.alice.app_id.clone(),
+                counterparty: pair.bob.public_key.clone(),
+                request_id: request.payment_request_id.clone(),
+                change,
+                transactions: AtomicUsize::new(0),
+            },
+            TestnetSessionProvider::new(pair.alice.access.clone()),
+            pair.alice.adapter.clone(),
+            PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+        );
+        let result = sdk.publish_paykit_app(app.clone()).await;
+        let after = storage.snapshot().unwrap();
+        if change == "active lease" {
+            assert!(
+                matches!(result, Err(PaykitSdkError::Policy { .. })),
+                "{result:?}"
+            );
+            assert!(after
+                .paykit_app_operation_leases
+                .contains_key(&pair.alice.app_id));
+            continue;
+        }
+        assert_eq!(result.unwrap().apps().get(&pair.alice.app_id), Some(&app));
+        let lease_claims = if matches!(change, "expired lease" | "completed lease") {
+            2
+        } else {
+            1
+        };
+        assert_eq!(
+            after.next_paykit_app_operation_lease_id,
+            before.next_paykit_app_operation_lease_id + lease_claims,
+            "{change} must take the normal publication path"
+        );
+        assert!(after.paykit_app_operation_leases.is_empty(), "{change}");
+        assert!(
+            after.registered_paykit_apps.contains(&pair.alice.app_id),
+            "{change}"
+        );
+        assert!(
+            !after.retired_paykit_apps.contains(&pair.alice.app_id),
+            "{change}"
+        );
+        assert_eq!(
+            after.registered_paykit_app_capabilities[&pair.alice.app_id],
+            app.capabilities()
+        );
+        assert!(
+            after.outbound_private_messages.iter().all(|message| {
+                message.status != OutboundPrivateMessageStatus::RecoveryRequired
+            }),
+            "{change}"
+        );
+        assert!(
+            after.payment_request_execution_claims.is_empty(),
+            "{change}"
+        );
+    }
 }
 
 #[tokio::test]

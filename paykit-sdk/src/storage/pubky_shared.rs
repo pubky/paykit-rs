@@ -262,6 +262,8 @@ impl StorageAdapter for PubkySharedStateStorage {
         let access = self.load_access().await?;
         let session = access.session.clone();
         with_shared_state_lock(&session, |lock| async move {
+            // A late write can commit and remove its marker during a state read.
+            // Checking markers first prevents accepting that read's stale contents.
             wait_for_pending_writes(&access.session).await?;
             let snapshot = self.load_remote_state(&access).await?;
             if self.last_revision()?.is_some() && snapshot.revision.is_none() {

@@ -6,6 +6,31 @@ use super::*;
 
 const APP_REGISTRY_UPDATE_MAX_ATTEMPTS: usize = 8;
 
+fn app_publication_noop_lease_sequence(
+    tx: &dyn StorageTransaction,
+    app_id: &paykit_lib::PaykitAppId,
+    capabilities: paykit_lib::PaykitAppCapabilities,
+) -> Option<u64> {
+    if !tx.paykit_app_is_registered(app_id)
+        || tx.paykit_app_is_retired(app_id)
+        || tx.paykit_app_capabilities(app_id) != Some(capabilities)
+        || tx.paykit_app_operation_lease(app_id).is_some()
+    {
+        return None;
+    }
+    let state = tx.export_storage_state();
+    // Publication reconciles recovery work across apps, including execution claims.
+    if !state.payment_request_execution_claims.is_empty()
+        || state
+            .outbound_private_messages
+            .iter()
+            .any(|message| message.status == OutboundPrivateMessageStatus::RecoveryRequired)
+    {
+        return None;
+    }
+    Some(state.next_paykit_app_operation_lease_id)
+}
+
 fn authorized_app_ids(
     apps: &HashMap<paykit_lib::PaykitAppId, paykit_lib::PaykitAppCapabilities>,
     enabled: impl Fn(paykit_lib::PaykitAppCapabilities) -> bool,
@@ -234,7 +259,15 @@ where
         app: paykit_lib::PaykitApp,
     ) -> Result<paykit_lib::PaykitAppRegistry> {
         let _identity_guard = self.claim_identity_operation("publish Paykit app")?;
-        let (session, _) = self.load_session_access_and_refresh_identity().await?;
+        let (session, _, noop_sequence) = self
+            .load_session_access_and_refresh_identity_with(|tx| {
+                Ok(app_publication_noop_lease_sequence(
+                    tx,
+                    &self.config.app_id,
+                    app.capabilities(),
+                ))
+            })
+            .await?;
         let session = session.ok_or_else(|| PaykitSdkError::Identity {
             context: "publishing a Paykit app requires an active Pubky session".into(),
             source: None,
@@ -244,6 +277,13 @@ where
         self.with_guarded_storage_operation(
             Arc::clone(&session._guard),
             Box::pin(async {
+                if let Some(sequence) = noop_sequence.flatten() {
+                    if let Some(registry) =
+                        self.unchanged_paykit_app(&app, &session, sequence).await?
+                    {
+                        return Ok(registry);
+                    }
+                }
                 let app_lease = self.claim_paykit_app_publication_operation().await?;
                 let result = self
                     .publish_paykit_app_inner(app, &app_lease, &session)
@@ -252,6 +292,58 @@ where
             }),
         )
         .await
+    }
+
+    async fn unchanged_paykit_app(
+        &self,
+        app: &paykit_lib::PaykitApp,
+        session_access: &PubkySessionAccess,
+        lease_sequence: u64,
+    ) -> Result<Option<paykit_lib::PaykitAppRegistry>> {
+        let (registry, _) = self
+            .load_paykit_app_registry_for_update(session_access, true)
+            .await?;
+        let expected_noise_key = session_access.paykit_identity_secret_key().map(|key| {
+            (
+                pubky::Keypair::from_secret(&key.noise_secret_key()).public_key(),
+                key.key_generation(),
+            )
+        });
+        // Loading validates authorization but may initialize a key only on its clone.
+        if registry.apps().get(&self.config.app_id) != Some(app)
+            || expected_noise_key
+                .as_ref()
+                .is_some_and(|(key, generation)| {
+                    registry.noise_public_key() != Some(key)
+                        || registry.key_generation() != *generation
+                })
+        {
+            return Ok(None);
+        }
+
+        let owner = session_access.public_key()?;
+        let noise_key = expected_noise_key
+            .as_ref()
+            .map(|(key, _)| PubkyPublicKey::from_public_key(key));
+        // Generic adapters need not lock the whole operation. Recheck atomically,
+        // including a lease claimed and released while the registry was read.
+        let unchanged = self
+            .storage
+            .transaction(|tx| {
+                Ok(
+                    tx.load_identity_state().and_then(|state| state.public_key) == Some(owner)
+                        && noise_key
+                            .as_ref()
+                            .is_none_or(|key| tx.paykit_noise_public_key().as_ref() == Some(key))
+                        && app_publication_noop_lease_sequence(
+                            tx,
+                            &self.config.app_id,
+                            app.capabilities(),
+                        ) == Some(lease_sequence),
+                )
+            })
+            .await?;
+        Ok(unchanged.then_some(registry))
     }
 
     async fn publish_paykit_app_inner(
