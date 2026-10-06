@@ -31,7 +31,7 @@ pub(super) enum PrivateSendReadiness {
     DeferPendingConfirmations,
 }
 
-fn can_defer_pending_confirmations(
+pub(super) fn can_defer_pending_confirmations(
     tx: &dyn StorageTransaction,
     counterparty: &PubkyPublicKey,
 ) -> bool {

@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::runtime::outbound_private::PrivateSendReadiness;
 
 #[tokio::test]
 async fn test_private_contact_preparation_rechecks_sent_retry_time_and_registration() {
@@ -54,7 +55,12 @@ async fn test_private_contact_preparation_rechecks_sent_retry_time_and_registrat
         *now.lock().unwrap() = started_at + elapsed;
         let actual = storage
             .transaction(|tx| {
-                sdk.private_contact_preparation_needs_outbound(tx, &counterparty, &sent)
+                sdk.private_contact_preparation_needs_outbound(
+                    tx,
+                    &counterparty,
+                    &sent,
+                    PrivateSendReadiness::Queued,
+                )
             })
             .await
             .unwrap();
@@ -70,7 +76,12 @@ async fn test_private_contact_preparation_rechecks_sent_retry_time_and_registrat
                     tx.retire_paykit_app(app_id());
                 }
                 assert_eq!(tx.outbound_private_messages(&counterparty), sent);
-                sdk.private_contact_preparation_needs_outbound(tx, &counterparty, &sent)
+                sdk.private_contact_preparation_needs_outbound(
+                    tx,
+                    &counterparty,
+                    &sent,
+                    PrivateSendReadiness::Queued,
+                )
             })
             .await
             .unwrap();
@@ -132,6 +143,7 @@ async fn test_private_contact_preparation_keeps_unsent_and_cleanup_fallbacks() {
                         tx,
                         &counterparty,
                         &tx.outbound_private_messages(&counterparty),
+                        PrivateSendReadiness::Queued,
                     )?,
                     "{case}"
                 );

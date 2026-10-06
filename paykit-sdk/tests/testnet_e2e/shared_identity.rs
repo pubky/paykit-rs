@@ -410,7 +410,7 @@ async fn test_request_preparation_preserves_confirmation_for_restart() {
         prepared.resolution.payable_endpoints[0].endpoint.payload,
         "ln-bob"
     );
-    assert_eq!(transactions.load(Ordering::SeqCst), 5);
+    assert_eq!(transactions.load(Ordering::SeqCst), 2);
     assert_eq!(commits.load(Ordering::SeqCst), 0);
     let state = pair.bitkit.storage_state().await;
     assert!(state.peer_link_operation_leases.is_empty());
@@ -541,18 +541,22 @@ async fn test_request_preparation_receives_cancellation_with_pending_confirmatio
         .process_outbound_private_messages(pair.bitkit.public_key.clone())
         .await
         .unwrap();
-    let error = pair
-        .bitkit
-        .sdk
-        .prepare_and_resolve_private_payment_request(
-            pair.bob.public_key.clone(),
-            &request_id,
-            None,
-            1,
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(error, PaykitSdkError::Policy { .. }));
+    for _ in 0..2 {
+        // The first call consumes cancellation; the next checks the saved request
+        // with an empty inbox and its confirmation still queued.
+        let error = pair
+            .bitkit
+            .sdk
+            .prepare_and_resolve_private_payment_request(
+                pair.bob.public_key.clone(),
+                &request_id,
+                None,
+                1,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, PaykitSdkError::Policy { .. }));
+    }
     let requests = pair
         .bitkit
         .sdk

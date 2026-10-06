@@ -1,5 +1,5 @@
 use super::encrypted_links::require_distinct_link_identity;
-use super::outbound_private::PrivateSendReadiness;
+use super::outbound_private::{can_defer_pending_confirmations, PrivateSendReadiness};
 use super::private_stream::{
     private_receive_snapshot, PrivateInboxCheckpoint, PrivateReceiveSnapshot,
 };
@@ -54,6 +54,7 @@ impl PrivatePreparationCheckpoint {
 
 struct PrivateResolutionProjection {
     context: super::app_registry::CounterpartyAppAuthorizationContext,
+    request_terms: Option<PaymentRequestTermsRecord>,
     items: Vec<PrivateStreamItemRecord>,
     state: PrivatePaymentResolutionState,
     private_allowed: bool,
@@ -508,18 +509,13 @@ where
                 payment_request_resolution_terms(record, context.payment_request_apps.as_deref())
             })
             .transpose()?;
-        let amount = payment_request_terms
-            .as_ref()
-            .map(payment_request_amount)
-            .or(amount);
-
         self.resolve_private_contact_payment_from_projection(
             counterparty,
             amount,
             after_private_payment_list_version,
-            payment_request_terms,
             PrivateResolutionProjection {
                 context,
+                request_terms: payment_request_terms,
                 items,
                 state,
                 private_allowed,
@@ -535,17 +531,21 @@ where
         counterparty: PubkyPublicKey,
         amount: Option<PaymentAmountContext>,
         after_private_payment_list_version: Option<u64>,
-        payment_request_terms: Option<PaymentRequestTermsRecord>,
         projection: PrivateResolutionProjection,
     ) -> Result<PrivateContactPaymentResolution> {
         let PrivateResolutionProjection {
             context,
+            request_terms: payment_request_terms,
             items,
             mut state,
             private_allowed,
             private_live,
             inbox_is_current,
         } = projection;
+        let amount = payment_request_terms
+            .as_ref()
+            .map(payment_request_amount)
+            .or(amount);
         let (app_registry, authorized_private_apps) = (context.registry, context.private_apps);
 
         if let Some((terms, endpoints)) = payment_request_terms.as_ref().and_then(|terms| {
@@ -772,8 +772,35 @@ where
         after_private_payment_list_version: Option<u64>,
         max_advance_steps: u32,
     ) -> Result<PreparedPrivateContactPayment> {
+        self.prepare_and_resolve_private_payment(
+            counterparty,
+            amount,
+            after_private_payment_list_version,
+            None,
+            max_advance_steps,
+        )
+        .await
+    }
+
+    async fn prepare_and_resolve_private_payment(
+        &self,
+        counterparty: PubkyPublicKey,
+        amount: Option<PaymentAmountContext>,
+        after_private_payment_list_version: Option<u64>,
+        payment_request_id: Option<&PaymentRequestId>,
+        max_advance_steps: u32,
+    ) -> Result<PreparedPrivateContactPayment> {
+        let send_readiness = if payment_request_id.is_some() {
+            PrivateSendReadiness::DeferPendingConfirmations
+        } else {
+            PrivateSendReadiness::Queued
+        };
         let prepared = match self
-            .unchanged_private_contact_preparation(&counterparty)
+            .unchanged_private_contact_preparation(
+                &counterparty,
+                payment_request_id,
+                send_readiness,
+            )
             .await?
         {
             PrivatePreparationOutcome::Prepare => None,
@@ -783,7 +810,7 @@ where
                     counterparty.clone(),
                     amount.clone(),
                     after_private_payment_list_version,
-                    None,
+                    payment_request_id,
                     Some(&inbox),
                 )
                 .await?,
@@ -794,7 +821,6 @@ where
                     counterparty.clone(),
                     amount.clone(),
                     after_private_payment_list_version,
-                    None,
                     *projection,
                 )
                 .await?,
@@ -818,11 +844,7 @@ where
             });
         }
         let (link_report, receive_report, outbound_report, inbox) = self
-            .prepare_private_contact_payment(
-                &counterparty,
-                max_advance_steps,
-                PrivateSendReadiness::Queued,
-            )
+            .prepare_private_contact_payment(&counterparty, max_advance_steps, send_readiness)
             .await?;
 
         let resolution = self
@@ -830,7 +852,7 @@ where
                 counterparty,
                 amount,
                 after_private_payment_list_version,
-                None,
+                payment_request_id,
                 inbox.as_ref(),
             )
             .await?;
@@ -848,7 +870,15 @@ where
         tx: &dyn StorageTransaction,
         counterparty: &PubkyPublicKey,
         outbound: &[OutboundPrivateMessageRecord],
+        send_readiness: PrivateSendReadiness,
     ) -> Result<bool> {
+        if matches!(
+            send_readiness,
+            PrivateSendReadiness::DeferPendingConfirmations
+        ) && can_defer_pending_confirmations(tx, counterparty)
+        {
+            return Ok(false);
+        }
         if outbound.iter().any(|message| {
             message.prepared_send.is_some()
                 || matches!(
@@ -869,11 +899,18 @@ where
     async fn unchanged_private_contact_preparation(
         &self,
         counterparty: &PubkyPublicKey,
+        payment_request_id: Option<&PaymentRequestId>,
+        send_readiness: PrivateSendReadiness,
     ) -> Result<PrivatePreparationOutcome> {
         let (access, _, checkpoint) = self
             .load_session_access_and_refresh_identity_with(|tx| {
                 let outbound = tx.outbound_private_messages(counterparty);
-                if self.private_contact_preparation_needs_outbound(tx, counterparty, &outbound)? {
+                if self.private_contact_preparation_needs_outbound(
+                    tx,
+                    counterparty,
+                    &outbound,
+                    send_readiness,
+                )? {
                     return Ok(None);
                 }
                 Ok(PrivatePreparationCheckpoint::load(
@@ -938,7 +975,9 @@ where
                     || tx.payment_endpoint_reservations(counterparty) != reservations
                     || !inbox.is_current(tx)
                     // Retry eligibility can change without changing the saved records.
-                    || self.private_contact_preparation_needs_outbound(tx, counterparty, &outbound)?
+                    || self.private_contact_preparation_needs_outbound(
+                        tx, counterparty, &outbound, send_readiness,
+                    )?
                 {
                     return Ok(PrivatePreparationOutcome::Prepare);
                 }
@@ -952,10 +991,25 @@ where
                 };
                 // A stale speculative registry error must not bypass preparation.
                 let context = observation?.apply(tx, counterparty);
+                let request_terms = payment_request_id
+                    .map(|id| {
+                        let record = self.payment_request_record_in_transaction(
+                            tx,
+                            counterparty,
+                            id,
+                            false,
+                        )?;
+                        payment_request_resolution_terms(
+                            record,
+                            context.payment_request_apps.as_deref(),
+                        )
+                    })
+                    .transpose()?;
                 Ok(PrivatePreparationOutcome::Project(
                     generation,
                     Box::new(PrivateResolutionProjection {
                         context,
+                        request_terms,
                         items: tx.private_stream_items(counterparty),
                         state: PrivatePaymentResolutionState::NoPrivateEndpoint,
                         private_allowed: true,
@@ -981,29 +1035,14 @@ where
         after_private_payment_list_version: Option<u64>,
         max_advance_steps: u32,
     ) -> Result<PreparedPrivateContactPayment> {
-        let (link_report, receive_report, outbound_report, inbox) = self
-            .prepare_private_contact_payment(
-                &counterparty,
-                max_advance_steps,
-                PrivateSendReadiness::DeferPendingConfirmations,
-            )
-            .await?;
-        let resolution = self
-            .resolve_private_contact_payment_with_request(
-                counterparty,
-                None,
-                after_private_payment_list_version,
-                Some(payment_request_id),
-                inbox.as_ref(),
-            )
-            .await?;
-
-        Ok(PreparedPrivateContactPayment {
-            resolution,
-            link_report,
-            receive_report,
-            outbound_report,
-        })
+        self.prepare_and_resolve_private_payment(
+            counterparty,
+            None,
+            after_private_payment_list_version,
+            Some(payment_request_id),
+            max_advance_steps,
+        )
+        .await
     }
 
     async fn prepare_private_contact_payment(
