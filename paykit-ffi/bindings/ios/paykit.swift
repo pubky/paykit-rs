@@ -2045,6 +2045,10 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Prepare private state, then resolve endpoints allowed by a Payment Request.
+     *
+     * Fresh private intake and request validation still run when only unclaimed,
+     * unprepared Delivery Confirmations remain. Those confirmations stay durable
+     * for a later outbound processing call; this method does not schedule a worker.
      */
     func prepareAndResolvePrivatePaymentRequest(counterparty: String, paymentRequestId: String, afterPrivatePaymentListVersion: UInt64?, maxAdvanceSteps: UInt32) async throws  -> PreparedPrivateContactPayment
 
@@ -3745,6 +3749,10 @@ open func prepareAndResolvePrivateContactPayment(counterparty: String, amount: P
 
     /**
      * Prepare private state, then resolve endpoints allowed by a Payment Request.
+     *
+     * Fresh private intake and request validation still run when only unclaimed,
+     * unprepared Delivery Confirmations remain. Those confirmations stay durable
+     * for a later outbound processing call; this method does not schedule a worker.
      */
 open func prepareAndResolvePrivatePaymentRequest(counterparty: String, paymentRequestId: String, afterPrivatePaymentListVersion: UInt64?, maxAdvanceSteps: UInt32)async throws  -> PreparedPrivateContactPayment  {
     return
@@ -25056,7 +25064,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_and_resolve_private_contact_payment() != 31058) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_and_resolve_private_payment_request() != 60689) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_and_resolve_private_payment_request() != 47410) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_receipt_issuance() != 41997) {

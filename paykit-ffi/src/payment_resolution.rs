@@ -259,6 +259,10 @@ impl FfiPaykitSdk {
     }
 
     /// Prepare private state, then resolve endpoints allowed by a Payment Request.
+    ///
+    /// Fresh private intake and request validation still run when only unclaimed,
+    /// unprepared Delivery Confirmations remain. Those confirmations stay durable
+    /// for a later outbound processing call; this method does not schedule a worker.
     pub async fn prepare_and_resolve_private_payment_request(
         &self,
         counterparty: String,

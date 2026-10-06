@@ -24,9 +24,47 @@ struct PrivateSendDrainResult {
     lease_released: bool,
 }
 
+#[derive(Clone, Copy)]
 pub(super) enum PrivateSendReadiness {
     Queued,
     PrivatePaymentList,
+    DeferPendingConfirmations,
+}
+
+fn can_defer_pending_confirmations(
+    tx: &dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+) -> bool {
+    if tx.linked_peer(counterparty).map(|peer| peer.state) != Some(LinkedPeerState::Linked)
+        || tx
+            .encrypted_link_state(counterparty)
+            .is_none_or(|state| state.link_snapshot.is_none())
+        || tx.peer_link_operation_lease(counterparty).is_some()
+        || !terminal_private_list_reservation_cancellations_in_transaction(tx, counterparty)
+            .is_empty()
+    {
+        return false;
+    }
+    let messages = tx.outbound_private_messages(counterparty);
+    if messages.iter().any(|message| {
+        message.prepared_send.is_some()
+            || message.status == OutboundPrivateMessageStatus::RecoveryRequired
+    }) {
+        return false;
+    }
+    let mut queued = messages
+        .iter()
+        .filter(|message| message.is_queued())
+        .peekable();
+    queued.peek().is_some()
+        && queued.all(|message| {
+            message.is_delivery_confirmation()
+                && message.status == OutboundPrivateMessageStatus::Pending
+                && message.attempt_count == 0
+                && message.last_attempt_at.is_none()
+                && message.sent_at.is_none()
+                && message.last_error.is_none()
+        })
 }
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
@@ -60,6 +98,13 @@ where
                 let counterparty = counterparty.clone();
                 let readiness = &readiness;
                 move |tx| {
+                    // Received event and confirmation intent are already durable. Leave only
+                    // unclaimed confirmations for later maintenance, without advancing Noise.
+                    if matches!(readiness, PrivateSendReadiness::DeferPendingConfirmations)
+                        && can_defer_pending_confirmations(tx, &counterparty)
+                    {
+                        return Ok(None);
+                    }
                     if matches!(readiness, PrivateSendReadiness::PrivatePaymentList)
                         && Self::private_queue_readiness_in_transaction(tx, &counterparty)?
                             == PrivateQueueReadiness::PendingHandshake

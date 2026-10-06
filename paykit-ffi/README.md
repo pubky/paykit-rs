@@ -184,6 +184,10 @@ pixel and cache limits, and request timeouts remain app responsibilities.
 - `PaykitSdk.resolvePrivatePaymentRequest`, `resolvePublicPaymentRequest`, and
   `prepareAndResolvePrivatePaymentRequest` — resolve using the request amount
   while enforcing its accepted endpoint identifiers and required payee App.
+  Request preparation retains fresh private intake and final validation, but
+  leaves an otherwise idle queue of unclaimed, unprepared Delivery Confirmations
+  durably pending. Callers service them through later outbound processing;
+  preparation does not schedule a worker or guarantee a delivery time.
 
 `PaymentRequestTerms.paymentEndpoints` optionally specifies fixed destinations
 for the request. Use request-aware private resolution; it returns no list

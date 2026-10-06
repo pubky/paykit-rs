@@ -11,6 +11,11 @@ pub(super) struct PrivateReceiveSnapshot {
     has_peer_lease: bool,
 }
 
+pub(super) struct PrivateReceiveContext {
+    pub(super) session_access: GuardedSessionAccess,
+    pub(super) snapshot: PrivateReceiveSnapshot,
+}
+
 enum PrivateInboxProbe {
     Empty(Box<PrivateReceiveSnapshot>),
     Ready(Box<PrivateReceiveSnapshot>),
@@ -90,7 +95,7 @@ where
         &self,
         counterparty: PubkyPublicKey,
     ) -> Result<PrivateStreamIntakeReport> {
-        self.receive_private_messages_with_checkpoint(counterparty)
+        self.receive_private_messages_with_checkpoint(counterparty, None)
             .await
             .map(|(report, _)| report)
     }
@@ -98,12 +103,22 @@ where
     pub(super) async fn receive_private_messages_with_checkpoint(
         &self,
         counterparty: PubkyPublicKey,
+        context: Option<PrivateReceiveContext>,
     ) -> Result<(PrivateStreamIntakeReport, Option<PrivateInboxCheckpoint>)> {
-        let (session_access, snapshots) = self.private_receive_context(Some(&counterparty)).await?;
-        let snapshot = snapshots
-            .into_iter()
-            .next()
-            .and_then(|(_, snapshot)| snapshot);
+        let (session_access, snapshot) = if let Some(context) = context {
+            let access = context.session_access;
+            access.capability_for_capabilities(PAYKIT_SESSION_CAPABILITIES)?;
+            access.paykit_noise_secret_key()?;
+            self.validate_local_noise_key_authorization(&access).await?;
+            (access, Some(context.snapshot))
+        } else {
+            let (access, snapshots) = self.private_receive_context(Some(&counterparty)).await?;
+            let snapshot = snapshots
+                .into_iter()
+                .next()
+                .and_then(|(_, snapshot)| snapshot);
+            (access, snapshot)
+        };
         let probe = self
             .probe_private_inbox(&counterparty, &session_access, snapshot)
             .await?;

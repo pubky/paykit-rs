@@ -1,4 +1,5 @@
 use super::encrypted_links::require_distinct_link_identity;
+use super::outbound_private::PrivateSendReadiness;
 use super::private_stream::{
     private_receive_snapshot, PrivateInboxCheckpoint, PrivateReceiveSnapshot,
 };
@@ -817,7 +818,11 @@ where
             });
         }
         let (link_report, receive_report, outbound_report, inbox) = self
-            .prepare_private_contact_payment(&counterparty, max_advance_steps)
+            .prepare_private_contact_payment(
+                &counterparty,
+                max_advance_steps,
+                PrivateSendReadiness::Queued,
+            )
             .await?;
 
         let resolution = self
@@ -964,9 +969,11 @@ where
 
     /// Prepare private state, then resolve endpoints permitted by a Payment Request.
     ///
-    /// This performs the same bounded link and stream preparation as
-    /// [`Self::prepare_and_resolve_private_contact_payment`], then applies the
+    /// This performs bounded link and stream preparation, then applies the
     /// request amount, accepted endpoint identifiers, and required payee App.
+    /// When only unclaimed, unprepared Delivery Confirmations remain, they stay
+    /// durably queued for a later outbound processing call. Other outbound work
+    /// is processed before resolution, as in private contact preparation.
     pub async fn prepare_and_resolve_private_payment_request(
         &self,
         counterparty: PubkyPublicKey,
@@ -975,7 +982,11 @@ where
         max_advance_steps: u32,
     ) -> Result<PreparedPrivateContactPayment> {
         let (link_report, receive_report, outbound_report, inbox) = self
-            .prepare_private_contact_payment(&counterparty, max_advance_steps)
+            .prepare_private_contact_payment(
+                &counterparty,
+                max_advance_steps,
+                PrivateSendReadiness::DeferPendingConfirmations,
+            )
             .await?;
         let resolution = self
             .resolve_private_contact_payment_with_request(
@@ -999,14 +1010,15 @@ where
         &self,
         counterparty: &PubkyPublicKey,
         max_advance_steps: u32,
+        send_readiness: PrivateSendReadiness,
     ) -> Result<(
         Option<LinkedPeerHandshakeReport>,
         Option<PrivateStreamIntakeReport>,
         Option<OutboundPrivateSendReport>,
         Option<PrivateInboxCheckpoint>,
     )> {
-        let link_report = self
-            .ensure_link_with_peer_if_available(counterparty.clone(), max_advance_steps)
+        let (link_report, mut receive_context) = self
+            .ensure_link_with_peer_for_private_receive(counterparty.clone(), max_advance_steps)
             .await?;
         let mut receive_report = None;
         let mut outbound_report = None;
@@ -1015,14 +1027,21 @@ where
         if link_report.is_some() {
             for _ in 0..PREPARE_PRIVATE_PAYMENT_SYNC_ROUND_LIMIT {
                 // Consume available confirmations before retrying published events.
+                // Reuse only the adjacent validated checkpoint, never one from before a send.
                 let (received, checkpoint) = self
-                    .receive_private_messages_with_checkpoint(counterparty.clone())
+                    .receive_private_messages_with_checkpoint(
+                        counterparty.clone(),
+                        receive_context.take(),
+                    )
                     .await?;
                 let receive_progress = receive_report_made_progress(&received);
                 merge_receive_report(&mut receive_report, received);
 
                 let outbound = self
-                    .process_outbound_private_messages(counterparty.clone())
+                    .process_outbound_private_messages_with_readiness(
+                        counterparty.clone(),
+                        send_readiness,
+                    )
                     .await?;
                 let outbound_progress = outbound_report_made_progress(&outbound);
                 merge_outbound_report(&mut outbound_report, outbound);

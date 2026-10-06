@@ -292,6 +292,7 @@ struct CountedStorage {
     inner: PubkySharedStateStorage,
     operations: Arc<AtomicUsize>,
     transactions: Arc<AtomicUsize>,
+    commits: Arc<AtomicUsize>,
     reject_next_transaction: Arc<AtomicBool>,
 }
 
@@ -316,8 +317,260 @@ impl StorageAdapter for CountedStorage {
                 source: None,
             });
         }
-        self.inner.transaction_erased(f).await
+        let mut changed = false;
+        let result = self
+            .inner
+            .transaction_erased(Box::new(|tx| {
+                let before = tx.export_storage_state();
+                let result = f(tx);
+                changed = result.is_ok() && tx.export_storage_state() != before;
+                result
+            }))
+            .await?;
+        if changed {
+            self.commits.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(result)
     }
+}
+
+async fn received_request_with_confirmation(
+) -> (HomeserverSharedPair, paykit_sdk::PaymentRequestRecord) {
+    let pair = linked_homeserver_shared_pair().await;
+    pair.bob
+        .sdk
+        .enqueue_private_payment_list_with_receiving_details(
+            pair.bitkit.public_key.clone(),
+            vec![private_receiving_detail("btc-lightning-bolt11", "ln-bob")],
+        )
+        .await
+        .unwrap();
+    let request = pair
+        .bob
+        .sdk
+        .propose_payment_request(pair.bitkit.public_key.clone(), recurring_request_terms())
+        .await
+        .unwrap();
+    pair.bob
+        .sdk
+        .process_outbound_private_messages(pair.bitkit.public_key.clone())
+        .await
+        .unwrap();
+    pair.bitkit
+        .sdk
+        .receive_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    (pair, request)
+}
+
+#[tokio::test]
+async fn test_request_preparation_preserves_confirmation_for_restart() {
+    let (pair, request) = received_request_with_confirmation().await;
+    let request_id = PaymentRequestId::new(request.payment_request_id.clone()).unwrap();
+    let before = pair.bitkit.storage_state().await;
+    let queued = before
+        .outbound_private_messages
+        .iter()
+        .filter(|message| message.status == OutboundPrivateMessageStatus::Pending)
+        .map(|message| message.outbound_message_id)
+        .collect::<Vec<_>>();
+    assert_eq!(queued.len(), 1);
+    let transactions = Arc::new(AtomicUsize::new(0));
+    let commits = Arc::new(AtomicUsize::new(0));
+    let sdk = PaykitSdk::new(
+        CountedStorage {
+            inner: pair.bitkit.storage.clone(),
+            operations: Arc::new(AtomicUsize::new(0)),
+            transactions: transactions.clone(),
+            commits: commits.clone(),
+            reject_next_transaction: Arc::new(AtomicBool::new(false)),
+        },
+        TestnetSessionProvider::new(pair.bitkit.access.clone()),
+        pair.bitkit.adapter.clone(),
+        PaykitSdkConfig::new(pair.bitkit.app_id.clone()).unwrap(),
+    );
+    let prepared = sdk
+        .prepare_and_resolve_private_payment_request(
+            pair.bob.public_key.clone(),
+            &request_id,
+            None,
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(prepared.link_report.unwrap().state, LinkedPeerState::Linked);
+    assert!(prepared.receive_report.unwrap().stream_item_ids.is_empty());
+    let outbound = prepared.outbound_report.unwrap();
+    assert!(outbound.attempted.is_empty());
+    assert!(outbound.sent.is_empty());
+    assert!(outbound.failed.is_empty());
+    assert_eq!(prepared.resolution.payable_endpoints.len(), 1);
+    assert_eq!(
+        prepared.resolution.payable_endpoints[0].endpoint.payload,
+        "ln-bob"
+    );
+    assert_eq!(transactions.load(Ordering::SeqCst), 5);
+    assert_eq!(commits.load(Ordering::SeqCst), 0);
+    let state = pair.bitkit.storage_state().await;
+    assert!(state.peer_link_operation_leases.is_empty());
+    assert_eq!(
+        state.outbound_private_messages,
+        before.outbound_private_messages
+    );
+    assert_eq!(state.encrypted_link_states, before.encrypted_link_states);
+    let confirmation = state
+        .outbound_private_messages
+        .iter()
+        .find(|message| message.outbound_message_id == queued[0])
+        .unwrap();
+    assert_eq!(confirmation.status, OutboundPrivateMessageStatus::Pending);
+    assert!(confirmation.prepared_send.is_none());
+    drop(sdk);
+
+    let restarted = pair.bitkit.restarted_sdk(Utc::now());
+    assert_eq!(
+        restarted
+            .pending_outbound_private_counterparties()
+            .await
+            .unwrap(),
+        vec![pair.bob.public_key.clone()]
+    );
+    let reports = restarted.process_pending_private_messages().await.unwrap();
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].error.is_none());
+    assert_eq!(reports[0].report.as_ref().unwrap().sent, queued);
+    assert!(reports[0].report.as_ref().unwrap().failed.is_empty());
+    let after = pair.bitkit.storage_state().await;
+    assert_eq!(after.outbound_private_messages.len(), 1);
+    assert_eq!(
+        after.outbound_private_messages[0].status,
+        OutboundPrivateMessageStatus::Sent
+    );
+    assert!(after.outbound_private_messages[0].prepared_send.is_none());
+    assert!(after.peer_link_operation_leases.is_empty());
+    pair.bob
+        .sdk
+        .receive_private_messages(pair.bitkit.public_key.clone())
+        .await
+        .unwrap();
+    let state = pair.bob.storage.snapshot().unwrap();
+    assert!(state
+        .outbound_private_messages
+        .iter()
+        .find(|message| Some(message.outbound_message_id) == request.proposal_outbound_message_id)
+        .unwrap()
+        .confirmed_at
+        .is_some());
+}
+
+#[tokio::test]
+async fn test_request_preparation_replays_prepared_confirmation_after_restart() {
+    let (pair, request) = received_request_with_confirmation().await;
+    let crash_time = Utc::now();
+    let (sdk, reached) = pair.bitkit.crashable_sdk(
+        PrivateOperationCrashPoint::PreparedStateCommitted,
+        crash_time,
+    );
+    let peer = pair.bob.public_key.clone();
+    let sending = tokio::spawn(async move { sdk.process_outbound_private_messages(peer).await });
+    tokio::time::timeout(Duration::from_secs(10), reached)
+        .await
+        .unwrap()
+        .unwrap();
+    sending.abort();
+    assert!(sending.await.unwrap_err().is_cancelled());
+    let before = wait_for_shared_state_after_crash(&pair.bitkit.storage).await;
+    let confirmation = &before.outbound_private_messages[0];
+    assert!(confirmation.prepared_send.is_some());
+
+    let restarted = pair
+        .bitkit
+        .restarted_sdk(crash_time + chrono::Duration::seconds(61));
+    let prepared = restarted
+        .prepare_and_resolve_private_payment_request(
+            pair.bob.public_key.clone(),
+            &PaymentRequestId::new(request.payment_request_id).unwrap(),
+            None,
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        prepared.outbound_report.unwrap().sent,
+        vec![confirmation.outbound_message_id]
+    );
+    assert_eq!(prepared.resolution.payable_endpoints.len(), 1);
+    let after = pair.bitkit.storage_state().await;
+    assert_eq!(
+        after.outbound_private_messages[0].status,
+        OutboundPrivateMessageStatus::Sent
+    );
+    assert!(after.outbound_private_messages[0].prepared_send.is_none());
+    assert_eq!(after.encrypted_link_states, before.encrypted_link_states);
+    assert!(after.peer_link_operation_leases.is_empty());
+    pair.bob
+        .sdk
+        .receive_private_messages(pair.bitkit.public_key.clone())
+        .await
+        .unwrap();
+    assert!(pair
+        .bob
+        .storage
+        .snapshot()
+        .unwrap()
+        .outbound_private_messages
+        .iter()
+        .find(|message| Some(message.outbound_message_id) == request.proposal_outbound_message_id)
+        .unwrap()
+        .confirmed_at
+        .is_some());
+}
+
+#[tokio::test]
+async fn test_request_preparation_receives_cancellation_with_pending_confirmation() {
+    let (pair, request) = received_request_with_confirmation().await;
+    let request_id = PaymentRequestId::new(request.payment_request_id).unwrap();
+    pair.bob
+        .sdk
+        .cancel_payment_request(pair.bitkit.public_key.clone(), &request_id, None)
+        .await
+        .unwrap();
+    pair.bob
+        .sdk
+        .process_outbound_private_messages(pair.bitkit.public_key.clone())
+        .await
+        .unwrap();
+    let error = pair
+        .bitkit
+        .sdk
+        .prepare_and_resolve_private_payment_request(
+            pair.bob.public_key.clone(),
+            &request_id,
+            None,
+            1,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, PaykitSdkError::Policy { .. }));
+    let requests = pair
+        .bitkit
+        .sdk
+        .received_payment_requests_from(&pair.bob.public_key)
+        .await
+        .unwrap();
+    assert_eq!(requests[0].state, PaymentRequestLifecycleState::Canceled);
+    let state = pair.bitkit.storage_state().await;
+    assert_eq!(state.outbound_private_messages.len(), 2);
+    assert!(state
+        .outbound_private_messages
+        .iter()
+        .all(
+            |message| message.status == OutboundPrivateMessageStatus::Pending
+                && message.attempt_count == 0
+                && message.prepared_send.is_none()
+        ));
+    assert!(state.peer_link_operation_leases.is_empty());
 }
 
 #[tokio::test]
@@ -477,6 +730,7 @@ async fn test_shared_operations_transaction_counts() {
             inner: pair.bitkit.storage.clone(),
             operations: operations.clone(),
             transactions: transactions.clone(),
+            commits: Arc::new(AtomicUsize::new(0)),
             reject_next_transaction: reject_next_transaction.clone(),
         },
         TestnetSessionProvider::new(pair.bitkit.access.clone()),
@@ -1048,6 +1302,7 @@ async fn test_idle_polling_reads_shared_state_once_without_rewriting_it() {
                 inner: user.storage.clone(),
                 operations: Arc::new(AtomicUsize::new(0)),
                 transactions: transactions.clone(),
+                commits: Arc::new(AtomicUsize::new(0)),
                 reject_next_transaction: Arc::new(AtomicBool::new(false)),
             },
             TestnetSessionProvider::new(user.access.clone()),

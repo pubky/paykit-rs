@@ -1,3 +1,4 @@
+use super::private_stream::{private_receive_snapshot, PrivateReceiveContext};
 use super::recovery::RecoveryObservationCheckpoint;
 use super::*;
 use crate::domain::linked_peers::{
@@ -467,33 +468,48 @@ where
             .await
     }
 
-    pub(super) async fn ensure_link_with_peer_if_available(
+    pub(super) async fn ensure_link_with_peer_for_private_receive(
         &self,
         counterparty: PubkyPublicKey,
         max_advance_steps: u32,
-    ) -> Result<Option<LinkedPeerHandshakeReport>> {
+    ) -> Result<(
+        Option<LinkedPeerHandshakeReport>,
+        Option<PrivateReceiveContext>,
+    )> {
         let (access, _, checkpoint) = self
             .load_session_access_and_refresh_identity_with(|tx| {
                 Ok(HandshakeCheckpoint::load(tx, &counterparty))
             })
             .await?;
         let Some(access) = access else {
-            return Ok(None);
+            return Ok((None, None));
         };
         if !access.private_link_capable_for_capabilities(PAYKIT_SESSION_CAPABILITIES)? {
-            return Ok(None);
+            return Ok((None, None));
         }
-        let probe = self
-            .probe_link_handshake_from_checkpoint(
+        let (probe, receive) = self
+            .probe_link_handshake_from_checkpoint_with(
                 &counterparty,
                 &access,
                 checkpoint.expect("active session loads handshake checkpoint"),
+                |tx| private_receive_snapshot(tx, &counterparty),
             )
             .await?;
-        drop(access);
-        self.ensure_link_with_peer_from_probe(counterparty, max_advance_steps, probe)
-            .await
-            .map(Some)
+        match (probe, receive.flatten()) {
+            (HandshakeProbe::Idle(report), Some(snapshot)) => Ok((
+                Some(report),
+                Some(PrivateReceiveContext {
+                    session_access: access,
+                    snapshot,
+                }),
+            )),
+            (probe, _) => {
+                drop(access);
+                self.ensure_link_with_peer_from_probe(counterparty, max_advance_steps, probe)
+                    .await
+                    .map(|report| (Some(report), None))
+            }
+        }
     }
 
     async fn ensure_link_with_peer_from_probe(
@@ -601,23 +617,44 @@ where
         access: &GuardedSessionAccess,
         checkpoint: HandshakeCheckpoint,
     ) -> Result<HandshakeProbe> {
+        self.probe_link_handshake_from_checkpoint_with(counterparty, access, checkpoint, |_| ())
+            .await
+            .map(|(probe, _)| probe)
+    }
+
+    async fn probe_link_handshake_from_checkpoint_with<T: Send + 'static>(
+        &self,
+        counterparty: &PubkyPublicKey,
+        access: &GuardedSessionAccess,
+        checkpoint: HandshakeCheckpoint,
+        project: impl FnOnce(&dyn StorageTransaction) -> T + Send,
+    ) -> Result<(HandshakeProbe, Option<T>)> {
         if checkpoint.linked {
             require_distinct_link_identity(&access.public_key()?, counterparty)?;
             self.validate_local_noise_key_authorization(access).await?;
-            if let Some(current) = self
-                .unchanged_link_checkpoint(counterparty, access, checkpoint.recovery)
+            if let Some((current, value)) = self
+                .unchanged_link_checkpoint_with(
+                    counterparty,
+                    access,
+                    checkpoint.recovery,
+                    async {},
+                    |tx, current, ()| Ok((current, project(tx))),
+                )
                 .await?
             {
-                return Ok(HandshakeProbe::Idle(LinkedPeerHandshakeReport {
-                    counterparty: counterparty.clone(),
-                    state: LinkedPeerState::Linked,
-                    generation: current.link_state.generation,
-                    handshake_role: None,
-                }));
+                return Ok((
+                    HandshakeProbe::Idle(LinkedPeerHandshakeReport {
+                        counterparty: counterparty.clone(),
+                        state: LinkedPeerState::Linked,
+                        generation: current.link_state.generation,
+                        handshake_role: None,
+                    }),
+                    Some(value),
+                ));
             }
         }
         let Some(pending) = checkpoint.pending else {
-            return Ok(HandshakeProbe::Reload(None));
+            return Ok((HandshakeProbe::Reload(None), None));
         };
         let secret_key = access.paykit_noise_secret_key()?;
         let session_info = access.session.info();
@@ -625,7 +662,7 @@ where
             .snapshot
             .next_handshake_read_path(session_info.public_key(), &secret_key)
         else {
-            return Ok(HandshakeProbe::Reload(None));
+            return Ok((HandshakeProbe::Reload(None), None));
         };
         self.validate_local_noise_key_authorization(access).await?;
         let public_storage =
@@ -641,7 +678,7 @@ where
             noise_key_authorization::require_authorization(&public_storage, &remote_public_key)
                 .await?;
         if authorization != pending.authorization {
-            return Ok(HandshakeProbe::Reload(Some(Box::new(authorization))));
+            return Ok((HandshakeProbe::Reload(Some(Box::new(authorization))), None));
         }
         let (marker, available) = tokio::join!(
             paykit_lib::fetch_encrypted_link_recovery_marker(
@@ -656,16 +693,19 @@ where
         if marker?.is_some_and(|marker| {
             Some(marker.attempt_id()) != pending.snapshot.recovery_context().remote_attempt_id()
         }) {
-            return Ok(HandshakeProbe::Reload(Some(Box::new(authorization))));
+            return Ok((HandshakeProbe::Reload(Some(Box::new(authorization))), None));
         }
         let available = available.map_err(|error| {
             map_pubky_transport_error("check handshake message availability", error)
         })?;
-        Ok(if available {
-            HandshakeProbe::Reload(Some(Box::new(authorization)))
-        } else {
-            HandshakeProbe::Idle(pending.report)
-        })
+        Ok((
+            if available {
+                HandshakeProbe::Reload(Some(Box::new(authorization)))
+            } else {
+                HandshakeProbe::Idle(pending.report)
+            },
+            None,
+        ))
     }
 
     pub(super) async fn prepare_link_handshake_with_claim(

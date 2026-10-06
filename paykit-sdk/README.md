@@ -228,7 +228,11 @@ Common workflows:
   `resolve_private_payment_request`, `resolve_public_payment_request`, or
   `prepare_and_resolve_private_payment_request`; these use the request amount
   and enforce its accepted endpoint identifiers and required payee App before
-  invoking the payment adapter
+  invoking the payment adapter. Request preparation still performs fresh private
+  intake and final validation, but leaves an otherwise idle queue of unclaimed,
+  unprepared Delivery Confirmations durable for later outbound processing.
+  Callers must drive maintenance; preparation does not schedule a worker or
+  guarantee when those confirmations will be delivered
 - build receipt drafts with `ReceiptDraftBuilder`; call
   `prepare_receipt_issuance` before receipt network side effects, then
   `process_receipt_issuance`; use `issue_receipt` only when the draft already
