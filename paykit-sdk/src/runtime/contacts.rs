@@ -7,7 +7,7 @@ where
     P: PaymentAdapter,
     C: Clock,
 {
-    /// Save or update a Contact Record.
+    /// Save or update a Contact Record. Unchanged records retain their timestamps.
     pub async fn save_contact(&self, update: ContactUpdate) -> Result<ContactRecord> {
         update.validate()?;
         let now = self.clock.now();
@@ -30,7 +30,8 @@ where
     /// All updates and the initialized identity are checked before any record
     /// changes. Records are returned in input order. Duplicate keys are applied
     /// in that order, so the last update wins in storage; each returned record
-    /// reflects its corresponding update. All records use one operation timestamp.
+    /// reflects its corresponding update. New or changed records use one operation
+    /// timestamp; unchanged records retain their timestamps.
     /// An empty batch still requires an initialized identity and leaves stored
     /// state unchanged.
     ///
