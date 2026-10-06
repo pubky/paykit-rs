@@ -7,6 +7,36 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc63 - 2026-10-06
+
+### Added
+
+- Atomic Contact Record batch updates through `save_contacts` in Rust and
+  `saveContacts` in Swift and Kotlin.
+- Optional paired storage and backup revision metadata through
+  `observed_backup_state_revision` in Rust and `observedBackupStateRevision` in
+  Swift and Kotlin. Historical observations do not replace fresh authorization
+  or confirm backup completion.
+
+### Changed
+
+- Combine shared-state reads and checkpoints for payment preparation, private
+  message delivery, App Registry publication, and Payment Endpoint cleanup while
+  preserving authorization checks, peer leases, and durable message state.
+- Batch Payment Request and Allowance record queries and allow independent
+  public reads to proceed concurrently.
+- Restore Noise handshakes from saved transcripts and stage handshake writes
+  before publication. The pre-launch snapshot format changes; apps sharing an
+  identity must update together. No legacy snapshot migration is provided.
+
+### Fixed
+
+- Preserve confirmed lock-loss errors as retryable contention without weakening
+  uncertain-write handling.
+- Validate restored Encrypted Link authorization and retain refreshed app
+  authorization when Payment Request validation fails.
+- Preserve handshake retry checkpoints when saving shared state fails.
+
 ## 0.1.0-rc62 - 2026-10-03
 
 ### Fixed
