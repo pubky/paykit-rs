@@ -7,6 +7,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc64 - 2026-10-06
+
+### Added
+
+- Bulk Contact Record removal and peer blocking through
+  `remove_contacts_and_block_peers` in Rust and `removeContactsAndBlockPeers` in
+  Swift and Kotlin. Busy peers and contacts with public markers are retained.
+
+### Changed
+
+- Batch Encrypted Link Handshake state reads and release the peer lease with the
+  final checkpoint, reducing shared-state round trips without changing the
+  save-before-send boundary or recovery checks.
+- Use published `pubky-noise` 0.1.0-rc12 instead of a Git revision. Persisted
+  formats are unchanged from rc63.
+
 ## 0.1.0-rc63 - 2026-10-06
 
 ### Added
