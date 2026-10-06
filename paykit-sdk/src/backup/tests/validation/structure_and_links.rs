@@ -136,109 +136,168 @@ fn test_recovery_required_restore_state_drops_link_snapshots() {
     assert_eq!(state.generation, 8);
 }
 
-#[test]
-fn test_restore_reconciliation_preserves_active_link_checkpoint() {
-    let counterparty = public_key();
-    let mut peers = std::collections::HashMap::from([(
-        counterparty.clone(),
-        LinkedPeerRecord {
-            counterparty: counterparty.clone(),
-            state: LinkedPeerState::Linked,
-            last_sync_at: Some(timestamp()),
-            last_private_receive_at: None,
-            failure_count: 0,
-            local_recovery_attempt_id: None,
-            local_recovery_marker_created_at: None,
-            local_recovery_marker_last_error: None,
-            remote_recovery_attempt_id: None,
-            remote_recovery_marker_observed_at: None,
-            noise_key_authorization: None,
-        },
-    )]);
-    let link_states = std::collections::HashMap::from([(
-        counterparty.clone(),
-        EncryptedLinkStateRecord {
-            counterparty: counterparty.clone(),
-            link_snapshot: Some(vec![1]),
-            handshake_snapshot: None,
-            handshake_role: None,
-            generation: 7,
-            checkpointed_at: timestamp(),
-        },
-    )]);
+#[tokio::test]
+async fn test_restore_backup_state_requires_matching_checkpoint_authorization() {
+    let signer = pubky::Keypair::random();
+    let counterparty = PubkyPublicKey::from_public_key(&signer.public_key());
+    let matching = paykit_lib::PaykitNoiseKeyAuthorization::sign(&signer, &[7; 32], 1).unwrap();
+    let mismatched = paykit_lib::PaykitNoiseKeyAuthorization::sign(&signer, &[8; 32], 2).unwrap();
 
-    let recovery_required = reconcile_restored_linked_peers(&mut peers, &link_states, &Vec::new());
+    for state in [LinkedPeerState::Linked, LinkedPeerState::Linking] {
+        for (authorization, has_peer) in [
+            (Some(matching.clone()), true),
+            (None, true),
+            (Some(mismatched.clone()), true),
+            (None, false),
+        ] {
+            let checkpoint = link_checkpoint(&counterparty, matching.noise_public_key(), &state);
+            let mut backup = empty_backup(identity(public_key()));
+            backup.encrypted_link_states.push(checkpoint.clone());
+            if has_peer {
+                backup.linked_peers.push(LinkedPeerRecord {
+                    counterparty: counterparty.clone(),
+                    state: state.clone(),
+                    last_sync_at: Some(timestamp()),
+                    last_private_receive_at: None,
+                    failure_count: 0,
+                    local_recovery_attempt_id: None,
+                    local_recovery_marker_created_at: None,
+                    local_recovery_marker_last_error: None,
+                    remote_recovery_attempt_id: None,
+                    remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: authorization.clone(),
+                });
+            }
+            let can_resume = authorization.as_ref() == Some(&matching);
+            if !can_resume {
+                backup
+                    .outbound_private_messages
+                    .push(private_payment_list_outbound(
+                        counterparty.clone(),
+                        1,
+                        "lnbc1example",
+                    ));
+            }
+            let backup = serde_json::from_slice(&serde_json::to_vec(&backup).unwrap()).unwrap();
+            let storage = InMemoryStorage::new();
 
-    assert!(recovery_required.is_empty());
-    assert_eq!(
-        peers.get(&counterparty.clone()).unwrap().state,
-        LinkedPeerState::Linked
-    );
+            let report = restore_backup_state(&storage, backup).await.unwrap();
+
+            let restored = storage.snapshot().unwrap();
+            let peer = &restored.linked_peers[&counterparty];
+            let link = &restored.encrypted_link_states[&counterparty];
+            assert_eq!(peer.noise_key_authorization, authorization);
+            if can_resume {
+                assert!(report.recovery_required_peers.is_empty());
+                assert_eq!(peer.state, state);
+                assert_eq!(link, &checkpoint);
+            } else {
+                assert_eq!(report.recovery_required_peers, vec![counterparty.clone()]);
+                assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
+                assert!(link.link_snapshot.is_none());
+                assert!(link.handshake_snapshot.is_none());
+                assert!(link.handshake_role.is_none());
+                assert_eq!(link.generation, checkpoint.generation + 1);
+                assert_eq!(
+                    restored.outbound_private_messages[0].status,
+                    OutboundPrivateMessageStatus::RecoveryRequired
+                );
+            }
+        }
+    }
+}
+
+fn link_checkpoint(
+    counterparty: &PubkyPublicKey,
+    noise_public_key: &pubky::PublicKey,
+    state: &LinkedPeerState,
+) -> EncryptedLinkStateRecord {
+    use pubky_noise::snow_crypto::{HandshakePattern, NoisePhase, NoiseStep};
+
+    let linked = *state == LinkedPeerState::Linked;
+    let snapshot = pubky_noise::serializer::PubkyNoiseSessionState {
+        version: pubky_noise::serializer::SESSION_STATE_VERSION,
+        phase: if linked {
+            NoisePhase::Transport
+        } else {
+            NoisePhase::HandShake
+        },
+        pattern: HandshakePattern::PatternXX,
+        initiator: true,
+        ephemeral_secret: [1; 32],
+        static_secret: Some([2; 32]),
+        counter: if linked { 3 } else { 0 },
+        noise_step: if linked {
+            NoiseStep::Final
+        } else {
+            NoiseStep::StepOne
+        },
+        sub_step_index: 0,
+        handshake_hash: linked.then_some([3; 32]),
+        link_id: linked.then_some([4; 32]),
+        sending_nonce: 0,
+        receiving_nonce: 0,
+        write_counter: if linked { 3 } else { 0 },
+        read_counter: if linked { 3 } else { 0 },
+        endpoint_pubkey: counterparty.to_public_key().unwrap().to_bytes(),
+    };
+    let mut bytes = snapshot.serialize();
+    bytes.extend_from_slice(&noise_public_key.to_bytes());
+    // The Paykit snapshot appends the routing key and empty recovery context.
+    bytes.extend_from_slice(&[0; 72]);
+    EncryptedLinkStateRecord {
+        counterparty: counterparty.clone(),
+        link_snapshot: linked.then(|| bytes.clone()),
+        handshake_snapshot: (!linked).then_some(bytes),
+        handshake_role: (!linked).then_some(EncryptedLinkHandshakeRole::Initiator),
+        generation: 7,
+        checkpointed_at: timestamp(),
+    }
 }
 
 #[test]
-fn test_restore_reconciliation_preserves_handshake_checkpoint() {
-    let counterparty = public_key();
-    let mut peers = std::collections::HashMap::new();
-    let link_states = std::collections::HashMap::from([(
-        counterparty.clone(),
-        EncryptedLinkStateRecord {
-            counterparty: counterparty.clone(),
-            link_snapshot: None,
-            handshake_snapshot: Some(vec![2]),
-            handshake_role: Some(EncryptedLinkHandshakeRole::Initiator),
-            generation: 7,
-            checkpointed_at: timestamp(),
-        },
-    )]);
+fn test_restore_reconciliation_preserves_recovery_required_and_blocked_peers() {
+    let signer = pubky::Keypair::random();
+    let counterparty = PubkyPublicKey::from_public_key(&signer.public_key());
+    let authorization =
+        paykit_lib::PaykitNoiseKeyAuthorization::sign(&signer, &[7; 32], 1).unwrap();
+    for state in [LinkedPeerState::RecoveryRequired, LinkedPeerState::Blocked] {
+        let mut peers = std::collections::HashMap::from([(
+            counterparty.clone(),
+            LinkedPeerRecord {
+                counterparty: counterparty.clone(),
+                state: state.clone(),
+                last_sync_at: Some(timestamp()),
+                last_private_receive_at: None,
+                failure_count: 1,
+                local_recovery_attempt_id: None,
+                local_recovery_marker_created_at: None,
+                local_recovery_marker_last_error: None,
+                remote_recovery_attempt_id: None,
+                remote_recovery_marker_observed_at: None,
+                noise_key_authorization: Some(authorization.clone()),
+            },
+        )]);
+        let link_states = std::collections::HashMap::from([(
+            counterparty.clone(),
+            link_checkpoint(
+                &counterparty,
+                authorization.noise_public_key(),
+                &LinkedPeerState::Linked,
+            ),
+        )]);
 
-    let recovery_required = reconcile_restored_linked_peers(&mut peers, &link_states, &Vec::new());
+        let recovery_required =
+            reconcile_restored_linked_peers(&mut peers, &link_states, &Vec::new()).unwrap();
 
-    assert!(recovery_required.is_empty());
-    assert_eq!(
-        peers.get(&counterparty.clone()).unwrap().state,
-        LinkedPeerState::Linking
-    );
-}
-
-#[test]
-fn test_restore_reconciliation_preserves_existing_recovery_required_peer() {
-    let counterparty = public_key();
-    let mut peers = std::collections::HashMap::from([(
-        counterparty.clone(),
-        LinkedPeerRecord {
-            counterparty: counterparty.clone(),
-            state: LinkedPeerState::RecoveryRequired,
-            last_sync_at: Some(timestamp()),
-            last_private_receive_at: None,
-            failure_count: 1,
-            local_recovery_attempt_id: None,
-            local_recovery_marker_created_at: None,
-            local_recovery_marker_last_error: None,
-            remote_recovery_attempt_id: None,
-            remote_recovery_marker_observed_at: None,
-            noise_key_authorization: None,
-        },
-    )]);
-    let link_states = std::collections::HashMap::from([(
-        counterparty.clone(),
-        EncryptedLinkStateRecord {
-            counterparty: counterparty.clone(),
-            link_snapshot: Some(vec![1]),
-            handshake_snapshot: None,
-            handshake_role: None,
-            generation: 7,
-            checkpointed_at: timestamp(),
-        },
-    )]);
-
-    let recovery_required = reconcile_restored_linked_peers(&mut peers, &link_states, &Vec::new());
-
-    assert_eq!(recovery_required, vec![counterparty.clone()]);
-    assert_eq!(
-        peers.get(&counterparty.clone()).unwrap().state,
-        LinkedPeerState::RecoveryRequired
-    );
+        let expected = if state == LinkedPeerState::RecoveryRequired {
+            vec![counterparty.clone()]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(recovery_required, expected);
+        assert_eq!(peers.get(&counterparty.clone()).unwrap().state, state);
+    }
 }
 
 #[test]
@@ -272,7 +331,8 @@ fn test_restore_reconciliation_marks_missing_checkpoint_recovery_required() {
         },
     )]);
 
-    let recovery_required = reconcile_restored_linked_peers(&mut peers, &link_states, &Vec::new());
+    let recovery_required =
+        reconcile_restored_linked_peers(&mut peers, &link_states, &Vec::new()).unwrap();
 
     assert_eq!(recovery_required, vec![counterparty.clone()]);
     assert_eq!(
@@ -302,7 +362,8 @@ fn test_restore_reconciliation_marks_missing_link_state_recovery_required() {
     )]);
     let link_states = std::collections::HashMap::new();
 
-    let recovery_required = reconcile_restored_linked_peers(&mut peers, &link_states, &Vec::new());
+    let recovery_required =
+        reconcile_restored_linked_peers(&mut peers, &link_states, &Vec::new()).unwrap();
 
     assert_eq!(recovery_required, vec![counterparty.clone()]);
     assert_eq!(

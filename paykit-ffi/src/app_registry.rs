@@ -59,7 +59,7 @@ pub struct FfiPaykitAppRegistry {
 /// Verified Pubky identity approval of the current Paykit Noise key.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct FfiPaykitNoiseKeyAuthorization {
-    /// Pubky identity that signed the authorization.
+    /// Pubky identity that signed the authorization, in app-facing `pubky...` form.
     pub owner: String,
     /// Authorized Ed25519 routing key as raw z32 text.
     pub noise_public_key: String,
@@ -291,6 +291,29 @@ impl From<PaykitAppRemovalBlockers> for FfiPaykitAppRemovalBlockers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_noise_key_authorization_conversion_formats_only_owner() {
+        let signer = pubky::Keypair::random();
+        let authorization =
+            paykit_lib::PaykitNoiseKeyAuthorization::sign(&signer, &[7; 32], 3).unwrap();
+        let signed_bytes = serde_json::to_vec(&authorization).unwrap();
+
+        let ffi = FfiPaykitNoiseKeyAuthorization::from(authorization.clone());
+
+        assert_eq!(ffi.owner, format!("pubky{}", signer.public_key().z32()));
+        assert_eq!(ffi.noise_public_key, authorization.noise_public_key().z32());
+        assert_eq!(
+            ffi.noise_static_public_key,
+            hex::encode(authorization.noise_static_public_key())
+        );
+        assert_eq!(ffi.key_generation, 3);
+        let wire: serde_json::Value = serde_json::from_slice(&signed_bytes).unwrap();
+        assert_eq!(wire["owner"], signer.public_key().z32());
+        let verified: paykit_lib::PaykitNoiseKeyAuthorization =
+            serde_json::from_slice(&signed_bytes).unwrap();
+        assert_eq!(verified, authorization);
+    }
 
     #[test]
     fn test_app_registry_conversion_preserves_apps_and_defaults() {

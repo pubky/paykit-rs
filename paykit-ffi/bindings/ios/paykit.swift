@@ -11735,7 +11735,7 @@ public func FfiConverterTypePaykitBlobRecord_lower(_ value: PaykitBlobRecord) ->
  */
 public struct PaykitNoiseKeyAuthorization {
     /**
-     * Pubky identity that signed the authorization.
+     * Pubky identity that signed the authorization, in app-facing `pubky...` form.
      */
     public var owner: String
     /**
@@ -11755,7 +11755,7 @@ public struct PaykitNoiseKeyAuthorization {
     // declare one manually.
     public init(
         /**
-         * Pubky identity that signed the authorization.
+         * Pubky identity that signed the authorization, in app-facing `pubky...` form.
          */owner: String,
         /**
          * Authorized Ed25519 routing key as raw z32 text.

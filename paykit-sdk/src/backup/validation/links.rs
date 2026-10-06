@@ -5,9 +5,12 @@ pub(in crate::backup) fn reconcile_restored_linked_peers(
     linked_peers: &mut HashMap<PubkyPublicKey, LinkedPeerRecord>,
     encrypted_link_states: &HashMap<PubkyPublicKey, EncryptedLinkStateRecord>,
     outbound_private_messages: &[OutboundPrivateMessageRecord],
-) -> Vec<PubkyPublicKey> {
+) -> Result<Vec<PubkyPublicKey>> {
     for (counterparty, link_state) in encrypted_link_states {
-        let restored_state = restored_peer_state_from_link_state(link_state);
+        let authorization = linked_peers
+            .get(counterparty)
+            .and_then(|peer| peer.noise_key_authorization.as_ref());
+        let restored_state = restored_peer_state_from_link_state(link_state, authorization)?;
         let checkpointed_at = link_state.checkpointed_at;
         linked_peers
             .entry(counterparty.clone())
@@ -19,6 +22,9 @@ pub(in crate::backup) fn reconcile_restored_linked_peers(
                     return;
                 }
                 match restored_state {
+                    Some(LinkedPeerState::RecoveryRequired) => {
+                        peer.state = LinkedPeerState::RecoveryRequired;
+                    }
                     Some(LinkedPeerState::Linked) => peer.state = LinkedPeerState::Linked,
                     Some(LinkedPeerState::Linking) if peer.state != LinkedPeerState::Linked => {
                         peer.state = LinkedPeerState::Linking;
@@ -91,19 +97,39 @@ pub(in crate::backup) fn reconcile_restored_linked_peers(
         }
     }
     peers.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-    peers
+    Ok(peers)
 }
 
 fn restored_peer_state_from_link_state(
     record: &EncryptedLinkStateRecord,
-) -> Option<LinkedPeerState> {
-    if record.link_snapshot.is_some() {
-        Some(LinkedPeerState::Linked)
-    } else if record.handshake_snapshot.is_some() && record.handshake_role.is_some() {
-        Some(LinkedPeerState::Linking)
+    authorization: Option<&paykit_lib::PaykitNoiseKeyAuthorization>,
+) -> Result<Option<LinkedPeerState>> {
+    let (state, remote_noise_public_key) = if let Some(bytes) = &record.link_snapshot {
+        let snapshot = paykit_lib::EncryptedLinkSnapshot::deserialize(bytes)?;
+        (
+            LinkedPeerState::Linked,
+            snapshot.remote_noise_public_key().clone(),
+        )
+    } else if let (Some(bytes), Some(_)) = (&record.handshake_snapshot, record.handshake_role) {
+        let snapshot = paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(bytes)?;
+        (
+            LinkedPeerState::Linking,
+            snapshot.remote_noise_public_key().clone(),
+        )
     } else {
-        None
-    }
+        return Ok(None);
+    };
+    // Owner and signature validation precede reconciliation; a checkpoint also
+    // needs the retained authorization for its exact routing key.
+    Ok(Some(
+        if authorization.is_some_and(|authorization| {
+            authorization.noise_public_key() == &remote_noise_public_key
+        }) {
+            state
+        } else {
+            LinkedPeerState::RecoveryRequired
+        },
+    ))
 }
 
 fn restored_peer_record(
