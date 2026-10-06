@@ -783,13 +783,14 @@ async fn test_shared_operations_transaction_counts() {
     let pair = linked_homeserver_shared_pair().await;
     let operations = Arc::new(AtomicUsize::new(0));
     let transactions = Arc::new(AtomicUsize::new(0));
+    let commits = Arc::new(AtomicUsize::new(0));
     let reject_next_transaction = Arc::new(AtomicBool::new(false));
     let sdk = PaykitSdk::new(
         CountedStorage {
             inner: pair.bitkit.storage.clone(),
             operations: operations.clone(),
             transactions: transactions.clone(),
-            commits: Arc::new(AtomicUsize::new(0)),
+            commits: commits.clone(),
             reject_next_transaction: reject_next_transaction.clone(),
         },
         TestnetSessionProvider::new(pair.bitkit.access.clone()),
@@ -919,9 +920,11 @@ async fn test_shared_operations_transaction_counts() {
 
     let before_publication = pair.bitkit.storage_state().await;
     let revision = pair.bitkit.storage.last_revision().unwrap();
+    commits.store(0, Ordering::SeqCst);
     sdk.publish_paykit_app(test_app("Bitkit")).await.unwrap();
     let unchanged_transactions = transactions.swap(0, Ordering::SeqCst);
     assert_eq!(unchanged_transactions, 2);
+    assert_eq!(commits.swap(0, Ordering::SeqCst), 0);
     assert_eq!(pair.bitkit.storage.last_revision().unwrap(), revision);
     assert_eq!(pair.bitkit.storage_state().await, before_publication);
     let mut capabilities = test_app("Bitkit").capabilities();
@@ -931,7 +934,9 @@ async fn test_shared_operations_transaction_counts() {
         .await
         .unwrap();
     let downgrade_transactions = transactions.swap(0, Ordering::SeqCst);
-    assert_eq!(downgrade_transactions, 8);
+    let downgrade_commits = commits.swap(0, Ordering::SeqCst);
+    assert_eq!(downgrade_commits, 2);
+    assert_eq!(downgrade_transactions, 6);
     assert_eq!(
         registry
             .apps()
@@ -949,7 +954,7 @@ async fn test_shared_operations_transaction_counts() {
     );
     assert!(state.paykit_app_operation_leases.is_empty());
     assert_no_pending_shared_state_writes(&pair.bitkit.access.session).await;
-    eprintln!("shared-state transactions: clear={clear_transactions}, proposal={proposal_transactions}, send={send_transactions}, unchanged publication={unchanged_transactions}, downgrade={downgrade_transactions}");
+    eprintln!("shared-state transactions: clear={clear_transactions}, proposal={proposal_transactions}, send={send_transactions}, unchanged publication={unchanged_transactions}, downgrade={downgrade_transactions} ({downgrade_commits} commits)");
 
     let bob_key = pair
         .bob
