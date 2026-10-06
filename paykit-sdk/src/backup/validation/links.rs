@@ -6,11 +6,16 @@ pub(in crate::backup) fn reconcile_restored_linked_peers(
     encrypted_link_states: &HashMap<PubkyPublicKey, EncryptedLinkStateRecord>,
     outbound_private_messages: &[OutboundPrivateMessageRecord],
 ) -> Result<Vec<PubkyPublicKey>> {
+    let mut recovery_required_peers = HashSet::new();
     for (counterparty, link_state) in encrypted_link_states {
         let authorization = linked_peers
             .get(counterparty)
             .and_then(|peer| peer.noise_key_authorization.as_ref());
         let restored_state = restored_peer_state_from_link_state(link_state, authorization)?;
+        // Blocked policy must not preserve an unauthorized checkpoint or prepared send.
+        if restored_state == Some(LinkedPeerState::RecoveryRequired) {
+            recovery_required_peers.insert(counterparty.clone());
+        }
         let checkpointed_at = link_state.checkpointed_at;
         linked_peers
             .entry(counterparty.clone())
@@ -86,16 +91,18 @@ pub(in crate::backup) fn reconcile_restored_linked_peers(
         }
     }
 
-    let mut peers = Vec::new();
     for record in linked_peers.values_mut() {
-        if record.state == LinkedPeerState::RecoveryRequired {
+        if record.state == LinkedPeerState::RecoveryRequired
+            || recovery_required_peers.contains(&record.counterparty)
+        {
             // An incomplete restored checkpoint must not reuse an old stream.
             record.local_recovery_attempt_id = None;
             record.local_recovery_marker_created_at = None;
             record.local_recovery_marker_last_error = None;
-            peers.push(record.counterparty.clone());
+            recovery_required_peers.insert(record.counterparty.clone());
         }
     }
+    let mut peers = recovery_required_peers.into_iter().collect::<Vec<_>>();
     peers.sort_by(|left, right| left.as_str().cmp(right.as_str()));
     Ok(peers)
 }
