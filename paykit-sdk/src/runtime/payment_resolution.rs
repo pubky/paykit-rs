@@ -979,15 +979,15 @@ where
                         tx, counterparty, &outbound, send_readiness,
                     )?
                 {
-                    return Ok(PrivatePreparationOutcome::Prepare);
+                    return Ok(Ok(PrivatePreparationOutcome::Prepare));
                 }
                 let generation = recovery.link_state.generation;
                 let Some(observation) = observation else {
                     // Late remote changes belong to resolution, not handshake preparation.
-                    return Ok(PrivatePreparationOutcome::Resolve(
+                    return Ok(Ok(PrivatePreparationOutcome::Resolve(
                         generation,
                         Box::new(inbox),
-                    ));
+                    )));
                 };
                 // A stale speculative registry error must not bypass preparation.
                 let context = observation?.apply(tx, counterparty);
@@ -1004,21 +1004,24 @@ where
                             context.payment_request_apps.as_deref(),
                         )
                     })
-                    .transpose()?;
-                Ok(PrivatePreparationOutcome::Project(
-                    generation,
-                    Box::new(PrivateResolutionProjection {
-                        context,
-                        request_terms,
-                        items: tx.private_stream_items(counterparty),
-                        state: PrivatePaymentResolutionState::NoPrivateEndpoint,
-                        private_allowed: true,
-                        private_live: true,
-                        inbox_is_current: inbox.is_current(tx),
-                    }),
-                ))
+                    .transpose();
+                // Retain refreshed authorization even when this request is not payable.
+                Ok(request_terms.map(|request_terms| {
+                    PrivatePreparationOutcome::Project(
+                        generation,
+                        Box::new(PrivateResolutionProjection {
+                            context,
+                            request_terms,
+                            items: tx.private_stream_items(counterparty),
+                            state: PrivatePaymentResolutionState::NoPrivateEndpoint,
+                            private_allowed: true,
+                            private_live: true,
+                            inbox_is_current: inbox.is_current(tx),
+                        }),
+                    )
+                }))
             })
-            .await
+            .await?
     }
 
     /// Prepare private state, then resolve endpoints permitted by a Payment Request.

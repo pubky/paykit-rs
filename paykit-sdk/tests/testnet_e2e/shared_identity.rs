@@ -465,6 +465,61 @@ async fn test_request_preparation_preserves_confirmation_for_restart() {
 }
 
 #[tokio::test]
+async fn test_rejected_request_preparation_preserves_app_revocation() {
+    for remove_app in [false, true] {
+        let (pair, request) = received_request_with_confirmation().await;
+        let request_id = PaymentRequestId::new(request.payment_request_id).unwrap();
+        let before = pair.bitkit.storage_state().await;
+        assert!(
+            before.authorized_paykit_apps[&pair.bob.public_key][&pair.bob.app_id].payment_requests
+        );
+        let (mut registry, revision) = paykit_lib::get_paykit_app_registry_with_revision(
+            &pair.bob.access.outbox_client.public_storage(),
+            pair.bob.access.session.info().public_key(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let app = registry.remove_app(&pair.bob.app_id).unwrap();
+        if !remove_app {
+            let mut capabilities = app.capabilities();
+            capabilities.payment_requests = false;
+            registry
+                .register_app(
+                    pair.bob.app_id.clone(),
+                    PaykitApp::new("Bob", capabilities).unwrap(),
+                )
+                .unwrap();
+        }
+        paykit_lib::update_paykit_app_registry(&pair.bob.access.session, &registry, &revision)
+            .await
+            .unwrap();
+
+        let error = pair
+            .bitkit
+            .sdk
+            .prepare_and_resolve_private_payment_request(
+                pair.bob.public_key.clone(),
+                &request_id,
+                None,
+                1,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, PaykitSdkError::Policy { .. }));
+        let after = pair.bitkit.storage_state().await;
+        assert!(!after.authorized_paykit_apps[&pair.bob.public_key]
+            .get(&pair.bob.app_id)
+            .is_some_and(|capabilities| capabilities.payment_requests));
+        assert_eq!(
+            after.outbound_private_messages,
+            before.outbound_private_messages
+        );
+        assert_eq!(after.encrypted_link_states, before.encrypted_link_states);
+    }
+}
+
+#[tokio::test]
 async fn test_request_preparation_replays_prepared_confirmation_after_restart() {
     let (pair, request) = received_request_with_confirmation().await;
     let crash_time = Utc::now();
