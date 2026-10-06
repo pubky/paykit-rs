@@ -109,6 +109,56 @@ where
             .await
     }
 
+    /// Block saved contacts and remove their Contact Records in one transaction.
+    ///
+    /// Returns only removed records, in input order without duplicates. A contact
+    /// with an active peer lease is left unchanged. A contact with a Public Contact
+    /// Marker is blocked but retained until its marker is removed. These skipped
+    /// records do not prevent other contacts from being removed. Storage failures
+    /// roll back the entire batch; a local-identity key rejects it before mutation.
+    ///
+    /// Blocking discards Encrypted Link state and retires pending private work, as
+    /// in `block_peer`. This does not withdraw published Payment Lists or cancel
+    /// subscriptions. Callers must apply their subscription policy and perform any
+    /// best-effort withdrawal before blocking.
+    pub async fn remove_contacts_and_block_peers(
+        &self,
+        public_keys: Vec<PubkyPublicKey>,
+    ) -> Result<Vec<ContactRecord>> {
+        self.retry_storage_transaction(|| {
+            let public_keys = public_keys.clone();
+            move |tx| {
+                let local = initialized_identity_in_transaction(tx, "remove contacts")?;
+                if public_keys.contains(&local) {
+                    return Err(PaykitSdkError::Policy {
+                        context: "cannot block the local Paykit identity".into(),
+                        source: None,
+                    });
+                }
+                let now = self.clock.now();
+                let mut seen = std::collections::HashSet::new();
+                let mut removed = Vec::new();
+                for public_key in public_keys {
+                    if !seen.insert(public_key.clone()) {
+                        continue;
+                    }
+                    let Some(record) = tx.contact_record(&public_key) else {
+                        continue;
+                    };
+                    if super::encrypted_links::block_peer_in_transaction(tx, &public_key, now)?
+                        .is_some()
+                        && record.can_remove_locally()
+                    {
+                        tx.remove_contact_record(&public_key);
+                        removed.push(record);
+                    }
+                }
+                Ok(removed)
+            }
+        })
+        .await
+    }
+
     /// Fetch a contact's public profile and cache it in the Contact Record.
     pub async fn refresh_contact_paykit_profile(
         &self,

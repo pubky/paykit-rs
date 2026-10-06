@@ -2232,6 +2232,15 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func removeContact(publicKey: String) async throws  -> ContactRecord?
 
     /**
+     * Block and remove contacts in one shared-state transaction.
+     *
+     * Returns removed records. Busy peers remain unchanged; contacts with public
+     * markers are blocked but retained. Callers enforce subscription policy and
+     * perform any best-effort withdrawal before this operation.
+     */
+    func removeContactsAndBlockPeers(publicKeys: [String]) async throws  -> [ContactRecord]
+
+    /**
      * Remove a blocked peer's public marker. Active links retain their markers.
      */
     func removeEncryptedLinkRecoveryMarker(counterparty: String) async throws  -> EncryptedLinkRecoveryMarkerReport
@@ -4427,6 +4436,30 @@ open func removeContact(publicKey: String)async throws  -> ContactRecord?  {
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionTypeContactRecord.lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Block and remove contacts in one shared-state transaction.
+     *
+     * Returns removed records. Busy peers remain unchanged; contacts with public
+     * markers are blocked but retained. Callers enforce subscription policy and
+     * perform any best-effort withdrawal before this operation.
+     */
+open func removeContactsAndBlockPeers(publicKeys: [String])async throws  -> [ContactRecord]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_remove_contacts_and_block_peers(
+                    self.uniffiClonePointer(),
+                    FfiConverterSequenceString.lower(publicKeys)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeContactRecord.lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -25299,6 +25332,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 39834) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contacts_and_block_peers() != 10421) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_encrypted_link_recovery_marker() != 34687) {

@@ -43,9 +43,10 @@ impl FfiSdkPubkySessionProvider for NoSessionProvider {
 }
 
 #[tokio::test]
-async fn test_save_contacts_validates_batch_before_atomic_write() {
+async fn test_contact_batches_validate_before_atomic_write() {
     struct ContactStore {
         snapshot: Mutex<FfiSdkStateBlobSnapshot>,
+        reject_writes: std::sync::atomic::AtomicBool,
     }
 
     impl FfiSdkStateBlobStore for ContactStore {
@@ -58,6 +59,12 @@ async fn test_save_contacts_validates_batch_before_atomic_write() {
             blob: Arc<FfiSdkStateBlob>,
             expected_revision: Option<String>,
         ) -> Result<String, PaykitFfiError> {
+            if self.reject_writes.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(PaykitFfiError::Storage {
+                    code: "storage_error".into(),
+                    context: "contact write rejected".into(),
+                });
+            }
             let mut snapshot = self.snapshot.lock().unwrap();
             assert_eq!(
                 expected_revision.as_deref(),
@@ -74,6 +81,7 @@ async fn test_save_contacts_validates_batch_before_atomic_write() {
 
     let state = outbound_state(&[], 0);
     let store = Arc::new(ContactStore {
+        reject_writes: std::sync::atomic::AtomicBool::new(false),
         snapshot: Mutex::new(FfiSdkStateBlobSnapshot {
             blob: Arc::new(FfiSdkStateBlob::new(encode_storage_state(&state).unwrap())),
             revision: "revision-0".into(),
@@ -151,6 +159,40 @@ async fn test_save_contacts_validates_batch_before_atomic_write() {
     assert_eq!(
         store.load_state_blob().unwrap().unwrap().revision,
         "revision-1"
+    );
+    assert!(sdk
+        .remove_contacts_and_block_peers(vec![first.to_app_key(), "invalid".into()])
+        .await
+        .is_err());
+    assert_eq!(
+        store.load_state_blob().unwrap().unwrap().revision,
+        "revision-1"
+    );
+    store
+        .reject_writes
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(sdk
+        .remove_contacts_and_block_peers(vec![first.to_app_key(), second.to_app_key()])
+        .await
+        .is_err());
+    let failed = store.load_state_blob().unwrap().unwrap();
+    assert_eq!(failed.revision, "revision-1");
+    assert_eq!(
+        decode_storage_state(&failed.blob.export_bytes()).unwrap(),
+        stored
+    );
+    store
+        .reject_writes
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let removed = sdk
+        .remove_contacts_and_block_peers(vec![first.to_app_key(), second.to_app_key()])
+        .await
+        .unwrap();
+    assert_eq!(removed.len(), 2);
+    assert!(sdk.contact_records().await.unwrap().is_empty());
+    assert_eq!(
+        store.load_state_blob().unwrap().unwrap().revision,
+        "revision-2"
     );
 }
 

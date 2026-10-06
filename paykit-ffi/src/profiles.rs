@@ -480,6 +480,26 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
+    /// Block and remove contacts in one shared-state transaction.
+    ///
+    /// Returns removed records. Busy peers remain unchanged; contacts with public
+    /// markers are blocked but retained. Callers enforce subscription policy and
+    /// perform any best-effort withdrawal before this operation.
+    pub async fn remove_contacts_and_block_peers(
+        &self,
+        public_keys: Vec<String>,
+    ) -> Result<Vec<FfiContactRecord>, PaykitFfiError> {
+        let public_keys = public_keys
+            .into_iter()
+            .map(parse_public_key)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.runtime
+            .remove_contacts_and_block_peers(public_keys)
+            .await
+            .map(|records| records.into_iter().map(Into::into).collect())
+            .map_err(Into::into)
+    }
+
     /// Refresh the cached Paykit Profile for a Contact Record.
     pub async fn refresh_contact_paykit_profile(
         &self,
