@@ -286,6 +286,14 @@ impl PubkySharedStateStorage {
                     write_error,
                 ))
             }
+            Err(write_error) if is_rate_limit_rejection(&write_error) => {
+                // A throttled PUT is rejected before publication, not left in flight.
+                let _ = remove_pending_write(&storage, &pending_path).await;
+                Err(shared_write_error(
+                    "Pubky shared-state write rejected by rate limit",
+                    write_error,
+                ))
+            }
             Err(write_error) => {
                 tracing::warn!(
                     "shared-state commit could not be confirmed; retaining write marker"
@@ -1000,6 +1008,14 @@ fn is_quota_rejection(err: &PubkyError) -> bool {
     )
 }
 
+fn is_rate_limit_rejection(err: &PubkyError) -> bool {
+    matches!(
+        err,
+        PubkyError::Request(RequestError::Server { status, .. })
+            if *status == StatusCode::TOO_MANY_REQUESTS
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1130,9 +1146,10 @@ mod tests {
     }
 
     #[test]
-    fn test_quota_rejection_does_not_include_ambiguous_failures() {
+    fn test_write_rejections_do_not_include_ambiguous_failures() {
         for status in [
             StatusCode::INSUFFICIENT_STORAGE,
+            StatusCode::TOO_MANY_REQUESTS,
             StatusCode::REQUEST_TIMEOUT,
             StatusCode::GATEWAY_TIMEOUT,
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1144,6 +1161,10 @@ mod tests {
             assert_eq!(
                 is_quota_rejection(&error),
                 status == StatusCode::INSUFFICIENT_STORAGE
+            );
+            assert_eq!(
+                is_rate_limit_rejection(&error),
+                status == StatusCode::TOO_MANY_REQUESTS
             );
         }
     }
