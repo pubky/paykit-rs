@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::PreparedOutboundPrivateSend;
 use crate::EncryptedLinkHandshakeRole;
 
 #[tokio::test]
@@ -144,19 +145,22 @@ async fn test_restore_backup_state_requires_matching_checkpoint_authorization() 
     let mismatched = paykit_lib::PaykitNoiseKeyAuthorization::sign(&signer, &[8; 32], 2).unwrap();
 
     for state in [LinkedPeerState::Linked, LinkedPeerState::Linking] {
-        for (authorization, has_peer) in [
-            (Some(matching.clone()), true),
-            (None, true),
-            (Some(mismatched.clone()), true),
-            (None, false),
+        for (authorization, peer_state) in [
+            (Some(matching.clone()), Some(state.clone())),
+            (None, Some(state.clone())),
+            (Some(mismatched.clone()), Some(state.clone())),
+            (None, None),
+            (Some(matching.clone()), Some(LinkedPeerState::Blocked)),
+            (None, Some(LinkedPeerState::Blocked)),
+            (Some(mismatched.clone()), Some(LinkedPeerState::Blocked)),
         ] {
             let checkpoint = link_checkpoint(&counterparty, matching.noise_public_key(), &state);
             let mut backup = empty_backup(identity(public_key()));
             backup.encrypted_link_states.push(checkpoint.clone());
-            if has_peer {
+            if let Some(peer_state) = &peer_state {
                 backup.linked_peers.push(LinkedPeerRecord {
                     counterparty: counterparty.clone(),
-                    state: state.clone(),
+                    state: peer_state.clone(),
                     last_sync_at: Some(timestamp()),
                     last_private_receive_at: None,
                     failure_count: 0,
@@ -168,8 +172,8 @@ async fn test_restore_backup_state_requires_matching_checkpoint_authorization() 
                     noise_key_authorization: authorization.clone(),
                 });
             }
-            let can_resume = authorization.as_ref() == Some(&matching);
-            if !can_resume {
+            let checkpoint_authorized = authorization.as_ref() == Some(&matching);
+            if !checkpoint_authorized {
                 backup
                     .outbound_private_messages
                     .push(private_payment_list_outbound(
@@ -177,6 +181,24 @@ async fn test_restore_backup_state_requires_matching_checkpoint_authorization() 
                         1,
                         "lnbc1example",
                     ));
+                let mut sending =
+                    private_payment_list_outbound(counterparty.clone(), 2, "lnbc1prepared");
+                sending.status = OutboundPrivateMessageStatus::Sending;
+                sending.attempt_count = 1;
+                sending.last_attempt_at = Some(timestamp());
+                sending.prepared_send = Some(PreparedOutboundPrivateSend {
+                    destination_path: format!(
+                        "{}/{}/0",
+                        paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX,
+                        "0".repeat(64)
+                    ),
+                    ciphertext: vec![0; pubky_noise::snow_crypto::PUBKY_NOISE_TRANSPORT_PACKET_LEN],
+                });
+                let mut failed = sending.clone();
+                failed.outbound_message_id = 3;
+                failed.status = OutboundPrivateMessageStatus::Failed;
+                failed.last_error = Some("transport failed".into());
+                backup.outbound_private_messages.extend([sending, failed]);
             }
             let backup = serde_json::from_slice(&serde_json::to_vec(&backup).unwrap()).unwrap();
             let storage = InMemoryStorage::new();
@@ -187,21 +209,30 @@ async fn test_restore_backup_state_requires_matching_checkpoint_authorization() 
             let peer = &restored.linked_peers[&counterparty];
             let link = &restored.encrypted_link_states[&counterparty];
             assert_eq!(peer.noise_key_authorization, authorization);
-            if can_resume {
+            let expected_state = if peer_state == Some(LinkedPeerState::Blocked) {
+                LinkedPeerState::Blocked
+            } else if checkpoint_authorized {
+                state.clone()
+            } else {
+                LinkedPeerState::RecoveryRequired
+            };
+            assert_eq!(peer.state, expected_state);
+            if checkpoint_authorized {
                 assert!(report.recovery_required_peers.is_empty());
-                assert_eq!(peer.state, state);
                 assert_eq!(link, &checkpoint);
             } else {
                 assert_eq!(report.recovery_required_peers, vec![counterparty.clone()]);
-                assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
                 assert!(link.link_snapshot.is_none());
                 assert!(link.handshake_snapshot.is_none());
                 assert!(link.handshake_role.is_none());
                 assert_eq!(link.generation, checkpoint.generation + 1);
-                assert_eq!(
-                    restored.outbound_private_messages[0].status,
-                    OutboundPrivateMessageStatus::RecoveryRequired
-                );
+                for message in &restored.outbound_private_messages {
+                    assert_eq!(
+                        message.status,
+                        OutboundPrivateMessageStatus::RecoveryRequired
+                    );
+                    assert!(message.prepared_send.is_none());
+                }
             }
         }
     }
