@@ -1,7 +1,10 @@
 use std::{
     any::Any,
     collections::{HashMap, HashSet},
-    sync::{Arc, Barrier, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Barrier, Mutex,
+    },
 };
 
 use chrono::{TimeZone, Utc};
@@ -835,10 +838,12 @@ async fn test_encoded_state_blob_snapshot_store_supports_repeated_transactions()
     #[derive(Default)]
     struct EncodedSnapshotStore {
         data: Mutex<Option<Vec<u8>>>,
+        loads: AtomicUsize,
     }
 
     impl FfiSdkStateBlobStore for EncodedSnapshotStore {
         fn load_state_blob(&self) -> Result<Option<FfiSdkStateBlobSnapshot>, PaykitFfiError> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
             self.data
                 .lock()
                 .unwrap()
@@ -886,10 +891,18 @@ async fn test_encoded_state_blob_snapshot_store_supports_repeated_transactions()
     )
     .unwrap();
     let storage = FfiSdkStorageAdapter::Callback(FfiSdkStorage {
-        store,
+        store: store.clone(),
         transaction_lock: Arc::new(Mutex::new(())),
     });
+    let loads = store.loads.load(Ordering::SeqCst);
+    assert_eq!(sdk.observed_backup_state_revision().unwrap(), None);
+    assert_eq!(store.loads.load(Ordering::SeqCst), loads);
     let before = sdk.backup_state_revision().await.unwrap();
+    assert_eq!(store.loads.load(Ordering::SeqCst), loads + 1);
+    assert_eq!(sdk.observed_backup_state_revision().unwrap(), None);
+    assert_eq!(store.loads.load(Ordering::SeqCst), loads + 1);
+    assert!(sdk.state_revision().unwrap().is_some());
+    assert_eq!(store.loads.load(Ordering::SeqCst), loads + 2);
 
     let error = storage
         .with_operation(async {

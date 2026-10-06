@@ -26,16 +26,20 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<Vec<PaymentRequestRecord>> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.public_key.is_none() {
-            return Ok(Vec::new());
-        }
-        self.ensure_peer_not_blocked(counterparty).await?;
-        let mut records =
-            derive_received_payment_request_records(&self.storage, counterparty, self.clock.now())
-                .await?;
-        self.mark_recovery_required_payment_request_records(counterparty, &mut records)
+        let mut records = self
+            .list_payment_requests(PaymentRequestFilter {
+                counterparty: Some(counterparty.clone()),
+                received_only: true,
+                ..PaymentRequestFilter::default()
+            })
             .await?;
+        records.sort_by_key(|record| {
+            std::cmp::Reverse(
+                record
+                    .last_stream_item_id
+                    .or(record.proposal_stream_item_id),
+            )
+        });
         Ok(records)
     }
 
@@ -47,15 +51,20 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<Vec<PaymentRequestRecord>> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.public_key.is_none() {
-            return Ok(Vec::new());
-        }
-        self.ensure_peer_not_blocked(counterparty).await?;
-        let mut records =
-            derive_payment_request_records(&self.storage, counterparty, self.clock.now()).await?;
-        self.mark_recovery_required_payment_request_records(counterparty, &mut records)
+        let mut records = self
+            .list_payment_requests(PaymentRequestFilter {
+                counterparty: Some(counterparty.clone()),
+                ..PaymentRequestFilter::default()
+            })
             .await?;
+        records.sort_by_key(|record| {
+            std::cmp::Reverse((
+                record.last_event_at,
+                record
+                    .last_outbound_message_id
+                    .or(record.last_stream_item_id),
+            ))
+        });
         Ok(records)
     }
 
@@ -701,26 +710,6 @@ where
                 ),
                 source: None,
             })
-    }
-
-    async fn mark_recovery_required_payment_request_records(
-        &self,
-        counterparty: &PubkyPublicKey,
-        records: &mut [PaymentRequestRecord],
-    ) -> Result<()> {
-        let recovery_required = self
-            .storage
-            .transaction(|tx| {
-                Ok(tx
-                    .linked_peer(counterparty)
-                    .is_some_and(|peer| peer.state == LinkedPeerState::RecoveryRequired))
-            })
-            .await?;
-        if !recovery_required {
-            return Ok(());
-        }
-        mark_payment_requests_recovery_required(records);
-        Ok(())
     }
 
     pub(crate) async fn enqueue_raw_payment_request(

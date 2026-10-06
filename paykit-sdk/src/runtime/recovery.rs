@@ -534,29 +534,42 @@ where
         {
             return Ok(false);
         }
-        let authorization = match self
-            .paykit_noise_key_authorization(counterparty.clone())
-            .await
-        {
+        let expected_authorization = checkpoint
+            .peer
+            .noise_key_authorization
+            .as_ref()
+            .expect("recovery checkpoints require peer authorization");
+        let (authorization, marker) = tokio::join!(
+            self.paykit_noise_key_authorization(counterparty.clone()),
+            async {
+                let Some(public_storage) = self.pubky.load_public_storage().await? else {
+                    return Ok::<_, PaykitSdkError>(None);
+                };
+                Ok(Some(
+                    paykit_lib::fetch_encrypted_link_recovery_marker(
+                        &public_storage,
+                        &secret_key,
+                        session_access.session.info().public_key(),
+                        &counterparty.to_public_key()?,
+                        expected_authorization.noise_public_key(),
+                    )
+                    .await?,
+                ))
+            },
+        );
+        let authorization = match authorization {
             Ok(authorization) => authorization,
             Err(PaykitSdkError::NotFound { .. }) => return Ok(false),
             Err(err) => return Err(err),
         };
-        if checkpoint.peer.noise_key_authorization.as_ref() != Some(&authorization) {
+        // The speculative marker is usable only for the freshly authorized checkpoint key.
+        if expected_authorization != &authorization {
             return Ok(false);
         }
-        let Some(public_storage) = self.pubky.load_public_storage().await? else {
+        let Some(marker) = marker? else {
             return Ok(false);
         };
-        if let Some(marker) = paykit_lib::fetch_encrypted_link_recovery_marker(
-            &public_storage,
-            &secret_key,
-            session_access.session.info().public_key(),
-            &counterparty.to_public_key()?,
-            authorization.noise_public_key(),
-        )
-        .await?
-        {
+        if let Some(marker) = marker {
             if should_observe_remote_recovery_marker(
                 Some(&checkpoint.peer),
                 counterparty,

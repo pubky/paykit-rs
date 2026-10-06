@@ -1784,7 +1784,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func authorizeAllowanceReassociation(scope: PaymentRequestScope, reassociation: AllowanceReassociationInput) async throws  -> AllowanceAssociationRecord
 
     /**
-     * Return a content fingerprint for SDK-managed backup state.
+     * Read current storage and return a content fingerprint for SDK-managed backup state.
      *
      * Unlike `state_revision`, this excludes transient operation leases. Compare it
      * before and after SDK workflows, including failures, to schedule app backups.
@@ -2004,6 +2004,17 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Observe a counterparty's public recovery marker.
      */
     func observeEncryptedLinkRecoveryMarker(counterparty: String) async throws  -> EncryptedLinkRecoveryMarkerReport
+
+    /**
+     * Return completed shared-state backup metadata without storage or session calls.
+     *
+     * This is an observation, not current remote state or authorization. Returns
+     * `None` for callback storage or when no completed observation is available.
+     * Keep scheduling backups after failed workflows, and discard native cached
+     * observations on identity, key, session, or runtime reset. Use
+     * `backup_state_revision` when a fresh read is required.
+     */
+    func observedBackupStateRevision() throws  -> ObservedBackupStateRevision?
 
     /**
      * Fetch the public Paykit application registry for an identity.
@@ -2763,7 +2774,7 @@ open func authorizeAllowanceReassociation(scope: PaymentRequestScope, reassociat
 }
 
     /**
-     * Return a content fingerprint for SDK-managed backup state.
+     * Read current storage and return a content fingerprint for SDK-managed backup state.
      *
      * Unlike `state_revision`, this excludes transient operation leases. Compare it
      * before and after SDK workflows, including failures, to schedule app backups.
@@ -3602,6 +3613,22 @@ open func observeEncryptedLinkRecoveryMarker(counterparty: String)async throws  
             liftFunc: FfiConverterTypeEncryptedLinkRecoveryMarkerReport_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
+}
+
+    /**
+     * Return completed shared-state backup metadata without storage or session calls.
+     *
+     * This is an observation, not current remote state or authorization. Returns
+     * `None` for callback storage or when no completed observation is available.
+     * Keep scheduling backups after failed workflows, and discard native cached
+     * observations on identity, key, session, or runtime reset. Use
+     * `backup_state_revision` when a fresh read is required.
+     */
+open func observedBackupStateRevision()throws  -> ObservedBackupStateRevision?  {
+    return try  FfiConverterOptionTypeObservedBackupStateRevision.lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_method_ffipaykitsdk_observed_backup_state_revision(self.uniffiClonePointer(),$0
+    )
+})
 }
 
     /**
@@ -10934,6 +10961,93 @@ public func FfiConverterTypeLinkedPeerRecord_lift(_ buf: RustBuffer) throws -> L
 #endif
 public func FfiConverterTypeLinkedPeerRecord_lower(_ value: LinkedPeerRecord) -> RustBuffer {
     return FfiConverterTypeLinkedPeerRecord.lower(value)
+}
+
+
+/**
+ * Backup fingerprint paired with the exact shared-state revision it describes.
+ */
+public struct ObservedBackupStateRevision {
+    /**
+     * Previously observed storage revision, including transient leases.
+     */
+    public var stateRevision: String
+    /**
+     * Content fingerprint excluding state omitted from SDK backups.
+     */
+    public var backupRevision: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Previously observed storage revision, including transient leases.
+         */stateRevision: String,
+        /**
+         * Content fingerprint excluding state omitted from SDK backups.
+         */backupRevision: String) {
+        self.stateRevision = stateRevision
+        self.backupRevision = backupRevision
+    }
+}
+
+#if compiler(>=6)
+extension ObservedBackupStateRevision: Sendable {}
+#endif
+
+
+extension ObservedBackupStateRevision: Equatable, Hashable {
+    public static func ==(lhs: ObservedBackupStateRevision, rhs: ObservedBackupStateRevision) -> Bool {
+        if lhs.stateRevision != rhs.stateRevision {
+            return false
+        }
+        if lhs.backupRevision != rhs.backupRevision {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(stateRevision)
+        hasher.combine(backupRevision)
+    }
+}
+
+extension ObservedBackupStateRevision: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeObservedBackupStateRevision: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ObservedBackupStateRevision {
+        return
+            try ObservedBackupStateRevision(
+                stateRevision: FfiConverterString.read(from: &buf),
+                backupRevision: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ObservedBackupStateRevision, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.stateRevision, into: &buf)
+        FfiConverterString.write(value.backupRevision, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeObservedBackupStateRevision_lift(_ buf: RustBuffer) throws -> ObservedBackupStateRevision {
+    return try FfiConverterTypeObservedBackupStateRevision.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeObservedBackupStateRevision_lower(_ value: ObservedBackupStateRevision) -> RustBuffer {
+    return FfiConverterTypeObservedBackupStateRevision.lower(value)
 }
 
 
@@ -22849,6 +22963,30 @@ fileprivate struct FfiConverterOptionTypeLinkedPeerHandshakeReport: FfiConverter
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeObservedBackupStateRevision: FfiConverterRustBuffer {
+    typealias SwiftType = ObservedBackupStateRevision?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeObservedBackupStateRevision.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeObservedBackupStateRevision.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeOutboundPrivateSendReport: FfiConverterRustBuffer {
     typealias SwiftType = OutboundPrivateSendReport?
 
@@ -24917,7 +25055,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_authorize_allowance_reassociation() != 14050) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_backup_state_revision() != 4088) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_backup_state_revision() != 60914) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_begin_payment_execution() != 18142) {
@@ -25041,6 +25179,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_observe_encrypted_link_recovery_marker() != 51945) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_observed_backup_state_revision() != 29510) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_paykit_app_registry() != 60710) {

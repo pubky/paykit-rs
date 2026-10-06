@@ -820,6 +820,7 @@ async fn test_payment_preparation_refreshes_an_empty_private_list() {
         remote: &'a TestUser,
         public_reads: AtomicUsize,
         marker_published: Arc<AtomicBool>,
+        marker_publication: tokio::sync::Mutex<()>,
     }
     #[async_trait]
     impl PubkySessionProvider for RecoverAtResolution<'_> {
@@ -829,16 +830,19 @@ async fn test_payment_preparation_refreshes_an_empty_private_list() {
 
         async fn load_public_storage(&self) -> PaykitResult<Option<pubky::PublicStorage>> {
             // Initial recovery uses two handles; the inbox probe uses the third.
-            // The next public read starts post-inbox authorization and recovery.
-            if self.public_reads.fetch_add(1, Ordering::SeqCst) == 3 {
-                let before = self.local.storage.snapshot()?;
-                assert!(before.peer_link_operation_leases.is_empty());
-                self.remote
-                    .sdk
-                    .publish_encrypted_link_recovery_marker(self.local.public_key.clone())
-                    .await?;
-                assert_eq!(self.local.storage.snapshot()?, before);
-                self.marker_published.store(true, Ordering::SeqCst);
+            // All joined post-inbox reads must wait for the injected publication.
+            if self.public_reads.fetch_add(1, Ordering::SeqCst) >= 3 {
+                let _publication = self.marker_publication.lock().await;
+                if !self.marker_published.load(Ordering::SeqCst) {
+                    let before = self.local.storage.snapshot()?;
+                    assert!(before.peer_link_operation_leases.is_empty());
+                    self.remote
+                        .sdk
+                        .publish_encrypted_link_recovery_marker(self.local.public_key.clone())
+                        .await?;
+                    assert_eq!(self.local.storage.snapshot()?, before);
+                    self.marker_published.store(true, Ordering::SeqCst);
+                }
             }
             Ok(Some(self.local.access.outbox_client.public_storage()))
         }
@@ -867,6 +871,7 @@ async fn test_payment_preparation_refreshes_an_empty_private_list() {
             remote: &pair.alice,
             public_reads: AtomicUsize::new(0),
             marker_published: marker_published.clone(),
+            marker_publication: tokio::sync::Mutex::new(()),
         },
         NoWalletSelection,
         PaykitSdkConfig::new(pair.bob.app_id.clone()).unwrap(),

@@ -295,6 +295,12 @@ async fn test_payment_requests_with_marks_recovery_required_peer_state() {
         .await
         .unwrap();
     assert_eq!(record, records[0]);
+    assert_eq!(
+        sdk.received_payment_requests_from(&counterparty)
+            .await
+            .unwrap(),
+        records
+    );
 }
 
 #[tokio::test]
@@ -546,7 +552,7 @@ async fn test_list_payment_requests_counterparty_filter_preserves_blocked_error(
             None,
         )],
         None,
-        FixedClock.now(),
+        FixedClock.now() - chrono::Duration::seconds(1),
     )
     .await
     .unwrap();
@@ -580,7 +586,7 @@ async fn test_list_payment_requests_counterparty_filter_preserves_blocked_error(
         .unwrap();
     let blocked_result = sdk
         .list_payment_requests(PaymentRequestFilter {
-            counterparty: Some(blocked),
+            counterparty: Some(blocked.clone()),
             ..PaymentRequestFilter::default()
         })
         .await;
@@ -589,7 +595,26 @@ async fn test_list_payment_requests_counterparty_filter_preserves_blocked_error(
     assert!(records
         .iter()
         .all(|record| record.counterparty == counterparty));
+    assert_eq!(
+        sdk.payment_requests_with(&counterparty).await.unwrap()[0].payment_request_id,
+        "550e8400-e29b-41d4-a716-446655440020"
+    );
+    assert_eq!(
+        sdk.received_payment_requests_from(&counterparty)
+            .await
+            .unwrap()[0]
+            .payment_request_id,
+        "550e8400-e29b-41d4-a716-446655440021"
+    );
     assert!(matches!(blocked_result, Err(PaykitSdkError::Policy { .. })));
+    assert!(matches!(
+        sdk.payment_requests_with(&blocked).await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
+    assert!(matches!(
+        sdk.received_payment_requests_from(&blocked).await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
 }
 
 #[tokio::test]

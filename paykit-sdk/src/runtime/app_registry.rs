@@ -11,6 +11,7 @@ fn app_publication_noop_lease_sequence(
     tx: &dyn StorageTransaction,
     app_id: &paykit_lib::PaykitAppId,
     capabilities: paykit_lib::PaykitAppCapabilities,
+    now: DateTime<Utc>,
 ) -> Option<u64> {
     if !tx.paykit_app_is_registered(app_id)
         || tx.paykit_app_is_retired(app_id)
@@ -20,8 +21,15 @@ fn app_publication_noop_lease_sequence(
         return None;
     }
     let state = tx.export_storage_state();
-    // Publication reconciles recovery work across apps, including execution claims.
-    if !state.payment_request_execution_claims.is_empty()
+    // Active claims need no publication. Preserve cleanup of resolved claims and
+    // let the normal publication path report any derivation error.
+    if state
+        .payment_request_execution_claims
+        .values()
+        .any(|claim| {
+            crate::domain::payment_requests::payment_execution_claim_is_resolved(tx, claim, now)
+                .unwrap_or(true)
+        })
         || state
             .outbound_private_messages
             .iter()
@@ -294,6 +302,7 @@ where
                     tx,
                     &self.config.app_id,
                     app.capabilities(),
+                    self.clock.now(),
                 ))
             })
             .await?;
@@ -399,6 +408,7 @@ where
                             tx,
                             &self.config.app_id,
                             app.capabilities(),
+                            self.clock.now(),
                         ) == Some(lease_sequence),
                 )
             })

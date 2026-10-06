@@ -1,7 +1,6 @@
 use std::sync::{Arc, Mutex};
 
 use paykit_sdk::{IdentityStatus, PaykitSdk, PubkySharedStateStorage, RestoreReport};
-use sha2::{Digest, Sha256};
 
 use crate::config::{default_pubky_client_config, FfiPaykitSdkConfig, FfiPubkyClientConfig};
 use crate::errors::{storage_error, validation_error, PaykitFfiError};
@@ -25,6 +24,15 @@ pub struct FfiIdentityStatus {
     pub public_key: Option<String>,
     /// Current Pubky capability.
     pub capability: FfiPubkyIdentityCapability,
+}
+
+/// Backup fingerprint paired with the exact shared-state revision it describes.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiObservedBackupStateRevision {
+    /// Previously observed storage revision, including transient leases.
+    pub state_revision: String,
+    /// Content fingerprint excluding state omitted from SDK backups.
+    pub backup_revision: String,
 }
 
 /// Report returned after restoring SDK-managed backup state.
@@ -225,20 +233,37 @@ impl FfiPaykitSdk {
         self.storage.state_revision()
     }
 
-    /// Return a content fingerprint for SDK-managed backup state.
+    /// Return completed shared-state backup metadata without storage or session calls.
+    ///
+    /// This is an observation, not current remote state or authorization. Returns
+    /// `None` for callback storage or when no completed observation is available.
+    /// Keep scheduling backups after failed workflows, and discard native cached
+    /// observations on identity, key, session, or runtime reset. Use
+    /// `backup_state_revision` when a fresh read is required.
+    pub fn observed_backup_state_revision(
+        &self,
+    ) -> Result<Option<FfiObservedBackupStateRevision>, PaykitFfiError> {
+        match &self.storage {
+            FfiSdkStorageAdapter::Callback(_) => Ok(None),
+            FfiSdkStorageAdapter::PubkyShared(storage) => Ok(storage
+                .observed_backup_state_revision()?
+                .map(|observed| FfiObservedBackupStateRevision {
+                    state_revision: observed.state_revision,
+                    backup_revision: observed.backup_revision,
+                })),
+        }
+    }
+
+    /// Read current storage and return a content fingerprint for SDK-managed backup state.
     ///
     /// Unlike `state_revision`, this excludes transient operation leases. Compare it
     /// before and after SDK workflows, including failures, to schedule app backups.
     /// This is not a storage compare-and-swap revision.
     pub async fn backup_state_revision(&self) -> Result<String, PaykitFfiError> {
         let backup = self.runtime.export_backup_state().await?;
-        let mut value = serde_json::to_value(backup)
-            .map_err(|_| storage_error("backup_encode_failed", "failed to encode SDK backup"))?;
-        // Canonical ordering keeps the fingerprint stable across map iteration orders.
-        value.sort_all_objects();
-        let bytes = serde_json::to_vec(&value)
-            .map_err(|_| storage_error("backup_encode_failed", "failed to encode SDK backup"))?;
-        Ok(hex::encode(Sha256::digest(bytes)))
+        backup
+            .content_fingerprint()
+            .map_err(|_| storage_error("backup_encode_failed", "failed to encode SDK backup"))
     }
 
     /// Initialize durable SDK identity state.

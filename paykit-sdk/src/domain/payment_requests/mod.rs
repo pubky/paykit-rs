@@ -44,9 +44,8 @@ pub(crate) use derivation::derive_payment_request_records_from_parts;
 use derivation::recurrence_unit_to_str;
 pub(crate) use derivation::{
     payment_proof_allowed_states, payment_request_records,
-    payment_request_records_from_transaction, received_payment_request_records,
-    received_payment_request_records_from_transaction, request_from_record,
-    validate_proof_conversion,
+    payment_request_records_from_transaction, received_payment_request_records_from_transaction,
+    request_from_record, validate_proof_conversion,
 };
 
 /// Local role for one Payment Request.
@@ -1163,24 +1162,7 @@ pub(crate) fn release_resolved_payment_execution_claims(
         .payment_request_execution_claims
         .into_values()
     {
-        if request_has_unresolved_payment(tx, &claim.counterparty, &claim.payment_request_id) {
-            continue;
-        }
-        let records = payment_request_records_from_transaction(tx, &claim.counterparty, now)?;
-        if records.iter().any(|record| {
-            record.payment_request_id == claim.payment_request_id
-                && !request_has_unreported_successful_payment(
-                    tx.allowance_accounting_state().as_ref(),
-                    record,
-                )
-                && matches!(
-                    record.state,
-                    PaymentRequestLifecycleState::Canceled
-                        | PaymentRequestLifecycleState::Rejected
-                        | PaymentRequestLifecycleState::ProofSubmitted
-                        | PaymentRequestLifecycleState::InvalidConflict
-                )
-        }) {
+        if payment_execution_claim_is_resolved(tx, &claim, now)? {
             tx.remove_payment_request_execution_claim(
                 &claim.counterparty,
                 &claim.payment_request_id,
@@ -1188,6 +1170,31 @@ pub(crate) fn release_resolved_payment_execution_claims(
         }
     }
     Ok(())
+}
+
+pub(crate) fn payment_execution_claim_is_resolved(
+    tx: &dyn StorageTransaction,
+    claim: &PaymentRequestExecutionClaim,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    if request_has_unresolved_payment(tx, &claim.counterparty, &claim.payment_request_id) {
+        return Ok(false);
+    }
+    let records = payment_request_records_from_transaction(tx, &claim.counterparty, now)?;
+    Ok(records.iter().any(|record| {
+        record.payment_request_id == claim.payment_request_id
+            && !request_has_unreported_successful_payment(
+                tx.allowance_accounting_state().as_ref(),
+                record,
+            )
+            && matches!(
+                record.state,
+                PaymentRequestLifecycleState::Canceled
+                    | PaymentRequestLifecycleState::Rejected
+                    | PaymentRequestLifecycleState::ProofSubmitted
+                    | PaymentRequestLifecycleState::InvalidConflict
+            )
+    }))
 }
 
 fn require_execution_claim_owner(

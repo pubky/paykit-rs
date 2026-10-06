@@ -70,7 +70,6 @@ use crate::{
         enqueue_payment_request as enqueue_payment_request_message, payment_proof_allowed_states,
         payment_request_record_blocks_app_removal,
         payment_request_records as derive_payment_request_records,
-        received_payment_request_records as derive_received_payment_request_records,
         release_payment_request_execution_claim, request_from_record, PaymentProofSubmission,
         PaymentRequestFilter, PaymentRequestLifecycleState, PaymentRequestLocalRole,
         PaymentRequestRecord, PaymentRequestTermsRecord,

@@ -82,6 +82,15 @@ tokio::task_local! {
     static SHARED_STATE_OPERATION: Arc<SharedStateOperation>;
 }
 
+/// Paired metadata from one successfully completed shared-state operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObservedBackupStateRevision {
+    /// Storage revision of the observed state, including transient leases.
+    pub state_revision: String,
+    /// Content fingerprint of that state's SDK backup projection.
+    pub backup_revision: String,
+}
+
 pub(crate) fn shared_state_operation_active() -> bool {
     SHARED_STATE_OPERATION.try_with(|_| ()).is_ok()
 }
@@ -104,6 +113,7 @@ pub struct PubkySharedStateStorage {
     session_provider: Arc<dyn PubkySessionProvider>,
     transaction_lock: Arc<Mutex<()>>,
     last_revision: Arc<std::sync::Mutex<Option<String>>>,
+    observed_backup_revision: Arc<std::sync::Mutex<Option<ObservedBackupStateRevision>>>,
 }
 
 impl PubkySharedStateStorage {
@@ -131,6 +141,7 @@ impl PubkySharedStateStorage {
             session_provider: Arc::new(session_provider),
             transaction_lock: Arc::new(Mutex::new(())),
             last_revision: Arc::new(std::sync::Mutex::new(None)),
+            observed_backup_revision: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -143,6 +154,31 @@ impl PubkySharedStateStorage {
                 context: "Pubky shared-state revision lock poisoned".into(),
                 source: Some(anyhow::anyhow!(err.to_string())),
             })
+    }
+
+    /// Return paired backup metadata without reading storage or checking live access.
+    ///
+    /// This is historical observation, never authority or proof of current remote
+    /// state. Unavailable during storage operations, after failed or cancelled
+    /// operations, and after key rotation or recovery until a normal operation
+    /// completes successfully. Discard caller caches when changing identity or keys.
+    pub fn observed_backup_state_revision(&self) -> Result<Option<ObservedBackupStateRevision>> {
+        let Ok(_guard) = self.transaction_lock.try_lock() else {
+            return Ok(None);
+        };
+        self.observed_backup_revision
+            .lock()
+            .map(|revision| revision.clone())
+            .map_err(|_| PaykitSdkError::Storage {
+                context: "Pubky backup revision lock poisoned".into(),
+                source: None,
+            })
+    }
+
+    fn record_backup_revision(&self, revision: Option<ObservedBackupStateRevision>) {
+        if let Ok(mut observed) = self.observed_backup_revision.lock() {
+            *observed = revision;
+        }
     }
 
     async fn load_session_access(&self) -> Result<PubkySessionAccess> {
@@ -272,6 +308,7 @@ impl StorageAdapter for PubkySharedStateStorage {
         if self.active_operation().is_some() {
             return operation.await;
         }
+        self.record_backup_revision(None);
         if shared_state_operation_active() {
             return Err(PaykitSdkError::Policy {
                 context: "cannot nest operations for different shared-state adapters".into(),
@@ -279,9 +316,10 @@ impl StorageAdapter for PubkySharedStateStorage {
             });
         }
         let _guard = self.transaction_lock.lock().await;
+        self.record_backup_revision(None);
         let access = self.load_access().await?;
         let session = access.session.clone();
-        with_shared_state_lock(&session, |lock| async move {
+        let (result, state) = with_shared_state_lock(&session, |lock| async move {
             // A late write can commit and remove its marker during a state read.
             // Checking markers first prevents accepting that read's stale contents.
             wait_for_pending_writes(&access.session).await?;
@@ -299,9 +337,27 @@ impl StorageAdapter for PubkySharedStateStorage {
                 lock,
                 state: Mutex::new(Ok(snapshot.state)),
             });
-            SHARED_STATE_OPERATION.scope(context, operation).await
+            let result = SHARED_STATE_OPERATION
+                .scope(Arc::clone(&context), operation)
+                .await?;
+            let state = Arc::try_unwrap(context)
+                .ok()
+                .and_then(|context| context.state.into_inner().ok());
+            Ok((result, state))
         })
-        .await
+        .await?;
+        // Hash only after the remote lock scope ends. The local lock still pairs
+        // this completed state with its revision; neither is reused for authority.
+        let observed = state.and_then(|state| {
+            Some(ObservedBackupStateRevision {
+                state_revision: self.last_revision().ok()??,
+                backup_revision: crate::SdkBackupState::from_storage_state(state)
+                    .content_fingerprint()
+                    .ok()?,
+            })
+        });
+        self.record_backup_revision(observed);
+        Ok(result)
     }
 
     async fn recover_shared_state_from_backup(
@@ -310,6 +366,7 @@ impl StorageAdapter for PubkySharedStateStorage {
         replacement_key: PaykitIdentitySecretKey,
         state: super::ValidatedStorageState,
     ) -> Result<()> {
+        self.record_backup_revision(None);
         if shared_state_operation_active() {
             return Err(PaykitSdkError::Policy {
                 context: "shared-state recovery requires a separate storage operation".into(),
@@ -319,6 +376,7 @@ impl StorageAdapter for PubkySharedStateStorage {
         current_key.validate_successor(&replacement_key)?;
         let state = state.into_storage_state();
         let _guard = self.transaction_lock.lock().await;
+        self.record_backup_revision(None);
         let access = self.load_access().await?;
         let owner = access.public_key()?;
         replacement_key.validate_pubky_derivation(access.local_secret_key.as_ref())?;
@@ -437,6 +495,7 @@ impl StorageAdapter for PubkySharedStateStorage {
         replacement_key: PaykitIdentitySecretKey,
         f: StorageKeyRotationCallback<'a>,
     ) -> Result<Box<dyn Any + Send>> {
+        self.record_backup_revision(None);
         if shared_state_operation_active() {
             return Err(PaykitSdkError::Policy {
                 context: "Paykit key rotation requires a separate storage operation".into(),
@@ -445,6 +504,7 @@ impl StorageAdapter for PubkySharedStateStorage {
         }
         current_key.validate_successor(&replacement_key)?;
         let _guard = self.transaction_lock.lock().await;
+        self.record_backup_revision(None);
         let access = self.load_session_access().await?;
         current_key.validate_pubky_derivation(access.local_secret_key.as_ref())?;
         replacement_key.validate_pubky_derivation(access.local_secret_key.as_ref())?;

@@ -10,7 +10,7 @@ use paykit_sdk::{
 use std::{
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Mutex,
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -23,7 +23,7 @@ use crate::harness::{
 
 struct PausedPublicReadProvider {
     inner: TestnetSessionProvider,
-    public_reads: AtomicUsize,
+    public_reads: Arc<AtomicUsize>,
     pause_after: usize,
     fail_paused_read: bool,
     pause: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
@@ -89,7 +89,7 @@ async fn test_private_receive_rejects_a_changed_checkpoint_before_commit() {
             storage.clone(),
             PausedPublicReadProvider {
                 inner: TestnetSessionProvider::new(pair.alice.access.clone()),
-                public_reads: AtomicUsize::new(0),
+                public_reads: Arc::new(AtomicUsize::new(0)),
                 pause_after: 1,
                 fail_paused_read: false,
                 pause: Mutex::new(Some((ready, paused))),
@@ -179,6 +179,47 @@ async fn test_private_receive_rejects_a_changed_checkpoint_before_commit() {
 }
 
 #[tokio::test]
+async fn test_recovery_reads_overlap_without_bypassing_authorization_failure() {
+    let pair = linked_two_party().await;
+    let initial = pair.alice.storage.snapshot().unwrap();
+    let storage = InMemoryStorage::from_state(initial.clone());
+    let public_reads = Arc::new(AtomicUsize::new(0));
+    let (ready, reached) = oneshot::channel();
+    let (resume, paused) = oneshot::channel();
+    let sdk = PaykitSdk::new(
+        storage.clone(),
+        PausedPublicReadProvider {
+            inner: TestnetSessionProvider::new(pair.alice.access.clone()),
+            public_reads: public_reads.clone(),
+            pause_after: 0,
+            fail_paused_read: true,
+            pause: Mutex::new(Some((ready, paused))),
+        },
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    );
+    let observe = sdk.observe_encrypted_link_recovery_marker(pair.bob.public_key.clone());
+    tokio::pin!(observe);
+    tokio::select! {
+        reached = tokio::time::timeout(Duration::from_secs(30), reached) =>
+            reached.expect("authorization read should pause").unwrap(),
+        result = &mut observe => panic!("observation did not pause: {result:?}"),
+    }
+    assert_eq!(public_reads.load(Ordering::SeqCst), 2);
+    assert_eq!(storage.snapshot().unwrap(), initial);
+    resume.send(()).unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(30), observe)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(error, PaykitSdkError::RecoveryRequired { .. }));
+    assert!(error
+        .to_string()
+        .contains("injected registry lookup failure"));
+    assert_eq!(storage.snapshot().unwrap(), initial);
+}
+
+#[tokio::test]
 async fn test_recovery_observation_rechecks_state_after_public_lookup() {
     let pair = linked_two_party().await;
     let initial = pair.alice.storage.snapshot().unwrap();
@@ -239,7 +280,7 @@ async fn test_recovery_observation_rechecks_state_after_public_lookup() {
                 storage.clone(),
                 PausedPublicReadProvider {
                     inner: TestnetSessionProvider::new(pair.alice.access.clone()),
-                    public_reads: AtomicUsize::new(0),
+                    public_reads: Arc::new(AtomicUsize::new(0)),
                     pause_after: 1,
                     fail_paused_read: false,
                     pause: Mutex::new(Some((ready, paused))),
@@ -380,7 +421,7 @@ async fn test_private_resolution_rechecks_checkpoint_before_app_authorization() 
             storage.clone(),
             PausedPublicReadProvider {
                 inner: TestnetSessionProvider::new(pair.alice.access.clone()),
-                public_reads: AtomicUsize::new(0),
+                public_reads: Arc::new(AtomicUsize::new(0)),
                 // Noise authorization and the final recovery marker precede the registry.
                 pause_after: 2,
                 fail_paused_read: !matches!(change, "unchanged" | "cancel"),
@@ -584,8 +625,8 @@ async fn test_contact_preparation_rechecks_local_inputs_before_resolution() {
             storage.clone(),
             PausedPublicReadProvider {
                 inner: TestnetSessionProvider::new(pair.alice.access.clone()),
-                public_reads: AtomicUsize::new(0),
-                // Initial recovery, inbox probe, and final recovery precede the registry.
+                public_reads: Arc::new(AtomicUsize::new(0)),
+                // Initial recovery and the inbox probe precede the joined final reads.
                 pause_after: 5,
                 fail_paused_read: !matches!(
                     change,

@@ -10,19 +10,6 @@ use super::{
 /// newest-first by the last applied stream item. Malformed recognized Payment
 /// Request events without a valid `payment_request_id` remain available in the
 /// raw private stream log but cannot be attached to a request-scoped record.
-pub(crate) async fn received_payment_request_records<S>(
-    storage: &S,
-    counterparty: &PubkyPublicKey,
-    now: DateTime<Utc>,
-) -> Result<Vec<PaymentRequestRecord>>
-where
-    S: StorageAdapter,
-{
-    storage
-        .transaction(|tx| received_payment_request_records_from_transaction(tx, counterparty, now))
-        .await
-}
-
 pub(crate) fn received_payment_request_records_from_transaction(
     tx: &dyn StorageTransaction,
     counterparty: &PubkyPublicKey,

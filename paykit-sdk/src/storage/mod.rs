@@ -12,7 +12,7 @@ mod state_blob;
 
 pub use in_memory::{run_storage_state_transaction, InMemoryStorage};
 pub(crate) use pubky_shared::shared_state_operation_active;
-pub use pubky_shared::PubkySharedStateStorage;
+pub use pubky_shared::{ObservedBackupStateRevision, PubkySharedStateStorage};
 pub use records::{
     EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord, NewOutboundPrivateMessage,
     NewPrivateStreamItem, OutboundPrivateMessageRecord, PaykitAppOperationLease,

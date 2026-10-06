@@ -930,11 +930,12 @@ where
             return Ok(PrivatePreparationOutcome::Prepare);
         };
         require_distinct_link_identity(&access.public_key()?, counterparty)?;
-        self.validate_local_noise_key_authorization(&access).await?;
-        if !self
-            .observe_link_checkpoint(counterparty, &access, Some(&checkpoint.recovery))
-            .await?
-        {
+        let (local_authorization, observed) = tokio::join!(
+            self.validate_local_noise_key_authorization(&access),
+            self.observe_link_checkpoint(counterparty, &access, Some(&checkpoint.recovery)),
+        );
+        local_authorization?;
+        if !observed? {
             return Ok(PrivatePreparationOutcome::Prepare);
         }
         let PrivatePreparationCheckpoint {
@@ -951,22 +952,16 @@ where
             return Ok(PrivatePreparationOutcome::Prepare);
         };
         // The post-inbox authorization and marker reads remain mandatory.
-        let observed = match self
-            .observe_link_checkpoint(counterparty, &access, Some(&recovery))
-            .await
-        {
+        let (observed, observation) = tokio::join!(
+            self.observe_link_checkpoint(counterparty, &access, Some(&recovery)),
+            self.fetch_counterparty_app_authorization(counterparty),
+        );
+        let observed = match observed {
             Ok(observed) => observed,
             Err(PaykitSdkError::RecoveryRequired { .. }) => false,
             Err(error) => return Err(error),
         };
-        let observation = if observed {
-            Some(
-                self.fetch_counterparty_app_authorization(counterparty)
-                    .await,
-            )
-        } else {
-            None
-        };
+        let observation = observed.then_some(observation);
         self.storage
             .transaction(|tx| {
                 if RecoveryObservationCheckpoint::load(tx, counterparty).as_ref() != Some(&recovery)

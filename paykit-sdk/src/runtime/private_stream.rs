@@ -290,16 +290,11 @@ where
                     source: None,
                 })?;
         let remote_public_key = counterparty.to_public_key()?;
-        let authorization =
-            noise_key_authorization::require_authorization(&public_storage, &remote_public_key)
-                .await?;
-        if authorization != snapshot.authorization {
-            return Ok(PrivateInboxProbe::Reload);
-        }
         let link = &snapshot.link;
         let secret_key = session_access.paykit_noise_secret_key()?;
         let session_info = session_access.session.info();
-        let (marker, pending) = tokio::join!(
+        let (authorization, marker, pending) = tokio::join!(
+            noise_key_authorization::require_authorization(&public_storage, &remote_public_key),
             paykit_lib::fetch_encrypted_link_recovery_marker(
                 &public_storage,
                 &secret_key,
@@ -313,6 +308,9 @@ where
                 &secret_key,
             ),
         );
+        if authorization? != snapshot.authorization {
+            return Ok(PrivateInboxProbe::Reload);
+        }
         let marker = marker?;
         if marker.is_some_and(|marker| {
             Some(marker.attempt_id()) != link.recovery_context().remote_attempt_id()

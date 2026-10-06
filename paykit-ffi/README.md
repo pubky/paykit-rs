@@ -34,6 +34,12 @@ on low-level `paykit-lib` protocol bindings.
   apps can detect when SDK-managed state changed.
 - `PaykitSdk.backupStateRevision` — fingerprint backup contents without
   transient operation leases, so empty polls do not trigger app backups.
+- `PaykitSdk.observedBackupStateRevision` - return optional paired storage and
+  backup revisions from a completed shared-state operation, without I/O. This
+  is historical metadata, not current remote state or authorization. Callback
+  storage returns no observation. Retain fresh `backupStateRevision` as the
+  fallback, schedule conservatively after failures, and discard cached pairs
+  on identity, key, session, or runtime reset.
 - `PubkySessionAccess` — opaque Pubky session access material. Use its
   explicit export methods only when persisting or loading platform-protected
   session state.
