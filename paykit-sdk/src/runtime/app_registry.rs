@@ -306,16 +306,17 @@ where
         self.with_guarded_storage_operation(
             Arc::clone(&session._guard),
             Box::pin(async {
+                let (registry, revision) = self
+                    .load_paykit_app_registry_for_update(&session, true)
+                    .await?;
                 if let Some(sequence) = noop_sequence.flatten() {
-                    if let Some(registry) =
-                        self.unchanged_paykit_app(&app, &session, sequence).await?
+                    if self
+                        .unchanged_paykit_app(&app, &session, &registry, sequence)
+                        .await?
                     {
                         return Ok(registry);
                     }
                 }
-                let (registry, revision) = self
-                    .load_paykit_app_registry_for_update(&session, true)
-                    .await?;
                 let remote_capabilities = registry
                     .apps()
                     .get(&self.config.app_id)
@@ -360,11 +361,9 @@ where
         &self,
         app: &paykit_lib::PaykitApp,
         session_access: &PubkySessionAccess,
+        registry: &paykit_lib::PaykitAppRegistry,
         lease_sequence: u64,
-    ) -> Result<Option<paykit_lib::PaykitAppRegistry>> {
-        let (registry, _) = self
-            .load_paykit_app_registry_for_update(session_access, true)
-            .await?;
+    ) -> Result<bool> {
         let expected_noise_key = session_access.paykit_identity_secret_key().map(|key| {
             (
                 pubky::Keypair::from_secret(&key.noise_secret_key()).public_key(),
@@ -380,7 +379,7 @@ where
                         || registry.key_generation() != *generation
                 })
         {
-            return Ok(None);
+            return Ok(false);
         }
 
         let owner = session_access.public_key()?;
@@ -389,8 +388,7 @@ where
             .map(|(key, _)| PubkyPublicKey::from_public_key(key));
         // Generic adapters need not lock the whole operation. Recheck atomically,
         // including a lease claimed and released while the registry was read.
-        let unchanged = self
-            .storage
+        self.storage
             .transaction(|tx| {
                 Ok(
                     tx.load_identity_state().and_then(|state| state.public_key) == Some(owner)
@@ -404,8 +402,7 @@ where
                         ) == Some(lease_sequence),
                 )
             })
-            .await?;
-        Ok(unchanged.then_some(registry))
+            .await
     }
 
     async fn publish_paykit_app_inner(
