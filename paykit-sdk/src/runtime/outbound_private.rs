@@ -1,5 +1,8 @@
 use super::*;
-use crate::domain::endpoint_reservations::terminal_private_list_reservation_cancellations_in_transaction;
+use crate::domain::endpoint_reservations::{
+    terminal_private_list_reservation_cancellations_in_transaction,
+    PaymentEndpointReservationCancellationRecord,
+};
 
 enum PrivateSendPreparation {
     Idle,
@@ -285,87 +288,33 @@ where
         mut report: OutboundPrivateSendReport,
         lease: PeerLinkOperationLease,
     ) -> Result<PrivateSendDrainResult> {
-        let (session_access, mut link, mut link_state) = self
+        let (session_access, mut link, mut link_state, retry_times, mut outcome) = self
             .with_storage_operation(Box::pin(async {
                 let (session_access, _) = self.private_link_session_access().await?;
-                let (link, state) = self
+                let (mut link, mut state) = self
                     .restore_link_for_outbound_send(&counterparty, &lease, &session_access)
                     .await?;
-                Ok((session_access, link, state))
+                // Freeze retry eligibility so each event is attempted at most once per run.
+                let started_at = self.clock.now();
+                let (stale_before, failed_retry_after) =
+                    self.outbound_retry_thresholds(started_at)?;
+                let retry_times = (started_at, stale_before, failed_retry_after);
+                let outcome = self
+                    .process_private_send_step(
+                        &lease,
+                        &session_access,
+                        &mut link,
+                        &mut state,
+                        &mut report,
+                        retry_times,
+                    )
+                    .await?;
+                Ok((session_access, link, state, retry_times, outcome))
             }))
             .await?;
-        // Freeze retry eligibility so each event is attempted at most once per run.
-        let started_at = self.clock.now();
-        let (stale_before, failed_retry_after) = self.outbound_retry_thresholds(started_at)?;
 
         loop {
-            let (step, cancellations) = self
-                .with_guarded_storage_operation(
-                    Arc::clone(&session_access._guard),
-                    Box::pin(async {
-                        let now = self.clock.now().max(started_at);
-                        let (preparation, mut cancellations) = self
-                            .storage
-                            .transaction(|tx| {
-                                crate::storage::require_peer_link_operation_lease(tx, &lease)?;
-                                let sending = tx.claim_next_outbound_private_message(
-                                    &counterparty,
-                                    now,
-                                    stale_before,
-                                    failed_retry_after,
-                                );
-                                let preparation = match sending {
-                                    Some(sending) => self.prepare_claimed_private_message(
-                                        tx,
-                                        &lease,
-                                        &mut link,
-                                        &mut link_state,
-                                        &mut report,
-                                        sending,
-                                    )?,
-                                    None => PrivateSendPreparation::Idle,
-                                };
-                                let cancellations =
-                                    terminal_private_list_reservation_cancellations_in_transaction(
-                                        tx,
-                                        &counterparty,
-                                    );
-                                Ok((preparation, cancellations))
-                            })
-                            .await?;
-                        let step = match preparation {
-                            PrivateSendPreparation::Ready(sending, prepared) => {
-                                // A failed or uncertain commit must never advance or publish Noise.
-                                if let Some(prepared) = prepared {
-                                    link.acknowledge_persisted_private_send(*prepared)?;
-                                }
-                                self.send_prepared_private_message(
-                                    &lease,
-                                    &link,
-                                    &mut report,
-                                    *sending,
-                                    &session_access,
-                                    (stale_before, failed_retry_after),
-                                )
-                                .await?
-                            }
-                            PrivateSendPreparation::Idle => PrivateSendStep::Idle,
-                            PrivateSendPreparation::Skipped(message_id) => {
-                                PrivateSendStep::Skipped(message_id)
-                            }
-                            PrivateSendPreparation::Failed(sending, error) => {
-                                PrivateSendStep::Failed(sending, error)
-                            }
-                        };
-                        if matches!(step, PrivateSendStep::Skipped(_)) {
-                            cancellations = self.storage.transaction(|tx| {
-                                Ok(terminal_private_list_reservation_cancellations_in_transaction(tx, &counterparty))
-                            }).await?;
-                        }
-                        Ok((step, cancellations))
-                    }),
-                )
-                .await?;
+            let (step, cancellations) = outcome;
             // Wallet callbacks run without the identity-wide lock.
             if !matches!(step, PrivateSendStep::Complete) {
                 report.reservation_cleanup_failures.extend(
@@ -386,7 +335,7 @@ where
                     .await;
                     break;
                 }
-                PrivateSendStep::Skipped(None) => continue,
+                PrivateSendStep::Skipped(None) => {}
                 PrivateSendStep::Failed(sending, error) => {
                     self.record_private_send_error(
                         &counterparty,
@@ -408,12 +357,104 @@ where
                     });
                 }
             }
+            outcome = self
+                .with_guarded_storage_operation(
+                    Arc::clone(&session_access._guard),
+                    Box::pin(self.process_private_send_step(
+                        &lease,
+                        &session_access,
+                        &mut link,
+                        &mut link_state,
+                        &mut report,
+                        retry_times,
+                    )),
+                )
+                .await?;
         }
 
         Ok(PrivateSendDrainResult {
             report,
             lease_released: false,
         })
+    }
+
+    async fn process_private_send_step(
+        &self,
+        lease: &PeerLinkOperationLease,
+        session_access: &PubkySessionAccess,
+        link: &mut paykit_lib::EncryptedLink,
+        link_state: &mut EncryptedLinkStateRecord,
+        report: &mut OutboundPrivateSendReport,
+        (started_at, stale_before, failed_retry_after): (
+            DateTime<Utc>,
+            DateTime<Utc>,
+            DateTime<Utc>,
+        ),
+    ) -> Result<(
+        PrivateSendStep,
+        Vec<PaymentEndpointReservationCancellationRecord>,
+    )> {
+        let counterparty = &lease.counterparty;
+        let now = self.clock.now().max(started_at);
+        let (preparation, mut cancellations) = self
+            .storage
+            .transaction(|tx| {
+                crate::storage::require_peer_link_operation_lease(tx, lease)?;
+                let sending = tx.claim_next_outbound_private_message(
+                    counterparty,
+                    now,
+                    stale_before,
+                    failed_retry_after,
+                );
+                let preparation = match sending {
+                    Some(sending) => self.prepare_claimed_private_message(
+                        tx, lease, link, link_state, report, sending,
+                    )?,
+                    None => PrivateSendPreparation::Idle,
+                };
+                let cancellations = terminal_private_list_reservation_cancellations_in_transaction(
+                    tx,
+                    counterparty,
+                );
+                Ok((preparation, cancellations))
+            })
+            .await?;
+        let step = match preparation {
+            PrivateSendPreparation::Ready(sending, prepared) => {
+                // A failed or uncertain commit must never advance or publish Noise.
+                if let Some(prepared) = prepared {
+                    link.acknowledge_persisted_private_send(*prepared)?;
+                }
+                self.send_prepared_private_message(
+                    lease,
+                    link,
+                    report,
+                    *sending,
+                    session_access,
+                    (stale_before, failed_retry_after),
+                )
+                .await?
+            }
+            PrivateSendPreparation::Idle => PrivateSendStep::Idle,
+            PrivateSendPreparation::Skipped(message_id) => PrivateSendStep::Skipped(message_id),
+            PrivateSendPreparation::Failed(sending, error) => {
+                PrivateSendStep::Failed(sending, error)
+            }
+        };
+        if matches!(step, PrivateSendStep::Skipped(_)) {
+            cancellations = self
+                .storage
+                .transaction(|tx| {
+                    Ok(
+                        terminal_private_list_reservation_cancellations_in_transaction(
+                            tx,
+                            counterparty,
+                        ),
+                    )
+                })
+                .await?;
+        }
+        Ok((step, cancellations))
     }
 
     fn prepare_claimed_private_message(

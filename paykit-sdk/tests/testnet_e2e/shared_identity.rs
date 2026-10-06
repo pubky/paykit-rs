@@ -820,12 +820,16 @@ async fn test_shared_operations_transaction_counts() {
     assert_eq!(removed.removed.len(), 1);
     assert!(removed.failed.is_empty());
     assert_eq!(transactions.swap(0, Ordering::SeqCst), 4);
+    operations.store(0, Ordering::SeqCst);
+    commits.store(0, Ordering::SeqCst);
     let cleared = sdk
         .clear_private_payment_list_and_process_outbound(pair.bob.public_key.clone())
         .await
         .unwrap();
     let clear_transactions = transactions.swap(0, Ordering::SeqCst);
     assert_eq!(clear_transactions, 12);
+    assert_eq!(operations.swap(0, Ordering::SeqCst), 2);
+    assert_eq!(commits.swap(0, Ordering::SeqCst), 4);
     assert_eq!(cleared.cleared.len(), 1);
     assert!(cleared.failed_to_queue.is_empty());
     assert!(cleared.failed_to_deliver.is_empty());
@@ -866,30 +870,40 @@ async fn test_shared_operations_transaction_counts() {
         .unwrap();
     let proposal_transactions = transactions.swap(0, Ordering::SeqCst);
     assert_eq!(proposal_transactions, 2);
+    let second_proposal = sdk
+        .propose_payment_request(pair.bob.public_key.clone(), recurring_request_terms())
+        .await
+        .unwrap();
+    assert_eq!(transactions.swap(0, Ordering::SeqCst), 2);
+    operations.store(0, Ordering::SeqCst);
+    commits.store(0, Ordering::SeqCst);
     let sent = sdk
         .process_outbound_private_messages(pair.bob.public_key.clone())
         .await
         .unwrap();
     let send_transactions = transactions.swap(0, Ordering::SeqCst);
-    assert!(
-        send_transactions <= 10,
-        "request send used {send_transactions} transactions"
-    );
-    assert_eq!(sent.sent.len(), 1);
+    assert_eq!(send_transactions, 12);
+    // Restore shares the first packet's operation; the next packet releases and reacquires it.
+    assert_eq!(operations.swap(0, Ordering::SeqCst), 2);
+    assert_eq!(commits.swap(0, Ordering::SeqCst), 5);
+    assert_eq!(sent.sent.len(), 2);
     assert!(sent.failed.is_empty());
     pair.bob
         .sdk
         .receive_private_messages(pair.bitkit.public_key.clone())
         .await
         .unwrap();
-    assert!(pair
+    let received_requests = pair
         .bob
         .sdk
         .received_payment_requests_from(&pair.bitkit.public_key)
         .await
-        .unwrap()
-        .iter()
-        .any(|request| request.payment_request_id == proposal.payment_request_id));
+        .unwrap();
+    for proposal in [proposal, second_proposal] {
+        assert!(received_requests
+            .iter()
+            .any(|request| request.payment_request_id == proposal.payment_request_id));
+    }
 
     pair.bob
         .sdk
