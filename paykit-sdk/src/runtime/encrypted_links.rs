@@ -73,7 +73,7 @@ impl HandshakeSource {
     }
 
     fn apply(
-        &mut self,
+        &self,
         tx: &mut dyn StorageTransaction,
         lease: &PeerLinkOperationLease,
         now: DateTime<Utc>,
@@ -131,12 +131,6 @@ impl HandshakeSource {
                 })
             }
         };
-        self.peer = tx
-            .linked_peer(&lease.counterparty)
-            .expect("saved handshake peer");
-        self.state = tx
-            .encrypted_link_state(&lease.counterparty)
-            .expect("saved handshake checkpoint");
         Ok(Ok(report))
     }
 }
@@ -996,14 +990,24 @@ where
         observation: Result<Option<EncryptedLinkRecoveryMarker>>,
         update: Result<Option<HandshakeCheckpointUpdate>>,
     ) -> Result<LinkedPeerHandshakeReport> {
-        let result = self
+        let (result, peer, state) = self
             .with_guarded_storage_operation(
                 Arc::clone(&access._guard),
                 Box::pin(self.storage.transaction(|tx| {
-                    source.apply(tx, lease, self.clock.now(), observation, update)
+                    let result = source.apply(tx, lease, self.clock.now(), observation, update)?;
+                    Ok((
+                        result,
+                        tx.linked_peer(&lease.counterparty)
+                            .expect("current handshake peer"),
+                        tx.encrypted_link_state(&lease.counterparty)
+                            .expect("current handshake checkpoint"),
+                    ))
                 })),
             )
             .await?;
+        // A rejected or unconfirmed commit must leave the in-memory checkpoint unchanged.
+        source.peer = peer;
+        source.state = state;
         if result
             .as_ref()
             .is_err_and(link_handshake_error_requires_recovery)
@@ -1172,22 +1176,20 @@ where
                 let observation = self.observe_handshake_source(source, access).await;
                 self.apply_handshake_observation(source, access, lease, observation, update)
                     .await?;
-                access
-                    .session
-                    .storage()
-                    .put_locked(&lock, packet.to_vec())
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| {
-                        map_pubky_transport_error("publish Encrypted Link Handshake", error)
-                    })
+                // Only packet PUT failures enter post-publication validation.
+                Ok::<_, PaykitSdkError>(
+                    access
+                        .session
+                        .storage()
+                        .put_locked(&lock, packet.to_vec())
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| {
+                            map_pubky_transport_error("publish Encrypted Link Handshake", error)
+                        }),
+                )
             })
-            .await
-        };
-        let publication = match publication {
-            // Non-transport failures were already checked before publication.
-            Err(error) if !matches!(error, PaykitSdkError::Transport { .. }) => return Err(error),
-            result => result,
+            .await?
         };
         let observation = self.observe_handshake_source(&source, access).await;
         // Final XX acknowledgement and Linked promotion share one durable boundary.
@@ -1606,8 +1608,15 @@ mod handshake_checkpoint_tests {
             .unwrap();
         let baseline = storage.snapshot().unwrap();
         let identity = baseline.identity_state.as_ref().unwrap();
-        for drift in ["idle", "protocol", "transport", "identity", "key"] {
-            let mut source = HandshakeSource {
+        for drift in [
+            "idle",
+            "protocol",
+            "transport",
+            "identity",
+            "key",
+            "save-rejected",
+        ] {
+            let source = HandshakeSource {
                 peer: baseline.linked_peers[&counterparty].clone(),
                 state: baseline.encrypted_link_states[&counterparty].clone(),
                 identity: identity.public_key.clone().unwrap(),
@@ -1624,6 +1633,44 @@ mod handshake_checkpoint_tests {
                 .transaction(|tx| {
                     let update = match drift {
                         "idle" => Ok(None),
+                        "save-rejected" => {
+                            use pubky_noise::{
+                                serializer::PubkyNoiseSessionState,
+                                snow_crypto::{HandshakePattern, NoisePhase, NoiseStep},
+                            };
+                            let state = PubkyNoiseSessionState {
+                                version: pubky_noise::serializer::SESSION_STATE_VERSION,
+                                phase: NoisePhase::HandShake,
+                                pattern: HandshakePattern::PatternXX,
+                                initiator: true,
+                                ephemeral_secret: [1; 32],
+                                static_secret: Some([2; 32]),
+                                counter: 3,
+                                noise_step: NoiseStep::Final,
+                                sub_step_index: 0,
+                                handshake_hash: Some([3; 32]),
+                                link_id: None,
+                                sending_nonce: 0,
+                                receiving_nonce: 0,
+                                write_counter: 0,
+                                read_counter: 0,
+                                endpoint_pubkey: counterparty.to_public_key().unwrap().to_bytes(),
+                                handshake_messages: vec![vec![5; 96]],
+                            };
+                            let mut inner = state.serialize();
+                            inner.extend_from_slice(
+                                &pubky::Keypair::random().public_key().to_bytes(),
+                            );
+                            inner.extend_from_slice(&[0; 72]);
+                            let mut bytes = vec![1];
+                            bytes.extend_from_slice(&(inner.len() as u16).to_be_bytes());
+                            bytes.extend_from_slice(&inner);
+                            bytes.extend_from_slice(&[0; 2]);
+                            Ok(Some(HandshakeCheckpointUpdate::Pending(
+                                paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(&bytes)
+                                    .unwrap(),
+                            )))
+                        }
                         "transport" => Err(PaykitSdkError::Transport {
                             context: "handshake PUT failed".into(),
                             source: None,
@@ -1633,7 +1680,18 @@ mod handshake_checkpoint_tests {
                             source: None,
                         }),
                     };
-                    source.apply(tx, &lease, now, Ok(None), update)
+                    let result = source.apply(tx, &lease, now, Ok(None), update)?;
+                    if drift == "save-rejected" {
+                        assert_eq!(
+                            result.as_ref().unwrap().generation,
+                            baseline.encrypted_link_states[&counterparty].generation + 1
+                        );
+                        return Err(PaykitSdkError::Transport {
+                            context: "handshake checkpoint quota exceeded".into(),
+                            source: None,
+                        });
+                    }
+                    Ok(result)
                 })
                 .await;
             match drift {
@@ -1642,6 +1700,11 @@ mod handshake_checkpoint_tests {
                 "transport" => assert!(
                     matches!(result, Ok(Err(PaykitSdkError::Transport { context, .. })) if context == "handshake PUT failed")
                 ),
+                "save-rejected" => {
+                    assert!(matches!(result, Err(PaykitSdkError::Transport { .. })));
+                    assert_eq!(source.peer, baseline.linked_peers[&counterparty]);
+                    assert_eq!(source.state, baseline.encrypted_link_states[&counterparty]);
+                }
                 _ => assert!(matches!(
                     result,
                     Err(PaykitSdkError::ConcurrentUpdate { .. })

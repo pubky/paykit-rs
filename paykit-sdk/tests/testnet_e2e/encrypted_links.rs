@@ -600,6 +600,8 @@ async fn test_handshake_publication_requires_durable_pending_and_atomic_completi
         secret: [u8; 32],
         reject: &'static str,
         packet: CapturedPacket,
+        checkpoint_attempts: Arc<AtomicUsize>,
+        transactions_after_rejection: Arc<AtomicUsize>,
         revoke: Option<(TestnetSessionProvider, PubkySessionAccess)>,
     }
     #[async_trait]
@@ -608,6 +610,10 @@ async fn test_handshake_publication_requires_durable_pending_and_atomic_completi
             &self,
             f: StorageTransactionCallback<'a>,
         ) -> Result<Box<dyn Any + Send>> {
+            if self.checkpoint_attempts.load(Ordering::SeqCst) != 0 {
+                self.transactions_after_rejection
+                    .fetch_add(1, Ordering::SeqCst);
+            }
             let had_packet = self.packet.lock().unwrap().is_some();
             let result = self
                 .inner
@@ -622,10 +628,17 @@ async fn test_handshake_publication_requires_durable_pending_and_atomic_completi
                             snapshot.pending_publication(&self.local, &self.secret)?
                         {
                             *self.packet.lock().unwrap() = Some((path.to_owned(), packet.to_vec()));
-                            reject |= self.reject == "pending";
+                            reject |= matches!(self.reject, "pending" | "pending-transport");
                         }
                     }
                     if reject {
+                        self.checkpoint_attempts.fetch_add(1, Ordering::SeqCst);
+                        if self.reject == "pending-transport" {
+                            return Err(PaykitSdkError::Transport {
+                                context: "handshake checkpoint quota exceeded".into(),
+                                source: None,
+                            });
+                        }
                         return Err(PaykitSdkError::Storage {
                             context: "handshake commit rejected".into(),
                             source: None,
@@ -643,7 +656,7 @@ async fn test_handshake_publication_requires_durable_pending_and_atomic_completi
         }
     }
 
-    for reject in ["pending", "ack", "publication"] {
+    for reject in ["pending-transport", "pending", "ack", "publication"] {
         let pair = two_party().await;
         let (alice, bob) = (&pair.alice, &pair.bob);
         let (local, peer) = (alice.public_key.clone(), bob.public_key.clone());
@@ -667,6 +680,8 @@ async fn test_handshake_publication_requires_durable_pending_and_atomic_completi
             .unwrap()
             .unwrap();
         let packet = Arc::new(Mutex::new(None));
+        let checkpoint_attempts = Arc::new(AtomicUsize::new(0));
+        let transactions_after_rejection = Arc::new(AtomicUsize::new(0));
         let provider = TestnetSessionProvider::with_session_secret(
             alice.access.clone(),
             alice.session_secret.clone(),
@@ -679,6 +694,8 @@ async fn test_handshake_publication_requires_durable_pending_and_atomic_completi
                 secret: handshake_secret(alice),
                 reject,
                 packet: Arc::clone(&packet),
+                checkpoint_attempts: Arc::clone(&checkpoint_attempts),
+                transactions_after_rejection: Arc::clone(&transactions_after_rejection),
                 revoke: (reject == "publication").then(|| (provider.clone(), alice.access.clone())),
             },
             provider,
@@ -686,7 +703,16 @@ async fn test_handshake_publication_requires_durable_pending_and_atomic_completi
             PaykitSdkConfig::new(alice.app_id.clone()).unwrap(),
         );
         let result = sdk.advance_link_handshake(peer.clone()).await;
-        if reject == "publication" {
+        if reject == "pending-transport" {
+            assert!(
+                matches!(&result, Err(PaykitSdkError::Transport { context, .. })
+                    if context == "handshake checkpoint quota exceeded"),
+                "{result:?}"
+            );
+            assert_eq!(checkpoint_attempts.load(Ordering::SeqCst), 1);
+            // Only lease cleanup may follow the rejected save, not another observation apply.
+            assert_eq!(transactions_after_rejection.load(Ordering::SeqCst), 1);
+        } else if reject == "publication" {
             assert!(
                 matches!(result, Err(PaykitSdkError::Transport { .. })),
                 "{result:?}"
@@ -701,12 +727,35 @@ async fn test_handshake_publication_requires_durable_pending_and_atomic_completi
             .await
             .unwrap()
             .unwrap();
+        assert!(alice
+            .storage
+            .snapshot()
+            .unwrap()
+            .peer_link_operation_leases
+            .is_empty());
         assert!(after.link_snapshot.is_none());
         assert_eq!(
             alice.storage.snapshot().unwrap().linked_peers[&peer].state,
             LinkedPeerState::Linking
         );
         let (path, packet) = packet.lock().unwrap().clone().unwrap();
+        if matches!(reject, "pending" | "pending-transport") {
+            assert_eq!(after, before);
+        } else {
+            let pending = paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(
+                after.handshake_snapshot.as_ref().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                pending
+                    .pending_publication(
+                        alice.access.session.info().public_key(),
+                        &handshake_secret(alice)
+                    )
+                    .unwrap(),
+                Some((path.as_str(), packet.as_slice()))
+            );
+        }
         assert!(path.ends_with("/2"));
         let uri = format!("pubky://{}{path}", alice.public_key);
         let public = alice.access.outbox_client.public_storage();
@@ -735,7 +784,7 @@ async fn test_handshake_publication_requires_durable_pending_and_atomic_completi
             ));
             assert_eq!(
                 after.generation,
-                before.generation + u64::from(reject != "pending")
+                before.generation + u64::from(!matches!(reject, "pending" | "pending-transport"))
             );
         }
     }
