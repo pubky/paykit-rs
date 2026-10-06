@@ -179,31 +179,10 @@ where
         record: &PaymentRequestRecord,
         action: &str,
     ) -> Result<()> {
-        let proposal_app_id =
-            record
-                .proposal_app_id
-                .as_ref()
-                .ok_or_else(|| PaykitSdkError::Protocol {
-                    context: format!(
-                        "cannot {action}: Payment Request {} has no originating Paykit App",
-                        record.payment_request_id
-                    ),
-                    source: None,
-                })?;
-        if self
+        let authorized = self
             .authorized_payment_request_apps_for_peer(counterparty)
-            .await?
-            .is_some_and(|app_ids| app_ids.contains(proposal_app_id))
-        {
-            return Ok(());
-        }
-        Err(PaykitSdkError::Policy {
-            context: format!(
-                "cannot {action}: originating Paykit app '{}' is not currently authorized for Payment Requests",
-                proposal_app_id
-            ),
-            source: None,
-        })
+            .await?;
+        require_payment_request_origin_app_authorized(record, authorized.as_deref(), action)
     }
 
     pub(super) async fn authorized_payment_request_apps_for_peer(
@@ -684,20 +663,34 @@ where
         counterparty: &PubkyPublicKey,
         payment_request_id: &PaymentRequestId,
     ) -> Result<PaymentRequestRecord> {
-        let records = self
-            .storage
+        self.storage
             .transaction(|tx| {
-                let mut records =
-                    payment_request_records_from_transaction(tx, counterparty, self.clock.now())?;
-                if tx
-                    .linked_peer(counterparty)
-                    .is_some_and(|peer| peer.state == LinkedPeerState::RecoveryRequired)
-                {
-                    mark_payment_requests_recovery_required(&mut records);
-                }
-                Ok(records)
+                self.payment_request_record_in_transaction(
+                    tx,
+                    counterparty,
+                    payment_request_id,
+                    true,
+                )
             })
-            .await?;
+            .await
+    }
+
+    pub(super) fn payment_request_record_in_transaction(
+        &self,
+        tx: &dyn StorageTransaction,
+        counterparty: &PubkyPublicKey,
+        payment_request_id: &PaymentRequestId,
+        include_link_recovery: bool,
+    ) -> Result<PaymentRequestRecord> {
+        let mut records =
+            payment_request_records_from_transaction(tx, counterparty, self.clock.now())?;
+        if include_link_recovery
+            && tx
+                .linked_peer(counterparty)
+                .is_some_and(|peer| peer.state == LinkedPeerState::RecoveryRequired)
+        {
+            mark_payment_requests_recovery_required(&mut records);
+        }
         records
             .into_iter()
             .find(|record| record.payment_request_id == payment_request_id.as_str())
@@ -952,6 +945,34 @@ fn filtered_payment_request_records(
     }
     sort_payment_requests_newest_first(&mut records);
     Ok(records)
+}
+
+pub(super) fn require_payment_request_origin_app_authorized(
+    record: &PaymentRequestRecord,
+    authorized: Option<&[paykit_lib::PaykitAppId]>,
+    action: &str,
+) -> Result<()> {
+    let proposal_app_id =
+        record
+            .proposal_app_id
+            .as_ref()
+            .ok_or_else(|| PaykitSdkError::Protocol {
+                context: format!(
+                    "cannot {action}: Payment Request {} has no originating Paykit App",
+                    record.payment_request_id
+                ),
+                source: None,
+            })?;
+    if authorized.is_some_and(|apps| apps.contains(proposal_app_id)) {
+        return Ok(());
+    }
+    Err(PaykitSdkError::Policy {
+        context: format!(
+            "cannot {action}: originating Paykit app '{}' is not currently authorized for Payment Requests",
+            proposal_app_id
+        ),
+        source: None,
+    })
 }
 
 fn mark_payment_requests_recovery_required(records: &mut [PaymentRequestRecord]) {

@@ -1,5 +1,147 @@
 use super::super::*;
 
+#[tokio::test]
+async fn test_private_contact_preparation_rechecks_sent_retry_time_and_registration() {
+    #[derive(Clone)]
+    struct AdvancingClock(Arc<Mutex<DateTime<Utc>>>);
+    impl Clock for AdvancingClock {
+        fn now(&self) -> DateTime<Utc> {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    let storage = registered_test_storage();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let started_at = FixedClock.now();
+    let sent = storage
+        .transaction(|tx| {
+            let event = payment_request_message(
+                "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
+                "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
+                None,
+            );
+            let mut sent = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                counterparty.clone(),
+                app_id(),
+                event.kind.unwrap(),
+                event.raw_json,
+                started_at,
+            ))?;
+            sent.last_attempt_at = Some(started_at);
+            sent.attempt_count = 1;
+            sent = mark_outbound_sent(sent, started_at);
+            tx.save_outbound_private_message(sent.clone())?;
+            Ok(vec![sent])
+        })
+        .await
+        .unwrap();
+    let now = Arc::new(Mutex::new(started_at));
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("bitkit").unwrap(),
+        AdvancingClock(now.clone()),
+    );
+    let before = storage.snapshot().unwrap();
+    let backoff = ChronoDuration::from_std(OUTBOUND_PRIVATE_RETRY_BACKOFF).unwrap();
+    for (elapsed, needs_outbound) in [
+        (ChronoDuration::zero(), false),
+        (backoff - ChronoDuration::milliseconds(1), false),
+        (backoff, true),
+        (backoff + ChronoDuration::milliseconds(1), true),
+    ] {
+        *now.lock().unwrap() = started_at + elapsed;
+        let actual = storage
+            .transaction(|tx| {
+                sdk.private_contact_preparation_needs_outbound(tx, &counterparty, &sent)
+            })
+            .await
+            .unwrap();
+        assert_eq!(actual, needs_outbound);
+        assert_eq!(storage.snapshot().unwrap(), before);
+    }
+    for active in [false, true] {
+        let actual = storage
+            .transaction(|tx| {
+                if active {
+                    tx.activate_paykit_app(&app_id());
+                } else {
+                    tx.retire_paykit_app(app_id());
+                }
+                assert_eq!(tx.outbound_private_messages(&counterparty), sent);
+                sdk.private_contact_preparation_needs_outbound(tx, &counterparty, &sent)
+            })
+            .await
+            .unwrap();
+        assert_eq!(actual, active);
+    }
+}
+
+#[tokio::test]
+async fn test_private_contact_preparation_keeps_unsent_and_cleanup_fallbacks() {
+    let storage = registered_test_storage();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let queued = queue_private_payment_list_with_reservations(
+        &storage,
+        &counterparty,
+        app_id(),
+        vec![PrivatePaymentEndpointReservation {
+            reservation_id: "unused".into(),
+            receiving_detail: PrivateReceivingDetail {
+                identifier: "btc-lightning-bolt11".into(),
+                payload: "private-invoice".into(),
+            },
+            expires_at: None,
+            attribution: HashMap::new(),
+        }],
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("bitkit").unwrap(),
+        FixedClock,
+    );
+    for case in ["pending", "failed", "sending", "prepared", "cleanup"] {
+        storage
+            .transaction(|tx| {
+                let mut message = queued.clone();
+                message.last_attempt_at = Some(FixedClock.now());
+                message.status = match case {
+                    "pending" => OutboundPrivateMessageStatus::Pending,
+                    "failed" => OutboundPrivateMessageStatus::Failed,
+                    "sending" => OutboundPrivateMessageStatus::Sending,
+                    "prepared" => OutboundPrivateMessageStatus::Sent,
+                    _ => OutboundPrivateMessageStatus::Invalid,
+                };
+                if case == "prepared" {
+                    message.prepared_send =
+                        Some(PreparedOutboundPrivateSend {
+                            destination_path: "/pub/paykit/v0/private/prepared/0".into(),
+                            ciphertext:
+                                vec![1; pubky_noise::snow_crypto::PUBKY_NOISE_TRANSPORT_PACKET_LEN],
+                        });
+                }
+                tx.save_outbound_private_message(message)?;
+                assert!(
+                    sdk.private_contact_preparation_needs_outbound(
+                        tx,
+                        &counterparty,
+                        &tx.outbound_private_messages(&counterparty),
+                    )?,
+                    "{case}"
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+}
+
 async fn cache_bitkit_private_app(storage: &InMemoryStorage, counterparty: &PubkyPublicKey) {
     storage
         .transaction({

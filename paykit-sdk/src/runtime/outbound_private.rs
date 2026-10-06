@@ -597,6 +597,32 @@ where
         Ok(())
     }
 
+    pub(super) fn outbound_private_work_is_claimable(
+        &self,
+        tx: &dyn StorageTransaction,
+        messages: &[OutboundPrivateMessageRecord],
+    ) -> Result<bool> {
+        let (stale_before, failed_retry_after) =
+            self.outbound_retry_thresholds(self.clock.now())?;
+        let registered_apps = messages
+            .iter()
+            .filter(|message| tx.paykit_app_is_registered(&message.app_id))
+            .map(|message| message.app_id.clone())
+            .collect();
+        let retired_apps = messages
+            .iter()
+            .filter(|message| tx.paykit_app_is_retired(&message.app_id))
+            .map(|message| message.app_id.clone())
+            .collect();
+        Ok(outbound_private_queue_head_is_claimable(
+            messages,
+            &registered_apps,
+            &retired_apps,
+            stale_before,
+            failed_retry_after,
+        ))
+    }
+
     fn outbound_retry_thresholds(
         &self,
         now: DateTime<Utc>,
