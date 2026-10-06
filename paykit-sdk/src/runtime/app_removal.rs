@@ -293,50 +293,54 @@ where
     })
 }
 
-pub(super) async fn stage_app_capability_update<S>(
-    storage: &S,
+pub(super) fn stage_app_capability_update_in_transaction(
+    tx: &mut dyn StorageTransaction,
     lease: &PaykitAppOperationLease,
     remote_previous: Option<paykit_lib::PaykitAppCapabilities>,
     next: paykit_lib::PaykitAppCapabilities,
-    now: DateTime<Utc>,
 ) -> Result<
     Option<(
         paykit_lib::PaykitAppCapabilities,
         paykit_lib::PaykitAppCapabilities,
     )>,
->
+> {
+    crate::storage::require_paykit_app_operation_lease(tx, lease)?;
+    let app_id = &lease.app_id;
+    let local_previous = tx.paykit_app_capabilities(app_id);
+    let registered = tx.paykit_app_is_registered(app_id);
+    let retired = tx.paykit_app_is_retired(app_id);
+    match (registered, retired, local_previous) {
+        (true, _, Some(previous)) | (false, true, Some(previous)) => {
+            let staged = capability_intersection(
+                capability_intersection(previous, next),
+                remote_previous.unwrap_or_else(no_paykit_app_capabilities),
+            );
+            tx.save_paykit_app_capabilities(app_id, staged);
+            Ok(Some((previous, staged)))
+        }
+        (false, _, None) => Ok(None),
+        _ => Err(PaykitSdkError::Storage {
+            context: "Paykit app capability state is inconsistent".into(),
+            source: None,
+        }),
+    }
+}
+
+pub(super) async fn validate_staged_app_capability_update<S>(
+    storage: &S,
+    lease: &PaykitAppOperationLease,
+    remote_previous: Option<paykit_lib::PaykitAppCapabilities>,
+    next: paykit_lib::PaykitAppCapabilities,
+    staged_update: Option<(
+        paykit_lib::PaykitAppCapabilities,
+        paykit_lib::PaykitAppCapabilities,
+    )>,
+    now: DateTime<Utc>,
+) -> Result<()>
 where
     S: StorageAdapter,
 {
     let app_id = &lease.app_id;
-    let staged_update = storage
-        .transaction({
-            let app_id = app_id.clone();
-            let lease = lease.clone();
-            move |tx| {
-                crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
-                let local_previous = tx.paykit_app_capabilities(&app_id);
-                let registered = tx.paykit_app_is_registered(&app_id);
-                let retired = tx.paykit_app_is_retired(&app_id);
-                match (registered, retired, local_previous) {
-                    (true, _, Some(previous)) | (false, true, Some(previous)) => {
-                        let staged = capability_intersection(
-                            capability_intersection(previous, next),
-                            remote_previous.unwrap_or_else(no_paykit_app_capabilities),
-                        );
-                        tx.save_paykit_app_capabilities(&app_id, staged);
-                        Ok(Some((previous, staged)))
-                    }
-                    (false, _, None) => Ok(None),
-                    _ => Err(PaykitSdkError::Storage {
-                        context: "Paykit app capability state is inconsistent".into(),
-                        source: None,
-                    }),
-                }
-            }
-        })
-        .await?;
-
     let local_previous = staged_update.map(|(previous, _)| previous);
 
     let previous = match (local_previous, remote_previous) {
@@ -362,7 +366,7 @@ where
         }
         return Err(err);
     }
-    Ok(staged_update)
+    Ok(())
 }
 
 fn capability_intersection(

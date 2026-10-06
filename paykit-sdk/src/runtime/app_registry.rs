@@ -1,6 +1,7 @@
 use super::app_removal::{
     app_removal_blockers, begin_paykit_app_removal, detach_shared_app_reservations,
-    retire_app_outbound_private_messages, stage_app_capability_update,
+    retire_app_outbound_private_messages, stage_app_capability_update_in_transaction,
+    validate_staged_app_capability_update,
 };
 use super::*;
 
@@ -107,19 +108,8 @@ where
     C: Clock,
 {
     pub(super) async fn claim_paykit_app_operation(&self) -> Result<PaykitAppOperationLease> {
-        self.claim_paykit_app_operation_inner(false).await
-    }
-
-    async fn claim_paykit_app_publication_operation(&self) -> Result<PaykitAppOperationLease> {
-        self.claim_paykit_app_operation_inner(true).await
-    }
-
-    async fn claim_paykit_app_operation_inner(
-        &self,
-        allow_unpublished: bool,
-    ) -> Result<PaykitAppOperationLease> {
         self.retry_storage_transaction(|| {
-            move |tx| self.claim_paykit_app_operation_in_transaction(tx, allow_unpublished)
+            move |tx| self.claim_paykit_app_operation_in_transaction(tx, false)
         })
         .await
     }
@@ -323,10 +313,43 @@ where
                         return Ok(registry);
                     }
                 }
-                let app_lease = self.claim_paykit_app_publication_operation().await?;
-                let result = self
-                    .publish_paykit_app_inner(app, &app_lease, &session)
-                    .await;
+                let (registry, revision) = self
+                    .load_paykit_app_registry_for_update(&session, true)
+                    .await?;
+                let remote_capabilities = registry
+                    .apps()
+                    .get(&self.config.app_id)
+                    .map(|previous| previous.capabilities());
+                let capabilities = app.capabilities();
+                // Persist restrictive capabilities with the lease before any public write.
+                let (app_lease, staged_update) = self
+                    .retry_storage_transaction(|| {
+                        move |tx| {
+                            let lease = self.claim_paykit_app_operation_in_transaction(tx, true)?;
+                            let staged = stage_app_capability_update_in_transaction(
+                                tx,
+                                &lease,
+                                remote_capabilities,
+                                capabilities,
+                            )?;
+                            Ok((lease, staged))
+                        }
+                    })
+                    .await?;
+                let result = async {
+                    validate_staged_app_capability_update(
+                        &self.storage,
+                        &app_lease,
+                        remote_capabilities,
+                        capabilities,
+                        staged_update,
+                        self.clock.now(),
+                    )
+                    .await?;
+                    self.publish_paykit_app_inner(app, &app_lease, &session, (registry, revision))
+                        .await
+                }
+                .await;
                 self.finish_paykit_app_operation(app_lease, result).await
             }),
         )
@@ -390,25 +413,10 @@ where
         app: paykit_lib::PaykitApp,
         app_lease: &PaykitAppOperationLease,
         session_access: &PubkySessionAccess,
+        initial_registry: (paykit_lib::PaykitAppRegistry, Option<String>),
     ) -> Result<paykit_lib::PaykitAppRegistry> {
         let app_id = self.config.app_id.clone();
         let capabilities = app.capabilities();
-        let (registry, revision) = self
-            .load_paykit_app_registry_for_update(session_access, true)
-            .await?;
-        self.require_paykit_app_operation_lease(app_lease).await?;
-        let remote_capabilities = registry
-            .apps()
-            .get(&app_id)
-            .map(|previous| previous.capabilities());
-        stage_app_capability_update(
-            &self.storage,
-            app_lease,
-            remote_capabilities,
-            capabilities,
-            self.clock.now(),
-        )
-        .await?;
         // Keep the staged restrictions on failure: publication may have committed.
         let registry = self
             .update_paykit_app_registry_with_access_inner(
@@ -416,7 +424,7 @@ where
                 true,
                 true,
                 Some(app_lease),
-                Some((registry, revision)),
+                Some(initial_registry),
                 |registry| {
                     registry.register_app(app_id.clone(), app.clone())?;
                     Ok(())
