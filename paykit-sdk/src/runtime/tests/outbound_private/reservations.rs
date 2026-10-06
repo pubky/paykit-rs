@@ -189,7 +189,7 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
         .process_outbound_private_messages(counterparty.clone())
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    assert_eq!(result.unwrap(), OutboundPrivateSendReport::default());
     assert!(canceled.lock().unwrap().is_empty());
     assert_eq!(
         storage

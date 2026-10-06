@@ -66,10 +66,14 @@ where
                     {
                         return Ok(None);
                     }
-                    let has_queued = !tx
+                    let has_send_work = !tx
                         .queued_outbound_private_messages(&counterparty)
-                        .is_empty();
-                    if !has_queued
+                        .is_empty()
+                        && self.outbound_private_work_is_claimable(
+                            tx,
+                            &tx.outbound_private_messages(&counterparty),
+                        )?;
+                    if !has_send_work
                         && !tx
                             .payment_endpoint_reservations(&counterparty)
                             .iter()
@@ -85,7 +89,7 @@ where
                         .into_iter()
                         .filter(|record| record.app_id == self.config.app_id)
                         .collect::<Vec<_>>();
-                    if !has_queued && cancellations.is_empty() {
+                    if !has_send_work && cancellations.is_empty() {
                         return Ok(None);
                     }
                     let now = self.clock.now();
@@ -96,11 +100,11 @@ where
                             tx.linked_peer(&counterparty).map(|peer| peer.state),
                             &counterparty,
                         );
-                    Ok(Some((lease, has_queued, cancellations, readiness)))
+                    Ok(Some((lease, has_send_work, cancellations, readiness)))
                 }
             })
             .await?;
-        let Some((lease, has_queued, cancellations, readiness)) = work else {
+        let Some((lease, has_send_work, cancellations, readiness)) = work else {
             return Ok(OutboundPrivateSendReport::default());
         };
         let lease = lease.ok_or_else(|| PaykitSdkError::ConcurrentUpdate {
@@ -116,7 +120,7 @@ where
                 self.cancel_reservation_records(cancellations, Some(&lease), None)
                     .await,
             );
-            if !has_queued {
+            if !has_send_work {
                 return Ok(PrivateSendDrainResult {
                     report,
                     lease_released: false,
