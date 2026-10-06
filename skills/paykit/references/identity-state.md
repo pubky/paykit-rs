@@ -32,9 +32,10 @@ its Pubky public key. A delegated key's derivation is not independently
 verifiable without the root; import only through trusted authorization.
 
 Publish this app with `publish_paykit_app(PaykitApp::new(display_name,
-capabilities)?)`; its App ID comes from runtime config. Advertise only supported
-`private_payments`, `payment_requests`, `receipts`, and `outgoing_payments`.
-These booleans are not Pubky grant capabilities. Public-only registration can
+app_capabilities)?)`; its App ID comes from runtime config. `app_capabilities`
+is a `PaykitAppCapabilities` record. Enable only supported `private_payments`,
+`payment_requests`, `receipts`, and `outgoing_payments` features. These booleans
+are not Pubky grant capabilities. Public-only registration can
 omit the Noise key; private capabilities require current key material. Both
 identities need initialized registry Noise keys for a new private link.
 

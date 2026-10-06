@@ -8,11 +8,19 @@ architecture and [Link Recovery](recovery.md) for workers/errors.
 
 ## Shared-State Setup
 
-Swift-shaped call-order example; the app supplies the providers and capabilities:
+Swift-shaped call-order example; the app supplies the providers. Set each
+`appCapabilities` flag to `true` only for a feature the app supports; this example
+starts with all flags disabled:
 
 ```text
 config = defaultConfig(appId: "example-wallet")
 sessionCapabilities = requiredSessionCapabilities()
+appCapabilities = PaykitAppCapabilities(
+    privatePayments: false,
+    paymentRequests: false,
+    receipts: false,
+    outgoingPayments: false
+)
 sdk = PaykitSdk.withPaymentAdapterAndPubkySharedState(
     sessionProvider: sessionProvider,
     paymentAdapter: paymentAdapter,
@@ -21,9 +29,13 @@ sdk = PaykitSdk.withPaymentAdapterAndPubkySharedState(
 status = await sdk.initialize()
 registry = await sdk.publishPaykitApp(
     displayName: "Example Wallet",
-    capabilities: capabilities
+    capabilities: appCapabilities
 )
 ```
+
+Use `sessionCapabilities` (a `String`) when authorizing the Pubky session behind
+`sessionProvider`. The `appCapabilities` record advertises supported features in
+the App Registry; it does not grant session permissions.
 
 This constructor has no `stateStore` parameter or `SdkStateBlobStore` callbacks.
 `withPaymentAdapterAndPubkySharedStateAndClientConfig` adds `pubkyClient`.
