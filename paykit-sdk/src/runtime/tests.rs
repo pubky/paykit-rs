@@ -672,6 +672,7 @@ async fn seed_private_capable_identity_and_handshake(
                 local_recovery_marker_last_error: None,
                 remote_recovery_attempt_id: None,
                 remote_recovery_marker_observed_at: None,
+                noise_key_authorization: None,
             });
             tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                 counterparty,

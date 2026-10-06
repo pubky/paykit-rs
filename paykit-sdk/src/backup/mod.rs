@@ -576,7 +576,7 @@ impl SdkBackupState {
             &mut linked_peers,
             &encrypted_link_states,
             &outbound_private_messages,
-        );
+        )?;
         clear_recovery_required_link_snapshots(
             &mut encrypted_link_states,
             &recovery_required_peers,

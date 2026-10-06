@@ -2016,6 +2016,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func paykitAppRemovalBlockers() async throws  -> PaykitAppRemovalBlockers
 
     /**
+     * Fetch and verify the current Noise key, failing if authorization is missing or invalid.
+     */
+    func paykitNoiseKeyAuthorization(publicKey: String) async throws  -> PaykitNoiseKeyAuthorization
+
+    /**
      * Return all Payment Requests across non-blocked counterparties.
      */
     func paymentRequests() async throws  -> [PaymentRequestRecord]
@@ -2088,6 +2093,12 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Publish a blob under this identity's Paykit blob path.
      */
     func publishPaykitBlob(blobName: String, bytes: Data) async throws  -> PaykitBlobRecord
+
+    /**
+     * Publish the current Noise key using the local Pubky identity secret.
+     * Requires authorizer capabilities. Call before private app publication or delegation.
+     */
+    func publishPaykitNoiseKeyAuthorization() async throws  -> PaykitNoiseKeyAuthorization
 
     /**
      * Publish this identity's Paykit Profile at an expected revision.
@@ -2285,6 +2296,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Rotate identity-wide Paykit key material to the next generation.
      *
+     * Requires the Pubky identity secret and authorizer capabilities.
      * Persist the replacement before this call and retry with the same key
      * after an error or interruption. Distribute it to remaining authorized
      * applications before private Paykit operations resume.
@@ -3618,6 +3630,26 @@ open func paykitAppRemovalBlockers()async throws  -> PaykitAppRemovalBlockers  {
 }
 
     /**
+     * Fetch and verify the current Noise key, failing if authorization is missing or invalid.
+     */
+open func paykitNoiseKeyAuthorization(publicKey: String)async throws  -> PaykitNoiseKeyAuthorization  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_paykit_noise_key_authorization(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(publicKey)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaykitNoiseKeyAuthorization_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
      * Return all Payment Requests across non-blocked counterparties.
      */
 open func paymentRequests()async throws  -> [PaymentRequestRecord]  {
@@ -3897,6 +3929,27 @@ open func publishPaykitBlob(blobName: String, bytes: Data)async throws  -> Payki
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypePaykitBlobRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Publish the current Noise key using the local Pubky identity secret.
+     * Requires authorizer capabilities. Call before private app publication or delegation.
+     */
+open func publishPaykitNoiseKeyAuthorization()async throws  -> PaykitNoiseKeyAuthorization  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_publish_paykit_noise_key_authorization(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaykitNoiseKeyAuthorization_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -4607,6 +4660,7 @@ open func retrieveReceipt(counterparty: String, receiptId: String)async throws  
     /**
      * Rotate identity-wide Paykit key material to the next generation.
      *
+     * Requires the Pubky identity secret and authorizer capabilities.
      * Persist the replacement before this call and retry with the same key
      * after an error or interruption. Distribute it to remaining authorized
      * applications before private Paykit operations resume.
@@ -11300,7 +11354,7 @@ public func FfiConverterTypePaykitAppCapabilities_lower(_ value: PaykitAppCapabi
  */
 public struct PaykitAppRegistry {
     /**
-     * Generation of the identity-wide Paykit key material.
+     * Advertised key generation; verify with `paykit_noise_key_authorization`.
      */
     public var keyGeneration: UInt64
     /**
@@ -11308,6 +11362,7 @@ public struct PaykitAppRegistry {
      *
      * Public-only registries may omit this value. This is not a Pubky identity
      * key and must not be passed through Pubky public-key normalization helpers.
+     * This field is discovery metadata, not identity-signed authorization.
      */
     public var noisePublicKey: String?
     /**
@@ -11327,13 +11382,14 @@ public struct PaykitAppRegistry {
     // declare one manually.
     public init(
         /**
-         * Generation of the identity-wide Paykit key material.
+         * Advertised key generation; verify with `paykit_noise_key_authorization`.
          */keyGeneration: UInt64,
         /**
          * Identity-wide Noise public key as raw z32 text, when initialized.
          *
          * Public-only registries may omit this value. This is not a Pubky identity
          * key and must not be passed through Pubky public-key normalization helpers.
+         * This field is discovery metadata, not identity-signed authorization.
          */noisePublicKey: String?,
         /**
          * Registered applications in App ID order.
@@ -11671,6 +11727,121 @@ public func FfiConverterTypePaykitBlobRecord_lift(_ buf: RustBuffer) throws -> P
 #endif
 public func FfiConverterTypePaykitBlobRecord_lower(_ value: PaykitBlobRecord) -> RustBuffer {
     return FfiConverterTypePaykitBlobRecord.lower(value)
+}
+
+
+/**
+ * Verified Pubky identity approval of the current Paykit Noise key.
+ */
+public struct PaykitNoiseKeyAuthorization {
+    /**
+     * Pubky identity that signed the authorization, in app-facing `pubky...` form.
+     */
+    public var owner: String
+    /**
+     * Authorized Ed25519 routing key as raw z32 text.
+     */
+    public var noisePublicKey: String
+    /**
+     * Authorized X25519 handshake static key as hexadecimal text.
+     */
+    public var noiseStaticPublicKey: String
+    /**
+     * Authorized Paykit key generation.
+     */
+    public var keyGeneration: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Pubky identity that signed the authorization, in app-facing `pubky...` form.
+         */owner: String,
+        /**
+         * Authorized Ed25519 routing key as raw z32 text.
+         */noisePublicKey: String,
+        /**
+         * Authorized X25519 handshake static key as hexadecimal text.
+         */noiseStaticPublicKey: String,
+        /**
+         * Authorized Paykit key generation.
+         */keyGeneration: UInt64) {
+        self.owner = owner
+        self.noisePublicKey = noisePublicKey
+        self.noiseStaticPublicKey = noiseStaticPublicKey
+        self.keyGeneration = keyGeneration
+    }
+}
+
+#if compiler(>=6)
+extension PaykitNoiseKeyAuthorization: Sendable {}
+#endif
+
+
+extension PaykitNoiseKeyAuthorization: Equatable, Hashable {
+    public static func ==(lhs: PaykitNoiseKeyAuthorization, rhs: PaykitNoiseKeyAuthorization) -> Bool {
+        if lhs.owner != rhs.owner {
+            return false
+        }
+        if lhs.noisePublicKey != rhs.noisePublicKey {
+            return false
+        }
+        if lhs.noiseStaticPublicKey != rhs.noiseStaticPublicKey {
+            return false
+        }
+        if lhs.keyGeneration != rhs.keyGeneration {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(owner)
+        hasher.combine(noisePublicKey)
+        hasher.combine(noiseStaticPublicKey)
+        hasher.combine(keyGeneration)
+    }
+}
+
+extension PaykitNoiseKeyAuthorization: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaykitNoiseKeyAuthorization: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaykitNoiseKeyAuthorization {
+        return
+            try PaykitNoiseKeyAuthorization(
+                owner: FfiConverterString.read(from: &buf),
+                noisePublicKey: FfiConverterString.read(from: &buf),
+                noiseStaticPublicKey: FfiConverterString.read(from: &buf),
+                keyGeneration: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PaykitNoiseKeyAuthorization, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.owner, into: &buf)
+        FfiConverterString.write(value.noisePublicKey, into: &buf)
+        FfiConverterString.write(value.noiseStaticPublicKey, into: &buf)
+        FfiConverterUInt64.write(value.keyGeneration, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaykitNoiseKeyAuthorization_lift(_ buf: RustBuffer) throws -> PaykitNoiseKeyAuthorization {
+    return try FfiConverterTypePaykitNoiseKeyAuthorization.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaykitNoiseKeyAuthorization_lower(_ value: PaykitNoiseKeyAuthorization) -> RustBuffer {
+    return FfiConverterTypePaykitNoiseKeyAuthorization.lower(value)
 }
 
 
@@ -24433,6 +24604,15 @@ public func parsePubkyResource(uri: String)throws  -> PubkyResourceRef  {
 })
 }
 /**
+ * Capabilities for an identity authorizer. Never grant these to ordinary Paykit apps.
+ */
+public func paykitAuthorizerSessionCapabilities() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_func_paykit_authorizer_session_capabilities($0
+    )
+})
+}
+/**
  * Resolve an actual-payment deadline for the selected Billing Period.
  * The caller compares this with independently verified payment time.
  */
@@ -24551,6 +24731,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_parse_pubky_resource() != 2298) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_paykit_authorizer_session_capabilities() != 54573) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_payment_deadline_at() != 2507) {
@@ -24796,6 +24979,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_paykit_app_removal_blockers() != 11867) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_paykit_noise_key_authorization() != 61254) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_payment_requests() != 9060) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -24836,6 +25022,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_blob() != 27941) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_noise_key_authorization() != 59067) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_profile() != 23202) {
@@ -24940,7 +25129,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_retrieve_receipt() != 26622) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_rotate_paykit_identity_key() != 40244) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_rotate_paykit_identity_key() != 20685) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contact() != 1121) {

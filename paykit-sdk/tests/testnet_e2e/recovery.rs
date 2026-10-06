@@ -185,22 +185,22 @@ async fn test_handshake_rechecks_marker_after_advancement() {
     use paykit_sdk::{PaykitSdk, PaykitSdkConfig, PubkySessionAccess, PubkySessionProvider};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct RecoverDuringRestore<'a> {
+    struct RecoverDuringAdvance<'a> {
         local: &'a crate::harness::TestUser,
         remote: &'a crate::harness::TestUser,
         reads: AtomicUsize,
     }
 
     #[async_trait::async_trait]
-    impl PubkySessionProvider for RecoverDuringRestore<'_> {
+    impl PubkySessionProvider for RecoverDuringAdvance<'_> {
         async fn load_session_access(&self) -> paykit_sdk::Result<Option<PubkySessionAccess>> {
             Ok(Some(self.local.access.clone()))
         }
 
         async fn load_public_storage(&self) -> paykit_sdk::Result<Option<pubky::PublicStorage>> {
-            // The first read checks the marker. The next checks the snapshot's
-            // Noise key during restore, before the completed link is saved.
-            if self.reads.fetch_add(1, Ordering::SeqCst) == 1 {
+            // Authorization and the initial marker lookup precede advancement.
+            // Publish before the marker recheck, before the completed link is saved.
+            if self.reads.fetch_add(1, Ordering::SeqCst) == 2 {
                 self.remote
                     .sdk
                     .publish_encrypted_link_recovery_marker(self.local.public_key.clone())
@@ -252,7 +252,7 @@ async fn test_handshake_rechecks_marker_after_advancement() {
 
     let sdk = PaykitSdk::new(
         pair.bob.storage.clone(),
-        RecoverDuringRestore {
+        RecoverDuringAdvance {
             local: &pair.bob,
             remote: &pair.alice,
             reads: AtomicUsize::new(0),

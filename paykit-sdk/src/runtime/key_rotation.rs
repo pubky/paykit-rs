@@ -15,12 +15,12 @@ where
     /// The operation preserves contacts, private stream history, Payment
     /// Requests, Receipts, and app-owned records. It removes old Encrypted
     /// Link snapshots and leases, parks unsent private messages for recovery,
-    /// and publishes the replacement Noise public key in the App Registry.
-    /// Derive `replacement_key` from the Pubky secret for the next generation,
-    /// or import that derived key from the identity's authorizer. Persist it
-    /// securely before calling this method. Shared
-    /// state commits before the App Registry is published, so an error does not
-    /// imply rollback. Retry with the exact same current and replacement keys;
+    /// and publishes the replacement Noise public key and signed authorization.
+    /// Requires the Pubky identity secret and authorizer capabilities.
+    /// Derive `replacement_key` from the Pubky secret for the next generation and
+    /// persist it securely before calling this method. Shared state commits before
+    /// the registry and authorization, so an error does not imply rollback.
+    /// Retry with the exact same current and replacement keys;
     /// do not generate another replacement for the same generation. Distribute
     /// the replacement to remaining authorized applications before they resume.
     /// Rotation rejects live shared peer leases. Expired leases cannot fence
@@ -51,6 +51,12 @@ where
                 })?;
         current_key.validate_successor(&replacement_key)?;
         replacement_key.validate_pubky_derivation(access.local_secret_key.as_ref())?;
+        let authorization = noise_key_authorization::validate_rotation_authorization(
+            &access,
+            &current_key,
+            &replacement_key,
+        )
+        .await?;
 
         let owner = access.public_key()?;
         let public_storage = access.outbox_client.public_storage();
@@ -88,16 +94,19 @@ where
             )
             .await?;
 
-        self.update_paykit_app_registry_for_key_rotation(&access, |registry| {
-            apply_registry_key_rotation(
-                registry,
-                &current_key,
-                &replacement_key,
-                &current_noise_public_key,
-                &replacement_noise_public_key,
-            )
-        })
-        .await
+        let registry = self
+            .update_paykit_app_registry_for_key_rotation(&access, |registry| {
+                apply_registry_key_rotation(
+                    registry,
+                    &current_key,
+                    &replacement_key,
+                    &current_noise_public_key,
+                    &replacement_noise_public_key,
+                )
+            })
+            .await?;
+        paykit_lib::publish_paykit_noise_key_authorization(&access.session, &authorization).await?;
+        Ok(registry)
     }
 }
 

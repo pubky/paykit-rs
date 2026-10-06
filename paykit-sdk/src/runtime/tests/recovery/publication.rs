@@ -19,6 +19,7 @@ async fn test_mark_private_recovery_pending_skips_active_peer_lease() {
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty: counterparty.clone(),
@@ -93,6 +94,7 @@ async fn test_automatic_recovery_marker_publish_records_missing_session() {
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
@@ -150,6 +152,7 @@ async fn test_replaced_lease_cannot_record_recovery_marker_publish_error() {
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty: counterparty.clone(),
@@ -232,6 +235,7 @@ async fn test_mark_private_recovery_pending_rotates_local_attempt() {
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
                     remote_recovery_marker_observed_at: Some(FixedClock.now()),
+                    noise_key_authorization: None,
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,
@@ -294,6 +298,7 @@ async fn test_mark_private_recovery_pending_preserves_ongoing_local_marker() {
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,

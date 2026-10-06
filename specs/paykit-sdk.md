@@ -28,6 +28,30 @@ optional default-app preferences. Public Payment Endpoints are stored per app.
 Private Payment Lists use Latest-State Message semantics per app and their
 current views are aggregated for payment resolution.
 
+App Registry key fields are unsigned discovery metadata. Key authority is the
+`PaykitNoiseKeyAuthorization` at `/pub/paykit-authority/v0/current-key.json`.
+The Pubky identity signs its owner, Ed25519 routing key, X25519 static key
+(`noise_static_public_key`, hex-encoded), and generation. Verify the signature and
+expected owner; retain the highest verified authorization in shared state and
+backups, rejecting lower generations or different routing/static keys at the
+same generation. Missing, malformed, or conflicting records block private
+communication without a registry fallback. Public-only contacts need no Noise authorization.
+
+Before private app publication or delegation, the identity authorizer calls
+`publish_paykit_noise_key_authorization` with the current Paykit key, Pubky identity
+secret, and `PAYKIT_AUTHORIZER_SESSION_CAPABILITIES`:
+`/pub/paykit/:rw,/pub/paykit-authority/v0/current-key.json:rw`.
+Ordinary apps receive only the Paykit secret and `PAYKIT_SESSION_CAPABILITIES`
+(`/pub/paykit/:rw`), never authority-path write access. Rotation requires authorizer
+access and existing authorization; its publication order and retries follow
+[shared-state recovery](#backup-and-restore).
+
+Authorization has no expiry. Freshness relies on the homeserver serving current
+contents, enforcing separate capabilities, and fencing writes after lock loss.
+Generation pins do not detect a stale first read or rollback of shared state.
+Device revocation requires revoking its Pubky grant and distributing replacement
+keys only to remaining apps; rotation cannot revoke a Pubky identity secret holder.
+
 The app or binding layer provides live Pubky session access. Handles for apps
 sharing an identity use the same encrypted Pubky-hosted SDK state. Homeserver
 write locks serialize whole-state transactions, and prepared Noise sends
@@ -425,7 +449,9 @@ helpers, and `pubky://` resource normalization. All session and auth operations
 require Pubky grants. Full SDK runtime auth should use
 `PAYKIT_SESSION_CAPABILITIES` as the expected scope for auth
 start/resume/approve, completion, and session import. The required scope covers
-the identity-wide Paykit public and private paths. Private-capable auth
+the identity-wide Paykit public and private paths. Authorizers instead use
+`PAYKIT_AUTHORIZER_SESSION_CAPABILITIES` as specified in the
+[Shared Identity Model](#shared-identity-model). Private-capable auth
 completion and session import also supply either the matching
 `PubkyLocalSecretKey` or the delegated Paykit identity secret.
 Pending external grant auth also owns a client proof-of-possession key that is
@@ -1061,21 +1087,28 @@ unless explicitly configured to manage that app's complete endpoint namespace.
 
 ### Establish Encrypted Link
 
-1. Ensure matching live session access is available.
-2. Fetch the counterparty Paykit App Registry and read its identity-wide Noise
-   public key.
+1. Require matching live session access and local routing/static keys and
+   generation matching the identity's current signed authorization.
+2. Fetch and verify peer authorization, check its owner and generation pin,
+   persist it, and use its signed routing key, never the App Registry key.
 3. Start an initiator or responder Encrypted Link Handshake through
    `paykit-lib`.
 4. Persist the handshake snapshot, role, and `linking` peer state.
-5. Advance the stored handshake on retry/poll cycles.
+5. Advance the stored handshake on retry/poll cycles, checking the peer's
+   authenticated X25519 static key against the signed record whenever available.
 6. When the handshake is pending, replace the stored handshake snapshot.
-7. When the handshake completes, persist the active link snapshot, clear the
-   handshake snapshot/role, and mark the peer `linked`.
-8. Before restoring a snapshot, compare its counterparty Noise key with the
-   current App Registry and require recovery when the counterparty rotated it.
-9. If the stored handshake or link snapshot cannot be restored, mark the peer
-   recovery-required and stop private automation for that peer. If a restored
-   handshake fails to advance, keep the peer `linking` and retry later.
+7. Completion requires a matching static key before persisting the active link
+   snapshot, clearing the handshake snapshot/role, and marking the peer `linked`.
+8. On restore, repeat local authorization and peer fetch/verify/pin checks.
+   Require the snapshot's routing key and any authenticated peer static key to
+   match; completed links require the static key before send or receive.
+   Snapshot validity alone is not identity authorization.
+9. Failed snapshot restore or protocol/key mismatch requires peer recovery and
+   stops private automation. Transient advancement failures may remain `linking`
+   for retry.
+
+Every Encrypted Link setup, send, and receive operation fetches current
+authorization; retained pins are not a substitute for this check.
 
 ### Encrypted Link Recovery Markers
 
@@ -1088,7 +1121,8 @@ stream generation, so the marker remains published after recovery completes.
 Marker privacy rules:
 
 - derive marker paths per identity pair from the local identity-wide Noise
-  secret key and the counterparty identity-wide Noise public key
+  secret key and the counterparty routing key from its verified, pinned signed
+  authorization
 - keep marker payloads minimal: version, kind, recovery attempt ID, and creation
   time
 - do not include Payment Endpoints, Payment References, message counts, peer
@@ -1359,7 +1393,7 @@ receipt after a partial failure.
 Backup should include SDK-managed state:
 
 - public identity state
-- peer records
+- peer records, including the highest verified signed Noise key authorizations
 - Encrypted Link snapshots
 - handshake snapshots
 - Private Payment List cache
@@ -1388,6 +1422,13 @@ receiving fresh private data from counterparties.
 Backup export is an optional portable snapshot of the same logical SDK state.
 It is not the live cross-app synchronization mechanism, and sign-out does not
 delete either the shared state or caller-managed backup copies.
+
+rc59 persisted integration data is unsupported in rc60: there is no in-place
+upgrade or migration for SDK state blobs, Pubky shared-state payloads, Rust or
+FFI backups (including encoded backup strings), or FFI state-blob snapshots.
+rc60 testing requires fresh/reset Paykit state, not importing rc59 data. A
+decode failure must not silently reset state. Resetting cannot recover private
+history or establish accounting freshness. Recovery is not an rc59 migration.
 
 Allowance lifecycle and accounting evidence is also private SDK-managed state.
 Relinking or receiving fresh lifecycle messages cannot restore missing selection
@@ -1422,22 +1463,31 @@ For Allowance V1, restored or recovery-incomplete execution state must remain
 ineligible until wallet reconciliation establishes that no later successful or
 unresolved payment is missing.
 
-Backup restore preserves private history and derived records. Valid restored
-Encrypted Link checkpoints are resumed; missing, malformed, mismatched, or
-otherwise unsafe checkpoints pause private automation until relink. Concurrent
+Backup restore preserves history, derived records, and peer authorization pins.
+Checkpoints resume only after [current signed-key checks](#establish-encrypted-link);
+missing or unsafe checkpoints pause private automation until relink. Concurrent
 multi-app updates use homeserver-enforced write locks and crash-safe
 prepared Noise operations.
 
-`recover_shared_state_from_backup` is the explicit recovery path for missing or
-corrupt Pubky shared state. It requires a matching trusted backup, active session,
-the current Paykit key, and its successor. Under the shared-state lock it verifies
-the App Registry key, rejects healthy state or unknown generations, and commits
-the restored state encrypted with the replacement key before updating the registry.
-Retries with the same keys preserve valid already-committed replacement state.
-Unreadable generation headers and corrupt replacement-generation state are
-rejected: restoring under already-used replacement keys could reuse Noise state.
-Only absent state or corrupt state with a readable current-generation header
-can be replaced.
+`recover_shared_state_from_backup` requires a matching trusted backup, an active
+`PAYKIT_AUTHORIZER_SESSION_CAPABILITIES` session, the Pubky identity secret,
+the current Paykit key, its next-generation successor derived from that secret,
+and an existing protected signed authorization.
+
+Before replacement, recovery verifies the record's signature, owner, routing/static
+keys, and generation against the current key or the exact replacement on retry.
+Missing, malformed, or conflicting authorization fails before state replacement.
+It cannot bootstrap missing authority; normal publication requires readable SDK state.
+
+Under the shared-state lock, recovery checks App Registry key/generation
+consistency, not key authority, and rejects healthy current state or unknown
+generations. It commits restored state encrypted with the replacement key, then
+updates the App Registry, then publishes replacement signed authorization.
+Errors do not roll back commits. Retry with the exact same keys and backup;
+valid replacement state, including later app progress, survives publication retries.
+Only absent state or corrupt state with a readable current-generation header can
+be replaced, while the registry still identifies the current key. Unreadable headers
+and corrupt replacement-generation state are rejected to prevent Noise state reuse.
 Recovery discards Noise checkpoints and prepared sends, preserves backup history,
 and requires relinking and wallet reconciliation before execution. State newer
 than the backup cannot be reconstructed. Callers must securely persist the
@@ -1701,9 +1751,8 @@ Allowance, earlier occurrences and other requests remain independent, and
 manual-only decisions survive. Background
 matching cannot change the persisted choice or provide this user authorization.
 
-The unreleased SDK backup schema and both platform storage envelopes remain
-version 1 and may evolve directly during development. Previous development data
-is unsupported; no migration is provided.
+The current SDK backup schema and both platform storage envelopes remain
+version 1; see [Backup And Restore](#backup-and-restore) for supported persisted formats.
 Restore rejects a backup that would discard or change retained Allowance or
 Payment Request lifecycle or conflict evidence for the same payer identity. Rejection
 leaves all current state unchanged; use a backup retaining that history.

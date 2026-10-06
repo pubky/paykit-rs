@@ -297,8 +297,17 @@ where
         lease: &PeerLinkOperationLease,
         session_access: &PubkySessionAccess,
     ) -> Result<(paykit_lib::EncryptedLink, EncryptedLinkStateRecord)> {
-        self.observe_remote_recovery_marker_with_lease(counterparty, session_access, lease)
+        let authorization = self
+            .counterparty_noise_key_authorization(counterparty)
             .await?;
+        let remote_noise_public_key = authorization.noise_public_key().clone();
+        self.observe_remote_recovery_marker_with_lease(
+            counterparty,
+            session_access,
+            lease,
+            &remote_noise_public_key,
+        )
+        .await?;
         self.ensure_peer_allows_private_automation(counterparty)
             .await?;
         let secret_key = session_access.paykit_noise_secret_key()?;
@@ -312,8 +321,13 @@ where
                 source: None,
             })?;
         let Some(snapshot_bytes) = stored_link_state.link_snapshot.as_ref() else {
-            self.mark_outbound_link_recovery_required(counterparty, lease, session_access)
-                .await?;
+            self.mark_outbound_link_recovery_required(
+                counterparty,
+                lease,
+                session_access,
+                &remote_noise_public_key,
+            )
+            .await?;
             return Err(PaykitSdkError::RecoveryRequired {
                 context: format!(
                     "no active Encrypted Link snapshot for counterparty {counterparty}"
@@ -324,22 +338,26 @@ where
         let snapshot = match paykit_lib::EncryptedLinkSnapshot::deserialize(snapshot_bytes) {
             Ok(snapshot) => snapshot,
             Err(err) => {
-                self.mark_outbound_link_recovery_required(counterparty, lease, session_access)
-                    .await?;
+                self.mark_outbound_link_recovery_required(
+                    counterparty,
+                    lease,
+                    session_access,
+                    &remote_noise_public_key,
+                )
+                .await?;
                 return Err(err.into());
             }
         };
         self.require_snapshot_recovery_context(counterparty, snapshot.recovery_context(), lease)
             .await?;
-        if !self
-            .snapshot_uses_current_counterparty_noise_key(
+        if snapshot.remote_noise_public_key() != &remote_noise_public_key {
+            self.mark_outbound_link_recovery_required(
                 counterparty,
-                snapshot.remote_noise_public_key(),
+                lease,
+                session_access,
+                &remote_noise_public_key,
             )
-            .await?
-        {
-            self.mark_outbound_link_recovery_required(counterparty, lease, session_access)
-                .await?;
+            .await?;
             return Err(PaykitSdkError::RecoveryRequired {
                 context: format!("counterparty {counterparty} rotated its Paykit identity key"),
                 source: None,
@@ -353,12 +371,25 @@ where
             snapshot,
         )
         .await
-        {
+        .map_err(PaykitSdkError::from)
+        .and_then(|link| {
+            noise_key_authorization::validate_remote_static_key(
+                &authorization,
+                link.remote_static_public_key(),
+                true,
+            )?;
+            Ok(link)
+        }) {
             Ok(link) => link,
             Err(err) => {
-                self.mark_outbound_link_recovery_required(counterparty, lease, session_access)
-                    .await?;
-                return Err(err.into());
+                self.mark_outbound_link_recovery_required(
+                    counterparty,
+                    lease,
+                    session_access,
+                    &remote_noise_public_key,
+                )
+                .await?;
+                return Err(err);
             }
         };
         Ok((link, stored_link_state))
@@ -369,6 +400,7 @@ where
         counterparty: &PubkyPublicKey,
         lease: &PeerLinkOperationLease,
         session_access: &PubkySessionAccess,
+        remote_noise_public_key: &paykit_lib::PublicKey,
     ) -> Result<()> {
         mark_recovery_required_with_lease(
             &self.storage,
@@ -378,7 +410,12 @@ where
         )
         .await?;
         let _ = self
-            .publish_local_recovery_marker_with_session(counterparty, session_access, lease)
+            .publish_local_recovery_marker_with_key(
+                counterparty,
+                session_access,
+                lease,
+                remote_noise_public_key,
+            )
             .await;
         Ok(())
     }

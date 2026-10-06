@@ -40,12 +40,13 @@ pub struct FfiPaykitApp {
 /// Public application registry for one Paykit identity.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct FfiPaykitAppRegistry {
-    /// Generation of the identity-wide Paykit key material.
+    /// Advertised key generation; verify with `paykit_noise_key_authorization`.
     pub key_generation: u64,
     /// Identity-wide Noise public key as raw z32 text, when initialized.
     ///
     /// Public-only registries may omit this value. This is not a Pubky identity
     /// key and must not be passed through Pubky public-key normalization helpers.
+    /// This field is discovery metadata, not identity-signed authorization.
     pub noise_public_key: Option<String>,
     /// Registered applications in App ID order.
     pub apps: Vec<FfiPaykitApp>,
@@ -53,6 +54,36 @@ pub struct FfiPaykitAppRegistry {
     pub default_app_id: Option<String>,
     /// Per-endpoint default applications.
     pub default_apps_by_endpoint: HashMap<String, String>,
+}
+
+/// Verified Pubky identity approval of the current Paykit Noise key.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiPaykitNoiseKeyAuthorization {
+    /// Pubky identity that signed the authorization, in app-facing `pubky...` form.
+    pub owner: String,
+    /// Authorized Ed25519 routing key as raw z32 text.
+    pub noise_public_key: String,
+    /// Authorized X25519 handshake static key as hexadecimal text.
+    pub noise_static_public_key: String,
+    /// Authorized Paykit key generation.
+    pub key_generation: u64,
+}
+
+impl From<paykit_lib::PaykitNoiseKeyAuthorization> for FfiPaykitNoiseKeyAuthorization {
+    fn from(value: paykit_lib::PaykitNoiseKeyAuthorization) -> Self {
+        Self {
+            owner: value.owner().to_string(),
+            noise_public_key: value.noise_public_key().z32(),
+            noise_static_public_key: hex::encode(value.noise_static_public_key()),
+            key_generation: value.key_generation(),
+        }
+    }
+}
+
+/// Capabilities for an identity authorizer. Never grant these to ordinary Paykit apps.
+#[uniffi::export]
+pub fn paykit_authorizer_session_capabilities() -> String {
+    paykit_sdk::PAYKIT_AUTHORIZER_SESSION_CAPABILITIES.into()
 }
 
 /// Work that prevents safe removal of this Paykit application.
@@ -70,6 +101,30 @@ pub struct FfiPaykitAppRemovalBlockers {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
+    /// Publish the current Noise key using the local Pubky identity secret.
+    /// Requires authorizer capabilities. Call before private app publication or delegation.
+    pub async fn publish_paykit_noise_key_authorization(
+        &self,
+    ) -> Result<FfiPaykitNoiseKeyAuthorization, PaykitFfiError> {
+        self.runtime
+            .publish_paykit_noise_key_authorization()
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    /// Fetch and verify the current Noise key, failing if authorization is missing or invalid.
+    pub async fn paykit_noise_key_authorization(
+        &self,
+        public_key: String,
+    ) -> Result<FfiPaykitNoiseKeyAuthorization, PaykitFfiError> {
+        self.runtime
+            .paykit_noise_key_authorization(parse_public_key(public_key)?)
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
     /// Fetch the public Paykit application registry for an identity.
     pub async fn paykit_app_registry(
         &self,
@@ -84,6 +139,7 @@ impl FfiPaykitSdk {
 
     /// Rotate identity-wide Paykit key material to the next generation.
     ///
+    /// Requires the Pubky identity secret and authorizer capabilities.
     /// Persist the replacement before this call and retry with the same key
     /// after an error or interruption. Distribute it to remaining authorized
     /// applications before private Paykit operations resume.
@@ -235,6 +291,29 @@ impl From<PaykitAppRemovalBlockers> for FfiPaykitAppRemovalBlockers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_noise_key_authorization_conversion_formats_only_owner() {
+        let signer = pubky::Keypair::random();
+        let authorization =
+            paykit_lib::PaykitNoiseKeyAuthorization::sign(&signer, &[7; 32], 3).unwrap();
+        let signed_bytes = serde_json::to_vec(&authorization).unwrap();
+
+        let ffi = FfiPaykitNoiseKeyAuthorization::from(authorization.clone());
+
+        assert_eq!(ffi.owner, format!("pubky{}", signer.public_key().z32()));
+        assert_eq!(ffi.noise_public_key, authorization.noise_public_key().z32());
+        assert_eq!(
+            ffi.noise_static_public_key,
+            hex::encode(authorization.noise_static_public_key())
+        );
+        assert_eq!(ffi.key_generation, 3);
+        let wire: serde_json::Value = serde_json::from_slice(&signed_bytes).unwrap();
+        assert_eq!(wire["owner"], signer.public_key().z32());
+        let verified: paykit_lib::PaykitNoiseKeyAuthorization =
+            serde_json::from_slice(&signed_bytes).unwrap();
+        assert_eq!(verified, authorization);
+    }
 
     #[test]
     fn test_app_registry_conversion_preserves_apps_and_defaults() {
