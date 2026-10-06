@@ -359,7 +359,7 @@
 - **Related terms**: Payment Request, Recurrence
 
 ### Conversion Rate
-- **Definition**: An exact decimal multiplier expressing payment Asset units per one requested Asset unit. A supplied rate fixes the price; an omitted asset in a supplied rates set has no fallback.
+- **Definition**: An exact decimal multiplier expressing payment Asset units per one requested Asset unit. A rate can target an Asset or an Asset-Rail pair; the latter takes precedence over the Asset-wide default. An unpriced cross-asset endpoint has no market-rate fallback.
 - **NOT**: A market-rate feed, a payment authorization, or a global USD/USDT parity assumption.
 - **Related terms**: Payment Amount, Payment Conversion Quote
 

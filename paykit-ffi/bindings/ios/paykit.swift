@@ -10196,7 +10196,7 @@ public func FfiConverterTypeContactUpdate_lower(_ value: ContactUpdate) -> RustB
  */
 public struct ConversionRate {
     /**
-     * Payment asset code.
+     * Payment asset or asset-rail selector; `usdt-polygon` overrides `usdt`.
      */
     public var asset: String
     /**
@@ -10208,7 +10208,7 @@ public struct ConversionRate {
     // declare one manually.
     public init(
         /**
-         * Payment asset code.
+         * Payment asset or asset-rail selector; `usdt-polygon` overrides `usdt`.
          */asset: String,
         /**
          * Positive decimal multiplier; never convert through floating point.

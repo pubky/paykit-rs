@@ -169,7 +169,6 @@ fn test_payment_conversion_rates_are_positive_unique_and_exact() {
     for rates in [
         vec![],
         vec![rate("usdt", "1"), rate("usdt", "2")],
-        vec![rate("usd", "1")],
         vec![rate("eth", "1")],
     ] {
         assert!(request_with(
@@ -430,4 +429,147 @@ fn test_conversion_requires_unambiguous_asset_and_endpoint_segments() {
         &["usdt-arbitrum-address"],
     )
     .is_err());
+}
+
+#[test]
+fn test_conversion_rate_selection_prefers_rail_then_asset_regardless_of_order() {
+    let mut rates = vec![rate("usdt", "1"), rate("usdt-polygon", "1.008")];
+    for _ in 0..2 {
+        for (endpoint, expected) in [
+            ("usdt-polygon-address", Some("1.008")),
+            ("usdt-polygon-invoice", Some("1.008")),
+            ("usdt-arbitrum-address", Some("1")),
+            ("btc-lightning-bolt11", None),
+        ] {
+            assert_eq!(
+                ConversionRate::for_endpoint(
+                    &rates,
+                    &PaymentEndpointIdentifier::new(endpoint).unwrap()
+                )
+                .unwrap()
+                .map(|rate| rate.value.as_str()),
+                expected,
+                "{endpoint}"
+            );
+        }
+        rates.reverse();
+    }
+    assert!(ConversionRate::for_endpoint(
+        &rates,
+        &PaymentEndpointIdentifier::new("usdt-polygon").unwrap()
+    )
+    .is_err());
+}
+
+#[test]
+fn test_conversion_selectors_require_unique_accepted_asset_or_rail() {
+    for selector in [
+        "usdt-",
+        "-polygon",
+        "USDT",
+        "usdt-Polygon",
+        "usdt-polygon-address",
+        "usdt-solana",
+        "usdt_polygon",
+    ] {
+        assert!(
+            request_with(
+                Some(PaymentConversion::Fixed {
+                    rates: vec![rate(selector, "1")]
+                }),
+                None,
+                None,
+                "usd",
+                &["usdt-polygon-address"],
+            )
+            .is_err(),
+            "{selector}"
+        );
+    }
+    assert!(request_with(
+        Some(PaymentConversion::Fixed {
+            rates: vec![rate("usdt-polygon", "1"), rate("usdt-polygon", "2")]
+        }),
+        None,
+        None,
+        "usd",
+        &["usdt-polygon-address"],
+    )
+    .is_err());
+}
+
+#[test]
+fn test_fixed_rail_rates_preserve_coverage_and_endpoint_restrictions() {
+    let request = request_with(
+        Some(PaymentConversion::Fixed {
+            rates: vec![rate("usdt-polygon", "1.008")],
+        }),
+        Some(recurrence()),
+        None,
+        "usd",
+        &["usdt-polygon-address", "usdt-arbitrum-address"],
+    )
+    .unwrap();
+    proof(&request, "usdt-polygon-address")
+        .validate_for_request(&request)
+        .unwrap();
+    assert!(proof(&request, "usdt-arbitrum-address")
+        .validate_for_request(&request)
+        .is_err());
+    assert!(proof(&request, "usdt-polygon-invoice")
+        .validate_for_request(&request)
+        .is_err());
+    round_trip(PaymentRequestEvent::Request(request));
+}
+
+#[test]
+fn test_fixed_rates_can_price_the_requested_asset_on_a_specific_rail() {
+    let request = request_with(
+        Some(PaymentConversion::Fixed {
+            rates: vec![rate("usdt-polygon", "1.008")],
+        }),
+        Some(recurrence()),
+        None,
+        "usdt",
+        &["usdt-polygon-address", "usdt-arbitrum-address"],
+    )
+    .unwrap();
+    for endpoint in ["usdt-polygon-address", "usdt-arbitrum-address"] {
+        proof(&request, endpoint)
+            .validate_for_request(&request)
+            .unwrap();
+    }
+    round_trip(PaymentRequestEvent::Request(request));
+}
+
+#[test]
+fn test_recurring_quote_rail_coverage_and_same_asset_pricing() {
+    let request = request(Some(PaymentConversion::PerPeriod {}));
+    let quote = PaymentConversionQuote::new(
+        EventId::new_v4(),
+        request.payment_request_id().clone(),
+        period(),
+        vec![rate("usdt-arbitrum", "1.008")],
+        "2026-06-01T00:00:00Z".into(),
+        "2026-06-02T00:00:00Z".into(),
+    )
+    .unwrap();
+    proof(&request, "usdt-arbitrum-address")
+        .with_conversion_quote_id(quote.event_id().clone())
+        .validate_conversion_quote(&request, Some(&quote))
+        .unwrap();
+    round_trip(PaymentRequestEvent::ConversionQuote(quote));
+    // Same-asset payments remain usable without a quote; optional quotes cannot reprice them.
+    for selector in ["usd", "usd-bank"] {
+        let quote = PaymentConversionQuote::new(
+            EventId::new_v4(),
+            request.payment_request_id().clone(),
+            period(),
+            vec![rate(selector, "1.008")],
+            "2026-06-01T00:00:00Z".into(),
+            "2026-06-02T00:00:00Z".into(),
+        )
+        .unwrap();
+        assert!(quote.validate_for_request(&request).is_err(), "{selector}");
+    }
 }

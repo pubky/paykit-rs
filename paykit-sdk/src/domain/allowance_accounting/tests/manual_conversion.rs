@@ -1,6 +1,10 @@
 use super::*;
 
 async fn converted_fixture() -> Fixture {
+    priced_fixture("usd", "btc", "0.00001").await
+}
+
+async fn priced_fixture(asset: &str, selector: &str, rate: &str) -> Fixture {
     let mut fixture = Fixture::new().await;
     fixture.occurrence.request.payment_request_id = paykit_lib::PaymentRequestId::new_v4();
     let request_id = fixture.occurrence.request.payment_request_id.clone();
@@ -8,11 +12,11 @@ async fn converted_fixture() -> Fixture {
         "version": 1, "app_id": "bitkit", "kind": "paykit.payment_request", "event_id": new_id(),
         "payment_request_id": request_id.as_str(),
         "request": {
-            "amount": { "value": "1", "asset": "usd" },
+            "amount": { "value": "1", "asset": asset },
             "payment_reference": "converted", "proposal_expires_at": null,
             "recurrence": null, "required_app_id": null, "metadata": {},
-            "accepted_payment_endpoint_identifiers": ["btc-lightning-bolt11"],
-            "conversion": { "type": "fixed", "rates": [{"asset": "btc", "value": "0.00001"}] }
+            "accepted_payment_endpoint_identifiers": ["btc-lightning-bolt11", "btc-onchain-p2tr"],
+            "conversion": { "type": "fixed", "rates": [{"asset": selector, "value": rate}] }
         }
     });
     crate::domain::private_stream::persist_private_stream_batch(
@@ -93,6 +97,46 @@ async fn test_accounting_manual_conversion_retains_actual_amount_and_hands_off()
 }
 
 #[tokio::test]
+async fn test_accounting_manual_fixed_rates_require_endpoint_coverage() {
+    let fixture = priced_fixture("usd", "btc-onchain", "0.00001").await;
+    let unpriced = converted_checks();
+    assert!(matches!(
+        reserve_manual(&fixture, unpriced.clone()).await,
+        PaymentAttemptDecision::Blocked {
+            reason: AllowanceAccountingBlock::WalletChecksFailed
+        }
+    ));
+    assert!(fixture.state().history.occurrences.is_empty());
+
+    let mut priced = unpriced.clone();
+    priced.payment_endpoint_identifier =
+        paykit_lib::PaymentEndpointIdentifier::new("btc-onchain-p2tr").unwrap();
+    let prepared = attempt(reserve_manual(&fixture, priced.clone()).await);
+    let blocked = fixture
+        .storage
+        .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id.clone(), unpriced))
+        .await
+        .unwrap();
+    assert!(matches!(
+        blocked,
+        PaymentAttemptDecision::Blocked {
+            reason: AllowanceAccountingBlock::WalletChecksFailed
+        }
+    ));
+    assert_eq!(
+        fixture.state().history.occurrences[0].attempts[0].status,
+        PaymentExecutionStatus::Prepared
+    );
+
+    let submitted = fixture
+        .storage
+        .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id.clone(), priced))
+        .await
+        .unwrap();
+    assert_eq!(attempt(submitted).status, PaymentExecutionStatus::Submitted);
+}
+
+#[tokio::test]
 async fn test_accounting_manual_conversion_handoff_cannot_change_amount_or_asset() {
     let fixture = converted_fixture().await;
     let prepared = attempt(reserve_manual(&fixture, converted_checks()).await);
@@ -153,23 +197,27 @@ async fn test_accounting_conversion_requires_manual_authority_and_wallet_attesta
 
 #[tokio::test]
 async fn test_accounting_manual_same_asset_requires_requested_amount() {
-    let fixture = Fixture::new().await;
-    let mut underpaid = checks();
-    underpaid.actual_amount = paykit_lib::PaymentAmount::new("0.5", "btc").unwrap();
-    assert!(matches!(
-        reserve_manual(&fixture, underpaid).await,
-        PaymentAttemptDecision::Blocked {
-            reason: AllowanceAccountingBlock::WalletChecksFailed
-        }
-    ));
-    let prepared = attempt(reserve_manual(&fixture, checks()).await);
-    assert_eq!(prepared.amount.value, "1");
-    let submitted = fixture
-        .storage
-        .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id.clone(), checks()))
-        .await
-        .unwrap();
-    assert_eq!(attempt(submitted).status, PaymentExecutionStatus::Submitted);
+    for fixture in [
+        Fixture::new().await,
+        priced_fixture("btc", "btc-onchain", "1.01").await,
+    ] {
+        let mut underpaid = checks();
+        underpaid.actual_amount = paykit_lib::PaymentAmount::new("0.5", "btc").unwrap();
+        assert!(matches!(
+            reserve_manual(&fixture, underpaid).await,
+            PaymentAttemptDecision::Blocked {
+                reason: AllowanceAccountingBlock::WalletChecksFailed
+            }
+        ));
+        let prepared = attempt(reserve_manual(&fixture, checks()).await);
+        assert_eq!(prepared.amount.value, "1");
+        let submitted = fixture
+            .storage
+            .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id.clone(), checks()))
+            .await
+            .unwrap();
+        assert_eq!(attempt(submitted).status, PaymentExecutionStatus::Submitted);
+    }
 }
 
 #[tokio::test]
@@ -192,4 +240,39 @@ async fn test_accounting_recovery_preserves_manual_conversion_amount() {
     let mut conflicting = state.clone();
     conflicting.history.occurrences[0].attempts[0].amount.value = "0.00002".into();
     assert!(merge_restored_accounting(Some(state), Some(conflicting)).is_err());
+}
+
+#[tokio::test]
+async fn test_accounting_same_asset_rail_pricing_requires_manual_approval() {
+    let fixture = priced_fixture("btc", "btc-lightning", "1.01").await;
+    let automatic = fixture
+        .storage
+        .transaction(|tx| {
+            reserve(
+                tx,
+                &app_id(),
+                fixture.occurrence.clone(),
+                None,
+                checks(),
+                PaymentExecutionMode::Automatic,
+            )
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        automatic,
+        PaymentAttemptDecision::Blocked {
+            reason: AllowanceAccountingBlock::WalletChecksFailed
+        }
+    ));
+    let mut priced = checks();
+    priced.actual_amount = paykit_lib::PaymentAmount::new("1.01", "btc").unwrap();
+    let prepared = attempt(reserve_manual(&fixture, priced.clone()).await);
+    assert_eq!(prepared.amount.value, "1.01");
+    let submitted = fixture
+        .storage
+        .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id.clone(), priced))
+        .await
+        .unwrap();
+    assert_eq!(attempt(submitted).status, PaymentExecutionStatus::Submitted);
 }
