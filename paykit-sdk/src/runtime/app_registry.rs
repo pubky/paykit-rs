@@ -754,6 +754,8 @@ where
         let session_info = session_access.session.info();
         let owner = session_info.public_key();
         for attempt in 0..APP_REGISTRY_UPDATE_MAX_ATTEMPTS {
+            // A supplied pre-lease snapshot cannot prove that publication is unchanged.
+            let reuses_snapshot = initial_registry.is_some();
             let (mut registry, revision) = if let Some(initial) = initial_registry.take() {
                 initial
             } else {
@@ -780,7 +782,7 @@ where
             if let Some(lease) = app_lease {
                 self.require_paykit_app_operation_lease(lease).await?;
             }
-            if registry == unchanged {
+            if registry == unchanged && !reuses_snapshot {
                 return Ok(registry);
             }
             let write = match revision {

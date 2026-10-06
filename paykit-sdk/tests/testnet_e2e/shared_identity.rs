@@ -1045,6 +1045,7 @@ async fn test_shared_operations_transaction_counts() {
 async fn test_unchanged_app_publication_rechecks_local_work() {
     struct ChangedAppStorage {
         inner: InMemoryStorage,
+        access: PubkySessionAccess,
         app_id: PaykitAppId,
         counterparty: PubkyPublicKey,
         request_id: String,
@@ -1059,14 +1060,48 @@ async fn test_unchanged_app_publication_rechecks_local_work() {
             f: StorageTransactionCallback<'a>,
         ) -> PaykitResult<Box<dyn Any + Send>> {
             let transaction = self.transactions.fetch_add(1, Ordering::SeqCst);
-            let before_refresh = matches!(self.change, "active lease" | "expired lease");
+            let before_refresh = matches!(
+                self.change,
+                "active lease" | "expired lease" | "published capabilities"
+            );
+            let published_capabilities = if self.change == "published capabilities"
+                && transaction == 1
+            {
+                // Complete another instance's publication after this caller's registry read.
+                let (mut registry, revision) = paykit_lib::get_paykit_app_registry_with_revision(
+                    &self.access.outbox_client.public_storage(),
+                    self.access.session.info().public_key(),
+                )
+                .await?
+                .unwrap();
+                let app = registry.apps().get(&self.app_id).unwrap();
+                let mut capabilities = app.capabilities();
+                capabilities.receipts = false;
+                registry.register_app(
+                    self.app_id.clone(),
+                    PaykitApp::new(app.display_name(), capabilities)?,
+                )?;
+                paykit_lib::update_paykit_app_registry(&self.access.session, &registry, &revision)
+                    .await?;
+                Some(capabilities)
+            } else {
+                None
+            };
             self.inner
                 .transaction_erased(Box::new(move |tx| {
+                    if let Some(capabilities) = published_capabilities {
+                        let lease = tx.paykit_app_operation_lease(&self.app_id).unwrap();
+                        tx.save_paykit_app_capabilities(&self.app_id, capabilities);
+                        tx.release_paykit_app_operation(&self.app_id, lease.lease_id);
+                    }
                     // InMemoryStorage does not lock across the registry reads.
                     if transaction == usize::from(!before_refresh) {
                         let now = Utc::now();
                         match self.change {
-                            "active lease" | "expired lease" | "completed lease" => {
+                            "active lease"
+                            | "expired lease"
+                            | "completed lease"
+                            | "published capabilities" => {
                                 let expires_at = if self.change == "expired lease" {
                                     now - chrono::Duration::seconds(1)
                                 } else {
@@ -1138,11 +1173,13 @@ async fn test_unchanged_app_publication_rechecks_local_work() {
         "recovery",
         "execution",
         "completed lease",
+        "published capabilities",
     ] {
         let storage = InMemoryStorage::from_state(before.clone());
         let sdk = PaykitSdk::new(
             ChangedAppStorage {
                 inner: storage.clone(),
+                access: pair.alice.access.clone(),
                 app_id: pair.alice.app_id.clone(),
                 counterparty: pair.bob.public_key.clone(),
                 request_id: request.payment_request_id.clone(),
@@ -1166,7 +1203,20 @@ async fn test_unchanged_app_publication_rechecks_local_work() {
             continue;
         }
         assert_eq!(result.unwrap().apps().get(&pair.alice.app_id), Some(&app));
-        let lease_claims = if matches!(change, "expired lease" | "completed lease") {
+        let registry = sdk
+            .paykit_app_registry(pair.alice.public_key.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            registry.apps().get(&pair.alice.app_id),
+            Some(&app),
+            "{change}"
+        );
+        let lease_claims = if matches!(
+            change,
+            "expired lease" | "completed lease" | "published capabilities"
+        ) {
             2
         } else {
             1
