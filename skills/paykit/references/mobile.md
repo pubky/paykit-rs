@@ -67,8 +67,14 @@ Only enable unlisted-peer cleanup for a complete keep set for this app.
 
 Inspect `failedToQueue` and `failedToDeliver`: neither means rollback. An
 unconfirmed shared-state write may have committed; earlier work can still be
-pending. Inspect durable queue/reservation state before releasing or recreating wallet
-reservations. See [Payment Workflows](workflows.md) for retry and consumption rules.
+pending. Retain submitted and previously unresolved wallet reservations; FFI does
+not expose durable reservation records. Retry unchanged intent with the same
+complete inputs and reservation IDs while the details remain valid; retries may
+publish again.
+Do not replay an older update over a newer intended list. Release only after
+successful SDK-requested adapter cancellation or adapter-confirmed safe expiry or
+cleanup, not merely a failed sync or superseding list. Cancellation callbacks must
+be idempotent. See [Payment Workflows](workflows.md) for updates and consumption.
 
 ```text
 prepared = await sdk.prepareAndResolvePrivateContactPayment(

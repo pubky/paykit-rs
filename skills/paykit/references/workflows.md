@@ -29,8 +29,14 @@ or a Payment Request's required payee App.
 - Inspect public sync failures and private `failed_to_queue`/`failed_to_deliver`
   (FFI `failedToQueue`/`failedToDeliver`). An unconfirmed shared-state write may
   have committed; earlier pending work also survives. These reports are
-  not rollback guarantees. Inspect durable queue/reservation records before
-  recreating or cancelling wallet reservations, then resume appropriate work.
+  not rollback guarantees. Retain submitted and previously unresolved reservations.
+  For unchanged intent, retry the same complete inputs with the same reservation
+  IDs and still-valid details; a retry may publish again. For a newer intended
+  list, submit its complete set, preserving IDs for unchanged reservations rather
+  than replaying the older update. Omitted reservations are not thereby released:
+  release only after successful SDK-requested, idempotent adapter cancellation or
+  adapter-confirmed safe expiry or cleanup. A superseding list cannot prove that
+  previously attempted details were never shared; keep unresolved reservations.
 
 Saved contacts are private shared records by default. Public Contact Markers
 are separately opt-in, not app enrollment or proof of a live link. For display,
