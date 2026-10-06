@@ -14,6 +14,154 @@ fn counterparty() -> PubkyPublicKey {
     PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
 }
 
+#[tokio::test]
+async fn test_handshake_checkpoint_save_distinguishes_applied_from_stale() {
+    use pubky_noise::{
+        serializer::PubkyNoiseSessionState,
+        snow_crypto::{HandshakePattern, NoisePhase, NoiseStep},
+    };
+    let counterparty = counterparty();
+    let state = PubkyNoiseSessionState {
+        version: pubky_noise::serializer::SESSION_STATE_VERSION,
+        phase: NoisePhase::HandShake,
+        pattern: HandshakePattern::PatternXX,
+        initiator: true,
+        ephemeral_secret: [1; 32],
+        static_secret: Some([2; 32]),
+        counter: 3,
+        noise_step: NoiseStep::Final,
+        sub_step_index: 0,
+        handshake_hash: Some([3; 32]),
+        link_id: None,
+        sending_nonce: 0,
+        receiving_nonce: 0,
+        write_counter: 0,
+        read_counter: 0,
+        endpoint_pubkey: counterparty.to_public_key().unwrap().to_bytes(),
+        handshake_messages: vec![vec![5; 96]],
+    };
+    let mut inner = state.serialize();
+    inner.extend_from_slice(
+        &pubky::Keypair::from_secret(&[5; 32])
+            .public_key()
+            .to_bytes(),
+    );
+    inner.extend_from_slice(&[0; 72]);
+    let mut encoded = vec![1];
+    encoded.extend_from_slice(&(inner.len() as u16).to_be_bytes());
+    encoded.extend_from_slice(&inner);
+    // Structural fixture: identity/path authorization is the caller's responsibility.
+    let path = format!(
+        "{}/{}/2",
+        paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX,
+        "a".repeat(64)
+    );
+    encoded.extend_from_slice(&(path.len() as u16).to_be_bytes());
+    encoded.extend_from_slice(path.as_bytes());
+    let mut packet = vec![0; pubky_noise::snow_crypto::PUBKY_NOISE_CIPHERTEXT_LEN + 2];
+    packet[1] = 32;
+    encoded.extend_from_slice(&packet);
+    let snapshot = HandshakeCheckpointUpdate::Pending(
+        paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(&encoded).unwrap(),
+    );
+    let storage = InMemoryStorage::new();
+    save_link_handshake_state(
+        &storage,
+        counterparty.clone(),
+        EncryptedLinkHandshakeRole::Initiator,
+        vec![1, 2, 3],
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    let (peer, source, lease) = storage
+        .transaction(|tx| {
+            let lease = tx
+                .claim_peer_link_operation(
+                    &counterparty,
+                    timestamp(),
+                    timestamp() + chrono::Duration::seconds(60),
+                )?
+                .unwrap();
+            Ok((
+                tx.linked_peer(&counterparty).unwrap(),
+                tx.encrypted_link_state(&counterparty).unwrap(),
+                lease,
+            ))
+        })
+        .await
+        .unwrap();
+    let initial = storage.snapshot().unwrap();
+    for mutation in [
+        "none", "peer", "packet", "missing", "lease", "expiry", "linked", "recovery",
+    ] {
+        let mut before = initial.clone();
+        let changed = before.encrypted_link_states.get_mut(&counterparty).unwrap();
+        let changed_peer = before.linked_peers.get_mut(&counterparty).unwrap();
+        match mutation {
+            "peer" => {
+                changed_peer.local_recovery_attempt_id =
+                    Some("11111111-1111-4111-8111-111111111111".into())
+            }
+            "packet" => changed.handshake_snapshot.as_mut().unwrap().push(0),
+            "linked" | "recovery" => {
+                changed_peer.state = if mutation == "linked" {
+                    LinkedPeerState::Linked
+                } else {
+                    LinkedPeerState::RecoveryRequired
+                };
+                changed.link_snapshot = (mutation == "linked").then(|| vec![4, 5, 6]);
+                changed.handshake_snapshot = None;
+                changed.handshake_role = None;
+                changed.generation += 1;
+            }
+            "missing" => {
+                before.encrypted_link_states.remove(&counterparty);
+            }
+            "lease" => {
+                before
+                    .peer_link_operation_leases
+                    .get_mut(&counterparty)
+                    .unwrap()
+                    .claimed_at += chrono::Duration::seconds(1);
+            }
+            _ => {}
+        }
+        let storage = InMemoryStorage::from_state(before.clone());
+        let now = if mutation == "expiry" {
+            lease.expires_at
+        } else {
+            timestamp()
+        };
+        let result = storage
+            .transaction(|tx| {
+                save_handshake_checkpoint_in_transaction(tx, &peer, &source, &snapshot, &lease, now)
+            })
+            .await;
+        if mutation == "none" {
+            let HandshakeCheckpointSave::Applied(report) = result.unwrap() else {
+                panic!("current checkpoint was not applied");
+            };
+            assert_eq!(report.state, LinkedPeerState::Linking);
+            assert_eq!(report.generation, source.generation + 1);
+            let after = storage.snapshot().unwrap();
+            assert!(after.encrypted_link_states[&counterparty]
+                .link_snapshot
+                .is_none());
+            assert_eq!(
+                after.encrypted_link_states[&counterparty].handshake_snapshot,
+                Some(encoded.clone())
+            );
+        } else {
+            assert!(
+                matches!(result, Ok(HandshakeCheckpointSave::Stale)),
+                "{mutation}"
+            );
+            assert_eq!(storage.snapshot().unwrap(), before, "{mutation}");
+        }
+    }
+}
+
 #[test]
 fn test_recovery_context_requires_both_tracked_attempt_ids() {
     let local = "11111111-1111-4111-8111-111111111111".to_owned();
@@ -218,44 +366,6 @@ async fn test_save_link_handshake_state_marks_peer_linking() {
     .await
     .unwrap();
     assert_eq!(unchanged, peer);
-
-    let unchanged = save_link_handshake_state_if_generation(
-        &storage,
-        counterparty.clone(),
-        EncryptedLinkHandshakeRole::Initiator,
-        vec![1, 2, 3],
-        report.generation,
-        timestamp() + chrono::Duration::minutes(2),
-    )
-    .await
-    .unwrap();
-    assert_eq!(unchanged, report);
-    assert_eq!(
-        load_encrypted_link_state(&storage, &counterparty)
-            .await
-            .unwrap(),
-        Some(link_state)
-    );
-
-    let advanced = save_link_handshake_state_if_generation(
-        &storage,
-        counterparty.clone(),
-        EncryptedLinkHandshakeRole::Initiator,
-        vec![4, 5, 6],
-        report.generation,
-        timestamp() + chrono::Duration::minutes(3),
-    )
-    .await
-    .unwrap();
-    assert_eq!(advanced.generation, report.generation + 1);
-    assert_eq!(
-        load_encrypted_link_state(&storage, &counterparty)
-            .await
-            .unwrap()
-            .unwrap()
-            .handshake_snapshot,
-        Some(vec![4, 5, 6])
-    );
 }
 
 #[tokio::test]
@@ -637,88 +747,6 @@ async fn test_save_link_handshake_state_rejects_blocked_peer() {
     .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
-}
-
-#[tokio::test]
-async fn test_generation_checked_handshake_save_keeps_newer_link() {
-    let storage = InMemoryStorage::new();
-    let counterparty = counterparty();
-    save_link_handshake_state(
-        &storage,
-        counterparty.clone(),
-        EncryptedLinkHandshakeRole::Initiator,
-        vec![1, 2, 3],
-        timestamp(),
-    )
-    .await
-    .unwrap();
-    save_linked_peer_link_state(&storage, counterparty.clone(), vec![4, 5, 6], timestamp())
-        .await
-        .unwrap();
-
-    let report = save_link_handshake_state_if_generation(
-        &storage,
-        counterparty.clone(),
-        EncryptedLinkHandshakeRole::Initiator,
-        vec![7, 8, 9],
-        0,
-        timestamp(),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(report.state, LinkedPeerState::Linked);
-    assert_eq!(report.generation, 1);
-    let link_state = load_encrypted_link_state(&storage, &counterparty)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(link_state.link_snapshot, Some(vec![4, 5, 6]));
-    assert!(link_state.handshake_snapshot.is_none());
-}
-
-#[tokio::test]
-async fn test_generation_checked_handshake_save_preserves_recovery_required() {
-    let storage = InMemoryStorage::new();
-    let counterparty = counterparty();
-    save_link_handshake_state(
-        &storage,
-        counterparty.clone(),
-        EncryptedLinkHandshakeRole::Initiator,
-        vec![1, 2, 3],
-        timestamp(),
-    )
-    .await
-    .unwrap();
-    mark_recovery_required_inner(&storage, counterparty.clone(), None, timestamp())
-        .await
-        .unwrap();
-
-    let report = save_link_handshake_state_if_generation(
-        &storage,
-        counterparty.clone(),
-        EncryptedLinkHandshakeRole::Initiator,
-        vec![7, 8, 9],
-        0,
-        timestamp(),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(report.state, LinkedPeerState::RecoveryRequired);
-    assert_eq!(report.generation, 1);
-    assert_eq!(report.handshake_role, None);
-    let peer = load_linked_peer(&storage, &counterparty)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
-    let link_state = load_encrypted_link_state(&storage, &counterparty)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(link_state.link_snapshot.is_none());
-    assert!(link_state.handshake_snapshot.is_none());
 }
 
 #[tokio::test]

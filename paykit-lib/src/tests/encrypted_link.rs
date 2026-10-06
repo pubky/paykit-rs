@@ -1,6 +1,102 @@
 use super::*;
 
 #[tokio::test]
+async fn test_handshake_read_error_preserves_retry_handle() {
+    use pubky_testnet::pubky_homeserver::{AppContext, ConfigToml, HomeserverApp, MockDataDir};
+    use std::{net::TcpListener, sync::Arc, time::Duration};
+
+    let testnet = build_testnet().await;
+    let http = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tls = TcpListener::bind("127.0.0.1:0").unwrap();
+    let sockets = [http.local_addr().unwrap(), tls.local_addr().unwrap()];
+    let mut config = ConfigToml::minimal_test_config();
+    if std::env::var_os("TEST_PUBKY_CONNECTION_STRING").is_none() {
+        config.general.database_url =
+            Some(DockerPostgres::shared().await.connection_string().unwrap());
+    }
+    config.drive.icann_listen_socket = sockets[0];
+    config.drive.pubky_listen_socket = sockets[1];
+    config.pkdns.dht_bootstrap_nodes = Some(testnet.testnet.dht_bootstrap_nodes());
+    let context = AppContext::read_from(MockDataDir::new(config, None).unwrap())
+        .await
+        .unwrap();
+    drop((http, tls));
+    let server = HomeserverApp::start(context.clone()).await.unwrap();
+    let client = Pubky::with_client(
+        testnet
+            .client_builder()
+            .request_timeout(Duration::from_secs(5))
+            .build()
+            .unwrap(),
+    );
+    let setup =
+        InProgressHandshakeSetup::on_server(testnet, server.public_key(), client.clone(), client)
+            .await;
+    let responder = match advance_handshake(setup.responder_handshake).await.unwrap() {
+        HandshakeProgress::Pending(handshake) => handshake,
+        HandshakeProgress::Complete(_) => panic!("an absent first packet must remain Pending"),
+    };
+    let before = responder.serialize().unwrap();
+    let before_config = Arc::clone(responder.config());
+
+    let mut rejected_write = restore_encrypted_link_handshake_from_config(
+        Arc::clone(setup.initiator_handshake.config()),
+        setup.responder_session.info().public_key(),
+        setup.initiator_handshake.snapshot().unwrap(),
+    )
+    .await
+    .unwrap();
+    rejected_write.set_max_recovery_attempts(0);
+    let initiator = match advance_handshake(setup.initiator_handshake).await.unwrap() {
+        HandshakeProgress::Pending(handshake) => handshake,
+        HandshakeProgress::Complete(_) => panic!("the first XX packet cannot complete the link"),
+    };
+
+    // Retain storage and keys while making the pending read unavailable.
+    drop(server);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for socket in sockets {
+            while tokio::net::TcpStream::connect(socket).await.is_ok() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let error = advance_handshake(responder).await.err().unwrap();
+    assert!(matches!(error.error(), PaykitError::Transport { .. }));
+    assert_eq!(error.to_string(), error.error().to_string());
+    let debug = format!("{error:?}");
+    assert!(!debug.contains(&format!(
+        "{:?}",
+        before_config.pubky_root_keypair.secret_key()
+    )));
+    assert!(!debug.contains(&before_config.read_path));
+    let (cause, retry) = error.into_parts();
+    assert!(matches!(cause, PaykitError::Transport { .. }));
+    let retry = retry.expect("an unchanged read failure retains its handshake");
+    assert_eq!(retry.serialize().unwrap(), before);
+    assert!(Arc::ptr_eq(retry.config(), &before_config));
+
+    let (cause, retry_write) = advance_handshake(rejected_write)
+        .await
+        .err()
+        .unwrap()
+        .into_parts();
+    assert!(matches!(cause, PaykitError::Transport { .. }));
+    assert!(
+        retry_write.is_none(),
+        "write failure must not expose mutated state"
+    );
+
+    let _server = HomeserverApp::start(context).await.unwrap();
+    tokio::join!(
+        drive_handshake_to_completion(initiator),
+        drive_handshake_to_completion(*retry),
+    );
+}
+
+#[tokio::test]
 async fn test_handshake_paths_isolate_copied_noise_key() {
     let setup = TestSetup::new().await;
     let local_noise_secret = derive_paykit_noise_secret_key(&[1; 32]);
@@ -468,26 +564,19 @@ async fn test_handshake_restore_rejects_mismatched_remote_pubkey() {
 }
 
 #[tokio::test]
-async fn test_handshake_restore_rejects_transport_phase_snapshot() {
+async fn test_handshake_snapshot_rejects_transport_phase_snapshot() {
     let setup = PrivateTestSetup::new().await;
 
     // Build a handshake snapshot value from a transport-mode link snapshot.
     let transport_bytes = setup.sender_link.serialize().unwrap();
-    let handshake_snapshot = EncryptedLinkHandshakeSnapshot::deserialize(&transport_bytes).unwrap();
-    let sender_config = setup.sender_link.config().clone();
-    let remote = handshake_snapshot.recipient().clone();
-
-    let result =
-        restore_encrypted_link_handshake_from_config(sender_config, &remote, handshake_snapshot)
-            .await;
-    let err = match result {
-        Ok(_) => panic!("handshake restore should reject transport-phase snapshot"),
-        Err(err) => err,
-    };
-    assert!(
-        matches!(err, PaykitError::Validation(ref msg) if msg.contains("handshake-phase snapshot")),
-        "expected handshake-phase validation error, got: {err}"
-    );
+    let mut checkpoint = vec![1];
+    checkpoint.extend_from_slice(&(transport_bytes.len() as u16).to_be_bytes());
+    checkpoint.extend_from_slice(&transport_bytes);
+    checkpoint.extend_from_slice(&0_u16.to_be_bytes());
+    assert!(matches!(
+        EncryptedLinkHandshakeSnapshot::deserialize(&checkpoint),
+        Err(PaykitError::InvalidData { .. })
+    ));
 
     close_encrypted_link(setup.sender_link).await.unwrap();
     close_encrypted_link(setup.receiver_link).await.unwrap();

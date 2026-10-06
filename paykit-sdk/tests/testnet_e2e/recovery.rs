@@ -479,6 +479,14 @@ async fn test_private_resolution_rechecks_checkpoint_before_app_authorization() 
 async fn test_contact_preparation_rechecks_local_inputs_before_resolution() {
     use paykit_sdk::{OutboundPrivateMessageStatus, PrivatePaymentEndpointReservation};
 
+    #[derive(Clone)]
+    struct PreparationClock(std::sync::Arc<Mutex<Option<chrono::DateTime<chrono::Utc>>>>);
+    impl paykit_sdk::Clock for PreparationClock {
+        fn now(&self) -> chrono::DateTime<chrono::Utc> {
+            self.0.lock().unwrap().unwrap_or_else(chrono::Utc::now)
+        }
+    }
+
     let pair = linked_two_party().await;
     pair.bob
         .sdk
@@ -523,31 +531,71 @@ async fn test_contact_preparation_rechecks_local_inputs_before_resolution() {
         "local-key",
         "snapshot",
         "queued",
+        "sent-due",
         "cleanup",
         "cancel",
         "incoming",
     ] {
         let storage = InMemoryStorage::from_state(initial.clone());
+        let other = PaykitSdk::new(
+            storage.clone(),
+            TestnetSessionProvider::new(pair.alice.access.clone()),
+            pair.alice.adapter.clone(),
+            PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+        );
+        let mut queued_id = None;
+        let mut started_at = chrono::Utc::now();
+        if change == "sent-due" {
+            other
+                .propose_payment_request(
+                    pair.bob.public_key.clone(),
+                    PaymentRequestTerms::builder(
+                        PaymentAmount::new("0.001", "btc").unwrap(),
+                        PaymentReference::new("contact-payment").unwrap(),
+                        vec![PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap()],
+                    )
+                    .build()
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            let sent = other
+                .process_outbound_private_messages(pair.bob.public_key.clone())
+                .await
+                .unwrap();
+            assert_eq!(sent.sent.len(), 1);
+            queued_id = Some(sent.sent[0]);
+            let state = storage.snapshot().unwrap();
+            let message = state
+                .outbound_private_messages
+                .iter()
+                .find(|message| Some(message.outbound_message_id) == queued_id)
+                .unwrap();
+            assert_eq!(message.status, OutboundPrivateMessageStatus::Sent);
+            assert!(message.confirmed_at.is_none());
+            assert!(message.prepared_send.is_none());
+            started_at = message.last_attempt_at.unwrap();
+        }
+        let now = std::sync::Arc::new(Mutex::new((change == "sent-due").then_some(started_at)));
+        let before = storage.snapshot().unwrap();
         let (ready, reached) = oneshot::channel();
         let (resume, paused) = oneshot::channel();
-        let sdk = PaykitSdk::new(
+        let sdk = PaykitSdk::with_clock(
             storage.clone(),
             PausedPublicReadProvider {
                 inner: TestnetSessionProvider::new(pair.alice.access.clone()),
                 public_reads: AtomicUsize::new(0),
                 // Initial recovery, inbox probe, and final recovery precede the registry.
                 pause_after: 5,
-                fail_paused_read: !matches!(change, "unchanged" | "consumed" | "cancel"),
+                fail_paused_read: !matches!(
+                    change,
+                    "unchanged" | "consumed" | "sent-due" | "cancel"
+                ),
                 pause: Mutex::new(Some((ready, paused))),
             },
             pair.alice.adapter.clone(),
             PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
-        );
-        let other = PaykitSdk::new(
-            storage.clone(),
-            TestnetSessionProvider::new(pair.alice.access.clone()),
-            pair.alice.adapter.clone(),
-            PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+            PreparationClock(now.clone()),
         );
         let mut prepare = Box::pin(sdk.prepare_and_resolve_private_contact_payment(
             pair.bob.public_key.clone(),
@@ -560,14 +608,17 @@ async fn test_contact_preparation_rechecks_local_inputs_before_resolution() {
                 reached.expect("preparation should reach registry lookup").unwrap(),
             result = &mut prepare => panic!("preparation did not pause: {change}: {result:?}"),
         }
-        assert_eq!(storage.snapshot().unwrap(), initial, "{change}");
+        assert_eq!(storage.snapshot().unwrap(), before, "{change}");
         if change == "cancel" {
             drop(prepare);
             assert_eq!(storage.snapshot().unwrap(), initial);
             continue;
         }
-        let mut queued_id = None;
         match change {
+            "sent-due" => {
+                *now.lock().unwrap() = Some(started_at + chrono::Duration::seconds(30));
+                assert_eq!(storage.snapshot().unwrap(), before);
+            }
             "queued" => {
                 queued_id = Some(
                     other
@@ -705,7 +756,7 @@ async fn test_contact_preparation_rechecks_local_inputs_before_resolution() {
                 .insert(pair.bob.public_key.clone(), authorized_apps.clone());
         }
         let after = storage.snapshot().unwrap();
-        if change == "queued" {
+        if matches!(change, "queued" | "sent-due") {
             let message = after
                 .outbound_private_messages
                 .iter()
@@ -714,6 +765,17 @@ async fn test_contact_preparation_rechecks_local_inputs_before_resolution() {
             assert_eq!(message.status, OutboundPrivateMessageStatus::Sent);
             assert!(message.prepared_send.is_none());
             assert!(after.peer_link_operation_leases.is_empty());
+            if change == "sent-due" {
+                let original = before
+                    .outbound_private_messages
+                    .iter()
+                    .find(|original| original.outbound_message_id == message.outbound_message_id)
+                    .unwrap();
+                assert_eq!(message.raw_json, original.raw_json);
+                assert_eq!(message.attempt_count, original.attempt_count + 1);
+                assert_eq!(message.last_attempt_at, *now.lock().unwrap());
+                assert!(message.confirmed_at.is_none());
+            }
         } else {
             if change == "cleanup" {
                 assert!(after.payment_endpoint_reservations.is_empty());

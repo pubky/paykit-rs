@@ -325,8 +325,10 @@ manages persistent recovery markers and chooses the initiator by comparing Pubky
 public keys. Low-level callers must coordinate these roles and IDs themselves.
 
 #### Handshake advancing
-- `advance_handshake(handshake: EncryptedLinkHandshake) -> Result<HandshakeProgress>`
+- `advance_handshake(handshake: EncryptedLinkHandshake) -> std::result::Result<HandshakeProgress, HandshakeAdvanceError>`
   Advances the handshake by one step. Returns `HandshakeProgress::Pending(handle)` when waiting for the counterparty, or `HandshakeProgress::Complete(EncryptedLink)` when finished. Polling-safe — the caller controls retry timing and timeouts. If a homeserver write fails during the handshake (`HomeserverWriteError`), the function automatically recovers from a pre-mutation snapshot and returns `Pending` so the caller's polling loop retries transparently. The maximum number of consecutive recovery attempts is configurable via `EncryptedLinkHandshake::set_max_recovery_attempts` (default: `DEFAULT_MAX_RECOVERY_ATTEMPTS`, 3). The recovery-attempt counter resets to zero after every successful step.
+
+  HTTP/response-body transport read failures remain real errors. `HandshakeAdvanceError::error()` borrows the underlying `PaykitError`; `into_parts()` returns that error and an optional boxed handshake. Only an unchanged transport read failure retains the handle, which can be passed back as `*handshake` after the caller decides to retry. Retained state does not imply a transient failure or authorize automatic retries. Malformed packets and other errors carry no retry handle, and Debug never prints retained handshake state.
 
 #### Handshake checkpointing / resumption
 - `EncryptedLinkHandshake::snapshot() -> Result<EncryptedLinkHandshakeSnapshot>`
@@ -336,7 +338,7 @@ public keys. Low-level callers must coordinate these roles and IDs themselves.
 - `EncryptedLinkHandshake::config() -> &Arc<PubkyNoiseConfig>`
   Access the shared Noise configuration for in-process handshake restore.
 - `EncryptedLinkHandshakeSnapshot::serialize() -> Vec<u8>` / `EncryptedLinkHandshakeSnapshot::deserialize(bytes: &[u8]) -> Result<EncryptedLinkHandshakeSnapshot>` / `EncryptedLinkHandshakeSnapshot::recipient() -> &PublicKey` / `EncryptedLinkHandshakeSnapshot::remote_noise_public_key() -> &PublicKey`
-  Snapshot wire format helpers. Serialized snapshots contain the `pubky-noise` session state followed by the counterparty's 32-byte Noise public key and 72-byte recovery context.
+  Snapshot wire format helpers. The versioned handshake envelope retains the Noise session state, counterparty Noise key, recovery context, and at most one bounded pending-publication packet with its exact destination. Persist pending output before publishing it; acknowledge the exact packet before restoring the checkpoint or promoting the link to transport mode.
 - `restore_encrypted_link_handshake(session, secret_key, remote_identity_public_key, outbox_client, snapshot) -> Result<EncryptedLinkHandshake>`
   Cross-restart restore for an in-progress handshake.
 - `restore_encrypted_link_handshake_from_config(config, remote_identity_public_key, snapshot) -> Result<EncryptedLinkHandshake>`
@@ -484,9 +486,9 @@ The caller controls the polling strategy for `advance_handshake`. Two common pat
 
 ```rust,ignore
 use std::time::Duration;
-use paykit_lib::{advance_handshake, HandshakeProgress, EncryptedLinkHandshake};
+use paykit_lib::{advance_handshake, HandshakeAdvanceError, HandshakeProgress, EncryptedLinkHandshake};
 
-async fn poll_fixed(mut handshake: EncryptedLinkHandshake) -> paykit_lib::Result<paykit_lib::EncryptedLink> {
+async fn poll_fixed(mut handshake: EncryptedLinkHandshake) -> Result<paykit_lib::EncryptedLink, HandshakeAdvanceError> {
     loop {
         match advance_handshake(handshake).await? {
             HandshakeProgress::Pending(h) => {
@@ -503,16 +505,17 @@ async fn poll_fixed(mut handshake: EncryptedLinkHandshake) -> paykit_lib::Result
 
 ```rust,ignore
 use std::time::{Duration, Instant};
-use paykit_lib::{advance_handshake, HandshakeProgress, EncryptedLinkHandshake};
+use paykit_lib::{advance_handshake, HandshakeAdvanceError, HandshakeProgress, EncryptedLinkHandshake};
 
-async fn poll_with_timeout(mut handshake: EncryptedLinkHandshake) -> paykit_lib::Result<paykit_lib::EncryptedLink> {
+async fn poll_with_timeout(mut handshake: EncryptedLinkHandshake) -> Result<paykit_lib::EncryptedLink, HandshakeAdvanceError> {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         if Instant::now() > deadline {
             return Err(paykit_lib::PaykitError::Transport {
                 context: "handshake timed out".into(),
                 source: anyhow::anyhow!("deadline exceeded"),
-            });
+            }
+            .into());
         }
         match advance_handshake(handshake).await? {
             HandshakeProgress::Pending(h) => {
@@ -524,6 +527,11 @@ async fn poll_with_timeout(mut handshake: EncryptedLinkHandshake) -> paykit_lib:
     }
 }
 ```
+
+Both polling examples propagate the complete advance error, including any retry
+handle, to their caller. The timeout generated by the second example has no
+retry handle. Session creation, capability scope, and key rotation remain the
+caller's responsibility.
 
 ### Session Resumption
 

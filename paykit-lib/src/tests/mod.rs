@@ -88,18 +88,25 @@ struct InProgressHandshakeSetup {
 impl InProgressHandshakeSetup {
     async fn new() -> Self {
         let testnet = build_testnet().await;
-        let homeserver = testnet.homeserver_app();
-
+        let homeserver = testnet.homeserver_app().public_key();
         let initiator_sdk = testnet.sdk().unwrap();
         let responder_sdk = testnet.sdk().unwrap();
+        Self::on_server(testnet, homeserver, initiator_sdk, responder_sdk).await
+    }
 
+    async fn on_server(
+        testnet: EphemeralTestnet,
+        homeserver: PublicKey,
+        initiator_sdk: Pubky,
+        responder_sdk: Pubky,
+    ) -> Self {
         let initiator_keypair = Keypair::random();
         let initiator_session =
-            signup_session(&initiator_sdk, &homeserver.public_key(), &initiator_keypair).await;
+            signup_session(&initiator_sdk, &homeserver, &initiator_keypair).await;
 
         let responder_keypair = Keypair::random();
         let responder_session =
-            signup_session(&responder_sdk, &homeserver.public_key(), &responder_keypair).await;
+            signup_session(&responder_sdk, &homeserver, &responder_keypair).await;
 
         let initiator_info = initiator_session.info();
         let responder_info = responder_session.info();

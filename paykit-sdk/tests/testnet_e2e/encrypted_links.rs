@@ -40,6 +40,16 @@ async fn test_link_handshake_two_party_reaches_linked() {
         initiated.handshake_role,
         Some(EncryptedLinkHandshakeRole::Initiator)
     );
+    assert_eq!(
+        pair.alice
+            .sdk
+            .advance_link_handshake(pair.bob.public_key.clone())
+            .await
+            .unwrap()
+            .state,
+        LinkedPeerState::Linking,
+        "an absent remote marker must not conflict with the local recovery attempt"
+    );
 
     let accepted = pair
         .bob
@@ -328,6 +338,19 @@ async fn test_advance_link_handshake_without_started_handshake_fails() {
 enum LinkCheckpoint {
     Linked,
     PreparedSend,
+    FinalHandshake(Box<pubky::PublicKey>, [u8; 32]),
+}
+
+fn handshake_secret(user: &TestUser) -> [u8; 32] {
+    paykit_lib::derive_paykit_noise_secret_key(
+        user.access
+            .local_secret_key
+            .as_ref()
+            .unwrap()
+            .derive_paykit_identity_secret_key(1)
+            .unwrap()
+            .as_bytes(),
+    )
 }
 
 struct PausedLinkCheckpointStorage {
@@ -345,7 +368,18 @@ impl StorageAdapter for PausedLinkCheckpointStorage {
     ) -> Result<Box<dyn Any + Send>> {
         let result = self.inner.transaction_erased(f).await?;
         let state = self.inner.snapshot()?;
-        let checkpoint_ready = match self.checkpoint {
+        let checkpoint_ready = match &self.checkpoint {
+            LinkCheckpoint::FinalHandshake(local, secret) => state
+                .encrypted_link_states
+                .get(&self.counterparty)
+                .and_then(|state| state.handshake_snapshot.as_deref())
+                .is_some_and(|bytes| {
+                    paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(bytes)
+                        .unwrap()
+                        .pending_publication(local, secret)
+                        .unwrap()
+                        .is_some_and(|(path, _)| path.ends_with("/2"))
+                }),
             LinkCheckpoint::PreparedSend => state
                 .outbound_private_messages
                 .iter()
@@ -447,7 +481,10 @@ async fn test_key_rotation_waits_for_handshake_checkpoint_without_nested_session
             inner: pair.alice.storage.clone(),
             counterparty: pair.bob.public_key.clone(),
             pause: Mutex::new(Some((checkpoint_ready, checkpoint_resume))),
-            checkpoint: LinkCheckpoint::Linked,
+            checkpoint: LinkCheckpoint::FinalHandshake(
+                Box::new(pair.alice.access.session.info().public_key().clone()),
+                handshake_secret(&pair.alice),
+            ),
         },
         CountingSessionProvider {
             inner: TestnetSessionProvider::new(pair.alice.access.clone()),
@@ -500,6 +537,13 @@ async fn test_key_rotation_waits_for_handshake_checkpoint_without_nested_session
         .derive_paykit_identity_secret_key(2)
         .unwrap();
     let before = pair.alice.storage.snapshot().unwrap();
+    assert_eq!(
+        before.linked_peers[&pair.bob.public_key].state,
+        LinkedPeerState::Linking
+    );
+    assert!(before.encrypted_link_states[&pair.bob.public_key]
+        .link_snapshot
+        .is_none());
     let competing_rotation = pair
         .alice
         .sdk
@@ -543,6 +587,158 @@ async fn test_key_rotation_waits_for_handshake_checkpoint_without_nested_session
         state.linked_peers[&pair.bob.public_key].state,
         LinkedPeerState::RecoveryRequired
     );
+}
+
+#[tokio::test]
+async fn test_handshake_publication_requires_durable_pending_and_atomic_completion() {
+    type CapturedPacket = Arc<Mutex<Option<(String, Vec<u8>)>>>;
+
+    struct RejectedHandshakeStorage {
+        inner: InMemoryStorage,
+        peer: PubkyPublicKey,
+        local: pubky::PublicKey,
+        secret: [u8; 32],
+        reject: &'static str,
+        packet: CapturedPacket,
+        revoke: Option<(TestnetSessionProvider, PubkySessionAccess)>,
+    }
+    #[async_trait]
+    impl StorageAdapter for RejectedHandshakeStorage {
+        async fn transaction_erased<'a>(
+            &self,
+            f: StorageTransactionCallback<'a>,
+        ) -> Result<Box<dyn Any + Send>> {
+            let had_packet = self.packet.lock().unwrap().is_some();
+            let result = self
+                .inner
+                .transaction_erased(Box::new(|tx| {
+                    let result = f(tx)?;
+                    let state = tx.encrypted_link_state(&self.peer).unwrap();
+                    let mut reject = self.reject == "ack" && state.link_snapshot.is_some();
+                    if let Some(bytes) = state.handshake_snapshot {
+                        let snapshot =
+                            paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(&bytes)?;
+                        if let Some((path, packet)) =
+                            snapshot.pending_publication(&self.local, &self.secret)?
+                        {
+                            *self.packet.lock().unwrap() = Some((path.to_owned(), packet.to_vec()));
+                            reject |= self.reject == "pending";
+                        }
+                    }
+                    if reject {
+                        return Err(PaykitSdkError::Storage {
+                            context: "handshake commit rejected".into(),
+                            source: None,
+                        });
+                    }
+                    Ok(result)
+                }))
+                .await?;
+            if !had_packet && self.packet.lock().unwrap().is_some() {
+                if let Some((provider, access)) = &self.revoke {
+                    provider.revoke_session_access(access).await?;
+                }
+            }
+            Ok(result)
+        }
+    }
+
+    for reject in ["pending", "ack", "publication"] {
+        let pair = two_party().await;
+        let (alice, bob) = (&pair.alice, &pair.bob);
+        let (local, peer) = (alice.public_key.clone(), bob.public_key.clone());
+        alice
+            .sdk
+            .initiate_link_with_peer(peer.clone())
+            .await
+            .unwrap();
+        bob.sdk.accept_link_with_peer(local.clone()).await.unwrap();
+        // Observe the responder's first marker, then publish the initial XX packet.
+        for _ in 0..2 {
+            alice
+                .sdk
+                .advance_link_handshake(peer.clone())
+                .await
+                .unwrap();
+        }
+        bob.sdk.advance_link_handshake(local).await.unwrap();
+        let before = load_encrypted_link_state(&alice.storage, &peer)
+            .await
+            .unwrap()
+            .unwrap();
+        let packet = Arc::new(Mutex::new(None));
+        let provider = TestnetSessionProvider::with_session_secret(
+            alice.access.clone(),
+            alice.session_secret.clone(),
+        );
+        let sdk = PaykitSdk::new(
+            RejectedHandshakeStorage {
+                inner: alice.storage.clone(),
+                peer: peer.clone(),
+                local: alice.access.session.info().public_key().clone(),
+                secret: handshake_secret(alice),
+                reject,
+                packet: Arc::clone(&packet),
+                revoke: (reject == "publication").then(|| (provider.clone(), alice.access.clone())),
+            },
+            provider,
+            alice.adapter.clone(),
+            PaykitSdkConfig::new(alice.app_id.clone()).unwrap(),
+        );
+        let result = sdk.advance_link_handshake(peer.clone()).await;
+        if reject == "publication" {
+            assert!(
+                matches!(result, Err(PaykitSdkError::Transport { .. })),
+                "{result:?}"
+            );
+        } else {
+            assert!(
+                matches!(result, Err(PaykitSdkError::Storage { .. })),
+                "{result:?}"
+            );
+        }
+        let after = load_encrypted_link_state(&alice.storage, &peer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(after.link_snapshot.is_none());
+        assert_eq!(
+            alice.storage.snapshot().unwrap().linked_peers[&peer].state,
+            LinkedPeerState::Linking
+        );
+        let (path, packet) = packet.lock().unwrap().clone().unwrap();
+        assert!(path.ends_with("/2"));
+        let uri = format!("pubky://{}{path}", alice.public_key);
+        let public = alice.access.outbox_client.public_storage();
+        if reject == "ack" {
+            let published = public.get(&uri).await.unwrap().bytes().await.unwrap();
+            assert_eq!(published.as_ref(), packet.as_slice());
+            let report = alice
+                .sdk
+                .advance_link_handshake(peer.clone())
+                .await
+                .unwrap();
+            assert_eq!(report.state, LinkedPeerState::Linked);
+            assert_eq!(report.generation, before.generation + 2);
+            let linked = load_encrypted_link_state(&alice.storage, &peer)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(linked.handshake_snapshot.is_none());
+            let retried = public.get(&uri).await.unwrap().bytes().await.unwrap();
+            assert_eq!(retried.as_ref(), packet.as_slice());
+        } else {
+            assert!(matches!(
+                public.get(&uri).await,
+                Err(pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }))
+                    if status == pubky::StatusCode::NOT_FOUND
+            ));
+            assert_eq!(
+                after.generation,
+                before.generation + u64::from(reject != "pending")
+            );
+        }
+    }
 }
 
 #[tokio::test]

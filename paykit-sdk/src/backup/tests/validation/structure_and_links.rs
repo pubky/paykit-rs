@@ -240,11 +240,23 @@ fn link_checkpoint(
         write_counter: if linked { 3 } else { 0 },
         read_counter: if linked { 3 } else { 0 },
         endpoint_pubkey: counterparty.to_public_key().unwrap().to_bytes(),
+        handshake_messages: if linked {
+            vec![vec![5; 96]]
+        } else {
+            Vec::new()
+        },
     };
     let mut bytes = snapshot.serialize();
     bytes.extend_from_slice(&noise_public_key.to_bytes());
     // The Paykit snapshot appends the routing key and empty recovery context.
     bytes.extend_from_slice(&[0; 72]);
+    if !linked {
+        let mut envelope = vec![1];
+        envelope.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+        envelope.extend_from_slice(&bytes);
+        envelope.extend_from_slice(&0_u16.to_be_bytes());
+        bytes = envelope;
+    }
     EncryptedLinkStateRecord {
         counterparty: counterparty.clone(),
         link_snapshot: linked.then(|| bytes.clone()),

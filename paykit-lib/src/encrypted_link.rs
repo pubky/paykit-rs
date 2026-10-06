@@ -8,7 +8,8 @@ mod snapshot;
 pub use handshake::{
     accept_encrypted_link, advance_handshake, initiate_encrypted_link,
     restore_encrypted_link_handshake, restore_encrypted_link_handshake_from_config,
-    EncryptedLinkHandshake, HandshakeProgress, DEFAULT_MAX_RECOVERY_ATTEMPTS,
+    EncryptedLinkHandshake, HandshakeAdvanceError, HandshakeProgress,
+    PreparedEncryptedLinkHandshakeStep, DEFAULT_MAX_RECOVERY_ATTEMPTS,
 };
 pub use link::{
     close_encrypted_link, restore_encrypted_link, restore_encrypted_link_from_config,

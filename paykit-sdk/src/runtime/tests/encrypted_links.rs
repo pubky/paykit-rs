@@ -1,6 +1,147 @@
 use super::*;
 
 #[tokio::test]
+async fn test_peer_block_changes_are_atomic_and_do_not_retry_live_leases() {
+    use std::{any::Any, sync::atomic::AtomicUsize};
+
+    struct PolicyStorage {
+        inner: InMemoryStorage,
+        calls: Arc<AtomicUsize>,
+        reject: bool,
+    }
+
+    #[async_trait]
+    impl StorageAdapter for PolicyStorage {
+        async fn transaction_erased<'a>(
+            &self,
+            callback: crate::storage::StorageTransactionCallback<'a>,
+        ) -> Result<Box<dyn Any + Send>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .transaction_erased(Box::new(|tx| {
+                    let result = callback(tx)?;
+                    if self.reject {
+                        return Err(PaykitSdkError::Storage {
+                            context: "peer policy commit rejected".into(),
+                            source: None,
+                        });
+                    }
+                    Ok(result)
+                }))
+                .await
+        }
+    }
+
+    for action in ["block", "unblock"] {
+        for case in [
+            "ready", "busy", "expired", "identity", "self", "rollback", "noop",
+        ] {
+            if action == "block" && case == "noop" {
+                continue;
+            }
+            let storage = registered_test_storage();
+            let counterparty =
+                PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+            seed_private_capable_identity_and_link(&storage, counterparty.clone()).await;
+            let mut before = storage.snapshot().unwrap();
+            let mut peer = default_linked_peer(counterparty.clone());
+            peer.state = if action == "unblock" && case != "noop" {
+                LinkedPeerState::Blocked
+            } else {
+                LinkedPeerState::Linked
+            };
+            before.linked_peers.insert(counterparty.clone(), peer);
+            if matches!(case, "busy" | "expired") {
+                before.peer_link_operation_leases.insert(
+                    counterparty.clone(),
+                    PeerLinkOperationLease {
+                        counterparty: counterparty.clone(),
+                        lease_id: 0,
+                        claimed_at: FixedClock.now() - ChronoDuration::minutes(1),
+                        expires_at: FixedClock.now()
+                            + ChronoDuration::seconds(if case == "busy" { 60 } else { 0 }),
+                    },
+                );
+                before.next_peer_link_operation_lease_id = 1;
+            }
+            let target = if case == "self" {
+                before
+                    .identity_state
+                    .as_ref()
+                    .unwrap()
+                    .public_key
+                    .clone()
+                    .unwrap()
+            } else {
+                counterparty.clone()
+            };
+            if case == "identity" {
+                before.identity_state = None;
+            }
+            let storage = InMemoryStorage::from_state(before.clone());
+            let calls = Arc::new(AtomicUsize::new(0));
+            let sdk = PaykitSdk::with_clock(
+                PolicyStorage {
+                    inner: storage.clone(),
+                    calls: calls.clone(),
+                    reject: case == "rollback",
+                },
+                TestPubkySessionProvider { session: None },
+                TestPaymentAdapter,
+                PaykitSdkConfig::new("bitkit").unwrap(),
+                FixedClock,
+            );
+            let result = if action == "block" {
+                sdk.block_peer(target).await
+            } else {
+                sdk.unblock_peer(target).await
+            };
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "{action}: {case}");
+            let after = storage.snapshot().unwrap();
+            if matches!(case, "busy" | "identity" | "self" | "rollback") {
+                let error = result.unwrap_err();
+                match case {
+                    "busy" => assert!(matches!(error, PaykitSdkError::ConcurrentUpdate { .. })),
+                    "identity" => assert!(matches!(error, PaykitSdkError::Identity { .. })),
+                    "self" => assert!(matches!(error, PaykitSdkError::Policy { .. })),
+                    _ => assert!(matches!(error, PaykitSdkError::Storage { .. })),
+                }
+                assert_eq!(after, before, "{action}: {case}");
+                continue;
+            }
+            let report = result.unwrap();
+            assert!(after.peer_link_operation_leases.is_empty());
+            assert_eq!(
+                after.next_peer_link_operation_lease_id,
+                before.next_peer_link_operation_lease_id + 1
+            );
+            if case == "noop" {
+                assert_eq!(report, before.linked_peers[&counterparty]);
+                before.next_peer_link_operation_lease_id += 1;
+                assert_eq!(after, before);
+            } else {
+                assert_eq!(
+                    report.state,
+                    if action == "block" {
+                        LinkedPeerState::Blocked
+                    } else {
+                        LinkedPeerState::NotLinked
+                    }
+                );
+                let link = &after.encrypted_link_states[&counterparty];
+                assert_eq!(
+                    link.generation,
+                    before.encrypted_link_states[&counterparty].generation + 1
+                );
+                assert!(link.link_snapshot.is_none());
+                assert!(link.handshake_snapshot.is_none());
+                assert!(link.handshake_role.is_none());
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_peer_operation_contention_preserves_lease_until_release() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

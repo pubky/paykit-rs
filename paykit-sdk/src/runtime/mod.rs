@@ -55,8 +55,7 @@ use crate::{
         default_linked_peer, mark_recovery_required_for_marker_in_transaction,
         mark_recovery_required_in_transaction, mark_recovery_required_with_lease,
         requeue_recovery_required_outbound_messages, require_private_automation_ready,
-        save_link_handshake_state_if_generation_with_lease, save_link_handshake_state_with_lease,
-        save_linked_peer_link_state_if_generation_with_lease, save_linked_peer_state_with_lease,
+        save_link_handshake_state_with_lease, save_linked_peer_state_with_lease,
         EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport, LinkedPeerState,
     },
     domain::outbound_private::{
