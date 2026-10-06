@@ -105,16 +105,16 @@ async fn test_contact_batches_validate_before_atomic_write() {
             label: Some("x".repeat(129)),
         },
     ] {
-        let result = sdk
-            .save_contacts(vec![
-                FfiContactUpdate {
-                    public_key: first.to_app_key(),
-                    label: Some("Must not be saved".into()),
-                },
-                invalid,
-            ])
-            .await;
+        let updates = vec![
+            FfiContactUpdate {
+                public_key: first.to_app_key(),
+                label: Some("Must not be saved".into()),
+            },
+            invalid,
+        ];
+        let result = sdk.save_contacts(updates.clone()).await;
         assert!(result.is_err());
+        assert!(sdk.save_contacts_and_unblock_peers(updates).await.is_err());
         let snapshot = store.load_state_blob().unwrap().unwrap();
         assert_eq!(snapshot.revision, "revision-0");
         assert_eq!(
@@ -194,6 +194,28 @@ async fn test_contact_batches_validate_before_atomic_write() {
         store.load_state_blob().unwrap().unwrap().revision,
         "revision-2"
     );
+    let updates = vec![FfiContactUpdate {
+        public_key: first.to_app_key(),
+        label: Some("Restored".into()),
+    }];
+    let blocked = store.load_state_blob().unwrap().unwrap();
+    store.reject_writes.store(true, Ordering::SeqCst);
+    assert!(sdk
+        .save_contacts_and_unblock_peers(updates.clone())
+        .await
+        .is_err());
+    let failed = store.load_state_blob().unwrap().unwrap();
+    assert_eq!(failed.revision, blocked.revision);
+    assert_eq!(failed.blob.export_bytes(), blocked.blob.export_bytes());
+    store.reject_writes.store(false, Ordering::SeqCst);
+    let restored = sdk.save_contacts_and_unblock_peers(updates).await.unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].label.as_deref(), Some("Restored"));
+    let snapshot = store.load_state_blob().unwrap().unwrap();
+    assert_eq!(snapshot.revision, "revision-3");
+    let state = decode_storage_state(&snapshot.blob.export_bytes()).unwrap();
+    assert_eq!(state.linked_peers[&first].state, LinkedPeerState::NotLinked);
+    assert_eq!(state.linked_peers[&second].state, LinkedPeerState::Blocked);
 }
 
 #[tokio::test]

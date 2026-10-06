@@ -434,6 +434,10 @@ bootstrap.approveAuthWithCompanionClaim(
   winning in storage. Existing profile and Public Contact Marker metadata is
   preserved. Marker publication and unblocking peers remain separate operations.
   An empty batch still requires an initialized identity and leaves state unchanged.
+- `PaykitSdk.saveContactsAndUnblockPeers(updates)` — explicitly add or restore
+  contacts and unblock their blocked peers in the same atomic transaction. Other
+  peers and existing links are unchanged. A busy blocked peer rejects the batch;
+  unblocked peers need a fresh Encrypted Link. Use `saveContact` for label edits.
 - `PaykitSdk.fetchPubkyProfile` and bounded `fetchPubkyFollows` — read Pubky
   app profile and follow data.
 - `PaykitSdk.resolveProfile` and `currentProfile` — resolve profile display

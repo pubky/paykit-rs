@@ -447,6 +447,27 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
+    /// Save contacts and unblock selected blocked peers in one atomic transaction.
+    ///
+    /// For explicit contact additions or restoration, not label edits. Unblocked
+    /// peers need a fresh Encrypted Link; other links remain unchanged. Ordering,
+    /// duplicates and metadata follow `save_contacts`. Invalid input or an active
+    /// lease on a selected blocked peer rejects the entire batch.
+    pub async fn save_contacts_and_unblock_peers(
+        &self,
+        updates: Vec<FfiContactUpdate>,
+    ) -> Result<Vec<FfiContactRecord>, PaykitFfiError> {
+        let updates = updates
+            .into_iter()
+            .map(ContactUpdate::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.runtime
+            .save_contacts_and_unblock_peers(updates)
+            .await
+            .map(|records| records.into_iter().map(Into::into).collect())
+            .map_err(Into::into)
+    }
+
     /// Return one Contact Record.
     pub async fn contact_record(
         &self,

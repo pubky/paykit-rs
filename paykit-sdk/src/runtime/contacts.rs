@@ -62,6 +62,74 @@ where
             .await
     }
 
+    /// Save Contact Records and unblock their peers in one atomic transaction.
+    ///
+    /// Use this when the user explicitly adds or restores contacts, not for label
+    /// edits. Only selected blocked peers are unblocked; existing links and
+    /// unselected peers are unchanged. Unblocked peers need a fresh Encrypted Link.
+    /// Contact ordering, duplicate keys, timestamps and metadata follow `save_contacts`.
+    /// Invalid updates, the local identity, or an active lease on a selected blocked
+    /// peer reject the entire batch without changing contacts or peer state.
+    pub async fn save_contacts_and_unblock_peers(
+        &self,
+        updates: Vec<ContactUpdate>,
+    ) -> Result<Vec<ContactRecord>> {
+        for update in &updates {
+            update.validate()?;
+        }
+        self.storage
+            .transaction(move |tx| {
+                let local = initialized_identity_in_transaction(tx, "restore contacts")?;
+                let now = self.clock.now();
+                for update in &updates {
+                    if update.public_key == local {
+                        return Err(PaykitSdkError::Policy {
+                            context: "cannot save the local Paykit identity as a contact".into(),
+                            source: None,
+                        });
+                    }
+                    if tx
+                        .linked_peer(&update.public_key)
+                        .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
+                        && tx
+                            .peer_link_operation_lease(&update.public_key)
+                            .is_some_and(|lease| lease.expires_at > now)
+                    {
+                        return Err(PaykitSdkError::ConcurrentUpdate {
+                            context: format!(
+                                "peer link operation already in progress for counterparty {}",
+                                update.public_key
+                            ),
+                            source: None,
+                        });
+                    }
+                }
+                updates
+                    .into_iter()
+                    .map(|update| {
+                        if tx
+                            .linked_peer(&update.public_key)
+                            .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
+                        {
+                            super::encrypted_links::unblock_peer_in_transaction(
+                                tx,
+                                &update.public_key,
+                                now,
+                            )?
+                            .ok_or_else(|| {
+                                PaykitSdkError::ConcurrentUpdate {
+                                    context: "peer link operation already in progress".into(),
+                                    source: None,
+                                }
+                            })?;
+                        }
+                        Ok(save_contact_in_transaction(tx, update, now))
+                    })
+                    .collect()
+            })
+            .await
+    }
+
     /// Load one Contact Record.
     pub async fn contact_record(
         &self,

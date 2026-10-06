@@ -90,6 +90,51 @@ async fn test_independent_apps_register_concurrently_without_lost_updates() {
 }
 
 #[tokio::test]
+async fn test_contact_restoration_is_shared_without_restoring_blocked_links() {
+    let pair = homeserver_shared_pair().await;
+    let updates: Vec<_> = (0..62)
+        .map(|_| ContactUpdate {
+            public_key: PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()),
+            label: Some("Contact".into()),
+        })
+        .collect();
+    let records = pair
+        .bitkit
+        .sdk
+        .save_contacts(updates.clone())
+        .await
+        .unwrap();
+    let keys = updates
+        .iter()
+        .map(|update| update.public_key.clone())
+        .collect();
+    pair.bitkit
+        .sdk
+        .remove_contacts_and_block_peers(keys)
+        .await
+        .unwrap();
+    assert!(pair.server.sdk.contact_records().await.unwrap().is_empty());
+
+    let restored = pair
+        .bitkit
+        .sdk
+        .save_contacts_and_unblock_peers(updates)
+        .await
+        .unwrap();
+
+    assert_eq!(restored.len(), records.len());
+    let state = pair.server.storage_state().await;
+    assert!(state.peer_link_operation_leases.is_empty());
+    for record in restored {
+        assert_eq!(state.contact_records[&record.public_key], record);
+        assert_eq!(
+            state.linked_peers[&record.public_key].state,
+            LinkedPeerState::NotLinked
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_failed_app_publication_keeps_capability_restrictions_until_republished() {
     let pair = homeserver_shared_pair().await;
     let user = &pair.bitkit;

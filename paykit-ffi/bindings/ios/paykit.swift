@@ -2344,6 +2344,16 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func saveContacts(updates: [ContactUpdate]) async throws  -> [ContactRecord]
 
     /**
+     * Save contacts and unblock selected blocked peers in one atomic transaction.
+     *
+     * For explicit contact additions or restoration, not label edits. Unblocked
+     * peers need a fresh Encrypted Link; other links remain unchanged. Ordering,
+     * duplicates and metadata follow `save_contacts`. Invalid input or an active
+     * lease on a selected blocked peer rejects the entire batch.
+     */
+    func saveContactsAndUnblockPeers(updates: [ContactUpdate]) async throws  -> [ContactRecord]
+
+    /**
      * Persist the wallet-selected candidate under the expected association revision.
      */
     func selectAllowance(scope: PaymentRequestScope, selection: AllowanceSelectionInput) async throws  -> AllowanceAssociationRecord
@@ -4795,6 +4805,31 @@ open func saveContacts(updates: [ContactUpdate])async throws  -> [ContactRecord]
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_save_contacts(
+                    self.uniffiClonePointer(),
+                    FfiConverterSequenceTypeContactUpdate.lower(updates)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeContactRecord.lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Save contacts and unblock selected blocked peers in one atomic transaction.
+     *
+     * For explicit contact additions or restoration, not label edits. Unblocked
+     * peers need a fresh Encrypted Link; other links remain unchanged. Ordering,
+     * duplicates and metadata follow `save_contacts`. Invalid input or an active
+     * lease on a selected blocked peer rejects the entire batch.
+     */
+open func saveContactsAndUnblockPeers(updates: [ContactUpdate])async throws  -> [ContactRecord]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_save_contacts_and_unblock_peers(
                     self.uniffiClonePointer(),
                     FfiConverterSequenceTypeContactUpdate.lower(updates)
                 )
@@ -25383,6 +25418,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contacts() != 6516) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contacts_and_unblock_peers() != 14421) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_select_allowance() != 13682) {

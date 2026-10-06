@@ -331,8 +331,6 @@ where
     /// Existing Encrypted Link snapshots are not restored. Callers should start
     /// a fresh Encrypted Link Handshake before private workflows resume.
     pub async fn unblock_peer(&self, counterparty: PubkyPublicKey) -> Result<LinkedPeerRecord> {
-        let lease_timeout = ChronoDuration::from_std(PEER_LINK_OPERATION_LEASE_TIMEOUT)
-            .expect("fixed peer link lease timeout must fit chrono duration");
         self.retry_storage_transaction(|| {
             let counterparty = counterparty.clone();
             move |tx| {
@@ -343,27 +341,7 @@ where
                         source: None,
                     });
                 }
-                let now = self.clock.now();
-                let Some(lease) =
-                    tx.claim_peer_link_operation(&counterparty, now, now + lease_timeout)?
-                else {
-                    return Ok(None);
-                };
-                let mut record = tx
-                    .linked_peer(&counterparty)
-                    .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
-                if record.state == LinkedPeerState::Blocked {
-                    record.state = LinkedPeerState::NotLinked;
-                    record.local_recovery_attempt_id = None;
-                    record.local_recovery_marker_created_at = None;
-                    record.local_recovery_marker_last_error = None;
-                    record.last_sync_at = Some(now);
-                    record.failure_count = 0;
-                    tx.save_linked_peer(record.clone());
-                    clear_encrypted_link_state(tx, &counterparty, now);
-                }
-                tx.release_peer_link_operation(&counterparty, lease.lease_id);
-                Ok(Some(record))
+                unblock_peer_in_transaction(tx, &counterparty, self.clock.now())
             }
         })
         .await?
@@ -1602,6 +1580,33 @@ pub(super) fn block_peer_in_transaction(
     record.failure_count = 0;
     tx.save_linked_peer(record.clone());
     clear_encrypted_link_state(tx, counterparty, now);
+    tx.release_peer_link_operation(counterparty, lease.lease_id);
+    Ok(Some(record))
+}
+
+pub(super) fn unblock_peer_in_transaction(
+    tx: &mut dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    now: DateTime<Utc>,
+) -> Result<Option<LinkedPeerRecord>> {
+    let lease_timeout = ChronoDuration::from_std(PEER_LINK_OPERATION_LEASE_TIMEOUT)
+        .expect("fixed peer link lease timeout must fit chrono duration");
+    let Some(lease) = tx.claim_peer_link_operation(counterparty, now, now + lease_timeout)? else {
+        return Ok(None);
+    };
+    let mut record = tx
+        .linked_peer(counterparty)
+        .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
+    if record.state == LinkedPeerState::Blocked {
+        record.state = LinkedPeerState::NotLinked;
+        record.local_recovery_attempt_id = None;
+        record.local_recovery_marker_created_at = None;
+        record.local_recovery_marker_last_error = None;
+        record.last_sync_at = Some(now);
+        record.failure_count = 0;
+        tx.save_linked_peer(record.clone());
+        clear_encrypted_link_state(tx, counterparty, now);
+    }
     tx.release_peer_link_operation(counterparty, lease.lease_id);
     Ok(Some(record))
 }
