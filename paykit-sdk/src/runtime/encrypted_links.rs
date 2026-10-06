@@ -28,27 +28,6 @@ impl HandshakeAdvance {
 }
 
 impl HandshakeSource {
-    fn apply_and_finish(
-        &self,
-        tx: &mut dyn StorageTransaction,
-        lease: &PeerLinkOperationLease,
-        now: DateTime<Utc>,
-        observation: Result<Option<EncryptedLinkRecoveryMarker>>,
-        update: Result<Option<HandshakeCheckpointUpdate>>,
-        finish: bool,
-    ) -> Result<Result<HandshakeAdvance>> {
-        let result = self.apply(tx, lease, now, observation, update)?;
-        Ok(result.map(|report| {
-            if finish {
-                tx.release_peer_link_operation(&lease.counterparty, lease.lease_id);
-            }
-            HandshakeAdvance {
-                report,
-                lease_released: finish,
-            }
-        }))
-    }
-
     fn require_current(
         &self,
         tx: &dyn StorageTransaction,
@@ -108,14 +87,15 @@ impl HandshakeSource {
         Ok(snapshot)
     }
 
-    fn apply(
+    fn apply_and_finish(
         &self,
         tx: &mut dyn StorageTransaction,
         lease: &PeerLinkOperationLease,
         now: DateTime<Utc>,
         observation: Result<Option<EncryptedLinkRecoveryMarker>>,
         update: Result<Option<HandshakeCheckpointUpdate>>,
-    ) -> Result<Result<LinkedPeerHandshakeReport>> {
+        finish: bool,
+    ) -> Result<Result<HandshakeAdvance>> {
         self.require_current(tx, lease, now)?;
         // Recovery effects commit only for the exact source; failed effects roll back.
         let checked = match observation {
@@ -139,7 +119,7 @@ impl HandshakeSource {
         };
         let update = match checked {
             Ok(Some(update)) => update,
-            Ok(None) => return Ok(Ok(self.report())),
+            Ok(None) => return Ok(Ok(HandshakeAdvance::retaining_lease(self.report()))),
             Err(error) => {
                 if link_handshake_error_requires_recovery(&error)
                     && tx
@@ -167,7 +147,13 @@ impl HandshakeSource {
                 })
             }
         };
-        Ok(Ok(report))
+        if finish {
+            tx.release_peer_link_operation(&lease.counterparty, lease.lease_id);
+        }
+        Ok(Ok(HandshakeAdvance {
+            report,
+            lease_released: finish,
+        }))
     }
 }
 
@@ -1721,6 +1707,42 @@ mod handshake_checkpoint_tests {
     use super::*;
     use crate::InMemoryStorage;
 
+    fn pending_checkpoint_update(counterparty: &PubkyPublicKey) -> HandshakeCheckpointUpdate {
+        use pubky_noise::{
+            serializer::PubkyNoiseSessionState,
+            snow_crypto::{HandshakePattern, NoisePhase, NoiseStep},
+        };
+        let state = PubkyNoiseSessionState {
+            version: pubky_noise::serializer::SESSION_STATE_VERSION,
+            phase: NoisePhase::HandShake,
+            pattern: HandshakePattern::PatternXX,
+            initiator: true,
+            ephemeral_secret: [1; 32],
+            static_secret: Some([2; 32]),
+            counter: 3,
+            noise_step: NoiseStep::Final,
+            sub_step_index: 0,
+            handshake_hash: Some([3; 32]),
+            link_id: None,
+            sending_nonce: 0,
+            receiving_nonce: 0,
+            write_counter: 0,
+            read_counter: 0,
+            endpoint_pubkey: counterparty.to_public_key().unwrap().to_bytes(),
+            handshake_messages: vec![vec![5; 96]],
+        };
+        let mut inner = state.serialize();
+        inner.extend_from_slice(&pubky::Keypair::random().public_key().to_bytes());
+        inner.extend_from_slice(&[0; 72]);
+        let mut bytes = vec![1];
+        bytes.extend_from_slice(&(inner.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(&inner);
+        bytes.extend_from_slice(&[0; 2]);
+        HandshakeCheckpointUpdate::Pending(
+            paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(&bytes).unwrap(),
+        )
+    }
+
     #[tokio::test]
     async fn test_handshake_observations_preserve_current_state_and_errors() {
         let key = || PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
@@ -1765,44 +1787,7 @@ mod handshake_checkpoint_tests {
                 .transaction(|tx| {
                     let update = match drift {
                         "idle" => Ok(None),
-                        "save-rejected" => {
-                            use pubky_noise::{
-                                serializer::PubkyNoiseSessionState,
-                                snow_crypto::{HandshakePattern, NoisePhase, NoiseStep},
-                            };
-                            let state = PubkyNoiseSessionState {
-                                version: pubky_noise::serializer::SESSION_STATE_VERSION,
-                                phase: NoisePhase::HandShake,
-                                pattern: HandshakePattern::PatternXX,
-                                initiator: true,
-                                ephemeral_secret: [1; 32],
-                                static_secret: Some([2; 32]),
-                                counter: 3,
-                                noise_step: NoiseStep::Final,
-                                sub_step_index: 0,
-                                handshake_hash: Some([3; 32]),
-                                link_id: None,
-                                sending_nonce: 0,
-                                receiving_nonce: 0,
-                                write_counter: 0,
-                                read_counter: 0,
-                                endpoint_pubkey: counterparty.to_public_key().unwrap().to_bytes(),
-                                handshake_messages: vec![vec![5; 96]],
-                            };
-                            let mut inner = state.serialize();
-                            inner.extend_from_slice(
-                                &pubky::Keypair::random().public_key().to_bytes(),
-                            );
-                            inner.extend_from_slice(&[0; 72]);
-                            let mut bytes = vec![1];
-                            bytes.extend_from_slice(&(inner.len() as u16).to_be_bytes());
-                            bytes.extend_from_slice(&inner);
-                            bytes.extend_from_slice(&[0; 2]);
-                            Ok(Some(HandshakeCheckpointUpdate::Pending(
-                                paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(&bytes)
-                                    .unwrap(),
-                            )))
-                        }
+                        "save-rejected" => Ok(Some(pending_checkpoint_update(&counterparty))),
                         "transport" => Err(PaykitSdkError::Transport {
                             context: "handshake PUT failed".into(),
                             source: None,
@@ -1883,7 +1868,14 @@ mod handshake_checkpoint_tests {
             .await
             .unwrap();
         let baseline = storage.snapshot().unwrap();
-        for case in ["pending", "finished", "transport", "expired", "replaced"] {
+        for case in [
+            "idle",
+            "pending",
+            "finished",
+            "transport",
+            "expired",
+            "replaced",
+        ] {
             let storage = InMemoryStorage::from_state(baseline.clone());
             let source = HandshakeSource {
                 peer: baseline.linked_peers[&counterparty].clone(),
@@ -1925,28 +1917,40 @@ mod handshake_checkpoint_tests {
                             now
                         },
                         Ok(None),
-                        if case == "transport" {
-                            Err(PaykitSdkError::Transport {
+                        match case {
+                            "idle" => Ok(None),
+                            "transport" => Err(PaykitSdkError::Transport {
                                 context: "publication failed".into(),
                                 source: None,
-                            })
-                        } else {
-                            Ok(None)
+                            }),
+                            _ => Ok(Some(pending_checkpoint_update(&counterparty))),
                         },
                         case != "pending",
                     )
                 })
                 .await;
-            if case == "finished" {
-                assert!(result.unwrap().unwrap().lease_released);
-                assert!(storage
-                    .transaction(|tx| Ok(tx.peer_link_operation_lease(&counterparty)))
-                    .await
-                    .unwrap()
-                    .is_none());
+            if matches!(case, "pending" | "finished") {
+                let outcome = result.unwrap().unwrap();
+                assert_eq!(outcome.lease_released, case == "finished");
+                let after = storage.snapshot().unwrap();
+                assert_eq!(
+                    after.encrypted_link_states[&counterparty].generation,
+                    source.state.generation + 1
+                );
+                assert_eq!(
+                    storage
+                        .transaction(|tx| Ok(tx.peer_link_operation_lease(&counterparty)))
+                        .await
+                        .unwrap(),
+                    (case == "pending").then_some(lease.clone())
+                );
             } else {
                 match case {
-                    "pending" => assert!(!result.unwrap().unwrap().lease_released),
+                    "idle" => {
+                        let outcome = result.unwrap().unwrap();
+                        assert!(!outcome.lease_released);
+                        assert_eq!(outcome.report, source.report());
+                    }
                     "transport" => {
                         assert!(matches!(result, Ok(Err(PaykitSdkError::Transport { .. }))))
                     }
