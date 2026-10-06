@@ -4032,7 +4032,8 @@ dependencies = [
 [[package]]
 name = "pubky-noise"
 version = "0.1.0-rc12"
-source = "git+https://github.com/pubky/pubky-noise?rev=5c06ff552912bd131d163403bec2360ab31dff10#5c06ff552912bd131d163403bec2360ab31dff10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c034fc7c278e85960a566a032ee26acf9d9c00ee6f64d74fa1f73ee9ed7d4f06"
 dependencies = [
  "chacha20poly1305",
  "curve25519-dalek 5.0.0",
