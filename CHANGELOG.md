@@ -7,6 +7,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc68 - 2026-10-07
+
+### Fixed
+
+- Reject Payment Request claim and acceptance for a freshly observed revoked
+  App even if another instance overwrites the authorization cache with older permissions.
+
 ## 0.1.0-rc67 - 2026-10-07
 
 ### Changed
