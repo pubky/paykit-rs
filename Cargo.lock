@@ -3415,7 +3415,7 @@ dependencies = [
 
 [[package]]
 name = "paykit-ffi"
-version = "0.1.0-rc69"
+version = "0.1.0-rc70"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -3445,7 +3445,7 @@ dependencies = [
 
 [[package]]
 name = "paykit-lib"
-version = "0.1.0-rc69"
+version = "0.1.0-rc70"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3470,7 +3470,7 @@ dependencies = [
 
 [[package]]
 name = "paykit-sdk"
-version = "0.1.0-rc69"
+version = "0.1.0-rc70"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3613,9 +3613,9 @@ checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
 
 [[package]]
 name = "pkarr"
-version = "8.0.0"
+version = "8.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3248274a604751c9a6749137cebfe0ddfc8b4b0e31c779515c4f984c937a4dac"
+checksum = "0fa6e085dac5eb00b309bfafd0fa0db088a7d3aaad4b5de75db4732e7c7f7595"
 dependencies = [
  "async-compat",
  "base32",
@@ -3913,9 +3913,9 @@ checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 
 [[package]]
 name = "pubky"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2099d521cacff9a1bf2ad48978d4601608d80860d7b08f7ecb0ced98bb63b628"
+checksum = "c298b2ec3f482618764c4bdc5cd69a9e52515e95e315d8f2dd946b83e4d03362"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -3945,9 +3945,9 @@ dependencies = [
 
 [[package]]
 name = "pubky-common"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9b32c46e101fa9b94fcb3f3baa5751d3f696b3823508697a4f407281cbe9c4c"
+checksum = "e4a8b4c4831885f025577109215022f7e785b8c421b516cdfe1b510c8f2653fe"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -3967,9 +3967,9 @@ dependencies = [
 
 [[package]]
 name = "pubky-homeserver"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "589e60c62bb93c146f3e9a6db24869de853c7097e9b0a6d5021f3922c6ef8a2e"
+checksum = "4cbc89e3ca5186cba5db4f6ff714b2a01761d27590c04ad8dc64a5eeccd427ac"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -4031,9 +4031,9 @@ dependencies = [
 
 [[package]]
 name = "pubky-noise"
-version = "0.1.0-rc12"
+version = "0.1.0-rc13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c034fc7c278e85960a566a032ee26acf9d9c00ee6f64d74fa1f73ee9ed7d4f06"
+checksum = "d05863db1f5683e6c539c384eb7d9372451faad4770916b279bf6e1de2a5008a"
 dependencies = [
  "chacha20poly1305",
  "curve25519-dalek 5.0.0",
@@ -4049,9 +4049,9 @@ dependencies = [
 
 [[package]]
 name = "pubky-testnet"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b91bf40a96d6444da350dd4afc6e0af9d9ea86eae306a561ff8aeab2470b330"
+checksum = "e0185542bf65d51e11f99c8016184907bb0f6c5aebc21571af14bb707cb77560"
 dependencies = [
  "anyhow",
  "clap",
