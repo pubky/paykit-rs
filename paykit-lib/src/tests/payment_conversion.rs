@@ -558,6 +558,18 @@ fn test_recurring_quote_rail_coverage_and_same_asset_pricing() {
         .with_conversion_quote_id(quote.event_id().clone())
         .validate_conversion_quote(&request, Some(&quote))
         .unwrap();
+    let same_asset =
+        proof(&request, "usd-bank-account").with_conversion_quote_id(quote.event_id().clone());
+    same_asset
+        .validate_conversion_quote(&request, Some(&quote))
+        .unwrap();
+    assert!(same_asset
+        .validate_conversion_quote(&request, None)
+        .is_err());
+    assert!(proof(&request, "btc-lightning-bolt11")
+        .with_conversion_quote_id(quote.event_id().clone())
+        .validate_conversion_quote(&request, Some(&quote))
+        .is_err());
     round_trip(PaymentRequestEvent::ConversionQuote(quote));
     // Same-asset payments remain usable without a quote; optional quotes cannot reprice them.
     for selector in ["usd", "usd-bank"] {
