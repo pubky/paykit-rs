@@ -1552,7 +1552,7 @@ where
         &self,
         lease: &PeerLinkOperationLease,
     ) -> Result<()> {
-        self.retry_storage_transaction(|| {
+        self.retry_operation_lease_release(|| {
             let lease = lease.clone();
             move |tx| {
                 tx.release_peer_link_operation(&lease.counterparty, lease.lease_id);

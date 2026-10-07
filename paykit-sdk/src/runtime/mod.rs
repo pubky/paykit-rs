@@ -382,6 +382,25 @@ where
         retry_storage_transaction_with_adapter(&self.storage, operation).await
     }
 
+    async fn retry_operation_lease_release<F, O>(&self, mut operation: F) -> Result<()>
+    where
+        F: FnMut() -> O,
+        O: FnOnce(&mut dyn StorageTransaction) -> Result<()> + Send,
+    {
+        let result = self.storage.transaction(operation()).await;
+        if !matches!(
+            result,
+            Err(PaykitSdkError::SharedStateBusy { .. } | PaykitSdkError::ConcurrentUpdate { .. })
+        ) || crate::storage::shared_state_operation_active()
+        {
+            return result;
+        }
+        // Lease-ID-fenced cleanup can retry once with fresh state. Never replay
+        // an uncertain write or retry inside an invalidated storage operation.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        self.storage.transaction(operation()).await
+    }
+
     /// Initialize durable SDK identity state.
     ///
     /// Without a live session, return cached or locally available identity

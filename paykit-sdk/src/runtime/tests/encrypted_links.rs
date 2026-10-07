@@ -229,6 +229,108 @@ async fn test_peer_operation_contention_preserves_lease_until_release() {
 }
 
 #[tokio::test]
+async fn test_operation_lease_release_retries_only_bounded_contention() {
+    use std::{any::Any, sync::atomic::AtomicUsize};
+
+    struct CleanupStorage {
+        inner: InMemoryStorage,
+        calls: AtomicUsize,
+        failures: usize,
+        error: fn() -> PaykitSdkError,
+    }
+
+    #[async_trait]
+    impl StorageAdapter for CleanupStorage {
+        async fn transaction_erased<'a>(
+            &self,
+            callback: crate::storage::StorageTransactionCallback<'a>,
+        ) -> Result<Box<dyn Any + Send>> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) < self.failures {
+                return Err((self.error)());
+            }
+            self.inner.transaction_erased(callback).await
+        }
+    }
+
+    let busy = || PaykitSdkError::SharedStateBusy {
+        context: "shared state locked".into(),
+        source: None,
+    };
+    let uncertain = || PaykitSdkError::Storage {
+        context: "unconfirmed write".into(),
+        source: None,
+    };
+    let conflict = || PaykitSdkError::ConcurrentUpdate {
+        context: "shared state changed".into(),
+        source: None,
+    };
+    let identity = || PaykitSdkError::Identity {
+        context: "session changed".into(),
+        source: None,
+    };
+    for release_peer in [true, false] {
+        for (failures, error, expected_calls) in [
+            (1, busy as fn() -> PaykitSdkError, 2),
+            (usize::MAX, busy, 2),
+            (1, conflict, 2),
+            (usize::MAX, conflict, 2),
+            (usize::MAX, uncertain, 1),
+            (usize::MAX, identity, 1),
+        ] {
+            let storage = InMemoryStorage::new();
+            let counterparty =
+                PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+            let (peer_lease, app_lease) = storage
+                .transaction(|tx| {
+                    let now = FixedClock.now();
+                    let expires = now + ChronoDuration::seconds(60);
+                    Ok((
+                        tx.claim_peer_link_operation(&counterparty, now, expires)?
+                            .unwrap(),
+                        tx.claim_paykit_app_operation(&app_id(), now, expires)?
+                            .unwrap(),
+                    ))
+                })
+                .await
+                .unwrap();
+            let mut expected = storage.snapshot().unwrap();
+            let sdk = PaykitSdk::with_clock(
+                CleanupStorage {
+                    inner: storage.clone(),
+                    calls: AtomicUsize::new(0),
+                    failures,
+                    error,
+                },
+                TestPubkySessionProvider { session: None },
+                TestPaymentAdapter,
+                PaykitSdkConfig::new("bitkit").unwrap(),
+                FixedClock,
+            );
+            let result = if release_peer {
+                sdk.release_peer_link_operation(&peer_lease).await
+            } else {
+                sdk.release_paykit_app_operation(&app_lease).await
+            };
+            assert_eq!(sdk.storage.calls.load(Ordering::SeqCst), expected_calls);
+            if failures == 1 {
+                result.unwrap();
+                if release_peer {
+                    expected.peer_link_operation_leases.remove(&counterparty);
+                } else {
+                    expected.paykit_app_operation_leases.remove(&app_id());
+                }
+            } else {
+                assert_eq!(
+                    std::mem::discriminant(&result.unwrap_err()),
+                    std::mem::discriminant(&error())
+                );
+            }
+            assert_eq!(storage.snapshot().unwrap(), expected);
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_peer_lease_cleanup_preserves_operation_result() {
     struct FailingCleanupStorage;
     #[async_trait]

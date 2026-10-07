@@ -153,7 +153,7 @@ where
         &self,
         lease: &PaykitAppOperationLease,
     ) -> Result<()> {
-        self.retry_storage_transaction(|| {
+        self.retry_operation_lease_release(|| {
             let lease = lease.clone();
             move |tx| {
                 tx.release_paykit_app_operation(&lease.app_id, lease.lease_id);
