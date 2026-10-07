@@ -1,3 +1,4 @@
+use super::allowance_accounting::ensure_accounting_identity;
 use super::*;
 use crate::domain::payment_requests::{
     claim_payment_request_execution_in_transaction,
@@ -385,9 +386,11 @@ where
                 source: None,
             });
         }
-        let authorization = self
-            .fetch_counterparty_app_authorization(&counterparty)
-            .await?;
+        // Preserve observed permissions even when claim or acceptance is rejected.
+        self.counterparty_app_authorization_context_with(&counterparty, |tx| {
+            ensure_accounting_identity(tx, &expected_identity)
+        })
+        .await?;
         let event = PaymentRequestEvent::Acceptance(PaymentRequestAcceptance::new(
             EventId::new_v4(),
             payment_request_id.clone(),
@@ -401,7 +404,6 @@ where
                         .is_some_and(|state| state.link_snapshot.is_some()),
                     &counterparty,
                 )?;
-                authorization.apply(tx, &counterparty);
                 claim_payment_request_execution_in_transaction(
                     tx,
                     &counterparty,

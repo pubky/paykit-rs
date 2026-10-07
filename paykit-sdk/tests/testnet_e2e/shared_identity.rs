@@ -510,8 +510,10 @@ async fn test_request_preparation_preserves_confirmation_for_restart() {
 }
 
 #[tokio::test]
-async fn test_rejected_request_preparation_preserves_app_revocation() {
-    for remove_app in [false, true] {
+async fn test_rejected_request_actions_preserve_app_revocation() {
+    for (remove_app, claim_and_accept) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
         let (pair, request) = received_request_with_confirmation().await;
         let request_id = PaymentRequestId::new(request.payment_request_id).unwrap();
         let before = pair.bitkit.storage_state().await;
@@ -540,17 +542,24 @@ async fn test_rejected_request_preparation_preserves_app_revocation() {
             .await
             .unwrap();
 
-        let error = pair
-            .bitkit
-            .sdk
-            .prepare_and_resolve_private_payment_request(
-                pair.bob.public_key.clone(),
-                &request_id,
-                None,
-                1,
-            )
-            .await
-            .unwrap_err();
+        let error = if claim_and_accept {
+            pair.bitkit
+                .sdk
+                .claim_and_accept_payment_request(pair.bob.public_key.clone(), &request_id)
+                .await
+                .unwrap_err()
+        } else {
+            pair.bitkit
+                .sdk
+                .prepare_and_resolve_private_payment_request(
+                    pair.bob.public_key.clone(),
+                    &request_id,
+                    None,
+                    1,
+                )
+                .await
+                .unwrap_err()
+        };
         assert!(matches!(error, PaykitSdkError::Policy { .. }));
         let after = pair.bitkit.storage_state().await;
         assert!(!after.authorized_paykit_apps[&pair.bob.public_key]
@@ -561,6 +570,10 @@ async fn test_rejected_request_preparation_preserves_app_revocation() {
             before.outbound_private_messages
         );
         assert_eq!(after.encrypted_link_states, before.encrypted_link_states);
+        assert_eq!(
+            after.payment_request_execution_claims,
+            before.payment_request_execution_claims
+        );
     }
 }
 
@@ -4665,7 +4678,7 @@ async fn test_claim_and_accept_commits_once_and_preserves_ownership_on_failure()
         accepted.execution_claim_app_id,
         Some(pair.bitkit.app_id.clone())
     );
-    assert_eq!(transactions.load(Ordering::SeqCst), 2);
+    assert_eq!(transactions.load(Ordering::SeqCst), 3);
     assert_eq!(commits.load(Ordering::SeqCst), 1);
     let state = pair.server.storage_state().await;
     let acceptance = state
