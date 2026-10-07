@@ -387,10 +387,11 @@ where
             });
         }
         // Preserve observed permissions even when claim or acceptance is rejected.
-        self.counterparty_app_authorization_context_with(&counterparty, |tx| {
-            ensure_accounting_identity(tx, &expected_identity)
-        })
-        .await?;
+        let (authorization, ()) = self
+            .counterparty_app_authorization_context_with(&counterparty, |tx| {
+                ensure_accounting_identity(tx, &expected_identity)
+            })
+            .await?;
         let event = PaymentRequestEvent::Acceptance(PaymentRequestAcceptance::new(
             EventId::new_v4(),
             payment_request_id.clone(),
@@ -404,12 +405,18 @@ where
                         .is_some_and(|state| state.link_snapshot.is_some()),
                     &counterparty,
                 )?;
-                claim_payment_request_execution_in_transaction(
+                let record = claim_payment_request_execution_in_transaction(
                     tx,
                     &counterparty,
                     &self.config.app_id,
                     payment_request_id,
                     now,
+                )?;
+                // A concurrent cache write must not override this call's observed revocation.
+                require_payment_request_origin_app_authorized(
+                    &record,
+                    authorization.payment_request_apps.as_deref(),
+                    "claim and accept Payment Request",
                 )?;
                 enqueue_checked_payment_request_action_in_transaction(
                     tx,

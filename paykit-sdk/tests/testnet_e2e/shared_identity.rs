@@ -578,6 +578,106 @@ async fn test_rejected_request_actions_preserve_app_revocation() {
 }
 
 #[tokio::test]
+async fn test_claim_and_accept_rejects_revoked_app_after_stale_authorization_write() {
+    struct StaleAuthorizationStorage {
+        inner: PubkySharedStateStorage,
+        writer: PubkySharedStateStorage,
+        counterparty: PubkyPublicKey,
+        app_id: PaykitAppId,
+        stale_apps: std::collections::HashMap<PaykitAppId, PaykitAppCapabilities>,
+        overwritten: AtomicBool,
+    }
+
+    #[async_trait]
+    impl StorageAdapter for StaleAuthorizationStorage {
+        async fn transaction_erased<'a>(
+            &self,
+            transaction: StorageTransactionCallback<'a>,
+        ) -> PaykitResult<Box<dyn Any + Send>> {
+            let mut revoked = false;
+            let result = self
+                .inner
+                .transaction_erased(Box::new(|tx| {
+                    let result = transaction(tx)?;
+                    revoked = tx
+                        .authorized_paykit_apps(&self.counterparty)
+                        .is_some_and(|apps| {
+                            !apps
+                                .get(&self.app_id)
+                                .is_some_and(|capabilities| capabilities.payment_requests)
+                        });
+                    Ok(result)
+                }))
+                .await?;
+            if revoked && !self.overwritten.swap(true, Ordering::SeqCst) {
+                // Another App finishes a receive using permissions fetched before revocation.
+                self.writer
+                    .transaction(|tx| {
+                        tx.save_authorized_paykit_apps(
+                            self.counterparty.clone(),
+                            self.stale_apps.clone(),
+                        );
+                        Ok(())
+                    })
+                    .await?;
+            }
+            Ok(result)
+        }
+    }
+
+    let (pair, request) = received_request_with_confirmation().await;
+    let request_id = request_id(&request);
+    let before = pair.bitkit.storage_state().await;
+    let stale_apps = before.authorized_paykit_apps[&pair.bob.public_key].clone();
+    assert!(stale_apps[&pair.bob.app_id].payment_requests);
+    let (mut registry, revision) = paykit_lib::get_paykit_app_registry_with_revision(
+        &pair.bob.access.outbox_client.public_storage(),
+        pair.bob.access.session.info().public_key(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    registry.remove_app(&pair.bob.app_id).unwrap();
+    paykit_lib::update_paykit_app_registry(&pair.bob.access.session, &registry, &revision)
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::new(
+        StaleAuthorizationStorage {
+            inner: pair.bitkit.storage.clone(),
+            writer: pair.server.storage.clone(),
+            counterparty: pair.bob.public_key.clone(),
+            app_id: pair.bob.app_id.clone(),
+            stale_apps: stale_apps.clone(),
+            overwritten: AtomicBool::new(false),
+        },
+        TestnetSessionProvider::new(pair.bitkit.access.clone()),
+        pair.bitkit.adapter.clone(),
+        PaykitSdkConfig::new(pair.bitkit.app_id.clone()).unwrap(),
+    );
+
+    let error = sdk
+        .claim_and_accept_payment_request(pair.bob.public_key.clone(), &request_id)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, PaykitSdkError::Policy { .. }));
+    let after = pair.server.storage_state().await;
+    assert_eq!(
+        after.authorized_paykit_apps[&pair.bob.public_key],
+        stale_apps
+    );
+    assert_eq!(
+        after.outbound_private_messages,
+        before.outbound_private_messages
+    );
+    assert_eq!(
+        after.payment_request_execution_claims,
+        before.payment_request_execution_claims
+    );
+    assert_eq!(after.encrypted_link_states, before.encrypted_link_states);
+}
+
+#[tokio::test]
 async fn test_request_preparation_replays_prepared_confirmation_after_restart() {
     let (pair, request) = received_request_with_confirmation().await;
     let crash_time = Utc::now();
