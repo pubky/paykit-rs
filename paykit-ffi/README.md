@@ -511,6 +511,9 @@ with `withPaymentAdapterAndPubkySharedState`. This mode does not use
 `SdkStateBlobStore` callbacks. It requires active session access with current
 Paykit identity key material for every operation. Independent runtimes use
 renewable homeserver write locks across bounded groups of state transactions.
+All serving homeserver instances must run 0.15 or newer; updating these bindings
+does not upgrade the server. Confirm deployment separately from the
+`webdav-locks` capability, which does not identify the server version.
 Each changed transaction is durably saved before returning. After contention
 or an uncertain result, inspect durable request/payment records and resume
 existing work; a multi-step operation may already have committed intent.
@@ -523,8 +526,11 @@ retries receives `SharedStateBusy` (`shared_state_busy`), whether the holder is
 doing normal work or waiting for recovery. Back off and keep the operation
 pending instead of immediately retrying. Reads can also be
 blocked; there is no fixed completion deadline.
-This is a best-effort testing mitigation, not a replacement for homeserver
-commit-time lock enforcement. Normal successful writes have no cooldown.
+This is a best-effort mitigation, not a safety guarantee. Homeserver 0.15 checks
+lock ownership before publication, but a lost database transaction can still
+release its lock while backend publication remains in flight. Normal successful
+writes have no cooldown. See the [shared-state safety requirements](../paykit-sdk/README.md)
+before deploying multiple writers.
 
 Use `identityStatus` to gate product actions. `publicKey` identifies the last
 initialized identity when known. `SignedOut` means Pubky-backed workflows must

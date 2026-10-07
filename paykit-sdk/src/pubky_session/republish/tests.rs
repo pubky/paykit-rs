@@ -46,7 +46,8 @@ fn testnet_pubky(
                     config
                 })
                 .cache(cache)
-                .request_timeout(Duration::from_secs(1));
+                .dht_request_timeout(Duration::from_secs(1))
+                .relay_request_timeout(Duration::from_secs(1));
             if let Some(relay) = relay {
                 builder.no_dht().relays(&[relay.as_str()]).unwrap();
             }
@@ -158,7 +159,8 @@ async fn test_republish_identity_reports_resolution_and_publication_failures() {
                     .relays(&[&relay])
                     .unwrap()
                     .cache(cache)
-                    .request_timeout(Duration::from_millis(100))
+                    .dht_request_timeout(Duration::from_millis(100))
+                    .relay_request_timeout(Duration::from_millis(100))
             })
             .build()
             .unwrap();

@@ -97,6 +97,8 @@ pub(crate) fn shared_state_operation_active() -> bool {
 
 /// Encrypted identity-wide SDK state stored in Pubky.
 ///
+/// All serving homeserver instances must run 0.15 or newer. The client
+/// dependency version does not enforce this deployment requirement.
 /// Each operation reads the latest complete state under a renewed homeserver
 /// write lock. Its transactions reuse that state and replace the encrypted
 /// resource whenever it changes, before returning. One instance serializes its

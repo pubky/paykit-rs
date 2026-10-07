@@ -415,9 +415,17 @@ provide cryptographic isolation from other authorized apps.
 The homeserver must fence writes through commit when lock ownership expires
 and publish complete files durably. Locks alone do not provide storage crash safety.
 
-Pubky 0.14 checks lock ownership when a write starts, not at commit. Production
-multi-app use requires homeserver commit-time fencing of expired lock holders.
-For testing, shared-state writes publish a unique pending marker before their
+Shared-state deployments require Homeserver 0.15 or newer on every serving
+instance. Updating the Pubky client does not upgrade the homeserver, and the
+`webdav-locks` capability alone does not identify its finalization guarantees.
+Homeserver 0.15 checks the lock token again before publishing and holds the
+database lock through finalization. This prevents stale publication after
+ordinary lease expiry, but database-transaction loss can still release that
+lock while backend publication is in flight. Do not use conditional reads as
+proof of current encrypted state: blob contents and database metadata can
+disagree after a failed finalization.
+
+Shared-state writes therefore still publish a unique pending marker before their
 PUT and remove it after a confirmed result. An unconfirmed write leaves its
 marker; the next transaction waits five minutes under a renewed lock, then
 reloads state. Cancellation leaves the marker and restarts the wait on the next
@@ -427,7 +435,7 @@ be doing normal work or waiting for recovery; back off and keep the operation
 pending. This can also block reads, and there is no fixed completion
 deadline. The cooldown adds no timed delay to normal successful writes,
 but cannot rule out a write completing after five
-minutes and does not replace the homeserver fix.
+minutes and does not replace storage-side fencing through publication.
 Explicit PUT rejections for lock expiry (412), rate limiting (429), or storage
 quota (507) clear that attempt's pending marker without a cooldown, provided
 cleanup succeeds.
