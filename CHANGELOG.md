@@ -7,6 +7,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc71 - 2026-10-07
+
 ### Added
 
 - Optional asset-rail conversion rates, such as `usdt-polygon`, which override
@@ -14,6 +16,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   price the requested asset; per-period quotes remain cross-asset only.
 - `ConversionRate::for_endpoint` selects the applicable explicit rate. Wallets
   retain amount calculation and settlement verification responsibility.
+- Paykit integration skill for coding agents covering shared-identity
+  authorization, payment workflows, persistence, and recovery.
 
 ### Changed
 
