@@ -8,9 +8,11 @@ construct `PubkySharedStateStorage::new(session_provider)` using a provider for
 the same identity as the runtime. Mobile constructors are in
 [Mobile Integration](mobile.md).
 
-Request `PAYKIT_SESSION_CAPABILITIES` in Rust or
-`requiredSessionCapabilities()` in bindings, not a config method or copied
-permission string. Use grant-backed `PubkySessionAccess` and a stable app-owned
+Ordinary apps request `PAYKIT_SESSION_CAPABILITIES` in Rust or
+`requiredSessionCapabilities()` in bindings. An identity authorizer uses
+`PAYKIT_AUTHORIZER_SESSION_CAPABILITIES` / `paykitAuthorizerSessionCapabilities()`
+for signed-key publication, rotation, and recovery. Use the helpers, not copied
+permission strings. Use grant-backed `PubkySessionAccess` and a stable app-owned
 `PubkySessionBootstrap` client ID. Session creation, capability renewal, secure
 credential storage, and key distribution remain the app's responsibility;
 Ring is optional. A Pubky client ID and Paykit App ID have different roles.
@@ -31,13 +33,25 @@ Do not generate app-specific Noise secrets or derive a remote Noise key from
 its Pubky public key. A delegated key's derivation is not independently
 verifiable without the root; import only through trusted authorization.
 
+Before private app publication or delegation, the authorizer calls
+`publish_paykit_noise_key_authorization()`. It needs the Pubky identity secret,
+current Paykit key, and authorizer grant, including the separate authority path.
+Ordinary delegated apps receive the current Paykit key and ordinary Paykit grant,
+never the root secret or authority-path write access. Both peers need valid
+Paykit Noise Key Authorizations; the SDK checks their signed routing/static keys
+and generation and pins peer authorization. Missing, malformed, or conflicting
+authorization fails closed. App Registry key fields are discovery metadata,
+not a substitute. Key rotation uses the rotation API, not a fresh bootstrap
+publication over an existing generation.
+
 Publish this app with `publish_paykit_app(PaykitApp::new(display_name,
 app_capabilities)?)`; its App ID comes from runtime config. `app_capabilities`
 is a `PaykitAppCapabilities` record. Enable only supported `private_payments`,
 `payment_requests`, `receipts`, and `outgoing_payments` features. These booleans
 are not Pubky grant capabilities. Public-only registration can
-omit the Noise key; private capabilities require current key material. Both
-identities need initialized registry Noise keys for a new private link.
+omit the Noise key; private capabilities require current key material matching
+the signed authorization. Both identities need initialized registry Noise keys
+and signed authorizations for a new private link.
 
 ## Live Shared Storage
 
@@ -45,6 +59,10 @@ identities need initialized registry Noise keys for a new private link.
 constant `PAYKIT_SHARED_STATE_PATH` (`/pub/paykit/v0/shared-state.bin`). It is
 not a backup uploaded after local mutations. Transactions load current state
 under a renewed WebDAV write lock and publish changed state while holding it.
+Bounded SDK operations reuse their loaded state and lock across compatible
+transactions, but each changed checkpoint is durable before returning. Errors
+do not roll back earlier checkpoints. Locks are released between outbound
+messages and before wallet callbacks; do not wrap whole app workflows in a lock.
 State-backed operations, including reads, require live session access and the
 current Paykit secret. Do not replace a failed load/decode with empty state.
 Encryption does not hide resource size/timing or prevent homeserver replay.
@@ -57,17 +75,21 @@ checkpoint commit before publication. App IDs separate ownership, not trust:
 apps with shared keys/write access can access the same private state.
 
 **Production constraint:** the homeserver must fence expired lock holders at
-write commit and durably publish whole files. Pubky 0.14 checks ownership when
-a write starts, not at commit. The SDK's uncertain-write cooldown is a testing
-mitigation, not proof of production multi-app safety. Verify the deployed
-homeserver's commit-time behavior before claiming that guarantee.
+write commit and durably publish whole files, including after storage or database
+failure. Check the deployed server against the
+[SDK storage requirements](https://github.com/pubky/paykit-rs/blob/master/paykit-sdk/README.md#profile-and-contacts)
+at the application's pin. A Pubky/Noise dependency upgrade does not upgrade the
+server or establish those guarantees. Keep the SDK's uncertain-write cooldown;
+it is a mitigation, not proof that an arbitrarily delayed write cannot publish.
 
 An unconfirmed write leaves a pending marker. The next transaction waits five
 minutes under a renewed lock before reloading. Cancellation restarts that wait
 on the next call; competing operations can receive `SharedStateBusy`
 (`shared_state_busy`). Reads may also block; there is no fixed completion
 deadline. Back off and show pending recovery, not a tight retry loop or blank
-state. Do not infer a safe retry from failure to inspect pending markers.
+state. `SharedStateBusy` can also mean ordinary lock contention, not just a
+pending-write cooldown. Do not retry it as a revision conflict inside an
+invalidated operation. Do not infer a safe retry from failure to inspect markers.
 Ordinary successful writes have no timed cooldown. HTTP request timeouts belong
 to the Pubky client; whole-operation cancellation must account for this wait.
 After any uncertain multi-step call, inspect durable records and resume intent
@@ -86,13 +108,15 @@ rather than creating another request/payment.
   events and Receipt issuance, and clear nonempty app-owned Private Payment
   Lists. Failed cleanup leaves new app work blocked; retry removal or explicitly
   republish to reactivate. Removal is not grant revocation or key rotation.
-- `rotate_paykit_identity_key(replacement_key)` replaces generation `g` with
-  `g + 1`. Derive/import and securely persist the replacement first. Quiesce
+- `rotate_paykit_identity_key(replacement_key)` requires the Pubky identity
+  secret, authorizer grant, and current signed authorization. It replaces
+  generation `g` with its root-derived successor `g + 1`; persist it first. Quiesce
   other writers; live peer leases block rotation, but expired leases cannot
   fence already-dispatched remote writes. History survives; old links require
   recovery and accounting reconciliation. Shared state commits before registry
-  publication, so retry uncertainty with the exact same current/replacement
-  pair, then supply the replacement to every remaining authorized app.
+  and replacement authorization publication, so retry uncertainty with the exact
+  same current/replacement pair, then supply the replacement to every remaining
+  authorized app.
 
 Grant revocation does not erase an app's copied secrets/history. App removal
 does not revoke its grant. Generation rotation limits delegated old-key access
@@ -113,18 +137,26 @@ Normal `restore_backup_state(backup)` / `restoreBackupString(backup)` requires
 empty or matching identity-only storage. Never overwrite healthy shared state
 with a stale app backup. Republish participating App Registry entries after
 restore and reconcile complete wallet execution history before automation.
+Restore retains peer authorization pins; a saved snapshot does not bypass checks
+against current signed keys.
 
 For missing/corrupt Pubky shared state, use
 `recover_shared_state_from_backup(backup, replacement_key)` (FFI takes an
-`SdkBackupBlob`, not the backup string). It needs current and successor keys;
-persist the successor first. It rejects healthy state, unreadable generation
+`SdkBackupBlob`, not the backup string). It needs the Pubky identity secret,
+authorizer grant, existing protected authorization, and current and root-derived
+successor keys; persist the successor first. Missing or conflicting authorization
+fails before replacement. It rejects healthy state, unreadable generation
 headers, unknown generations, and corrupt successor-generation state. Recovery
 loses data newer than the backup, discards old Noise checkpoints/prepared sends,
 and requires relinking and wallet reconciliation. Retry with the same keys and
 backup; already-recovered valid state is preserved, including subsequent work.
+Recovery publishes the replacement registry and authorization after committing
+state. Distribute the replacement key to remaining authorized apps before they
+resume private work.
 
 Sources: [identity keys/access](https://github.com/pubky/paykit-rs/blob/master/paykit-sdk/src/identity.rs),
 [shared storage](https://github.com/pubky/paykit-rs/blob/master/paykit-sdk/src/storage/pubky_shared.rs),
 [app lifecycle](https://github.com/pubky/paykit-rs/blob/master/paykit-sdk/src/runtime/app_registry.rs),
+[signed keys](https://github.com/pubky/paykit-rs/blob/master/paykit-sdk/src/runtime/noise_key_authorization.rs),
 [rotation](https://github.com/pubky/paykit-rs/blob/master/paykit-sdk/src/runtime/key_rotation.rs),
 [backup](https://github.com/pubky/paykit-rs/blob/master/paykit-sdk/src/runtime/backup.rs).

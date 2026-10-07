@@ -44,6 +44,13 @@ are separately opt-in, not app enrollment or proof of a live link. For display,
 profile updates/deletion use the fetched revision to reject concurrent edits;
 profile/avatar/blob publication is public, not private backup storage.
 
+Import selected contacts with `save_contacts(updates)` in one atomic transaction,
+not a remote save loop. It preserves unchanged records and does not unblock peers.
+For explicit user-authorized re-add/import that should unblock selected contacts,
+use `save_contacts_and_unblock_peers(updates)`; do not use it for label edits or
+automatic refresh. Unblocked peers still need a fresh Encrypted Link. FFI names
+are `saveContacts` and `saveContactsAndUnblockPeers`.
+
 ## Pay a Contact
 
 1. Choose public or private deliberately. Private preparation is
@@ -108,9 +115,13 @@ identities run receive and outbound workers, including Delivery Confirmations.
 2. Payer: query `actionable_received_payment_requests()` or
    `list_payment_requests(filter)`. Claim with
    `claim_payment_request_for_execution(counterparty, &payment_request_id)`
-   before payment preparation; shared claims coordinate local apps. Check terms
-   and consent, then accept or reject. A still-proposed request must be accepted
-   successfully before execution. A claim or Acceptance is not payment.
+   before payment preparation when reserving work early; shared claims coordinate
+   apps on the identity. Once terms and consent are checked, use
+   `claim_and_accept_payment_request` (FFI `claimAndAcceptPaymentRequest`) when
+   claim and Acceptance can happen together. It also accepts an existing claim
+   by this App, never one owned by another App. Success durably queues Acceptance,
+   not delivery or payment. A still-proposed request must be accepted successfully
+   before execution; reject instead when consent is declined.
 3. Resolve through the request-specific API and execute only through the wallet.
    Retain one execution identity per occurrence across manual/automatic paths.
    Do not release claims or unresolved reservations to let another app retry an
@@ -128,10 +139,26 @@ identities run receive and outbound workers, including Delivery Confirmations.
    and entitlement. Receipt Access, Receipt, Payment Proof, and product access
    grants are distinct objects.
 
+Request preparation can leave otherwise idle, unclaimed and unprepared Delivery
+Confirmations queued for maintenance while returning a validated payment target.
+Do not add an unconditional outbound drain just to show that target. Drive the
+durable queue in background maintenance; delivery can lag if the app stops.
+Likewise, queued Acceptance is distinct from its delivery. Neither permits
+skipping wallet validation, payment accounting, or uncertain-outcome recovery.
+
 Recurring requests still need app scheduling, user/local authorization, payment
 execution, and one-payment-per-Billing-Period policy. Cancellation is not a refund.
 For conversion/deadline features, establish peer support, preserve the selected
 quote with the execution, and validate payment timing/amount externally.
+`proposal_expires_at` limits acceptance; `payment_deadline` separately limits
+payment timing, including for accepted requests. Do not discard an uncertain
+payment or rebroadcast it merely because a deadline passed. Select conversion
+rates by the chosen endpoint: an explicit asset-rail rate takes precedence over
+an asset-wide rate, then same-asset parity. Never invent a missing cross-asset
+rate. Follow the [conversion contract](https://github.com/pubky/paykit-rs/blob/master/specs/payment-conversion.md)
+for fixed terms versus per-period quotes, manual approval and payment-time checks.
+Explicitly priced endpoints require manual approval, including same-asset fixed
+rail prices; an Allowance does not authorize repricing.
 
 For Allowance-based automation, use SDK accounting rather than a parallel local
 counter: reconcile complete wallet history, persist selection/association,

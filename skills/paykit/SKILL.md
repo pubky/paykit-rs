@@ -44,6 +44,10 @@ do not construct storage paths from unchecked strings.
   `paykit_app_registry(owner)`, not directory scans or Receiver Markers. The
   identity-wide App Registry advertises apps, capabilities, default preferences,
   and the current identity-wide Noise public key and generation.
+- Private setup also requires a Paykit Noise Key Authorization signed by the
+  Pubky identity. The authorizer publishes it before private enrollment or
+  delegation; ordinary delegated apps cannot write that authorization. Registry
+  key fields alone are not a trust anchor.
 - Private Payment Lists supersede older lists from the same App and aggregate
   across authorized apps. Preserve App ID attribution when selecting a target.
   App IDs do not cryptographically isolate mutually authorized apps.

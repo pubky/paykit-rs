@@ -4,8 +4,9 @@
 
 Use `ensure_link_with_peer(counterparty, max_advance_steps)`. It chooses roles,
 resumes persisted handshakes, checks recovery markers before reusing/advancing
-links, and detects changed registry Noise keys. It owns checkpoints and outbox
-cleanup. Do not independently reset Noise files, snapshots, keys, or queues.
+links, and validates current signed Noise keys against pinned authorization.
+It owns checkpoints and outbox cleanup. Do not independently reset Noise files,
+snapshots, keys, or queues.
 An identity's App Registry Noise key is not a per-peer Encrypted Link Recovery
 Marker; identity-wide key rotation is not the repair for one broken peer.
 
@@ -15,7 +16,7 @@ For an intentional repair of a stalled link, call
 `encrypted_link_recovery_marker_status(&counterparty)` before retrying. Do not
 request fresh recovery on every poll or mistake an offline peer for a broken link.
 
-One bounded Rust-method pseudocode cycle for a known counterparty:
+One bounded Rust-method pseudocode cycle for a pending/recovering counterparty:
 
 ```text
 link = await sdk.ensure_link_with_peer(counterparty, max_advance_steps)
@@ -29,22 +30,35 @@ inspect_reports(received, sent)
 
 Scheduling/inspection are app logic. Handle errors at each step, not by continuing
 with a stale handle. A locally `Linked` snapshot is not proof of remote liveness.
-For receive/outbound-only workers that bypass `ensure_link_with_peer`, use
-`observe_encrypted_link_recovery_marker(counterparty)` when checking remote
-recovery; observation can mutate local recovery state.
+Established-link intake already checks signed authorization, recovery markers,
+and the next message slot. Idle polling need not precede every receive with
+`ensure_link_with_peer` or unconditionally drain outbound work. For an explicit
+recovery check outside intake/preparation, use
+`observe_encrypted_link_recovery_marker(counterparty)`; observation can mutate
+local recovery state.
 
-All-peer workers use `receive_private_messages_from_linked_peers()` and
-`process_pending_private_messages()`. They do not advance `Linking` handshakes;
+All-peer intake uses `receive_private_messages_from_linked_peers()`; delivery
+maintenance uses `process_pending_private_messages()`. Idle intake batches share
+one state read and bound concurrent read-only probes. Keep maintenance scheduled
+even when no incoming message is found. These do not advance `Linking` handshakes;
 enumerate `linked_peers()` and schedule `ensure_link_with_peer` for pending or
 recovery-required peers too. For pay-contact UX,
 `prepare_and_resolve_private_contact_payment(counterparty, amount,
 after_private_payment_list_version, max_advance_steps)` performs bounded
 preparation and private-only resolution.
+Do not surround combined preparation with duplicate ensure/receive/resolve calls;
+inspect its reports and resume only work that remains pending. Listing saved
+requests through `list_payment_requests` does not itself perform network intake.
 
 The app owns background scheduling; a retry timer does not guarantee mobile
 background execution. Avoid overlapping per-peer workers and indefinite UI
 loops. A handshake step limit is not a network timeout. Shared-state contention
 can delay even reads: use the [busy/uncertainty policy](identity-state.md#live-shared-storage).
+Prioritize foreground work before queued maintenance; do not interrupt an active
+durable write to make room. Bound background batches, keep queued work cancellable,
+and validate identity/session ownership again after queue admission. Display
+caches must not replace fresh payment or authorization checks. Measure app queue
+wait separately from SDK execution rather than assuming more concurrency helps.
 
 ## Delivery and Replay
 
@@ -73,12 +87,12 @@ Never edit queue statuses to force replay or assign fresh IDs to uncertain work.
 | Observation | Action |
 | --- | --- |
 | Unavailable session/network | Preserve state; restore access/connectivity and retry |
-| Missing registry/Noise key | Resolve enrollment/key access, not an empty-state reset |
+| Missing registry/key or invalid signed authorization | Resolve enrollment/authorizer access; never trust unsigned registry keys or reset state |
 | Stored `Linking` with handshake | Advance later using the same keys/state |
 | `RecoveryRequired` thrown during preparation | Inspect `linked_peers()`; a pending handshake can produce this error before any resolution is returned |
 | Stored `RecoveryRequired` or remote marker/key change | Let the SDK ensure/recovery flow relink and resume eligible work |
 | Lease conflict or `ConcurrentUpdate` | Stop overlapping work, reload current state, retry with backoff |
-| `SharedStateBusy` | Allow pending write recovery/cooldown; no immediate retry loop |
+| `SharedStateBusy` | Back off after bounded lock contention or pending-write recovery; preserve credentials and intent, with no immediate retry loop |
 | Storage failure, corrupt state, or key-generation mismatch | Preserve evidence; repair access or use explicit backup recovery, never overwrite with empty state |
 | Invalid event, Event ID conflict, blocked peer, or policy rejection | Surface it; do not retry as a new event or silently unblock |
 

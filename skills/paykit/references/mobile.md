@@ -8,9 +8,9 @@ architecture and [Link Recovery](recovery.md) for workers/errors.
 
 ## Shared-State Setup
 
-Swift-shaped call-order example; the app supplies the providers. Set each
-`appCapabilities` flag to `true` only for a feature the app supports; this example
-starts with all flags disabled:
+Swift-shaped call-order example for a delegated app; the app supplies the
+providers. Set each `appCapabilities` flag to `true` only for a feature the app
+supports; this example starts with all flags disabled:
 
 ```text
 config = defaultConfig(appId: "example-wallet")
@@ -36,6 +36,15 @@ registry = await sdk.publishPaykitApp(
 Use `sessionCapabilities` (a `String`) when authorizing the Pubky session behind
 `sessionProvider`. The `appCapabilities` record advertises supported features in
 the App Registry; it does not grant session permissions.
+
+An authorizer holding the Pubky identity secret instead requests
+`paykitAuthorizerSessionCapabilities()`. With the current Paykit key in its
+session access, it calls `publishPaykitNoiseKeyAuthorization()` after initialization
+and before private app publication or delegation. Delegated apps use
+`requiredSessionCapabilities()` and the key received from that authorizer;
+they do not receive authority-path write access or publish the authorization.
+Enabling private flags requires the matching signed authorization to exist.
+See [Identity and State](identity-state.md#startup-and-access) for key handling.
 
 This constructor has no `stateStore` parameter or `SdkStateBlobStore` callbacks.
 `withPaymentAdapterAndPubkySharedStateAndClientConfig` adds `pubkyClient`.
@@ -116,10 +125,18 @@ Return a new nonempty revision never reused for another blob; reject decode
 errors rather than loading empty state. Protect these plaintext blobs at rest.
 
 `exportBackupString()` is a separate, unencrypted hex export, not the live Pubky
-resource. Encrypt it at the app backup boundary. Compare `backupStateRevision()`
-before/after mutations, including a `finally` path after failures, to schedule
-backup; failed comparison means conservatively dirty. This excludes transient
-leases and is not `stateRevision()` or a storage CAS token. Restore/recovery
+resource. Encrypt it at the app backup boundary. For shared storage, inspect
+`observedBackupStateRevision()` after completed SDK work and compare its
+`backupRevision` with the last backed-up fingerprint. It makes no storage or
+session calls. This observation is not fresh remote state, payment readiness,
+or authorization. Clear app-cached observations on identity, key, session, or
+runtime reset. Failed workflows can have committed changes: keep backups pending
+after failures or unknown observations rather than treating them as unchanged.
+
+Use `backupStateRevision()` when a fresh read is needed or callback storage has
+no observation; failed comparison means conservatively dirty. Coalesce pending
+backup work without losing it. The backup fingerprint excludes transient leases
+and is not `stateRevision()` or a storage CAS token. Restore/recovery
 constraints and key handling are in [Identity and State](identity-state.md#backups-and-restore).
 
 Android callback-supplied blob, payment-payload, and reservation-attribution
