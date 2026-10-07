@@ -10,6 +10,7 @@ mod encrypted_link_recovery;
 mod error;
 mod event;
 mod noise_key;
+mod noise_key_authorization;
 mod payment_amount;
 mod payment_endpoint;
 mod payment_reference;
@@ -51,7 +52,8 @@ pub use encrypted_link::{
     initiate_encrypted_link, restore_encrypted_link, restore_encrypted_link_from_config,
     restore_encrypted_link_handshake, restore_encrypted_link_handshake_from_config, EncryptedLink,
     EncryptedLinkHandshake, EncryptedLinkHandshakeSnapshot, EncryptedLinkRecoveryContext,
-    EncryptedLinkSnapshot, HandshakeProgress, PreparedPrivateApplicationMessageReceive,
+    EncryptedLinkSnapshot, HandshakeAdvanceError, HandshakeProgress,
+    PreparedEncryptedLinkHandshakeStep, PreparedPrivateApplicationMessageReceive,
     PreparedPrivateApplicationMessageSend, PrivateApplicationMessage, PrivateMessageKind,
     DEFAULT_MAX_RECOVERY_ATTEMPTS, DEFAULT_MAX_SEND_RETRIES,
     PRIVATE_APPLICATION_MESSAGE_RECEIVE_LIMIT,
@@ -69,6 +71,11 @@ pub use error::PaykitError;
 pub use event::EventId;
 #[doc(inline)]
 pub use noise_key::{derive_paykit_noise_public_key, derive_paykit_noise_secret_key};
+#[doc(inline)]
+pub use noise_key_authorization::{
+    get_paykit_noise_key_authorization, publish_paykit_noise_key_authorization,
+    PaykitNoiseKeyAuthorization,
+};
 #[doc(inline)]
 pub use payment_amount::PaymentAmount;
 #[doc(inline)]
@@ -105,8 +112,9 @@ pub use pubky_routing::{
     content_revision, delete_resource_if_revision, fetch_payment_endpoint_revision,
     fetch_resource_revision, is_write_conflict, list_payment_endpoint_identifiers,
     put_resource_if_revision, with_write_lock, PAYKIT_APP_REGISTRY_PATH,
-    PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX, PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX,
-    PAYKIT_SHARED_STATE_PATH, PAYKIT_SHARED_STATE_WRITE_PATH_PREFIX,
+    PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX, PAYKIT_NOISE_KEY_AUTHORIZATION_PATH,
+    PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX, PAYKIT_SHARED_STATE_PATH,
+    PAYKIT_SHARED_STATE_WRITE_PATH_PREFIX,
 };
 #[doc(inline)]
 pub use receipt::{

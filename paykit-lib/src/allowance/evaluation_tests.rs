@@ -306,3 +306,40 @@ fn test_calendar_period_capacity_does_not_reopen_when_clock_crosses_midnight_bac
 }
 
 mod periods;
+
+#[test]
+fn test_allowance_matching_excludes_explicitly_priced_endpoints() {
+    let terms = AllowanceTerms::builder("usdt")
+        .lifetime_amount_limit("100")
+        .build()
+        .unwrap();
+    let request = PaymentRequestTerms::builder(
+        PaymentAmount::new("10", "usdt").unwrap(),
+        PaymentReference::new("invoice-1").unwrap(),
+        vec![
+            endpoint("usdt-polygon-address"),
+            endpoint("usdt-arbitrum-address"),
+        ],
+    )
+    .conversion(Some(crate::PaymentConversion::Fixed {
+        rates: vec![crate::ConversionRate {
+            asset: "usdt-polygon".into(),
+            value: "1.008".into(),
+        }],
+    }))
+    .build()
+    .unwrap();
+    assert_eq!(
+        match_allowance_request(&terms, &request).unwrap(),
+        vec![endpoint("usdt-arbitrum-address")]
+    );
+    let restricted = AllowanceTerms::builder("usdt")
+        .lifetime_amount_limit("100")
+        .allowed_payment_endpoint_identifiers(vec![endpoint("usdt-polygon-address")])
+        .build()
+        .unwrap();
+    assert_eq!(
+        match_allowance_request(&restricted, &request),
+        Err(AllowanceEvaluationBlock::NoEligibleEndpoint)
+    );
+}

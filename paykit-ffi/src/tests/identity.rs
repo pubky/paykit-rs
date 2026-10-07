@@ -5,13 +5,12 @@ use paykit_sdk::{
     PAYKIT_SESSION_CAPABILITIES,
 };
 use pubky_testnet::{docker_postgres::DockerPostgres, EphemeralTestnet};
-use tokio::sync::{Mutex as TokioMutex, OnceCell};
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::*;
 
 const TEST_CLIENT_ID: &str = "paykit.test";
 
-static SHARED_POSTGRES: OnceCell<DockerPostgres> = OnceCell::const_new();
 static TESTNET_BUILD_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 
 async fn build_testnet() -> EphemeralTestnet {
@@ -19,12 +18,7 @@ async fn build_testnet() -> EphemeralTestnet {
     let builder = if std::env::var_os("TEST_PUBKY_CONNECTION_STRING").is_some() {
         EphemeralTestnet::builder()
     } else {
-        let postgres = SHARED_POSTGRES
-            .get_or_init(|| async {
-                DockerPostgres::start()
-                    .await
-                    .expect("failed to start Docker Postgres")
-            })
+        let postgres = DockerPostgres::shared()
             .await
             .connection_string()
             .expect("Docker Postgres connection string should be valid");

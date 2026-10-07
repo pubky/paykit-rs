@@ -111,12 +111,13 @@ impl PaykitAppRegistry {
         }
     }
 
-    /// Return the generation of identity-wide Paykit key material.
+    /// Return the advertised generation; verify the signed Noise key authorization before use.
     pub fn key_generation(&self) -> u64 {
         self.key_generation
     }
 
-    /// Return the identity-wide Noise public key, when initialized.
+    /// Return the advertised Noise public key, when initialized.
+    /// This is discovery metadata, not identity-signed authorization.
     pub fn noise_public_key(&self) -> Option<&PublicKey> {
         self.noise_public_key.as_ref()
     }

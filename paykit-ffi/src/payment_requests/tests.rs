@@ -374,7 +374,7 @@ fn test_conversion_terms_and_quote_selection_survive_bindings() {
         recurrence: None,
         conversion: Some(FfiPaymentConversion::Fixed {
             rates: vec![FfiConversionRate {
-                asset: "usdt".into(),
+                asset: "usdt-arbitrum".into(),
                 value: "1".into(),
             }],
         }),

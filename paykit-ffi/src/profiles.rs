@@ -425,6 +425,49 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
+    /// Save or update Contact Records in one atomic storage transaction.
+    ///
+    /// All updates are validated before any record changes. Records are returned
+    /// in input order, including duplicates; the last update for a key wins in
+    /// storage. An empty batch still requires an initialized identity and leaves
+    /// stored state unchanged. Existing profile and Public Contact Marker metadata
+    /// is preserved; marker publication and unblocking peers remain separate.
+    pub async fn save_contacts(
+        &self,
+        updates: Vec<FfiContactUpdate>,
+    ) -> Result<Vec<FfiContactRecord>, PaykitFfiError> {
+        let updates = updates
+            .into_iter()
+            .map(ContactUpdate::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.runtime
+            .save_contacts(updates)
+            .await
+            .map(|records| records.into_iter().map(Into::into).collect())
+            .map_err(Into::into)
+    }
+
+    /// Save contacts and unblock selected blocked peers in one atomic transaction.
+    ///
+    /// For explicit contact additions or restoration, not label edits. Unblocked
+    /// peers need a fresh Encrypted Link; other links remain unchanged. Ordering,
+    /// duplicates and metadata follow `save_contacts`. Invalid input or an active
+    /// lease on a selected blocked peer rejects the entire batch.
+    pub async fn save_contacts_and_unblock_peers(
+        &self,
+        updates: Vec<FfiContactUpdate>,
+    ) -> Result<Vec<FfiContactRecord>, PaykitFfiError> {
+        let updates = updates
+            .into_iter()
+            .map(ContactUpdate::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.runtime
+            .save_contacts_and_unblock_peers(updates)
+            .await
+            .map(|records| records.into_iter().map(Into::into).collect())
+            .map_err(Into::into)
+    }
+
     /// Return one Contact Record.
     pub async fn contact_record(
         &self,
@@ -455,6 +498,26 @@ impl FfiPaykitSdk {
             .remove_contact(&parse_public_key(public_key)?)
             .await
             .map(|record| record.map(Into::into))
+            .map_err(Into::into)
+    }
+
+    /// Block and remove contacts in one shared-state transaction.
+    ///
+    /// Returns removed records. Busy peers remain unchanged; contacts with public
+    /// markers are blocked but retained. Callers enforce subscription policy and
+    /// perform any best-effort withdrawal before this operation.
+    pub async fn remove_contacts_and_block_peers(
+        &self,
+        public_keys: Vec<String>,
+    ) -> Result<Vec<FfiContactRecord>, PaykitFfiError> {
+        let public_keys = public_keys
+            .into_iter()
+            .map(parse_public_key)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.runtime
+            .remove_contacts_and_block_peers(public_keys)
+            .await
+            .map(|records| records.into_iter().map(Into::into).collect())
             .map_err(Into::into)
     }
 

@@ -140,6 +140,7 @@ async fn test_persist_private_stream_batch_stores_messages_and_checkpoint() {
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
                 Ok(())
             }
@@ -676,6 +677,7 @@ async fn test_persist_private_stream_batch_empty_checkpoint_updates_sync_time() 
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
                 Ok(())
             }

@@ -88,7 +88,7 @@ pub struct FfiPaymentRequestRecurrence {
 /// Units of payment asset owed per requested asset unit.
 #[derive(uniffi::Record, Clone, PartialEq, Eq)]
 pub struct FfiConversionRate {
-    /// Payment asset code.
+    /// Payment asset or asset-rail selector; `usdt-polygon` overrides `usdt`.
     pub asset: String,
     /// Positive decimal multiplier; never convert through floating point.
     pub value: String,
@@ -482,6 +482,20 @@ impl FfiPaykitSdk {
         let payment_request_id = parse_payment_request_id(payment_request_id)?;
         self.runtime
             .accept_payment_request(parse_public_key(counterparty)?, &payment_request_id)
+            .await
+            .map_err(Into::into)
+            .and_then(FfiPaymentRequestRecord::try_from)
+    }
+
+    /// Atomically claim a received Payment Request and durably queue acceptance, without sending it.
+    pub async fn claim_and_accept_payment_request(
+        &self,
+        counterparty: String,
+        payment_request_id: String,
+    ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
+        let payment_request_id = parse_payment_request_id(payment_request_id)?;
+        self.runtime
+            .claim_and_accept_payment_request(parse_public_key(counterparty)?, &payment_request_id)
             .await
             .map_err(Into::into)
             .and_then(FfiPaymentRequestRecord::try_from)

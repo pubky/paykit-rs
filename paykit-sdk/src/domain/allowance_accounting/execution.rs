@@ -9,17 +9,29 @@ fn execution_wallet_checks(
     checks: &PaymentExecutionChecks,
     mode: &PaymentExecutionMode,
 ) -> bool {
-    // Manual cross-asset execution relies on the wallet's fresh conversion
-    // attestation in local_enabled. It never consumes Allowance capacity.
-    let converted_manual = *mode == PaymentExecutionMode::Manual
-        && terms.amount().asset() != checks.actual_amount.asset();
+    // Manual execution relies on the wallet's pricing attestation, but fixed terms
+    // must cover the endpoint or allow implicit same-asset 1:1 pricing.
+    let amount_valid = match terms.conversion() {
+        Some(paykit_lib::PaymentConversion::Fixed { rates }) => {
+            paykit_lib::ConversionRate::for_endpoint(rates, &checks.payment_endpoint_identifier)
+                .is_ok_and(|rate| match rate {
+                    Some(_) => *mode == PaymentExecutionMode::Manual,
+                    None => same_amount(terms.amount(), &checks.actual_amount),
+                })
+        }
+        _ => {
+            same_amount(terms.amount(), &checks.actual_amount)
+                || (*mode == PaymentExecutionMode::Manual
+                    && terms.amount().asset() != checks.actual_amount.asset())
+        }
+    };
     checks.endpoint_current
         && checks.local_enabled
         && checks.recurrence_eligible
         && terms
             .accepted_payment_endpoint_identifiers()
             .contains(&checks.payment_endpoint_identifier)
-        && (converted_manual || same_amount(terms.amount(), &checks.actual_amount))
+        && amount_valid
 }
 
 fn same_amount(left: &paykit_lib::PaymentAmount, right: &paykit_lib::PaymentAmount) -> bool {

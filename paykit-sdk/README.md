@@ -34,12 +34,31 @@ aggregated across apps when resolving a private payment.
 
 Public-only apps may publish registry entries and public Payment Endpoints
 before the identity-wide Noise key is initialized. Private capabilities require
-identity-wide Paykit key material and initialize the registry's Noise key.
+identity-wide Paykit key material and a signed Noise key authorization.
+
+### Noise Key Authorization
+
+Before private app publication or delegation, the identity authorizer calls
+`publish_paykit_noise_key_authorization`. It needs the current Paykit key,
+the Pubky identity secret, and `PAYKIT_AUTHORIZER_SESSION_CAPABILITIES`:
+`/pub/paykit/:rw,/pub/paykit-authority/v0/current-key.json:rw`.
+Ordinary apps receive only the Paykit secret and `/pub/paykit/:rw`; they must
+never receive write access to the authority path.
+
+Encrypted Links trust the identity-signed routing/static keys and generation,
+not unsigned App Registry key fields. The SDK pins peer authorizations in shared
+state and backups and checks authenticated static keys before completed or
+restored links carry messages. Missing, malformed, or conflicting authorization
+fails closed. See the [Shared Identity Model](../specs/paykit-sdk.md#shared-identity-model)
+for publication, generation, and trust rules.
 
 Multiple app processes using the same identity must also use the same durable
 SDK state. The SDK ships `PubkySharedStateStorage`, which stores that logical
-state as one encrypted Pubky resource and holds a renewable WebDAV write lock
-across each read-modify-write transaction. Separate local state blobs are only
+state as one encrypted Pubky resource. Bounded SDK operations reuse a renewable
+WebDAV write lock and the latest decrypted state across their transactions.
+Each changed transaction is durably saved before returning; an operation error
+does not roll back earlier checkpoints. Locks are released between outbound
+messages and before wallet callbacks. Separate local state blobs are only
 suitable when one process owns the runtime. Private sends durably couple the exact prepared
 ciphertext with the advanced Encrypted Link snapshot before publication.
 
@@ -112,7 +131,7 @@ let sdk = PaykitSdk::new(storage, pubky, payment, config);
 let status = sdk.initialize().await?;
 
 if status.capability == paykit_sdk::PubkyIdentityCapability::PrivateLinkCapable {
-    // Private Paykit workflows can run for linked peers.
+    // Private workflows also require current signed Noise key authorization.
 }
 # Ok(())
 # }
@@ -178,7 +197,16 @@ Common workflows:
   authorized app must persist it before private work resumes
 - call `receive_private_messages` before deriving Private Payment Lists,
   Payment Requests, Allowances, Receipt Access state, or resolving a private
-  contact payment when the freshest private endpoints matter
+  contact payment when the freshest private endpoints matter. Idle checks verify
+  signed key authorization, recovery markers, and the next message slot without
+  claiming a peer lease or rewriting shared state. Batch intake shares one state
+  read and probes up to sixteen peers concurrently. Available messages are prepared
+  read-only, then committed atomically with their checkpoint only if the link and
+  authorization remain current and no peer lease intervenes. App authorization
+  updates share the first message commit. Recovery reloads state under a lease;
+  message processing remains one peer at a time
+- list saved Payment Requests with `payment_requests` or `list_payment_requests`;
+  all counterparties and filters use one shared-state read, without network intake
 - use `propose_allowance`, `accept_allowance`, `reject_allowance`, and
   `end_allowance` for durable lifecycle intent; drain the normal outbound queue
   and use `allowance_record` or `list_allowances` for derived views
@@ -200,7 +228,11 @@ Common workflows:
   `resolve_private_payment_request`, `resolve_public_payment_request`, or
   `prepare_and_resolve_private_payment_request`; these use the request amount
   and enforce its accepted endpoint identifiers and required payee App before
-  invoking the payment adapter
+  invoking the payment adapter. Request preparation still performs fresh private
+  intake and final validation, but leaves an otherwise idle queue of unclaimed,
+  unprepared Delivery Confirmations durable for later outbound processing.
+  Callers must drive maintenance; preparation does not schedule a worker or
+  guarantee when those confirmations will be delivered
 - build receipt drafts with `ReceiptDraftBuilder`; call
   `prepare_receipt_issuance` before receipt network side effects, then
   `process_receipt_issuance`; use `issue_receipt` only when the draft already
@@ -389,13 +421,20 @@ For testing, shared-state writes publish a unique pending marker before their
 PUT and remove it after a confirmed result. An unconfirmed write leaves its
 marker; the next transaction waits five minutes under a renewed lock, then
 reloads state. Cancellation leaves the marker and restarts the wait on the next
-attempt. If another runtime cannot acquire the lock and pending markers exist
-or cannot be checked, it receives `SharedStateBusy`, not a retryable
-`ConcurrentUpdate`; back off and show
-recovery as pending. This can also block reads, and there is no fixed completion
+attempt. A runtime that exhausts lock acquisition retries receives
+`SharedStateBusy`, not a revision-conflict `ConcurrentUpdate`. The holder may
+be doing normal work or waiting for recovery; back off and keep the operation
+pending. This can also block reads, and there is no fixed completion
 deadline. The cooldown adds no timed delay to normal successful writes,
 but cannot rule out a write completing after five
 minutes and does not replace the homeserver fix.
+Explicit PUT rejections for lock expiry (412), rate limiting (429), or storage
+quota (507) clear that attempt's pending marker without a cooldown, provided
+cleanup succeeds.
+Rate-limit errors remain transport errors; callers should back off before
+resuming from freshly loaded state. Any other failure, including timeouts,
+connection errors, and other 4xx/5xx responses, keeps the pending marker because
+publication is uncertain.
 Malformed pending markers block shared state instead of being ignored or
 deleted automatically. Investigate them with participating apps stopped before
 removing anything that could represent an unfinished write.
@@ -435,20 +474,19 @@ publish their App Registry entries again after restore. Restore preserves
 terminal invalid and recovery-required outbound private records for audit,
 while pending, sending, failed, sent, and superseded outbound records are
 validated before restore.
-Restored Encrypted Link checkpoints resume when they are valid. Missing or
-unsafe checkpoints mark affected peers recovery-required so private automation
-pauses until relink.
+Restore retains peer authorization pins; checkpoints resume only after the
+[current signed-key checks](../specs/paykit-sdk.md#establish-encrypted-link).
+Missing or unsafe checkpoints pause private automation until relink.
 
 For missing or corrupt Pubky shared state, use
-`recover_shared_state_from_backup(backup, replacement_key)` with the current key
-and its successor. Persist the replacement key first, then distribute it after
-recovery. This preserves backup history but discards old Noise checkpoints and
-prepared sends; links must recover and payments require wallet reconciliation.
-It rejects healthy state, unreadable generation headers, and unknown generations.
-Retry an interrupted recovery with the same keys and backup; valid committed
-replacement state is preserved. Corrupt replacement-generation state is rejected,
-not overwritten under keys that may already have been used.
-Data newer than the backup cannot be recovered.
+`recover_shared_state_from_backup(backup, replacement_key)` with a matching
+trusted backup, active `PAYKIT_AUTHORIZER_SESSION_CAPABILITIES` session, Pubky
+identity secret, current Paykit key and its derived successor, and existing
+protected authorization. Missing, malformed, or conflicting authorization fails
+before replacement. Persist the replacement key first; recovery commits state,
+updates the App Registry, then publishes replacement authorization. See
+[Backup And Restore](../specs/paykit-sdk.md#backup-and-restore) for same-key retries,
+key distribution, relinking/reconciliation, and supported persisted formats.
 
 Losing the durable SDK state without a backup means losing access to private
 Paykit runtime state. Public Paykit data can be rediscovered from Pubky, but

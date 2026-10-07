@@ -82,7 +82,7 @@ fn quote(id: &str, request: &PaymentRequest) -> PaymentConversionQuote {
         request.payment_request_id().clone(),
         BillingPeriod::new("2026-06-01T00:00:00Z", "2026-07-01T00:00:00Z").unwrap(),
         vec![ConversionRate {
-            asset: "usdt".into(),
+            asset: "usdt-arbitrum".into(),
             value: "50000".into(),
         }],
         "2026-06-01T00:00:00Z".into(),

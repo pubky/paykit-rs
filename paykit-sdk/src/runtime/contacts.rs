@@ -7,23 +7,125 @@ where
     P: PaymentAdapter,
     C: Clock,
 {
-    /// Save or update a Contact Record.
+    /// Save or update a Contact Record. Unchanged records retain their timestamps.
     pub async fn save_contact(&self, update: ContactUpdate) -> Result<ContactRecord> {
         update.validate()?;
-        let local_public_key = self.require_initialized_identity("save contact").await?;
-        if update.public_key == local_public_key {
-            return Err(PaykitSdkError::Policy {
-                context: "cannot save the local Paykit identity as a contact".into(),
-                source: None,
-            });
+        let now = self.clock.now();
+        self.storage
+            .transaction(move |tx| {
+                let local_public_key = initialized_identity_in_transaction(tx, "save contact")?;
+                if update.public_key == local_public_key {
+                    return Err(PaykitSdkError::Policy {
+                        context: "cannot save the local Paykit identity as a contact".into(),
+                        source: None,
+                    });
+                }
+                Ok(save_contact_in_transaction(tx, update, now))
+            })
+            .await
+    }
+
+    /// Save or update Contact Records in one atomic storage transaction.
+    ///
+    /// All updates and the initialized identity are checked before any record
+    /// changes. Records are returned in input order. Duplicate keys are applied
+    /// in that order, so the last update wins in storage; each returned record
+    /// reflects its corresponding update. New or changed records use one operation
+    /// timestamp; unchanged records retain their timestamps.
+    /// An empty batch still requires an initialized identity and leaves stored
+    /// state unchanged.
+    ///
+    /// Existing profile and Public Contact Marker metadata is preserved. This
+    /// does not publish markers or unblock peers.
+    pub async fn save_contacts(&self, updates: Vec<ContactUpdate>) -> Result<Vec<ContactRecord>> {
+        for update in &updates {
+            update.validate()?;
         }
         let now = self.clock.now();
         self.storage
             .transaction(move |tx| {
-                let existing = tx.contact_record(&update.public_key);
-                let record = ContactRecord::from_update(update, existing, now);
-                tx.save_contact_record(record.clone());
-                Ok(record)
+                let local_public_key = initialized_identity_in_transaction(tx, "save contacts")?;
+                if updates
+                    .iter()
+                    .any(|update| update.public_key == local_public_key)
+                {
+                    return Err(PaykitSdkError::Policy {
+                        context: "cannot save the local Paykit identity as a contact".into(),
+                        source: None,
+                    });
+                }
+                Ok(updates
+                    .into_iter()
+                    .map(|update| save_contact_in_transaction(tx, update, now))
+                    .collect())
+            })
+            .await
+    }
+
+    /// Save Contact Records and unblock their peers in one atomic transaction.
+    ///
+    /// Use this when the user explicitly adds or restores contacts, not for label
+    /// edits. Only selected blocked peers are unblocked; existing links and
+    /// unselected peers are unchanged. Unblocked peers need a fresh Encrypted Link.
+    /// Contact ordering, duplicate keys, timestamps and metadata follow `save_contacts`.
+    /// Invalid updates, the local identity, or an active lease on a selected blocked
+    /// peer reject the entire batch without changing contacts or peer state.
+    pub async fn save_contacts_and_unblock_peers(
+        &self,
+        updates: Vec<ContactUpdate>,
+    ) -> Result<Vec<ContactRecord>> {
+        for update in &updates {
+            update.validate()?;
+        }
+        self.storage
+            .transaction(move |tx| {
+                let local = initialized_identity_in_transaction(tx, "restore contacts")?;
+                let now = self.clock.now();
+                for update in &updates {
+                    if update.public_key == local {
+                        return Err(PaykitSdkError::Policy {
+                            context: "cannot save the local Paykit identity as a contact".into(),
+                            source: None,
+                        });
+                    }
+                    if tx
+                        .linked_peer(&update.public_key)
+                        .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
+                        && tx
+                            .peer_link_operation_lease(&update.public_key)
+                            .is_some_and(|lease| lease.expires_at > now)
+                    {
+                        return Err(PaykitSdkError::ConcurrentUpdate {
+                            context: format!(
+                                "peer link operation already in progress for counterparty {}",
+                                update.public_key
+                            ),
+                            source: None,
+                        });
+                    }
+                }
+                updates
+                    .into_iter()
+                    .map(|update| {
+                        if tx
+                            .linked_peer(&update.public_key)
+                            .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
+                        {
+                            super::encrypted_links::unblock_peer_in_transaction(
+                                tx,
+                                &update.public_key,
+                                now,
+                            )?
+                            .ok_or_else(|| {
+                                PaykitSdkError::ConcurrentUpdate {
+                                    context: "peer link operation already in progress".into(),
+                                    source: None,
+                                }
+                            })?;
+                        }
+                        Ok(save_contact_in_transaction(tx, update, now))
+                    })
+                    .collect()
             })
             .await
     }
@@ -33,17 +135,21 @@ where
         &self,
         public_key: &PubkyPublicKey,
     ) -> Result<Option<ContactRecord>> {
-        self.require_initialized_identity("load contact").await?;
         self.storage
-            .transaction(|tx| Ok(tx.contact_record(public_key)))
+            .transaction(|tx| {
+                initialized_identity_in_transaction(tx, "load contact")?;
+                Ok(tx.contact_record(public_key))
+            })
             .await
     }
 
     /// List Contact Records.
     pub async fn contact_records(&self) -> Result<Vec<ContactRecord>> {
-        self.require_initialized_identity("list contacts").await?;
         self.storage
-            .transaction(|tx| Ok(tx.contact_records()))
+            .transaction(|tx| {
+                initialized_identity_in_transaction(tx, "list contacts")?;
+                Ok(tx.contact_records())
+            })
             .await
     }
 
@@ -52,9 +158,9 @@ where
         &self,
         public_key: &PubkyPublicKey,
     ) -> Result<Option<ContactRecord>> {
-        self.require_initialized_identity("remove contact").await?;
         self.storage
             .transaction(|tx| {
+                initialized_identity_in_transaction(tx, "remove contact")?;
                 let Some(existing) = tx.contact_record(public_key) else {
                     return Ok(None);
                 };
@@ -69,6 +175,56 @@ where
                 Ok(tx.remove_contact_record(public_key))
             })
             .await
+    }
+
+    /// Block saved contacts and remove their Contact Records in one transaction.
+    ///
+    /// Returns only removed records, in input order without duplicates. A contact
+    /// with an active peer lease is left unchanged. A contact with a Public Contact
+    /// Marker is blocked but retained until its marker is removed. These skipped
+    /// records do not prevent other contacts from being removed. Storage failures
+    /// roll back the entire batch; a local-identity key rejects it before mutation.
+    ///
+    /// Blocking discards Encrypted Link state and retires pending private work, as
+    /// in `block_peer`. This does not withdraw published Payment Lists or cancel
+    /// subscriptions. Callers must apply their subscription policy and perform any
+    /// best-effort withdrawal before blocking.
+    pub async fn remove_contacts_and_block_peers(
+        &self,
+        public_keys: Vec<PubkyPublicKey>,
+    ) -> Result<Vec<ContactRecord>> {
+        self.retry_storage_transaction(|| {
+            let public_keys = public_keys.clone();
+            move |tx| {
+                let local = initialized_identity_in_transaction(tx, "remove contacts")?;
+                if public_keys.contains(&local) {
+                    return Err(PaykitSdkError::Policy {
+                        context: "cannot block the local Paykit identity".into(),
+                        source: None,
+                    });
+                }
+                let now = self.clock.now();
+                let mut seen = std::collections::HashSet::new();
+                let mut removed = Vec::new();
+                for public_key in public_keys {
+                    if !seen.insert(public_key.clone()) {
+                        continue;
+                    }
+                    let Some(record) = tx.contact_record(&public_key) else {
+                        continue;
+                    };
+                    if super::encrypted_links::block_peer_in_transaction(tx, &public_key, now)?
+                        .is_some()
+                        && record.can_remove_locally()
+                    {
+                        tx.remove_contact_record(&public_key);
+                        removed.push(record);
+                    }
+                }
+                Ok(removed)
+            }
+        })
+        .await
     }
 
     /// Fetch a contact's public profile and cache it in the Contact Record.
@@ -345,6 +501,17 @@ where
             })
             .await
     }
+}
+
+fn save_contact_in_transaction(
+    tx: &mut dyn StorageTransaction,
+    update: ContactUpdate,
+    now: DateTime<Utc>,
+) -> ContactRecord {
+    let existing = tx.contact_record(&update.public_key);
+    let record = ContactRecord::from_update(update, existing, now);
+    tx.save_contact_record(record.clone());
+    record
 }
 
 fn require_pending_contact_marker(

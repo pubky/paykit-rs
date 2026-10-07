@@ -7,6 +7,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{
     domain::contacts::ContactRecord,
@@ -337,6 +338,20 @@ fn storage_state_is_empty_except_identity(state: &StorageState) -> bool {
 }
 
 impl SdkBackupState {
+    /// Return a canonical content fingerprint, not a storage compare-and-swap revision.
+    pub fn content_fingerprint(&self) -> Result<String> {
+        let bytes = serde_json::to_value(self)
+            .and_then(|mut value| {
+                value.sort_all_objects();
+                serde_json::to_vec(&value)
+            })
+            .map_err(|_| PaykitSdkError::Storage {
+                context: "failed to encode SDK backup".into(),
+                source: None,
+            })?;
+        Ok(hex::encode(Sha256::digest(bytes)))
+    }
+
     pub(crate) fn from_storage_state(state: StorageState) -> Self {
         let mut linked_peers = state.linked_peers.into_values().collect::<Vec<_>>();
         linked_peers
@@ -576,7 +591,7 @@ impl SdkBackupState {
             &mut linked_peers,
             &encrypted_link_states,
             &outbound_private_messages,
-        );
+        )?;
         clear_recovery_required_link_snapshots(
             &mut encrypted_link_states,
             &recovery_required_peers,

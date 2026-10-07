@@ -127,6 +127,7 @@ pub(crate) fn default_linked_peer(counterparty: PubkyPublicKey) -> LinkedPeerRec
         local_recovery_marker_last_error: None,
         remote_recovery_attempt_id: None,
         remote_recovery_marker_observed_at: None,
+        noise_key_authorization: None,
     }
 }
 
@@ -138,46 +139,6 @@ fn ensure_not_blocked(peer: &LinkedPeerRecord) -> Result<()> {
         });
     }
     Ok(())
-}
-
-fn report_current_link_state(
-    counterparty: PubkyPublicKey,
-    peer: &mut LinkedPeerRecord,
-    link_state: &EncryptedLinkStateRecord,
-    now: DateTime<Utc>,
-) -> LinkedPeerHandshakeReport {
-    if link_state.link_snapshot.is_some() {
-        peer.state = LinkedPeerState::Linked;
-        peer.last_sync_at = Some(now);
-        peer.failure_count = 0;
-        LinkedPeerHandshakeReport {
-            counterparty,
-            state: LinkedPeerState::Linked,
-            generation: link_state.generation,
-            handshake_role: None,
-        }
-    } else if link_state.handshake_snapshot.is_some() {
-        peer.state = LinkedPeerState::Linking;
-        peer.last_sync_at = Some(now);
-        peer.failure_count = 0;
-        LinkedPeerHandshakeReport {
-            counterparty,
-            state: LinkedPeerState::Linking,
-            generation: link_state.generation,
-            handshake_role: link_state.handshake_role,
-        }
-    } else {
-        peer.state = LinkedPeerState::RecoveryRequired;
-        if peer.last_sync_at.is_none() {
-            peer.last_sync_at = Some(now);
-        }
-        LinkedPeerHandshakeReport {
-            counterparty,
-            state: LinkedPeerState::RecoveryRequired,
-            generation: link_state.generation,
-            handshake_role: None,
-        }
-    }
 }
 
 /// Save a Linked Peer state update.
@@ -244,8 +205,8 @@ where
                     source: None,
                 });
             }
-            if record.state == LinkedPeerState::Linked
-                && state == LinkedPeerState::Linked
+            if matches!(state, LinkedPeerState::Linking | LinkedPeerState::Linked)
+                && record.state == state
                 && record.failure_count == 0
             {
                 return Ok(record);
@@ -500,121 +461,6 @@ where
     .await
 }
 
-/// Persist an in-progress handshake only if the stored generation is unchanged.
-#[cfg(test)]
-pub(crate) async fn save_link_handshake_state_if_generation<S>(
-    storage: &S,
-    counterparty: PubkyPublicKey,
-    handshake_role: EncryptedLinkHandshakeRole,
-    handshake_snapshot: Vec<u8>,
-    expected_generation: u64,
-    now: DateTime<Utc>,
-) -> Result<LinkedPeerHandshakeReport>
-where
-    S: StorageAdapter,
-{
-    save_link_handshake_state_if_generation_inner(
-        storage,
-        counterparty,
-        handshake_role,
-        handshake_snapshot,
-        expected_generation,
-        None,
-        now,
-    )
-    .await
-}
-
-/// Persist an in-progress handshake if generation and lease still match.
-pub(crate) async fn save_link_handshake_state_if_generation_with_lease<S>(
-    storage: &S,
-    counterparty: PubkyPublicKey,
-    handshake_role: EncryptedLinkHandshakeRole,
-    handshake_snapshot: Vec<u8>,
-    expected_generation: u64,
-    lease: PeerLinkOperationLease,
-    now: DateTime<Utc>,
-) -> Result<LinkedPeerHandshakeReport>
-where
-    S: StorageAdapter,
-{
-    save_link_handshake_state_if_generation_inner(
-        storage,
-        counterparty,
-        handshake_role,
-        handshake_snapshot,
-        expected_generation,
-        Some(lease),
-        now,
-    )
-    .await
-}
-
-async fn save_link_handshake_state_if_generation_inner<S>(
-    storage: &S,
-    counterparty: PubkyPublicKey,
-    handshake_role: EncryptedLinkHandshakeRole,
-    handshake_snapshot: Vec<u8>,
-    expected_generation: u64,
-    lease: Option<PeerLinkOperationLease>,
-    now: DateTime<Utc>,
-) -> Result<LinkedPeerHandshakeReport>
-where
-    S: StorageAdapter,
-{
-    retry_storage_transaction(storage, || {
-        let counterparty = counterparty.clone();
-        let handshake_snapshot = handshake_snapshot.clone();
-        let lease = lease.clone();
-        move |tx| {
-            if let Some(lease) = lease.as_ref() {
-                require_peer_link_operation_lease(tx, lease)?;
-            }
-            let mut peer = tx
-                .linked_peer(&counterparty)
-                .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
-            ensure_not_blocked(&peer)?;
-
-            if let Some(existing) = tx.encrypted_link_state(&counterparty) {
-                if existing.generation != expected_generation {
-                    let report =
-                        report_current_link_state(counterparty.clone(), &mut peer, &existing, now);
-                    tx.save_linked_peer(peer);
-                    return Ok(report);
-                }
-            }
-
-            if lease.is_some() {
-                let snapshot =
-                    paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(&handshake_snapshot)?;
-                require_recovery_context(&peer, snapshot.recovery_context())?;
-            }
-            peer.state = LinkedPeerState::Linking;
-            peer.last_sync_at = Some(now);
-            peer.failure_count = 0;
-
-            let link_state = EncryptedLinkStateRecord {
-                counterparty: counterparty.clone(),
-                link_snapshot: None,
-                handshake_snapshot: Some(handshake_snapshot),
-                handshake_role: Some(handshake_role),
-                generation: expected_generation.saturating_add(1),
-                checkpointed_at: now,
-            };
-
-            tx.save_linked_peer(peer.clone());
-            tx.save_encrypted_link_state(link_state.clone());
-            Ok(LinkedPeerHandshakeReport {
-                counterparty,
-                state: peer.state,
-                generation: link_state.generation,
-                handshake_role: link_state.handshake_role,
-            })
-        }
-    })
-    .await
-}
-
 /// Persist an established Encrypted Link snapshot.
 #[cfg(test)]
 pub(crate) async fn save_linked_peer_link_state<S>(
@@ -666,89 +512,99 @@ where
     .await
 }
 
-/// Persist an established link if generation and lease still match.
-pub(crate) async fn save_linked_peer_link_state_if_generation_with_lease<S>(
-    storage: &S,
-    counterparty: PubkyPublicKey,
-    link_snapshot: Vec<u8>,
-    expected_generation: u64,
-    lease: PeerLinkOperationLease,
-    now: DateTime<Utc>,
-) -> Result<LinkedPeerHandshakeReport>
-where
-    S: StorageAdapter,
-{
-    save_linked_peer_link_state_if_generation_inner(
-        storage,
-        counterparty,
-        link_snapshot,
-        expected_generation,
-        Some(lease),
-        now,
-    )
-    .await
+pub(crate) enum HandshakeCheckpointSave {
+    Applied(LinkedPeerHandshakeReport),
+    Stale,
 }
 
-async fn save_linked_peer_link_state_if_generation_inner<S>(
-    storage: &S,
-    counterparty: PubkyPublicKey,
-    link_snapshot: Vec<u8>,
-    expected_generation: u64,
-    lease: Option<PeerLinkOperationLease>,
+pub(crate) enum HandshakeCheckpointUpdate {
+    Pending(paykit_lib::EncryptedLinkHandshakeSnapshot),
+    Complete(paykit_lib::EncryptedLinkSnapshot),
+}
+
+pub(crate) fn handshake_checkpoint_is_current(
+    tx: &dyn StorageTransaction,
+    peer: &LinkedPeerRecord,
+    state: &EncryptedLinkStateRecord,
+    lease: &PeerLinkOperationLease,
     now: DateTime<Utc>,
-) -> Result<LinkedPeerHandshakeReport>
-where
-    S: StorageAdapter,
-{
-    retry_storage_transaction(storage, || {
-        let counterparty = counterparty.clone();
-        let link_snapshot = link_snapshot.clone();
-        let lease = lease.clone();
-        move |tx| {
-            if let Some(lease) = lease.as_ref() {
-                require_peer_link_operation_lease(tx, lease)?;
-            }
-            let mut peer = tx
-                .linked_peer(&counterparty)
-                .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
-            ensure_not_blocked(&peer)?;
+) -> bool {
+    peer.counterparty == state.counterparty
+        && lease.counterparty == state.counterparty
+        && lease.expires_at > now
+        && tx.peer_link_operation_lease(&state.counterparty).as_ref() == Some(lease)
+        && tx.linked_peer(&state.counterparty).as_ref() == Some(peer)
+        && tx.encrypted_link_state(&state.counterparty).as_ref() == Some(state)
+}
 
-            if let Some(existing) = tx.encrypted_link_state(&counterparty) {
-                if existing.generation != expected_generation {
-                    let report =
-                        report_current_link_state(counterparty.clone(), &mut peer, &existing, now);
-                    tx.save_linked_peer(peer);
-                    return Ok(report);
-                }
-            }
-
-            let snapshot = paykit_lib::EncryptedLinkSnapshot::deserialize(&link_snapshot)?;
-            require_recovery_context(&peer, snapshot.recovery_context())?;
-            peer.state = LinkedPeerState::Linked;
-            peer.last_sync_at = Some(now);
-            peer.failure_count = 0;
-
-            let link_state = EncryptedLinkStateRecord {
-                counterparty: counterparty.clone(),
-                link_snapshot: Some(link_snapshot),
-                handshake_snapshot: None,
-                handshake_role: None,
-                generation: expected_generation.saturating_add(1),
-                checkpointed_at: now,
-            };
-
-            tx.save_linked_peer(peer.clone());
-            tx.save_encrypted_link_state(link_state.clone());
-            requeue_recovery_required_outbound_messages(tx, &counterparty, now)?;
-            Ok(LinkedPeerHandshakeReport {
-                counterparty,
-                state: peer.state,
-                generation: link_state.generation,
-                handshake_role: link_state.handshake_role,
-            })
+/// Save pending publication or acknowledged completion against its exact source.
+/// The caller must check current identity/key/authorization in this transaction;
+/// Applied proves checkpoint persistence, not permission to publish by itself.
+pub(crate) fn save_handshake_checkpoint_in_transaction(
+    tx: &mut dyn StorageTransaction,
+    expected_peer: &LinkedPeerRecord,
+    expected_state: &EncryptedLinkStateRecord,
+    update: &HandshakeCheckpointUpdate,
+    lease: &PeerLinkOperationLease,
+    now: DateTime<Utc>,
+) -> Result<HandshakeCheckpointSave> {
+    let counterparty = &expected_state.counterparty;
+    if !handshake_checkpoint_is_current(tx, expected_peer, expected_state, lease, now) {
+        return Ok(HandshakeCheckpointSave::Stale);
+    }
+    let (recipient, recovery) = match update {
+        HandshakeCheckpointUpdate::Pending(snapshot) => {
+            (snapshot.recipient(), snapshot.recovery_context())
         }
-    })
-    .await
+        HandshakeCheckpointUpdate::Complete(snapshot) => {
+            (snapshot.recipient(), snapshot.recovery_context())
+        }
+    };
+    if expected_peer.state != LinkedPeerState::Linking
+        || expected_state.link_snapshot.is_some()
+        || expected_state.handshake_snapshot.is_none()
+        || expected_state.handshake_role.is_none()
+        || PubkyPublicKey::from_public_key(recipient) != *counterparty
+    {
+        return Err(PaykitSdkError::Policy {
+            context: "staged handshake requires the current linking checkpoint".into(),
+            source: None,
+        });
+    }
+    require_recovery_context(expected_peer, recovery)?;
+    let mut state = expected_state.clone();
+    state.generation = state
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| PaykitSdkError::Policy {
+            context: "handshake checkpoint generation exhausted".into(),
+            source: None,
+        })?;
+    state.checkpointed_at = now;
+    let mut peer = expected_peer.clone();
+    match update {
+        HandshakeCheckpointUpdate::Pending(snapshot) => {
+            state.handshake_snapshot = Some(snapshot.serialize())
+        }
+        HandshakeCheckpointUpdate::Complete(snapshot) => {
+            state.link_snapshot = Some(snapshot.serialize());
+            state.handshake_snapshot = None;
+            state.handshake_role = None;
+            peer.state = LinkedPeerState::Linked;
+            requeue_recovery_required_outbound_messages(tx, counterparty, now)?;
+        }
+    }
+    peer.failure_count = 0;
+    peer.last_sync_at = Some(now);
+    let report = LinkedPeerHandshakeReport {
+        counterparty: counterparty.clone(),
+        state: peer.state.clone(),
+        generation: state.generation,
+        handshake_role: state.handshake_role,
+    };
+    tx.save_encrypted_link_state(state);
+    tx.save_linked_peer(peer);
+    Ok(HandshakeCheckpointSave::Applied(report))
 }
 
 pub(crate) fn requeue_recovery_required_outbound_messages(

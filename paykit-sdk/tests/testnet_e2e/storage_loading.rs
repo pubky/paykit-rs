@@ -3,12 +3,12 @@ use std::time::Duration;
 use paykit_sdk::{
     storage::PublicEndpointRecord, InMemoryStorage, PaykitApp, PaykitAppCapabilities, PaykitSdk,
     PaykitSdkConfig, PaykitSdkError, PubkyIdentityCapability, PubkyLocalSecretKey, PubkyPublicKey,
-    PubkySharedStateStorage, StorageAdapter, PAYKIT_SESSION_CAPABILITIES,
+    PubkySharedStateStorage, StorageAdapter, PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
 };
 
 use crate::harness::{
-    build_testnet, build_testnet_with_admin, session_bootstrap, TestnetPaymentAdapter,
-    TestnetSessionProvider,
+    build_testnet, build_testnet_with_admin, build_testnet_with_config, session_bootstrap,
+    TestnetPaymentAdapter, TestnetSessionProvider,
 };
 
 #[tokio::test]
@@ -17,7 +17,12 @@ async fn test_recover_corrupt_shared_state_checks_registry_keys_and_generation()
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
     let access = session_bootstrap(&testnet, "recovery.test")
-        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .sign_up(
+            &secret,
+            &homeserver,
+            None,
+            PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        )
         .await
         .unwrap()
         .access;
@@ -30,6 +35,7 @@ async fn test_recover_corrupt_shared_state_checks_registry_keys_and_generation()
         PaykitSdkConfig::new("bitkit").unwrap(),
     );
     sdk.initialize().await.unwrap();
+    sdk.publish_paykit_noise_key_authorization().await.unwrap();
     sdk.publish_paykit_app(
         PaykitApp::new(
             "Bitkit",
@@ -161,7 +167,12 @@ async fn test_shared_state_bootstraps_after_public_only_registry_but_rejects_los
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
     let access = session_bootstrap(&testnet, "storage-loading.test")
-        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .sign_up(
+            &secret,
+            &homeserver,
+            None,
+            PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        )
         .await
         .unwrap()
         .access;
@@ -197,6 +208,10 @@ async fn test_shared_state_bootstraps_after_public_only_registry_but_rejects_los
         PaykitSdkConfig::new("private-app").unwrap(),
     );
     private_sdk.initialize().await.unwrap();
+    private_sdk
+        .publish_paykit_noise_key_authorization()
+        .await
+        .unwrap();
     let registry = private_sdk.publish_paykit_app(app).await.unwrap();
     assert!(registry.noise_public_key().is_some());
     assert_eq!(registry.apps().len(), 2);
@@ -233,7 +248,12 @@ async fn test_shared_state_identity_status_remains_available_after_sign_out() {
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
     let result = session_bootstrap(&testnet, "paykit-sdk.test")
-        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .sign_up(
+            &secret,
+            &homeserver,
+            None,
+            PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        )
         .await
         .unwrap();
     let session_secret = result.export_session_secret().await.unwrap().into_inner();
@@ -261,7 +281,12 @@ async fn test_shared_state_quota_rejection_keeps_previous_state_without_cooldown
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
     let access = session_bootstrap(&testnet, "storage-loading.test")
-        .sign_up(&secret, &homeserver, None, PAYKIT_SESSION_CAPABILITIES)
+        .sign_up(
+            &secret,
+            &homeserver,
+            None,
+            PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        )
         .await
         .unwrap()
         .access;
@@ -321,6 +346,71 @@ async fn test_shared_state_quota_rejection_keeps_previous_state_without_cooldown
     )
     .await
     .expect("quota rejection must not cause an uncertain-write cooldown")
+    .unwrap();
+    assert_eq!(restored, original);
+}
+
+#[tokio::test]
+async fn test_shared_state_rate_limit_keeps_previous_state_without_cooldown() {
+    use pubky_testnet::pubky_homeserver::{
+        ConfigToml, GlobPattern, HttpMethod, LimitKeyType, PathLimit,
+    };
+
+    let mut config = ConfigToml::minimal_test_config();
+    config.drive.rate_limits = vec![PathLimit {
+        path: GlobPattern::new(paykit_lib::PAYKIT_SHARED_STATE_PATH),
+        method: HttpMethod(reqwest::Method::PUT),
+        quota: "1r/h".parse().unwrap(),
+        key: LimitKeyType::User,
+        burst: None,
+        whitelist: Vec::new(),
+    }];
+    let testnet = build_testnet_with_config(config).await;
+    let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
+    let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
+    let access = session_bootstrap(&testnet, "storage-loading.test")
+        .sign_up(
+            &secret,
+            &homeserver,
+            None,
+            paykit_sdk::PAYKIT_SESSION_CAPABILITIES,
+        )
+        .await
+        .unwrap()
+        .access;
+    let provider = TestnetSessionProvider::new(access);
+    let storage = PubkySharedStateStorage::new(provider.clone());
+    let sdk = PaykitSdk::new(
+        storage.clone(),
+        provider.clone(),
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new("bitkit").unwrap(),
+    );
+    sdk.initialize().await.unwrap();
+    let original = storage
+        .transaction(|tx| Ok(tx.export_storage_state()))
+        .await
+        .unwrap();
+
+    let error = storage
+        .transaction(|tx| {
+            let mut identity = tx.load_identity_state().unwrap();
+            identity.initialized_at += chrono::Duration::seconds(1);
+            tx.save_identity_state(identity);
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, PaykitSdkError::Transport { context, .. }
+        if context == "Pubky shared-state write rejected by rate limit"));
+
+    let other_storage = PubkySharedStateStorage::new(provider);
+    let restored = tokio::time::timeout(
+        Duration::from_secs(10),
+        other_storage.transaction(|tx| Ok(tx.export_storage_state())),
+    )
+    .await
+    .expect("rate-limit rejection must not cause an uncertain-write cooldown")
     .unwrap();
     assert_eq!(restored, original);
 }

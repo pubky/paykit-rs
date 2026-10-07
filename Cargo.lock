@@ -3415,7 +3415,7 @@ dependencies = [
 
 [[package]]
 name = "paykit-ffi"
-version = "0.1.0-rc59"
+version = "0.1.0-rc69"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -3445,13 +3445,14 @@ dependencies = [
 
 [[package]]
 name = "paykit-lib"
-version = "0.1.0-rc59"
+version = "0.1.0-rc69"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "blake3",
  "chacha20poly1305",
  "chrono",
+ "hex",
  "proptest",
  "pubky",
  "pubky-noise",
@@ -3469,7 +3470,7 @@ dependencies = [
 
 [[package]]
 name = "paykit-sdk"
-version = "0.1.0-rc59"
+version = "0.1.0-rc69"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3479,6 +3480,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "crypto_secretbox",
+ "futures-util",
  "hex",
  "http-relay",
  "mainline",
@@ -3494,6 +3496,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "url",
  "zeroize",
 ]
@@ -4028,9 +4031,9 @@ dependencies = [
 
 [[package]]
 name = "pubky-noise"
-version = "0.1.0-rc11"
+version = "0.1.0-rc12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e314e7716f68f48f5438650ed958753bc18ff5aca70bc46c1e3e77be3b7bae6"
+checksum = "c034fc7c278e85960a566a032ee26acf9d9c00ee6f64d74fa1f73ee9ed7d4f06"
 dependencies = [
  "chacha20poly1305",
  "curve25519-dalek 5.0.0",
@@ -4039,6 +4042,7 @@ dependencies = [
  "hex",
  "pubky",
  "rand 0.9.2",
+ "reqwest",
  "sha2 0.11.0",
  "snow",
 ]
@@ -6576,7 +6580,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

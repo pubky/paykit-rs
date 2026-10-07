@@ -54,6 +54,10 @@
 - **Synonyms to AVOID**: receiver registry, receiver index
 - **Related terms**: Paykit App, Paykit App ID, Pubky Routing
 
+### Paykit Noise Key Authorization
+- **Definition**: An identity-signed record approving the current Noise routing key, X25519 handshake static key, and Paykit key generation. Stored at `/pub/paykit-authority/v0/current-key.json`, outside ordinary Paykit write capabilities. The App Registry's key fields are discovery metadata, not authorization.
+- **Related terms**: Paykit Identity Secret, Paykit App Registry, Encrypted Link
+
 ### Paykit Identity Secret
 - **Definition**: Rotatable identity-wide secret material from which Paykit derives separate Noise and shared-state encryption keys. A holder of the Pubky identity secret can derive any generation; authorized apps may instead receive only the current generation from the identity's key-management layer.
 - **NOT**: The Pubky identity secret, an Encrypted Link snapshot, or an app-specific payment key.
@@ -355,7 +359,7 @@
 - **Related terms**: Payment Request, Recurrence
 
 ### Conversion Rate
-- **Definition**: An exact decimal multiplier expressing payment Asset units per one requested Asset unit. A supplied rate fixes the price; an omitted asset in a supplied rates set has no fallback.
+- **Definition**: An exact decimal multiplier expressing payment Asset units per one requested Asset unit. A rate can target an Asset or an Asset-Rail pair; the latter takes precedence over the Asset-wide default. An unpriced cross-asset endpoint has no market-rate fallback.
 - **NOT**: A market-rate feed, a payment authorization, or a global USD/USDT parity assumption.
 - **Related terms**: Payment Amount, Payment Conversion Quote
 

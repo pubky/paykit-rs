@@ -31,20 +31,51 @@ smallest supported unit. Network fees are additional; they are not deducted from
 the requested payment value. Rates must be positive decimal strings, without
 signs, exponents or grouping separators. The grammar is `[0-9]+(\.[0-9]*)?`
 or `\.[0-9]+`; leading and trailing zeroes are allowed. These are exact
-decimals, not floating-point values. Asset codes must be unique within the
-nonempty rates list. Rates need not sum to anything.
+decimals, not floating-point values. Rate selectors must be unique within the
+nonempty rates list (`usdt` and `usdt-polygon` are different selectors). Rates
+need not sum to anything.
 
 Conversion-enabled requests use the asset-prefixed Payment Endpoint Identifier
 convention: three nonempty lowercase alphanumeric segments, separated by
-hyphens. The request asset must also be lowercase alphanumeric. A rate applies to all accepted endpoints whose first segment is that
-asset, including Bitcoin on-chain and Lightning endpoints. Asset spelling is
-case-sensitive. Rates must name an accepted asset different from the requested
-asset; same-asset payments have an implicit rate of exactly one.
+hyphens. The request asset must also be lowercase alphanumeric. A rate's `asset`
+is either one asset segment (`usdt`) or an asset and rail (`usdt-polygon`). Each
+segment is lowercase alphanumeric and spelling is case-sensitive. A rate selector
+must match at least one accepted endpoint; it never adds an accepted endpoint.
+It does not change the request denomination, token identity or proof format.
+
+For a selected accepted endpoint such as `usdt-polygon-address`, resolve pricing
+in this order, regardless of rates-list order:
+
+1. Use the exact asset-rail rate (`usdt-polygon`) if present.
+2. Otherwise use the asset-wide rate (`usdt`) if present.
+3. Otherwise, if the payment asset equals the requested asset, use exactly 1.
+4. Otherwise the endpoint is unavailable for conversion; do not fetch a market rate.
+
+For example, `[{"asset":"usdt","value":"1"},{"asset":"usdt-polygon","value":"1.008"}]`
+means a `10 usd` request costs 10.08 USDT on Polygon and 10 USDT on any other
+accepted USDT rail. The format segment does not affect rate selection. If only
+`usdt-polygon` is supplied, other USDT rails do not inherit that rate.
+
+Fixed rates may explicitly price the requested asset too: a `10 usdt` request
+with only `usdt-polygon: 1.008` costs 10.08 USDT on Polygon and 10 USDT on another
+accepted USDT rail. The explicit rate takes precedence over implicit parity.
+Per-period quotes are **cross-asset only**: they must not include either a
+bare or rail-qualified rate for the requested asset. Same-asset per-period
+payments use 1:1 without a quote, so an optional quote cannot change that price.
+Use fixed terms when quoting same-asset rail costs.
+
+Explicitly priced endpoints require manual payment approval. Allowances account
+in the requested asset and amount and cannot authorize repricing. An unpriced
+same-asset endpoint can use an Allowance.
+
+`ConversionRate::for_endpoint` selects the explicit rate for Rust callers. It
+validates rate syntax and precedence, but the caller must still validate request
+acceptance, quote association, actual amounts and payment timing.
 
 | Terms | Cross-asset behavior |
 | --- | --- |
 | No `conversion` | Payer approves its own calculation; payee independently evaluates the received value. No shared rate is promised. Applications may decline such conversions. |
-| Fixed rates or a selected quote | Both parties use its exact rates. An omitted payment asset is unavailable; there is no market-rate fallback. |
+| Fixed rates or a selected quote | Both parties use asset-rail precedence above. Without an applicable rate, only same-asset 1:1 payment is available. |
 | `per_period`, no quote selected | Cross-asset payment must wait for a usable quote. Same-asset payment remains possible without a quote. |
 
 An accepted endpoint is necessary but does not guarantee conversion-rate coverage.
@@ -58,6 +89,18 @@ Lightning endpoint supporting millisatoshis. Both peers use the selected
 endpoint precision, not a common rounding unit for every BTC rail. A `0.05 usd` request at `1 usdt/usd` requires exactly
 50,000 atomic units when that token has six decimals. Token identity and precision
 come from the selected, validated endpoint, not its display symbol alone.
+
+### Including receiving costs
+
+A payee can include receiving costs, such as bridge fees, in the rate for an
+accepted source rail. The payer owes the resulting amount plus their transaction
+fee; included costs must not be charged twice. A flat cost requires a multiplier
+calculated for the specific request amount.
+
+The rate fixes the payer's obligation, not a bridge's future fee or delivered
+amount. A later increase in bridge costs alone is not payer underpayment.
+Applications execute bridging, verify delivery separately, and use the payment
+deadline to bound the offer.
 
 ## Payment deadlines
 
@@ -167,15 +210,13 @@ fractional seconds; leap seconds are not supported. Equivalent Billing Period
 instants compare equal even when fractional-second spellings differ. Signed
 proof context keeps the timestamp strings carried by that proof verbatim.
 
-Existing messages with no conversion/deadline fields retain their meaning. Peers
-must support these fields and the new event before using them. This is a
-coordinated protocol revision; the caller must establish support through its
-application deployment or an explicitly agreed peer capability mechanism. The
-existing `payment_requests` App capability does not advertise this extension.
-The SDK does not discover extension support or negotiate a downgrade; implementations
-must not strip unknown terms to make a request appear payable. Closed-world
-parsing rejects unsupported terms. No on-chain execution, allowance accounting,
-market-rate provider, new database table or automatic-payment authority is added.
+Before using conversion terms, deadlines or quotes, applications must establish
+peer support through coordinated deployment or an agreed capability mechanism.
+This includes support for rail-qualified selectors and explicit same-asset fixed
+rates. The `payment_requests` App capability does not advertise these features;
+older parsers reject unsupported terms. Do not strip terms or rail suffixes, or
+silently fall back to a generic rate, to make a request payable. Messages without
+conversion terms and existing bare cross-asset rates retain their meaning.
 
 All Event Messages must fit the existing encrypted message limit. Keep metadata
 and rate lists compact; oversized messages are rejected by the outbound queue.

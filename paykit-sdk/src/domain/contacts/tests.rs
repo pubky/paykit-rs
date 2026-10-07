@@ -281,6 +281,45 @@ fn test_contact_record_normalizes_whitespace_labels() {
 }
 
 #[test]
+fn test_contact_record_unchanged_label_preserves_record() {
+    let now = chrono::Utc::now();
+    for label in [None, Some("Alice")] {
+        let existing = ContactRecord::from_update(
+            ContactUpdate {
+                public_key: public_key(),
+                label: label.map(str::to_owned),
+            },
+            None,
+            now,
+        )
+        .mark_public_contact_published(now);
+        let unchanged = ContactRecord::from_update(
+            ContactUpdate {
+                public_key: existing.public_key.clone(),
+                label: Some(format!("  {}  ", label.unwrap_or_default())),
+            },
+            Some(existing.clone()),
+            now + chrono::Duration::seconds(1),
+        );
+        assert_eq!(unchanged, existing);
+
+        let changed_at = now + chrono::Duration::seconds(2);
+        let changed = ContactRecord::from_update(
+            ContactUpdate {
+                public_key: existing.public_key.clone(),
+                label: Some("Renamed".into()),
+            },
+            Some(existing.clone()),
+            changed_at,
+        );
+        let mut expected = existing;
+        expected.label = Some("Renamed".into());
+        expected.updated_at = changed_at;
+        assert_eq!(changed, expected);
+    }
+}
+
+#[test]
 fn test_pending_public_contact_marker_may_exist_remotely() {
     let record = ContactRecord::from_update(
         ContactUpdate {

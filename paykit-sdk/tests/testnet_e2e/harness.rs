@@ -17,16 +17,15 @@ use paykit_sdk::{
     PrivateReceivingDetail, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
     PubkySessionBootstrap, PubkySessionProvider, PublicPaymentEndpointCandidate,
     PublicPaymentEndpointSelectionRequest, PublicReceivingDetail, Result,
-    PAYKIT_SESSION_CAPABILITIES,
+    PAYKIT_AUTHORIZER_SESSION_CAPABILITIES, PAYKIT_SESSION_CAPABILITIES,
 };
 use pubky_testnet::{
     docker_postgres::DockerPostgres, pubky::Keypair, pubky_homeserver::ConfigToml, EphemeralTestnet,
 };
-use tokio::sync::{oneshot, Mutex as TokioMutex, OnceCell, Semaphore, SemaphorePermit};
+use tokio::sync::{oneshot, Mutex as TokioMutex, Semaphore, SemaphorePermit};
 
 const TEST_CLIENT_ID: &str = "paykit-sdk.test";
 
-static SHARED_POSTGRES: OnceCell<DockerPostgres> = OnceCell::const_new();
 static TESTNET_BUILD_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 static TESTNET_CONCURRENCY: Semaphore = Semaphore::const_new(2);
 
@@ -43,16 +42,6 @@ impl Deref for TestnetInstance {
     }
 }
 
-async fn shared_postgres() -> &'static DockerPostgres {
-    SHARED_POSTGRES
-        .get_or_init(|| async {
-            DockerPostgres::start()
-                .await
-                .expect("failed to start Docker Postgres")
-        })
-        .await
-}
-
 pub async fn build_testnet() -> TestnetInstance {
     build_testnet_with_config(ConfigToml::minimal_test_config()).await
 }
@@ -63,7 +52,7 @@ pub async fn build_testnet_with_admin() -> TestnetInstance {
     build_testnet_with_config(config).await
 }
 
-async fn build_testnet_with_config(config: ConfigToml) -> TestnetInstance {
+pub async fn build_testnet_with_config(config: ConfigToml) -> TestnetInstance {
     let permit = TESTNET_CONCURRENCY
         .acquire()
         .await
@@ -73,7 +62,7 @@ async fn build_testnet_with_config(config: ConfigToml) -> TestnetInstance {
     let builder = if std::env::var_os("TEST_PUBKY_CONNECTION_STRING").is_some() {
         EphemeralTestnet::builder()
     } else {
-        let postgres = shared_postgres()
+        let postgres = DockerPostgres::shared()
             .await
             .connection_string()
             .expect("Docker Postgres connection string should be valid");
@@ -169,10 +158,11 @@ pub struct TestnetPaymentAdapter {
     public_details: Arc<Mutex<Vec<PublicReceivingDetail>>>,
     private_details: Arc<Mutex<Vec<PrivateReceivingDetail>>>,
     fail_reservation_cancellation: Arc<Mutex<bool>>,
-    public_details_pause: Arc<Mutex<Option<PublicDetailsPause>>>,
+    public_details_pause: Arc<Mutex<Option<AdapterPause>>>,
+    reservation_cancellation_pause: Arc<Mutex<Option<AdapterPause>>>,
 }
 
-struct PublicDetailsPause {
+struct AdapterPause {
     loaded: oneshot::Sender<()>,
     resume: oneshot::Receiver<()>,
 }
@@ -192,7 +182,7 @@ impl TestnetPaymentAdapter {
         *self
             .public_details_pause
             .lock()
-            .expect("public details pause lock poisoned") = Some(PublicDetailsPause {
+            .expect("public details pause lock poisoned") = Some(AdapterPause {
             loaded: loaded_tx,
             resume: resume_rx,
         });
@@ -204,6 +194,21 @@ impl TestnetPaymentAdapter {
             .fail_reservation_cancellation
             .lock()
             .expect("failure flag lock poisoned") = fail;
+    }
+
+    pub fn pause_next_reservation_cancellation(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (loaded_tx, loaded_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        *self
+            .reservation_cancellation_pause
+            .lock()
+            .expect("reservation cancellation pause lock poisoned") = Some(AdapterPause {
+            loaded: loaded_tx,
+            resume: resume_rx,
+        });
+        (loaded_rx, resume_tx)
     }
 }
 
@@ -274,6 +279,15 @@ impl PaymentAdapter for TestnetPaymentAdapter {
         &self,
         _cancellation: &PrivatePaymentEndpointReservationCancellation,
     ) -> Result<()> {
+        let pause = self
+            .reservation_cancellation_pause
+            .lock()
+            .expect("reservation cancellation pause lock poisoned")
+            .take();
+        if let Some(pause) = pause {
+            let _ = pause.loaded.send(());
+            let _ = pause.resume.await;
+        }
         if *self
             .fail_reservation_cancellation
             .lock()
@@ -325,7 +339,7 @@ impl TestUser {
                 &secret_key,
                 &homeserver_public_key,
                 None,
-                PAYKIT_SESSION_CAPABILITIES,
+                PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
             )
             .await
             .expect("testnet sign-up should succeed");
@@ -350,6 +364,7 @@ impl TestUser {
             report.capability,
             paykit_sdk::PubkyIdentityCapability::PrivateLinkCapable
         );
+        sdk.publish_paykit_noise_key_authorization().await.unwrap();
         sdk.publish_paykit_app(
             PaykitApp::new(
                 "Paykit Test App",

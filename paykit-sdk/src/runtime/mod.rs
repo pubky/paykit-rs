@@ -41,9 +41,9 @@ use crate::{
         PAYKIT_PROFILE_PATH, PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
     },
     domain::endpoint_reservations::{
-        expired_outbound_reservation_cancellations, invalid_private_list_reservation_cancellations,
+        expired_outbound_reservation_cancellations_in_transaction,
         queue_private_payment_list_with_reservations_with_link_lease, reservation_payload_hash,
-        unattempted_superseded_reservation_cancellations,
+        terminal_private_list_reservation_cancellations,
         PaymentEndpointReservationCancellationRecord, PrivatePaymentListQueuePolicy,
     },
     domain::endpoints::{
@@ -52,28 +52,24 @@ use crate::{
         EndpointSyncReport,
     },
     domain::linked_peers::{
-        default_linked_peer, load_encrypted_link_state,
-        mark_recovery_required_for_marker_in_transaction, mark_recovery_required_in_transaction,
-        mark_recovery_required_with_lease, requeue_recovery_required_outbound_messages,
-        require_private_automation_ready, save_link_handshake_state_if_generation_with_lease,
-        save_link_handshake_state_with_lease, save_linked_peer_link_state_if_generation_with_lease,
-        save_linked_peer_state_with_lease, EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport,
-        LinkedPeerState,
+        default_linked_peer, mark_recovery_required_for_marker_in_transaction,
+        mark_recovery_required_in_transaction, mark_recovery_required_with_lease,
+        requeue_recovery_required_outbound_messages, require_private_automation_ready,
+        save_link_handshake_state_with_lease, save_linked_peer_state_with_lease,
+        EncryptedLinkHandshakeRole, LinkedPeerHandshakeReport, LinkedPeerState,
     },
     domain::outbound_private::{
-        claim_next_outbound_private_message_with_peer_lease, mark_outbound_failed,
-        mark_outbound_invalid, mark_outbound_recovery_required, mark_outbound_sent,
-        queued_outbound_private_messages, validate_queued_outbound_private_message,
-        OutboundPrivateCounterpartySendReport, OutboundPrivateMessageStatus,
-        OutboundPrivateSendFailure, OutboundPrivateSendReport, RecoveryMarkerPublishFailure,
-        ReservationCleanupFailure,
+        mark_outbound_failed, mark_outbound_invalid, mark_outbound_recovery_required,
+        mark_outbound_sent, queued_outbound_private_messages,
+        validate_queued_outbound_private_message, OutboundPrivateCounterpartySendReport,
+        OutboundPrivateMessageStatus, OutboundPrivateSendFailure, OutboundPrivateSendReport,
+        RecoveryMarkerPublishFailure, ReservationCleanupFailure,
     },
     domain::payment_requests::{
         claim_payment_request_execution, enqueue_checked_payment_request_action,
         enqueue_payment_request as enqueue_payment_request_message, payment_proof_allowed_states,
         payment_request_record_blocks_app_removal,
         payment_request_records as derive_payment_request_records,
-        received_payment_request_records as derive_received_payment_request_records,
         release_payment_request_execution_claim, request_from_record, PaymentProofSubmission,
         PaymentRequestFilter, PaymentRequestLifecycleState, PaymentRequestLocalRole,
         PaymentRequestRecord, PaymentRequestTermsRecord,
@@ -94,8 +90,7 @@ use crate::{
         PrivatePaymentListSyncReport,
     },
     domain::private_stream::{
-        persist_private_stream_batch_write, PrivateStreamBatchWrite,
-        PrivateStreamCounterpartyIntakeReport, PrivateStreamIntakeReport,
+        PrivateStreamBatchWrite, PrivateStreamCounterpartyIntakeReport, PrivateStreamIntakeReport,
     },
     domain::publication::PublicationStatus,
     domain::receipts::{
@@ -140,6 +135,7 @@ mod backup;
 mod contacts;
 mod encrypted_links;
 mod key_rotation;
+mod noise_key_authorization;
 mod outbound_private;
 mod payment_requests;
 mod payment_resolution;
@@ -206,7 +202,16 @@ struct RuntimeOperationGuard {
 
 struct GuardedSessionAccess {
     access: PubkySessionAccess,
-    _guard: OwnedRwLockReadGuard<()>,
+    _guard: Arc<OwnedRwLockReadGuard<()>>,
+}
+
+struct SessionOperation {
+    gate: Arc<RwLock<()>>,
+    guard: Arc<OwnedRwLockReadGuard<()>>,
+}
+
+tokio::task_local! {
+    static SESSION_OPERATION: SessionOperation;
 }
 
 impl Deref for GuardedSessionAccess {
@@ -260,6 +265,13 @@ where
     }
 
     fn claim_identity_operation(&self, context: &str) -> Result<RuntimeOperationGuard> {
+        if self.active_session_guard().is_some() || crate::storage::shared_state_operation_active()
+        {
+            return Err(PaykitSdkError::Policy {
+                context: format!("cannot {context} inside a session-backed storage operation"),
+                source: None,
+            });
+        }
         let mut in_progress =
             self.identity_operation_in_progress
                 .lock()
@@ -279,6 +291,57 @@ where
         Ok(RuntimeOperationGuard {
             in_progress: Arc::clone(&self.identity_operation_in_progress),
         })
+    }
+
+    fn active_session_guard(&self) -> Option<Arc<OwnedRwLockReadGuard<()>>> {
+        SESSION_OPERATION
+            .try_with(|operation| {
+                Arc::ptr_eq(&operation.gate, &self.session_operation_gate)
+                    .then(|| Arc::clone(&operation.guard))
+            })
+            .ok()
+            .flatten()
+    }
+
+    async fn session_read_guard(&self) -> Result<Arc<OwnedRwLockReadGuard<()>>> {
+        if let Some(guard) = self.active_session_guard() {
+            return Ok(guard);
+        }
+        if crate::storage::shared_state_operation_active() {
+            return Err(PaykitSdkError::Policy {
+                context: "SDK session access must precede shared-state access".into(),
+                source: None,
+            });
+        }
+        Ok(Arc::new(
+            Arc::clone(&self.session_operation_gate).read_owned().await,
+        ))
+    }
+
+    async fn with_storage_operation<T: Send + 'static>(
+        &self,
+        operation: std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + '_>>,
+    ) -> Result<T> {
+        let guard = self.session_read_guard().await?;
+        self.with_guarded_storage_operation(guard, operation).await
+    }
+
+    async fn with_guarded_storage_operation<T: Send + 'static>(
+        &self,
+        guard: Arc<OwnedRwLockReadGuard<()>>,
+        operation: std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + '_>>,
+    ) -> Result<T> {
+        // Acquire the session gate before storage. Nested session reads reuse
+        // this guard so a waiting sign-out cannot deadlock the operation.
+        SESSION_OPERATION
+            .scope(
+                SessionOperation {
+                    gate: Arc::clone(&self.session_operation_gate),
+                    guard,
+                },
+                self.storage.with_operation(operation),
+            )
+            .await
     }
 
     fn cached_identity_state(&self) -> Option<IdentityState> {
@@ -319,18 +382,36 @@ where
         retry_storage_transaction_with_adapter(&self.storage, operation).await
     }
 
+    async fn retry_operation_lease_release<F, O>(&self, mut operation: F) -> Result<()>
+    where
+        F: FnMut() -> O,
+        O: FnOnce(&mut dyn StorageTransaction) -> Result<()> + Send,
+    {
+        let result = self.storage.transaction(operation()).await;
+        if !matches!(
+            result,
+            Err(PaykitSdkError::SharedStateBusy { .. } | PaykitSdkError::ConcurrentUpdate { .. })
+        ) || crate::storage::shared_state_operation_active()
+        {
+            return result;
+        }
+        // Lease-ID-fenced cleanup can retry once with fresh state. Never replay
+        // an uncertain write or retry inside an invalidated storage operation.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        self.storage.transaction(operation()).await
+    }
+
     /// Initialize durable SDK identity state.
     ///
     /// Without a live session, return cached or locally available identity
     /// metadata without creating or refreshing shared state.
     pub async fn initialize(&self) -> Result<IdentityStatus> {
         let _identity_guard = self.claim_identity_operation("initialize")?;
-        let (session, state) = self.load_session_access_and_refresh_identity().await?;
-        if session.is_some() {
-            self.storage
-                .transaction(crate::backup::refresh_stored_message_classification)
-                .await?;
-        }
+        let (session, state, _) = self
+            .load_session_access_and_refresh_identity_with(
+                crate::backup::refresh_stored_message_classification,
+            )
+            .await?;
         let live_session_available = session.is_some();
         let required_capabilities = PAYKIT_SESSION_CAPABILITIES;
         let private_link_capable = session
@@ -413,7 +494,17 @@ where
     async fn load_session_access_and_refresh_identity(
         &self,
     ) -> Result<(Option<GuardedSessionAccess>, IdentityState)> {
-        let session_guard = Arc::clone(&self.session_operation_gate).read_owned().await;
+        let (access, identity, _) = self
+            .load_session_access_and_refresh_identity_with(|_| Ok(()))
+            .await?;
+        Ok((access, identity))
+    }
+
+    async fn load_session_access_and_refresh_identity_with<T: Send + 'static>(
+        &self,
+        operation: impl Fn(&mut dyn StorageTransaction) -> Result<T> + Send + Sync,
+    ) -> Result<(Option<GuardedSessionAccess>, IdentityState, Option<T>)> {
+        let session_guard = self.session_read_guard().await?;
         let session = self.pubky.load_session_access().await?;
         let now = self.clock.now();
 
@@ -427,7 +518,7 @@ where
                 });
 
             self.cache_identity_state(state.clone());
-            return Ok((None, state));
+            return Ok((None, state, None));
         };
 
         let required_capabilities = PAYKIT_SESSION_CAPABILITIES;
@@ -437,14 +528,18 @@ where
             .paykit_identity_secret_key()
             .as_ref()
             .map(crate::storage::paykit_noise_public_key);
-        let state = self
-            .storage
-            .transaction(move |tx| {
-                let state = bind_storage_to_identity(tx, public_key, now)?;
-                if let Some(noise_public_key) = noise_public_key {
-                    crate::storage::bind_paykit_noise_key(tx, noise_public_key)?;
+        let (state, value) = self
+            .retry_storage_transaction(|| {
+                let public_key = public_key.clone();
+                let noise_public_key = noise_public_key.clone();
+                let operation = &operation;
+                move |tx| {
+                    let state = bind_storage_to_identity(tx, public_key, now)?;
+                    if let Some(noise_public_key) = noise_public_key {
+                        crate::storage::bind_paykit_noise_key(tx, noise_public_key)?;
+                    }
+                    Ok((state, operation(tx)?))
                 }
-                Ok(state)
             })
             .await?;
 
@@ -455,19 +550,13 @@ where
                 _guard: session_guard,
             }),
             state,
+            Some(value),
         ))
     }
 
     async fn require_initialized_identity(&self, context: &str) -> Result<PubkyPublicKey> {
         self.storage
-            .transaction(|tx| {
-                tx.load_identity_state()
-                    .and_then(|state| state.public_key)
-                    .ok_or_else(|| PaykitSdkError::Identity {
-                        context: format!("cannot {context} without an initialized Pubky identity"),
-                        source: None,
-                    })
-            })
+            .transaction(|tx| initialized_identity_in_transaction(tx, context))
             .await
     }
 
@@ -475,32 +564,33 @@ where
         &self,
         context: &str,
     ) -> Result<GuardedSessionAccess> {
-        let session_guard = Arc::clone(&self.session_operation_gate).read_owned().await;
-        let expected_public_key = self.require_initialized_identity(context).await?;
-        let session_access =
-            self.pubky
-                .load_session_access()
-                .await?
-                .ok_or_else(|| PaykitSdkError::Identity {
+        let session_guard = self.session_read_guard().await?;
+        let session_access = self.pubky.load_session_access().await?;
+        let session_access = self
+            .storage
+            .transaction(move |tx| {
+                let expected_public_key = initialized_identity_in_transaction(tx, context)?;
+                let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
                     context: format!("cannot {context} without an active Pubky session"),
                     source: None,
                 })?;
-        let actual_public_key = session_access.public_key()?;
-        if actual_public_key != expected_public_key {
-            return Err(PaykitSdkError::Identity {
-                context: format!(
-                    "cannot {context} because active Pubky session does not match initialized identity"
-                ),
-                source: None,
-            });
-        }
-        session_access.validate_for_capabilities(PAYKIT_SESSION_CAPABILITIES)?;
-        if let Some(key) = session_access.paykit_identity_secret_key() {
-            let public_key = crate::storage::paykit_noise_public_key(&key);
-            self.storage
-                .transaction(move |tx| crate::storage::bind_paykit_noise_key(tx, public_key))
-                .await?;
-        }
+                let actual_public_key = session_access.public_key()?;
+                if actual_public_key != expected_public_key {
+                    return Err(PaykitSdkError::Identity {
+                        context: format!(
+                            "cannot {context} because active Pubky session does not match initialized identity"
+                        ),
+                        source: None,
+                    });
+                }
+                session_access.validate_for_capabilities(PAYKIT_SESSION_CAPABILITIES)?;
+                if let Some(key) = session_access.paykit_identity_secret_key() {
+                    let public_key = crate::storage::paykit_noise_public_key(&key);
+                    crate::storage::bind_paykit_noise_key(tx, public_key)?;
+                }
+                Ok(session_access)
+            })
+            .await?;
         Ok(GuardedSessionAccess {
             access: session_access,
             _guard: session_guard,
@@ -513,7 +603,7 @@ where
     /// metadata. Session-protected storage is not read, and an uninitialized
     /// runtime without local metadata returns `None`.
     pub async fn identity_status(&self) -> Result<Option<IdentityStatus>> {
-        let _session_guard = Arc::clone(&self.session_operation_gate).read_owned().await;
+        let _session_guard = self.session_read_guard().await?;
         let session = self.pubky.load_session_access().await?;
         if session.is_none() {
             return Ok(self
@@ -564,6 +654,18 @@ where
             })
             .await
     }
+}
+
+fn initialized_identity_in_transaction(
+    tx: &dyn StorageTransaction,
+    context: &str,
+) -> Result<PubkyPublicKey> {
+    tx.load_identity_state()
+        .and_then(|state| state.public_key)
+        .ok_or_else(|| PaykitSdkError::Identity {
+            context: format!("cannot {context} without an initialized Pubky identity"),
+            source: None,
+        })
 }
 
 fn bind_storage_to_identity(

@@ -1784,7 +1784,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func authorizeAllowanceReassociation(scope: PaymentRequestScope, reassociation: AllowanceReassociationInput) async throws  -> AllowanceAssociationRecord
 
     /**
-     * Return a content fingerprint for SDK-managed backup state.
+     * Read current storage and return a content fingerprint for SDK-managed backup state.
      *
      * Unlike `state_revision`, this excludes transient operation leases. Compare it
      * before and after SDK workflows, including failures, to schedule app backups.
@@ -1807,6 +1807,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Queue cancellation for a known non-terminal Payment Request.
      */
     func cancelPaymentRequest(counterparty: String, paymentRequestId: String, reason: String?) async throws  -> PaymentRequestRecord
+
+    /**
+     * Atomically claim a received Payment Request and durably queue acceptance, without sending it.
+     */
+    func claimAndAcceptPaymentRequest(counterparty: String, paymentRequestId: String) async throws  -> PaymentRequestRecord
 
     /**
      * Claim a received Payment Request before preparing payment execution.
@@ -2006,6 +2011,17 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func observeEncryptedLinkRecoveryMarker(counterparty: String) async throws  -> EncryptedLinkRecoveryMarkerReport
 
     /**
+     * Return completed shared-state backup metadata without storage or session calls.
+     *
+     * This is an observation, not current remote state or authorization. Returns
+     * `None` for callback storage or when no completed observation is available.
+     * Keep scheduling backups after failed workflows, and discard native cached
+     * observations on identity, key, session, or runtime reset. Use
+     * `backup_state_revision` when a fresh read is required.
+     */
+    func observedBackupStateRevision() throws  -> ObservedBackupStateRevision?
+
+    /**
      * Fetch the public Paykit application registry for an identity.
      */
     func paykitAppRegistry(publicKey: String) async throws  -> PaykitAppRegistry?
@@ -2014,6 +2030,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Report work that must finish before this application can be removed.
      */
     func paykitAppRemovalBlockers() async throws  -> PaykitAppRemovalBlockers
+
+    /**
+     * Fetch and verify the current Noise key, failing if authorization is missing or invalid.
+     */
+    func paykitNoiseKeyAuthorization(publicKey: String) async throws  -> PaykitNoiseKeyAuthorization
 
     /**
      * Return all Payment Requests across non-blocked counterparties.
@@ -2040,6 +2061,10 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Prepare private state, then resolve endpoints allowed by a Payment Request.
+     *
+     * Fresh private intake and request validation still run when only unclaimed,
+     * unprepared Delivery Confirmations remain. Those confirmations stay durable
+     * for a later outbound processing call; this method does not schedule a worker.
      */
     func prepareAndResolvePrivatePaymentRequest(counterparty: String, paymentRequestId: String, afterPrivatePaymentListVersion: UInt64?, maxAdvanceSteps: UInt32) async throws  -> PreparedPrivateContactPayment
 
@@ -2088,6 +2113,12 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Publish a blob under this identity's Paykit blob path.
      */
     func publishPaykitBlob(blobName: String, bytes: Data) async throws  -> PaykitBlobRecord
+
+    /**
+     * Publish the current Noise key using the local Pubky identity secret.
+     * Requires authorizer capabilities. Call before private app publication or delegation.
+     */
+    func publishPaykitNoiseKeyAuthorization() async throws  -> PaykitNoiseKeyAuthorization
 
     /**
      * Publish this identity's Paykit Profile at an expected revision.
@@ -2206,6 +2237,15 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func removeContact(publicKey: String) async throws  -> ContactRecord?
 
     /**
+     * Block and remove contacts in one shared-state transaction.
+     *
+     * Returns removed records. Busy peers remain unchanged; contacts with public
+     * markers are blocked but retained. Callers enforce subscription policy and
+     * perform any best-effort withdrawal before this operation.
+     */
+    func removeContactsAndBlockPeers(publicKeys: [String]) async throws  -> [ContactRecord]
+
+    /**
      * Remove a blocked peer's public marker. Active links retain their markers.
      */
     func removeEncryptedLinkRecoveryMarker(counterparty: String) async throws  -> EncryptedLinkRecoveryMarkerReport
@@ -2285,6 +2325,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Rotate identity-wide Paykit key material to the next generation.
      *
+     * Requires the Pubky identity secret and authorizer capabilities.
      * Persist the replacement before this call and retry with the same key
      * after an error or interruption. Distribute it to remaining authorized
      * applications before private Paykit operations resume.
@@ -2295,6 +2336,27 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Save or update a Contact Record.
      */
     func saveContact(update: ContactUpdate) async throws  -> ContactRecord
+
+    /**
+     * Save or update Contact Records in one atomic storage transaction.
+     *
+     * All updates are validated before any record changes. Records are returned
+     * in input order, including duplicates; the last update for a key wins in
+     * storage. An empty batch still requires an initialized identity and leaves
+     * stored state unchanged. Existing profile and Public Contact Marker metadata
+     * is preserved; marker publication and unblocking peers remain separate.
+     */
+    func saveContacts(updates: [ContactUpdate]) async throws  -> [ContactRecord]
+
+    /**
+     * Save contacts and unblock selected blocked peers in one atomic transaction.
+     *
+     * For explicit contact additions or restoration, not label edits. Unblocked
+     * peers need a fresh Encrypted Link; other links remain unchanged. Ordering,
+     * duplicates and metadata follow `save_contacts`. Invalid input or an active
+     * lease on a selected blocked peer rejects the entire batch.
+     */
+    func saveContactsAndUnblockPeers(updates: [ContactUpdate]) async throws  -> [ContactRecord]
 
     /**
      * Persist the wallet-selected candidate under the expected association revision.
@@ -2736,7 +2798,7 @@ open func authorizeAllowanceReassociation(scope: PaymentRequestScope, reassociat
 }
 
     /**
-     * Return a content fingerprint for SDK-managed backup state.
+     * Read current storage and return a content fingerprint for SDK-managed backup state.
      *
      * Unlike `state_revision`, this excludes transient operation leases. Compare it
      * before and after SDK workflows, including failures, to schedule app backups.
@@ -2810,6 +2872,26 @@ open func cancelPaymentRequest(counterparty: String, paymentRequestId: String, r
                 uniffi_paykit_fn_method_ffipaykitsdk_cancel_payment_request(
                     self.uniffiClonePointer(),
                     FfiConverterString.lower(counterparty),FfiConverterString.lower(paymentRequestId),FfiConverterOptionString.lower(reason)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaymentRequestRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Atomically claim a received Payment Request and durably queue acceptance, without sending it.
+     */
+open func claimAndAcceptPaymentRequest(counterparty: String, paymentRequestId: String)async throws  -> PaymentRequestRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_claim_and_accept_payment_request(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(paymentRequestId)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -3578,6 +3660,22 @@ open func observeEncryptedLinkRecoveryMarker(counterparty: String)async throws  
 }
 
     /**
+     * Return completed shared-state backup metadata without storage or session calls.
+     *
+     * This is an observation, not current remote state or authorization. Returns
+     * `None` for callback storage or when no completed observation is available.
+     * Keep scheduling backups after failed workflows, and discard native cached
+     * observations on identity, key, session, or runtime reset. Use
+     * `backup_state_revision` when a fresh read is required.
+     */
+open func observedBackupStateRevision()throws  -> ObservedBackupStateRevision?  {
+    return try  FfiConverterOptionTypeObservedBackupStateRevision.lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_method_ffipaykitsdk_observed_backup_state_revision(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
      * Fetch the public Paykit application registry for an identity.
      */
 open func paykitAppRegistry(publicKey: String)async throws  -> PaykitAppRegistry?  {
@@ -3613,6 +3711,26 @@ open func paykitAppRemovalBlockers()async throws  -> PaykitAppRemovalBlockers  {
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypePaykitAppRemovalBlockers_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Fetch and verify the current Noise key, failing if authorization is missing or invalid.
+     */
+open func paykitNoiseKeyAuthorization(publicKey: String)async throws  -> PaykitNoiseKeyAuthorization  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_paykit_noise_key_authorization(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(publicKey)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaykitNoiseKeyAuthorization_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -3702,6 +3820,10 @@ open func prepareAndResolvePrivateContactPayment(counterparty: String, amount: P
 
     /**
      * Prepare private state, then resolve endpoints allowed by a Payment Request.
+     *
+     * Fresh private intake and request validation still run when only unclaimed,
+     * unprepared Delivery Confirmations remain. Those confirmations stay durable
+     * for a later outbound processing call; this method does not schedule a worker.
      */
 open func prepareAndResolvePrivatePaymentRequest(counterparty: String, paymentRequestId: String, afterPrivatePaymentListVersion: UInt64?, maxAdvanceSteps: UInt32)async throws  -> PreparedPrivateContactPayment  {
     return
@@ -3897,6 +4019,27 @@ open func publishPaykitBlob(blobName: String, bytes: Data)async throws  -> Payki
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypePaykitBlobRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Publish the current Noise key using the local Pubky identity secret.
+     * Requires authorizer capabilities. Call before private app publication or delegation.
+     */
+open func publishPaykitNoiseKeyAuthorization()async throws  -> PaykitNoiseKeyAuthorization  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_publish_paykit_noise_key_authorization(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaykitNoiseKeyAuthorization_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -4333,6 +4476,30 @@ open func removeContact(publicKey: String)async throws  -> ContactRecord?  {
 }
 
     /**
+     * Block and remove contacts in one shared-state transaction.
+     *
+     * Returns removed records. Busy peers remain unchanged; contacts with public
+     * markers are blocked but retained. Callers enforce subscription policy and
+     * perform any best-effort withdrawal before this operation.
+     */
+open func removeContactsAndBlockPeers(publicKeys: [String])async throws  -> [ContactRecord]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_remove_contacts_and_block_peers(
+                    self.uniffiClonePointer(),
+                    FfiConverterSequenceString.lower(publicKeys)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeContactRecord.lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
      * Remove a blocked peer's public marker. Active links retain their markers.
      */
 open func removeEncryptedLinkRecoveryMarker(counterparty: String)async throws  -> EncryptedLinkRecoveryMarkerReport  {
@@ -4607,6 +4774,7 @@ open func retrieveReceipt(counterparty: String, receiptId: String)async throws  
     /**
      * Rotate identity-wide Paykit key material to the next generation.
      *
+     * Requires the Pubky identity secret and authorizer capabilities.
      * Persist the replacement before this call and retry with the same key
      * after an error or interruption. Distribute it to remaining authorized
      * applications before private Paykit operations resume.
@@ -4644,6 +4812,57 @@ open func saveContact(update: ContactUpdate)async throws  -> ContactRecord  {
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeContactRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Save or update Contact Records in one atomic storage transaction.
+     *
+     * All updates are validated before any record changes. Records are returned
+     * in input order, including duplicates; the last update for a key wins in
+     * storage. An empty batch still requires an initialized identity and leaves
+     * stored state unchanged. Existing profile and Public Contact Marker metadata
+     * is preserved; marker publication and unblocking peers remain separate.
+     */
+open func saveContacts(updates: [ContactUpdate])async throws  -> [ContactRecord]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_save_contacts(
+                    self.uniffiClonePointer(),
+                    FfiConverterSequenceTypeContactUpdate.lower(updates)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeContactRecord.lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Save contacts and unblock selected blocked peers in one atomic transaction.
+     *
+     * For explicit contact additions or restoration, not label edits. Unblocked
+     * peers need a fresh Encrypted Link; other links remain unchanged. Ordering,
+     * duplicates and metadata follow `save_contacts`. Invalid input or an active
+     * lease on a selected blocked peer rejects the entire batch.
+     */
+open func saveContactsAndUnblockPeers(updates: [ContactUpdate])async throws  -> [ContactRecord]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_save_contacts_and_unblock_peers(
+                    self.uniffiClonePointer(),
+                    FfiConverterSequenceTypeContactUpdate.lower(updates)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeContactRecord.lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -9977,7 +10196,7 @@ public func FfiConverterTypeContactUpdate_lower(_ value: ContactUpdate) -> RustB
  */
 public struct ConversionRate {
     /**
-     * Payment asset code.
+     * Payment asset or asset-rail selector; `usdt-polygon` overrides `usdt`.
      */
     public var asset: String
     /**
@@ -9989,7 +10208,7 @@ public struct ConversionRate {
     // declare one manually.
     public init(
         /**
-         * Payment asset code.
+         * Payment asset or asset-rail selector; `usdt-polygon` overrides `usdt`.
          */asset: String,
         /**
          * Positive decimal multiplier; never convert through floating point.
@@ -10839,6 +11058,93 @@ public func FfiConverterTypeLinkedPeerRecord_lower(_ value: LinkedPeerRecord) ->
 
 
 /**
+ * Backup fingerprint paired with the exact shared-state revision it describes.
+ */
+public struct ObservedBackupStateRevision {
+    /**
+     * Previously observed storage revision, including transient leases.
+     */
+    public var stateRevision: String
+    /**
+     * Content fingerprint excluding state omitted from SDK backups.
+     */
+    public var backupRevision: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Previously observed storage revision, including transient leases.
+         */stateRevision: String,
+        /**
+         * Content fingerprint excluding state omitted from SDK backups.
+         */backupRevision: String) {
+        self.stateRevision = stateRevision
+        self.backupRevision = backupRevision
+    }
+}
+
+#if compiler(>=6)
+extension ObservedBackupStateRevision: Sendable {}
+#endif
+
+
+extension ObservedBackupStateRevision: Equatable, Hashable {
+    public static func ==(lhs: ObservedBackupStateRevision, rhs: ObservedBackupStateRevision) -> Bool {
+        if lhs.stateRevision != rhs.stateRevision {
+            return false
+        }
+        if lhs.backupRevision != rhs.backupRevision {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(stateRevision)
+        hasher.combine(backupRevision)
+    }
+}
+
+extension ObservedBackupStateRevision: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeObservedBackupStateRevision: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ObservedBackupStateRevision {
+        return
+            try ObservedBackupStateRevision(
+                stateRevision: FfiConverterString.read(from: &buf),
+                backupRevision: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ObservedBackupStateRevision, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.stateRevision, into: &buf)
+        FfiConverterString.write(value.backupRevision, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeObservedBackupStateRevision_lift(_ buf: RustBuffer) throws -> ObservedBackupStateRevision {
+    return try FfiConverterTypeObservedBackupStateRevision.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeObservedBackupStateRevision_lower(_ value: ObservedBackupStateRevision) -> RustBuffer {
+    return FfiConverterTypeObservedBackupStateRevision.lower(value)
+}
+
+
+/**
  * Summary for processing outbound private messages for one counterparty.
  */
 public struct OutboundPrivateCounterpartySendReport {
@@ -11300,7 +11606,7 @@ public func FfiConverterTypePaykitAppCapabilities_lower(_ value: PaykitAppCapabi
  */
 public struct PaykitAppRegistry {
     /**
-     * Generation of the identity-wide Paykit key material.
+     * Advertised key generation; verify with `paykit_noise_key_authorization`.
      */
     public var keyGeneration: UInt64
     /**
@@ -11308,6 +11614,7 @@ public struct PaykitAppRegistry {
      *
      * Public-only registries may omit this value. This is not a Pubky identity
      * key and must not be passed through Pubky public-key normalization helpers.
+     * This field is discovery metadata, not identity-signed authorization.
      */
     public var noisePublicKey: String?
     /**
@@ -11327,13 +11634,14 @@ public struct PaykitAppRegistry {
     // declare one manually.
     public init(
         /**
-         * Generation of the identity-wide Paykit key material.
+         * Advertised key generation; verify with `paykit_noise_key_authorization`.
          */keyGeneration: UInt64,
         /**
          * Identity-wide Noise public key as raw z32 text, when initialized.
          *
          * Public-only registries may omit this value. This is not a Pubky identity
          * key and must not be passed through Pubky public-key normalization helpers.
+         * This field is discovery metadata, not identity-signed authorization.
          */noisePublicKey: String?,
         /**
          * Registered applications in App ID order.
@@ -11671,6 +11979,121 @@ public func FfiConverterTypePaykitBlobRecord_lift(_ buf: RustBuffer) throws -> P
 #endif
 public func FfiConverterTypePaykitBlobRecord_lower(_ value: PaykitBlobRecord) -> RustBuffer {
     return FfiConverterTypePaykitBlobRecord.lower(value)
+}
+
+
+/**
+ * Verified Pubky identity approval of the current Paykit Noise key.
+ */
+public struct PaykitNoiseKeyAuthorization {
+    /**
+     * Pubky identity that signed the authorization, in app-facing `pubky...` form.
+     */
+    public var owner: String
+    /**
+     * Authorized Ed25519 routing key as raw z32 text.
+     */
+    public var noisePublicKey: String
+    /**
+     * Authorized X25519 handshake static key as hexadecimal text.
+     */
+    public var noiseStaticPublicKey: String
+    /**
+     * Authorized Paykit key generation.
+     */
+    public var keyGeneration: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Pubky identity that signed the authorization, in app-facing `pubky...` form.
+         */owner: String,
+        /**
+         * Authorized Ed25519 routing key as raw z32 text.
+         */noisePublicKey: String,
+        /**
+         * Authorized X25519 handshake static key as hexadecimal text.
+         */noiseStaticPublicKey: String,
+        /**
+         * Authorized Paykit key generation.
+         */keyGeneration: UInt64) {
+        self.owner = owner
+        self.noisePublicKey = noisePublicKey
+        self.noiseStaticPublicKey = noiseStaticPublicKey
+        self.keyGeneration = keyGeneration
+    }
+}
+
+#if compiler(>=6)
+extension PaykitNoiseKeyAuthorization: Sendable {}
+#endif
+
+
+extension PaykitNoiseKeyAuthorization: Equatable, Hashable {
+    public static func ==(lhs: PaykitNoiseKeyAuthorization, rhs: PaykitNoiseKeyAuthorization) -> Bool {
+        if lhs.owner != rhs.owner {
+            return false
+        }
+        if lhs.noisePublicKey != rhs.noisePublicKey {
+            return false
+        }
+        if lhs.noiseStaticPublicKey != rhs.noiseStaticPublicKey {
+            return false
+        }
+        if lhs.keyGeneration != rhs.keyGeneration {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(owner)
+        hasher.combine(noisePublicKey)
+        hasher.combine(noiseStaticPublicKey)
+        hasher.combine(keyGeneration)
+    }
+}
+
+extension PaykitNoiseKeyAuthorization: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaykitNoiseKeyAuthorization: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaykitNoiseKeyAuthorization {
+        return
+            try PaykitNoiseKeyAuthorization(
+                owner: FfiConverterString.read(from: &buf),
+                noisePublicKey: FfiConverterString.read(from: &buf),
+                noiseStaticPublicKey: FfiConverterString.read(from: &buf),
+                keyGeneration: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PaykitNoiseKeyAuthorization, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.owner, into: &buf)
+        FfiConverterString.write(value.noisePublicKey, into: &buf)
+        FfiConverterString.write(value.noiseStaticPublicKey, into: &buf)
+        FfiConverterUInt64.write(value.keyGeneration, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaykitNoiseKeyAuthorization_lift(_ buf: RustBuffer) throws -> PaykitNoiseKeyAuthorization {
+    return try FfiConverterTypePaykitNoiseKeyAuthorization.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaykitNoiseKeyAuthorization_lower(_ value: PaykitNoiseKeyAuthorization) -> RustBuffer {
+    return FfiConverterTypePaykitNoiseKeyAuthorization.lower(value)
 }
 
 
@@ -22025,7 +22448,7 @@ public enum PaykitError: Swift.Error {
          */context: String
     )
     /**
-     * Shared state is locked with an unconfirmed write; back off for recovery.
+     * Shared state remains locked after acquisition retries; back off before retrying.
      */
     case SharedStateBusy(
         /**
@@ -22625,6 +23048,30 @@ fileprivate struct FfiConverterOptionTypeLinkedPeerHandshakeReport: FfiConverter
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeLinkedPeerHandshakeReport.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeObservedBackupStateRevision: FfiConverterRustBuffer {
+    typealias SwiftType = ObservedBackupStateRevision?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeObservedBackupStateRevision.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeObservedBackupStateRevision.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -23378,6 +23825,31 @@ fileprivate struct FfiConverterSequenceTypeContactRecord: FfiConverterRustBuffer
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeContactRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeContactUpdate: FfiConverterRustBuffer {
+    typealias SwiftType = [ContactUpdate]
+
+    public static func write(_ value: [ContactUpdate], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeContactUpdate.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ContactUpdate] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ContactUpdate]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeContactUpdate.read(from: &buf))
         }
         return seq
     }
@@ -24433,6 +24905,15 @@ public func parsePubkyResource(uri: String)throws  -> PubkyResourceRef  {
 })
 }
 /**
+ * Capabilities for an identity authorizer. Never grant these to ordinary Paykit apps.
+ */
+public func paykitAuthorizerSessionCapabilities() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_func_paykit_authorizer_session_capabilities($0
+    )
+})
+}
+/**
  * Resolve an actual-payment deadline for the selected Billing Period.
  * The caller compares this with independently verified payment time.
  */
@@ -24553,6 +25034,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_parse_pubky_resource() != 2298) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_func_paykit_authorizer_session_capabilities() != 54573) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_func_payment_deadline_at() != 2507) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -24664,7 +25148,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_authorize_allowance_reassociation() != 14050) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_backup_state_revision() != 4088) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_backup_state_revision() != 60914) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_begin_payment_execution() != 18142) {
@@ -24674,6 +25158,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_cancel_payment_request() != 58269) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_claim_and_accept_payment_request() != 47604) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_claim_payment_request_for_execution() != 22993) {
@@ -24790,10 +25277,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_observe_encrypted_link_recovery_marker() != 51945) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_observed_backup_state_revision() != 29510) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_paykit_app_registry() != 60710) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_paykit_app_removal_blockers() != 11867) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_paykit_noise_key_authorization() != 61254) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_payment_requests() != 9060) {
@@ -24808,7 +25301,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_and_resolve_private_contact_payment() != 31058) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_and_resolve_private_payment_request() != 60689) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_and_resolve_private_payment_request() != 47410) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_receipt_issuance() != 41997) {
@@ -24836,6 +25329,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_blob() != 27941) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_noise_key_authorization() != 59067) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_profile() != 23202) {
@@ -24901,6 +25397,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 39834) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contacts_and_block_peers() != 10421) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_encrypted_link_recovery_marker() != 34687) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -24940,10 +25439,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_retrieve_receipt() != 26622) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_rotate_paykit_identity_key() != 40244) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_rotate_paykit_identity_key() != 20685) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contact() != 1121) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contacts() != 6516) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contacts_and_unblock_peers() != 14421) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_select_allowance() != 13682) {

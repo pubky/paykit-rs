@@ -120,6 +120,12 @@ pub struct EncryptedLink {
 }
 
 impl EncryptedLink {
+    /// X25519 static key authenticated by the Noise transcript.
+    /// The caller must bind this key to the expected identity, including after restore.
+    pub fn remote_static_public_key(&self) -> Option<&[u8]> {
+        self.encryptor.remote_static_public_key()
+    }
+
     pub(super) fn from_parts(
         encryptor: pubky_noise::PubkyNoiseEncryptor,
         recipient: PublicKey,
@@ -595,6 +601,8 @@ pub async fn close_encrypted_link(mut link: EncryptedLink) -> Result<()> {
 ///
 /// Restored links reset `max_send_retries` to [`DEFAULT_MAX_SEND_RETRIES`].
 /// `remote_identity_public_key` must match `snapshot.recipient()`.
+/// Download failures return [`PaykitError::Transport`]; retain the snapshot to retry.
+/// Missing or invalid handshake transcripts return [`PaykitError::InvalidData`].
 #[instrument(skip(session, secret_key, outbox_client, snapshot))]
 pub async fn restore_encrypted_link(
     session: pubky::PubkySession,
@@ -622,9 +630,11 @@ pub async fn restore_encrypted_link(
         read_path,
         outbox_client,
     )
-    .map_err(|err| PaykitError::Transport {
+    .map_err(|err| PaykitError::InvalidData {
         context: format!("failed to create encryptor config for restore: {err:?}"),
-        source: anyhow::anyhow!("pubky-noise PubkyNoiseConfig::new failed: {err:?}"),
+        source: Some(anyhow::anyhow!(
+            "pubky-noise PubkyNoiseConfig::new failed: {err:?}"
+        )),
     })?;
 
     restore_encrypted_link_inner(config, remote_identity_public_key, snapshot).await
@@ -641,6 +651,8 @@ pub async fn restore_encrypted_link(
 /// The config's Noise key must match the snapshot's static key.
 /// The config paths must match the session's local Pubky identity, the remote
 /// identity, and the Noise keys; mismatches return [`PaykitError::Validation`].
+/// Download failures return [`PaykitError::Transport`]; missing or invalid
+/// handshake transcripts return [`PaykitError::InvalidData`].
 #[instrument(skip(config, snapshot))]
 pub async fn restore_encrypted_link_from_config(
     config: std::sync::Arc<pubky_noise::PubkyNoiseConfig>,
@@ -693,9 +705,9 @@ async fn restore_encrypted_link_inner(
         remote_identity_public_key.clone(),
     )
     .await
-    .map_err(|err| PaykitError::Transport {
+    .map_err(|err| PaykitError::InvalidData {
         context: format!("failed to restore Encrypted Link: {err:?}"),
-        source: anyhow::anyhow!("pubky-noise restore failed: {err:?}"),
+        source: Some(anyhow::anyhow!("pubky-noise restore failed: {err:?}")),
     })?;
 
     debug!("Encrypted Link restored successfully");

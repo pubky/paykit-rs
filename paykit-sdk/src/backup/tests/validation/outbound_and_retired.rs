@@ -80,7 +80,7 @@ fn test_retired_app_allows_confirmation_but_not_unconfirmed_event() {
 fn test_restore_unconfirmed_publication_requires_recovery_without_checkpoint() {
     let mut events = vec![published_event()];
     let mut peers = HashMap::new();
-    let recovery = reconcile_restored_linked_peers(&mut peers, &HashMap::new(), &events);
+    let recovery = reconcile_restored_linked_peers(&mut peers, &HashMap::new(), &events).unwrap();
     assert_eq!(recovery, vec![events[0].counterparty.clone()]);
     mark_restored_outbound_recovery_required(&mut events, &recovery, false);
     assert_eq!(

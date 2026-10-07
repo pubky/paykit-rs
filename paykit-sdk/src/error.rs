@@ -16,9 +16,9 @@ pub enum PaykitSdkError {
         source: Option<anyhow::Error>,
     },
 
-    /// Shared state is locked while an unconfirmed write is pending.
+    /// Shared state remains locked after bounded acquisition retries.
     ///
-    /// The holder may be waiting for write recovery. Back off rather than
+    /// The holder may be active or waiting for write recovery. Back off rather than
     /// immediately retrying; cancellation can restart the recovery wait.
     #[error("shared state busy: {context}")]
     SharedStateBusy {

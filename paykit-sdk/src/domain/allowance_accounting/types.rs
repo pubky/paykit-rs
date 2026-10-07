@@ -229,8 +229,8 @@ pub struct PaymentExecutionChecks {
     /// Endpoint details are current, usable, and unconsumed.
     pub endpoint_current: bool,
     /// Local enablement and every private safeguard passed.
-    /// For manual cross-asset execution this also attests that the wallet validated
-    /// the actual amount against the request's conversion policy, selected quote
+    /// For manual conversion or explicitly priced payments, this also attests that
+    /// the wallet validated the actual amount against the conversion policy, selected quote
     /// when required, endpoint precision and upward rounding, and payment deadlines.
     /// The wallet must persist its selected quote separately before execution.
     pub local_enabled: bool,

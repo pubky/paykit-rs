@@ -36,6 +36,8 @@ pub const PAYKIT_PATH_PREFIX: &str = "/pub/paykit/v0/";
 
 /// Public path for the identity-wide Paykit App Registry.
 pub const PAYKIT_APP_REGISTRY_PATH: &str = "/pub/paykit/v0/app-registry.json";
+/// Identity-authorized current Noise key, outside delegated Paykit write access.
+pub const PAYKIT_NOISE_KEY_AUTHORIZATION_PATH: &str = "/pub/paykit-authority/v0/current-key.json";
 
 /// Pubky path for the encrypted identity-wide SDK state.
 pub const PAYKIT_SHARED_STATE_PATH: &str = "/pub/paykit/v0/shared-state.bin";
@@ -872,7 +874,7 @@ async fn list_resources(
     Ok(resources)
 }
 
-fn is_not_found(err: &PubkyError) -> bool {
+pub(crate) fn is_not_found(err: &PubkyError) -> bool {
     matches!(
         err,
         PubkyError::Request(RequestError::Server { status, .. })

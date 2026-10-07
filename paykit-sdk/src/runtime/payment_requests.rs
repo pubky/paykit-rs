@@ -1,5 +1,11 @@
+use super::allowance_accounting::ensure_accounting_identity;
 use super::*;
-use crate::domain::payment_requests::validate_proof_conversion;
+use crate::domain::payment_requests::{
+    claim_payment_request_execution_in_transaction,
+    enqueue_checked_payment_request_action_in_transaction,
+    payment_request_records_from_transaction, received_payment_request_records_from_transaction,
+    validate_proof_conversion,
+};
 use crate::domain::private_stream::is_payment_request_kind;
 use paykit_lib::{ConversionRate, PaymentConversionQuote, PaymentRequestEvent};
 
@@ -23,16 +29,20 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<Vec<PaymentRequestRecord>> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.public_key.is_none() {
-            return Ok(Vec::new());
-        }
-        self.ensure_peer_not_blocked(counterparty).await?;
-        let mut records =
-            derive_received_payment_request_records(&self.storage, counterparty, self.clock.now())
-                .await?;
-        self.mark_recovery_required_payment_request_records(counterparty, &mut records)
+        let mut records = self
+            .list_payment_requests(PaymentRequestFilter {
+                counterparty: Some(counterparty.clone()),
+                received_only: true,
+                ..PaymentRequestFilter::default()
+            })
             .await?;
+        records.sort_by_key(|record| {
+            std::cmp::Reverse(
+                record
+                    .last_stream_item_id
+                    .or(record.proposal_stream_item_id),
+            )
+        });
         Ok(records)
     }
 
@@ -44,15 +54,20 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<Vec<PaymentRequestRecord>> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
-        if identity.public_key.is_none() {
-            return Ok(Vec::new());
-        }
-        self.ensure_peer_not_blocked(counterparty).await?;
-        let mut records =
-            derive_payment_request_records(&self.storage, counterparty, self.clock.now()).await?;
-        self.mark_recovery_required_payment_request_records(counterparty, &mut records)
+        let mut records = self
+            .list_payment_requests(PaymentRequestFilter {
+                counterparty: Some(counterparty.clone()),
+                ..PaymentRequestFilter::default()
+            })
             .await?;
+        records.sort_by_key(|record| {
+            std::cmp::Reverse((
+                record.last_event_at,
+                record
+                    .last_outbound_message_id
+                    .or(record.last_stream_item_id),
+            ))
+        });
         Ok(records)
     }
 
@@ -65,37 +80,20 @@ where
         &self,
         filter: PaymentRequestFilter,
     ) -> Result<Vec<PaymentRequestRecord>> {
-        let (_, identity) = self.load_session_access_and_refresh_identity().await?;
+        let (_, identity, records) = self
+            .load_session_access_and_refresh_identity_with(|tx| {
+                filtered_payment_request_records(tx, &filter, self.clock.now())
+            })
+            .await?;
         if identity.public_key.is_none() {
             return Ok(Vec::new());
         }
-        let now = self.clock.now();
-
-        let counterparties = if let Some(counterparty) = &filter.counterparty {
-            self.ensure_peer_not_blocked(counterparty).await?;
-            vec![counterparty.clone()]
-        } else {
-            self.payment_request_counterparties(filter.received_only)
-                .await?
-        };
-
-        let mut records = Vec::new();
-        for counterparty in counterparties {
-            let mut peer_records = if filter.received_only {
-                derive_received_payment_request_records(&self.storage, &counterparty, now).await?
-            } else {
-                derive_payment_request_records(&self.storage, &counterparty, now).await?
-            };
-            self.mark_recovery_required_payment_request_records(&counterparty, &mut peer_records)
-                .await?;
-            records.extend(
-                peer_records
-                    .into_iter()
-                    .filter(|record| filter.matches(record)),
-            );
+        if let Some(records) = records {
+            return Ok(records);
         }
-        sort_payment_requests_newest_first(&mut records);
-        Ok(records)
+        self.storage
+            .transaction(|tx| filtered_payment_request_records(tx, &filter, self.clock.now()))
+            .await
     }
 
     /// Return all Payment Requests across non-blocked counterparties.
@@ -193,31 +191,10 @@ where
         record: &PaymentRequestRecord,
         action: &str,
     ) -> Result<()> {
-        let proposal_app_id =
-            record
-                .proposal_app_id
-                .as_ref()
-                .ok_or_else(|| PaykitSdkError::Protocol {
-                    context: format!(
-                        "cannot {action}: Payment Request {} has no originating Paykit App",
-                        record.payment_request_id
-                    ),
-                    source: None,
-                })?;
-        if self
+        let authorized = self
             .authorized_payment_request_apps_for_peer(counterparty)
-            .await?
-            .is_some_and(|app_ids| app_ids.contains(proposal_app_id))
-        {
-            return Ok(());
-        }
-        Err(PaykitSdkError::Policy {
-            context: format!(
-                "cannot {action}: originating Paykit app '{}' is not currently authorized for Payment Requests",
-                proposal_app_id
-            ),
-            source: None,
-        })
+            .await?;
+        require_payment_request_origin_app_authorized(record, authorized.as_deref(), action)
     }
 
     pub(super) async fn authorized_payment_request_apps_for_peer(
@@ -230,46 +207,20 @@ where
         Ok(context.payment_request_apps)
     }
 
-    async fn payment_request_counterparties(
-        &self,
-        received_only: bool,
-    ) -> Result<Vec<PubkyPublicKey>> {
-        self.storage
-            .transaction(move |tx| {
-                let snapshot = tx.export_storage_state();
-                let mut counterparties = HashSet::new();
-                for item in snapshot.private_stream_items {
-                    if is_payment_request_kind(item.parsed_kind.as_deref()) {
-                        counterparties.insert(item.counterparty);
-                    }
-                }
-                if !received_only {
-                    for outbound in snapshot.outbound_private_messages {
-                        if is_payment_request_kind(Some(&outbound.kind)) {
-                            counterparties.insert(outbound.counterparty);
-                        }
-                    }
-                }
-                let mut counterparties = counterparties
-                    .into_iter()
-                    .filter(|counterparty| {
-                        !snapshot
-                            .linked_peers
-                            .get(counterparty)
-                            .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
-                    })
-                    .collect::<Vec<_>>();
-                counterparties.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-                Ok(counterparties)
-            })
-            .await
-    }
-
     pub(super) async fn ensure_private_outbound_ready(
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<GuardedSessionAccess> {
-        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
+        let (session_access, _, readiness) = self
+            .load_session_access_and_refresh_identity_with(|tx| {
+                Ok(require_private_automation_ready(
+                    tx.linked_peer(counterparty).map(|peer| peer.state),
+                    tx.encrypted_link_state(counterparty)
+                        .is_some_and(|state| state.link_snapshot.is_some()),
+                    counterparty,
+                ))
+            })
+            .await?;
         let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky session available".into(),
             source: None,
@@ -280,26 +231,7 @@ where
                 source: None,
             });
         }
-        self.ensure_peer_allows_private_automation(counterparty)
-            .await?;
-
-        let has_active_link = self
-            .storage
-            .transaction(|tx| {
-                Ok(tx
-                    .encrypted_link_state(counterparty)
-                    .and_then(|state| state.link_snapshot)
-                    .is_some())
-            })
-            .await?;
-        if !has_active_link {
-            return Err(PaykitSdkError::RecoveryRequired {
-                context: format!(
-                    "no active Encrypted Link snapshot for counterparty {counterparty}"
-                ),
-                source: None,
-            });
-        }
+        readiness.expect("active session loads outbound readiness")?;
 
         Ok(session_access)
     }
@@ -420,6 +352,87 @@ where
         )
         .await?;
         self.load_payment_request_record(&counterparty, payment_request_id)
+            .await
+    }
+
+    /// Atomically claim a received Payment Request and queue its acceptance.
+    ///
+    /// An existing claim must belong to this App. Callers that reserve work during
+    /// preparation should still use [`Self::claim_payment_request_for_execution`]
+    /// before preparing the payment. Success durably queues acceptance, not delivery;
+    /// accounting callers must still reserve payment and obtain a fresh handoff.
+    pub async fn claim_and_accept_payment_request(
+        &self,
+        counterparty: PubkyPublicKey,
+        payment_request_id: &PaymentRequestId,
+    ) -> Result<PaymentRequestRecord> {
+        let (session, expected_identity, _) = self
+            .load_session_access_and_refresh_identity_with(|tx| {
+                require_private_automation_ready(
+                    tx.linked_peer(&counterparty).map(|peer| peer.state),
+                    tx.encrypted_link_state(&counterparty)
+                        .is_some_and(|state| state.link_snapshot.is_some()),
+                    &counterparty,
+                )
+            })
+            .await?;
+        let session = session.ok_or_else(|| PaykitSdkError::Identity {
+            context: "no Pubky session available".into(),
+            source: None,
+        })?;
+        if !session.private_link_capable_for_capabilities(PAYKIT_SESSION_CAPABILITIES)? {
+            return Err(PaykitSdkError::Identity {
+                context: "local Pubky identity is not private-link-capable".into(),
+                source: None,
+            });
+        }
+        // Preserve observed permissions even when claim or acceptance is rejected.
+        let (authorization, ()) = self
+            .counterparty_app_authorization_context_with(&counterparty, |tx| {
+                ensure_accounting_identity(tx, &expected_identity)
+            })
+            .await?;
+        let event = PaymentRequestEvent::Acceptance(PaymentRequestAcceptance::new(
+            EventId::new_v4(),
+            payment_request_id.clone(),
+        ));
+        self.storage
+            .transaction(|tx| {
+                let now = self.clock.now();
+                require_private_automation_ready(
+                    tx.linked_peer(&counterparty).map(|peer| peer.state),
+                    tx.encrypted_link_state(&counterparty)
+                        .is_some_and(|state| state.link_snapshot.is_some()),
+                    &counterparty,
+                )?;
+                let record = claim_payment_request_execution_in_transaction(
+                    tx,
+                    &counterparty,
+                    &self.config.app_id,
+                    payment_request_id,
+                    now,
+                )?;
+                // A concurrent cache write must not override this call's observed revocation.
+                require_payment_request_origin_app_authorized(
+                    &record,
+                    authorization.payment_request_apps.as_deref(),
+                    "claim and accept Payment Request",
+                )?;
+                enqueue_checked_payment_request_action_in_transaction(
+                    tx,
+                    &counterparty,
+                    &self.config.app_id,
+                    &event,
+                    now,
+                    Some(&expected_identity),
+                )?;
+                self.payment_request_record_in_transaction(
+                    tx,
+                    &counterparty,
+                    payment_request_id,
+                    true,
+                )
+            })
             .await
     }
 
@@ -743,10 +756,34 @@ where
         counterparty: &PubkyPublicKey,
         payment_request_id: &PaymentRequestId,
     ) -> Result<PaymentRequestRecord> {
+        self.storage
+            .transaction(|tx| {
+                self.payment_request_record_in_transaction(
+                    tx,
+                    counterparty,
+                    payment_request_id,
+                    true,
+                )
+            })
+            .await
+    }
+
+    pub(super) fn payment_request_record_in_transaction(
+        &self,
+        tx: &dyn StorageTransaction,
+        counterparty: &PubkyPublicKey,
+        payment_request_id: &PaymentRequestId,
+        include_link_recovery: bool,
+    ) -> Result<PaymentRequestRecord> {
         let mut records =
-            derive_payment_request_records(&self.storage, counterparty, self.clock.now()).await?;
-        self.mark_recovery_required_payment_request_records(counterparty, &mut records)
-            .await?;
+            payment_request_records_from_transaction(tx, counterparty, self.clock.now())?;
+        if include_link_recovery
+            && tx
+                .linked_peer(counterparty)
+                .is_some_and(|peer| peer.state == LinkedPeerState::RecoveryRequired)
+        {
+            mark_payment_requests_recovery_required(&mut records);
+        }
         records
             .into_iter()
             .find(|record| record.payment_request_id == payment_request_id.as_str())
@@ -759,50 +796,22 @@ where
             })
     }
 
-    async fn mark_recovery_required_payment_request_records(
-        &self,
-        counterparty: &PubkyPublicKey,
-        records: &mut [PaymentRequestRecord],
-    ) -> Result<()> {
-        let recovery_required = self
-            .storage
-            .transaction(|tx| {
-                Ok(tx
-                    .linked_peer(counterparty)
-                    .is_some_and(|peer| peer.state == LinkedPeerState::RecoveryRequired))
-            })
-            .await?;
-        if !recovery_required {
-            return Ok(());
-        }
-        for record in records {
-            if matches!(
-                record.state,
-                PaymentRequestLifecycleState::Proposed
-                    | PaymentRequestLifecycleState::ProposalExpired
-                    | PaymentRequestLifecycleState::Accepted
-                    | PaymentRequestLifecycleState::ProofSubmitted
-                    | PaymentRequestLifecycleState::ActiveRecurring
-            ) {
-                record.state = PaymentRequestLifecycleState::RecoveryRequired;
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) async fn enqueue_raw_payment_request(
         &self,
         counterparty: PubkyPublicKey,
         event: &PaymentRequest,
     ) -> Result<PaymentRequestRecord> {
-        self.ensure_private_outbound_ready(&counterparty).await?;
-        enqueue_payment_request_message(
-            &self.storage,
-            counterparty,
-            &self.config.app_id,
-            event,
-            self.clock.now(),
-        )
+        self.with_storage_operation(Box::pin(async {
+            self.ensure_private_outbound_ready(&counterparty).await?;
+            enqueue_payment_request_message(
+                &self.storage,
+                counterparty,
+                &self.config.app_id,
+                event,
+                self.clock.now(),
+            )
+            .await
+        }))
         .await
     }
 
@@ -812,15 +821,18 @@ where
         event: &PaymentRequestEvent,
         expected_identity: Option<IdentityState>,
     ) -> Result<OutboundPrivateMessageRecord> {
-        let _session = self.ensure_private_outbound_ready(&counterparty).await?;
-        crate::domain::payment_requests::enqueue_checked_payment_request_action_with_identity(
-            &self.storage,
-            counterparty,
-            &self.config.app_id,
-            event,
-            || self.clock.now(),
-            expected_identity,
-        )
+        self.with_storage_operation(Box::pin(async {
+            let _session = self.ensure_private_outbound_ready(&counterparty).await?;
+            crate::domain::payment_requests::enqueue_checked_payment_request_action_with_identity(
+                &self.storage,
+                counterparty,
+                &self.config.app_id,
+                event,
+                || self.clock.now(),
+                expected_identity,
+            )
+            .await
+        }))
         .await
     }
     #[cfg(test)]
@@ -939,6 +951,115 @@ fn require_state(
             ),
             source: None,
         })
+    }
+}
+
+fn filtered_payment_request_records(
+    tx: &dyn StorageTransaction,
+    filter: &PaymentRequestFilter,
+    now: DateTime<Utc>,
+) -> Result<Vec<PaymentRequestRecord>> {
+    let counterparties = if let Some(counterparty) = &filter.counterparty {
+        if tx
+            .linked_peer(counterparty)
+            .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
+        {
+            return Err(PaykitSdkError::Policy {
+                context: format!("counterparty {counterparty} is blocked"),
+                source: None,
+            });
+        }
+        vec![counterparty.clone()]
+    } else {
+        let snapshot = tx.export_storage_state();
+        let mut peers = HashSet::new();
+        for item in snapshot.private_stream_items {
+            if is_payment_request_kind(item.parsed_kind.as_deref()) {
+                peers.insert(item.counterparty);
+            }
+        }
+        if !filter.received_only {
+            for outbound in snapshot.outbound_private_messages {
+                if is_payment_request_kind(Some(&outbound.kind)) {
+                    peers.insert(outbound.counterparty);
+                }
+            }
+        }
+        let mut peers = peers
+            .into_iter()
+            .filter(|peer| {
+                !snapshot
+                    .linked_peers
+                    .get(peer)
+                    .is_some_and(|record| record.state == LinkedPeerState::Blocked)
+            })
+            .collect::<Vec<_>>();
+        peers.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        peers
+    };
+    let mut records = Vec::new();
+    for peer in counterparties {
+        let mut peer_records = if filter.received_only {
+            received_payment_request_records_from_transaction(tx, &peer, now)?
+        } else {
+            payment_request_records_from_transaction(tx, &peer, now)?
+        };
+        if tx
+            .linked_peer(&peer)
+            .is_some_and(|record| record.state == LinkedPeerState::RecoveryRequired)
+        {
+            mark_payment_requests_recovery_required(&mut peer_records);
+        }
+        records.extend(
+            peer_records
+                .into_iter()
+                .filter(|record| filter.matches(record)),
+        );
+    }
+    sort_payment_requests_newest_first(&mut records);
+    Ok(records)
+}
+
+pub(super) fn require_payment_request_origin_app_authorized(
+    record: &PaymentRequestRecord,
+    authorized: Option<&[paykit_lib::PaykitAppId]>,
+    action: &str,
+) -> Result<()> {
+    let proposal_app_id =
+        record
+            .proposal_app_id
+            .as_ref()
+            .ok_or_else(|| PaykitSdkError::Protocol {
+                context: format!(
+                    "cannot {action}: Payment Request {} has no originating Paykit App",
+                    record.payment_request_id
+                ),
+                source: None,
+            })?;
+    if authorized.is_some_and(|apps| apps.contains(proposal_app_id)) {
+        return Ok(());
+    }
+    Err(PaykitSdkError::Policy {
+        context: format!(
+            "cannot {action}: originating Paykit app '{}' is not currently authorized for Payment Requests",
+            proposal_app_id
+        ),
+        source: None,
+    })
+}
+
+fn mark_payment_requests_recovery_required(records: &mut [PaymentRequestRecord]) {
+    for record in records {
+        if matches!(
+            record.state,
+            PaymentRequestLifecycleState::Proposed
+                | PaymentRequestLifecycleState::ProposalExpired
+                | PaymentRequestLifecycleState::Accepted
+                | PaymentRequestLifecycleState::ProofSubmitted
+                | PaymentRequestLifecycleState::ActiveRecurring
+        ) {
+            record.state = PaymentRequestLifecycleState::RecoveryRequired;
+        }
     }
 }
 

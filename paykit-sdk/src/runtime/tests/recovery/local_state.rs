@@ -19,6 +19,7 @@ async fn test_mark_private_recovery_pending_skips_newer_link_generation() {
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty: counterparty.clone(),
@@ -126,6 +127,7 @@ async fn test_encrypted_link_recovery_marker_status_reports_peer_fields() {
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
                     remote_recovery_marker_observed_at: Some(FixedClock.now()),
+                    noise_key_authorization: None,
                 });
                 Ok(())
             }
@@ -183,6 +185,7 @@ async fn test_publish_recovery_marker_public_only_does_not_mutate_link_state() {
                     local_recovery_marker_last_error: None,
                     remote_recovery_attempt_id: None,
                     remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
                 });
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty,

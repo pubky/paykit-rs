@@ -5,9 +5,17 @@ pub(in crate::backup) fn reconcile_restored_linked_peers(
     linked_peers: &mut HashMap<PubkyPublicKey, LinkedPeerRecord>,
     encrypted_link_states: &HashMap<PubkyPublicKey, EncryptedLinkStateRecord>,
     outbound_private_messages: &[OutboundPrivateMessageRecord],
-) -> Vec<PubkyPublicKey> {
+) -> Result<Vec<PubkyPublicKey>> {
+    let mut recovery_required_peers = HashSet::new();
     for (counterparty, link_state) in encrypted_link_states {
-        let restored_state = restored_peer_state_from_link_state(link_state);
+        let authorization = linked_peers
+            .get(counterparty)
+            .and_then(|peer| peer.noise_key_authorization.as_ref());
+        let restored_state = restored_peer_state_from_link_state(link_state, authorization)?;
+        // Blocked policy must not preserve an unauthorized checkpoint or prepared send.
+        if restored_state == Some(LinkedPeerState::RecoveryRequired) {
+            recovery_required_peers.insert(counterparty.clone());
+        }
         let checkpointed_at = link_state.checkpointed_at;
         linked_peers
             .entry(counterparty.clone())
@@ -19,6 +27,9 @@ pub(in crate::backup) fn reconcile_restored_linked_peers(
                     return;
                 }
                 match restored_state {
+                    Some(LinkedPeerState::RecoveryRequired) => {
+                        peer.state = LinkedPeerState::RecoveryRequired;
+                    }
                     Some(LinkedPeerState::Linked) => peer.state = LinkedPeerState::Linked,
                     Some(LinkedPeerState::Linking) if peer.state != LinkedPeerState::Linked => {
                         peer.state = LinkedPeerState::Linking;
@@ -80,30 +91,52 @@ pub(in crate::backup) fn reconcile_restored_linked_peers(
         }
     }
 
-    let mut peers = Vec::new();
     for record in linked_peers.values_mut() {
-        if record.state == LinkedPeerState::RecoveryRequired {
+        if record.state == LinkedPeerState::RecoveryRequired
+            || recovery_required_peers.contains(&record.counterparty)
+        {
             // An incomplete restored checkpoint must not reuse an old stream.
             record.local_recovery_attempt_id = None;
             record.local_recovery_marker_created_at = None;
             record.local_recovery_marker_last_error = None;
-            peers.push(record.counterparty.clone());
+            recovery_required_peers.insert(record.counterparty.clone());
         }
     }
+    let mut peers = recovery_required_peers.into_iter().collect::<Vec<_>>();
     peers.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-    peers
+    Ok(peers)
 }
 
 fn restored_peer_state_from_link_state(
     record: &EncryptedLinkStateRecord,
-) -> Option<LinkedPeerState> {
-    if record.link_snapshot.is_some() {
-        Some(LinkedPeerState::Linked)
-    } else if record.handshake_snapshot.is_some() && record.handshake_role.is_some() {
-        Some(LinkedPeerState::Linking)
+    authorization: Option<&paykit_lib::PaykitNoiseKeyAuthorization>,
+) -> Result<Option<LinkedPeerState>> {
+    let (state, remote_noise_public_key) = if let Some(bytes) = &record.link_snapshot {
+        let snapshot = paykit_lib::EncryptedLinkSnapshot::deserialize(bytes)?;
+        (
+            LinkedPeerState::Linked,
+            snapshot.remote_noise_public_key().clone(),
+        )
+    } else if let (Some(bytes), Some(_)) = (&record.handshake_snapshot, record.handshake_role) {
+        let snapshot = paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(bytes)?;
+        (
+            LinkedPeerState::Linking,
+            snapshot.remote_noise_public_key().clone(),
+        )
     } else {
-        None
-    }
+        return Ok(None);
+    };
+    // Owner and signature validation precede reconciliation; a checkpoint also
+    // needs the retained authorization for its exact routing key.
+    Ok(Some(
+        if authorization.is_some_and(|authorization| {
+            authorization.noise_public_key() == &remote_noise_public_key
+        }) {
+            state
+        } else {
+            LinkedPeerState::RecoveryRequired
+        },
+    ))
 }
 
 fn restored_peer_record(
@@ -122,6 +155,7 @@ fn restored_peer_record(
         local_recovery_marker_last_error: None,
         remote_recovery_attempt_id: None,
         remote_recovery_marker_observed_at: None,
+        noise_key_authorization: None,
     }
 }
 
@@ -202,6 +236,15 @@ pub(in crate::backup) fn validate_linked_peer_records(
     records: &HashMap<PubkyPublicKey, LinkedPeerRecord>,
 ) -> Result<()> {
     for record in records.values() {
+        if let Some(authorization) = &record.noise_key_authorization {
+            if authorization.owner() != &record.counterparty.to_public_key()? {
+                return Err(PaykitSdkError::Protocol {
+                    context: "stored Noise key authorization belongs to another counterparty"
+                        .into(),
+                    source: None,
+                });
+            }
+        }
         validate_recovery_marker_fields(
             &record.counterparty,
             "local Encrypted Link recovery marker",

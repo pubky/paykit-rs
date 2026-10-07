@@ -1,4 +1,31 @@
 use super::*;
+use std::sync::atomic::AtomicUsize;
+
+struct ContactTestStorage {
+    inner: InMemoryStorage,
+    transactions: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl StorageAdapter for ContactTestStorage {
+    async fn transaction_erased<'a>(
+        &self,
+        callback: crate::storage::StorageTransactionCallback<'a>,
+    ) -> Result<Box<dyn std::any::Any + Send>> {
+        self.transactions.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .transaction_erased(Box::new(move |tx| {
+                let before = tx.export_storage_state();
+                let result = callback(tx);
+                // Inspect the draft before rollback to catch validation after mutation.
+                if result.is_err() {
+                    assert_eq!(tx.export_storage_state(), before);
+                }
+                result
+            }))
+            .await
+    }
+}
 
 fn public_resource(path: &str) -> pubky::PubkyResource {
     let owner = pubky::Keypair::random().public_key();
@@ -123,6 +150,515 @@ async fn test_save_contact_empty_label_clears_existing_label() {
         .unwrap();
 
     assert!(updated.label.is_none());
+}
+
+#[tokio::test]
+async fn test_save_contacts_preserves_input_order_and_existing_metadata() {
+    let local = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let first = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let second = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let earlier = FixedClock.now() - chrono::Duration::days(1);
+    let existing = ContactRecord::from_update(
+        ContactUpdate {
+            public_key: first.clone(),
+            label: Some("Previous label".into()),
+        },
+        None,
+        earlier,
+    )
+    .with_profile(
+        Some(PaykitProfile {
+            display_name: Some("Cached profile".into()),
+            image_uri: None,
+            extra: None,
+        }),
+        earlier,
+    )
+    .mark_public_contact_published(earlier)
+    .mark_public_contact_removal_pending(earlier)
+    .mark_public_contact_failed("Retry marker removal".into(), earlier);
+    let inner = InMemoryStorage::from_state(crate::storage::StorageState {
+        identity_state: Some(IdentityState {
+            public_key: Some(local),
+            initialized_at: earlier,
+        }),
+        contact_records: HashMap::from([(first.clone(), existing.clone())]),
+        ..Default::default()
+    });
+    let transactions = Arc::new(AtomicUsize::new(0));
+    let sdk = PaykitSdk::with_clock(
+        ContactTestStorage {
+            inner: inner.clone(),
+            transactions: transactions.clone(),
+        },
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+
+    let records = sdk
+        .save_contacts(vec![
+            ContactUpdate {
+                public_key: first.clone(),
+                label: Some(" First update ".into()),
+            },
+            ContactUpdate {
+                public_key: second.clone(),
+                label: None,
+            },
+            ContactUpdate {
+                public_key: first.clone(),
+                label: Some("   ".into()),
+            },
+        ])
+        .await
+        .unwrap();
+
+    assert_eq!(transactions.load(Ordering::SeqCst), 1);
+    assert_eq!(records.len(), 3);
+    let mut expected = existing;
+    expected.label = Some("First update".into());
+    expected.updated_at = FixedClock.now();
+    assert_eq!(records[0], expected);
+    expected.label = None;
+    assert_eq!(records[2], expected);
+    assert_eq!(records[1].public_key, second);
+    assert!(records[1].label.is_none());
+    assert!(records[1].profile.is_none());
+    assert_eq!(records[1].created_at, FixedClock.now());
+    assert_eq!(records[1].updated_at, FixedClock.now());
+    assert_eq!(
+        records[1].public_contact_marker_status,
+        PublicationStatus::NotPublished
+    );
+    assert_eq!(
+        inner.snapshot().unwrap().contact_records,
+        HashMap::from([(first, records[2].clone()), (second, records[1].clone())])
+    );
+}
+
+#[tokio::test]
+async fn test_save_contacts_61_records_use_one_transaction() {
+    let inner = InMemoryStorage::from_state(crate::storage::StorageState {
+        identity_state: Some(IdentityState {
+            public_key: Some(PubkyPublicKey::from_public_key(
+                &pubky::Keypair::random().public_key(),
+            )),
+            initialized_at: FixedClock.now(),
+        }),
+        ..Default::default()
+    });
+    let transactions = Arc::new(AtomicUsize::new(0));
+    let sdk = PaykitSdk::with_clock(
+        ContactTestStorage {
+            inner: inner.clone(),
+            transactions: transactions.clone(),
+        },
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    let updates: Vec<_> = (0..61)
+        .map(|_| ContactUpdate {
+            public_key: PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()),
+            label: None,
+        })
+        .collect();
+    let expected_keys: Vec<_> = updates
+        .iter()
+        .map(|update| update.public_key.clone())
+        .collect();
+
+    let records = sdk.save_contacts(updates).await.unwrap();
+
+    assert_eq!(transactions.load(Ordering::SeqCst), 1);
+    assert_eq!(inner.snapshot().unwrap().contact_records.len(), 61);
+    assert_eq!(
+        records
+            .into_iter()
+            .map(|record| record.public_key)
+            .collect::<Vec<_>>(),
+        expected_keys
+    );
+}
+
+#[tokio::test]
+async fn test_remove_and_restore_contacts_use_one_transaction_each() {
+    let storage = registered_test_storage();
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(PubkyPublicKey::from_public_key(
+                &pubky::Keypair::random().public_key(),
+            )),
+            initialized_at: FixedClock.now(),
+        })
+        .await
+        .unwrap();
+    let keys: Vec<_> = (0..62)
+        .map(|_| PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()))
+        .collect();
+    storage
+        .transaction(|tx| {
+            for key in &keys {
+                tx.save_contact_record(ContactRecord::from_update(
+                    ContactUpdate {
+                        public_key: key.clone(),
+                        label: None,
+                    },
+                    None,
+                    FixedClock.now(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let transactions = Arc::new(AtomicUsize::new(0));
+    let sdk = PaykitSdk::with_clock(
+        ContactTestStorage {
+            inner: storage.clone(),
+            transactions: transactions.clone(),
+        },
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    let mut input = keys.clone();
+    input.push(keys[0].clone());
+    let removed = sdk.remove_contacts_and_block_peers(input).await.unwrap();
+    assert_eq!(
+        removed
+            .into_iter()
+            .map(|record| record.public_key)
+            .collect::<Vec<_>>(),
+        keys
+    );
+    assert_eq!(transactions.load(Ordering::SeqCst), 1);
+    let state = storage.snapshot().unwrap();
+    assert!(state.contact_records.is_empty());
+    assert!(state.peer_link_operation_leases.is_empty());
+    assert!(keys
+        .iter()
+        .all(|key| state.linked_peers[key].state == LinkedPeerState::Blocked));
+
+    let restored = sdk
+        .save_contacts_and_unblock_peers(
+            keys.iter()
+                .map(|key| ContactUpdate {
+                    public_key: key.clone(),
+                    label: None,
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(restored.len(), keys.len());
+    assert_eq!(transactions.load(Ordering::SeqCst), 2);
+    let state = storage.snapshot().unwrap();
+    assert_eq!(state.contact_records.len(), keys.len());
+    assert!(state.peer_link_operation_leases.is_empty());
+    assert!(state.encrypted_link_states.is_empty());
+    assert!(keys
+        .iter()
+        .all(|key| state.linked_peers[key].state == LinkedPeerState::NotLinked));
+}
+
+#[tokio::test]
+async fn test_restore_contacts_preserves_other_peers_and_rejects_busy_batch() {
+    let storage = registered_test_storage();
+    let local = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(local),
+            initialized_at: FixedClock.now(),
+        })
+        .await
+        .unwrap();
+    let keys: Vec<_> = (0..5)
+        .map(|_| PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()))
+        .collect();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    for key in &keys[..3] {
+        sdk.block_peer(key.clone()).await.unwrap();
+    }
+    let lease = storage
+        .transaction(|tx| {
+            let mut linked = default_linked_peer(keys[3].clone());
+            linked.state = LinkedPeerState::Linked;
+            tx.save_linked_peer(linked);
+            tx.claim_peer_link_operation(
+                &keys[1],
+                FixedClock.now(),
+                FixedClock.now() + ChronoDuration::seconds(60),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let updates = [0, 1, 3, 4, 0].map(|index| ContactUpdate {
+        public_key: keys[index].clone(),
+        label: None,
+    });
+    let before = storage.snapshot().unwrap();
+    assert!(matches!(
+        sdk.save_contacts_and_unblock_peers(updates.to_vec()).await,
+        Err(PaykitSdkError::ConcurrentUpdate { .. })
+    ));
+    assert_eq!(storage.snapshot().unwrap(), before);
+    storage
+        .transaction(|tx| {
+            tx.release_peer_link_operation(&keys[1], lease.lease_id);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let restored = sdk
+        .save_contacts_and_unblock_peers(updates.to_vec())
+        .await
+        .unwrap();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|record| &record.public_key)
+            .collect::<Vec<_>>(),
+        updates
+            .iter()
+            .map(|update| &update.public_key)
+            .collect::<Vec<_>>()
+    );
+    let after = storage.snapshot().unwrap();
+    assert_eq!(
+        after.linked_peers[&keys[0]].state,
+        LinkedPeerState::NotLinked
+    );
+    assert_eq!(
+        after.linked_peers[&keys[1]].state,
+        LinkedPeerState::NotLinked
+    );
+    assert_eq!(after.linked_peers[&keys[2]], before.linked_peers[&keys[2]]);
+    assert_eq!(after.linked_peers[&keys[3]], before.linked_peers[&keys[3]]);
+    assert!(!after.linked_peers.contains_key(&keys[4]));
+}
+
+#[tokio::test]
+async fn test_remove_contacts_and_block_peers_preserves_busy_and_public_contacts() {
+    let storage = registered_test_storage();
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(PubkyPublicKey::from_public_key(
+                &pubky::Keypair::random().public_key(),
+            )),
+            initialized_at: FixedClock.now(),
+        })
+        .await
+        .unwrap();
+    let keys: Vec<_> = (0..3)
+        .map(|_| PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()))
+        .collect();
+    storage
+        .transaction(|tx| {
+            for (index, key) in keys.iter().enumerate() {
+                let mut record = ContactRecord::from_update(
+                    ContactUpdate {
+                        public_key: key.clone(),
+                        label: None,
+                    },
+                    None,
+                    FixedClock.now(),
+                );
+                if index == 1 {
+                    record.public_contact_marker_status = PublicationStatus::Published;
+                }
+                tx.save_contact_record(record);
+            }
+            tx.claim_peer_link_operation(
+                &keys[0],
+                FixedClock.now(),
+                FixedClock.now() + ChronoDuration::seconds(60),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let before = storage.snapshot().unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    let removed = sdk
+        .remove_contacts_and_block_peers(keys.clone())
+        .await
+        .unwrap();
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].public_key, keys[2]);
+    let after = storage.snapshot().unwrap();
+    assert_eq!(
+        after.contact_records[&keys[0]],
+        before.contact_records[&keys[0]]
+    );
+    assert_eq!(
+        after.peer_link_operation_leases[&keys[0]],
+        before.peer_link_operation_leases[&keys[0]]
+    );
+    assert_eq!(
+        after.contact_records[&keys[1]],
+        before.contact_records[&keys[1]]
+    );
+    assert_eq!(after.linked_peers[&keys[1]].state, LinkedPeerState::Blocked);
+}
+
+#[tokio::test]
+async fn test_remove_contacts_and_block_peers_rejects_self_before_mutation() {
+    let storage = registered_test_storage();
+    let local = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .save_identity_state(IdentityState {
+            public_key: Some(local.clone()),
+            initialized_at: FixedClock.now(),
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    let peer = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    sdk.save_contact(ContactUpdate {
+        public_key: peer.clone(),
+        label: None,
+    })
+    .await
+    .unwrap();
+    let before = storage.snapshot().unwrap();
+    assert!(matches!(
+        sdk.remove_contacts_and_block_peers(vec![peer, local]).await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
+    assert_eq!(storage.snapshot().unwrap(), before);
+}
+
+#[tokio::test]
+async fn test_save_contacts_rejects_invalid_batch_before_mutation() {
+    for case in ["invalid_label", "self_contact", "uninitialized"] {
+        let local = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let first = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let second = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let original = ContactRecord::from_update(
+            ContactUpdate {
+                public_key: first.clone(),
+                label: Some("Original".into()),
+            },
+            None,
+            FixedClock.now(),
+        );
+        let state = crate::storage::StorageState {
+            identity_state: (case != "uninitialized").then(|| IdentityState {
+                public_key: Some(local.clone()),
+                initialized_at: FixedClock.now(),
+            }),
+            contact_records: HashMap::from([(first.clone(), original)]),
+            ..Default::default()
+        };
+        let inner = InMemoryStorage::from_state(state.clone());
+        let transactions = Arc::new(AtomicUsize::new(0));
+        let sdk = PaykitSdk::with_clock(
+            ContactTestStorage {
+                inner: inner.clone(),
+                transactions: transactions.clone(),
+            },
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::new("test-app").unwrap(),
+            FixedClock,
+        );
+        let updates = vec![
+            ContactUpdate {
+                public_key: first,
+                label: Some("Changed".into()),
+            },
+            ContactUpdate {
+                public_key: if case == "self_contact" {
+                    local
+                } else {
+                    second
+                },
+                label: (case == "invalid_label").then(|| "x".repeat(129)),
+            },
+        ];
+        let error = sdk.save_contacts(updates.clone()).await.unwrap_err();
+
+        assert!(matches!(
+            (case, error),
+            ("invalid_label", PaykitSdkError::Protocol { .. })
+                | ("self_contact", PaykitSdkError::Policy { .. })
+                | ("uninitialized", PaykitSdkError::Identity { .. })
+        ));
+        assert_eq!(inner.snapshot().unwrap(), state);
+        assert_eq!(
+            transactions.load(Ordering::SeqCst),
+            usize::from(case != "invalid_label")
+        );
+        assert!(sdk.save_contacts_and_unblock_peers(updates).await.is_err());
+        assert_eq!(inner.snapshot().unwrap(), state);
+    }
+}
+
+#[tokio::test]
+async fn test_save_contacts_empty_batch_requires_initialized_identity() {
+    for initialized in [false, true] {
+        let state = crate::storage::StorageState {
+            identity_state: Some(IdentityState {
+                public_key: initialized.then(|| {
+                    PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
+                }),
+                initialized_at: FixedClock.now(),
+            }),
+            ..Default::default()
+        };
+        let inner = InMemoryStorage::from_state(state.clone());
+        let transactions = Arc::new(AtomicUsize::new(0));
+        let sdk = PaykitSdk::with_clock(
+            ContactTestStorage {
+                inner: inner.clone(),
+                transactions: transactions.clone(),
+            },
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::new("test-app").unwrap(),
+            FixedClock,
+        );
+
+        let result = sdk.save_contacts(Vec::new()).await;
+        if initialized {
+            assert!(result.unwrap().is_empty());
+        } else {
+            assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+        }
+        assert_eq!(transactions.load(Ordering::SeqCst), 1);
+        assert_eq!(inner.snapshot().unwrap(), state);
+        assert_eq!(
+            sdk.save_contacts_and_unblock_peers(Vec::new())
+                .await
+                .is_ok(),
+            initialized
+        );
+        assert_eq!(inner.snapshot().unwrap(), state);
+    }
 }
 
 #[tokio::test]

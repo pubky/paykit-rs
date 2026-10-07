@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap, sync::Arc};
+use std::{any::Any, collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -11,7 +11,8 @@ mod records;
 mod state_blob;
 
 pub use in_memory::{run_storage_state_transaction, InMemoryStorage};
-pub use pubky_shared::PubkySharedStateStorage;
+pub(crate) use pubky_shared::shared_state_operation_active;
+pub use pubky_shared::{ObservedBackupStateRevision, PubkySharedStateStorage};
 pub use records::{
     EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord, NewOutboundPrivateMessage,
     NewPrivateStreamItem, OutboundPrivateMessageRecord, PaykitAppOperationLease,
@@ -57,6 +58,10 @@ impl ValidatedStorageState {
 pub type StorageTransactionCallback<'a> =
     Box<dyn FnOnce(&mut dyn StorageTransaction) -> Result<Box<dyn Any + Send>> + Send + 'a>;
 
+/// An asynchronous operation containing independently durable storage transactions.
+pub type StorageOperation<'a> =
+    Pin<Box<dyn Future<Output = Result<Box<dyn Any + Send>>> + Send + 'a>>;
+
 /// Erased storage callback used while rotating Paykit key material.
 pub type StorageKeyRotationCallback<'a> =
     Box<dyn FnOnce(&mut dyn StorageTransaction, bool) -> Result<Box<dyn Any + Send>> + Send + 'a>;
@@ -70,6 +75,42 @@ pub type StorageKeyRotationCallback<'a> =
 /// one transaction either commit together or roll back together.
 #[async_trait]
 pub trait StorageAdapter: Send + Sync {
+    /// Share storage access across the transactions of one bounded operation.
+    ///
+    /// Transactions still commit independently before returning. An operation
+    /// error does not roll back earlier commits. Adapters may keep a write lock
+    /// and its latest state for this future, so it must not wait on spawned tasks
+    /// that access the same storage. Same-adapter nesting is supported on the
+    /// same task. Do not call SDK methods from a storage operation: the SDK
+    /// must acquire its session guard before entering shared storage. A write
+    /// conflict must exit the operation before retrying with fresh state;
+    /// earlier committed transactions are not replayed automatically.
+    async fn run_operation_erased<'a>(
+        &self,
+        operation: StorageOperation<'a>,
+    ) -> Result<Box<dyn Any + Send>> {
+        operation.await
+    }
+
+    /// Run one bounded operation while sharing its storage access.
+    async fn with_operation<T, F>(&self, operation: F) -> Result<T>
+    where
+        Self: Sized,
+        T: Send + 'static,
+        F: Future<Output = Result<T>> + Send,
+    {
+        self.run_operation_erased(Box::pin(async move {
+            Ok(Box::new(operation.await?) as Box<dyn Any + Send>)
+        }))
+        .await?
+        .downcast::<T>()
+        .map(|value| *value)
+        .map_err(|_| PaykitSdkError::Storage {
+            context: "storage operation result type mismatch".into(),
+            source: None,
+        })
+    }
+
     /// Run an atomic storage transaction through an object-safe erased callback.
     async fn transaction_erased<'a>(
         &self,
@@ -224,7 +265,9 @@ where
     for attempt in 0..CONCURRENT_UPDATE_MAX_ATTEMPTS {
         match storage.transaction(operation()).await {
             Err(err)
-                if err.is_concurrent_update() && attempt + 1 < CONCURRENT_UPDATE_MAX_ATTEMPTS =>
+                if err.is_concurrent_update()
+                    && !shared_state_operation_active()
+                    && attempt + 1 < CONCURRENT_UPDATE_MAX_ATTEMPTS =>
             {
                 tokio::time::sleep(std::time::Duration::from_millis(25 * (attempt as u64 + 1)))
                     .await;
@@ -241,6 +284,13 @@ impl<T> StorageAdapter for Box<T>
 where
     T: StorageAdapter + ?Sized,
 {
+    async fn run_operation_erased<'a>(
+        &self,
+        operation: StorageOperation<'a>,
+    ) -> Result<Box<dyn Any + Send>> {
+        (**self).run_operation_erased(operation).await
+    }
+
     async fn load_local_identity_state(&self) -> Result<Option<IdentityState>> {
         (**self).load_local_identity_state().await
     }
@@ -280,6 +330,13 @@ impl<T> StorageAdapter for Arc<T>
 where
     T: StorageAdapter + ?Sized,
 {
+    async fn run_operation_erased<'a>(
+        &self,
+        operation: StorageOperation<'a>,
+    ) -> Result<Box<dyn Any + Send>> {
+        (**self).run_operation_erased(operation).await
+    }
+
     async fn load_local_identity_state(&self) -> Result<Option<IdentityState>> {
         (**self).load_local_identity_state().await
     }
