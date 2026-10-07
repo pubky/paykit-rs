@@ -1809,6 +1809,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func cancelPaymentRequest(counterparty: String, paymentRequestId: String, reason: String?) async throws  -> PaymentRequestRecord
 
     /**
+     * Atomically claim a received Payment Request and durably queue acceptance, without sending it.
+     */
+    func claimAndAcceptPaymentRequest(counterparty: String, paymentRequestId: String) async throws  -> PaymentRequestRecord
+
+    /**
      * Claim a received Payment Request before preparing payment execution.
      */
     func claimPaymentRequestForExecution(counterparty: String, paymentRequestId: String) async throws  -> PaymentRequestRecord
@@ -2867,6 +2872,26 @@ open func cancelPaymentRequest(counterparty: String, paymentRequestId: String, r
                 uniffi_paykit_fn_method_ffipaykitsdk_cancel_payment_request(
                     self.uniffiClonePointer(),
                     FfiConverterString.lower(counterparty),FfiConverterString.lower(paymentRequestId),FfiConverterOptionString.lower(reason)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaymentRequestRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Atomically claim a received Payment Request and durably queue acceptance, without sending it.
+     */
+open func claimAndAcceptPaymentRequest(counterparty: String, paymentRequestId: String)async throws  -> PaymentRequestRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_claim_and_accept_payment_request(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(paymentRequestId)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -25133,6 +25158,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_cancel_payment_request() != 58269) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_claim_and_accept_payment_request() != 47604) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_claim_payment_request_for_execution() != 22993) {

@@ -840,9 +840,16 @@ async fn test_accept_payment_request_does_not_queue_without_private_send_readine
         FixedClock,
     );
 
-    let result = sdk.accept_payment_request(counterparty, &request_id).await;
-
-    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    for combined in [false, true] {
+        let result = if combined {
+            sdk.claim_and_accept_payment_request(counterparty.clone(), &request_id)
+                .await
+        } else {
+            sdk.accept_payment_request(counterparty.clone(), &request_id)
+                .await
+        };
+        assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    }
     assert!(storage
         .snapshot()
         .unwrap()

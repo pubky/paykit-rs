@@ -181,6 +181,9 @@ pixel and cache limits, and request timeouts remain app responsibilities.
 - `PaykitSdk.proposePaymentRequest`, `acceptPaymentRequest`,
   `rejectPaymentRequest`, `cancelPaymentRequest`, and `submitPaymentProof` —
   queue Payment Request lifecycle events through the SDK outbound stream.
+- `PaykitSdk.claimAndAcceptPaymentRequest` — atomically claim execution and queue
+  acceptance. Keep the earlier preparation claim where needed; success confirms
+  durable acceptance, not delivery or permission to execute a payment.
 - `PaykitSdk.paymentRequests`, `paymentRequestsWith`,
   `receivedPaymentRequestsFrom`, `listPaymentRequests`,
   `activeRecurringPaymentRequests`, and `actionableReceivedPaymentRequests` —

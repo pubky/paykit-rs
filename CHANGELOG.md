@@ -7,6 +7,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+
+- Atomic Payment Request execution claim and acceptance through
+  `claim_and_accept_payment_request` in Rust and `claimAndAcceptPaymentRequest`
+  in Swift and Kotlin. Acceptance is durably queued without waiting for delivery;
+  payment preparation and execution retain their ownership checks.
+
 ## 0.1.0-rc64 - 2026-10-06
 
 ### Added

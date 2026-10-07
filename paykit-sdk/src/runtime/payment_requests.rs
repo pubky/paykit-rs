@@ -1,5 +1,7 @@
 use super::*;
 use crate::domain::payment_requests::{
+    claim_payment_request_execution_in_transaction,
+    enqueue_checked_payment_request_action_in_transaction,
     payment_request_records_from_transaction, received_payment_request_records_from_transaction,
     validate_proof_conversion,
 };
@@ -349,6 +351,79 @@ where
         )
         .await?;
         self.load_payment_request_record(&counterparty, payment_request_id)
+            .await
+    }
+
+    /// Atomically claim a received Payment Request and queue its acceptance.
+    ///
+    /// An existing claim must belong to this App. Callers that reserve work during
+    /// preparation should still use [`Self::claim_payment_request_for_execution`]
+    /// before preparing the payment. Success durably queues acceptance, not delivery;
+    /// accounting callers must still reserve payment and obtain a fresh handoff.
+    pub async fn claim_and_accept_payment_request(
+        &self,
+        counterparty: PubkyPublicKey,
+        payment_request_id: &PaymentRequestId,
+    ) -> Result<PaymentRequestRecord> {
+        let (session, expected_identity, _) = self
+            .load_session_access_and_refresh_identity_with(|tx| {
+                require_private_automation_ready(
+                    tx.linked_peer(&counterparty).map(|peer| peer.state),
+                    tx.encrypted_link_state(&counterparty)
+                        .is_some_and(|state| state.link_snapshot.is_some()),
+                    &counterparty,
+                )
+            })
+            .await?;
+        let session = session.ok_or_else(|| PaykitSdkError::Identity {
+            context: "no Pubky session available".into(),
+            source: None,
+        })?;
+        if !session.private_link_capable_for_capabilities(PAYKIT_SESSION_CAPABILITIES)? {
+            return Err(PaykitSdkError::Identity {
+                context: "local Pubky identity is not private-link-capable".into(),
+                source: None,
+            });
+        }
+        let authorization = self
+            .fetch_counterparty_app_authorization(&counterparty)
+            .await?;
+        let event = PaymentRequestEvent::Acceptance(PaymentRequestAcceptance::new(
+            EventId::new_v4(),
+            payment_request_id.clone(),
+        ));
+        self.storage
+            .transaction(|tx| {
+                let now = self.clock.now();
+                require_private_automation_ready(
+                    tx.linked_peer(&counterparty).map(|peer| peer.state),
+                    tx.encrypted_link_state(&counterparty)
+                        .is_some_and(|state| state.link_snapshot.is_some()),
+                    &counterparty,
+                )?;
+                authorization.apply(tx, &counterparty);
+                claim_payment_request_execution_in_transaction(
+                    tx,
+                    &counterparty,
+                    &self.config.app_id,
+                    payment_request_id,
+                    now,
+                )?;
+                enqueue_checked_payment_request_action_in_transaction(
+                    tx,
+                    &counterparty,
+                    &self.config.app_id,
+                    &event,
+                    now,
+                    Some(&expected_identity),
+                )?;
+                self.payment_request_record_in_transaction(
+                    tx,
+                    &counterparty,
+                    payment_request_id,
+                    true,
+                )
+            })
             .await
     }
 

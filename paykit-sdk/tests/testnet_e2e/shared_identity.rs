@@ -4618,6 +4618,88 @@ fn test_app(name: &str) -> PaykitApp {
 }
 
 #[tokio::test]
+async fn test_claim_and_accept_commits_once_and_preserves_ownership_on_failure() {
+    let pair = linked_homeserver_shared_pair().await;
+    let request = pair
+        .bob
+        .sdk
+        .propose_payment_request(pair.bitkit.public_key.clone(), recurring_request_terms())
+        .await
+        .unwrap();
+    pair.bob
+        .sdk
+        .process_outbound_private_messages(pair.bitkit.public_key.clone())
+        .await
+        .unwrap();
+    pair.bitkit
+        .sdk
+        .receive_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    let request_id = request_id(&request);
+    let transactions = Arc::new(AtomicUsize::new(0));
+    let commits = Arc::new(AtomicUsize::new(0));
+    let sdk = PaykitSdk::new(
+        CountedStorage {
+            inner: pair.bitkit.storage.clone(),
+            operations: Arc::new(AtomicUsize::new(0)),
+            transactions: transactions.clone(),
+            commits: commits.clone(),
+            reject_next_transaction: Arc::new(AtomicBool::new(false)),
+        },
+        TestnetSessionProvider::new(pair.bitkit.access.clone()),
+        pair.bitkit.adapter.clone(),
+        PaykitSdkConfig::new(pair.bitkit.app_id.clone()).unwrap(),
+    );
+
+    let accepted = sdk
+        .claim_and_accept_payment_request(pair.bob.public_key.clone(), &request_id)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        accepted.state,
+        PaymentRequestLifecycleState::ActiveRecurring
+    );
+    assert_eq!(
+        accepted.execution_claim_app_id,
+        Some(pair.bitkit.app_id.clone())
+    );
+    assert_eq!(transactions.load(Ordering::SeqCst), 2);
+    assert_eq!(commits.load(Ordering::SeqCst), 1);
+    let state = pair.server.storage_state().await;
+    let acceptance = state
+        .outbound_private_messages
+        .iter()
+        .filter(|message| message.kind == "paykit.payment_request_acceptance")
+        .collect::<Vec<_>>();
+    assert_eq!(acceptance.len(), 1);
+    assert_eq!(acceptance[0].status, OutboundPrivateMessageStatus::Pending);
+
+    sdk.release_payment_request_execution_claim(pair.bob.public_key.clone(), &request_id)
+        .await
+        .unwrap();
+    let before = pair.server.storage_state().await;
+    assert!(sdk
+        .claim_and_accept_payment_request(pair.bob.public_key.clone(), &request_id)
+        .await
+        .is_err());
+    assert_eq!(pair.server.storage_state().await, before);
+
+    pair.server
+        .sdk
+        .claim_payment_request_for_execution(pair.bob.public_key.clone(), &request_id)
+        .await
+        .unwrap();
+    let before = pair.server.storage_state().await;
+    assert!(sdk
+        .claim_and_accept_payment_request(pair.bob.public_key.clone(), &request_id)
+        .await
+        .is_err());
+    assert_eq!(pair.server.storage_state().await, before);
+}
+
+#[tokio::test]
 async fn test_independent_apps_claim_and_handoff_one_payment_request() {
     let pair = linked_homeserver_shared_pair().await;
     let request = pair

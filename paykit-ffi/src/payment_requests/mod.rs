@@ -487,6 +487,20 @@ impl FfiPaykitSdk {
             .and_then(FfiPaymentRequestRecord::try_from)
     }
 
+    /// Atomically claim a received Payment Request and durably queue acceptance, without sending it.
+    pub async fn claim_and_accept_payment_request(
+        &self,
+        counterparty: String,
+        payment_request_id: String,
+    ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
+        let payment_request_id = parse_payment_request_id(payment_request_id)?;
+        self.runtime
+            .claim_and_accept_payment_request(parse_public_key(counterparty)?, &payment_request_id)
+            .await
+            .map_err(Into::into)
+            .and_then(FfiPaymentRequestRecord::try_from)
+    }
+
     /// Queue rejection for a received Payment Request and return local derived state.
     pub async fn reject_payment_request(
         &self,
