@@ -7,6 +7,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+
+- Optional asset-rail conversion rates, such as `usdt-polygon`, which override
+  asset-wide rates for accepted endpoints on that rail. Fixed terms can also
+  price the requested asset; per-period quotes remain cross-asset only.
+- `ConversionRate::for_endpoint` selects the applicable explicit rate. Wallets
+  retain amount calculation and settlement verification responsibility.
+
+### Changed
+
+- Explicitly priced endpoints require manual approval rather than consuming an
+  Allowance in the original request amount. Bare cross-asset rate semantics and
+  wire shapes are unchanged. Both peers must support rail-specific pricing;
+  older peers reject the new selectors, so do not silently downgrade them.
+
 ## 0.1.0-rc69 - 2026-10-07
 
 ### Fixed

@@ -4,10 +4,7 @@ use chrono::{DateTime, Datelike, FixedOffset, SecondsFormat, TimeDelta};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    validation::{
-        parse_utc_timestamp, validate_asset_text, validate_decimal_text,
-        validate_outgoing_version_kind,
-    },
+    validation::{parse_utc_timestamp, validate_decimal_text, validate_outgoing_version_kind},
     EventId, PaykitError, PaymentEndpointIdentifier, PrivateMessageKind, Result,
 };
 
@@ -18,10 +15,29 @@ use super::{BillingPeriod, PaymentProof, PaymentRequest, PaymentRequestId, Payme
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConversionRate {
-    /// Payment asset, using the same spelling as its endpoint identifier asset segment.
+    /// Payment asset or asset-rail selector, for example `usdt` or `usdt-polygon`.
     pub asset: String,
     /// Payment asset units per requested asset unit.
     pub value: String,
+}
+
+impl ConversionRate {
+    /// Select an explicit rate, preferring an exact asset-rail match over the asset default.
+    ///
+    /// Validates the nonempty rate list and endpoint grammar. This does not check
+    /// request acceptance or quote validity. `None` means no explicit rate: only
+    /// the requested asset may then use implicit 1:1 pricing.
+    pub fn for_endpoint<'a>(
+        rates: &'a [Self],
+        endpoint: &PaymentEndpointIdentifier,
+    ) -> Result<Option<&'a Self>> {
+        validate_rates(rates)?;
+        let (asset, asset_rail) = endpoint_rate_selectors(endpoint)?;
+        Ok(rates
+            .iter()
+            .find(|rate| rate.asset == asset_rail)
+            .or_else(|| rates.iter().find(|rate| rate.asset == asset)))
+    }
 }
 
 impl fmt::Debug for ConversionRate {
@@ -230,7 +246,19 @@ impl PaymentConversionQuote {
                 "quote requires its recurring per-period Payment Request".into(),
             ));
         }
-        validate_rate_assets(&self.rates, &request.request)
+        validate_rate_assets(&self.rates, &request.request)?;
+        // Same-asset per-period payments use implicit 1:1 pricing without a quote,
+        // so an optional quote cannot change that price.
+        if self
+            .rates
+            .iter()
+            .any(|rate| rate.asset.split('-').next() == Some(request.request.amount.asset()))
+        {
+            return Err(PaykitError::Validation(
+                "per-period quotes only price cross-asset payments".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -240,13 +268,21 @@ fn validate_rates(rates: &[ConversionRate]) -> Result<()> {
             "conversion rates must not be empty".into(),
         ));
     }
-    let mut assets = HashSet::new();
+    let mut selectors = HashSet::new();
     for rate in rates {
         validate_decimal_text(&rate.value, "conversion rate.value")?;
-        validate_asset_text(&rate.asset, "conversion rate asset")?;
-        if !rate.value.bytes().any(|b| matches!(b, b'1'..=b'9')) || !assets.insert(&rate.asset) {
+        let mut segments = rate.asset.split('-');
+        if !segments.next().is_some_and(valid_asset_segment)
+            || !segments.next().is_none_or(valid_asset_segment)
+            || segments.next().is_some()
+        {
             return Err(PaykitError::Validation(
-                "conversion rates must be positive and assets unique".into(),
+                "conversion rate asset must be asset or asset-rail with lowercase alphanumeric segments".into(),
+            ));
+        }
+        if !rate.value.bytes().any(|b| matches!(b, b'1'..=b'9')) || !selectors.insert(&rate.asset) {
+            return Err(PaykitError::Validation(
+                "conversion rates must be positive and selectors unique".into(),
             ));
         }
     }
@@ -255,29 +291,28 @@ fn validate_rates(rates: &[ConversionRate]) -> Result<()> {
 
 fn validate_rate_assets(rates: &[ConversionRate], terms: &PaymentRequestTerms) -> Result<()> {
     for rate in rates {
-        if rate.asset == terms.amount.asset()
-            || !terms
-                .accepted_payment_endpoint_identifiers
-                .iter()
-                .any(|id| endpoint_asset(id).ok() == Some(rate.asset.as_str()))
+        if !terms
+            .accepted_payment_endpoint_identifiers
+            .iter()
+            .any(|id| {
+                endpoint_rate_selectors(id).is_ok_and(|(asset, asset_rail)| {
+                    rate.asset == asset || rate.asset == asset_rail
+                })
+            })
         {
             return Err(PaykitError::Validation(
-                "conversion rate must name an accepted cross-asset endpoint".into(),
+                "conversion rate must name an accepted asset or asset-rail".into(),
             ));
         }
     }
     Ok(())
 }
 
-fn endpoint_asset(identifier: &PaymentEndpointIdentifier) -> Result<&str> {
-    let mut segments = identifier.as_str().split('-');
-    let asset = segments.next().unwrap_or_default();
-    if valid_asset_segment(asset)
-        && segments.next().is_some_and(valid_asset_segment)
-        && segments.next().is_some_and(valid_asset_segment)
-        && segments.next().is_none()
-    {
-        Ok(asset)
+fn endpoint_rate_selectors(identifier: &PaymentEndpointIdentifier) -> Result<(&str, &str)> {
+    let (asset_rail, format) = identifier.as_str().rsplit_once('-').unwrap_or(("", ""));
+    let (asset, rail) = asset_rail.split_once('-').unwrap_or(("", ""));
+    if valid_asset_segment(asset) && valid_asset_segment(rail) && valid_asset_segment(format) {
+        Ok((asset, asset_rail))
     } else {
         Err(PaykitError::Validation(
             "conversion requires asset-rail-format identifiers with lowercase alphanumeric segments".into(),
@@ -301,7 +336,7 @@ impl PaymentRequestTerms {
                 ));
             }
             for id in &self.accepted_payment_endpoint_identifiers {
-                endpoint_asset(id)?;
+                endpoint_rate_selectors(id)?;
             }
             match conversion {
                 PaymentConversion::Fixed { rates } => {
@@ -381,7 +416,8 @@ impl PaymentProof {
                 self.validate_rate_coverage(terms, rates)
             }
             Some(PaymentConversion::PerPeriod {}) => {
-                if endpoint_asset(&self.payment_endpoint_identifier)? != terms.amount.asset()
+                if endpoint_rate_selectors(&self.payment_endpoint_identifier)?.0
+                    != terms.amount.asset()
                     && self.conversion_quote_id.is_none()
                 {
                     return Err(PaykitError::Validation(
@@ -402,8 +438,10 @@ impl PaymentProof {
         terms: &PaymentRequestTerms,
         rates: &[ConversionRate],
     ) -> Result<()> {
-        let asset = endpoint_asset(&self.payment_endpoint_identifier)?;
-        if asset == terms.amount.asset() || rates.iter().any(|rate| rate.asset == asset) {
+        let asset = endpoint_rate_selectors(&self.payment_endpoint_identifier)?.0;
+        if ConversionRate::for_endpoint(rates, &self.payment_endpoint_identifier)?.is_some()
+            || asset == terms.amount.asset()
+        {
             Ok(())
         } else {
             Err(PaykitError::Validation(

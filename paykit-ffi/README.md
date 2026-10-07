@@ -284,7 +284,8 @@ reservation and handoff, `localEnabled` must attest that the wallet checked
 conversion policy, any required quote, endpoint precision, rounding, and payment
 deadlines. The wallet must retain its selected quote separately. Handoff must
 use the reserved asset and amount. Automatic Allowance payments still require
-the exact requested asset and amount.
+the exact requested asset and amount, and exclude explicitly priced endpoints.
+This includes fixed same-asset rates that incorporate a rail-specific cost.
 
 For an explicit user-approved replacement on a recurring request, call
 `authorizeAllowanceReassociation` with the expected revision, a future Billing

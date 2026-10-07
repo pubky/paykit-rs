@@ -88,7 +88,7 @@ pub struct FfiPaymentRequestRecurrence {
 /// Units of payment asset owed per requested asset unit.
 #[derive(uniffi::Record, Clone, PartialEq, Eq)]
 pub struct FfiConversionRate {
-    /// Payment asset code.
+    /// Payment asset or asset-rail selector; `usdt-polygon` overrides `usdt`.
     pub asset: String,
     /// Positive decimal multiplier; never convert through floating point.
     pub value: String,

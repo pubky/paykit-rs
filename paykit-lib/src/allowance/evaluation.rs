@@ -31,6 +31,16 @@ pub fn match_allowance_request(
     }
     let mut endpoints = Vec::new();
     for endpoint in request.accepted_payment_endpoint_identifiers() {
+        // Allowances account in the requested amount; explicitly priced
+        // endpoints require manual approval instead of consuming that budget.
+        if let Some(crate::PaymentConversion::Fixed { rates }) = request.conversion() {
+            if crate::ConversionRate::for_endpoint(rates, endpoint)
+                .map_err(|_| AllowanceEvaluationBlock::InvalidRequest)?
+                .is_some()
+            {
+                continue;
+            }
+        }
         if terms
             .allowed_payment_endpoint_identifiers()
             .is_none_or(|allowed| allowed.contains(endpoint))
