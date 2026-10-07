@@ -7,6 +7,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc69 - 2026-10-07
+
+### Fixed
+
+- Return temporary shared-state contention after bounded lock acquisition retries,
+  without repeating the acquisition batch as a state revision conflict. Lock expiry
+  and uncertain-write recovery waits are unchanged.
+
 ## 0.1.0-rc68 - 2026-10-07
 
 ### Fixed

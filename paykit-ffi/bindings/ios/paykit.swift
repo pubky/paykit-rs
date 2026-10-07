@@ -22448,7 +22448,7 @@ public enum PaykitError: Swift.Error {
          */context: String
     )
     /**
-     * Shared state is locked with an unconfirmed write; back off for recovery.
+     * Shared state remains locked after acquisition retries; back off before retrying.
      */
     case SharedStateBusy(
         /**

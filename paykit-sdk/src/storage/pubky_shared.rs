@@ -593,17 +593,12 @@ where
         .await;
     match result {
         Err(error) if !acquired && error.is_concurrent_update() => {
-            if !pending_write_paths(session)
-                .await
-                .is_ok_and(|paths| paths.is_empty())
-            {
-                Err(PaykitSdkError::SharedStateBusy {
-                    context: "Pubky shared state is locked and pending writes could not be ruled out; retry later".into(),
-                    source: Some(error.into()),
-                })
-            } else {
-                Err(error)
-            }
+            // Acquisition already exhausted its bounded retries. Do not replay
+            // that batch as if the operation had observed a revision conflict.
+            Err(PaykitSdkError::SharedStateBusy {
+                context: "Pubky shared state remains locked; retry later".into(),
+                source: Some(error.into()),
+            })
         }
         result => result,
     }

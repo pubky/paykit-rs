@@ -518,9 +518,10 @@ Apps with shared keys and write access are mutually trusted; App IDs do not
 provide cryptographic isolation from other authorized apps.
 An unconfirmed state write leaves a homeserver marker. The next operation waits
 five minutes under a renewed lock before reloading state; cancelling restarts
-that wait on the next attempt. A competing runtime that cannot acquire the lock
-while a marker exists receives `SharedStateBusy` (`shared_state_busy`). Back off
-and show recovery as pending instead of immediately retrying. Reads can also be
+that wait on the next attempt. A competing runtime that exhausts lock acquisition
+retries receives `SharedStateBusy` (`shared_state_busy`), whether the holder is
+doing normal work or waiting for recovery. Back off and keep the operation
+pending instead of immediately retrying. Reads can also be
 blocked; there is no fixed completion deadline.
 This is a best-effort testing mitigation, not a replacement for homeserver
 commit-time lock enforcement. Normal successful writes have no cooldown.

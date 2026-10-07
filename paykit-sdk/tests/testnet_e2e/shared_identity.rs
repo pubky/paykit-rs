@@ -2383,7 +2383,9 @@ async fn test_shared_apps_advance_one_handshake_without_diverging() {
             result.is_ok()
                 || matches!(
                     result,
-                    Err(PaykitSdkError::Policy { .. } | PaykitSdkError::ConcurrentUpdate { .. })
+                    Err(PaykitSdkError::Policy { .. }
+                        | PaykitSdkError::ConcurrentUpdate { .. }
+                        | PaykitSdkError::SharedStateBusy { .. })
                 ),
             "concurrent handshake advancement should advance or observe contention: {result:?}"
         );
@@ -2434,7 +2436,9 @@ async fn test_shared_apps_observe_one_recovery_marker_without_diverging() {
             result.is_ok()
                 || matches!(
                     result,
-                    Err(PaykitSdkError::Policy { .. } | PaykitSdkError::ConcurrentUpdate { .. })
+                    Err(PaykitSdkError::Policy { .. }
+                        | PaykitSdkError::ConcurrentUpdate { .. }
+                        | PaykitSdkError::SharedStateBusy { .. })
                 ),
             "concurrent recovery should observe the marker or contention: {result:?}"
         );
@@ -2833,6 +2837,46 @@ async fn test_restore_with_replacement_key_discards_old_link_snapshots() {
         .outbound_private_messages
         .iter()
         .all(|message| message.prepared_send.is_none()));
+}
+
+#[tokio::test]
+async fn test_initialize_backs_off_when_shared_state_lock_is_busy() {
+    let pair = homeserver_shared_pair().await;
+    let user = &pair.bitkit;
+    let remote = user.access.session.storage();
+    let before = remote
+        .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let lock = remote
+        .lock(
+            paykit_lib::PAYKIT_SHARED_STATE_PATH,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(8), user.sdk.initialize()).await;
+    remote.unlock(&lock).await.unwrap();
+    let error = result
+        .expect("initialization must not multiply exhausted acquisition retries")
+        .unwrap_err();
+    assert!(matches!(error, PaykitSdkError::SharedStateBusy { .. }));
+    assert!(!error.is_concurrent_update());
+    user.sdk.initialize().await.unwrap();
+    assert_eq!(
+        remote
+            .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap(),
+        before,
+        "contention must not mutate the stored state"
+    );
 }
 
 #[tokio::test]
@@ -3267,7 +3311,7 @@ async fn test_pubky_shared_state_rejects_a_competing_writer_until_lock_release()
     locked_result.expect("the lock holder should commit its transaction");
 
     let error = competing_write.expect_err("a competing writer must not acquire the held lock");
-    assert!(error.is_concurrent_update());
+    assert!(matches!(error, PaykitSdkError::SharedStateBusy { .. }));
     assert!(!competing_callback_ran.load(Ordering::SeqCst));
 
     let reloaded_at = second
@@ -3540,9 +3584,10 @@ async fn test_independent_grants_share_homeserver_noise_state_under_concurrency(
         .unwrap()
         .expect("the lock holder should commit both queued messages");
     assert_eq!(successful_send.sent.len(), 2);
-    assert!(competing_send
-        .expect_err("the competing sender must not acquire the held lock")
-        .is_concurrent_update());
+    assert!(matches!(
+        competing_send.expect_err("the competing sender must not acquire the held lock"),
+        PaykitSdkError::SharedStateBusy { .. }
+    ));
     let retried_send = pair
         .server
         .sdk
@@ -3615,9 +3660,10 @@ async fn test_independent_grants_share_homeserver_noise_state_under_concurrency(
         .unwrap()
         .expect("the lock holder should commit the confirmations and requests");
     assert_eq!(successful_receive.stream_item_ids.len(), 4);
-    assert!(competing_receive
-        .expect_err("the competing receiver must not acquire the held lock")
-        .is_concurrent_update());
+    assert!(matches!(
+        competing_receive.expect_err("the competing receiver must not acquire the held lock"),
+        PaykitSdkError::SharedStateBusy { .. }
+    ));
     let retried_receive = pair
         .server
         .sdk
@@ -3821,9 +3867,10 @@ async fn test_key_rotation_preserves_in_flight_write_and_rejects_old_key() {
         .join()
         .unwrap()
         .expect("the lock holder should commit before rotation");
-    assert!(competing_rotation
-        .expect_err("key rotation must not acquire the writer's held lock")
-        .is_concurrent_update());
+    assert!(matches!(
+        competing_rotation.expect_err("key rotation must not acquire the writer's held lock"),
+        PaykitSdkError::SharedStateBusy { .. }
+    ));
 
     let registry = pair
         .bitkit
@@ -4248,7 +4295,10 @@ async fn wait_for_shared_state_after_crash(
                 .await
             {
                 Ok(state) => return state,
-                Err(error) if error.is_concurrent_update() => {
+                Err(error)
+                    if error.is_concurrent_update()
+                        || matches!(error, PaykitSdkError::SharedStateBusy { .. }) =>
+                {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
                 Err(error) => panic!("shared state should remain readable after crash: {error}"),
