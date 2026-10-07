@@ -181,11 +181,15 @@ The payer sets the Payment Proof's optional `conversion_quote_id` to the selecte
 quote's Event ID and supplies the same `billing_period`. The proof also names
 `payment_app_id`, the payee App owning the selected endpoint, while its
 `app_id` attributes the message to the sending payer App. The quote must belong to
-the same request, period and payee; its rates must cover the payment asset. A
-quote identifier is invalid on requests without `per_period` conversion. The
-identifier is required for cross-asset proofs under `per_period`, and optional
-for same-asset payments. Method-specific signatures must bind this identifier and
-period, not just the long-lived Payment Request ID.
+the same request, period and payee. For cross-asset payments, the quote's rates
+must cover the selected payment endpoint through an exact asset-rail or
+asset-wide rate. Same-asset payments remain 1:1 and do not require rate coverage;
+they may reference a quote that prices other accepted assets. Such an optional
+reference still requires a valid matching quote and its payment-time validity
+interval must be met. A quote identifier is invalid on requests without
+`per_period` conversion. The identifier is required for cross-asset proofs under
+`per_period`, and optional for same-asset payments. Method-specific signatures
+must bind this identifier and period, not just the long-lived Payment Request ID.
 
 The SDK preserves all quotes and validates quote/proof correlation without
 rejecting evidence based on the current clock. Applications check actual amount,

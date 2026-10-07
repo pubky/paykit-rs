@@ -279,8 +279,9 @@ same handoff/outcome flow, and the same semantic occurrence key. It consumes no
 Allowance capacity but cannot duplicate an unresolved or successful automatic
 payment. Calls directly to a separate wallet executor would bypass this guarantee.
 
-Manual converted payments retain the wallet-verified actual amount. Before
-reservation and handoff, `localEnabled` must attest that the wallet checked
+Manual conversion or explicitly priced payments, including fixed same-asset rail
+prices, retain the wallet-verified actual amount. Before reservation and handoff,
+`localEnabled` must attest that the wallet checked the actual amount against the
 conversion policy, any required quote, endpoint precision, rounding, and payment
 deadlines. The wallet must retain its selected quote separately. Handoff must
 use the reserved asset and amount. Automatic Allowance payments still require

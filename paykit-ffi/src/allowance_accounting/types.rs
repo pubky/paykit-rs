@@ -253,8 +253,9 @@ pub struct FfiPaymentExecutionChecks {
     /// Endpoint details are current, usable, and unconsumed.
     pub endpoint_current: bool,
     /// Local enablement and every private safeguard passed.
-    /// Manual cross-asset execution also attests wallet validation of conversion
-    /// policy, required quote, endpoint precision, rounding, and payment deadlines.
+    /// For manual conversion or explicitly priced payments, this also attests that
+    /// the wallet validated the actual amount against the conversion policy, selected quote
+    /// when required, endpoint precision and upward rounding, and payment deadlines.
     /// The wallet must persist its selected quote separately before execution.
     pub local_enabled: bool,
     /// Wallet scheduler verified this recurring interval; true for one-time payments.
