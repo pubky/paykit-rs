@@ -1,6 +1,50 @@
 use super::*;
 
 #[test]
+fn test_backup_fingerprint_uses_canonical_backup_projection() {
+    let first = contact_record(public_key());
+    let second = contact_record(public_key());
+    let mut state = StorageState::default();
+    for contact in [&first, &second] {
+        state
+            .contact_records
+            .insert(contact.public_key.clone(), contact.clone());
+    }
+    let backup = SdkBackupState::from_storage_state(state.clone());
+    let mut canonical = serde_json::to_value(&backup).unwrap();
+    canonical.sort_all_objects();
+    let expected = hex::encode(Sha256::digest(serde_json::to_vec(&canonical).unwrap()));
+    assert_eq!(backup.content_fingerprint().unwrap(), expected);
+
+    state.contact_records.clear();
+    for contact in [&second, &first] {
+        state
+            .contact_records
+            .insert(contact.public_key.clone(), contact.clone());
+    }
+    state.next_peer_link_operation_lease_id = 12;
+    state.next_paykit_app_operation_lease_id = 34;
+    state.registered_paykit_apps.insert(app_id());
+    assert_eq!(
+        SdkBackupState::from_storage_state(state.clone())
+            .content_fingerprint()
+            .unwrap(),
+        expected
+    );
+    state
+        .contact_records
+        .get_mut(&second.public_key)
+        .unwrap()
+        .label = Some("Changed".into());
+    assert_ne!(
+        SdkBackupState::from_storage_state(state)
+            .content_fingerprint()
+            .unwrap(),
+        expected
+    );
+}
+
+#[test]
 fn test_public_only_backup_records_do_not_require_private_capability() {
     let identity_key = public_key();
     let contact_key = public_key();

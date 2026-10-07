@@ -646,7 +646,7 @@ async fn seed_private_capable_identity_and_link(
         .unwrap();
 }
 
-async fn seed_private_capable_identity_and_handshake(
+pub(super) async fn seed_private_capable_identity_and_handshake(
     storage: &InMemoryStorage,
     counterparty: PubkyPublicKey,
 ) {

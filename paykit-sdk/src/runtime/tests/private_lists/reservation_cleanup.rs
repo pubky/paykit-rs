@@ -201,7 +201,7 @@ async fn test_unattempted_superseded_reservation_cleanup_cancels_without_claimed
     );
 
     let failures = sdk
-        .cancel_unattempted_superseded_reservations(&counterparty, None, None)
+        .cancel_terminal_private_list_reservations(&counterparty, None, None)
         .await;
 
     assert!(failures.is_empty());
@@ -217,39 +217,45 @@ async fn test_unattempted_superseded_reservation_cleanup_cancels_without_claimed
 }
 
 #[tokio::test]
-async fn test_terminal_private_list_reservation_cleanup_cancels_invalid_message_reservations() {
+async fn test_terminal_private_list_reservation_cleanup_cancels_superseded_then_invalid() {
     let storage = registered_test_storage();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    let queued = queue_private_payment_list_with_reservations(
-        &storage,
-        &counterparty,
-        app_id(),
-        vec![PrivatePaymentEndpointReservation {
-            reservation_id: "reservation-1".into(),
-            receiving_detail: PrivateReceivingDetail {
-                identifier: "btc-lightning-bolt11".into(),
-                payload: "one".into(),
-            },
-            expires_at: Some(FixedClock.now() - ChronoDuration::seconds(1)),
-            attribution: HashMap::new(),
-        }],
-        FixedClock.now(),
-    )
-    .await
-    .unwrap();
+    let mut queued_id = None;
+    for (reservation_id, payload) in [("superseded", "one"), ("invalid", "two")] {
+        let queued = queue_private_payment_list_with_reservations(
+            &storage,
+            &counterparty,
+            app_id(),
+            vec![PrivatePaymentEndpointReservation {
+                reservation_id: reservation_id.into(),
+                receiving_detail: PrivateReceivingDetail {
+                    identifier: "btc-lightning-bolt11".into(),
+                    payload: payload.into(),
+                },
+                expires_at: Some(FixedClock.now() - ChronoDuration::seconds(1)),
+                attribution: HashMap::new(),
+            }],
+            FixedClock.now(),
+        )
+        .await
+        .unwrap();
+        queued_id = Some(queued.outbound_message_id);
+    }
     storage
         .transaction({
             let counterparty = counterparty.clone();
             move |tx| {
-                let mut invalid = tx
-                    .outbound_private_messages(&counterparty)
-                    .into_iter()
-                    .find(|message| message.outbound_message_id == queued.outbound_message_id)
-                    .unwrap();
-                invalid.status = crate::OutboundPrivateMessageStatus::Invalid;
-                invalid.last_error =
-                    Some("Payment Endpoint Reservation expired before private list send".into());
-                tx.save_outbound_private_message(invalid)?;
+                for mut message in tx.outbound_private_messages(&counterparty) {
+                    if Some(message.outbound_message_id) == queued_id {
+                        message.status = crate::OutboundPrivateMessageStatus::Invalid;
+                        message.last_error = Some(
+                            "Payment Endpoint Reservation expired before private list send".into(),
+                        );
+                    } else {
+                        message.status = crate::OutboundPrivateMessageStatus::Superseded;
+                    }
+                    tx.save_outbound_private_message(message)?;
+                }
                 Ok(())
             }
         })
@@ -271,7 +277,10 @@ async fn test_terminal_private_list_reservation_cleanup_cancels_invalid_message_
         .await;
 
     assert!(failures.is_empty());
-    assert_eq!(*canceled.lock().unwrap(), vec!["reservation-1".to_string()]);
+    assert_eq!(
+        *canceled.lock().unwrap(),
+        vec!["superseded".to_string(), "invalid".to_string()]
+    );
     assert!(storage
         .snapshot()
         .unwrap()
@@ -738,7 +747,7 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
         .process_outbound_private_messages(counterparty.clone())
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    assert_eq!(result.unwrap(), OutboundPrivateSendReport::default());
     assert!(canceled.lock().unwrap().is_empty());
     assert_eq!(
         storage

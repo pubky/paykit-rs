@@ -60,25 +60,31 @@ where
         counterparty: &PubkyPublicKey,
         authorization: &PaykitNoiseKeyAuthorization,
     ) -> Result<()> {
-        if authorization.owner() != &counterparty.to_public_key()? {
-            return Err(authorization_error(
-                "Noise key authorization belongs to another counterparty",
-            ));
-        }
         self.storage
-            .transaction(|tx| {
-                let mut peer = tx
-                    .linked_peer(counterparty)
-                    .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
-                if let Some(previous) = &peer.noise_key_authorization {
-                    authorization.validate_against(previous)?;
-                }
-                peer.noise_key_authorization = Some(authorization.clone());
-                tx.save_linked_peer(peer);
-                Ok(())
-            })
+            .transaction(|tx| pin_authorization_in_transaction(tx, counterparty, authorization))
             .await
     }
+}
+
+pub(super) fn pin_authorization_in_transaction(
+    tx: &mut dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    authorization: &PaykitNoiseKeyAuthorization,
+) -> Result<()> {
+    if authorization.owner() != &counterparty.to_public_key()? {
+        return Err(authorization_error(
+            "Noise key authorization belongs to another counterparty",
+        ));
+    }
+    let mut peer = tx
+        .linked_peer(counterparty)
+        .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
+    if let Some(previous) = &peer.noise_key_authorization {
+        authorization.validate_against(previous)?;
+    }
+    peer.noise_key_authorization = Some(authorization.clone());
+    tx.save_linked_peer(peer);
+    Ok(())
 }
 
 pub(super) fn sign_authorization(

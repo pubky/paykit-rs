@@ -112,8 +112,10 @@ impl ContactRecord {
         let label = normalize_label(update.label);
         match existing {
             Some(mut existing) => {
-                existing.label = label;
-                existing.updated_at = now;
+                if existing.label != label {
+                    existing.label = label;
+                    existing.updated_at = now;
+                }
                 existing
             }
             None => Self {

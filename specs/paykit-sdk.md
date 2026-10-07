@@ -1310,6 +1310,11 @@ identity-wide shared state. Exactly one App can hold the claim. The App queues
 acceptance before it starts payment execution, and acceptance does not release
 the claim.
 
+`claim_and_accept_payment_request` combines the ownership check and acceptance
+queue update atomically. Apps that claim a request before preparing payment keep
+that earlier claim; the combined operation revalidates it. Success means the
+acceptance is saved, not delivered, and does not authorize payment execution.
+
 For outbound lifecycle events:
 
 1. Load local Payment Request state.

@@ -396,6 +396,51 @@ async fn test_sign_out_without_initialized_state_does_not_create_state() {
 }
 
 #[tokio::test]
+async fn test_storage_operation_reuses_caller_guard_while_writer_waits() {
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+
+    let sdk = PaykitSdk::with_clock(
+        InMemoryStorage::new(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    let guard = sdk.session_read_guard().await.unwrap();
+    let mut writer = Box::pin(Arc::clone(&sdk.session_operation_gate).write_owned());
+    {
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(writer.as_mut().poll(&mut context), Poll::Pending));
+    }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        sdk.with_guarded_storage_operation(
+            guard,
+            Box::pin(async {
+                sdk.with_storage_operation(Box::pin(async {
+                    assert!(sdk.identity_status().await?.is_none());
+                    Ok(())
+                }))
+                .await?;
+                assert!(matches!(
+                    sdk.forget_session_access().await,
+                    Err(PaykitSdkError::Policy { .. })
+                ));
+                Ok(())
+            }),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    writer.await;
+    sdk.forget_session_access().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_sign_out_waits_for_live_session_operations() {
     use std::{
         future::Future,

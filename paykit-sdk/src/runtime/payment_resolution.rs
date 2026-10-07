@@ -1,4 +1,12 @@
+use super::encrypted_links::require_distinct_link_identity;
+use super::outbound_private::{can_defer_pending_confirmations, PrivateSendReadiness};
+use super::private_stream::{
+    private_receive_snapshot, PrivateInboxCheckpoint, PrivateReceiveSnapshot,
+};
+use super::recovery::RecoveryObservationCheckpoint;
 use super::*;
+use crate::domain::endpoint_reservations::terminal_private_list_reservation_cancellations_in_transaction;
+use crate::storage::PrivateStreamItemRecord;
 use crate::PaymentAmountContext;
 use std::future::Future;
 
@@ -19,6 +27,98 @@ const PUBLIC_PAYMENT_RESOLUTION_MAX_ENDPOINTS: usize = 256;
 const PUBLIC_PAYMENT_RESOLUTION_MAX_REQUESTS: usize =
     PUBLIC_PAYMENT_RESOLUTION_MAX_ENDPOINTS + paykit_lib::PAYKIT_APP_REGISTRY_MAX_APPS;
 const PUBLIC_PAYMENT_RESOLUTION_MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+
+struct PrivatePreparationCheckpoint {
+    recovery: RecoveryObservationCheckpoint,
+    receive: PrivateReceiveSnapshot,
+    items: Vec<PrivateStreamItemRecord>,
+    outbound: Vec<OutboundPrivateMessageRecord>,
+    reservations: Vec<crate::storage::PaymentEndpointReservationRecord>,
+}
+
+impl PrivatePreparationCheckpoint {
+    fn load(
+        tx: &dyn StorageTransaction,
+        counterparty: &PubkyPublicKey,
+        outbound: Vec<OutboundPrivateMessageRecord>,
+    ) -> Option<Self> {
+        Some(Self {
+            recovery: RecoveryObservationCheckpoint::load(tx, counterparty)?,
+            receive: private_receive_snapshot(tx, counterparty)?,
+            items: tx.private_stream_items(counterparty),
+            outbound,
+            reservations: tx.payment_endpoint_reservations(counterparty),
+        })
+    }
+}
+
+struct PrivateResolutionProjection {
+    context: super::app_registry::CounterpartyAppAuthorizationContext,
+    request_terms: Option<PaymentRequestTermsRecord>,
+    items: Vec<PrivateStreamItemRecord>,
+    state: PrivatePaymentResolutionState,
+    private_allowed: bool,
+    private_live: bool,
+    inbox_is_current: bool,
+}
+
+enum PrivatePreparationOutcome {
+    Prepare,
+    Resolve(u64, Box<PrivateInboxCheckpoint>),
+    Project(u64, Box<PrivateResolutionProjection>),
+}
+
+fn payment_request_resolution_terms(
+    record: PaymentRequestRecord,
+    authorized_apps: Option<&[paykit_lib::PaykitAppId]>,
+) -> Result<PaymentRequestTermsRecord> {
+    let payment_request_id = &record.payment_request_id;
+    if record.local_role != Some(PaymentRequestLocalRole::Payer) {
+        return Err(PaykitSdkError::Policy {
+            context: format!(
+                "cannot resolve Payment Request {payment_request_id}: local identity is not the payer"
+            ),
+            source: None,
+        });
+    }
+    if !matches!(
+        record.state,
+        PaymentRequestLifecycleState::Proposed
+            | PaymentRequestLifecycleState::Accepted
+            | PaymentRequestLifecycleState::ActiveRecurring
+    ) {
+        return Err(PaykitSdkError::Policy {
+            context: format!(
+                "cannot resolve Payment Request {payment_request_id} in state {:?}",
+                record.state
+            ),
+            source: None,
+        });
+    }
+    super::payment_requests::require_payment_request_origin_app_authorized(
+        &record,
+        authorized_apps,
+        &format!("resolve Payment Request {payment_request_id}"),
+    )?;
+    record.terms.ok_or_else(|| PaykitSdkError::Protocol {
+        context: format!("Payment Request {payment_request_id} terms are unavailable"),
+        source: None,
+    })
+}
+
+fn cached_private_resolution_allowed(
+    peer_state: Option<LinkedPeerState>,
+    counterparty: &PubkyPublicKey,
+) -> Result<bool> {
+    match peer_state {
+        Some(LinkedPeerState::Linking | LinkedPeerState::RecoveryRequired) => Ok(false),
+        Some(LinkedPeerState::Blocked) => Err(PaykitSdkError::Policy {
+            context: format!("counterparty {counterparty} is blocked"),
+            source: None,
+        }),
+        _ => Ok(true),
+    }
+}
 
 #[derive(Default)]
 struct PublicPaymentCandidateLoad {
@@ -206,10 +306,11 @@ where
         amount: Option<PaymentAmountContext>,
         after_private_payment_list_version: Option<u64>,
     ) -> Result<PrivateContactPaymentResolution> {
-        self.resolve_private_contact_payment_with_terms(
+        self.resolve_private_contact_payment_with_request(
             counterparty,
             amount,
             after_private_payment_list_version,
+            None,
             None,
         )
         .await
@@ -228,27 +329,35 @@ where
         payment_request_id: &PaymentRequestId,
         after_private_payment_list_version: Option<u64>,
     ) -> Result<PrivateContactPaymentResolution> {
-        let terms = self
-            .payment_request_resolution_terms(&counterparty, payment_request_id)
-            .await?;
-        let amount = payment_request_amount(&terms);
-        self.resolve_private_contact_payment_with_terms(
+        self.resolve_private_contact_payment_with_request(
             counterparty,
-            Some(amount),
+            None,
             after_private_payment_list_version,
-            Some(terms),
+            Some(payment_request_id),
+            None,
         )
         .await
     }
 
-    async fn resolve_private_contact_payment_with_terms(
+    async fn resolve_private_contact_payment_with_request(
         &self,
         counterparty: PubkyPublicKey,
         amount: Option<PaymentAmountContext>,
         after_private_payment_list_version: Option<u64>,
-        payment_request_terms: Option<PaymentRequestTermsRecord>,
+        payment_request_id: Option<&PaymentRequestId>,
+        prepared_inbox: Option<&PrivateInboxCheckpoint>,
     ) -> Result<PrivateContactPaymentResolution> {
-        let (session_access, identity) = self.load_session_access_and_refresh_identity().await?;
+        let (session_access, identity, readiness) = self
+            .load_session_access_and_refresh_identity_with(|tx| {
+                Ok(require_private_automation_ready(
+                    tx.linked_peer(&counterparty).map(|peer| peer.state),
+                    tx.encrypted_link_state(&counterparty)
+                        .is_some_and(|state| state.link_snapshot.is_some()),
+                    &counterparty,
+                )
+                .map(|()| RecoveryObservationCheckpoint::load(tx, &counterparty)))
+            })
+            .await?;
         let private_live = session_access
             .as_ref()
             .map(|session| {
@@ -258,26 +367,102 @@ where
             .unwrap_or(false);
         let mut state = PrivatePaymentResolutionState::NoPrivateEndpoint;
         let mut private_allowed = identity.public_key.is_some();
+        let mut recovery_checkpoint = None;
 
         if private_allowed {
             private_allowed = if private_live {
-                self.private_resolution_allowed_for_peer(&counterparty, &mut state)
-                    .await?
+                match readiness.expect("active session loads private resolution readiness") {
+                    Ok(checkpoint) => {
+                        recovery_checkpoint = checkpoint;
+                        true
+                    }
+                    Err(PaykitSdkError::RecoveryRequired { .. }) => {
+                        state = PrivatePaymentResolutionState::RecoveryPending;
+                        false
+                    }
+                    Err(err) => return Err(err),
+                }
             } else {
                 self.cached_private_resolution_allowed_for_peer(&counterparty, &mut state)
                     .await?
             };
         }
 
-        if private_allowed && private_live {
-            match self
-                .observe_remote_recovery_marker_for_cached_private_state(
+        let read_private_state = |tx: &dyn StorageTransaction, private_allowed| {
+            let request = payment_request_id
+                // Link readiness is evaluated separately from request lifecycle.
+                .map(|id| self.payment_request_record_in_transaction(tx, &counterparty, id, false))
+                .transpose()?;
+            let needs_private_lists = request
+                .as_ref()
+                .and_then(|record| record.terms.as_ref())
+                .is_none_or(|terms| terms.payment_endpoints.is_none());
+            let allowed = if private_allowed && private_live {
+                let peer_state = tx.linked_peer(&counterparty).map(|peer| peer.state);
+                let has_link = tx
+                    .encrypted_link_state(&counterparty)
+                    .and_then(|state| state.link_snapshot)
+                    .is_some();
+                match require_private_automation_ready(peer_state, has_link, &counterparty) {
+                    Ok(()) => true,
+                    Err(PaykitSdkError::RecoveryRequired { .. }) => false,
+                    Err(err) => return Err(err),
+                }
+            } else if private_allowed {
+                cached_private_resolution_allowed(
+                    tx.linked_peer(&counterparty).map(|peer| peer.state),
                     &counterparty,
-                    session_access.as_deref(),
-                )
-                .await
-            {
-                Ok(()) => {}
+                )?
+            } else {
+                false
+            };
+            Ok((
+                allowed,
+                if allowed && needs_private_lists {
+                    tx.private_stream_items(&counterparty)
+                } else {
+                    Vec::new()
+                },
+                allowed && prepared_inbox.is_some_and(|checkpoint| checkpoint.is_current(tx)),
+                request,
+            ))
+        };
+
+        let mut projection = None;
+        // A remote recovery marker can change while the local inbox checkpoint remains current.
+        if private_allowed && private_live {
+            let access = session_access.as_ref().expect("live private session");
+            let observation = async {
+                let projection = self
+                    .unchanged_link_checkpoint_with(
+                        &counterparty,
+                        access,
+                        recovery_checkpoint,
+                        self.fetch_counterparty_app_authorization(&counterparty),
+                        |tx, _, observation| {
+                            // Registry failures propagate separately from recovery observation.
+                            let observation = match observation {
+                                Ok(observation) => observation,
+                                Err(error) => return Ok(Err(error)),
+                            };
+                            let context = observation.apply(tx, &counterparty);
+                            Ok(Ok((context, read_private_state(tx, true)?)))
+                        },
+                    )
+                    .await?;
+                if projection.is_none() {
+                    self.observe_remote_recovery_marker_from_checkpoint(
+                        &counterparty,
+                        access,
+                        None,
+                    )
+                    .await?;
+                }
+                Ok(projection)
+            }
+            .await;
+            match observation {
+                Ok(value) => projection = value.transpose()?,
                 Err(PaykitSdkError::RecoveryRequired { .. }) => {
                     state = PrivatePaymentResolutionState::RecoveryPending;
                     private_allowed = false;
@@ -286,23 +471,82 @@ where
             }
         }
 
-        if private_allowed && private_live {
-            private_allowed = self
-                .private_resolution_allowed_for_peer(&counterparty, &mut state)
-                .await?;
-        }
-
         drop(session_access);
 
-        let (app_registry, authorized_private_apps) = if private_live {
-            self.private_app_authorization_context(&counterparty)
+        let read_private_state =
+            |tx: &dyn StorageTransaction| read_private_state(tx, private_allowed);
+        let (context, (allowed, items, inbox_is_current, request)) =
+            if let Some(projection) = projection {
+                projection
+            } else if private_live || payment_request_id.is_some() {
+                self.counterparty_app_authorization_context_with(&counterparty, read_private_state)
+                    .await?
+            } else {
+                self.cached_counterparty_app_authorization_context_with(
+                    &counterparty,
+                    read_private_state,
+                )
                 .await?
-        } else {
-            let context = self
-                .cached_counterparty_app_authorization_context(&counterparty)
-                .await?;
-            (context.registry, context.private_apps)
-        };
+            };
+        // Reuse the empty inbox result only while its local checkpoint remains current.
+        if prepared_inbox.is_some() && !inbox_is_current {
+            return Box::pin(self.resolve_private_contact_payment_with_request(
+                counterparty,
+                amount,
+                after_private_payment_list_version,
+                payment_request_id,
+                None,
+            ))
+            .await;
+        }
+        if private_allowed && !allowed {
+            state = PrivatePaymentResolutionState::RecoveryPending;
+        }
+        private_allowed = allowed;
+
+        let payment_request_terms = request
+            .map(|record| {
+                payment_request_resolution_terms(record, context.payment_request_apps.as_deref())
+            })
+            .transpose()?;
+        self.resolve_private_contact_payment_from_projection(
+            counterparty,
+            amount,
+            after_private_payment_list_version,
+            PrivateResolutionProjection {
+                context,
+                request_terms: payment_request_terms,
+                items,
+                state,
+                private_allowed,
+                private_live,
+                inbox_is_current,
+            },
+        )
+        .await
+    }
+
+    async fn resolve_private_contact_payment_from_projection(
+        &self,
+        counterparty: PubkyPublicKey,
+        amount: Option<PaymentAmountContext>,
+        after_private_payment_list_version: Option<u64>,
+        projection: PrivateResolutionProjection,
+    ) -> Result<PrivateContactPaymentResolution> {
+        let PrivateResolutionProjection {
+            context,
+            request_terms: payment_request_terms,
+            items,
+            mut state,
+            private_allowed,
+            private_live,
+            inbox_is_current,
+        } = projection;
+        let amount = payment_request_terms
+            .as_ref()
+            .map(payment_request_amount)
+            .or(amount);
+        let (app_registry, authorized_private_apps) = (context.registry, context.private_apps);
 
         if let Some((terms, endpoints)) = payment_request_terms.as_ref().and_then(|terms| {
             terms
@@ -346,11 +590,8 @@ where
                 .await;
         }
 
-        let mut private_views = if private_allowed {
-            load_current_private_payment_lists(&self.storage, &counterparty).await?
-        } else {
-            Vec::new()
-        };
+        let mut private_views =
+            crate::domain::private_lists::derive_private_payment_list_views(items)?;
         filter_private_views_by_authorized_apps(
             &mut private_views,
             authorized_private_apps.as_deref(),
@@ -379,6 +620,7 @@ where
             .is_none_or(|batch| !batch.has_candidates())
             && private_live
             && state != PrivatePaymentResolutionState::RecoveryPending
+            && !inbox_is_current
         {
             match self
                 .recover_private_candidates_for_resolution(
@@ -530,15 +772,88 @@ where
         after_private_payment_list_version: Option<u64>,
         max_advance_steps: u32,
     ) -> Result<PreparedPrivateContactPayment> {
-        let (link_report, receive_report, outbound_report) = self
-            .prepare_private_contact_payment(&counterparty, max_advance_steps)
+        self.prepare_and_resolve_private_payment(
+            counterparty,
+            amount,
+            after_private_payment_list_version,
+            None,
+            max_advance_steps,
+        )
+        .await
+    }
+
+    async fn prepare_and_resolve_private_payment(
+        &self,
+        counterparty: PubkyPublicKey,
+        amount: Option<PaymentAmountContext>,
+        after_private_payment_list_version: Option<u64>,
+        payment_request_id: Option<&PaymentRequestId>,
+        max_advance_steps: u32,
+    ) -> Result<PreparedPrivateContactPayment> {
+        let send_readiness = if payment_request_id.is_some() {
+            PrivateSendReadiness::DeferPendingConfirmations
+        } else {
+            PrivateSendReadiness::Queued
+        };
+        let prepared = match self
+            .unchanged_private_contact_preparation(
+                &counterparty,
+                payment_request_id,
+                send_readiness,
+            )
+            .await?
+        {
+            PrivatePreparationOutcome::Prepare => None,
+            PrivatePreparationOutcome::Resolve(generation, inbox) => Some((
+                generation,
+                self.resolve_private_contact_payment_with_request(
+                    counterparty.clone(),
+                    amount.clone(),
+                    after_private_payment_list_version,
+                    payment_request_id,
+                    Some(&inbox),
+                )
+                .await?,
+            )),
+            PrivatePreparationOutcome::Project(generation, projection) => Some((
+                generation,
+                self.resolve_private_contact_payment_from_projection(
+                    counterparty.clone(),
+                    amount.clone(),
+                    after_private_payment_list_version,
+                    *projection,
+                )
+                .await?,
+            )),
+        };
+        if let Some((generation, resolution)) = prepared {
+            return Ok(PreparedPrivateContactPayment {
+                resolution,
+                link_report: Some(LinkedPeerHandshakeReport {
+                    counterparty,
+                    state: LinkedPeerState::Linked,
+                    generation,
+                    handshake_role: None,
+                }),
+                receive_report: Some(PrivateStreamIntakeReport {
+                    receive_batch_id: None,
+                    stream_item_ids: Vec::new(),
+                    event_conflicts: Vec::new(),
+                }),
+                outbound_report: Some(OutboundPrivateSendReport::default()),
+            });
+        }
+        let (link_report, receive_report, outbound_report, inbox) = self
+            .prepare_private_contact_payment(&counterparty, max_advance_steps, send_readiness)
             .await?;
 
         let resolution = self
-            .resolve_private_contact_payment(
+            .resolve_private_contact_payment_with_request(
                 counterparty,
                 amount,
                 after_private_payment_list_version,
+                payment_request_id,
+                inbox.as_ref(),
             )
             .await?;
 
@@ -550,11 +865,167 @@ where
         })
     }
 
+    pub(super) fn private_contact_preparation_needs_outbound(
+        &self,
+        tx: &dyn StorageTransaction,
+        counterparty: &PubkyPublicKey,
+        outbound: &[OutboundPrivateMessageRecord],
+        send_readiness: PrivateSendReadiness,
+    ) -> Result<bool> {
+        if matches!(
+            send_readiness,
+            PrivateSendReadiness::DeferPendingConfirmations
+        ) && can_defer_pending_confirmations(tx, counterparty)
+        {
+            return Ok(false);
+        }
+        if outbound.iter().any(|message| {
+            message.prepared_send.is_some()
+                || matches!(
+                    message.status,
+                    OutboundPrivateMessageStatus::Pending
+                        | OutboundPrivateMessageStatus::Failed
+                        | OutboundPrivateMessageStatus::Sending
+                )
+        }) || terminal_private_list_reservation_cancellations_in_transaction(tx, counterparty)
+            .iter()
+            .any(|record| record.app_id == self.config.app_id)
+        {
+            return Ok(true);
+        }
+        self.outbound_private_work_is_claimable(tx, outbound)
+    }
+
+    async fn unchanged_private_contact_preparation(
+        &self,
+        counterparty: &PubkyPublicKey,
+        payment_request_id: Option<&PaymentRequestId>,
+        send_readiness: PrivateSendReadiness,
+    ) -> Result<PrivatePreparationOutcome> {
+        let (access, _, checkpoint) = self
+            .load_session_access_and_refresh_identity_with(|tx| {
+                let outbound = tx.outbound_private_messages(counterparty);
+                if self.private_contact_preparation_needs_outbound(
+                    tx,
+                    counterparty,
+                    &outbound,
+                    send_readiness,
+                )? {
+                    return Ok(None);
+                }
+                Ok(PrivatePreparationCheckpoint::load(
+                    tx,
+                    counterparty,
+                    outbound,
+                ))
+            })
+            .await?;
+        let Some(access) = access else {
+            return Ok(PrivatePreparationOutcome::Prepare);
+        };
+        if !access.private_link_capable_for_capabilities(PAYKIT_SESSION_CAPABILITIES)? {
+            return Ok(PrivatePreparationOutcome::Prepare);
+        }
+        let Some(checkpoint) = checkpoint.flatten() else {
+            return Ok(PrivatePreparationOutcome::Prepare);
+        };
+        require_distinct_link_identity(&access.public_key()?, counterparty)?;
+        let (local_authorization, observed) = tokio::join!(
+            self.validate_local_noise_key_authorization(&access),
+            self.observe_link_checkpoint(counterparty, &access, Some(&checkpoint.recovery)),
+        );
+        local_authorization?;
+        if !observed? {
+            return Ok(PrivatePreparationOutcome::Prepare);
+        }
+        let PrivatePreparationCheckpoint {
+            recovery,
+            receive,
+            items,
+            outbound,
+            reservations,
+        } = checkpoint;
+        let Some(inbox) = self
+            .probe_empty_private_inbox(counterparty, &access, receive)
+            .await?
+        else {
+            return Ok(PrivatePreparationOutcome::Prepare);
+        };
+        // The post-inbox authorization and marker reads remain mandatory.
+        let (observed, observation) = tokio::join!(
+            self.observe_link_checkpoint(counterparty, &access, Some(&recovery)),
+            self.fetch_counterparty_app_authorization(counterparty),
+        );
+        let observed = match observed {
+            Ok(observed) => observed,
+            Err(PaykitSdkError::RecoveryRequired { .. }) => false,
+            Err(error) => return Err(error),
+        };
+        let observation = observed.then_some(observation);
+        self.storage
+            .transaction(|tx| {
+                if RecoveryObservationCheckpoint::load(tx, counterparty).as_ref() != Some(&recovery)
+                    || tx.private_stream_items(counterparty) != items
+                    || tx.outbound_private_messages(counterparty) != outbound
+                    || tx.payment_endpoint_reservations(counterparty) != reservations
+                    || !inbox.is_current(tx)
+                    // Retry eligibility can change without changing the saved records.
+                    || self.private_contact_preparation_needs_outbound(
+                        tx, counterparty, &outbound, send_readiness,
+                    )?
+                {
+                    return Ok(Ok(PrivatePreparationOutcome::Prepare));
+                }
+                let generation = recovery.link_state.generation;
+                let Some(observation) = observation else {
+                    // Late remote changes belong to resolution, not handshake preparation.
+                    return Ok(Ok(PrivatePreparationOutcome::Resolve(
+                        generation,
+                        Box::new(inbox),
+                    )));
+                };
+                // A stale speculative registry error must not bypass preparation.
+                let context = observation?.apply(tx, counterparty);
+                let request_terms = payment_request_id
+                    .map(|id| {
+                        let record = self.payment_request_record_in_transaction(
+                            tx,
+                            counterparty,
+                            id,
+                            false,
+                        )?;
+                        payment_request_resolution_terms(
+                            record,
+                            context.payment_request_apps.as_deref(),
+                        )
+                    })
+                    .transpose();
+                // Retain refreshed authorization even when this request is not payable.
+                Ok(request_terms.map(|request_terms| {
+                    PrivatePreparationOutcome::Project(
+                        generation,
+                        Box::new(PrivateResolutionProjection {
+                            context,
+                            request_terms,
+                            items: tx.private_stream_items(counterparty),
+                            state: PrivatePaymentResolutionState::NoPrivateEndpoint,
+                            private_allowed: true,
+                            private_live: true,
+                            inbox_is_current: inbox.is_current(tx),
+                        }),
+                    )
+                }))
+            })
+            .await?
+    }
+
     /// Prepare private state, then resolve endpoints permitted by a Payment Request.
     ///
-    /// This performs the same bounded link and stream preparation as
-    /// [`Self::prepare_and_resolve_private_contact_payment`], then applies the
+    /// This performs bounded link and stream preparation, then applies the
     /// request amount, accepted endpoint identifiers, and required payee App.
+    /// When only unclaimed, unprepared Delivery Confirmations remain, they stay
+    /// durably queued for a later outbound processing call. Other outbound work
+    /// is processed before resolution, as in private contact preparation.
     pub async fn prepare_and_resolve_private_payment_request(
         &self,
         counterparty: PubkyPublicKey,
@@ -562,61 +1033,64 @@ where
         after_private_payment_list_version: Option<u64>,
         max_advance_steps: u32,
     ) -> Result<PreparedPrivateContactPayment> {
-        let (link_report, receive_report, outbound_report) = self
-            .prepare_private_contact_payment(&counterparty, max_advance_steps)
-            .await?;
-        let resolution = self
-            .resolve_private_payment_request(
-                counterparty,
-                payment_request_id,
-                after_private_payment_list_version,
-            )
-            .await?;
-
-        Ok(PreparedPrivateContactPayment {
-            resolution,
-            link_report,
-            receive_report,
-            outbound_report,
-        })
+        self.prepare_and_resolve_private_payment(
+            counterparty,
+            None,
+            after_private_payment_list_version,
+            Some(payment_request_id),
+            max_advance_steps,
+        )
+        .await
     }
 
     async fn prepare_private_contact_payment(
         &self,
         counterparty: &PubkyPublicKey,
         max_advance_steps: u32,
+        send_readiness: PrivateSendReadiness,
     ) -> Result<(
         Option<LinkedPeerHandshakeReport>,
         Option<PrivateStreamIntakeReport>,
         Option<OutboundPrivateSendReport>,
+        Option<PrivateInboxCheckpoint>,
     )> {
-        let mut link_report = None;
+        let (link_report, mut receive_context) = self
+            .ensure_link_with_peer_for_private_receive(counterparty.clone(), max_advance_steps)
+            .await?;
         let mut receive_report = None;
         let mut outbound_report = None;
+        let mut inbox = None;
 
-        if self.private_payment_preparation_is_available().await? {
-            link_report = Some(
-                self.ensure_link_with_peer(counterparty.clone(), max_advance_steps)
-                    .await?,
-            );
+        if link_report.is_some() {
             for _ in 0..PREPARE_PRIVATE_PAYMENT_SYNC_ROUND_LIMIT {
+                // Consume available confirmations before retrying published events.
+                // Reuse only the adjacent validated checkpoint, never one from before a send.
+                let (received, checkpoint) = self
+                    .receive_private_messages_with_checkpoint(
+                        counterparty.clone(),
+                        receive_context.take(),
+                    )
+                    .await?;
+                let receive_progress = receive_report_made_progress(&received);
+                merge_receive_report(&mut receive_report, received);
+
                 let outbound = self
-                    .process_outbound_private_messages(counterparty.clone())
+                    .process_outbound_private_messages_with_readiness(
+                        counterparty.clone(),
+                        send_readiness,
+                    )
                     .await?;
                 let outbound_progress = outbound_report_made_progress(&outbound);
                 merge_outbound_report(&mut outbound_report, outbound);
 
-                let received = self.receive_private_messages(counterparty.clone()).await?;
-                let receive_progress = receive_report_made_progress(&received);
-                merge_receive_report(&mut receive_report, received);
-
                 if !outbound_progress && !receive_progress {
+                    inbox = checkpoint;
                     break;
                 }
             }
         }
 
-        Ok((link_report, receive_report, outbound_report))
+        Ok((link_report, receive_report, outbound_report, inbox))
     }
 
     async fn payment_request_resolution_terms(
@@ -624,74 +1098,17 @@ where
         counterparty: &PubkyPublicKey,
         payment_request_id: &PaymentRequestId,
     ) -> Result<PaymentRequestTermsRecord> {
-        let record = self
-            .load_payment_request_record(counterparty, payment_request_id)
-            .await?;
-        if record.local_role != Some(PaymentRequestLocalRole::Payer) {
-            return Err(PaykitSdkError::Policy {
-                context: format!(
-                    "cannot resolve Payment Request {}: local identity is not the payer",
-                    payment_request_id
-                ),
-                source: None,
-            });
-        }
-        if !matches!(
-            record.state,
-            PaymentRequestLifecycleState::Proposed
-                | PaymentRequestLifecycleState::Accepted
-                | PaymentRequestLifecycleState::ActiveRecurring
-        ) {
-            return Err(PaykitSdkError::Policy {
-                context: format!(
-                    "cannot resolve Payment Request {} in state {:?}",
-                    payment_request_id, record.state
-                ),
-                source: None,
-            });
-        }
-        self.ensure_payment_request_origin_app_authorized(
-            counterparty,
-            &record,
-            &format!("resolve Payment Request {payment_request_id}"),
-        )
-        .await?;
-        record.terms.ok_or_else(|| PaykitSdkError::Protocol {
-            context: format!(
-                "Payment Request {} terms are unavailable",
-                payment_request_id
-            ),
-            source: None,
-        })
-    }
-
-    async fn private_payment_preparation_is_available(&self) -> Result<bool> {
-        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
-        session_access
-            .as_ref()
-            .map(|session| {
-                session.private_link_capable_for_capabilities(PAYKIT_SESSION_CAPABILITIES)
+        let (context, record) = self
+            .counterparty_app_authorization_context_with(counterparty, |tx| {
+                self.payment_request_record_in_transaction(
+                    tx,
+                    counterparty,
+                    payment_request_id,
+                    true,
+                )
             })
-            .transpose()
-            .map(|capable| capable.unwrap_or(false))
-    }
-
-    async fn private_resolution_allowed_for_peer(
-        &self,
-        counterparty: &PubkyPublicKey,
-        state: &mut PrivatePaymentResolutionState,
-    ) -> Result<bool> {
-        match self
-            .ensure_peer_allows_private_automation(counterparty)
-            .await
-        {
-            Ok(()) => Ok(true),
-            Err(PaykitSdkError::RecoveryRequired { .. }) => {
-                *state = PrivatePaymentResolutionState::RecoveryPending;
-                Ok(false)
-            }
-            Err(err) => Err(err),
-        }
+            .await?;
+        payment_request_resolution_terms(record, context.payment_request_apps.as_deref())
     }
 
     async fn cached_private_resolution_allowed_for_peer(
@@ -703,17 +1120,11 @@ where
             .storage
             .transaction(|tx| Ok(tx.linked_peer(counterparty).map(|peer| peer.state)))
             .await?;
-        match peer_state {
-            Some(LinkedPeerState::Linking | LinkedPeerState::RecoveryRequired) => {
-                *state = PrivatePaymentResolutionState::RecoveryPending;
-                Ok(false)
-            }
-            Some(LinkedPeerState::Blocked) => Err(PaykitSdkError::Policy {
-                context: format!("counterparty {counterparty} is blocked"),
-                source: None,
-            }),
-            _ => Ok(true),
+        let allowed = cached_private_resolution_allowed(peer_state, counterparty)?;
+        if !allowed {
+            *state = PrivatePaymentResolutionState::RecoveryPending;
         }
+        Ok(allowed)
     }
 
     pub(super) async fn recover_private_candidates_for_resolution(
@@ -723,14 +1134,7 @@ where
         after_private_payment_list_version: Option<u64>,
         required_app_id: Option<&paykit_lib::PaykitAppId>,
     ) -> Result<PrivateRecoveryOutcome> {
-        let Some(identity) = self.storage.load_identity_state().await? else {
-            return Ok(PrivateRecoveryOutcome::NotNeeded);
-        };
-        if identity.public_key.is_none() {
-            return Ok(PrivateRecoveryOutcome::NotNeeded);
-        }
-
-        let (peer_state, has_active_link) = self
+        let (identity, peer_state, has_active_link) = self
             .storage
             .transaction(|tx| {
                 let peer = tx.linked_peer(counterparty);
@@ -740,11 +1144,16 @@ where
                     .and_then(|state| state.link_snapshot.as_ref())
                     .is_some();
                 Ok((
+                    tx.load_identity_state().and_then(|state| state.public_key),
                     peer.as_ref().map(|peer| peer.state.clone()),
                     has_active_link,
                 ))
             })
             .await?;
+
+        if identity.is_none() {
+            return Ok(PrivateRecoveryOutcome::NotNeeded);
+        }
 
         if matches!(
             peer_state,

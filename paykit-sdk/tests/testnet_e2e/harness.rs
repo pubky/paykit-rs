@@ -158,10 +158,11 @@ pub struct TestnetPaymentAdapter {
     public_details: Arc<Mutex<Vec<PublicReceivingDetail>>>,
     private_details: Arc<Mutex<Vec<PrivateReceivingDetail>>>,
     fail_reservation_cancellation: Arc<Mutex<bool>>,
-    public_details_pause: Arc<Mutex<Option<PublicDetailsPause>>>,
+    public_details_pause: Arc<Mutex<Option<AdapterPause>>>,
+    reservation_cancellation_pause: Arc<Mutex<Option<AdapterPause>>>,
 }
 
-struct PublicDetailsPause {
+struct AdapterPause {
     loaded: oneshot::Sender<()>,
     resume: oneshot::Receiver<()>,
 }
@@ -181,7 +182,7 @@ impl TestnetPaymentAdapter {
         *self
             .public_details_pause
             .lock()
-            .expect("public details pause lock poisoned") = Some(PublicDetailsPause {
+            .expect("public details pause lock poisoned") = Some(AdapterPause {
             loaded: loaded_tx,
             resume: resume_rx,
         });
@@ -193,6 +194,21 @@ impl TestnetPaymentAdapter {
             .fail_reservation_cancellation
             .lock()
             .expect("failure flag lock poisoned") = fail;
+    }
+
+    pub fn pause_next_reservation_cancellation(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (loaded_tx, loaded_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        *self
+            .reservation_cancellation_pause
+            .lock()
+            .expect("reservation cancellation pause lock poisoned") = Some(AdapterPause {
+            loaded: loaded_tx,
+            resume: resume_rx,
+        });
+        (loaded_rx, resume_tx)
     }
 }
 
@@ -263,6 +279,15 @@ impl PaymentAdapter for TestnetPaymentAdapter {
         &self,
         _cancellation: &PrivatePaymentEndpointReservationCancellation,
     ) -> Result<()> {
+        let pause = self
+            .reservation_cancellation_pause
+            .lock()
+            .expect("reservation cancellation pause lock poisoned")
+            .take();
+        if let Some(pause) = pause {
+            let _ = pause.loaded.send(());
+            let _ = pause.resume.await;
+        }
         if *self
             .fail_reservation_cancellation
             .lock()

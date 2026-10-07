@@ -184,6 +184,15 @@ async fn test_restored_link_rejects_substituted_static_key_before_send_or_receiv
                 .await
                 .unwrap_err()
         } else {
+            attacker.handle_handshake().await.unwrap();
+            attacker.transition_transport().unwrap();
+            let prepared = attacker.prepare_send(b"unauthorized message").unwrap();
+            bob.access
+                .session
+                .storage()
+                .put(prepared.destination_path(), prepared.ciphertext().to_vec())
+                .await
+                .unwrap();
             alice
                 .sdk
                 .receive_private_messages(bob.public_key.clone())
@@ -350,6 +359,12 @@ async fn test_links_require_authorization_and_pin_verified_generations() {
             .await,
         Err(PaykitSdkError::NotFound { .. })
     ));
+    assert!(alice
+        .storage
+        .snapshot()
+        .unwrap()
+        .peer_link_operation_leases
+        .is_empty());
     assert!(matches!(
         bob.sdk
             .ensure_link_with_peer(alice.public_key.clone(), 0)
@@ -360,9 +375,10 @@ async fn test_links_require_authorization_and_pin_verified_generations() {
         .publish_paykit_noise_key_authorization()
         .await
         .unwrap();
+    // A waiting responder must still observe authorization changes.
     alice
         .sdk
-        .ensure_link_with_peer(bob.public_key.clone(), 0)
+        .accept_link_with_peer(bob.public_key.clone())
         .await
         .unwrap();
     let pinned = alice
@@ -425,6 +441,11 @@ async fn test_links_require_authorization_and_pin_verified_generations() {
     assert!(alice
         .sdk
         .ensure_link_with_peer(bob.public_key.clone(), 0)
+        .await
+        .is_err());
+    assert!(alice
+        .sdk
+        .advance_link_handshake(bob.public_key.clone())
         .await
         .is_err());
     let after = alice

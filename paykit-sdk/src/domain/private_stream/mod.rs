@@ -6,6 +6,9 @@ use sha2::{Digest, Sha256};
 
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+use crate::storage::{retry_storage_transaction, StorageAdapter};
+
 use crate::{
     domain::{
         outbound_private::OutboundPrivateMessageStatus,
@@ -15,9 +18,9 @@ use crate::{
         receipts::ReceiptAccessRecord,
     },
     storage::{
-        require_peer_link_operation_lease, retry_storage_transaction, EncryptedLinkStateRecord,
-        EventDedupRecord, NewPrivateStreamItem, NewPrivateStreamItemDetails,
-        OutboundPrivateMessageRecord, PeerLinkOperationLease, StorageAdapter,
+        require_peer_link_operation_lease, EncryptedLinkStateRecord, EventDedupRecord,
+        NewPrivateStreamItem, NewPrivateStreamItemDetails, OutboundPrivateMessageRecord,
+        PeerLinkOperationLease,
     },
     PaykitSdkError, PubkyPublicKey, Result,
 };
@@ -203,6 +206,7 @@ where
 }
 
 /// Persist stream items and their resulting Encrypted Link checkpoint.
+#[cfg(test)]
 pub(crate) async fn persist_private_stream_batch_write<S>(
     storage: &S,
     write: PrivateStreamBatchWrite,
@@ -211,162 +215,163 @@ where
     S: StorageAdapter,
 {
     retry_storage_transaction(storage, || {
-        let PrivateStreamBatchWrite {
-            counterparty,
-            confirmation_app_id,
-            messages,
-            link_state,
-            authorized_receipt_apps,
-            link_lease,
-            receive_batch_id,
-            received_at,
-        } = write.clone();
-        move |tx| {
-            if let Some(lease) = link_lease.as_ref() {
-                require_peer_link_operation_lease(tx, lease)?;
-            }
-            let receive_batch_id = if messages.is_empty() {
-                None
-            } else {
-                Some(match receive_batch_id {
-                    Some(receive_batch_id) => receive_batch_id,
-                    None => tx.allocate_receive_batch_id()?,
-                })
-            };
-            let mut report = PrivateStreamIntakeReport {
-                receive_batch_id,
-                stream_item_ids: Vec::with_capacity(messages.len()),
-                event_conflicts: Vec::new(),
-            };
-            for message in messages {
-                let receive_batch_id = receive_batch_id.expect("nonempty batch has an id");
-                let PrivateStreamMessageClassification {
-                    status,
-                    parse_error,
-                    event,
-                    receipt_access,
-                    app_id: classification_app_id,
-                } = classify_private_application_message(&message);
-                let valid = status == PrivateStreamParseStatus::Valid;
-                let stream_item_id = tx.insert_private_stream_item(NewPrivateStreamItem::new(
-                    NewPrivateStreamItemDetails {
-                        counterparty: counterparty.clone(),
-                        receive_batch_id,
-                        raw_json: message.raw_json.clone(),
-                        parsed_version: message.version.map(u32::from),
-                        parsed_kind: message.kind.clone(),
-                        parsed_app_id: message.app_id.clone(),
-                        known_paykit_kind: message
-                            .known_kind()
-                            .map(|kind| kind.as_str().to_owned()),
-                        parse_status: status,
-                        parse_error,
-                        received_at,
-                    },
-                ))?;
-
-                let delivery_event_id = event.as_ref().map(|event| event.event_id.clone());
-                let dedupe_outcome = event.map(|event| {
-                    update_event_dedupe(
-                        tx,
-                        &counterparty,
-                        event.event_id,
-                        event.event_kind,
-                        payload_hash(&message.raw_json),
-                        stream_item_id,
-                        &mut report,
-                    )
-                });
-
-                if valid {
-                    if let Some(event_id) = delivery_event_id {
-                        queue_delivery_confirmation(
-                            tx,
-                            &counterparty,
-                            &confirmation_app_id,
-                            &event_id,
-                            &message.raw_json,
-                            received_at,
-                        )?;
-                    } else if message.known_kind() == Some(PrivateMessageKind::DeliveryConfirmation)
-                    {
-                        let confirmation =
-                            paykit_lib::parse_delivery_confirmation_json(&message.raw_json)?;
-                        apply_delivery_confirmation(tx, &counterparty, &confirmation, received_at)?;
-                    }
-                }
-
-                if matches!(dedupe_outcome, Some(EventDedupeOutcome::First)) {
-                    if let Some(access) = receipt_access.as_ref() {
-                        tx.save_receipt_access_record(ReceiptAccessRecord::from_access(
-                            counterparty.clone(),
-                            classification_app_id
-                                .as_ref()
-                                .expect("valid Receipt Access has an App ID")
-                                .clone(),
-                            authorized_receipt_apps.as_ref().is_some_and(|app_ids| {
-                                app_ids.contains(
-                                    classification_app_id
-                                        .as_ref()
-                                        .expect("valid Receipt Access has an App ID"),
-                                )
-                            }),
-                            stream_item_id,
-                            receive_batch_id,
-                            received_at,
-                            access,
-                        ));
-                    }
-                }
-
-                report.stream_item_ids.push(stream_item_id);
-            }
-
-            if !report.stream_item_ids.is_empty() {
-                // Conflicts can invalidate earlier events, not only requests named by this batch.
-                let records =
-                    payment_request_records_from_transaction(tx, &counterparty, received_at)?;
-                for record in records {
-                    if matches!(
-                        record.state,
-                        PaymentRequestLifecycleState::Canceled
-                            | PaymentRequestLifecycleState::Rejected
-                            | PaymentRequestLifecycleState::ProofSubmitted
-                            | PaymentRequestLifecycleState::InvalidConflict
-                    ) && !crate::domain::payment_requests::request_has_unresolved_payment(
-                        tx,
-                        &counterparty,
-                        &record.payment_request_id,
-                    ) && !crate::domain::payment_requests::request_has_unreported_successful_payment(
-                        tx.allowance_accounting_state().as_ref(),
-                        &record,
-                    ) {
-                        tx.remove_payment_request_execution_claim(
-                            &counterparty,
-                            &record.payment_request_id,
-                        );
-                    }
-                }
-            }
-
-            let checkpointed_link = link_state.is_some();
-            if let Some(link_state) = link_state {
-                tx.save_encrypted_link_state(link_state);
-            }
-            if let Some(mut peer) = tx.linked_peer(&counterparty) {
-                if !report.stream_item_ids.is_empty() {
-                    peer.last_private_receive_at = Some(received_at);
-                }
-                if checkpointed_link || !report.stream_item_ids.is_empty() {
-                    peer.last_sync_at = Some(received_at);
-                }
-                tx.save_linked_peer(peer);
-            }
-
-            Ok(report)
-        }
+        let write = write.clone();
+        move |tx| persist_private_stream_batch_in_transaction(tx, write)
     })
     .await
+}
+
+pub(crate) fn persist_private_stream_batch_in_transaction(
+    tx: &mut dyn crate::storage::StorageTransaction,
+    write: PrivateStreamBatchWrite,
+) -> Result<PrivateStreamIntakeReport> {
+    let PrivateStreamBatchWrite {
+        counterparty,
+        confirmation_app_id,
+        messages,
+        link_state,
+        authorized_receipt_apps,
+        link_lease,
+        receive_batch_id,
+        received_at,
+    } = write;
+    if let Some(lease) = link_lease.as_ref() {
+        require_peer_link_operation_lease(tx, lease)?;
+    }
+    let receive_batch_id = if messages.is_empty() {
+        None
+    } else {
+        Some(match receive_batch_id {
+            Some(receive_batch_id) => receive_batch_id,
+            None => tx.allocate_receive_batch_id()?,
+        })
+    };
+    let mut report = PrivateStreamIntakeReport {
+        receive_batch_id,
+        stream_item_ids: Vec::with_capacity(messages.len()),
+        event_conflicts: Vec::new(),
+    };
+    for message in messages {
+        let receive_batch_id = receive_batch_id.expect("nonempty batch has an id");
+        let PrivateStreamMessageClassification {
+            status,
+            parse_error,
+            event,
+            receipt_access,
+            app_id: classification_app_id,
+        } = classify_private_application_message(&message);
+        let valid = status == PrivateStreamParseStatus::Valid;
+        let stream_item_id = tx.insert_private_stream_item(NewPrivateStreamItem::new(
+            NewPrivateStreamItemDetails {
+                counterparty: counterparty.clone(),
+                receive_batch_id,
+                raw_json: message.raw_json.clone(),
+                parsed_version: message.version.map(u32::from),
+                parsed_kind: message.kind.clone(),
+                parsed_app_id: message.app_id.clone(),
+                known_paykit_kind: message.known_kind().map(|kind| kind.as_str().to_owned()),
+                parse_status: status,
+                parse_error,
+                received_at,
+            },
+        ))?;
+
+        let delivery_event_id = event.as_ref().map(|event| event.event_id.clone());
+        let dedupe_outcome = event.map(|event| {
+            update_event_dedupe(
+                tx,
+                &counterparty,
+                event.event_id,
+                event.event_kind,
+                payload_hash(&message.raw_json),
+                stream_item_id,
+                &mut report,
+            )
+        });
+
+        if valid {
+            if let Some(event_id) = delivery_event_id {
+                queue_delivery_confirmation(
+                    tx,
+                    &counterparty,
+                    &confirmation_app_id,
+                    &event_id,
+                    &message.raw_json,
+                    received_at,
+                )?;
+            } else if message.known_kind() == Some(PrivateMessageKind::DeliveryConfirmation) {
+                let confirmation = paykit_lib::parse_delivery_confirmation_json(&message.raw_json)?;
+                apply_delivery_confirmation(tx, &counterparty, &confirmation, received_at)?;
+            }
+        }
+
+        if matches!(dedupe_outcome, Some(EventDedupeOutcome::First)) {
+            if let Some(access) = receipt_access.as_ref() {
+                tx.save_receipt_access_record(ReceiptAccessRecord::from_access(
+                    counterparty.clone(),
+                    classification_app_id
+                        .as_ref()
+                        .expect("valid Receipt Access has an App ID")
+                        .clone(),
+                    authorized_receipt_apps.as_ref().is_some_and(|app_ids| {
+                        app_ids.contains(
+                            classification_app_id
+                                .as_ref()
+                                .expect("valid Receipt Access has an App ID"),
+                        )
+                    }),
+                    stream_item_id,
+                    receive_batch_id,
+                    received_at,
+                    access,
+                ));
+            }
+        }
+
+        report.stream_item_ids.push(stream_item_id);
+    }
+
+    if !report.stream_item_ids.is_empty() {
+        // Conflicts can invalidate earlier events, not only requests named by this batch.
+        let records = payment_request_records_from_transaction(tx, &counterparty, received_at)?;
+        for record in records {
+            if matches!(
+                record.state,
+                PaymentRequestLifecycleState::Canceled
+                    | PaymentRequestLifecycleState::Rejected
+                    | PaymentRequestLifecycleState::ProofSubmitted
+                    | PaymentRequestLifecycleState::InvalidConflict
+            ) && !crate::domain::payment_requests::request_has_unresolved_payment(
+                tx,
+                &counterparty,
+                &record.payment_request_id,
+            ) && !crate::domain::payment_requests::request_has_unreported_successful_payment(
+                tx.allowance_accounting_state().as_ref(),
+                &record,
+            ) {
+                tx.remove_payment_request_execution_claim(
+                    &counterparty,
+                    &record.payment_request_id,
+                );
+            }
+        }
+    }
+
+    let checkpointed_link = link_state.is_some();
+    if let Some(link_state) = link_state {
+        tx.save_encrypted_link_state(link_state);
+    }
+    if let Some(mut peer) = tx.linked_peer(&counterparty) {
+        if !report.stream_item_ids.is_empty() {
+            peer.last_private_receive_at = Some(received_at);
+        }
+        if checkpointed_link || !report.stream_item_ids.is_empty() {
+            peer.last_sync_at = Some(received_at);
+        }
+        tx.save_linked_peer(peer);
+    }
+
+    Ok(report)
 }
 
 pub(crate) struct PrivateStreamMessageClassification {

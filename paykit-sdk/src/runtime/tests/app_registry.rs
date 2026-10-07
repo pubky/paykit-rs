@@ -2,9 +2,32 @@ use super::*;
 use crate::runtime::app_removal::{
     begin_paykit_app_removal, detach_shared_app_reservations,
     require_app_capability_downgrade_safe, restore_app_capabilities,
-    retire_app_outbound_private_messages, stage_app_capability_update,
+    retire_app_outbound_private_messages, stage_app_capability_update_in_transaction,
+    validate_staged_app_capability_update,
 };
 use crate::storage::PaymentEndpointReservationRecord;
+
+async fn stage_app_capability_update(
+    storage: &InMemoryStorage,
+    lease: &PaykitAppOperationLease,
+    remote_previous: Option<paykit_lib::PaykitAppCapabilities>,
+    next: paykit_lib::PaykitAppCapabilities,
+    now: DateTime<Utc>,
+) -> Result<
+    Option<(
+        paykit_lib::PaykitAppCapabilities,
+        paykit_lib::PaykitAppCapabilities,
+    )>,
+> {
+    let staged = storage
+        .transaction(|tx| {
+            stage_app_capability_update_in_transaction(tx, lease, remote_previous, next)
+        })
+        .await?;
+    validate_staged_app_capability_update(storage, lease, remote_previous, next, staged, now)
+        .await?;
+    Ok(staged)
+}
 
 fn capabilities() -> paykit_lib::PaykitAppCapabilities {
     paykit_lib::PaykitAppCapabilities {

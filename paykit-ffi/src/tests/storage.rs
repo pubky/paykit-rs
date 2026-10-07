@@ -1,14 +1,17 @@
 use std::{
     any::Any,
     collections::{HashMap, HashSet},
-    sync::{Arc, Barrier, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Barrier, Mutex,
+    },
 };
 
 use chrono::{TimeZone, Utc};
 use paykit_sdk::storage::{
     PaymentEndpointReservationRecord, PeerLinkOperationLease, PublicEndpointRecord,
 };
-use paykit_sdk::storage::{StorageAdapter, StorageState};
+use paykit_sdk::storage::{PubkySharedStateStorage, StorageAdapter, StorageState};
 use paykit_sdk::PaykitSdkError;
 use paykit_sdk::{
     ContactRecord, IdentityState, LinkedPeerState, OutboundPrivateMessageStatus, PaykitAppId,
@@ -19,9 +22,221 @@ use sha2::{Digest, Sha256};
 use crate::errors::storage_error;
 use crate::storage::{
     decode_backup_state, decode_storage_state, encode_backup_state, encode_storage_state,
-    FfiSdkStorage,
+    FfiSdkStorage, FfiSdkStorageAdapter,
 };
 use crate::*;
+
+struct NoSessionProvider;
+
+impl FfiSdkPubkySessionProvider for NoSessionProvider {
+    fn load_session_access(&self) -> Result<Option<Arc<FfiPubkySessionAccess>>, PaykitFfiError> {
+        Ok(None)
+    }
+
+    fn public_storage_available(&self) -> Result<bool, PaykitFfiError> {
+        Ok(false)
+    }
+
+    fn clear_session_access(&self) -> Result<(), PaykitFfiError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_contact_batches_validate_before_atomic_write() {
+    struct ContactStore {
+        snapshot: Mutex<FfiSdkStateBlobSnapshot>,
+        reject_writes: std::sync::atomic::AtomicBool,
+    }
+
+    impl FfiSdkStateBlobStore for ContactStore {
+        fn load_state_blob(&self) -> Result<Option<FfiSdkStateBlobSnapshot>, PaykitFfiError> {
+            Ok(Some(self.snapshot.lock().unwrap().clone()))
+        }
+
+        fn save_state_blob_atomically(
+            &self,
+            blob: Arc<FfiSdkStateBlob>,
+            expected_revision: Option<String>,
+        ) -> Result<String, PaykitFfiError> {
+            if self.reject_writes.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(PaykitFfiError::Storage {
+                    code: "storage_error".into(),
+                    context: "contact write rejected".into(),
+                });
+            }
+            let mut snapshot = self.snapshot.lock().unwrap();
+            assert_eq!(
+                expected_revision.as_deref(),
+                Some(snapshot.revision.as_str())
+            );
+            let revision = next_test_revision(Some(&snapshot.revision));
+            *snapshot = FfiSdkStateBlobSnapshot {
+                blob,
+                revision: revision.clone(),
+            };
+            Ok(revision)
+        }
+    }
+
+    let state = outbound_state(&[], 0);
+    let store = Arc::new(ContactStore {
+        reject_writes: std::sync::atomic::AtomicBool::new(false),
+        snapshot: Mutex::new(FfiSdkStateBlobSnapshot {
+            blob: Arc::new(FfiSdkStateBlob::new(encode_storage_state(&state).unwrap())),
+            revision: "revision-0".into(),
+        }),
+    });
+    let sdk = FfiPaykitSdk::new(
+        store.clone(),
+        Arc::new(NoSessionProvider),
+        default_config("bitkit".into()).unwrap(),
+    )
+    .unwrap();
+    let first = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let second = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    for invalid in [
+        FfiContactUpdate {
+            public_key: "not-a-public-key".into(),
+            label: None,
+        },
+        FfiContactUpdate {
+            public_key: second.to_app_key(),
+            label: Some("x".repeat(129)),
+        },
+    ] {
+        let updates = vec![
+            FfiContactUpdate {
+                public_key: first.to_app_key(),
+                label: Some("Must not be saved".into()),
+            },
+            invalid,
+        ];
+        let result = sdk.save_contacts(updates.clone()).await;
+        assert!(result.is_err());
+        assert!(sdk.save_contacts_and_unblock_peers(updates).await.is_err());
+        let snapshot = store.load_state_blob().unwrap().unwrap();
+        assert_eq!(snapshot.revision, "revision-0");
+        assert_eq!(
+            decode_storage_state(&snapshot.blob.export_bytes()).unwrap(),
+            state
+        );
+    }
+
+    let records = sdk
+        .save_contacts(vec![
+            FfiContactUpdate {
+                public_key: first.as_str().into(),
+                label: Some("First update".into()),
+            },
+            FfiContactUpdate {
+                public_key: second.to_app_key(),
+                label: None,
+            },
+            FfiContactUpdate {
+                public_key: first.to_app_key(),
+                label: Some("Last update".into()),
+            },
+        ])
+        .await
+        .unwrap();
+
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0].public_key, first.to_app_key());
+    assert_eq!(records[1].public_key, second.to_app_key());
+    assert_eq!(records[2].public_key, first.to_app_key());
+    assert_eq!(records[0].label.as_deref(), Some("First update"));
+    assert_eq!(records[2].label.as_deref(), Some("Last update"));
+    let snapshot = store.load_state_blob().unwrap().unwrap();
+    assert_eq!(snapshot.revision, "revision-1");
+    let stored = decode_storage_state(&snapshot.blob.export_bytes()).unwrap();
+    assert_eq!(stored.contact_records.len(), 2);
+    assert_eq!(
+        stored.contact_records[&first].label.as_deref(),
+        Some("Last update")
+    );
+    assert!(sdk.save_contacts(Vec::new()).await.unwrap().is_empty());
+    assert_eq!(
+        store.load_state_blob().unwrap().unwrap().revision,
+        "revision-1"
+    );
+    assert!(sdk
+        .remove_contacts_and_block_peers(vec![first.to_app_key(), "invalid".into()])
+        .await
+        .is_err());
+    assert_eq!(
+        store.load_state_blob().unwrap().unwrap().revision,
+        "revision-1"
+    );
+    store
+        .reject_writes
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(sdk
+        .remove_contacts_and_block_peers(vec![first.to_app_key(), second.to_app_key()])
+        .await
+        .is_err());
+    let failed = store.load_state_blob().unwrap().unwrap();
+    assert_eq!(failed.revision, "revision-1");
+    assert_eq!(
+        decode_storage_state(&failed.blob.export_bytes()).unwrap(),
+        stored
+    );
+    store
+        .reject_writes
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let removed = sdk
+        .remove_contacts_and_block_peers(vec![first.to_app_key(), second.to_app_key()])
+        .await
+        .unwrap();
+    assert_eq!(removed.len(), 2);
+    assert!(sdk.contact_records().await.unwrap().is_empty());
+    assert_eq!(
+        store.load_state_blob().unwrap().unwrap().revision,
+        "revision-2"
+    );
+    let updates = vec![FfiContactUpdate {
+        public_key: first.to_app_key(),
+        label: Some("Restored".into()),
+    }];
+    let blocked = store.load_state_blob().unwrap().unwrap();
+    store.reject_writes.store(true, Ordering::SeqCst);
+    assert!(sdk
+        .save_contacts_and_unblock_peers(updates.clone())
+        .await
+        .is_err());
+    let failed = store.load_state_blob().unwrap().unwrap();
+    assert_eq!(failed.revision, blocked.revision);
+    assert_eq!(failed.blob.export_bytes(), blocked.blob.export_bytes());
+    store.reject_writes.store(false, Ordering::SeqCst);
+    let restored = sdk.save_contacts_and_unblock_peers(updates).await.unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].label.as_deref(), Some("Restored"));
+    let snapshot = store.load_state_blob().unwrap().unwrap();
+    assert_eq!(snapshot.revision, "revision-3");
+    let state = decode_storage_state(&snapshot.blob.export_bytes()).unwrap();
+    assert_eq!(state.linked_peers[&first].state, LinkedPeerState::NotLinked);
+    assert_eq!(state.linked_peers[&second].state, LinkedPeerState::Blocked);
+}
+
+#[tokio::test]
+async fn test_shared_storage_operation_requires_active_session() {
+    let config = default_pubky_client_config();
+    let storage = FfiSdkStorageAdapter::PubkyShared(PubkySharedStateStorage::new(
+        FfiSdkPubkySessionProviderAdapter::new(
+            Arc::new(NoSessionProvider),
+            pubky_from_config(&config).unwrap(),
+            config,
+        ),
+    ));
+
+    let error = storage.with_operation(async { Ok(()) }).await.unwrap_err();
+
+    assert!(matches!(
+        error,
+        PaykitSdkError::Identity { context, .. }
+            if context.contains("requires an active session")
+    ));
+}
 
 fn next_test_revision(current: Option<&str>) -> String {
     let next = current
@@ -687,10 +902,12 @@ async fn test_encoded_state_blob_snapshot_store_supports_repeated_transactions()
     #[derive(Default)]
     struct EncodedSnapshotStore {
         data: Mutex<Option<Vec<u8>>>,
+        loads: AtomicUsize,
     }
 
     impl FfiSdkStateBlobStore for EncodedSnapshotStore {
         fn load_state_blob(&self) -> Result<Option<FfiSdkStateBlobSnapshot>, PaykitFfiError> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
             self.data
                 .lock()
                 .unwrap()
@@ -722,24 +939,6 @@ async fn test_encoded_state_blob_snapshot_store_supports_repeated_transactions()
         }
     }
 
-    struct NoSessionProvider;
-
-    impl FfiSdkPubkySessionProvider for NoSessionProvider {
-        fn load_session_access(
-            &self,
-        ) -> Result<Option<Arc<FfiPubkySessionAccess>>, PaykitFfiError> {
-            Ok(None)
-        }
-
-        fn public_storage_available(&self) -> Result<bool, PaykitFfiError> {
-            Ok(false)
-        }
-
-        fn clear_session_access(&self) -> Result<(), PaykitFfiError> {
-            Ok(())
-        }
-    }
-
     let store = Arc::new(EncodedSnapshotStore::default());
     store
         .save_state_blob_atomically(
@@ -755,20 +954,43 @@ async fn test_encoded_state_blob_snapshot_store_supports_repeated_transactions()
         default_config("bitkit".into()).unwrap(),
     )
     .unwrap();
-    let storage = FfiSdkStorage {
-        store,
+    let storage = FfiSdkStorageAdapter::Callback(FfiSdkStorage {
+        store: store.clone(),
         transaction_lock: Arc::new(Mutex::new(())),
-    };
+    });
+    let loads = store.loads.load(Ordering::SeqCst);
+    assert_eq!(sdk.observed_backup_state_revision().unwrap(), None);
+    assert_eq!(store.loads.load(Ordering::SeqCst), loads);
     let before = sdk.backup_state_revision().await.unwrap();
+    assert_eq!(store.loads.load(Ordering::SeqCst), loads + 1);
+    assert_eq!(sdk.observed_backup_state_revision().unwrap(), None);
+    assert_eq!(store.loads.load(Ordering::SeqCst), loads + 1);
+    assert!(sdk.state_revision().unwrap().is_some());
+    assert_eq!(store.loads.load(Ordering::SeqCst), loads + 2);
 
-    storage
-        .transaction_erased(Box::new(|tx| {
-            tx.allocate_receive_batch_id()?;
-            Ok(Box::new(()) as Box<dyn Any + Send>)
-        }))
+    let error = storage
+        .with_operation(async {
+            let batch_id = storage
+                .transaction(|tx| tx.allocate_receive_batch_id())
+                .await?;
+            assert_eq!(batch_id, 0);
+            Err::<(), _>(PaykitSdkError::Policy {
+                context: "operation stopped after commit".into(),
+                source: None,
+            })
+        })
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(matches!(error, PaykitSdkError::Policy { context, .. }
+        if context == "operation stopped after commit"));
     assert_ne!(sdk.backup_state_revision().await.unwrap(), before);
+    assert_eq!(
+        storage
+            .transaction(|tx| Ok(tx.export_storage_state().next_receive_batch_id))
+            .await
+            .unwrap(),
+        1
+    );
     let before = sdk.backup_state_revision().await.unwrap();
     let revision = sdk.state_revision().unwrap();
     let peer = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

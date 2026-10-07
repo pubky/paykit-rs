@@ -1,5 +1,24 @@
 use super::*;
 
+#[derive(PartialEq)]
+pub(super) struct RecoveryObservationCheckpoint {
+    local_public_key: PubkyPublicKey,
+    local_noise_public_key: PubkyPublicKey,
+    peer: LinkedPeerRecord,
+    pub(super) link_state: EncryptedLinkStateRecord,
+}
+
+impl RecoveryObservationCheckpoint {
+    pub(super) fn load(tx: &dyn StorageTransaction, counterparty: &PubkyPublicKey) -> Option<Self> {
+        recovery_observation_checkpoint(
+            tx,
+            counterparty,
+            &tx.load_identity_state()?.public_key?,
+            &tx.paykit_noise_public_key()?,
+        )
+    }
+}
+
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
     S: StorageAdapter,
@@ -360,7 +379,7 @@ where
     pub(super) async fn observe_remote_recovery_marker_for_cached_private_state(
         &self,
         counterparty: &PubkyPublicKey,
-        session_access: Option<&PubkySessionAccess>,
+        session_access: Option<&GuardedSessionAccess>,
     ) -> Result<()> {
         let session_access = match session_access {
             Some(session_access) => session_access,
@@ -381,28 +400,185 @@ where
     pub(super) async fn observe_remote_recovery_marker_with_session(
         &self,
         counterparty: &PubkyPublicKey,
-        session_access: &PubkySessionAccess,
+        session_access: &GuardedSessionAccess,
     ) -> Result<EncryptedLinkRecoveryMarkerReport> {
-        let lease = self.claim_peer_link_operation(counterparty).await?;
-        let result = async {
-            self.ensure_peer_not_blocked(counterparty).await?;
-            let remote_key = match self.counterparty_noise_public_key(counterparty).await {
-                Ok(key) => key,
-                Err(PaykitSdkError::NotFound { .. }) => return Ok(false),
-                Err(err) => return Err(err),
-            };
-            self.observe_remote_recovery_marker_with_lease(
-                counterparty,
-                session_access,
-                &lease,
-                &remote_key,
-            )
-            .await
+        let local_public_key = session_access.public_key()?;
+        let secret_key = session_access.paykit_noise_secret_key()?;
+        let local_noise_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::from_secret(&secret_key).public_key());
+        let checkpoint = self
+            .storage
+            .transaction(|tx| {
+                Ok(recovery_observation_checkpoint(
+                    tx,
+                    counterparty,
+                    &local_public_key,
+                    &local_noise_public_key,
+                ))
+            })
+            .await?;
+        self.observe_remote_recovery_marker_from_checkpoint(
+            counterparty,
+            session_access,
+            checkpoint,
+        )
+        .await
+    }
+
+    pub(super) async fn observe_remote_recovery_marker_from_checkpoint(
+        &self,
+        counterparty: &PubkyPublicKey,
+        session_access: &GuardedSessionAccess,
+        checkpoint: Option<RecoveryObservationCheckpoint>,
+    ) -> Result<EncryptedLinkRecoveryMarkerReport> {
+        // Keep public reads outside bounded storage; session_access retains the identity guard.
+        if let Some(checkpoint) =
+            Box::pin(self.unchanged_link_checkpoint(counterparty, session_access, checkpoint))
+                .await?
+        {
+            return Ok(EncryptedLinkRecoveryMarkerReport::from_peer(
+                &checkpoint.peer,
+                false,
+            ));
         }
-        .await;
-        let changed = self.finish_peer_link_operation(lease, result).await?;
-        self.recovery_marker_report_or_default(counterparty, changed)
+        self.with_guarded_storage_operation(
+            Arc::clone(&session_access._guard),
+            Box::pin(async {
+                let lease = self.claim_peer_link_operation(counterparty).await?;
+                let result = async {
+                    self.ensure_peer_not_blocked(counterparty).await?;
+                    let remote_key = match self.counterparty_noise_public_key(counterparty).await {
+                        Ok(key) => key,
+                        Err(PaykitSdkError::NotFound { .. }) => return Ok(false),
+                        Err(err) => return Err(err),
+                    };
+                    self.observe_remote_recovery_marker_with_lease(
+                        counterparty,
+                        session_access,
+                        &lease,
+                        &remote_key,
+                    )
+                    .await
+                }
+                .await;
+                let changed = self.finish_peer_link_operation(lease, result).await?;
+                self.recovery_marker_report_or_default(counterparty, changed)
+                    .await
+            }),
+        )
+        .await
+    }
+
+    pub(super) async fn unchanged_link_checkpoint(
+        &self,
+        counterparty: &PubkyPublicKey,
+        session_access: &GuardedSessionAccess,
+        checkpoint: Option<RecoveryObservationCheckpoint>,
+    ) -> Result<Option<RecoveryObservationCheckpoint>> {
+        self.unchanged_link_checkpoint_with(
+            counterparty,
+            session_access,
+            checkpoint,
+            async {},
+            |_, checkpoint, ()| Ok(checkpoint),
+        )
+        .await
+    }
+
+    pub(super) async fn unchanged_link_checkpoint_with<T: Send + 'static, U: Send>(
+        &self,
+        counterparty: &PubkyPublicKey,
+        session_access: &GuardedSessionAccess,
+        checkpoint: Option<RecoveryObservationCheckpoint>,
+        load: impl std::future::Future<Output = U> + Send,
+        project: impl FnOnce(&mut dyn StorageTransaction, RecoveryObservationCheckpoint, U) -> Result<T>
+            + Send,
+    ) -> Result<Option<T>> {
+        if !self
+            .observe_link_checkpoint(counterparty, session_access, checkpoint.as_ref())
+            .await?
+        {
+            return Ok(None);
+        }
+        let checkpoint = checkpoint.expect("a current observation requires a checkpoint");
+
+        // Defer lookup errors to projection: a changed checkpoint must take recovery first.
+        let loaded = load.await;
+        // Projection and authorization writes require the exact public-lookup checkpoint.
+        self.storage
+            .transaction(|tx| {
+                let current = RecoveryObservationCheckpoint::load(tx, counterparty);
+                match current.filter(|current| current == &checkpoint) {
+                    Some(current) => project(tx, current, loaded).map(Some),
+                    None => Ok(None),
+                }
+            })
             .await
+    }
+
+    pub(super) async fn observe_link_checkpoint(
+        &self,
+        counterparty: &PubkyPublicKey,
+        session_access: &GuardedSessionAccess,
+        checkpoint: Option<&RecoveryObservationCheckpoint>,
+    ) -> Result<bool> {
+        let local_public_key = session_access.public_key()?;
+        let secret_key = session_access.paykit_noise_secret_key()?;
+        let local_noise_public_key =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::from_secret(&secret_key).public_key());
+        let Some(checkpoint) = checkpoint else {
+            return Ok(false);
+        };
+        if checkpoint.local_public_key != local_public_key
+            || checkpoint.local_noise_public_key != local_noise_public_key
+        {
+            return Ok(false);
+        }
+        let expected_authorization = checkpoint
+            .peer
+            .noise_key_authorization
+            .as_ref()
+            .expect("recovery checkpoints require peer authorization");
+        let (authorization, marker) = tokio::join!(
+            self.paykit_noise_key_authorization(counterparty.clone()),
+            async {
+                let Some(public_storage) = self.pubky.load_public_storage().await? else {
+                    return Ok::<_, PaykitSdkError>(None);
+                };
+                Ok(Some(
+                    paykit_lib::fetch_encrypted_link_recovery_marker(
+                        &public_storage,
+                        &secret_key,
+                        session_access.session.info().public_key(),
+                        &counterparty.to_public_key()?,
+                        expected_authorization.noise_public_key(),
+                    )
+                    .await?,
+                ))
+            },
+        );
+        let authorization = match authorization {
+            Ok(authorization) => authorization,
+            Err(PaykitSdkError::NotFound { .. }) => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        // The speculative marker is usable only for the freshly authorized checkpoint key.
+        if expected_authorization != &authorization {
+            return Ok(false);
+        }
+        let Some(marker) = marker? else {
+            return Ok(false);
+        };
+        if let Some(marker) = marker {
+            if should_observe_remote_recovery_marker(
+                Some(&checkpoint.peer),
+                counterparty,
+                marker.attempt_id(),
+            )? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     pub(super) async fn observe_remote_recovery_marker_with_lease(
@@ -412,8 +588,19 @@ where
         lease: &PeerLinkOperationLease,
         remote_noise_public_key: &paykit_lib::PublicKey,
     ) -> Result<bool> {
-        self.ensure_peer_not_blocked(counterparty).await?;
-        self.require_current_peer_link_operation(lease, session_access)
+        self.storage
+            .transaction(|tx| {
+                if tx
+                    .linked_peer(counterparty)
+                    .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
+                {
+                    return Err(PaykitSdkError::Policy {
+                        context: format!("counterparty {counterparty} is blocked"),
+                        source: None,
+                    });
+                }
+                self.require_current_peer_link_operation_in_transaction(tx, lease, session_access)
+            })
             .await?;
         let public_storage =
             self.pubky
@@ -603,6 +790,43 @@ fn can_publish_recovery_marker(peer: Option<&LinkedPeerRecord>, has_link_state: 
                     | LinkedPeerState::RecoveryRequired
             )
         })
+}
+
+fn recovery_observation_checkpoint(
+    tx: &dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    local_public_key: &PubkyPublicKey,
+    local_noise_public_key: &PubkyPublicKey,
+) -> Option<RecoveryObservationCheckpoint> {
+    if tx.load_identity_state()?.public_key.as_ref() != Some(local_public_key)
+        || tx.paykit_noise_public_key().as_ref() != Some(local_noise_public_key)
+        || tx.peer_link_operation_lease(counterparty).is_some()
+    {
+        return None;
+    }
+    let peer = tx.linked_peer(counterparty)?;
+    if peer.state != LinkedPeerState::Linked || peer.failure_count != 0 {
+        return None;
+    }
+    let state = tx.encrypted_link_state(counterparty)?;
+    let snapshot =
+        paykit_lib::EncryptedLinkSnapshot::deserialize(state.link_snapshot.as_ref()?).ok()?;
+    if PubkyPublicKey::from_public_key(snapshot.recipient()) != *counterparty {
+        return None;
+    }
+    crate::domain::linked_peers::require_recovery_context(&peer, snapshot.recovery_context())
+        .ok()?;
+    if snapshot.remote_noise_public_key()
+        != peer.noise_key_authorization.as_ref()?.noise_public_key()
+    {
+        return None;
+    }
+    Some(RecoveryObservationCheckpoint {
+        local_public_key: local_public_key.clone(),
+        local_noise_public_key: local_noise_public_key.clone(),
+        peer,
+        link_state: state,
+    })
 }
 
 fn should_observe_remote_recovery_marker(

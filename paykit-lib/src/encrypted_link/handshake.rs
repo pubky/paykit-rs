@@ -1,3 +1,5 @@
+use std::fmt;
+
 use tracing::{debug, instrument, warn};
 
 use crate::{PaykitError, PublicKey, Result};
@@ -41,7 +43,163 @@ pub struct EncryptedLinkHandshake {
     max_recovery_attempts: u32,
 }
 
+/// A failed handshake advance, optionally retaining unchanged read-retry state.
+///
+/// Only a transport read failure preserves the handle. This does not mean the
+/// failure is transient: retry policy, deadlines, and session authorization
+/// remain the caller's responsibility. Other failures do not expose potentially
+/// mutated handshake state. Debug output never includes the retained handle.
+pub struct HandshakeAdvanceError {
+    error: PaykitError,
+    retry_handshake: Option<Box<EncryptedLinkHandshake>>,
+}
+
+impl HandshakeAdvanceError {
+    /// Inspect the failure without consuming its optional retry handle.
+    pub fn error(&self) -> &PaykitError {
+        &self.error
+    }
+
+    /// Take the failure and, only for an unchanged transport read, its retry handle.
+    /// Pass `*handshake` back to [`advance_handshake`] after deciding to retry.
+    pub fn into_parts(self) -> (PaykitError, Option<Box<EncryptedLinkHandshake>>) {
+        (self.error, self.retry_handshake)
+    }
+}
+
+impl From<PaykitError> for HandshakeAdvanceError {
+    fn from(error: PaykitError) -> Self {
+        Self {
+            error,
+            retry_handshake: None,
+        }
+    }
+}
+
+impl fmt::Debug for HandshakeAdvanceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HandshakeAdvanceError")
+            .field("error", &self.error)
+            .field("has_retry_handshake", &self.retry_handshake.is_some())
+            .finish()
+    }
+}
+
+impl fmt::Display for HandshakeAdvanceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.error, f)
+    }
+}
+
+impl std::error::Error for HandshakeAdvanceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// One locally prepared handshake step, including its durable pending output.
+/// Persist the snapshot before publication; session authorization, capability
+/// scope, and key rotation remain the caller's responsibility.
+#[must_use]
+pub struct PreparedEncryptedLinkHandshakeStep {
+    snapshot: EncryptedLinkHandshakeSnapshot,
+    handshake_complete: bool,
+    remote_static_public_key: Option<Vec<u8>>,
+}
+
+impl PreparedEncryptedLinkHandshakeStep {
+    /// Whether cryptography completed, not whether publication is acknowledged.
+    pub fn is_handshake_complete(&self) -> bool {
+        self.handshake_complete
+    }
+
+    /// Authenticated remote static key, to compare with signed authorization.
+    pub fn remote_static_public_key(&self) -> Option<&[u8]> {
+        self.remote_static_public_key.as_deref()
+    }
+
+    /// Consume the preparation into the checkpoint that must be persisted.
+    pub fn into_snapshot(self) -> EncryptedLinkHandshakeSnapshot {
+        self.snapshot
+    }
+}
+
 impl EncryptedLinkHandshake {
+    /// Fetch at most one bounded packet and prepare one existing Noise step.
+    /// Returns `None` only for an absent required packet (404/410). No publication
+    /// occurs. The caller must validate the source checkpoint before applying
+    /// either the result or an error, and persist pending output before sending.
+    /// Session authorization, capability scope, and rotation are caller-owned.
+    pub async fn prepare_next_step(self) -> Result<Option<PreparedEncryptedLinkHandshakeStep>> {
+        let snapshot = self.snapshot()?;
+        let input = match snapshot.next_handshake_read_path(
+            self.config.local_session.info().public_key(),
+            &self.config.pubky_root_keypair.secret_key(),
+        )? {
+            Some(path) => {
+                let response = match self.config.outbox_client.public_storage().get(path).await {
+                    Ok(response) => response,
+                    Err(pubky::Error::Request(pubky::errors::RequestError::Server {
+                        status,
+                        ..
+                    })) if status == pubky::StatusCode::NOT_FOUND
+                        || status == pubky::StatusCode::GONE =>
+                    {
+                        return Ok(None)
+                    }
+                    Err(error) => {
+                        return Err(PaykitError::Transport {
+                            context: "fetch Encrypted Link Handshake packet".into(),
+                            source: error.into(),
+                        })
+                    }
+                };
+                Some(
+                    crate::pubky_routing::read_bounded_body(
+                        response,
+                        pubky_noise::snow_crypto::PUBKY_NOISE_CIPHERTEXT_LEN + 2,
+                        "read Encrypted Link Handshake packet",
+                    )
+                    .await?,
+                )
+            }
+            None => None,
+        };
+        let prepared = self
+            .encryptor
+            .prepare_handshake_step(input.as_deref())
+            .map_err(|error| handshake_error("prepare Encrypted Link Handshake", error))?;
+        let mut snapshot = EncryptedLinkHandshakeSnapshot::from_state(
+            prepared.resulting_session_state().clone(),
+            self.remote_identity_public_key,
+            self.remote_noise_public_key,
+            self.recovery_context,
+        );
+        if let (Some(path), Some(packet)) = (prepared.destination_path(), prepared.packet()) {
+            snapshot = snapshot.with_pending_publication(
+                self.config.local_session.info().public_key(),
+                path.to_owned(),
+                packet.to_vec(),
+            )?;
+        }
+        Ok(Some(PreparedEncryptedLinkHandshakeStep {
+            snapshot,
+            handshake_complete: prepared.is_handshake_complete(),
+            remote_static_public_key: prepared.remote_static_public_key().map(<[u8]>::to_vec),
+        }))
+    }
+
+    /// Complete a restored handshake without any reads or writes.
+    /// An incomplete handshake is returned unchanged. Restore only an
+    /// acknowledged checkpoint; authorization and key rotation are caller-owned.
+    pub fn finish_if_complete(self) -> Result<HandshakeProgress> {
+        if self.encryptor.is_handshake_complete() {
+            finish_handshake(self)
+        } else {
+            Ok(HandshakeProgress::Pending(self))
+        }
+    }
+
     /// X25519 static key authenticated by the completed Noise handshake.
     /// Returns `None` while the handshake is incomplete.
     /// The caller must authenticate this key before trusting the completed link.
@@ -51,7 +209,7 @@ impl EncryptedLinkHandshake {
 
     /// Set the maximum number of consecutive automatic recovery attempts
     /// before [`advance_handshake`] gives up and returns
-    /// [`PaykitError::Transport`].
+    /// an error whose underlying cause is [`PaykitError::Transport`].
     ///
     /// Default: [`DEFAULT_MAX_RECOVERY_ATTEMPTS`] (3).
     pub fn set_max_recovery_attempts(&mut self, max: u32) -> &mut Self {
@@ -258,15 +416,26 @@ pub fn accept_encrypted_link(
 /// written their next message yet returns [`HandshakeProgress::Pending`] without
 /// corrupting internal state. Homeserver write failures are automatically
 /// recovered from the pre-mutation snapshot until the recovery limit is reached.
+/// Transport read failures return an error retaining the unchanged handle via
+/// [`HandshakeAdvanceError::into_parts`]; they are not successful Pending steps.
+/// Session creation, capability scope, key rotation, deadlines, and retry timing
+/// remain the caller's responsibility.
 #[instrument(skip(handshake))]
-pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<HandshakeProgress> {
+pub async fn advance_handshake(
+    mut handshake: EncryptedLinkHandshake,
+) -> std::result::Result<HandshakeProgress, HandshakeAdvanceError> {
     // Check whether the handshake has already finished.
     if handshake.encryptor.is_handshake_complete() {
-        return finish_handshake(handshake);
+        return finish_handshake(handshake).map_err(Into::into);
     }
 
     // Process the next handshake step.
     match handshake.encryptor.handle_handshake().await {
+        Ok(pubky_noise::HandshakeResult::Pending)
+            if handshake.encryptor.is_handshake_complete() =>
+        {
+            finish_handshake(handshake).map_err(Into::into)
+        }
         Ok(pubky_noise::HandshakeResult::Pending) => {
             debug!("handshake step pending (waiting for counterparty)");
             handshake.recovery_attempts = 0;
@@ -274,8 +443,15 @@ pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<
         }
         Ok(pubky_noise::HandshakeResult::Terminal) => {
             debug!("handshake terminal, transitioning to transport");
-            finish_handshake(handshake)
+            finish_handshake(handshake).map_err(Into::into)
         }
+        Err(pubky_noise::PubkyNoiseError::HomeserverResponseError) => Err(HandshakeAdvanceError {
+            error: handshake_error(
+                "handshake step failed",
+                pubky_noise::PubkyNoiseError::HomeserverResponseError,
+            ),
+            retry_handshake: Some(Box::new(handshake)),
+        }),
         Err(pubky_noise::PubkyNoiseError::HomeserverWriteError) => {
             handshake.recovery_attempts += 1;
 
@@ -289,7 +465,8 @@ pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<
                         "HomeserverWriteError persisted beyond recovery limit ({})",
                         handshake.max_recovery_attempts,
                     ),
-                });
+                }
+                .into());
             }
 
             warn!(
@@ -328,7 +505,7 @@ pub async fn advance_handshake(mut handshake: EncryptedLinkHandshake) -> Result<
                 max_recovery_attempts: handshake.max_recovery_attempts,
             }))
         }
-        Err(err) => Err(handshake_error("handshake step failed", err)),
+        Err(err) => Err(handshake_error("handshake step failed", err).into()),
     }
 }
 
@@ -337,9 +514,7 @@ fn handshake_error(context: &str, err: pubky_noise::PubkyNoiseError) -> PaykitEr
     let source = anyhow::anyhow!("pubky-noise handshake failed: {err:?}");
     match err {
         pubky_noise::PubkyNoiseError::HomeserverResponseError
-        | pubky_noise::PubkyNoiseError::HomeserverWriteError
-        // Replay errors also cover transient HTTP failures in pubky-noise.
-        | pubky_noise::PubkyNoiseError::RestoreBackupReplayError => {
+        | pubky_noise::PubkyNoiseError::HomeserverWriteError => {
             PaykitError::Transport { context, source }
         }
         _ => PaykitError::InvalidData {
@@ -453,7 +628,7 @@ async fn restore_encrypted_link_handshake_inner(
         &remote_noise_public_key,
         &recovery_context,
     )?;
-    let state = snapshot.into_state();
+    let state = snapshot.into_state()?;
     if state.static_secret != Some(config.pubky_root_keypair.secret_key()) {
         return Err(PaykitError::Validation(
             "Noise config key does not match snapshot static key".into(),
@@ -489,12 +664,18 @@ mod tests {
         for error in [
             pubky_noise::PubkyNoiseError::HomeserverResponseError,
             pubky_noise::PubkyNoiseError::HomeserverWriteError,
-            pubky_noise::PubkyNoiseError::RestoreBackupReplayError,
         ] {
             assert!(matches!(
                 handshake_error("handshake failed", error),
                 PaykitError::Transport { .. }
             ));
         }
+        assert!(matches!(
+            handshake_error(
+                "handshake replay failed",
+                pubky_noise::PubkyNoiseError::RestoreBackupReplayError,
+            ),
+            PaykitError::InvalidData { .. }
+        ));
     }
 }

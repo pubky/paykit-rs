@@ -7,7 +7,106 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-## 0.1.0-rc60 - Unreleased
+## 0.1.0-rc69 - 2026-10-07
+
+### Fixed
+
+- Return temporary shared-state contention after bounded lock acquisition retries,
+  without repeating the acquisition batch as a state revision conflict. Lock expiry
+  and uncertain-write recovery waits are unchanged.
+
+## 0.1.0-rc68 - 2026-10-07
+
+### Fixed
+
+- Reject Payment Request claim and acceptance for a freshly observed revoked
+  App even if another instance overwrites the authorization cache with older permissions.
+
+## 0.1.0-rc67 - 2026-10-07
+
+### Changed
+
+- Reuse guarded Encrypted Link Handshake state within each phase and combine
+  lease acquisition with authorization pinning, reducing shared-state round
+  trips while preserving save-before-send and cross-phase validation.
+
+### Fixed
+
+- Retain refreshed counterparty app authorization when Payment Request execution
+  claim or acceptance is rejected.
+
+## 0.1.0-rc66 - 2026-10-07
+
+### Added
+
+- Atomic Payment Request execution claim and acceptance through
+  `claim_and_accept_payment_request` in Rust and `claimAndAcceptPaymentRequest`
+  in Swift and Kotlin. Acceptance is durably queued without waiting for delivery;
+  payment preparation and execution retain their ownership checks.
+
+## 0.1.0-rc64 - 2026-10-06
+
+### Added
+
+- Bulk Contact Record removal and peer blocking through
+  `remove_contacts_and_block_peers` in Rust and `removeContactsAndBlockPeers` in
+  Swift and Kotlin. Busy peers and contacts with public markers are retained.
+
+### Changed
+
+- Batch Encrypted Link Handshake state reads and release the peer lease with the
+  final checkpoint, reducing shared-state round trips without changing the
+  save-before-send boundary or recovery checks.
+- Use published `pubky-noise` 0.1.0-rc12 instead of a Git revision. Persisted
+  formats are unchanged from rc63.
+
+## 0.1.0-rc63 - 2026-10-06
+
+### Added
+
+- Atomic Contact Record batch updates through `save_contacts` in Rust and
+  `saveContacts` in Swift and Kotlin.
+- Optional paired storage and backup revision metadata through
+  `observed_backup_state_revision` in Rust and `observedBackupStateRevision` in
+  Swift and Kotlin. Historical observations do not replace fresh authorization
+  or confirm backup completion.
+
+### Changed
+
+- Combine shared-state reads and checkpoints for payment preparation, private
+  message delivery, App Registry publication, and Payment Endpoint cleanup while
+  preserving authorization checks, peer leases, and durable message state.
+- Batch Payment Request and Allowance record queries and allow independent
+  public reads to proceed concurrently.
+- Restore Noise handshakes from saved transcripts and stage handshake writes
+  before publication. The pre-launch snapshot format changes; apps sharing an
+  identity must update together. No legacy snapshot migration is provided.
+
+### Fixed
+
+- Preserve confirmed lock-loss errors as retryable contention without weakening
+  uncertain-write handling.
+- Validate restored Encrypted Link authorization and retain refreshed app
+  authorization when Payment Request validation fails.
+- Preserve handshake retry checkpoints when saving shared state fails.
+
+## 0.1.0-rc62 - 2026-10-03
+
+### Fixed
+
+- Process outbound peer batches sequentially so shared-state contention cannot
+  consume waiting peers' link leases before publication.
+
+## 0.1.0-rc61 - 2026-10-03
+
+### Changed
+
+- Combine shared-state checks for private message sends, receives, and Payment
+  Request preparation while preserving durable ciphertext and peer leases.
+- Deliver private-list updates to independent peers concurrently, with ordered
+  messages per peer and reservation expiry checked after cleanup.
+
+## 0.1.0-rc60 - 2026-10-03
 
 ### Added
 

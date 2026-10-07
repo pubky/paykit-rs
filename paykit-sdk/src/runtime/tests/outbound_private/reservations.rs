@@ -73,14 +73,14 @@ async fn test_expired_private_reservation_recovers_only_after_allocating_noise_s
         );
         let mut report = OutboundPrivateSendReport::default();
 
-        assert!(sdk
-            .claimed_message_ready_for_send(
-                &counterparty,
+        assert!(storage
+            .transaction(|tx| sdk.claimed_message_ready_for_send(
+                tx,
                 sending,
                 &lease,
                 &mut report,
-                FixedClock.now()
-            )
+                FixedClock.now() - ChronoDuration::seconds(5)
+            ))
             .await
             .unwrap()
             .is_none());
@@ -189,7 +189,7 @@ async fn test_process_outbound_private_messages_preserves_superseded_reservation
         .process_outbound_private_messages(counterparty.clone())
         .await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    assert_eq!(result.unwrap(), OutboundPrivateSendReport::default());
     assert!(canceled.lock().unwrap().is_empty());
     assert_eq!(
         storage

@@ -34,6 +34,12 @@ on low-level `paykit-lib` protocol bindings.
   apps can detect when SDK-managed state changed.
 - `PaykitSdk.backupStateRevision` — fingerprint backup contents without
   transient operation leases, so empty polls do not trigger app backups.
+- `PaykitSdk.observedBackupStateRevision` - return optional paired storage and
+  backup revisions from a completed shared-state operation, without I/O. This
+  is historical metadata, not current remote state or authorization. Callback
+  storage returns no observation. Retain fresh `backupStateRevision` as the
+  fallback, schedule conservatively after failures, and discard cached pairs
+  on identity, key, session, or runtime reset.
 - `PubkySessionAccess` — opaque Pubky session access material. Use its
   explicit export methods only when persisting or loading platform-protected
   session state.
@@ -175,6 +181,9 @@ pixel and cache limits, and request timeouts remain app responsibilities.
 - `PaykitSdk.proposePaymentRequest`, `acceptPaymentRequest`,
   `rejectPaymentRequest`, `cancelPaymentRequest`, and `submitPaymentProof` —
   queue Payment Request lifecycle events through the SDK outbound stream.
+- `PaykitSdk.claimAndAcceptPaymentRequest` — atomically claim execution and queue
+  acceptance. Keep the earlier preparation claim where needed; success confirms
+  durable acceptance, not delivery or permission to execute a payment.
 - `PaykitSdk.paymentRequests`, `paymentRequestsWith`,
   `receivedPaymentRequestsFrom`, `listPaymentRequests`,
   `activeRecurringPaymentRequests`, and `actionableReceivedPaymentRequests` —
@@ -184,6 +193,10 @@ pixel and cache limits, and request timeouts remain app responsibilities.
 - `PaykitSdk.resolvePrivatePaymentRequest`, `resolvePublicPaymentRequest`, and
   `prepareAndResolvePrivatePaymentRequest` — resolve using the request amount
   while enforcing its accepted endpoint identifiers and required payee App.
+  Request preparation retains fresh private intake and final validation, but
+  leaves an otherwise idle queue of unclaimed, unprepared Delivery Confirmations
+  durably pending. Callers service them through later outbound processing;
+  preparation does not schedule a worker or guarantee a delivery time.
 
 `PaymentRequestTerms.paymentEndpoints` optionally specifies fixed destinations
 for the request. Use request-aware private resolution; it returns no list
@@ -418,6 +431,16 @@ bootstrap.approveAuthWithCompanionClaim(
 - `PaykitSdk.saveContact`, `contactRecord`, `contactRecords`, and
   `removeContact` — manage Contact Records. Each contact is one Pubky
   identity.
+- `PaykitSdk.saveContacts(updates)` — save a batch in one atomic storage
+  transaction after validating every update and the initialized identity. Results
+  follow input order; duplicate keys are applied in order, with the last update
+  winning in storage. Existing profile and Public Contact Marker metadata is
+  preserved. Marker publication and unblocking peers remain separate operations.
+  An empty batch still requires an initialized identity and leaves state unchanged.
+- `PaykitSdk.saveContactsAndUnblockPeers(updates)` — explicitly add or restore
+  contacts and unblock their blocked peers in the same atomic transaction. Other
+  peers and existing links are unchanged. A busy blocked peer rejects the batch;
+  unblocked peers need a fresh Encrypted Link. Use `saveContact` for label edits.
 - `PaykitSdk.fetchPubkyProfile` and bounded `fetchPubkyFollows` — read Pubky
   app profile and follow data.
 - `PaykitSdk.resolveProfile` and `currentProfile` — resolve profile display
@@ -487,16 +510,18 @@ Apps that share one identity-wide Pubky state can instead construct the handle
 with `withPaymentAdapterAndPubkySharedState`. This mode does not use
 `SdkStateBlobStore` callbacks. It requires active session access with current
 Paykit identity key material for every operation. Independent runtimes use
-renewable homeserver write locks across each state transaction. After contention
+renewable homeserver write locks across bounded groups of state transactions.
+Each changed transaction is durably saved before returning. After contention
 or an uncertain result, inspect durable request/payment records and resume
 existing work; a multi-step operation may already have committed intent.
 Apps with shared keys and write access are mutually trusted; App IDs do not
 provide cryptographic isolation from other authorized apps.
 An unconfirmed state write leaves a homeserver marker. The next operation waits
 five minutes under a renewed lock before reloading state; cancelling restarts
-that wait on the next attempt. A competing runtime that cannot acquire the lock
-while a marker exists receives `SharedStateBusy` (`shared_state_busy`). Back off
-and show recovery as pending instead of immediately retrying. Reads can also be
+that wait on the next attempt. A competing runtime that exhausts lock acquisition
+retries receives `SharedStateBusy` (`shared_state_busy`), whether the holder is
+doing normal work or waiting for recovery. Back off and keep the operation
+pending instead of immediately retrying. Reads can also be
 blocked; there is no fixed completion deadline.
 This is a best-effort testing mitigation, not a replacement for homeserver
 commit-time lock enforcement. Normal successful writes have no cooldown.

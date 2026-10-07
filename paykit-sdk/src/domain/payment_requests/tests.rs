@@ -10,6 +10,16 @@ use crate::{
     storage::InMemoryStorage,
 };
 
+async fn received_payment_request_records(
+    storage: &InMemoryStorage,
+    counterparty: &PubkyPublicKey,
+    now: DateTime<Utc>,
+) -> Result<Vec<PaymentRequestRecord>> {
+    storage
+        .transaction(|tx| received_payment_request_records_from_transaction(tx, counterparty, now))
+        .await
+}
+
 fn timestamp() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap()
 }

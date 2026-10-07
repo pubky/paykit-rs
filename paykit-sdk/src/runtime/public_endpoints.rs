@@ -1,4 +1,10 @@
 use super::*;
+use crate::storage::PublicEndpointRecord;
+
+struct PublicEndpointSyncResult {
+    report: EndpointSyncReport,
+    lease_released: bool,
+}
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
 where
@@ -10,19 +16,25 @@ where
     /// Publish current public receiving details and remove stale SDK-managed endpoints.
     pub async fn sync_public_endpoints(&self) -> Result<EndpointSyncReport> {
         let _identity_guard = self.claim_identity_operation("sync public endpoints")?;
-        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
+        let (session_access, _, publication) = self
+            .load_session_access_and_refresh_identity_with(|tx| {
+                let lease = self.claim_paykit_app_operation_in_transaction(tx, false)?;
+                crate::storage::require_paykit_app_active(tx, &self.config.app_id)?;
+                Ok((lease, tx.public_endpoint_records()))
+            })
+            .await?;
         let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky session available".into(),
             source: None,
         })?;
-        let lease = self.claim_paykit_app_operation().await?;
+        let (lease, records) = publication.expect("active session loads App publication state");
         let result = async {
             let details = self.payment.current_public_receiving_details().await?;
-            self.sync_public_endpoints_with_lease(details, &lease, &session_access)
+            self.sync_public_endpoints_with_lease(details, records, &lease, &session_access)
                 .await
         }
         .await;
-        self.finish_paykit_app_operation(lease, result).await
+        self.finish_public_endpoint_sync(lease, result).await
     }
 
     /// Publish explicit public receiving details and remove stale SDK-managed endpoints.
@@ -31,34 +43,49 @@ where
         details: Vec<PublicReceivingDetail>,
     ) -> Result<EndpointSyncReport> {
         let _identity_guard = self.claim_identity_operation("sync public endpoints")?;
-        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
+        let (session_access, _, publication) = self
+            .load_session_access_and_refresh_identity_with(|tx| {
+                let lease = self.claim_paykit_app_operation_in_transaction(tx, false)?;
+                crate::storage::require_paykit_app_active(tx, &self.config.app_id)?;
+                Ok((lease, tx.public_endpoint_records()))
+            })
+            .await?;
         let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky session available".into(),
             source: None,
         })?;
-        let lease = self.claim_paykit_app_operation().await?;
+        let (lease, records) = publication.expect("active session loads App publication state");
         let result = self
-            .sync_public_endpoints_with_lease(details, &lease, &session_access)
+            .sync_public_endpoints_with_lease(details, records, &lease, &session_access)
             .await;
-        self.finish_paykit_app_operation(lease, result).await
+        self.finish_public_endpoint_sync(lease, result).await
+    }
+
+    async fn finish_public_endpoint_sync(
+        &self,
+        lease: PaykitAppOperationLease,
+        result: Result<PublicEndpointSyncResult>,
+    ) -> Result<EndpointSyncReport> {
+        match result {
+            Ok(PublicEndpointSyncResult {
+                report,
+                lease_released: true,
+            }) => Ok(report),
+            result => {
+                self.finish_paykit_app_operation(lease, result.map(|result| result.report))
+                    .await
+            }
+        }
     }
 
     async fn sync_public_endpoints_with_lease(
         &self,
         details: Vec<PublicReceivingDetail>,
+        records: Vec<PublicEndpointRecord>,
         lease: &PaykitAppOperationLease,
-        session_access: &PubkySessionAccess,
-    ) -> Result<EndpointSyncReport> {
+        session_access: &GuardedSessionAccess,
+    ) -> Result<PublicEndpointSyncResult> {
         validate_public_endpoint_count(details.len())?;
-        self.retry_storage_transaction(|| {
-            let app_id = self.config.app_id.clone();
-            let lease = lease.clone();
-            move |tx| {
-                crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
-                crate::storage::require_paykit_app_active(tx, &app_id)
-            }
-        })
-        .await?;
         let registry = paykit_lib::get_paykit_app_registry(
             &session_access.outbox_client.public_storage(),
             session_access.session.info().public_key(),
@@ -95,9 +122,7 @@ where
         let mut failed_removals = Vec::new();
         let removal_candidates = match self.config.endpoint_management_scope {
             EndpointManagementScope::ManagedOnly => {
-                let records = self
-                    .retry_storage_transaction(|| |tx| Ok(tx.public_endpoint_records()))
-                    .await?
+                let records = records
                     .into_iter()
                     .filter(|record| {
                         record.app_id == self.config.app_id
@@ -141,9 +166,7 @@ where
                     .iter()
                     .map(|identifier| identifier.as_str().to_owned())
                     .collect::<HashSet<_>>();
-                already_removed = self
-                    .retry_storage_transaction(|| |tx| Ok(tx.public_endpoint_records()))
-                    .await?
+                already_removed = records
                     .into_iter()
                     .filter(|record| {
                         record.app_id == self.config.app_id
@@ -266,127 +289,161 @@ where
         );
 
         // Remove stale endpoints first so replacement at the limit stays discoverable.
-        for (identifier_text, previous_payload, revision) in removal_candidates {
+        let mut lease_released = false;
+        let mut removal_candidates = removal_candidates.into_iter().peekable();
+        while let Some((identifier_text, previous_payload, revision)) = removal_candidates.next() {
+            let completes_removal = removal_candidates.peek().is_none()
+                && desired_entries.is_empty()
+                && report.failed.is_empty();
             let identifier = paykit_lib::PaymentEndpointIdentifier::new(&identifier_text)?;
-            self.require_paykit_app_operation_lease(lease).await?;
-            let result = self
-                .remove_public_endpoint_at_revision(session_access, &identifier, &revision)
-                .await;
-            match result {
-                Ok(()) => {
-                    current_identifiers.remove(&identifier);
-                    self.retry_storage_transaction(|| {
-                        let lease = lease.clone();
-                        let record =
-                            removed_record(&self.config.app_id, identifier_text.clone(), now);
-                        move |tx| {
-                            crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
-                            tx.save_public_endpoint_record(record);
-                            Ok(())
+            self.with_guarded_storage_operation(
+                Arc::clone(&session_access._guard),
+                Box::pin(async {
+                    self.require_paykit_app_operation_lease(lease).await?;
+                    let result = self
+                        .remove_public_endpoint_at_revision(session_access, &identifier, &revision)
+                        .await;
+                    match result {
+                        Ok(()) => {
+                            current_identifiers.remove(&identifier);
+                            self.retry_storage_transaction(|| {
+                                let lease = lease.clone();
+                                let record = removed_record(
+                                    &self.config.app_id,
+                                    identifier_text.clone(),
+                                    now,
+                                );
+                                move |tx| {
+                                    crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
+                                    tx.save_public_endpoint_record(record);
+                                    if completes_removal {
+                                        tx.release_paykit_app_operation(
+                                            &lease.app_id,
+                                            lease.lease_id,
+                                        );
+                                    }
+                                    Ok(())
+                                }
+                            })
+                            .await?;
+                            lease_released = completes_removal;
+                            report.removed.push(EndpointSyncChange {
+                                identifier: identifier_text,
+                                status: PublicationStatus::Removed,
+                                error: None,
+                            });
                         }
-                    })
-                    .await?;
-                    report.removed.push(EndpointSyncChange {
-                        identifier: identifier_text,
-                        status: PublicationStatus::Removed,
-                        error: None,
-                    });
-                }
-                Err(err) => {
-                    let error = err.to_string();
-                    self.retry_storage_transaction(|| {
-                        let lease = lease.clone();
-                        let record = failed_record(
-                            &self.config.app_id,
-                            identifier_text.clone(),
-                            previous_payload.clone(),
-                            error.clone(),
-                            now,
-                        );
-                        move |tx| {
-                            crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
-                            tx.save_public_endpoint_record(record);
-                            Ok(())
+                        Err(err) => {
+                            let error = err.to_string();
+                            self.retry_storage_transaction(|| {
+                                let lease = lease.clone();
+                                let record = failed_record(
+                                    &self.config.app_id,
+                                    identifier_text.clone(),
+                                    previous_payload.clone(),
+                                    error.clone(),
+                                    now,
+                                );
+                                move |tx| {
+                                    crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
+                                    tx.save_public_endpoint_record(record);
+                                    Ok(())
+                                }
+                            })
+                            .await?;
+                            report.failed.push(EndpointSyncChange {
+                                identifier: identifier_text,
+                                status: PublicationStatus::Failed,
+                                error: Some(error),
+                            });
                         }
-                    })
-                    .await?;
-                    report.failed.push(EndpointSyncChange {
-                        identifier: identifier_text,
-                        status: PublicationStatus::Failed,
-                        error: Some(error),
-                    });
-                }
-            }
+                    }
+                    Ok(())
+                }),
+            )
+            .await?;
         }
 
         for (identifier, payload) in desired_entries {
-            self.require_paykit_app_operation_lease(lease).await?;
-            let result = if !current_identifiers.contains(identifier) {
-                validate_public_endpoint_count(current_identifiers.len() + 1)
-            } else {
-                Ok(())
-            };
-            let result = match result {
-                Ok(()) => {
-                    // A failed PUT may still have committed; reserve its slot for this sync.
-                    current_identifiers.insert(identifier.clone());
-                    self.publish_public_endpoint_if_current(session_access, identifier, payload)
-                        .await
-                }
-                Err(error) => Err(error),
-            };
-            let change = match result {
-                Ok(()) => EndpointSyncChange {
-                    identifier: identifier.as_str().to_owned(),
-                    status: PublicationStatus::Published,
-                    error: None,
-                },
-                Err(err) => EndpointSyncChange {
-                    identifier: identifier.as_str().to_owned(),
-                    status: PublicationStatus::Failed,
-                    error: Some(err.to_string()),
-                },
-            };
-            self.retry_storage_transaction(|| {
-                let app_id = self.config.app_id.clone();
-                let lease = lease.clone();
-                let identifier = identifier.clone();
-                let payload = payload.clone();
-                let change = change.clone();
-                move |tx| {
-                    crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
-                    if change.status == PublicationStatus::Published
-                        && tx.public_endpoint_records().iter().any(|record| {
-                            *record
-                                == published_record(
-                                    &app_id,
-                                    &identifier,
-                                    &payload,
-                                    record.updated_at,
+            let change = self
+                .with_guarded_storage_operation(
+                    Arc::clone(&session_access._guard),
+                    Box::pin(async {
+                        self.require_paykit_app_operation_lease(lease).await?;
+                        let result = if !current_identifiers.contains(identifier) {
+                            validate_public_endpoint_count(current_identifiers.len() + 1)
+                        } else {
+                            Ok(())
+                        };
+                        let result = match result {
+                            Ok(()) => {
+                                // A failed PUT may still have committed; reserve its slot for this sync.
+                                current_identifiers.insert(identifier.clone());
+                                self.publish_public_endpoint_if_current(
+                                    session_access,
+                                    identifier,
+                                    payload,
                                 )
+                                .await
+                            }
+                            Err(error) => Err(error),
+                        };
+                        let change = match result {
+                            Ok(()) => EndpointSyncChange {
+                                identifier: identifier.as_str().to_owned(),
+                                status: PublicationStatus::Published,
+                                error: None,
+                            },
+                            Err(err) => EndpointSyncChange {
+                                identifier: identifier.as_str().to_owned(),
+                                status: PublicationStatus::Failed,
+                                error: Some(err.to_string()),
+                            },
+                        };
+                        self.retry_storage_transaction(|| {
+                            let app_id = self.config.app_id.clone();
+                            let lease = lease.clone();
+                            let identifier = identifier.clone();
+                            let payload = payload.clone();
+                            let change = change.clone();
+                            move |tx| {
+                                crate::storage::require_paykit_app_operation_lease(tx, &lease)?;
+                                if change.status == PublicationStatus::Published
+                                    && tx.public_endpoint_records().iter().any(|record| {
+                                        *record
+                                            == published_record(
+                                                &app_id,
+                                                &identifier,
+                                                &payload,
+                                                record.updated_at,
+                                            )
+                                    })
+                                {
+                                    return Ok(());
+                                }
+                                let record = if change.status == PublicationStatus::Published {
+                                    published_record(&app_id, &identifier, &payload, now)
+                                } else {
+                                    failed_record(
+                                        &app_id,
+                                        identifier.as_str().to_owned(),
+                                        Some(payload.as_str().to_owned()),
+                                        change
+                                            .error
+                                            .clone()
+                                            .expect("failed publication has an error"),
+                                        now,
+                                    )
+                                };
+                                tx.save_public_endpoint_record(record);
+                                Ok(())
+                            }
                         })
-                    {
-                        return Ok(());
-                    }
-                    let record = if change.status == PublicationStatus::Published {
-                        published_record(&app_id, &identifier, &payload, now)
-                    } else {
-                        failed_record(
-                            &app_id,
-                            identifier.as_str().to_owned(),
-                            Some(payload.as_str().to_owned()),
-                            change
-                                .error
-                                .clone()
-                                .expect("failed publication has an error"),
-                            now,
-                        )
-                    };
-                    tx.save_public_endpoint_record(record);
-                    Ok(())
-                }
-            })
-            .await?;
+                        .await?;
+                        Ok(change)
+                    }),
+                )
+                .await?;
             if change.status == PublicationStatus::Published {
                 report.published.push(change);
             } else {
@@ -394,7 +451,10 @@ where
             }
         }
 
-        Ok(report)
+        Ok(PublicEndpointSyncResult {
+            report,
+            lease_released,
+        })
     }
 
     async fn publish_public_endpoint_if_current(

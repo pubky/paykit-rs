@@ -54,8 +54,11 @@ for publication, generation, and trust rules.
 
 Multiple app processes using the same identity must also use the same durable
 SDK state. The SDK ships `PubkySharedStateStorage`, which stores that logical
-state as one encrypted Pubky resource and holds a renewable WebDAV write lock
-across each read-modify-write transaction. Separate local state blobs are only
+state as one encrypted Pubky resource. Bounded SDK operations reuse a renewable
+WebDAV write lock and the latest decrypted state across their transactions.
+Each changed transaction is durably saved before returning; an operation error
+does not roll back earlier checkpoints. Locks are released between outbound
+messages and before wallet callbacks. Separate local state blobs are only
 suitable when one process owns the runtime. Private sends durably couple the exact prepared
 ciphertext with the advanced Encrypted Link snapshot before publication.
 
@@ -194,7 +197,16 @@ Common workflows:
   authorized app must persist it before private work resumes
 - call `receive_private_messages` before deriving Private Payment Lists,
   Payment Requests, Allowances, Receipt Access state, or resolving a private
-  contact payment when the freshest private endpoints matter
+  contact payment when the freshest private endpoints matter. Idle checks verify
+  signed key authorization, recovery markers, and the next message slot without
+  claiming a peer lease or rewriting shared state. Batch intake shares one state
+  read and probes up to sixteen peers concurrently. Available messages are prepared
+  read-only, then committed atomically with their checkpoint only if the link and
+  authorization remain current and no peer lease intervenes. App authorization
+  updates share the first message commit. Recovery reloads state under a lease;
+  message processing remains one peer at a time
+- list saved Payment Requests with `payment_requests` or `list_payment_requests`;
+  all counterparties and filters use one shared-state read, without network intake
 - use `propose_allowance`, `accept_allowance`, `reject_allowance`, and
   `end_allowance` for durable lifecycle intent; drain the normal outbound queue
   and use `allowance_record` or `list_allowances` for derived views
@@ -216,7 +228,11 @@ Common workflows:
   `resolve_private_payment_request`, `resolve_public_payment_request`, or
   `prepare_and_resolve_private_payment_request`; these use the request amount
   and enforce its accepted endpoint identifiers and required payee App before
-  invoking the payment adapter
+  invoking the payment adapter. Request preparation still performs fresh private
+  intake and final validation, but leaves an otherwise idle queue of unclaimed,
+  unprepared Delivery Confirmations durable for later outbound processing.
+  Callers must drive maintenance; preparation does not schedule a worker or
+  guarantee when those confirmations will be delivered
 - build receipt drafts with `ReceiptDraftBuilder`; call
   `prepare_receipt_issuance` before receipt network side effects, then
   `process_receipt_issuance`; use `issue_receipt` only when the draft already
@@ -405,10 +421,10 @@ For testing, shared-state writes publish a unique pending marker before their
 PUT and remove it after a confirmed result. An unconfirmed write leaves its
 marker; the next transaction waits five minutes under a renewed lock, then
 reloads state. Cancellation leaves the marker and restarts the wait on the next
-attempt. If another runtime cannot acquire the lock and pending markers exist
-or cannot be checked, it receives `SharedStateBusy`, not a retryable
-`ConcurrentUpdate`; back off and show
-recovery as pending. This can also block reads, and there is no fixed completion
+attempt. A runtime that exhausts lock acquisition retries receives
+`SharedStateBusy`, not a revision-conflict `ConcurrentUpdate`. The holder may
+be doing normal work or waiting for recovery; back off and keep the operation
+pending. This can also block reads, and there is no fixed completion
 deadline. The cooldown adds no timed delay to normal successful writes,
 but cannot rule out a write completing after five
 minutes and does not replace the homeserver fix.

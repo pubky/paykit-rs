@@ -75,7 +75,7 @@ pub enum PaykitFfiError {
         /// Redacted human-readable error context.
         context: String,
     },
-    /// Shared state is locked with an unconfirmed write; back off for recovery.
+    /// Shared state remains locked after acquisition retries; back off before retrying.
     #[error("shared_state_busy/{code}: {context}")]
     SharedStateBusy {
         /// Stable machine-readable error code.
