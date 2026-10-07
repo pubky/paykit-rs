@@ -7,6 +7,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc67 - 2026-10-07
+
+### Changed
+
+- Reuse guarded Encrypted Link Handshake state within each phase and combine
+  lease acquisition with authorization pinning, reducing shared-state round
+  trips while preserving save-before-send and cross-phase validation.
+
+### Fixed
+
+- Retain refreshed counterparty app authorization when Payment Request execution
+  claim or acceptance is rejected.
+
 ## 0.1.0-rc66 - 2026-10-07
 
 ### Added
