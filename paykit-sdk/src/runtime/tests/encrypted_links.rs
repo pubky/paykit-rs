@@ -1,6 +1,61 @@
 use super::*;
 
 #[tokio::test]
+async fn test_peer_claim_pins_authorization_atomically() {
+    let storage = InMemoryStorage::new();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    let identity = pubky::Keypair::random();
+    let counterparty = PubkyPublicKey::from_public_key(&identity.public_key());
+    let current = paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[1; 32], 2).unwrap();
+    let lease = sdk
+        .claim_peer_link_operation_with_authorization(&counterparty, Some(&current))
+        .await
+        .unwrap();
+    let pinned = storage.snapshot().unwrap();
+    assert_eq!(
+        pinned.linked_peers[&counterparty]
+            .noise_key_authorization
+            .as_ref(),
+        Some(&current)
+    );
+    assert_eq!(pinned.peer_link_operation_leases[&counterparty], lease);
+
+    let replacement =
+        paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[2; 32], 3).unwrap();
+    assert!(sdk
+        .claim_peer_link_operation_with_authorization(&counterparty, Some(&replacement))
+        .await
+        .unwrap_err()
+        .is_concurrent_update());
+    assert_eq!(storage.snapshot().unwrap(), pinned);
+    sdk.release_peer_link_operation(&lease).await.unwrap();
+
+    let before = storage.snapshot().unwrap();
+    let rollback = paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[3; 32], 1).unwrap();
+    assert!(matches!(
+        sdk.claim_peer_link_operation_with_authorization(&counterparty, Some(&rollback))
+            .await,
+        Err(PaykitSdkError::Protocol { .. })
+    ));
+    assert_eq!(storage.snapshot().unwrap(), before);
+    let other =
+        paykit_lib::PaykitNoiseKeyAuthorization::sign(&pubky::Keypair::random(), &[4; 32], 3)
+            .unwrap();
+    assert!(matches!(
+        sdk.claim_peer_link_operation_with_authorization(&counterparty, Some(&other))
+            .await,
+        Err(PaykitSdkError::Identity { .. })
+    ));
+    assert_eq!(storage.snapshot().unwrap(), before);
+}
+
+#[tokio::test]
 async fn test_peer_block_changes_are_atomic_and_do_not_retry_live_leases() {
     use std::{any::Any, sync::atomic::AtomicUsize};
 
@@ -544,21 +599,6 @@ async fn test_ensure_link_recovery_required_ignores_stale_link_snapshot() {
         })
         .await
         .unwrap();
-    let lease = storage
-        .transaction({
-            let counterparty = counterparty.clone();
-            move |tx| {
-                Ok(tx
-                    .claim_peer_link_operation(
-                        &counterparty,
-                        FixedClock.now(),
-                        FixedClock.now() + chrono::Duration::seconds(60),
-                    )?
-                    .unwrap())
-            }
-        })
-        .await
-        .unwrap();
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
@@ -567,14 +607,7 @@ async fn test_ensure_link_recovery_required_ignores_stale_link_snapshot() {
         FixedClock,
     );
 
-    let result = sdk
-        .prepare_link_handshake_with_claim(
-            counterparty.clone(),
-            EncryptedLinkHandshakeRole::Initiator,
-            lease,
-            None,
-        )
-        .await;
+    let result = sdk.ensure_link_with_peer(counterparty.clone(), 1).await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     let snapshot = storage.snapshot().unwrap();
@@ -622,21 +655,6 @@ async fn test_ensure_link_recovery_required_ignores_stale_handshake_snapshot() {
         })
         .await
         .unwrap();
-    let lease = storage
-        .transaction({
-            let counterparty = counterparty.clone();
-            move |tx| {
-                Ok(tx
-                    .claim_peer_link_operation(
-                        &counterparty,
-                        FixedClock.now(),
-                        FixedClock.now() + chrono::Duration::seconds(60),
-                    )?
-                    .unwrap())
-            }
-        })
-        .await
-        .unwrap();
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
@@ -645,14 +663,7 @@ async fn test_ensure_link_recovery_required_ignores_stale_handshake_snapshot() {
         FixedClock,
     );
 
-    let result = sdk
-        .prepare_link_handshake_with_claim(
-            counterparty.clone(),
-            EncryptedLinkHandshakeRole::Responder,
-            lease,
-            None,
-        )
-        .await;
+    let result = sdk.ensure_link_with_peer(counterparty.clone(), 1).await;
 
     assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
     let snapshot = storage.snapshot().unwrap();

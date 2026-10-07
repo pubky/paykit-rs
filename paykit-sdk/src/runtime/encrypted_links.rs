@@ -28,6 +28,39 @@ impl HandshakeAdvance {
 }
 
 impl HandshakeSource {
+    fn load(
+        tx: &dyn StorageTransaction,
+        access: &GuardedSessionAccess,
+        lease: &PeerLinkOperationLease,
+        now: DateTime<Utc>,
+    ) -> Result<Self> {
+        let counterparty = &lease.counterparty;
+        let peer = tx.linked_peer(counterparty);
+        require_peer_not_recovery_required_or_blocked(
+            peer.as_ref().map(|peer| peer.state.clone()),
+            counterparty,
+        )?;
+        let state = tx.encrypted_link_state(counterparty).ok_or_else(|| {
+            PaykitSdkError::RecoveryRequired {
+                context: format!("no Encrypted Link state for counterparty {counterparty}"),
+                source: None,
+            }
+        })?;
+        let source = Self {
+            peer: peer.ok_or_else(|| PaykitSdkError::RecoveryRequired {
+                context: "missing Linked Peer for handshake".into(),
+                source: None,
+            })?,
+            state,
+            identity: access.public_key()?,
+            noise_key: PubkyPublicKey::from_public_key(
+                &pubky::Keypair::from_secret(&access.paykit_noise_secret_key()?).public_key(),
+            ),
+        };
+        source.require_current(tx, lease, now)?;
+        Ok(source)
+    }
+
     fn require_current(
         &self,
         tx: &dyn StorageTransaction,
@@ -379,24 +412,25 @@ where
         &self,
         counterparty: PubkyPublicKey,
     ) -> Result<LinkedPeerHandshakeReport> {
-        let authorization = match self.probe_link_handshake(&counterparty).await? {
+        let (session_access, probe) = self.probe_link_handshake(&counterparty).await?;
+        let authorization = match probe {
             HandshakeProbe::Idle(report) => return Ok(report),
             HandshakeProbe::Reload(authorization) => authorization.map(|value| *value),
         };
         async {
-            let (session_access, _) = self.private_link_session_access().await?;
-            let lease = self.claim_peer_link_operation(&counterparty).await?;
+            self.validate_local_noise_key_authorization(&session_access)
+                .await?;
+            let lease = self
+                .claim_peer_link_operation_with_authorization(&counterparty, authorization.as_ref())
+                .await?;
             let result = async {
-                if let Some(authorization) = &authorization {
-                    self.pin_counterparty_noise_key_authorization(&counterparty, authorization)
-                        .await?;
-                }
                 self.advance_link_handshake_with_claim(
                     &session_access,
                     counterparty,
                     lease.clone(),
                     authorization.as_ref(),
                     true,
+                    None,
                 )
                 .await
             }
@@ -426,8 +460,8 @@ where
         counterparty: PubkyPublicKey,
         max_advance_steps: u32,
     ) -> Result<LinkedPeerHandshakeReport> {
-        let probe = self.probe_link_handshake(&counterparty).await?;
-        self.ensure_link_with_peer_from_probe(counterparty, max_advance_steps, probe)
+        let (access, probe) = self.probe_link_handshake(&counterparty).await?;
+        self.ensure_link_with_peer_from_probe(counterparty, max_advance_steps, access, probe)
             .await
     }
 
@@ -466,12 +500,10 @@ where
                     snapshot,
                 }),
             )),
-            (probe, _) => {
-                drop(access);
-                self.ensure_link_with_peer_from_probe(counterparty, max_advance_steps, probe)
-                    .await
-                    .map(|report| (Some(report), None))
-            }
+            (probe, _) => self
+                .ensure_link_with_peer_from_probe(counterparty, max_advance_steps, access, probe)
+                .await
+                .map(|report| (Some(report), None)),
         }
     }
 
@@ -479,6 +511,7 @@ where
         &self,
         counterparty: PubkyPublicKey,
         max_advance_steps: u32,
+        session_access: GuardedSessionAccess,
         probe: HandshakeProbe,
     ) -> Result<LinkedPeerHandshakeReport> {
         let authorization = match probe {
@@ -486,30 +519,66 @@ where
             HandshakeProbe::Reload(authorization) => authorization.map(|value| *value),
         };
         let operation = async {
-            let (session_access, _) = self.private_link_session_access().await?;
+            self.validate_local_noise_key_authorization(&session_access)
+                .await?;
+            let local_public_key = session_access.public_key()?;
+            require_distinct_link_identity(&local_public_key, &counterparty)?;
+            let authorization = match authorization {
+                Some(authorization) => authorization,
+                None => {
+                    self.paykit_noise_key_authorization(counterparty.clone())
+                        .await?
+                }
+            };
             let (role, lease, initial) = self
                 .with_guarded_storage_operation(
                     Arc::clone(&session_access._guard),
                     Box::pin(async {
-                        let local_public_key = session_access.public_key()?;
-                        require_distinct_link_identity(&local_public_key, &counterparty)?;
                         let role = deterministic_handshake_role(&local_public_key, &counterparty);
-                        let lease = self.claim_peer_link_operation(&counterparty).await?;
-                        let initial = self
-                            .prepare_link_handshake_with_claim(
-                                counterparty.clone(),
-                                role,
-                                lease.clone(),
-                                authorization,
+                        let lease = self
+                            .claim_peer_link_operation_with_authorization(
+                                &counterparty,
+                                Some(&authorization),
                             )
-                            .await;
+                            .await?;
+                        let initial: Result<_> = async {
+                            let report = self
+                                .prepare_link_handshake_with_claim(
+                                    &session_access,
+                                    counterparty.clone(),
+                                    role,
+                                    lease.clone(),
+                                    &authorization,
+                                )
+                                .await?;
+                            let source = if report.state != LinkedPeerState::Linked
+                                && max_advance_steps > 0
+                            {
+                                Some(
+                                    self.storage
+                                        .transaction(|tx| {
+                                            HandshakeSource::load(
+                                                tx,
+                                                &session_access,
+                                                &lease,
+                                                self.clock.now(),
+                                            )
+                                        })
+                                        .await?,
+                                )
+                            } else {
+                                None
+                            };
+                            Ok((report, source))
+                        }
+                        .await;
                         Ok((role, lease, initial))
                     }),
                 )
                 .await?;
             let mut lease_released = false;
             let result = async {
-                let (mut report, authorization) = initial?;
+                let (mut report, mut source) = initial?;
                 for step in 0..max_advance_steps {
                     if report.state == LinkedPeerState::Linked {
                         return Ok(report);
@@ -521,6 +590,7 @@ where
                             lease.clone(),
                             Some(&authorization),
                             step + 1 == max_advance_steps,
+                            source.take(),
                         )
                         .await
                     {
@@ -566,21 +636,27 @@ where
         operation.await
     }
 
-    async fn probe_link_handshake(&self, counterparty: &PubkyPublicKey) -> Result<HandshakeProbe> {
+    async fn probe_link_handshake(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<(GuardedSessionAccess, HandshakeProbe)> {
         let (access, _, checkpoint) = self
             .load_session_access_and_refresh_identity_with(|tx| {
                 Ok(HandshakeCheckpoint::load(tx, counterparty))
             })
             .await?;
-        let Some(checkpoint) = checkpoint else {
-            return Ok(HandshakeProbe::Reload(None));
-        };
         let access = access.ok_or_else(|| PaykitSdkError::Identity {
             context: "no Pubky session available".into(),
             source: None,
         })?;
-        self.probe_link_handshake_from_checkpoint(counterparty, &access, checkpoint)
-            .await
+        let probe = self
+            .probe_link_handshake_from_checkpoint(
+                counterparty,
+                &access,
+                checkpoint.expect("active session loads handshake checkpoint"),
+            )
+            .await?;
+        Ok((access, probe))
     }
 
     async fn probe_link_handshake_from_checkpoint(
@@ -680,33 +756,21 @@ where
         ))
     }
 
-    pub(super) async fn prepare_link_handshake_with_claim(
+    async fn prepare_link_handshake_with_claim(
         &self,
+        session_access: &GuardedSessionAccess,
         counterparty: PubkyPublicKey,
         role: EncryptedLinkHandshakeRole,
         lease: PeerLinkOperationLease,
-        authorization: Option<paykit_lib::PaykitNoiseKeyAuthorization>,
-    ) -> Result<(
-        LinkedPeerHandshakeReport,
-        paykit_lib::PaykitNoiseKeyAuthorization,
-    )> {
-        let authorization = match authorization {
-            Some(authorization) => {
-                self.pin_counterparty_noise_key_authorization(&counterparty, &authorization)
-                    .await?;
-                authorization
-            }
-            None => {
-                self.counterparty_noise_key_authorization(&counterparty)
-                    .await?
-            }
-        };
+        authorization: &paykit_lib::PaykitNoiseKeyAuthorization,
+    ) -> Result<LinkedPeerHandshakeReport> {
         let remote_noise_public_key = authorization.noise_public_key().clone();
         {
-            let (session_access, _) = self.private_link_session_access().await?;
+            self.validate_local_noise_key_authorization(session_access)
+                .await?;
             self.observe_remote_recovery_marker_with_lease(
                 &counterparty,
-                &session_access,
+                session_access,
                 &lease,
                 &remote_noise_public_key,
             )
@@ -821,7 +885,7 @@ where
                 .await?
             }
         };
-        Ok((report, authorization))
+        Ok(report)
     }
 
     async fn advance_link_handshake_with_claim(
@@ -831,37 +895,18 @@ where
         lease: PeerLinkOperationLease,
         authorization: Option<&paykit_lib::PaykitNoiseKeyAuthorization>,
         finish: bool,
+        source: Option<HandshakeSource>,
     ) -> Result<HandshakeAdvance> {
-        let mut source = self
-            .storage
-            .transaction(|tx| {
-                let peer = tx.linked_peer(&counterparty);
-                require_peer_not_recovery_required_or_blocked(
-                    peer.as_ref().map(|peer| peer.state.clone()),
-                    &counterparty,
-                )?;
-                let state = tx.encrypted_link_state(&counterparty).ok_or_else(|| {
-                    PaykitSdkError::RecoveryRequired {
-                        context: format!("no Encrypted Link state for counterparty {counterparty}"),
-                        source: None,
-                    }
-                })?;
-                let source = HandshakeSource {
-                    peer: peer.ok_or_else(|| PaykitSdkError::RecoveryRequired {
-                        context: "missing Linked Peer for handshake".into(),
-                        source: None,
-                    })?,
-                    state,
-                    identity: session_access.public_key()?,
-                    noise_key: PubkyPublicKey::from_public_key(
-                        &pubky::Keypair::from_secret(&session_access.paykit_noise_secret_key()?)
-                            .public_key(),
-                    ),
-                };
-                source.require_current(tx, &lease, self.clock.now())?;
-                Ok(source)
-            })
-            .await?;
+        let mut source = match source {
+            Some(source) => source,
+            None => {
+                self.storage
+                    .transaction(|tx| {
+                        HandshakeSource::load(tx, session_access, &lease, self.clock.now())
+                    })
+                    .await?
+            }
+        };
         let fetched_authorization;
         let authorization = match authorization {
             Some(authorization) => authorization,
@@ -1434,13 +1479,33 @@ where
         &self,
         counterparty: &PubkyPublicKey,
     ) -> Result<PeerLinkOperationLease> {
+        self.claim_peer_link_operation_with_authorization(counterparty, None)
+            .await
+    }
+
+    pub(super) async fn claim_peer_link_operation_with_authorization(
+        &self,
+        counterparty: &PubkyPublicKey,
+        authorization: Option<&paykit_lib::PaykitNoiseKeyAuthorization>,
+    ) -> Result<PeerLinkOperationLease> {
         let lease_timeout = ChronoDuration::from_std(PEER_LINK_OPERATION_LEASE_TIMEOUT)
             .expect("fixed peer link lease timeout must fit chrono duration");
         self.retry_storage_transaction(|| {
             let counterparty = counterparty.clone();
             move |tx| {
                 let now = self.clock.now();
-                tx.claim_peer_link_operation(&counterparty, now, now + lease_timeout)
+                let lease =
+                    tx.claim_peer_link_operation(&counterparty, now, now + lease_timeout)?;
+                if lease.is_some() {
+                    if let Some(authorization) = authorization {
+                        noise_key_authorization::pin_authorization_in_transaction(
+                            tx,
+                            &counterparty,
+                            authorization,
+                        )?;
+                    }
+                }
+                Ok(lease)
             }
         })
         .await?

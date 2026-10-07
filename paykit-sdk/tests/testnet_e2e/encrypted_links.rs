@@ -2,7 +2,7 @@ use std::{
     any::Any,
     future::Future,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     task::{Context, Poll, Waker},
@@ -12,7 +12,7 @@ use std::{
 use async_trait::async_trait;
 use paykit_sdk::{
     load_encrypted_link_state,
-    storage::{StorageKeyRotationCallback, StorageTransactionCallback},
+    storage::{StorageKeyRotationCallback, StorageOperation, StorageTransactionCallback},
     EncryptedLinkHandshakeRole, InMemoryStorage, LinkedPeerState, PaykitIdentitySecretKey,
     PaykitSdk, PaykitSdkConfig, PaykitSdkError, PubkyPublicKey, PubkySessionAccess,
     PubkySessionProvider, Result, StorageAdapter,
@@ -24,6 +24,113 @@ use crate::harness::{
     build_testnet, drive_link_to_linked, linked_two_party, two_party, TestUser,
     TestnetSessionProvider,
 };
+
+#[tokio::test]
+async fn test_handshake_revalidates_prepared_source_before_publication() {
+    struct BlockAfterPreparation {
+        inner: InMemoryStorage,
+        counterparty: PubkyPublicKey,
+        block: AtomicBool,
+    }
+    #[async_trait]
+    impl StorageAdapter for BlockAfterPreparation {
+        async fn run_operation_erased<'a>(
+            &self,
+            operation: StorageOperation<'a>,
+        ) -> Result<Box<dyn Any + Send>> {
+            let result = operation.await?;
+            if self.block.swap(false, Ordering::SeqCst) {
+                self.inner
+                    .transaction(|tx| {
+                        let mut peer = tx.linked_peer(&self.counterparty).unwrap();
+                        peer.state = LinkedPeerState::Blocked;
+                        tx.save_linked_peer(peer);
+                        Ok(())
+                    })
+                    .await?;
+            }
+            Ok(result)
+        }
+
+        async fn transaction_erased<'a>(
+            &self,
+            callback: StorageTransactionCallback<'a>,
+        ) -> Result<Box<dyn Any + Send>> {
+            self.inner.transaction_erased(callback).await
+        }
+    }
+
+    let pair = two_party().await;
+    let (initiator, responder) = if pair.alice.public_key.as_str() < pair.bob.public_key.as_str() {
+        (&pair.alice, &pair.bob)
+    } else {
+        (&pair.bob, &pair.alice)
+    };
+    let sdk = PaykitSdk::new(
+        BlockAfterPreparation {
+            inner: initiator.storage.clone(),
+            counterparty: responder.public_key.clone(),
+            block: AtomicBool::new(true),
+        },
+        TestnetSessionProvider::new(initiator.access.clone()),
+        initiator.adapter.clone(),
+        PaykitSdkConfig::new(initiator.app_id.clone()).unwrap(),
+    );
+    let error = sdk
+        .ensure_link_with_peer(responder.public_key.clone(), 1)
+        .await
+        .unwrap_err();
+    assert!(error.is_concurrent_update());
+    let state = initiator.storage.snapshot().unwrap();
+    assert!(state.peer_link_operation_leases.is_empty());
+    assert_eq!(
+        state.linked_peers[&responder.public_key].state,
+        LinkedPeerState::Blocked
+    );
+    let source = paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(
+        state.encrypted_link_states[&responder.public_key]
+            .handshake_snapshot
+            .as_ref()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(source
+        .pending_publication(
+            initiator.access.session.info().public_key(),
+            &handshake_secret(initiator),
+        )
+        .unwrap()
+        .is_none());
+    let handshake = paykit_lib::restore_encrypted_link_handshake(
+        initiator.access.session.clone(),
+        handshake_secret(initiator),
+        &responder.public_key.to_public_key().unwrap(),
+        initiator.access.outbox_client.clone(),
+        source,
+    )
+    .await
+    .unwrap();
+    let prepared = handshake
+        .prepare_next_step()
+        .await
+        .unwrap()
+        .unwrap()
+        .into_snapshot();
+    let (path, _) = prepared
+        .pending_publication(
+            initiator.access.session.info().public_key(),
+            &handshake_secret(initiator),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(!initiator
+        .access
+        .outbox_client
+        .public_storage()
+        .exists(format!("pubky://{}{path}", initiator.public_key))
+        .await
+        .unwrap());
+}
 
 #[tokio::test]
 async fn test_link_handshake_two_party_reaches_linked() {
