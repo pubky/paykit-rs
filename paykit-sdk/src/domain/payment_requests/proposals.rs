@@ -32,8 +32,9 @@ pub(crate) fn enqueue_idempotent_payment_request(
 
     // Event Message history is retained across delivery and terminal states.
     // Compare canonical bytes, not typed equality or a normalized lifecycle view.
+    let state = tx.export_storage_state();
     let mut proposal_ids = None;
-    for message in tx.export_storage_state().outbound_private_messages {
+    for message in state.outbound_private_messages {
         if message.kind != PrivateMessageKind::PaymentRequest.as_str() {
             continue;
         }
@@ -80,6 +81,30 @@ pub(crate) fn enqueue_idempotent_payment_request(
     let (event_id, outbound_message_id) = if let Some(ids) = proposal_ids {
         ids
     } else {
+        for item in state.private_stream_items {
+            if item.known_paykit_kind.as_deref()
+                != Some(PrivateMessageKind::PaymentRequest.as_str())
+            {
+                continue;
+            }
+            let message = PrivateApplicationMessage {
+                version: item
+                    .parsed_version
+                    .and_then(|version| u8::try_from(version).ok()),
+                kind: item.parsed_kind,
+                app_id: item.parsed_app_id,
+                raw_json: item.raw_json,
+            };
+            if parse_payment_request_event_message(&message).is_some_and(|parsed| {
+                matches!(parsed.parsed_event(), Some(PaymentRequestEvent::Request(original))
+                    if original.payment_request_id() == request.payment_request_id())
+            }) {
+                return Err(PaykitSdkError::Policy {
+                    context: "Payment Request ID is already bound to a received proposal".into(),
+                    source: None,
+                });
+            }
+        }
         let message = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
             counterparty.clone(),
             app_id.clone(),

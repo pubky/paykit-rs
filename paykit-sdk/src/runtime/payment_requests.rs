@@ -260,6 +260,7 @@ where
     /// App, counterparty, and exact canonical terms (including metadata, decimal
     /// text, timestamps, and endpoint order). Reusing it with different valid input
     /// returns [`PaykitSdkError::Policy`], even after expiry or a terminal state.
+    /// IDs already used by received proposals cannot create a local proposal.
     ///
     /// A matching retry returns the current derived record with the original
     /// proposal Event ID and outbound message ID, without enqueueing or resetting
