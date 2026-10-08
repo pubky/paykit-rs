@@ -38,6 +38,9 @@ use crate::{
 };
 
 mod derivation;
+mod proposals;
+
+pub(crate) use proposals::enqueue_idempotent_payment_request;
 
 pub(crate) use derivation::derive_payment_request_records_from_parts;
 

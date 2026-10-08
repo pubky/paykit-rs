@@ -2,6 +2,50 @@ use super::*;
 use std::time::Duration;
 
 #[tokio::test]
+async fn test_idempotent_proposal_retry_requires_live_session() {
+    let storage = registered_test_storage();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    seed_private_capable_identity_and_link(&storage, counterparty.clone()).await;
+    let message = payment_request_message(
+        "650e8400-e29b-41d4-a716-446655440000",
+        "550e8400-e29b-41d4-a716-446655440000",
+        None,
+    );
+    let parsed = paykit_lib::parse_payment_request_event_message(&message).unwrap();
+    let PaymentRequestEvent::Request(request) = parsed.parsed_event().unwrap() else {
+        panic!("expected proposal")
+    };
+    enqueue_payment_request_message(
+        &storage,
+        counterparty.clone(),
+        &paykit_lib::PaykitAppId::new("bitkit").unwrap(),
+        request,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let before = storage.snapshot().unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("bitkit").unwrap(),
+        FixedClock,
+    );
+
+    let result = sdk
+        .propose_payment_request_with_id(
+            counterparty,
+            request.payment_request_id().clone(),
+            request.request().clone(),
+        )
+        .await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+    assert_eq!(storage.snapshot().unwrap(), before);
+}
+
+#[tokio::test]
 async fn test_unavailable_registry_does_not_hide_other_payment_requests() {
     let storage = registered_test_storage();
     storage
