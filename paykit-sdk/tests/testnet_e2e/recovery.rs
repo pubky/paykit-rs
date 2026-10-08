@@ -29,6 +29,84 @@ struct PausedPublicReadProvider {
     pause: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
 }
 
+#[tokio::test]
+async fn test_invalid_recovery_observation_preserves_handshake_and_retries_after_correction() {
+    for state in ["new", "pending", "linked"] {
+        let pair = if state == "linked" {
+            linked_two_party().await
+        } else {
+            two_party().await
+        };
+        if state == "pending" {
+            pair.alice
+                .sdk
+                .ensure_link_with_peer(pair.bob.public_key.clone(), 1)
+                .await
+                .unwrap();
+        }
+        let noise_key = |access: &PubkySessionAccess| {
+            let key = access
+                .local_secret_key
+                .as_ref()
+                .unwrap()
+                .derive_paykit_identity_secret_key(paykit_sdk::INITIAL_PAYKIT_KEY_GENERATION)
+                .unwrap();
+            paykit_lib::derive_paykit_noise_secret_key(key.as_bytes())
+        };
+        let alice_key = noise_key(&pair.alice.access);
+        let bob_key = noise_key(&pair.bob.access);
+        let (path, _) = paykit_lib::encrypted_link_recovery_marker_paths(
+            &bob_key,
+            pair.bob.access.session.info().public_key(),
+            pair.alice.access.session.info().public_key(),
+            &pubky::Keypair::from_secret(&alice_key).public_key(),
+        );
+        let storage = pair.bob.access.session.storage();
+        let original = match storage.get(&path).await {
+            Ok(response) => Some(response.bytes().await.unwrap()),
+            Err(_) => None,
+        };
+        storage
+            .put(&path, b"invalid recovery marker".to_vec())
+            .await
+            .unwrap();
+        let before = pair.alice.storage.snapshot().unwrap();
+        let error = pair
+            .alice
+            .sdk
+            .ensure_link_with_peer(pair.bob.public_key.clone(), 1)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, PaykitSdkError::LinkObservation { .. }),
+            "{state}: {error:?}"
+        );
+        let after = pair.alice.storage.snapshot().unwrap();
+        assert_eq!(after.encrypted_link_states, before.encrypted_link_states);
+        assert_eq!(
+            after.outbound_private_messages,
+            before.outbound_private_messages
+        );
+        assert!(after.peer_link_operation_leases.is_empty());
+        if let Some(peer) = before.linked_peers.get(&pair.bob.public_key) {
+            assert_eq!(after.linked_peers[&pair.bob.public_key], *peer);
+        }
+        match original {
+            Some(bytes) => {
+                storage.put(&path, bytes).await.unwrap();
+            }
+            None => {
+                storage.delete(&path).await.unwrap();
+            }
+        }
+        pair.alice
+            .sdk
+            .ensure_link_with_peer(pair.bob.public_key.clone(), 1)
+            .await
+            .unwrap();
+    }
+}
+
 #[async_trait::async_trait]
 impl PubkySessionProvider for PausedPublicReadProvider {
     async fn load_session_access(&self) -> paykit_sdk::Result<Option<PubkySessionAccess>> {
@@ -1004,6 +1082,7 @@ async fn test_handshake_rechecks_marker_after_advancement() {
         local: &'a crate::harness::TestUser,
         remote: &'a crate::harness::TestUser,
         reads: AtomicUsize,
+        observation: &'static str,
     }
 
     #[async_trait::async_trait]
@@ -1016,10 +1095,61 @@ async fn test_handshake_rechecks_marker_after_advancement() {
             // The probe and initial marker lookup precede advancement.
             // Publish before the marker recheck, before the completed link is saved.
             if self.reads.fetch_add(1, Ordering::SeqCst) == 2 {
-                self.remote
-                    .sdk
-                    .publish_encrypted_link_recovery_marker(self.local.public_key.clone())
-                    .await?;
+                if self.observation == "conflicting_key" {
+                    let conflicting = paykit_lib::PaykitNoiseKeyAuthorization::sign(
+                        &pubky::Keypair::from_secret(
+                            self.remote
+                                .access
+                                .local_secret_key
+                                .as_ref()
+                                .unwrap()
+                                .as_bytes(),
+                        ),
+                        &[11; 32],
+                        1,
+                    )
+                    .unwrap();
+                    self.remote
+                        .access
+                        .session
+                        .storage()
+                        .put(
+                            paykit_lib::PAYKIT_NOISE_KEY_AUTHORIZATION_PATH,
+                            serde_json::to_vec(&conflicting).unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                } else if self.observation == "invalid_marker" {
+                    let noise_key = |user: &crate::harness::TestUser| {
+                        paykit_lib::derive_paykit_noise_secret_key(
+                            user.access
+                                .local_secret_key
+                                .as_ref()
+                                .unwrap()
+                                .derive_paykit_identity_secret_key(1)
+                                .unwrap()
+                                .as_bytes(),
+                        )
+                    };
+                    let (path, _) = paykit_lib::encrypted_link_recovery_marker_paths(
+                        &noise_key(self.remote),
+                        self.remote.access.session.info().public_key(),
+                        self.local.access.session.info().public_key(),
+                        &pubky::Keypair::from_secret(&noise_key(self.local)).public_key(),
+                    );
+                    self.remote
+                        .access
+                        .session
+                        .storage()
+                        .put(&path, b"invalid marker".to_vec())
+                        .await
+                        .unwrap();
+                } else {
+                    self.remote
+                        .sdk
+                        .publish_encrypted_link_recovery_marker(self.local.public_key.clone())
+                        .await?;
+                }
             }
             Ok(Some(self.local.access.outbox_client.public_storage()))
         }
@@ -1029,74 +1159,98 @@ async fn test_handshake_rechecks_marker_after_advancement() {
         }
     }
 
-    let pair = two_party().await;
-    pair.alice
-        .sdk
-        .initiate_link_with_peer(pair.bob.public_key.clone())
-        .await
-        .unwrap();
-    pair.bob
-        .sdk
-        .accept_link_with_peer(pair.alice.public_key.clone())
-        .await
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        assert!(Instant::now() < deadline, "initiator did not complete");
-        if pair
-            .alice
+    for observation in ["changed_marker", "invalid_marker", "conflicting_key"] {
+        let pair = two_party().await;
+        pair.alice
             .sdk
-            .advance_link_handshake(pair.bob.public_key.clone())
+            .initiate_link_with_peer(pair.bob.public_key.clone())
             .await
-            .unwrap()
-            .state
-            == LinkedPeerState::Linked
-        {
-            break;
-        }
-        assert_eq!(
-            pair.bob
+            .unwrap();
+        pair.bob
+            .sdk
+            .accept_link_with_peer(pair.alice.public_key.clone())
+            .await
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            assert!(Instant::now() < deadline, "initiator did not complete");
+            if pair
+                .alice
                 .sdk
-                .advance_link_handshake(pair.alice.public_key.clone())
+                .advance_link_handshake(pair.bob.public_key.clone())
                 .await
                 .unwrap()
-                .state,
-            LinkedPeerState::Linking
-        );
-    }
+                .state
+                == LinkedPeerState::Linked
+            {
+                break;
+            }
+            assert_eq!(
+                pair.bob
+                    .sdk
+                    .advance_link_handshake(pair.alice.public_key.clone())
+                    .await
+                    .unwrap()
+                    .state,
+                LinkedPeerState::Linking
+            );
+        }
 
-    let sdk = PaykitSdk::new(
-        pair.bob.storage.clone(),
-        RecoverDuringAdvance {
-            local: &pair.bob,
-            remote: &pair.alice,
-            reads: AtomicUsize::new(0),
-        },
-        pair.bob.adapter.clone(),
-        PaykitSdkConfig::new(pair.bob.app_id.clone()).unwrap(),
-    );
-    let result = sdk
-        .advance_link_handshake(pair.alice.public_key.clone())
-        .await;
-    assert!(
-        matches!(result, Err(PaykitSdkError::RecoveryRequired { .. })),
-        "{result:?}"
-    );
-    let bob = pair.bob.storage.snapshot().unwrap();
-    let alice = pair.alice.storage.snapshot().unwrap();
-    assert_eq!(
-        bob.linked_peers[&pair.alice.public_key].state,
-        LinkedPeerState::RecoveryRequired
-    );
-    assert_eq!(
-        bob.linked_peers[&pair.alice.public_key].remote_recovery_attempt_id,
-        alice.linked_peers[&pair.bob.public_key].local_recovery_attempt_id
-    );
-    assert!(bob.encrypted_link_states[&pair.alice.public_key]
-        .link_snapshot
-        .is_none());
-    assert!(bob.peer_link_operation_leases.is_empty());
-    crate::harness::drive_recovery_to_linked(&pair.alice, &pair.bob).await;
+        let sdk = PaykitSdk::new(
+            pair.bob.storage.clone(),
+            RecoverDuringAdvance {
+                local: &pair.bob,
+                remote: &pair.alice,
+                reads: AtomicUsize::new(0),
+                observation,
+            },
+            pair.bob.adapter.clone(),
+            PaykitSdkConfig::new(pair.bob.app_id.clone()).unwrap(),
+        );
+        let before = pair.bob.storage.snapshot().unwrap();
+        let result = sdk
+            .advance_link_handshake(pair.alice.public_key.clone())
+            .await;
+        if observation != "changed_marker" {
+            assert!(
+                matches!(result, Err(PaykitSdkError::LinkObservation { .. })),
+                "{observation}: {result:?}"
+            );
+            let after = pair.bob.storage.snapshot().unwrap();
+            let state = &after.encrypted_link_states[&pair.alice.public_key];
+            assert_eq!(
+                state.generation,
+                before.encrypted_link_states[&pair.alice.public_key].generation
+            );
+            assert!(state.link_snapshot.is_none());
+            assert!(state.handshake_snapshot.is_some());
+            assert_eq!(
+                after.linked_peers[&pair.alice.public_key].state,
+                LinkedPeerState::Linking
+            );
+            assert!(after.peer_link_operation_leases.is_empty());
+            continue;
+        }
+        assert!(
+            matches!(result, Err(PaykitSdkError::RecoveryRequired { .. })),
+            "{result:?}"
+        );
+        let bob = pair.bob.storage.snapshot().unwrap();
+        let alice = pair.alice.storage.snapshot().unwrap();
+        assert_eq!(
+            bob.linked_peers[&pair.alice.public_key].state,
+            LinkedPeerState::RecoveryRequired
+        );
+        assert_eq!(
+            bob.linked_peers[&pair.alice.public_key].remote_recovery_attempt_id,
+            alice.linked_peers[&pair.bob.public_key].local_recovery_attempt_id
+        );
+        assert!(bob.encrypted_link_states[&pair.alice.public_key]
+            .link_snapshot
+            .is_none());
+        assert!(bob.peer_link_operation_leases.is_empty());
+        crate::harness::drive_recovery_to_linked(&pair.alice, &pair.bob).await;
+    }
 }
 
 #[tokio::test]

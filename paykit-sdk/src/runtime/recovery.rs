@@ -1,5 +1,12 @@
 use super::*;
 
+pub(super) fn link_observation_error(error: PaykitSdkError) -> PaykitSdkError {
+    match error {
+        PaykitSdkError::Protocol { context, .. } => PaykitSdkError::LinkObservation { context },
+        error => error,
+    }
+}
+
 #[derive(PartialEq)]
 pub(super) struct RecoveryObservationCheckpoint {
     local_public_key: PubkyPublicKey,
@@ -560,13 +567,13 @@ where
         let authorization = match authorization {
             Ok(authorization) => authorization,
             Err(PaykitSdkError::NotFound { .. }) => return Ok(false),
-            Err(err) => return Err(err),
+            Err(err) => return Err(link_observation_error(err)),
         };
         // The speculative marker is usable only for the freshly authorized checkpoint key.
         if expected_authorization != &authorization {
             return Ok(false);
         }
-        let Some(marker) = marker? else {
+        let Some(marker) = marker.map_err(link_observation_error)? else {
             return Ok(false);
         };
         if let Some(marker) = marker {
@@ -619,7 +626,8 @@ where
             &remote_public_key,
             remote_noise_public_key,
         )
-        .await?
+        .await
+        .map_err(|error| link_observation_error(error.into()))?
         else {
             return Ok(false);
         };
@@ -755,6 +763,7 @@ fn recovery_marker_error_text(err: &PaykitSdkError) -> String {
         PaykitSdkError::PaymentAdapter { context, .. } => context.clone(),
         PaykitSdkError::NotFound { .. }
         | PaykitSdkError::Protocol { .. }
+        | PaykitSdkError::LinkObservation { .. }
         | PaykitSdkError::Policy { .. }
         | PaykitSdkError::ConcurrentUpdate { .. }
         | PaykitSdkError::SharedStateBusy { .. }

@@ -76,7 +76,8 @@ where
                 | PaykitSdkError::Protocol { context, .. }
                 | PaykitSdkError::Policy { context, .. }
                 | PaykitSdkError::PaymentAdapter { context, .. }
-                | PaykitSdkError::RecoveryRequired { context, .. } => context,
+                | PaykitSdkError::RecoveryRequired { context, .. }
+                | PaykitSdkError::LinkObservation { context } => context,
             };
             context.push_str("; reservation cleanup also failed");
         }

@@ -80,7 +80,9 @@ pub(super) fn pin_authorization_in_transaction(
         .linked_peer(counterparty)
         .unwrap_or_else(|| default_linked_peer(counterparty.clone()));
     if let Some(previous) = &peer.noise_key_authorization {
-        authorization.validate_against(previous)?;
+        authorization
+            .validate_against(previous)
+            .map_err(|error| super::recovery::link_observation_error(error.into()))?;
     }
     peer.noise_key_authorization = Some(authorization.clone());
     tx.save_linked_peer(peer);
@@ -130,7 +132,7 @@ async fn require_local_authorization(
         PaykitSdkError::NotFound { .. } => {
             authorization_error("missing local signed Paykit Noise key authorization")
         }
-        err => err,
+        err => super::recovery::link_observation_error(err),
     })
 }
 

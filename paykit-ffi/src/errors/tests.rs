@@ -99,6 +99,14 @@ fn test_sdk_error_maps_to_expected_ffi_variant_and_code() {
             "malformed wire",
         ),
         (
+            PaykitSdkError::LinkObservation {
+                context: "invalid recovery marker".into(),
+            },
+            "protocol",
+            "link_observation_failed",
+            "invalid recovery marker",
+        ),
+        (
             PaykitSdkError::Policy {
                 context: "blocked by policy".into(),
                 source: None,
