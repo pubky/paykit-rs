@@ -263,7 +263,9 @@ where
     ///
     /// A matching retry returns the current derived record with the original
     /// proposal Event ID and outbound message ID, without enqueueing or resetting
-    /// delivery state. Lookup, insertion, and result derivation are atomic. Retry
+    /// delivery state. These IDs remain available if subsequent events invalidate
+    /// the lifecycle; they do not make the record actionable.
+    /// Lookup, insertion, and result derivation are atomic. Retry
     /// with the same input after an uncertain commit or a caller restart. This
     /// guarantee relies on retaining the identity's Event Message history; it
     /// does not survive deleting that state or restoring a backup before creation.

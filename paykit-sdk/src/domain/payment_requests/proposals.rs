@@ -32,7 +32,7 @@ pub(crate) fn enqueue_idempotent_payment_request(
 
     // Event Message history is retained across delivery and terminal states.
     // Compare canonical bytes, not typed equality or a normalized lifecycle view.
-    let mut exists = false;
+    let mut proposal_ids = None;
     for message in tx.export_storage_state().outbound_private_messages {
         if message.kind != PrivateMessageKind::PaymentRequest.as_str() {
             continue;
@@ -72,22 +72,36 @@ pub(crate) fn enqueue_idempotent_payment_request(
                 source: None,
             });
         }
-        exists = true;
+        proposal_ids = Some((
+            original.event_id().as_str().to_owned(),
+            message.outbound_message_id,
+        ));
     }
-    if !exists {
-        tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+    let (event_id, outbound_message_id) = if let Some(ids) = proposal_ids {
+        ids
+    } else {
+        let message = tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
             counterparty.clone(),
             app_id.clone(),
             PrivateMessageKind::PaymentRequest.as_str().to_owned(),
             raw_json,
             now,
         ))?;
-    }
-    payment_request_records_from_transaction(tx, counterparty, now)?
+        (
+            request.event_id().as_str().to_owned(),
+            message.outbound_message_id,
+        )
+    };
+    let mut record = payment_request_records_from_transaction(tx, counterparty, now)?
         .into_iter()
         .find(|record| record.payment_request_id == request.payment_request_id().as_str())
         .ok_or_else(|| PaykitSdkError::Protocol {
             context: "queued Payment Request has no derived record".into(),
             source: None,
-        })
+        })?;
+    // Invalid lifecycle events can suppress proposal fields during derivation.
+    // Recover queue identities without changing lifecycle or payment authority.
+    record.proposal_event_id = Some(event_id);
+    record.proposal_outbound_message_id = Some(outbound_message_id);
+    Ok(record)
 }

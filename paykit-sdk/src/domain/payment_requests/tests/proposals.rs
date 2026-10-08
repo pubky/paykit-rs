@@ -144,6 +144,46 @@ async fn test_idempotent_proposal_recovers_uncertain_commit_after_restart() {
 }
 
 #[tokio::test]
+async fn test_idempotent_proposal_preserves_ids_with_invalid_lifecycle() {
+    let peer = counterparty();
+    let (storage, identity) = proposal_storage(&peer);
+    let request = proposal();
+    let first = propose(&storage, &peer, &request, &identity, timestamp())
+        .await
+        .unwrap();
+    persist_messages_at(
+        &storage,
+        peer.clone(),
+        vec![malformed_cancellation_raw(
+            "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d104",
+            request.payment_request_id().as_str(),
+        )],
+        timestamp(),
+    )
+    .await;
+    let before = storage.snapshot().unwrap();
+    let mut expected = payment_request_records(&storage, &peer, timestamp())
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        expected.state,
+        PaymentRequestLifecycleState::InvalidConflict
+    );
+    assert!(expected.terms.is_none());
+    assert!(expected.proposal_event_id.is_none());
+    assert!(expected.proposal_outbound_message_id.is_none());
+    expected.proposal_event_id = first.proposal_event_id;
+    expected.proposal_outbound_message_id = first.proposal_outbound_message_id;
+
+    let record = propose(&storage, &peer, &retry(&request), &identity, timestamp())
+        .await
+        .unwrap();
+    assert_eq!(record, expected);
+    assert_eq!(storage.snapshot().unwrap(), before);
+}
+
+#[tokio::test]
 async fn test_idempotent_proposal_retains_binding_after_expiry_and_cancellation() {
     for canceled in [false, true] {
         let peer = counterparty();
