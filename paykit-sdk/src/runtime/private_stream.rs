@@ -1,3 +1,4 @@
+use super::recovery::link_observation_error;
 use super::*;
 use crate::domain::private_stream::persist_private_stream_batch_in_transaction;
 use futures_util::{stream, StreamExt};
@@ -308,10 +309,10 @@ where
                 &secret_key,
             ),
         );
-        if authorization? != snapshot.authorization {
+        if authorization.map_err(link_observation_error)? != snapshot.authorization {
             return Ok(PrivateInboxProbe::Reload);
         }
-        let marker = marker?;
+        let marker = marker.map_err(|error| link_observation_error(error.into()))?;
         if marker.is_some_and(|marker| {
             Some(marker.attempt_id()) != link.recovery_context().remote_attempt_id()
         }) {

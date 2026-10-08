@@ -30,6 +30,103 @@ struct PausedPublicReadProvider {
 }
 
 #[tokio::test]
+async fn test_private_messages_preserve_state_on_invalid_link_metadata() {
+    for metadata in ["authorization", "marker"] {
+        let pair = linked_two_party().await;
+        pair.bob
+            .sdk
+            .clear_private_payment_list_and_process_outbound(pair.alice.public_key.clone())
+            .await
+            .unwrap();
+        pair.alice
+            .sdk
+            .clear_private_payment_list(pair.bob.public_key.clone())
+            .await
+            .unwrap();
+        let path = if metadata == "authorization" {
+            paykit_lib::PAYKIT_NOISE_KEY_AUTHORIZATION_PATH.to_owned()
+        } else {
+            let noise_key = |access: &PubkySessionAccess| {
+                let key = access
+                    .local_secret_key
+                    .as_ref()
+                    .unwrap()
+                    .derive_paykit_identity_secret_key(paykit_sdk::INITIAL_PAYKIT_KEY_GENERATION)
+                    .unwrap();
+                paykit_lib::derive_paykit_noise_secret_key(key.as_bytes())
+            };
+            let (path, _) = paykit_lib::encrypted_link_recovery_marker_paths(
+                &noise_key(&pair.bob.access),
+                pair.bob.access.session.info().public_key(),
+                pair.alice.access.session.info().public_key(),
+                &pubky::Keypair::from_secret(&noise_key(&pair.alice.access)).public_key(),
+            );
+            path
+        };
+        let remote = pair.bob.access.session.storage();
+        let original = match remote.get(&path).await {
+            Ok(response) => Some(response.bytes().await.unwrap()),
+            Err(_) => None,
+        };
+        remote
+            .put(&path, b"invalid link metadata".to_vec())
+            .await
+            .unwrap();
+        let before = pair.alice.storage.snapshot().unwrap();
+        for receive in [false, true] {
+            let result = if receive {
+                pair.alice
+                    .sdk
+                    .receive_private_messages(pair.bob.public_key.clone())
+                    .await
+                    .map(|_| ())
+            } else {
+                pair.alice
+                    .sdk
+                    .process_outbound_private_messages(pair.bob.public_key.clone())
+                    .await
+                    .map(|_| ())
+            };
+            assert!(
+                matches!(result, Err(PaykitSdkError::LinkObservation { .. })),
+                "{metadata}, receive={receive}: {result:?}"
+            );
+            let after = pair.alice.storage.snapshot().unwrap();
+            assert_eq!(after.encrypted_link_states, before.encrypted_link_states);
+            assert_eq!(after.linked_peers, before.linked_peers);
+            assert_eq!(
+                after.outbound_private_messages,
+                before.outbound_private_messages
+            );
+            assert!(after.peer_link_operation_leases.is_empty());
+        }
+        match original {
+            Some(bytes) => {
+                remote.put(&path, bytes).await.unwrap();
+            }
+            None => {
+                remote.delete(&path).await.unwrap();
+            }
+        }
+        let sent = pair
+            .alice
+            .sdk
+            .process_outbound_private_messages(pair.bob.public_key.clone())
+            .await
+            .unwrap();
+        assert_eq!(sent.sent.len(), 1);
+        assert!(sent.failed.is_empty());
+        let received = pair
+            .alice
+            .sdk
+            .receive_private_messages(pair.bob.public_key.clone())
+            .await
+            .unwrap();
+        assert_eq!(received.stream_item_ids.len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn test_invalid_recovery_observation_preserves_handshake_and_retries_after_correction() {
     for state in ["new", "pending", "linked"] {
         let pair = if state == "linked" {

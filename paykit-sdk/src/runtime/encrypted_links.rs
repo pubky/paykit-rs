@@ -1672,7 +1672,8 @@ where
     ) -> Result<paykit_lib::PaykitNoiseKeyAuthorization> {
         let authorization = self
             .paykit_noise_key_authorization(counterparty.clone())
-            .await?;
+            .await
+            .map_err(link_observation_error)?;
         self.pin_counterparty_noise_key_authorization(counterparty, &authorization)
             .await?;
         Ok(authorization)
