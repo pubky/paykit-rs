@@ -133,6 +133,164 @@ async fn test_handshake_revalidates_prepared_source_before_publication() {
 }
 
 #[tokio::test]
+async fn test_handshake_probe_reuses_only_the_matching_checkpoint() {
+    struct ChangeAfterProbe {
+        inner: InMemoryStorage,
+        peer: PubkyPublicKey,
+        writer: pubky::PubkySession,
+        path: String,
+        replacement: Option<Vec<u8>>,
+        change_checkpoint: bool,
+        changed: AtomicBool,
+    }
+
+    #[async_trait]
+    impl StorageAdapter for ChangeAfterProbe {
+        async fn transaction_erased<'a>(
+            &self,
+            callback: StorageTransactionCallback<'a>,
+        ) -> Result<Box<dyn Any + Send>> {
+            let mut claimed = false;
+            let result = self
+                .inner
+                .transaction_erased(Box::new(|tx| {
+                    let result = callback(tx)?;
+                    claimed = tx.peer_link_operation_lease(&self.peer).is_some()
+                        && !self.changed.swap(true, Ordering::SeqCst);
+                    if claimed && self.change_checkpoint {
+                        let mut state = tx.encrypted_link_state(&self.peer).unwrap();
+                        state.generation += 1;
+                        tx.save_encrypted_link_state(state);
+                    }
+                    Ok(result)
+                }))
+                .await?;
+            if claimed {
+                match &self.replacement {
+                    Some(packet) => self.writer.storage().put(&self.path, packet.clone()).await,
+                    None => self.writer.storage().delete(&self.path).await,
+                }
+                .unwrap();
+            }
+            Ok(result)
+        }
+    }
+
+    for case in [
+        "advance-reuse",
+        "ensure-reuse",
+        "stale-success",
+        "stale-invalid",
+        "stale-oversized",
+    ] {
+        let pair = two_party().await;
+        let (alice, bob) = (&pair.alice, &pair.bob);
+        alice
+            .sdk
+            .initiate_link_with_peer(bob.public_key.clone())
+            .await
+            .unwrap();
+        bob.sdk
+            .accept_link_with_peer(alice.public_key.clone())
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            alice
+                .sdk
+                .advance_link_handshake(bob.public_key.clone())
+                .await
+                .unwrap();
+        }
+        bob.sdk
+            .advance_link_handshake(alice.public_key.clone())
+            .await
+            .unwrap();
+        let before = load_encrypted_link_state(&alice.storage, &bob.public_key)
+            .await
+            .unwrap()
+            .unwrap();
+        let snapshot = paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(
+            before.handshake_snapshot.as_ref().unwrap(),
+        )
+        .unwrap();
+        let read_path = snapshot
+            .next_handshake_read_path(
+                alice.access.session.info().public_key(),
+                &handshake_secret(alice),
+            )
+            .unwrap()
+            .unwrap();
+        let path = url::Url::parse(&format!("pubky://{read_path}"))
+            .unwrap()
+            .path()
+            .to_owned();
+        let public = alice.access.outbox_client.public_storage();
+        let packet = public
+            .get(&read_path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .to_vec();
+        let corrupt = match case {
+            "stale-invalid" => Some(vec![0]),
+            "stale-oversized" => Some(vec![
+                0;
+                pubky_noise::snow_crypto::PUBKY_NOISE_CIPHERTEXT_LEN + 3
+            ]),
+            _ => None,
+        };
+        if let Some(corrupt) = &corrupt {
+            bob.access
+                .session
+                .storage()
+                .put(&path, corrupt.clone())
+                .await
+                .unwrap();
+        }
+        let sdk = PaykitSdk::new(
+            ChangeAfterProbe {
+                inner: alice.storage.clone(),
+                peer: bob.public_key.clone(),
+                writer: bob.access.session.clone(),
+                path,
+                replacement: corrupt.map(|_| packet),
+                change_checkpoint: case.starts_with("stale-"),
+                changed: AtomicBool::new(false),
+            },
+            TestnetSessionProvider::new(alice.access.clone()),
+            alice.adapter.clone(),
+            PaykitSdkConfig::new(alice.app_id.clone()).unwrap(),
+        );
+        let report = if case == "ensure-reuse" {
+            sdk.ensure_link_with_peer(bob.public_key.clone(), 1).await
+        } else {
+            sdk.advance_link_handshake(bob.public_key.clone()).await
+        }
+        .unwrap();
+        let after = load_encrypted_link_state(&alice.storage, &bob.public_key)
+            .await
+            .unwrap()
+            .unwrap();
+        if case == "stale-success" {
+            assert_eq!(report.state, LinkedPeerState::Linking);
+            assert_eq!(after.handshake_snapshot, before.handshake_snapshot);
+            assert_eq!(after.generation, before.generation + 1);
+        } else {
+            assert_eq!(report.state, LinkedPeerState::Linked, "{case}");
+            assert!(after.link_snapshot.is_some());
+        }
+        assert!(alice
+            .storage
+            .snapshot()
+            .unwrap()
+            .peer_link_operation_leases
+            .is_empty());
+    }
+}
+
+#[tokio::test]
 async fn test_link_handshake_two_party_reaches_linked() {
     let pair = two_party().await;
 

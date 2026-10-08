@@ -199,8 +199,28 @@ fn link_handshake_error_requires_recovery(err: &PaykitSdkError) -> bool {
 
 struct PendingHandshake {
     snapshot: paykit_lib::EncryptedLinkHandshakeSnapshot,
+    state: EncryptedLinkStateRecord,
     report: LinkedPeerHandshakeReport,
     authorization: paykit_lib::PaykitNoiseKeyAuthorization,
+}
+
+struct ProbedHandshake {
+    state: EncryptedLinkStateRecord,
+    report: LinkedPeerHandshakeReport,
+    authorization: paykit_lib::PaykitNoiseKeyAuthorization,
+    identity: PubkyPublicKey,
+    noise_key: PubkyPublicKey,
+    prepared: Result<Option<paykit_lib::PreparedEncryptedLinkHandshakeStep>>,
+}
+
+impl ProbedHandshake {
+    fn matches(&self, source: &HandshakeSource) -> bool {
+        self.identity == source.identity
+            && self.noise_key == source.noise_key
+            && self.state == source.state
+            && self.report == source.report()
+            && source.peer.noise_key_authorization.as_ref() == Some(&self.authorization)
+    }
 }
 
 struct HandshakeCheckpoint {
@@ -224,6 +244,7 @@ impl HandshakeCheckpoint {
 enum HandshakeProbe {
     Idle(LinkedPeerHandshakeReport),
     Reload(Option<Box<paykit_lib::PaykitNoiseKeyAuthorization>>),
+    Prepared(Box<ProbedHandshake>),
 }
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
@@ -413,9 +434,12 @@ where
         counterparty: PubkyPublicKey,
     ) -> Result<LinkedPeerHandshakeReport> {
         let (session_access, probe) = self.probe_link_handshake(&counterparty).await?;
-        let authorization = match probe {
+        let (authorization, prepared) = match probe {
             HandshakeProbe::Idle(report) => return Ok(report),
-            HandshakeProbe::Reload(authorization) => authorization.map(|value| *value),
+            HandshakeProbe::Reload(authorization) => (authorization.map(|value| *value), None),
+            HandshakeProbe::Prepared(prepared) => {
+                (Some(prepared.authorization.clone()), Some(prepared))
+            }
         };
         async {
             self.validate_local_noise_key_authorization(&session_access)
@@ -426,11 +450,11 @@ where
             let result = async {
                 self.advance_link_handshake_with_claim(
                     &session_access,
-                    counterparty,
                     lease.clone(),
                     authorization.as_ref(),
                     true,
                     None,
+                    prepared,
                 )
                 .await
             }
@@ -514,9 +538,12 @@ where
         session_access: GuardedSessionAccess,
         probe: HandshakeProbe,
     ) -> Result<LinkedPeerHandshakeReport> {
-        let authorization = match probe {
+        let (authorization, mut prepared) = match probe {
             HandshakeProbe::Idle(report) => return Ok(report),
-            HandshakeProbe::Reload(authorization) => authorization.map(|value| *value),
+            HandshakeProbe::Reload(authorization) => (authorization.map(|value| *value), None),
+            HandshakeProbe::Prepared(prepared) => {
+                (Some(prepared.authorization.clone()), Some(prepared))
+            }
         };
         let operation = async {
             self.validate_local_noise_key_authorization(&session_access)
@@ -586,11 +613,11 @@ where
                     report = match self
                         .advance_link_handshake_with_claim(
                             &session_access,
-                            counterparty.clone(),
                             lease.clone(),
                             Some(&authorization),
                             step + 1 == max_advance_steps,
                             source.take(),
+                            prepared.take(),
                         )
                         .await
                     {
@@ -706,7 +733,7 @@ where
         };
         let secret_key = access.paykit_noise_secret_key()?;
         let session_info = access.session.info();
-        let Ok(Some(read_path)) = pending
+        let Ok(Some(_)) = pending
             .snapshot
             .next_handshake_read_path(session_info.public_key(), &secret_key)
         else {
@@ -728,29 +755,44 @@ where
         if authorization != pending.authorization {
             return Ok((HandshakeProbe::Reload(Some(Box::new(authorization))), None));
         }
-        let (marker, available) = tokio::join!(
+        let remote_noise_key = pending.snapshot.remote_noise_public_key().clone();
+        let remote_attempt = pending
+            .snapshot
+            .recovery_context()
+            .remote_attempt_id()
+            .map(str::to_owned);
+        let (marker, prepared) = tokio::join!(
             paykit_lib::fetch_encrypted_link_recovery_marker(
                 &public_storage,
                 &secret_key,
                 session_info.public_key(),
                 &remote_public_key,
-                pending.snapshot.remote_noise_public_key(),
+                &remote_noise_key,
             ),
-            public_storage.exists(read_path),
+            Box::pin(async {
+                let handshake = self
+                    .restore_link_handshake_from_snapshot(access, pending.snapshot, &authorization)
+                    .await?;
+                handshake.prepare_next_step().await.map_err(Into::into)
+            }),
         );
-        if marker?.is_some_and(|marker| {
-            Some(marker.attempt_id()) != pending.snapshot.recovery_context().remote_attempt_id()
-        }) {
+        if marker?.is_some_and(|marker| Some(marker.attempt_id()) != remote_attempt.as_deref()) {
             return Ok((HandshakeProbe::Reload(Some(Box::new(authorization))), None));
         }
-        let available = available.map_err(|error| {
-            map_pubky_transport_error("check handshake message availability", error)
-        })?;
         Ok((
-            if available {
-                HandshakeProbe::Reload(Some(Box::new(authorization)))
-            } else {
+            if matches!(prepared, Ok(None)) {
                 HandshakeProbe::Idle(pending.report)
+            } else {
+                HandshakeProbe::Prepared(Box::new(ProbedHandshake {
+                    state: pending.state,
+                    report: pending.report,
+                    authorization,
+                    identity: access.public_key()?,
+                    noise_key: PubkyPublicKey::from_public_key(
+                        &pubky::Keypair::from_secret(&secret_key).public_key(),
+                    ),
+                    prepared,
+                }))
             },
             None,
         ))
@@ -891,12 +933,13 @@ where
     async fn advance_link_handshake_with_claim(
         &self,
         session_access: &GuardedSessionAccess,
-        counterparty: PubkyPublicKey,
         lease: PeerLinkOperationLease,
         authorization: Option<&paykit_lib::PaykitNoiseKeyAuthorization>,
         finish: bool,
         source: Option<HandshakeSource>,
+        prepared: Option<Box<ProbedHandshake>>,
     ) -> Result<HandshakeAdvance> {
+        let counterparty = lease.counterparty.clone();
         let mut source = match source {
             Some(source) => source,
             None => {
@@ -999,6 +1042,7 @@ where
             &lease,
             authorization,
             finish,
+            prepared,
         ))
         .await
     }
@@ -1049,16 +1093,20 @@ where
         source: &HandshakeSource,
         access: &GuardedSessionAccess,
     ) -> Result<Option<EncryptedLinkRecoveryMarker>> {
-        self.validate_local_noise_key_authorization(access).await?;
-        let authorization = self
-            .paykit_noise_key_authorization(source.peer.counterparty.clone())
-            .await?;
+        let (local, authorization) = tokio::join!(
+            self.validate_local_noise_key_authorization(access),
+            self.paykit_noise_key_authorization(source.peer.counterparty.clone()),
+        );
+        local?;
+        let authorization = authorization?;
         if source.peer.noise_key_authorization.as_ref() != Some(&authorization) {
             return Err(PaykitSdkError::RecoveryRequired {
                 context: "handshake Noise key authorization changed".into(),
                 source: None,
             });
         }
+        // Check recovery after authorization, including changes during either read.
+        // Publication and completion each perform their own fresh observation.
         Ok(paykit_lib::fetch_encrypted_link_recovery_marker(
             &access.outbox_client.public_storage(),
             &access.paykit_noise_secret_key()?,
@@ -1148,6 +1196,7 @@ where
         lease: &PeerLinkOperationLease,
         authorization: &paykit_lib::PaykitNoiseKeyAuthorization,
         finish: bool,
+        prepared: Option<Box<ProbedHandshake>>,
     ) -> Result<HandshakeAdvance> {
         let secret = access.paykit_noise_secret_key()?;
         let local = access.session.info().public_key().clone();
@@ -1214,7 +1263,13 @@ where
                     }
                     paykit_lib::HandshakeProgress::Pending(handshake) => handshake,
                 };
-                let Some(prepared) = handshake.prepare_next_step().await? else {
+                // Reuse failures as well as packets only for their exact source.
+                // source.snapshot() above also checks the peer's recovery context.
+                let prepared = match prepared.filter(|prepared| prepared.matches(&source)) {
+                    Some(prepared) => prepared.prepared?,
+                    None => handshake.prepare_next_step().await?,
+                };
+                let Some(prepared) = prepared else {
                     return Ok(None);
                 };
                 noise_key_authorization::validate_remote_static_key(
@@ -1710,6 +1765,7 @@ fn pending_handshake(
             handshake_role: Some(role),
         },
         authorization,
+        state,
     })
 }
 
