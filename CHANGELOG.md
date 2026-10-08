@@ -7,6 +7,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc72 - 2026-10-08
+
+### Added
+
+- `propose_payment_request_with_id` for callers that persist a Payment Request ID
+  before queueing. Matching retries recover the original proposal IDs without
+  restoring payment authority or resetting delivery state.
+
+### Changed
+
+- Reuse prepared Encrypted Link Handshake reads within each phase while retaining
+  checkpoint, identity, authorization and recovery validation.
+- Distinguish invalid published link metadata with `PaykitSdkError::LinkObservation`
+  and the `link_observation_failed` FFI error code, preserving transport, storage
+  and identity errors.
+
 ## 0.1.0-rc71 - 2026-10-07
 
 ### Added
