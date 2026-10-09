@@ -1,5 +1,5 @@
 use super::private_stream::{private_receive_snapshot, PrivateReceiveContext};
-use super::recovery::RecoveryObservationCheckpoint;
+use super::recovery::{link_observation_error, RecoveryObservationCheckpoint};
 use super::*;
 use crate::domain::linked_peers::{
     handshake_checkpoint_is_current, save_handshake_checkpoint_in_transaction,
@@ -479,6 +479,8 @@ where
     /// stored handshake advances this call attempts after starting or finding a
     /// pending handshake. Idle handshakes use the same read-only probe as
     /// [`advance_link_handshake`](Self::advance_link_handshake).
+    /// Invalid recovery/key metadata returns [`PaykitSdkError::LinkObservation`];
+    /// callers do not need a separate recovery-marker observation before this call.
     pub async fn ensure_link_with_peer(
         &self,
         counterparty: PubkyPublicKey,
@@ -552,10 +554,10 @@ where
             require_distinct_link_identity(&local_public_key, &counterparty)?;
             let authorization = match authorization {
                 Some(authorization) => authorization,
-                None => {
-                    self.paykit_noise_key_authorization(counterparty.clone())
-                        .await?
-                }
+                None => self
+                    .paykit_noise_key_authorization(counterparty.clone())
+                    .await
+                    .map_err(link_observation_error)?,
             };
             let (role, lease, initial) = self
                 .with_guarded_storage_operation(
@@ -751,7 +753,8 @@ where
         let remote_public_key = counterparty.to_public_key()?;
         let authorization =
             noise_key_authorization::require_authorization(&public_storage, &remote_public_key)
-                .await?;
+                .await
+                .map_err(link_observation_error)?;
         if authorization != pending.authorization {
             return Ok((HandshakeProbe::Reload(Some(Box::new(authorization))), None));
         }
@@ -776,7 +779,10 @@ where
                 handshake.prepare_next_step().await.map_err(Into::into)
             }),
         );
-        if marker?.is_some_and(|marker| Some(marker.attempt_id()) != remote_attempt.as_deref()) {
+        if marker
+            .map_err(|error| link_observation_error(error.into()))?
+            .is_some_and(|marker| Some(marker.attempt_id()) != remote_attempt.as_deref())
+        {
             return Ok((HandshakeProbe::Reload(Some(Box::new(authorization))), None));
         }
         Ok((
@@ -1098,7 +1104,12 @@ where
             self.paykit_noise_key_authorization(source.peer.counterparty.clone()),
         );
         local?;
-        let authorization = authorization?;
+        let authorization = authorization.map_err(link_observation_error)?;
+        if let Some(pinned) = source.peer.noise_key_authorization.as_ref() {
+            authorization
+                .validate_against(pinned)
+                .map_err(|error| link_observation_error(error.into()))?;
+        }
         if source.peer.noise_key_authorization.as_ref() != Some(&authorization) {
             return Err(PaykitSdkError::RecoveryRequired {
                 context: "handshake Noise key authorization changed".into(),
@@ -1107,14 +1118,15 @@ where
         }
         // Check recovery after authorization, including changes during either read.
         // Publication and completion each perform their own fresh observation.
-        Ok(paykit_lib::fetch_encrypted_link_recovery_marker(
+        paykit_lib::fetch_encrypted_link_recovery_marker(
             &access.outbox_client.public_storage(),
             &access.paykit_noise_secret_key()?,
             access.session.info().public_key(),
             &source.peer.counterparty.to_public_key()?,
             authorization.noise_public_key(),
         )
-        .await?)
+        .await
+        .map_err(|error| link_observation_error(error.into()))
     }
 
     async fn apply_handshake_observation(
@@ -1660,7 +1672,8 @@ where
     ) -> Result<paykit_lib::PaykitNoiseKeyAuthorization> {
         let authorization = self
             .paykit_noise_key_authorization(counterparty.clone())
-            .await?;
+            .await
+            .map_err(link_observation_error)?;
         self.pin_counterparty_noise_key_authorization(counterparty, &authorization)
             .await?;
         Ok(authorization)

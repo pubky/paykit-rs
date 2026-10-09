@@ -134,6 +134,10 @@ impl From<PaykitSdkError> for PaykitFfiError {
                     context,
                 })
             }
+            PaykitSdkError::LinkObservation { context } => Self::Protocol {
+                code: "link_observation_failed".into(),
+                context,
+            },
             PaykitSdkError::Policy { context, source } => {
                 callback_ffi_error(source.as_ref(), &context).unwrap_or_else(|| Self::Policy {
                     code: "policy_error".into(),

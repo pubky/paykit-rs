@@ -79,6 +79,18 @@ pub enum PaykitSdkError {
         source: Option<anyhow::Error>,
     },
 
+    /// Published Encrypted Link recovery or key-authorization metadata is invalid
+    /// or conflicts with a pinned key generation.
+    ///
+    /// No handshake progress may use this observation. Callers may retry after
+    /// the metadata is corrected; this is not a terminal failure of a queued
+    /// Payment Request, nor permission to reset the link or bypass validation.
+    #[error("link observation failed: {context}")]
+    LinkObservation {
+        /// Redacted failure context; remote payloads are not retained.
+        context: String,
+    },
+
     /// Operation is blocked by configured SDK policy.
     #[error("policy error: {context}")]
     Policy {
@@ -132,6 +144,10 @@ impl fmt::Debug for PaykitSdkError {
             Self::Protocol { context, source } => {
                 debug_error_variant(f, "Protocol", context, source)
             }
+            Self::LinkObservation { context } => f
+                .debug_struct("LinkObservation")
+                .field("context", context)
+                .finish(),
             Self::Policy { context, source } => debug_error_variant(f, "Policy", context, source),
             Self::PaymentAdapter { context, source } => {
                 debug_error_variant(f, "PaymentAdapter", context, source)

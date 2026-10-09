@@ -267,7 +267,7 @@ async fn test_public_only_contact_does_not_require_noise_authorization() {
             .sdk
             .current_private_payment_lists(&bob.public_key)
             .await,
-        Err(PaykitSdkError::Protocol { .. })
+        Err(PaykitSdkError::LinkObservation { .. })
     ));
     assert!(alice
         .sdk

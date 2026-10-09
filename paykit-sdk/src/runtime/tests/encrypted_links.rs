@@ -41,7 +41,7 @@ async fn test_peer_claim_pins_authorization_atomically() {
     assert!(matches!(
         sdk.claim_peer_link_operation_with_authorization(&counterparty, Some(&rollback))
             .await,
-        Err(PaykitSdkError::Protocol { .. })
+        Err(PaykitSdkError::LinkObservation { .. })
     ));
     assert_eq!(storage.snapshot().unwrap(), before);
     let other =
