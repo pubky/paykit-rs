@@ -1112,3 +1112,358 @@ async fn test_persist_private_stream_batch_rolls_back_with_stale_lease() {
     assert!(snapshot.encrypted_link_states.is_empty());
     assert_eq!(snapshot.next_private_stream_item_id, 0);
 }
+
+fn unknown_kind_message(sequence: usize) -> PrivateApplicationMessage {
+    private_message(&format!(
+        r#"{{"version":1,"kind":"paykit.future","app_id":"bitkit","sequence":{sequence}}}"#
+    ))
+}
+
+fn retained_stream_items(storage: &InMemoryStorage, counterparty: &PubkyPublicKey) -> usize {
+    storage
+        .snapshot()
+        .unwrap()
+        .private_stream_items
+        .iter()
+        .filter(|item| &item.counterparty == counterparty)
+        .count()
+}
+
+#[tokio::test]
+async fn test_persist_private_stream_batch_refuses_counterparty_over_retention_quota() {
+    // One Linked Peer floods distinct messages in receive-sized batches.
+    const FLOOD_MESSAGES: usize = 16_384;
+    const BATCH_MESSAGES: usize = 100;
+    let storage = InMemoryStorage::new();
+    let flooding_peer = counterparty();
+    let honest_peer = counterparty();
+
+    let mut refusal = None;
+    for batch in 0..FLOOD_MESSAGES / BATCH_MESSAGES + 1 {
+        let messages = (0..BATCH_MESSAGES)
+            .map(|index| unknown_kind_message(batch * BATCH_MESSAGES + index))
+            .collect();
+        if let Err(error) = persist_private_stream_batch(
+            &storage,
+            flooding_peer.clone(),
+            messages,
+            None,
+            timestamp(),
+        )
+        .await
+        {
+            refusal = Some(error);
+            break;
+        }
+    }
+
+    let retained = retained_stream_items(&storage, &flooding_peer);
+    assert!(
+        matches!(refusal, Some(PaykitSdkError::Policy { .. })),
+        "flooding peer was never refused; {retained} stream items retained"
+    );
+    assert!(retained < FLOOD_MESSAGES);
+
+    // A refused batch rolls back whole, so the same batch is refused again.
+    let again = persist_private_stream_batch(
+        &storage,
+        flooding_peer.clone(),
+        (0..BATCH_MESSAGES)
+            .map(|index| unknown_kind_message(FLOOD_MESSAGES + index))
+            .collect(),
+        None,
+        timestamp(),
+    )
+    .await;
+    assert!(matches!(again, Err(PaykitSdkError::Policy { .. })));
+    assert_eq!(retained_stream_items(&storage, &flooding_peer), retained);
+
+    // Another counterparty is unaffected by the flooding peer's quota.
+    let report = persist_private_stream_batch(
+        &storage,
+        honest_peer.clone(),
+        vec![private_message(&payment_request_raw("invoice-2026-0001"))],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.stream_item_ids.len(), 1);
+    assert_eq!(retained_stream_items(&storage, &honest_peer), 1);
+}
+
+#[tokio::test]
+async fn test_persist_private_stream_batch_bounds_duplicate_resend_retention() {
+    const RESENDS: usize = 100;
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    let raw = payment_request_raw("invoice-2026-0001");
+    let duplicate_ids = |storage: &InMemoryStorage| {
+        storage
+            .snapshot()
+            .unwrap()
+            .event_dedup_records
+            .get(&(peer.clone(), "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101".into()))
+            .unwrap()
+            .duplicate_stream_item_ids
+            .clone()
+    };
+
+    // Each identical re-send arrives as its own receive transaction.
+    for _ in 0..RESENDS {
+        persist_private_stream_batch(
+            &storage,
+            peer.clone(),
+            vec![private_message(&raw)],
+            None,
+            timestamp(),
+        )
+        .await
+        .unwrap();
+    }
+    let retained = retained_stream_items(&storage, &peer);
+    let duplicates = duplicate_ids(&storage);
+
+    for _ in 0..RESENDS {
+        persist_private_stream_batch(
+            &storage,
+            peer.clone(),
+            vec![private_message(&raw)],
+            None,
+            timestamp(),
+        )
+        .await
+        .unwrap();
+    }
+
+    // Further identical re-sends are accepted without retaining more state.
+    assert!(retained < RESENDS);
+    assert_eq!(retained_stream_items(&storage, &peer), retained);
+    assert_eq!(duplicate_ids(&storage), duplicates);
+    // The sender still gets its single Delivery Confirmation.
+    assert_eq!(
+        storage.snapshot().unwrap().outbound_private_messages.len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn test_persist_private_stream_batch_accepts_counterparty_up_to_retention_quota() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    let report = persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        (0..MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY)
+            .map(unknown_kind_message)
+            .collect(),
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        report.stream_item_ids.len(),
+        MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY
+    );
+
+    // The next message is refused with its checkpoint; a write without messages still succeeds.
+    let refused = persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        vec![unknown_kind_message(
+            MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY,
+        )],
+        Some(EncryptedLinkStateRecord {
+            counterparty: peer.clone(),
+            link_snapshot: Some(vec![1, 2, 3]),
+            handshake_snapshot: None,
+            handshake_role: None,
+            generation: 1,
+            checkpointed_at: timestamp(),
+        }),
+        timestamp(),
+    )
+    .await;
+    assert!(matches!(refused, Err(PaykitSdkError::Policy { .. })));
+    let snapshot = storage.snapshot().unwrap();
+    assert!(snapshot.encrypted_link_states.is_empty());
+    assert_eq!(
+        snapshot.next_private_stream_item_id,
+        MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY as u64
+    );
+    persist_private_stream_batch(&storage, peer.clone(), Vec::new(), None, timestamp())
+        .await
+        .unwrap();
+    assert_eq!(
+        retained_stream_items(&storage, &peer),
+        MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY
+    );
+}
+
+#[tokio::test]
+async fn test_persist_private_stream_batch_at_quota_still_confirms_unretained_duplicate() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    let raw = payment_request_raw("invoice-2026-0001");
+    let mut messages = vec![private_message(&raw); 1 + MAX_RETAINED_EVENT_DUPLICATES];
+    let filler = MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY - messages.len();
+    messages.extend((0..filler).map(unknown_kind_message));
+    persist_private_stream_batch(&storage, peer.clone(), messages, None, timestamp())
+        .await
+        .unwrap();
+    storage
+        .transaction(|tx| {
+            let confirmation = tx.outbound_private_messages(&peer).remove(0);
+            tx.save_outbound_private_message(crate::domain::outbound_private::mark_outbound_sent(
+                confirmation,
+                timestamp(),
+            ))
+        })
+        .await
+        .unwrap();
+
+    // The sender never saw the confirmation and retries the same payload.
+    let report = persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        vec![private_message(&raw)],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    let state = storage.snapshot().unwrap();
+    assert!(report.stream_item_ids.is_empty());
+    assert_eq!(
+        retained_stream_items(&storage, &peer),
+        MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY
+    );
+    assert_eq!(state.outbound_private_messages.len(), 1);
+    assert_eq!(
+        state.outbound_private_messages[0].status,
+        crate::OutboundPrivateMessageStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn test_persist_private_stream_batch_retains_conflict_after_duplicate_limit() {
+    // Validates stored state before and after the write.
+    let storage = validating_storage();
+    let peer = counterparty();
+    let raw = payment_request_raw("invoice-2026-0001");
+    let mut messages = vec![private_message(&raw); 2 + MAX_RETAINED_EVENT_DUPLICATES];
+    messages.push(private_message(&payment_request_raw("invoice-2026-0002")));
+
+    let report = persist_private_stream_batch(&storage, peer.clone(), messages, None, timestamp())
+        .await
+        .unwrap();
+
+    let state = storage.0.snapshot().unwrap();
+    let record = state
+        .event_dedup_records
+        .get(&(peer.clone(), "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101".into()))
+        .unwrap();
+    assert_eq!(
+        record.duplicate_stream_item_ids.len(),
+        MAX_RETAINED_EVENT_DUPLICATES
+    );
+    assert_eq!(record.conflicting_stream_item_ids.len(), 1);
+    assert_eq!(report.event_conflicts.len(), 1);
+    assert_eq!(
+        report.stream_item_ids.len(),
+        2 + MAX_RETAINED_EVENT_DUPLICATES
+    );
+}
+
+#[tokio::test]
+async fn test_persist_private_stream_batch_rolls_back_batch_crossing_retention_quota() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    let below_quota = MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY - 1;
+    persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        (0..below_quota).map(unknown_kind_message).collect(),
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    // The first message fits and the second does not: neither is kept.
+    let refused = persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        vec![
+            unknown_kind_message(below_quota),
+            unknown_kind_message(below_quota + 1),
+        ],
+        None,
+        timestamp(),
+    )
+    .await;
+
+    assert!(matches!(refused, Err(PaykitSdkError::Policy { .. })));
+    assert_eq!(retained_stream_items(&storage, &peer), below_quota);
+}
+
+#[tokio::test]
+async fn test_persist_private_stream_batch_at_quota_confirms_first_identical_resend() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    let raw = payment_request_raw("invoice-2026-0001");
+    let mut messages = vec![private_message(&raw)];
+    messages
+        .extend((1..MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY).map(unknown_kind_message));
+    persist_private_stream_batch(&storage, peer.clone(), messages, None, timestamp())
+        .await
+        .unwrap();
+    storage
+        .transaction(|tx| {
+            let confirmation = tx.outbound_private_messages(&peer).remove(0);
+            tx.save_outbound_private_message(crate::domain::outbound_private::mark_outbound_sent(
+                confirmation,
+                timestamp(),
+            ))
+        })
+        .await
+        .unwrap();
+
+    // No duplicate is retained yet, but the quota leaves no room to retain one.
+    let report = persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        vec![private_message(&raw)],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    let state = storage.snapshot().unwrap();
+    assert!(report.stream_item_ids.is_empty());
+    assert_eq!(
+        retained_stream_items(&storage, &peer),
+        MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY
+    );
+    assert!(state.event_dedup_records
+        [&(peer.clone(), "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101".into())]
+        .duplicate_stream_item_ids
+        .is_empty());
+    assert_eq!(
+        state.outbound_private_messages[0].status,
+        crate::OutboundPrivateMessageStatus::Pending
+    );
+    // A conflicting payload for the same Event ID is new history and is refused.
+    let conflict = persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        vec![private_message(&payment_request_raw("invoice-2026-0002"))],
+        None,
+        timestamp(),
+    )
+    .await;
+    assert!(matches!(conflict, Err(PaykitSdkError::Policy { .. })));
+}

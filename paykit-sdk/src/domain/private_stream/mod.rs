@@ -32,6 +32,25 @@ use paykit_lib::{
     PrivateMessageKind, ReceiptAccess, ReceiptAccessEventMessage,
 };
 
+/// Most private stream items one counterparty can have retained.
+///
+/// A Linked Peer controls how many Private Application Messages it sends, and
+/// Event Message history is never pruned because it is the source of truth for
+/// derived state; storage only compacts superseded Private Payment Lists at
+/// commit. Intake for that counterparty is refused at this count rather than
+/// dropping history. The count is taken before commit compaction. At roughly
+/// 1.4 KB per item this pins about 6 MB of state per counterparty, and leaves
+/// room for about 1,000 paid one-time Payment Request lifecycles.
+pub(crate) const MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY: usize = 4096;
+
+/// Most identical re-sends of one Event Message retained as stream items.
+///
+/// Senders retry an unconfirmed Event Message without a retry limit. Later
+/// re-sends identical to the first stored payload are still acknowledged and
+/// confirmed, but add no state: the first stream item already holds the exact
+/// payload. A counterparty at its retained item limit retains none of them.
+pub(crate) const MAX_RETAINED_EVENT_DUPLICATES: usize = 2;
+
 /// Read surface shared by every typed Event Message parser in `paykit-lib`.
 ///
 /// Intake classification, outbound validation, and backup validation only
@@ -110,7 +129,8 @@ pub enum PrivateStreamParseStatus {
 pub struct PrivateStreamIntakeReport {
     /// Receive batch id assigned by storage, or `None` when no messages arrived.
     pub receive_batch_id: Option<u64>,
-    /// Stored stream item ids in input order.
+    /// Stored stream item ids in input order. Consumed identical Event Message
+    /// re-sends past the retained duplicate limit add no id.
     pub stream_item_ids: Vec<u64>,
     /// Event ID conflicts found while updating dedupe records.
     pub event_conflicts: Vec<EventIdConflict>,
@@ -251,6 +271,12 @@ pub(crate) fn persist_private_stream_batch_in_transaction(
         stream_item_ids: Vec::with_capacity(messages.len()),
         event_conflicts: Vec::new(),
     };
+    // Empty writes only checkpoint the link, so they never count items.
+    let mut retained_stream_items = if messages.is_empty() {
+        0
+    } else {
+        tx.private_stream_items(&counterparty).len()
+    };
     for message in messages {
         let receive_batch_id = receive_batch_id.expect("nonempty batch has an id");
         let PrivateStreamMessageClassification {
@@ -261,6 +287,46 @@ pub(crate) fn persist_private_stream_batch_in_transaction(
             app_id: classification_app_id,
         } = classify_private_application_message(&message);
         let valid = status == PrivateStreamParseStatus::Valid;
+        if let Some(event) = event.as_ref() {
+            let retained_duplicate_limit =
+                if retained_stream_items >= MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY {
+                    0
+                } else {
+                    MAX_RETAINED_EVENT_DUPLICATES
+                };
+            if is_unretained_event_duplicate(
+                tx,
+                &counterparty,
+                &event.event_id,
+                &message.raw_json,
+                retained_duplicate_limit,
+            ) {
+                // Consume the re-send and confirm it again without storing another copy.
+                if valid {
+                    queue_delivery_confirmation(
+                        tx,
+                        &counterparty,
+                        &confirmation_app_id,
+                        &event.event_id,
+                        &message.raw_json,
+                        received_at,
+                    )?;
+                }
+                continue;
+            }
+        }
+        if retained_stream_items >= MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY {
+            // Failing the transaction leaves the message unacknowledged in the
+            // sender's outbox and the Encrypted Link checkpoint unchanged.
+            return Err(PaykitSdkError::Policy {
+                context: format!(
+                    "counterparty {counterparty} reached the limit of \
+                     {MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY} retained private stream items"
+                ),
+                source: None,
+            });
+        }
+        retained_stream_items += 1;
         let stream_item_id = tx.insert_private_stream_item(NewPrivateStreamItem::new(
             NewPrivateStreamItemDetails {
                 counterparty: counterparty.clone(),
@@ -503,6 +569,21 @@ enum EventDedupeOutcome {
     First,
     Duplicate,
     Conflict,
+}
+
+/// Whether an Event Message repeats the first stored payload past the retained duplicate limit.
+fn is_unretained_event_duplicate(
+    tx: &dyn crate::storage::StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    event_id: &str,
+    raw_json: &str,
+    retained_duplicate_limit: usize,
+) -> bool {
+    tx.event_dedup_record(counterparty, event_id)
+        .is_some_and(|record| {
+            record.duplicate_stream_item_ids.len() >= retained_duplicate_limit
+                && record.payload_hash == payload_hash(raw_json)
+        })
 }
 
 fn update_event_dedupe(

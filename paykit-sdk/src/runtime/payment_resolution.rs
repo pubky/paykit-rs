@@ -1434,7 +1434,10 @@ fn outbound_report_made_progress(report: &OutboundPrivateSendReport) -> bool {
 }
 
 fn receive_report_made_progress(report: &PrivateStreamIntakeReport) -> bool {
-    !report.stream_item_ids.is_empty() || !report.event_conflicts.is_empty()
+    // A batch id means messages were consumed, even when unretained duplicates added no items.
+    report.receive_batch_id.is_some()
+        || !report.stream_item_ids.is_empty()
+        || !report.event_conflicts.is_empty()
 }
 
 pub(super) enum PrivateRecoveryOutcome {
