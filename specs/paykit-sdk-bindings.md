@@ -422,7 +422,8 @@ Bindings should expose high-level workflows before low-level records:
 - submit Payment Proofs with caller-supplied proof data
 - propose, inspect, accept, reject, and end Allowances
 - retrieve Receipts
-- export and restore SDK-managed backup state, including text-form wrappers
+- export and restore SDK-managed backup state, including text-form wrappers;
+  restore takes an explicit restored link policy
 
 Bindings should avoid typed private receive helpers that bypass durable ordered
 stream handling.

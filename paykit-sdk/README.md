@@ -482,8 +482,25 @@ publish their App Registry entries again after restore. Restore preserves
 terminal invalid and recovery-required outbound private records for audit,
 while pending, sending, failed, sent, and superseded outbound records are
 validated before restore.
-Restore retains peer authorization pins; checkpoints resume only after the
-[current signed-key checks](../specs/paykit-sdk.md#establish-encrypted-link).
+Restore retains peer authorization pins. The SDK cannot tell whether a backup is
+current, so every `restore_backup_state` call passes a `RestoredLinkPolicy`:
+
+- `Resume` keeps saved Encrypted Link and handshake snapshots; checkpoints
+  resume only after the
+  [current signed-key checks](../specs/paykit-sdk.md#establish-encrypted-link).
+  Use it only when no runtime for this identity sent or received private
+  messages after the backup was exported. The SDK also sends on its own
+  (Delivery Confirmations, Private Payment List syncs, retries), so holding the
+  latest available backup is not enough if the exporting runtime ran again.
+  Resuming a stale backup reuses a transport key and nonce and overwrites a
+  published outbox slot.
+- `RequireRecovery` discards the snapshots. Use it for an old or uncertain
+  backup. Every peer that had a snapshot is listed in
+  `RestoreReport::recovery_required_peers` and needs `ensure_link_with_peer`.
+  Its queued private messages are sent once the link is back and their app is
+  published again. Private messages the backup had not yet received are not
+  read from the old link; only unconfirmed Event Messages are replayed.
+
 Missing or unsafe checkpoints pause private automation until relink.
 
 For missing or corrupt Pubky shared state, use

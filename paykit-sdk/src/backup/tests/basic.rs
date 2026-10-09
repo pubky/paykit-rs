@@ -606,6 +606,7 @@ async fn test_restore_backup_state_rejects_active_peer_work() {
         None,
         None,
         timestamp() + chrono::Duration::seconds(61),
+        RestoredLinkPolicy::Resume,
     )
     .await
     .unwrap();
@@ -649,6 +650,7 @@ async fn test_failed_restore_does_not_bind_empty_storage_to_identity() {
         Some(trusted_identity),
         None,
         timestamp(),
+        RestoredLinkPolicy::Resume,
     )
     .await;
 

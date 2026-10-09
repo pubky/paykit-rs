@@ -655,6 +655,7 @@ async fn test_accounting_restore_failure_is_atomic_and_missing_ledger_stays_bloc
         None,
         None,
         time(),
+        crate::RestoredLinkPolicy::Resume,
     )
     .await
     .is_err());
@@ -794,6 +795,7 @@ async fn test_accounting_restore_rejects_identity_switch_without_erasing_ledger(
         Some(identity),
         None,
         time(),
+        crate::RestoredLinkPolicy::Resume,
     )
     .await
     .is_err());

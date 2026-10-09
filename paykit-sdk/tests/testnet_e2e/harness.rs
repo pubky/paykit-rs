@@ -553,6 +553,9 @@ pub async fn drive_link_to_linked(alice: &TestUser, bob: &TestUser) {
 }
 
 /// Re-establish a link after both peers have entered recovery.
+///
+/// When only one peer requires recovery, pass it first: its first step
+/// publishes the marker that moves the still-linked peer into recovery.
 pub async fn drive_recovery_to_linked(alice: &TestUser, bob: &TestUser) {
     drive_until_linked(alice, bob, true).await;
 }

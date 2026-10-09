@@ -17,7 +17,16 @@ where
     /// Restores only into an empty or matching identity-only state backing.
     /// Accounting always requires reconciliation after restore. Retained Allowance
     /// and Payment Request evidence cannot be discarded; rejection changes no state.
-    pub async fn restore_backup_state(&self, backup: SdkBackupState) -> Result<RestoreReport> {
+    ///
+    /// `link_policy` decides whether saved Encrypted Links resume or require a
+    /// fresh Encrypted Link Handshake. The SDK cannot tell whether a backup is
+    /// current, and resuming a stale one reuses a transport key and nonce, so the
+    /// caller must choose; see [`RestoredLinkPolicy`].
+    pub async fn restore_backup_state(
+        &self,
+        backup: SdkBackupState,
+        link_policy: RestoredLinkPolicy,
+    ) -> Result<RestoreReport> {
         let _identity_guard = self.claim_identity_operation("restore backup")?;
         let _session_guard = Arc::clone(&self.session_operation_gate).write_owned().await;
         let mut trusted_identity = None;
@@ -36,6 +45,7 @@ where
             trusted_identity,
             trusted_noise_public_key,
             self.clock.now(),
+            link_policy,
         )
         .await
     }
@@ -81,8 +91,13 @@ where
         let identity = self.restore_validation_identity(&access)?;
         let owner = access.public_key()?;
         let replacement_noise = crate::storage::paykit_noise_public_key(&replacement_key);
-        let (state, _) =
-            backup.into_storage_state(Some(&identity), Some(replacement_noise), 0, 0)?;
+        let (state, _) = backup.into_storage_state(
+            Some(&identity),
+            Some(replacement_noise),
+            0,
+            0,
+            RestoredLinkPolicy::RequireRecovery,
+        )?;
         let mut state = state.into_storage_state();
         for message in &mut state.outbound_private_messages {
             message.prepared_send = None;

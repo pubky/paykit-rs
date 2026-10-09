@@ -222,7 +222,8 @@ async fn test_accounting_backup_restore_rejects_populated_destination() {
         backup.clone(),
         None,
         None,
-        time()
+        time(),
+        crate::RestoredLinkPolicy::Resume,
     )
     .await
     .is_err());
@@ -234,6 +235,7 @@ async fn test_accounting_backup_restore_rejects_populated_destination() {
         None,
         None,
         time(),
+        crate::RestoredLinkPolicy::Resume,
     )
     .await
     .unwrap();

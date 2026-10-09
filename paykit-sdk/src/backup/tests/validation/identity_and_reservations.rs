@@ -77,6 +77,7 @@ async fn test_restore_backup_state_rejects_trusted_identity_switch() {
         Some(trusted_identity),
         None,
         DateTime::<Utc>::MIN_UTC,
+        RestoredLinkPolicy::Resume,
     )
     .await;
 

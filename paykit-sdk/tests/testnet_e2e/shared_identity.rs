@@ -2696,7 +2696,7 @@ async fn test_recover_missing_shared_state_retries_without_overwriting_progress(
     assert!(pair
         .bitkit
         .sdk
-        .restore_backup_state(backup.clone())
+        .restore_backup_state(backup.clone(), paykit_sdk::RestoredLinkPolicy::Resume)
         .await
         .is_err());
 
@@ -2822,7 +2822,10 @@ async fn test_restore_with_replacement_key_discards_old_link_snapshots() {
         TestnetPaymentAdapter::default(),
         PaykitSdkConfig::new("bitkit").unwrap(),
     );
-    let report = sdk.restore_backup_state(backup.clone()).await.unwrap();
+    let report = sdk
+        .restore_backup_state(backup.clone(), paykit_sdk::RestoredLinkPolicy::Resume)
+        .await
+        .unwrap();
     assert!(report
         .recovery_required_peers
         .contains(&pair.bob.public_key));

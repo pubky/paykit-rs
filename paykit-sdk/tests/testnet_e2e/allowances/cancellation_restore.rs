@@ -154,7 +154,12 @@ async fn test_stale_restore_cannot_erase_cancellation_and_readmit_payment() {
     let backup = pair.alice.sdk.export_backup_state().await.unwrap();
     cancel_request(&pair.alice, &pair.bob, &occurrence).await;
     let before = pair.alice.storage.snapshot().unwrap();
-    assert!(pair.alice.sdk.restore_backup_state(backup).await.is_err());
+    assert!(pair
+        .alice
+        .sdk
+        .restore_backup_state(backup, paykit_sdk::RestoredLinkPolicy::Resume)
+        .await
+        .is_err());
     assert_eq!(pair.alice.storage.snapshot().unwrap(), before);
     reconcile_unchanged_history(&pair.alice).await;
     assert_cancellation_blocks(
@@ -182,7 +187,12 @@ async fn test_stale_restore_cannot_erase_cancellation_before_handoff() {
     let backup = pair.alice.sdk.export_backup_state().await.unwrap();
     cancel_request(&pair.alice, &pair.bob, &occurrence).await;
     let before = pair.alice.storage.snapshot().unwrap();
-    assert!(pair.alice.sdk.restore_backup_state(backup).await.is_err());
+    assert!(pair
+        .alice
+        .sdk
+        .restore_backup_state(backup, paykit_sdk::RestoredLinkPolicy::Resume)
+        .await
+        .is_err());
     assert_eq!(pair.alice.storage.snapshot().unwrap(), before);
     assert_cancellation_blocks(
         pair.alice
@@ -203,7 +213,11 @@ async fn test_current_restore_retains_cancellation_after_reconciliation() {
         .alice
         .restart_with_storage(InMemoryStorage::new())
         .await;
-    restored.sdk.restore_backup_state(backup).await.unwrap();
+    restored
+        .sdk
+        .restore_backup_state(backup, paykit_sdk::RestoredLinkPolicy::Resume)
+        .await
+        .unwrap();
     reconcile_unchanged_history(&restored).await;
     assert_cancellation_blocks(
         restored
