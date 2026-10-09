@@ -7,6 +7,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Security
+
+- Bound the private stream state one Linked Peer can make the SDK retain. Each
+  counterparty may have at most 4,096 retained private stream items; a message
+  past that limit fails `receive_private_messages` with a `Policy` error and
+  stays unacknowledged, and nothing is pruned. Re-sends identical to the first
+  stored copy of an Event Message are retained at most twice, then confirmed
+  again without new state; conflicting payloads are still retained and count
+  toward the limit.
+
 ## 0.1.0-rc72 - 2026-10-08
 
 ### Added

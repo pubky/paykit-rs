@@ -204,7 +204,10 @@ Common workflows:
   read-only, then committed atomically with their checkpoint only if the link and
   authorization remain current and no peer lease intervenes. App authorization
   updates share the first message commit. Recovery reloads state under a lease;
-  message processing remains one peer at a time
+  message processing remains one peer at a time. One call handles at most 100
+  messages; call again to drain more. Each counterparty may have at most 4,096
+  retained private stream items: past that, receive fails with a `Policy` error
+  for that counterparty only and its messages stay unacknowledged
 - list saved Payment Requests with `payment_requests` or `list_payment_requests`;
   all counterparties and filters use one shared-state read, without network intake
 - use `propose_allowance`, `accept_allowance`, `reject_allowance`, and

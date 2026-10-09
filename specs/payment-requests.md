@@ -779,9 +779,13 @@ in their original order using the new link, not old prepared ciphertext.
 Latest-State Private Payment Lists do not use this mechanism.
 
 Event history and dedupe records MUST remain durable for as long as replay is
-possible; the SDK retains them without automatic pruning. Restoring an older
-backup or deleting previously confirmed history is not repaired by delivery
-confirmations and requires separate state reconciliation.
+possible; the SDK retains them without automatic pruning. The SDK retains the
+first copy of an Event Message and a bounded number of re-sends identical to it;
+later identical re-sends are still confirmed. When a counterparty reaches the
+SDK's retained stream item limit, further messages are refused unconfirmed
+rather than replacing stored history. Restoring an older backup or deleting
+previously confirmed history is not repaired by delivery confirmations and
+requires separate state reconciliation.
 
 ## Open questions
 

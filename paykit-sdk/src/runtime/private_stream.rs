@@ -92,6 +92,15 @@ where
     /// Empty inboxes are probed without acquiring a peer lease or writing state.
     /// Available messages are prepared read-only and committed only while the
     /// original link checkpoint remains current and no peer operation holds a lease.
+    ///
+    /// One call handles at most
+    /// [`PRIVATE_APPLICATION_MESSAGE_RECEIVE_LIMIT`](paykit_lib::PRIVATE_APPLICATION_MESSAGE_RECEIVE_LIMIT)
+    /// messages, each committed with its own checkpoint; call again to drain more.
+    /// A report with a `receive_batch_id` and no stream items means identical
+    /// re-sends were consumed without new state, so more messages may be pending.
+    /// Returns [`PaykitSdkError::Policy`] when the counterparty reached its
+    /// retained private stream item limit. That message stays unacknowledged and
+    /// messages committed earlier in the call stay committed.
     pub async fn receive_private_messages(
         &self,
         counterparty: PubkyPublicKey,

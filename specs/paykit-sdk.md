@@ -67,8 +67,9 @@ publication.
   views, snapshots, retries, recovery state, and app-facing getters.
 - Treat private state as identity-wide. App IDs attribute endpoints and
   messages; they do not partition Encrypted Links or private streams.
-- Preserve the private stream. Receive all Private Application Messages in
-  order and persist them before advancing the Encrypted Link checkpoint.
+- Preserve the private stream. Receive Private Application Messages in order
+  and persist them before advancing the Encrypted Link checkpoint, up to the
+  per-counterparty retention limit.
 - Own the Pubky integration needed by Paykit. Since Pubky is Paykit's only
   transport/storage backend, apps should not need a separate Pubky integration
   just to use Paykit SDK.
@@ -329,6 +330,27 @@ and App ID. They retain the latest valid inbound list (including an empty clear)
 pending or prepared sends, reservation evidence, and the latest outbound intent,
 publication, and attempted send. Event Message history and deduplication records
 are not pruned, so the 64 MiB limit still applies to growing payment history.
+
+Private stream intake bounds what one counterparty can add to that history:
+
+- At most 4,096 private stream items are retained per counterparty, counted
+  across every message kind and parse status. A message that would exceed the
+  limit fails its receive transaction with `Policy`. Nothing is pruned, the
+  Encrypted Link checkpoint does not advance, and the message stays in the
+  sender's outbox. Messages committed earlier in the same receive call stay
+  committed. Intake from other counterparties is unaffected.
+- At most two re-sends identical to the first stored payload of an Event ID are
+  retained as stream items. Later identical re-sends are consumed and confirmed
+  again without a new stream item or dedupe entry; for a counterparty at the
+  limit, every such re-send is. Their receive report carries a receive batch id
+  and no stream item id. A re-send that reuses the Event ID with a different
+  payload is always retained as a conflict and counts toward the limit.
+
+At roughly 1.4 KB per item the limit pins about 6 MB per counterparty. It does
+not bound the total across counterparties, and no workflow yet releases a
+counterparty that reached it. `resolve_private_contact_payment` reports
+`RecoveryPending` for such a counterparty when no cached Private Payment List
+endpoint is available, because its refresh receive is refused.
 
 Before each state PUT, the adapter publishes an empty, uniquely named marker
 under `/pub/paykit/v0/shared-state-writes/`. A confirmed PUT or an explicit PUT
@@ -998,8 +1020,10 @@ For each receive cycle:
    to identify version, kind, and source App ID when the payload is valid JSON.
 5. In one transaction, insert raw stream items, update Event Message dedupe
    records, queue their Delivery Confirmations (or apply received confirmations),
-   and save the advanced link snapshot.
-6. Acknowledge the prepared receive, then repeat until no message is available.
+   and save the advanced link snapshot. The transaction fails with `Policy`
+   when the counterparty reached its retained stream item limit.
+6. Acknowledge the prepared receive, then repeat until no message is available
+   or 100 messages were handled. Callers receive again to drain the rest.
 7. Release the lease.
 
 If the app crashes after messages are stored but before the snapshot is stored,
@@ -1189,7 +1213,8 @@ Payment Requests, Payment Proofs, and Receipts.
 1. Claim the peer link operation lease.
 2. Restore or establish Encrypted Link.
 3. Receive ordered Private Application Messages through `paykit-lib`.
-4. Persist raw messages and parse results.
+4. Persist raw messages and parse results, refusing with `Policy` a message
+   that exceeds the counterparty's retained stream item limit.
 5. Update Event Message dedupe records.
 6. Persist the updated Encrypted Link snapshot in the same transaction.
 7. Index Receipt Access events. Private Payment List views are derived on read
@@ -1580,7 +1605,8 @@ SDK errors should be structured:
 - `Transport`: Pubky or Encrypted Link transport failure
 - `NotFound`: required local or Pubky resource is missing
 - `Protocol`: invalid Paykit message, conflict, or unsupported version
-- `Policy`: operation blocked by configuration or privacy policy
+- `Policy`: operation blocked by configuration, privacy policy, or a
+  per-counterparty retention limit
 - `PaymentAdapter`: payment adapter failure
 - `RecoveryRequired`: local state is inconsistent and automatic execution is
   blocked until recovery completes
