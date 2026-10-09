@@ -1425,3 +1425,18 @@ fn test_blob_debug_redacts_bytes() {
         "FfiReservationAttribution(<redacted:1 fields>)"
     );
 }
+
+#[test]
+fn test_restored_link_policy_maps_each_choice_to_the_sdk_policy() {
+    use crate::FfiRestoredLinkPolicy;
+    use paykit_sdk::RestoredLinkPolicy;
+
+    assert_eq!(
+        RestoredLinkPolicy::from(FfiRestoredLinkPolicy::Resume),
+        RestoredLinkPolicy::Resume
+    );
+    assert_eq!(
+        RestoredLinkPolicy::from(FfiRestoredLinkPolicy::RequireRecovery),
+        RestoredLinkPolicy::RequireRecovery
+    );
+}

@@ -5,14 +5,29 @@ pub(in crate::backup) fn reconcile_restored_linked_peers(
     linked_peers: &mut HashMap<PubkyPublicKey, LinkedPeerRecord>,
     encrypted_link_states: &HashMap<PubkyPublicKey, EncryptedLinkStateRecord>,
     outbound_private_messages: &[OutboundPrivateMessageRecord],
+    link_policy: RestoredLinkPolicy,
 ) -> Result<Vec<PubkyPublicKey>> {
     let mut recovery_required_peers = HashSet::new();
     for (counterparty, link_state) in encrypted_link_states {
-        let authorization = linked_peers
-            .get(counterparty)
-            .and_then(|peer| peer.noise_key_authorization.as_ref());
-        let restored_state = restored_peer_state_from_link_state(link_state, authorization)?;
-        // Blocked policy must not preserve an unauthorized checkpoint or prepared send.
+        let restored_state = match link_policy {
+            RestoredLinkPolicy::Resume => {
+                let authorization = linked_peers
+                    .get(counterparty)
+                    .and_then(|peer| peer.noise_key_authorization.as_ref());
+                restored_peer_state_from_link_state(link_state, authorization)?
+            }
+            // The caller does not vouch that the backup is current. A private
+            // send after export already used the saved sending nonce and outbox
+            // slot, and a saved handshake replays to the same transport keys,
+            // so resuming either could encrypt new plaintext under a used key
+            // and nonce.
+            RestoredLinkPolicy::RequireRecovery => (link_state.link_snapshot.is_some()
+                || link_state.handshake_snapshot.is_some()
+                || link_state.handshake_role.is_some())
+            .then_some(LinkedPeerState::RecoveryRequired),
+        };
+        // Blocked policy must not preserve an unauthorized or discarded checkpoint
+        // or prepared send.
         if restored_state == Some(LinkedPeerState::RecoveryRequired) {
             recovery_required_peers.insert(counterparty.clone());
         }
@@ -95,7 +110,7 @@ pub(in crate::backup) fn reconcile_restored_linked_peers(
         if record.state == LinkedPeerState::RecoveryRequired
             || recovery_required_peers.contains(&record.counterparty)
         {
-            // An incomplete restored checkpoint must not reuse an old stream.
+            // A missing or discarded restored checkpoint must not reuse an old stream.
             record.local_recovery_attempt_id = None;
             record.local_recovery_marker_created_at = None;
             record.local_recovery_marker_last_error = None;

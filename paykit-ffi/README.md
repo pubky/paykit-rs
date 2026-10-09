@@ -553,6 +553,10 @@ app backup record, compare `backupStateRevision` before and after SDK-mutating
 workflows and mark the app backup dirty when it changes, including when a
 workflow fails after persisting progress. If the comparison fails, conservatively
 mark the backup dirty. Do not use this fingerprint as the store's CAS revision.
+An older copy of the state blob reloaded as live state, for example through an
+OS-level restore of app data, resumes stale Encrypted Link snapshots without any
+restored link policy, and the SDK cannot detect it. Keep the live blob out of
+such restores and recover from an SDK backup instead.
 
 State-store callbacks run while the SDK holds its per-handle storage lock. They
 must only load or save the blob and must not call back into that SDK handle.
@@ -664,14 +668,32 @@ according to the product's recovery model:
 
 ```text
 backupText = sdk.exportBackupString()
-sdk.restoreBackupString(backupText)
+sdk.restoreBackupString(backupText, RestoredLinkPolicy.RequireRecovery)
 ```
 
 Normal restore requires an otherwise empty SDK state backing. This prevents an older
 app backup from replacing newer state written by another app sharing the same
 identity. After restore, participating apps publish their App Registry entries
-again before creating new app-attributed work. Restored links retain peer pins
-and require the [signed-key checks](../specs/paykit-sdk.md#establish-encrypted-link).
+again before creating new app-attributed work.
+
+The SDK cannot tell whether a backup is current, so `restoreBackupState` and
+`restoreBackupString` take a `RestoredLinkPolicy` (`.resume` and
+`.requireRecovery` in Swift, `RESUME` and `REQUIRE_RECOVERY` in Kotlin):
+
+- `Resume` keeps saved Encrypted Links. They retain peer pins and require the
+  [signed-key checks](../specs/paykit-sdk.md#establish-encrypted-link). Use it
+  only when no runtime for this identity sent or received private messages
+  after the backup was exported. The SDK also sends on its own (Delivery
+  Confirmations, Private Payment List syncs, retries), so holding the latest
+  available backup is not enough if the exporting instance ran again. Resuming
+  a stale backup reuses a transport key and nonce and overwrites a published
+  outbox slot.
+- `RequireRecovery` discards saved Encrypted Link and handshake snapshots. Use
+  it for an old or uncertain backup. Relink every peer in
+  `RestoreReport.recoveryRequiredPeers` with `ensureLinkWithPeer`. Queued
+  private messages are sent once the link is back and their app is published
+  again. Private messages the backup had not yet received are not read from
+  the old link; only unconfirmed Event Messages are replayed.
 
 For missing or corrupt Pubky shared state, use
 `recoverSharedStateFromBackup(backupBlob, replacementKey)` with a matching trusted
