@@ -1943,6 +1943,32 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func fetchPubkyText(uri: String, maxBytes: UInt64) async throws  -> String?
 
     /**
+     * Forget what a blocked counterparty sent, when the local identity never
+     * acted on it.
+     *
+     * Local and irreversible, for every Paykit App on the identity; neither
+     * the counterparty nor other apps are notified. It releases a counterparty
+     * whose receive fails with the `retention_limit_reached` policy code.
+     *
+     * Fails with a policy error unless the counterparty is Blocked, and when
+     * the local identity has payment history with it: a queued or sent
+     * Payment Request or Allowance message, a Payment Request execution claim,
+     * a wallet accounting occurrence or association, or a retrieved Receipt.
+     * Such history is never forgotten.
+     *
+     * Removes the private stream items received from the counterparty,
+     * including its Private Payment Lists, with their dedupe and Receipt
+     * Access records and the Delivery Confirmations for them. Receipt Access
+     * that was never retrieved is lost with its decryption key. Everything
+     * else is kept.
+     *
+     * Resume by unblocking the peer and linking again. Ids from the forgotten
+     * history are not reserved: a proposal that reuses one is new input, so
+     * read it again before accepting.
+     */
+    func forgetPeer(counterparty: String) async throws  -> LinkedPeerRecord
+
+    /**
      * Clear local session access without revoking the grant or deleting shared state.
      *
      * Use this only when remote revocation cannot be reached and the app
@@ -3392,6 +3418,47 @@ open func fetchPubkyText(uri: String, maxBytes: UInt64)async throws  -> String? 
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterOptionString.lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Forget what a blocked counterparty sent, when the local identity never
+     * acted on it.
+     *
+     * Local and irreversible, for every Paykit App on the identity; neither
+     * the counterparty nor other apps are notified. It releases a counterparty
+     * whose receive fails with the `retention_limit_reached` policy code.
+     *
+     * Fails with a policy error unless the counterparty is Blocked, and when
+     * the local identity has payment history with it: a queued or sent
+     * Payment Request or Allowance message, a Payment Request execution claim,
+     * a wallet accounting occurrence or association, or a retrieved Receipt.
+     * Such history is never forgotten.
+     *
+     * Removes the private stream items received from the counterparty,
+     * including its Private Payment Lists, with their dedupe and Receipt
+     * Access records and the Delivery Confirmations for them. Receipt Access
+     * that was never retrieved is lost with its decryption key. Everything
+     * else is kept.
+     *
+     * Resume by unblocking the peer and linking again. Ids from the forgotten
+     * history are not reserved: a proposal that reuses one is new input, so
+     * read it again before accepting.
+     */
+open func forgetPeer(counterparty: String)async throws  -> LinkedPeerRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_forget_peer(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeLinkedPeerRecord_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -25238,6 +25305,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_text() != 46340) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_forget_peer() != 29860) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_forget_session_access() != 59961) {

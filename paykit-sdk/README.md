@@ -207,7 +207,24 @@ Common workflows:
   message processing remains one peer at a time. One call handles at most 100
   messages; call again to drain more. Each counterparty may have at most 4,096
   retained private stream items: past that, receive fails with a `Policy` error
-  for that counterparty only and its messages stay unacknowledged
+  for that counterparty only and its messages stay unacknowledged. Detect it
+  with `PaykitSdkError::is_retention_limit_reached` on the single-counterparty
+  call; batch reports carry only error text
+- call `forget_peer` to delete what a blocked counterparty sent when you never
+  acted on it, for example an unsolicited flood that reached that limit. It
+  requires `block_peer` first, is local and irreversible, and applies to every
+  Paykit App on the identity. It is refused with `Policy` when you have payment
+  history with that counterparty (a Payment Request or Allowance message you
+  queued or sent, an execution claim, a wallet accounting occurrence or
+  association, or a retrieved Receipt), so it never deletes history you acted
+  on or a Receipt you retrieved, and cannot yet release such a counterparty. It
+  deletes the received private stream items, including Private Payment Lists,
+  with their dedupe and Receipt Access records and your Delivery Confirmations
+  for them. That includes Receipt Access you have not retrieved, which the
+  issuer does not send again, so retrieve a Receipt you need before blocking; a
+  retrieved Receipt then counts as payment history. Resume with `unblock_peer`
+  and a fresh Encrypted Link Handshake; ids the counterparty sends again are
+  new proposals, so read a proposal again before accepting it
 - list saved Payment Requests with `payment_requests` or `list_payment_requests`;
   all counterparties and filters use one shared-state read, without network intake
 - use `propose_allowance`, `accept_allowance`, `reject_allowance`, and

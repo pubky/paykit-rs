@@ -407,6 +407,56 @@ where
         })
     }
 
+    /// Forget what a blocked counterparty sent, when the local identity never
+    /// acted on it.
+    ///
+    /// Forgetting is local and irreversible, applies to every Paykit App on the
+    /// identity, and notifies neither the counterparty nor other apps. It
+    /// releases a counterparty that reached its retained private stream item
+    /// limit.
+    ///
+    /// Returns [`PaykitSdkError::Policy`] unless the counterparty is `Blocked`,
+    /// which already cleared its Encrypted Link, and also when the local
+    /// identity has payment history with it: a queued or sent Payment Request
+    /// or Allowance Event Message, a Payment Request execution claim, a wallet
+    /// accounting occurrence or association, or a retrieved Receipt. Such
+    /// history is never forgotten, because those records name only ids that the
+    /// counterparty could then send again with different terms.
+    ///
+    /// Removed for this counterparty: received private stream items, including
+    /// its Private Payment Lists, with their Event Message dedupe records and
+    /// Receipt Access records, and the local Delivery Confirmations for them.
+    /// Receipt Access that was never retrieved is lost with its decryption key.
+    /// Everything else is kept, including the `Blocked` Linked Peer record.
+    /// Stream item ids are never reused.
+    ///
+    /// Resume with `unblock_peer` and a fresh Encrypted Link. Ids from the
+    /// forgotten history are not reserved: a proposal that reuses one is new
+    /// input, so read it again before accepting. Restoring a backup exported
+    /// before the call brings the history back.
+    pub async fn forget_peer(&self, counterparty: PubkyPublicKey) -> Result<LinkedPeerRecord> {
+        self.retry_storage_transaction(|| {
+            let counterparty = counterparty.clone();
+            move |tx| {
+                let local_public_key = initialized_identity_in_transaction(tx, "forget peer")?;
+                if counterparty == local_public_key {
+                    return Err(PaykitSdkError::Policy {
+                        context: "cannot forget the local Paykit identity".into(),
+                        source: None,
+                    });
+                }
+                forget_peer_in_transaction(tx, &counterparty, self.clock.now())
+            }
+        })
+        .await?
+        .ok_or_else(|| PaykitSdkError::ConcurrentUpdate {
+            context: format!(
+                "peer link operation already in progress for counterparty {counterparty}"
+            ),
+            source: None,
+        })
+    }
+
     /// Start an Encrypted Link Handshake as the initiator.
     pub async fn initiate_link_with_peer(
         &self,
@@ -1741,6 +1791,102 @@ pub(super) fn unblock_peer_in_transaction(
         clear_encrypted_link_state(tx, counterparty, now);
     }
     tx.release_peer_link_operation(counterparty, lease.lease_id);
+    Ok(Some(record))
+}
+
+pub(super) fn forget_peer_in_transaction(
+    tx: &mut dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    now: DateTime<Utc>,
+) -> Result<Option<LinkedPeerRecord>> {
+    let lease_timeout = ChronoDuration::from_std(PEER_LINK_OPERATION_LEASE_TIMEOUT)
+        .expect("fixed peer link lease timeout must fit chrono duration");
+    let Some(lease) = tx.claim_peer_link_operation(counterparty, now, now + lease_timeout)? else {
+        return Ok(None);
+    };
+    tx.release_peer_link_operation(counterparty, lease.lease_id);
+
+    let mut state = tx.export_storage_state();
+    // Only a blocked peer has no Encrypted Link, intake, or private automation
+    // left that could race with the removal or read half of it.
+    let record = match state.linked_peers.get(counterparty) {
+        Some(record) if record.state == LinkedPeerState::Blocked => record.clone(),
+        _ => {
+            return Err(PaykitSdkError::Policy {
+                context: format!(
+                    "counterparty {counterparty} must be blocked before its private history is forgotten"
+                ),
+                source: None,
+            })
+        }
+    };
+    // SECURITY: local responses, execution claims, wallet accounting, and
+    // Receipts name only ids. Once the dedupe records that pinned the received
+    // payloads are gone, the counterparty can send those ids again with other
+    // terms, so history the local identity acted on is never forgotten.
+    let acted_on = state.outbound_private_messages.iter().any(|message| {
+        message.counterparty == *counterparty
+            && !matches!(
+                PrivateMessageKind::parse(&message.kind),
+                // Local publications and confirmations answer no proposal.
+                Some(
+                    PrivateMessageKind::PrivatePaymentList
+                        | PrivateMessageKind::ReceiptAccess
+                        | PrivateMessageKind::DeliveryConfirmation
+                )
+            )
+    }) || state
+        .payment_request_execution_claims
+        .keys()
+        .any(|(owner, _)| owner == counterparty)
+        || state
+            .receipt_records
+            .keys()
+            .any(|(issuer, _)| issuer == counterparty)
+        // An accounting watermark is not history: evaluating a proposal writes
+        // one without any local decision, and it only keeps trusted time from
+        // going backwards. The counterparty could otherwise pin itself.
+        || state
+            .allowance_accounting
+            .as_ref()
+            .is_some_and(|accounting| {
+                let history = &accounting.history;
+                history
+                    .occurrences
+                    .iter()
+                    .any(|occurrence| occurrence.key.request.counterparty == *counterparty)
+                    || history
+                        .associations
+                        .iter()
+                        .any(|association| association.request.counterparty == *counterparty)
+            });
+    if acted_on {
+        return Err(PaykitSdkError::Policy {
+            context: format!(
+                "counterparty {counterparty} has payment history with this identity, which is never forgotten"
+            ),
+            source: None,
+        });
+    }
+
+    state
+        .private_stream_items
+        .retain(|item| item.counterparty != *counterparty);
+    state
+        .event_dedup_records
+        .retain(|(owner, _), _| owner != counterparty);
+    state
+        .receipt_access_records
+        .retain(|(owner, _), _| owner != counterparty);
+    // A confirmation not yet delivered would, after a relink, tell the
+    // counterparty that a forgotten Event Message is still held.
+    state.outbound_private_messages.retain(|message| {
+        message.counterparty != *counterparty || !message.is_delivery_confirmation()
+    });
+
+    // Id counters stay so removed ids are never reused.
+    crate::validate_storage_state(&state)?;
+    tx.replace_storage_state(crate::storage::ValidatedStorageState::new(state));
     Ok(Some(record))
 }
 

@@ -101,6 +101,9 @@ where
     /// Returns [`PaykitSdkError::Policy`] when the counterparty reached its
     /// retained private stream item limit. That message stays unacknowledged and
     /// messages committed earlier in the call stay committed.
+    /// [`PaykitSdkError::is_retention_limit_reached`] identifies this refusal.
+    /// It lasts until [`Self::forget_peer`] forgets the blocked counterparty,
+    /// which is refused when there is payment history with it.
     pub async fn receive_private_messages(
         &self,
         counterparty: PubkyPublicKey,

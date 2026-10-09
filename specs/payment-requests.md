@@ -787,6 +787,22 @@ rather than replacing stored history. Restoring an older backup or deleting
 previously confirmed history is not repaired by delivery confirmations and
 requires separate state reconciliation.
 
+The one exception to that durability requirement is an explicit local decision
+to forget a blocked counterparty. A blocked counterparty has no Encrypted Link, so no replay can
+reach the SDK until it is unblocked and linked again. Forgetting MUST be
+refused when the local identity has payment history with that counterparty: a
+queued or sent Payment Request or Allowance Event Message, a Payment Request
+execution claim, a wallet accounting occurrence or association, or a retrieved
+Receipt. Those records name
+only ids, so they would pair with a proposal sent again under the same ids once
+its dedupe record is gone. Forgetting removes the received history, its dedupe
+records, and the unsent or sent Delivery Confirmations for it together.
+Forgetting is itself a deletion of confirmed history: an Event Message whose
+Delivery Confirmation already reached the counterparty is not replayed, and
+only unconfirmed Event Messages are sent again on the new Encrypted Link.
+Afterwards an Event Message that reuses a forgotten id is an ordinary new
+proposal that waits for a local decision.
+
 ## Open questions
 
 1. Should Payment Proof payloads be opaque JSON objects or method-specific typed payloads?

@@ -663,7 +663,12 @@ missing history.
 V1 is closed-world. Unknown fields, enum values, or period shapes inside a
 recognized V1 kind are invalid. Unsupported versions and unknown kinds MUST
 NOT be interpreted as V1 or cause side effects. Durable private-stream
-implementations MUST retain their raw bytes for audit and future upgrade.
+implementations MUST retain their raw bytes for audit and future upgrade, until
+the user explicitly forgets the blocked counterparty that sent them. Forgetting
+is refused when the local identity has queued or sent any Allowance Event
+Message to that counterparty, in any status, or holds a wallet accounting
+occurrence or association for it, so it only removes proposals that never
+received a local response.
 
 The optional Payment Proof `allowance_id` is a coordinated pre-release extension
 of Payment Request wire version 1. Implementations predating this extension

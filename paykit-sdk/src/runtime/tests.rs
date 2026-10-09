@@ -694,6 +694,7 @@ mod app_registry;
 mod backup;
 mod contacts;
 mod encrypted_links;
+mod forget_peer;
 mod identity;
 mod key_rotation;
 mod linked_peers;

@@ -98,6 +98,17 @@ Paykit-side workflow.
   `advanceLinkHandshake` — establish Encrypted Links with counterparties.
 - `PaykitSdk.linkedPeers`, `blockPeer`, and `unblockPeer` — inspect and
   manage local peer state.
+- `PaykitSdk.forgetPeer`: irreversibly delete what a blocked counterparty
+  sent, for every Paykit App on the identity, when the local identity never
+  acted on it. It releases a counterparty whose `receivePrivateMessages` fails
+  with the policy code `retention_limit_reached`: call `blockPeer`,
+  `forgetPeer`, `unblockPeer`, then link again. It fails with a policy error
+  when there is payment history with that counterparty (a queued or sent
+  Payment Request or Allowance message, an execution claim, a wallet accounting
+  occurrence or association, or a retrieved Receipt), so history you acted on
+  and retrieved Receipts are never deleted, and such a counterparty stays
+  refused at the limit. Receipt Access that was never retrieved is deleted with
+  its Receipt Decryption Key. Batch receive reports do not carry the code.
 - `PaykitSdk.receivePrivateMessages` and
   `receivePrivateMessagesFromLinkedPeers` — receive and checkpoint private
   stream data.
