@@ -472,6 +472,24 @@ and must be stored or displayed only for their intended flow.
 Bindings should wrap these helpers so mobile apps do not need a second Pubky
 SDK dependency for ordinary Paykit onboarding.
 
+Approving a signup auth request never replaces a homeserver record that PKARR
+still holds for the approving identity, because the requester chooses the
+requested homeserver. The approve helper first looks up the identity's
+homeserver record. It fails with a `Policy` error when the record names a
+different homeserver, and approves without signing up or republishing when the
+record names the requested homeserver. When the lookup finds no record, the
+helper also reads the PKARR caches: a record that no longer resolves but is
+still cached by a relay or the client fails the approval until the caller
+rebroadcasts it with `republish_identity`. A lookup error fails the approval.
+Only when no record is found does the helper sign up on the requested
+homeserver. A signup that the requested homeserver rejects, including because
+the account already exists, fails the approval and publishes nothing; the signup
+helper, called with a homeserver the caller already trusts rather than one
+taken from the auth URL, restores the record of an existing account. A record
+that no reachable relay caches still counts as none, so a caller that knows the
+identity's homeserver should compare it with the request's homeserver before
+approving.
+
 Applications can attach an app-defined companion claim to a Pubky Auth
 approval. The integrator supplies the claim query parameter, claim type,
 expected capability, and serialized unsigned payload. The SDK owns request

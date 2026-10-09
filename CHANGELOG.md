@@ -7,6 +7,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Security
+
+- Approving a signup auth request no longer moves an identity that has a
+  homeserver record to the homeserver chosen by the requester. `approve_auth` and
+  `approve_auth_with_companion_claim` in Rust, and `approveAuth` and
+  `approveAuthWithCompanionClaim` in Swift and Kotlin, now look up the approving
+  identity's homeserver record before anything reaches the requester. A request
+  naming a different homeserver fails with a policy error. A request naming the
+  published homeserver is approved without signing up or republishing. A record
+  that no longer resolves but is still cached by a relay or the client fails the
+  approval until `republish_identity` (`republishIdentity`) rebroadcasts it, and
+  a lookup error fails the approval. Signup still runs when no record is found.
+- Companion claim approval applies the same checks before the claim is signed or
+  delivered and reports a refusal as an invalid request, so a refused signup
+  request receives neither the claim nor the grant.
+- An account-already-exists answer to that signup now fails the approval instead
+  of republishing the homeserver record. `sign_up` (`signUp`), called with a
+  homeserver the caller already trusts rather than one taken from the auth URL,
+  is unchanged and restores the record. A record that no reachable relay caches
+  still counts as none, so a caller that knows an identity's homeserver should
+  compare it with the request's `homeserver_public_key` before approving.
+
 ## 0.1.0-rc72 - 2026-10-08
 
 ### Added

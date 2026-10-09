@@ -89,13 +89,28 @@ The SDK performs these steps in order:
 
 1. Validate the claim identifiers, auth URL, claim type, capability, secret,
    and relay.
-2. Sign the application-provided unsigned payload for this auth request.
-3. Encrypt and deliver the signed claim to its derived relay channel.
-4. Only after successful claim delivery, approve the Pubky grant.
+2. For a signup-grant URL, look up the approving identity's homeserver
+   record. Refuse the request unless the record names the requested
+   homeserver, or no record is found on the network or in its caches.
+3. Sign the application-provided unsigned payload for this auth request.
+4. Encrypt and deliver the signed claim to its derived relay channel.
+5. Only after successful claim delivery, approve the Pubky grant. An identity
+   for which step 2 found no record is first signed up on the requested
+   homeserver.
 
-The grant is never delivered when claim validation, encryption, or relay
-delivery fails. If grant authorization fails, the companion claim may
-already be present on the relay, but it is not authorization by itself.
+The requester chooses the homeserver named by a signup-grant URL, so approval
+never moves an identity whose homeserver record PKARR still holds. A request
+refused in step 2 is reported as an invalid-auth-URL error and receives neither
+the claim nor the grant. That includes a lookup that fails and a record that no
+longer resolves but is still cached, both of which can succeed on a later
+attempt. When the identity already publishes the requested homeserver, the
+grant is approved without signing up or republishing. The approve helper
+paragraph in [`paykit-sdk.md`](paykit-sdk.md) states the full rules.
+
+The grant is never delivered when claim validation, the signup homeserver
+check, encryption, or relay delivery fails. If grant authorization fails,
+including a signup that the requested homeserver rejects, the companion claim
+may already be present on the relay, but it is not authorization by itself.
 
 Callers receive distinct invalid-auth-URL, invalid-claim, encryption,
 relay-delivery, and grant-authorization errors. Platform adapters may also

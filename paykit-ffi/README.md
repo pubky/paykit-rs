@@ -386,7 +386,9 @@ and grant authorization failure. Relay delivery completes before grant
 approval begins, so a relay or encryption failure does not authorize the
 requesting server. The integrating application owns its payload serialization
 and semantic validation; Paykit owns the common cryptographic transport and
-approval ordering.
+approval ordering. For a signup request, the invalid auth URL case also covers
+a homeserver that the approval rules refuse and a homeserver lookup that
+failed, which can succeed on a later attempt.
 
 Swift integration shape:
 
