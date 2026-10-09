@@ -253,6 +253,55 @@ where
         self.enqueue_raw_payment_request(counterparty, &event).await
     }
 
+    /// Queue a Payment Request once using a caller-persisted Payment Request ID.
+    ///
+    /// Persist the ID, counterparty, and exact original `terms` before calling.
+    /// Within this identity's shared SDK state, the ID is bound to the creating
+    /// App, counterparty, and exact canonical terms (including metadata, decimal
+    /// text, timestamps, and endpoint order). Reusing it with different valid input
+    /// returns [`PaykitSdkError::Policy`], even after expiry or a terminal state.
+    /// IDs already used by received proposals cannot create a local proposal.
+    ///
+    /// A matching retry returns the current derived record with the original
+    /// proposal Event ID and outbound message ID, without enqueueing or resetting
+    /// delivery state. These IDs remain available if subsequent events invalidate
+    /// the lifecycle; they do not make the record actionable.
+    /// Lookup, insertion, and result derivation are atomic. Retry
+    /// with the same input after an uncertain commit or a caller restart. This
+    /// guarantee relies on retaining the identity's Event Message history; it
+    /// does not survive deleting that state or restoring a backup before creation.
+    ///
+    /// Every call requires current session, identity, App capability, and link
+    /// checks. Session creation, capability scope, and key rotation remain the
+    /// caller's responsibility. The caller must establish counterparty support
+    /// for conversion and payment deadlines. Success describes the local queue,
+    /// not delivery, payment authorization, or counterparty processing.
+    pub async fn propose_payment_request_with_id(
+        &self,
+        counterparty: PubkyPublicKey,
+        payment_request_id: PaymentRequestId,
+        terms: PaymentRequestTerms,
+    ) -> Result<PaymentRequestRecord> {
+        self.with_storage_operation(Box::pin(async {
+            let session = self.ensure_private_outbound_ready(&counterparty).await?;
+            let identity = session.public_key()?;
+            let request = PaymentRequest::new(EventId::new_v4(), payment_request_id, terms);
+            self.storage
+                .transaction(|tx| {
+                    crate::domain::payment_requests::enqueue_idempotent_payment_request(
+                        tx,
+                        &counterparty,
+                        &self.config.app_id,
+                        &request,
+                        &identity,
+                        self.clock.now(),
+                    )
+                })
+                .await
+        }))
+        .await
+    }
+
     /// Claim a received Payment Request before beginning payment preparation.
     ///
     /// The shared claim hides the work from other local Paykit Apps. It remains
