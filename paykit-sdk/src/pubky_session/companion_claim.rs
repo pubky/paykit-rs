@@ -15,8 +15,8 @@ use thiserror::Error;
 use url::Url;
 
 use super::{
-    validate_auth_url_capabilities, validate_auth_url_client_id, validate_grant_auth_url,
-    PubkySessionBootstrap,
+    approve_checked_auth, validate_auth_url_capabilities, validate_auth_url_client_id,
+    validate_grant_auth_url, PubkySessionBootstrap,
 };
 use crate::PubkyLocalSecretKey;
 
@@ -98,7 +98,9 @@ impl PubkyAuthCompanionClaim {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum PubkyAuthCompanionClaimApprovalError {
-    /// The URL, claim identifier, secret, relay, or capability request is invalid.
+    /// The URL, claim identifier, secret, relay, or capability request is
+    /// invalid, or a signup request's homeserver was refused or could not be
+    /// checked. Nothing was delivered.
     #[error("invalid Pubky Auth companion request: {reason}")]
     InvalidAuthUrl {
         /// Redacted validation detail.
@@ -146,9 +148,15 @@ impl PubkySessionBootstrap {
     /// The claim is delivered before the Pubky grant. A claim
     /// validation, encryption, or relay delivery failure therefore leaves the
     /// requesting server unauthorized. Pubky client timeout configuration
-    /// remains the caller's responsibility. For a signup request, approval
-    /// creates the identity on its requested homeserver after claim delivery
-    /// and before issuing the application grant.
+    /// remains the caller's responsibility.
+    ///
+    /// A signup request follows the homeserver rules of
+    /// [`Self::approve_auth`], checked before the claim is delivered. A
+    /// request that those rules refuse, or whose homeserver lookup fails, is
+    /// reported as `InvalidAuthUrl` and receives neither the claim nor the
+    /// grant. An identity with no homeserver record is signed up on the
+    /// requested homeserver after claim delivery and before the application
+    /// grant is approved.
     pub async fn approve_auth_with_companion_claim(
         &self,
         auth_url: &str,
@@ -158,11 +166,18 @@ impl PubkySessionBootstrap {
     ) -> Result<(), PubkyAuthCompanionClaimApprovalError> {
         validate_auth_url_client_id(auth_url, &self.client_id).map_err(invalid_auth_url)?;
         let request = parse_companion_auth_request(auth_url, expected_capabilities, claim)?;
+        // A request that approval would refuse must not receive the signed
+        // claim, so the approval checks run before it leaves this device.
+        let signer = self.pubky.signer(secret_key.keypair());
+        let signup = self
+            .check_auth_approval(auth_url, expected_capabilities, &signer)
+            .await
+            .map_err(invalid_auth_url)?;
         let signed_claim = encode_signed_claim(claim, &request.secret, secret_key);
         let encrypted_claim = encrypt_claim(&signed_claim, &request.secret)?;
         self.deliver_companion_claim(&request, claim.claim_type(), &encrypted_claim)
             .await?;
-        self.approve_auth(auth_url, expected_capabilities, secret_key)
+        approve_checked_auth(&signer, auth_url, signup)
             .await
             .map_err(
                 |err| PubkyAuthCompanionClaimApprovalError::AuthorizationFailure {

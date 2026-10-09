@@ -6559,8 +6559,24 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
      * Approve a Pubky auth URL with this local secret key.
      *
      * The request client ID must match this bootstrap's client ID.
-     * A signup request creates the identity on its requested homeserver before
-     * approving the application grant.
+     *
+     * A signup request names a homeserver chosen by the requester, so
+     * approval never moves an identity away from a homeserver record that
+     * PKARR still holds. Approval fails with a policy error when the record
+     * names a different homeserver, and approves the application grant
+     * without signing up again when it names the requested one. If the record
+     * no longer resolves but is still cached, approval fails with an identity
+     * error; call `republish_identity` and approve again. Only when no record
+     * is found is the identity signed up on the requested homeserver before
+     * the application grant is approved.
+     *
+     * A failed lookup, or a signup that the requested homeserver rejects
+     * (including because the account already exists), fails the approval and
+     * publishes nothing. To restore the record of an existing account, call
+     * `sign_up` with a homeserver the caller already trusts, not one taken
+     * from the auth URL. A record that no reachable relay caches counts as
+     * none, so a caller that knows the identity's homeserver should compare
+     * it with the request's `homeserver_public_key` before approving.
      */
     func approveAuth(authUrl: String, expectedCapabilities: String, localSecretKey: PubkyLocalSecretKey) async throws
 
@@ -6569,7 +6585,9 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
      *
      * This high-level operation owns validation, request-bound signing,
      * channel derivation, encryption, relay delivery, and approval ordering.
-     * The request client ID must match this bootstrap's client ID.
+     * The request client ID must match this bootstrap's client ID. A signup
+     * request follows the homeserver rules of `approve_auth`, checked before
+     * the claim is delivered.
      */
     func approveAuthWithCompanionClaim(authUrl: String, expectedCapabilities: String, localSecretKey: PubkyLocalSecretKey, claim: PubkyAuthCompanionClaim) async throws
 
@@ -6608,6 +6626,9 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
 
     /**
      * Sign up on a homeserver and return session access material.
+     *
+     * Signing up an identity that already has an account on that homeserver
+     * publishes its homeserver record again.
      */
     func signUp(localSecretKey: PubkyLocalSecretKey, homeserverPublicKey: String, signupCode: String?, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
@@ -6707,8 +6728,24 @@ public static func withPubkyClientConfig(clientId: String, pubkyClient: PubkyCli
      * Approve a Pubky auth URL with this local secret key.
      *
      * The request client ID must match this bootstrap's client ID.
-     * A signup request creates the identity on its requested homeserver before
-     * approving the application grant.
+     *
+     * A signup request names a homeserver chosen by the requester, so
+     * approval never moves an identity away from a homeserver record that
+     * PKARR still holds. Approval fails with a policy error when the record
+     * names a different homeserver, and approves the application grant
+     * without signing up again when it names the requested one. If the record
+     * no longer resolves but is still cached, approval fails with an identity
+     * error; call `republish_identity` and approve again. Only when no record
+     * is found is the identity signed up on the requested homeserver before
+     * the application grant is approved.
+     *
+     * A failed lookup, or a signup that the requested homeserver rejects
+     * (including because the account already exists), fails the approval and
+     * publishes nothing. To restore the record of an existing account, call
+     * `sign_up` with a homeserver the caller already trusts, not one taken
+     * from the auth URL. A record that no reachable relay caches counts as
+     * none, so a caller that knows the identity's homeserver should compare
+     * it with the request's `homeserver_public_key` before approving.
      */
 open func approveAuth(authUrl: String, expectedCapabilities: String, localSecretKey: PubkyLocalSecretKey)async throws   {
     return
@@ -6732,7 +6769,9 @@ open func approveAuth(authUrl: String, expectedCapabilities: String, localSecret
      *
      * This high-level operation owns validation, request-bound signing,
      * channel derivation, encryption, relay delivery, and approval ordering.
-     * The request client ID must match this bootstrap's client ID.
+     * The request client ID must match this bootstrap's client ID. A signup
+     * request follows the homeserver rules of `approve_auth`, checked before
+     * the claim is delivered.
      */
 open func approveAuthWithCompanionClaim(authUrl: String, expectedCapabilities: String, localSecretKey: PubkyLocalSecretKey, claim: PubkyAuthCompanionClaim)async throws   {
     return
@@ -6846,6 +6885,9 @@ open func signIn(localSecretKey: PubkyLocalSecretKey, requiredCapabilities: Stri
 
     /**
      * Sign up on a homeserver and return session access material.
+     *
+     * Signing up an identity that already has an account on that homeserver
+     * publishes its homeserver record again.
      */
 open func signUp(localSecretKey: PubkyLocalSecretKey, homeserverPublicKey: String, signupCode: String?, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
     return
@@ -21320,7 +21362,9 @@ public enum PubkyAuthCompanionClaimApprovalError: Swift.Error {
 
 
     /**
-     * The URL, claim type, secret, relay, or capability request is invalid.
+     * The URL, claim type, secret, relay, or capability request is invalid,
+     * or a signup request's homeserver was refused or could not be checked.
+     * Nothing was delivered.
      */
     case InvalidAuthUrl(
         /**
@@ -25549,10 +25593,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_session_secret() != 34434) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth() != 56539) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth() != 27473) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim() != 38549) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth_with_companion_claim() != 3309) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_import_session() != 34968) {
@@ -25567,7 +25611,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_in() != 15662) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_up() != 31538) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_up() != 13465) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_start_sign_in_auth() != 47023) {
