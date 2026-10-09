@@ -7,15 +7,39 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+
+- `forget_peer` in Rust and `forgetPeer` in Swift and Kotlin, which deletes what
+  a `Blocked` counterparty sent when the local identity never acted on it and
+  so releases it from its retained private stream item limit. It is local and
+  irreversible and applies to every Paykit App on the identity. It removes the
+  received private stream items with their Event Message dedupe and Receipt
+  Access records and the local Delivery Confirmations for them. It is refused
+  with `Policy` when the local identity has payment history with that
+  counterparty (a queued or sent Payment Request or Allowance Event Message, an
+  execution claim, a wallet accounting occurrence or association, or a
+  retrieved Receipt), because those records name only ids the counterparty
+  could send again with different terms. Such a counterparty stays refused at
+  the limit. Receipt Access that was never retrieved is deleted with its
+  Receipt Decryption Key. Apps that mock the generated SDK
+  protocol or interface must add the method.
+
+### Changed
+
+- Identify the retained private stream item limit refusal with
+  `PaykitSdkError::is_retention_limit_reached` and the `retention_limit_reached`
+  FFI policy code. It is still a `Policy` error and the generated Swift/Kotlin
+  error shape is unchanged.
+
 ### Security
 
 - Bound the private stream state one Linked Peer can make the SDK retain. Each
   counterparty may have at most 4,096 retained private stream items; a message
   past that limit fails `receive_private_messages` with a `Policy` error and
-  stays unacknowledged, and nothing is pruned. Re-sends identical to the first
-  stored copy of an Event Message are retained at most twice, then confirmed
-  again without new state; conflicting payloads are still retained and count
-  toward the limit.
+  stays unacknowledged, and nothing is pruned automatically. Re-sends identical
+  to the first stored copy of an Event Message are retained at most twice, then
+  confirmed again without new state; conflicting payloads are still retained
+  and count toward the limit.
 
 ## 0.1.0-rc72 - 2026-10-08
 

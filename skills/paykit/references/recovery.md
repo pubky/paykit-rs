@@ -95,6 +95,7 @@ Never edit queue statuses to force replay or assign fresh IDs to uncertain work.
 | `SharedStateBusy` | Back off after bounded lock contention or pending-write recovery; preserve credentials and intent, with no immediate retry loop |
 | Storage failure, corrupt state, or key-generation mismatch | Preserve evidence; repair access or use explicit backup recovery, never overwrite with empty state |
 | Invalid event, Event ID conflict, blocked peer, or policy rejection | Surface it; do not retry as a new event or silently unblock |
+| Policy code `retention_limit_reached` on a per-peer receive | Intake for that peer stays refused. Only with explicit user consent: `block_peer`, `forget_peer`, `unblock_peer`, then relink. `forget_peer` deletes what that peer sent and is refused when there is payment history with it; discard cached proposals for the peer first |
 
 Use structured errors, not debug-string matching. Some batch reports flatten
 underlying causes into generic codes; inspect peer/queue records or use a typed

@@ -329,13 +329,21 @@ Changed-state commits compact obsolete Private Payment Lists per counterparty
 and App ID. They retain the latest valid inbound list (including an empty clear),
 pending or prepared sends, reservation evidence, and the latest outbound intent,
 publication, and attempted send. Event Message history and deduplication records
-are not pruned, so the 64 MiB limit still applies to growing payment history.
+are never pruned automatically, so the 64 MiB limit still applies to growing
+payment history. Only an explicit
+[`forget_peer`](#forget-a-blocked-peer) removes them, for one blocked
+counterparty at a time and never for a counterparty the local identity has
+payment history with. Callback and custom storage do not compact superseded
+Private Payment Lists, so there every received list counts toward the limit
+below.
 
 Private stream intake bounds what one counterparty can add to that history:
 
 - At most 4,096 private stream items are retained per counterparty, counted
   across every message kind and parse status. A message that would exceed the
-  limit fails its receive transaction with `Policy`. Nothing is pruned, the
+  limit fails its receive transaction with `Policy`. `is_retention_limit_reached`
+  identifies that error in Rust and bindings report it with the
+  `retention_limit_reached` code. Nothing is pruned, the
   Encrypted Link checkpoint does not advance, and the message stays in the
   sender's outbox. Messages committed earlier in the same receive call stay
   committed. Intake from other counterparties is unaffected.
@@ -347,10 +355,15 @@ Private stream intake bounds what one counterparty can add to that history:
   payload is always retained as a conflict and counts toward the limit.
 
 At roughly 1.4 KB per item the limit pins about 6 MB per counterparty. It does
-not bound the total across counterparties, and no workflow yet releases a
-counterparty that reached it. `resolve_private_contact_payment` reports
-`RecoveryPending` for such a counterparty when no cached Private Payment List
-endpoint is available, because its refresh receive is refused.
+not bound the total across counterparties. Intake for a counterparty that
+reached it stays refused. The app can release it by blocking that counterparty
+and calling [`forget_peer`](#forget-a-blocked-peer), but only when the local
+identity has no payment history with it; no workflow yet releases a
+counterparty that has. `resolve_private_contact_payment` reports
+`RecoveryPending` for a counterparty at the limit when no cached Private Payment
+List endpoint is available, because its refresh receive is refused. Batch
+receive reports carry only error text, so apps classify the refusal with the
+single-counterparty `receive_private_messages`.
 
 Before each state PUT, the adapter publishes an empty, uniquely named marker
 under `/pub/paykit/v0/shared-state-writes/`. A confirmed PUT or an explicit PUT
@@ -789,7 +802,9 @@ counterparty before restoring them.
 
 ### PrivateStreamItem
 
-Append-only raw private stream item:
+Append-only raw private stream item. Stored items are removed only by Private
+Payment List compaction, which only Pubky shared-state storage performs, and by
+[`forget_peer`](#forget-a-blocked-peer):
 
 - local identity
 - counterparty
@@ -1226,6 +1241,71 @@ Payment Proofs, Allowance lifecycle events, and any other Event Message kinds.
 Allowance lifecycle/history views derive from retained events on the exact
 Encrypted Link and preserve invalid or unresolved evidence for recovery.
 
+### Forget A Blocked Peer
+
+Apart from Private Payment List compaction on Pubky shared-state storage,
+`forget_peer` is the only operation that deletes received private history. It
+forgets what a blocked counterparty sent when the local identity never acted on
+it, which releases such a counterparty from its retained stream item limit. It
+is local and irreversible, applies to every Paykit App on the identity, and
+notifies neither the counterparty nor other Paykit Apps.
+
+1. Claim and release the peer link operation lease in the storage transaction,
+   so a live peer operation makes the call fail with `ConcurrentUpdate`.
+2. Refuse with `Policy` unless the Linked Peer is `Blocked`. Blocking already
+   cleared the Encrypted Link, so no intake, send, or private automation can
+   run for that counterparty.
+3. Refuse with `Policy` when the local identity has payment history with that
+   counterparty: a local outbound Payment Request or Allowance Event Message
+   in any status, a Payment Request execution claim, a wallet accounting
+   occurrence or association, or a retrieved Receipt it issued. An accounting
+   watermark alone is not history: evaluating a received proposal writes one
+   without any local decision, and it only keeps trusted time from going
+   backwards.
+4. Remove, for that counterparty: private stream items (including its Private
+   Payment Lists), Event Message dedupe records, Receipt Access records, and
+   the local outbound Delivery Confirmations.
+5. Validate the resulting state and commit it in the same transaction.
+
+Payment history is never forgotten because local responses, execution claims,
+accounting records, and Receipts name only ids. An acceptance, for example,
+names the Payment Request ID or proposal Event ID it answers. With the dedupe
+records gone, the counterparty could send those ids again with different terms
+and the kept local record would pair with them. Refusing is also the only
+choice that never deletes a record of a payment the local identity made,
+claimed, or accounted for, or a Receipt it retrieved. A counterparty with
+payment history that reaches the limit therefore stays refused; releasing it
+needs a retention design that is out of scope here.
+
+Receipt Access that was never retrieved is removed with its Receipt Decryption
+Key, and the issuer does not send it again. The SDK holds no other record of a
+payment made without a Payment Request, so an app retrieves any Receipt it
+needs before blocking. A retrieved Receipt is payment history, so `forget_peer`
+is then refused for that counterparty.
+
+Delivery Confirmations are removed with the Event Messages they confirm. This
+matters for confirmations not yet delivered: sent after a later relink, one
+would tell the counterparty that a forgotten Event Message is still held. An
+Event Message whose confirmation already reached the counterparty is not sent
+again.
+
+Everything else is kept: the `Blocked` Linked Peer record and its pinned Noise
+key authorization, the Encrypted Link state record and generation, local
+outbound Private Payment Lists and Payment Endpoint Reservations, Receipt
+issuance records with their outbound Receipt Access, Contact Records, and every
+id counter. Stream item ids are never reused.
+
+After the call the counterparty stays `Blocked`. Private workflows resume only
+after `unblock_peer` and a fresh Encrypted Link Handshake. Ids from the
+forgotten history are not reserved: the counterparty can reuse a Payment Request
+ID, Allowance ID, or Event ID with different terms, and such a message is an
+ordinary new proposal that waits for a local decision. Other Paykit Apps and
+devices on the identity are not told that a forget happened. Every app
+therefore binds an approval to the proposal it displayed, for example by its
+`proposal_stream_item_id`, which is never reused, and reads the record again
+immediately before accepting. A backup exported before the call still contains
+the forgotten history and restores it.
+
 ### Resolve Public Payment
 
 `resolve_public_contact_payment` fetches the counterparty App Registry and the
@@ -1606,7 +1686,9 @@ SDK errors should be structured:
 - `NotFound`: required local or Pubky resource is missing
 - `Protocol`: invalid Paykit message, conflict, or unsupported version
 - `Policy`: operation blocked by configuration, privacy policy, or a
-  per-counterparty retention limit
+  per-counterparty retention limit. The retention limit refusal carries a typed
+  cause (`is_retention_limit_reached`) and the binding code
+  `retention_limit_reached`
 - `PaymentAdapter`: payment adapter failure
 - `RecoveryRequired`: local state is inconsistent and automatic execution is
   blocked until recovery completes

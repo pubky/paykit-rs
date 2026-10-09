@@ -296,6 +296,39 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
+    /// Forget what a blocked counterparty sent, when the local identity never
+    /// acted on it.
+    ///
+    /// Local and irreversible, for every Paykit App on the identity; neither
+    /// the counterparty nor other apps are notified. It releases a counterparty
+    /// whose receive fails with the `retention_limit_reached` policy code.
+    ///
+    /// Fails with a policy error unless the counterparty is Blocked, and when
+    /// the local identity has payment history with it: a queued or sent
+    /// Payment Request or Allowance message, a Payment Request execution claim,
+    /// a wallet accounting occurrence or association, or a retrieved Receipt.
+    /// Such history is never forgotten.
+    ///
+    /// Removes the private stream items received from the counterparty,
+    /// including its Private Payment Lists, with their dedupe and Receipt
+    /// Access records and the Delivery Confirmations for them. Receipt Access
+    /// that was never retrieved is lost with its decryption key. Everything
+    /// else is kept.
+    ///
+    /// Resume by unblocking the peer and linking again. Ids from the forgotten
+    /// history are not reserved: a proposal that reuses one is new input, so
+    /// read it again before accepting.
+    pub async fn forget_peer(
+        &self,
+        counterparty: String,
+    ) -> Result<FfiLinkedPeerRecord, PaykitFfiError> {
+        self.runtime
+            .forget_peer(parse_public_key(counterparty)?)
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
     /// Start an Encrypted Link Handshake as the initiator.
     pub async fn initiate_link_with_peer(
         &self,
