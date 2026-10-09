@@ -2,7 +2,7 @@ use paykit_sdk::{
     PaykitSdk, PaykitSdkConfig, PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
     StorageAdapter, PAYKIT_SESSION_CAPABILITIES,
 };
-use pubky_testnet::pubky::Keypair;
+use pubky_testnet::pubky::{pkarr::ResolvePolicy, Keypair};
 
 use crate::harness::{
     build_testnet, session_bootstrap, TestUser, TestnetPaymentAdapter, TestnetSessionProvider,
@@ -15,6 +15,7 @@ async fn test_external_grant_signup_retries_after_account_creation() {
     let testnet = build_testnet().await;
     let pubky = testnet.sdk().expect("testnet Pubky client");
     let identity_keypair = Keypair::random();
+    let identity_public_key = identity_keypair.public_key();
     let identity_secret = PubkyLocalSecretKey::new(identity_keypair.secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
     pubky
@@ -22,6 +23,12 @@ async fn test_external_grant_signup_retries_after_account_creation() {
         .signup(&homeserver.to_public_key().unwrap(), None)
         .await
         .expect("account setup should succeed before the retried grant flow");
+    let published_record = pubky
+        .client()
+        .pkarr()
+        .resolve(&identity_public_key, ResolvePolicy::NetworkOnly)
+        .await
+        .expect("signup should publish the identity record");
     let bootstrap = session_bootstrap(&testnet, TEST_CLIENT_ID);
     let capabilities = PAYKIT_SESSION_CAPABILITIES;
 
@@ -40,6 +47,98 @@ async fn test_external_grant_signup_retries_after_account_creation() {
     assert!(completed.access.session.as_grant().is_some());
     assert_eq!(completed.public_key, identity_secret.public_key());
     assert_eq!(completed.client_id, TEST_CLIENT_ID);
+    // The identity already publishes this homeserver, so approval leaves its
+    // signed record exactly as it was.
+    let record_after_approval = testnet
+        .sdk()
+        .expect("testnet Pubky client")
+        .client()
+        .pkarr()
+        .resolve(&identity_public_key, ResolvePolicy::NetworkOnly)
+        .await
+        .expect("identity record should still resolve");
+    assert!(
+        record_after_approval.as_bytes() == published_record.as_bytes(),
+        "approval republished the identity record"
+    );
+}
+
+#[tokio::test]
+async fn test_external_grant_signup_creates_account_for_new_identity() {
+    let testnet = build_testnet().await;
+    let identity_keypair = Keypair::random();
+    let identity_public_key = identity_keypair.public_key();
+    let identity_secret = PubkyLocalSecretKey::new(identity_keypair.secret_key());
+    let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
+    let bootstrap = session_bootstrap(&testnet, TEST_CLIENT_ID);
+    let capabilities = PAYKIT_SESSION_CAPABILITIES;
+
+    let request = bootstrap
+        .start_sign_up_auth(capabilities, &homeserver, None)
+        .await
+        .expect("grant signup request should start");
+    let authorization_url = request.authorization_url().to_owned();
+    let (completed, approved) = tokio::join!(
+        request.complete(Some(identity_secret.clone()), capabilities),
+        bootstrap.approve_auth(&authorization_url, capabilities, &identity_secret),
+    );
+    approved.expect("grant signup request should be approved");
+    let completed = completed.expect("grant signup request should complete");
+
+    assert_eq!(completed.public_key, identity_secret.public_key());
+    assert_eq!(completed.client_id, TEST_CLIENT_ID);
+    let published_homeserver = testnet
+        .sdk()
+        .expect("testnet Pubky client")
+        .get_homeserver_of(&identity_public_key)
+        .await
+        .expect("identity record should resolve");
+    assert_eq!(
+        published_homeserver,
+        Some(homeserver.to_public_key().unwrap())
+    );
+}
+
+#[tokio::test]
+async fn test_sign_up_retries_after_account_creation() {
+    let testnet = build_testnet().await;
+    let pubky = testnet.sdk().expect("testnet Pubky client");
+    let identity_keypair = Keypair::random();
+    let identity_public_key = identity_keypair.public_key();
+    let identity_secret = PubkyLocalSecretKey::new(identity_keypair.secret_key());
+    let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
+    let bootstrap = session_bootstrap(&testnet, TEST_CLIENT_ID);
+    let capabilities = PAYKIT_SESSION_CAPABILITIES;
+
+    bootstrap
+        .sign_up(&identity_secret, &homeserver, None, capabilities)
+        .await
+        .expect("first signup should succeed");
+    let first_record = pubky
+        .client()
+        .pkarr()
+        .resolve(&identity_public_key, ResolvePolicy::NetworkOnly)
+        .await
+        .expect("signup should publish the identity record");
+    let retried = bootstrap
+        .sign_up(&identity_secret, &homeserver, None, capabilities)
+        .await
+        .expect("signup should succeed again for an existing account");
+
+    assert_eq!(retried.public_key, identity_secret.public_key());
+    assert_eq!(retried.client_id, TEST_CLIENT_ID);
+    // The homeserver chosen by the caller is published again, which is how a
+    // caller restores the record of an existing account.
+    let restored_record = pubky
+        .client()
+        .pkarr()
+        .resolve(&identity_public_key, ResolvePolicy::NetworkOnly)
+        .await
+        .expect("identity record should still resolve");
+    assert!(
+        restored_record.more_recent_than(&first_record),
+        "repeated signup did not publish the identity record again"
+    );
 }
 
 #[tokio::test]
