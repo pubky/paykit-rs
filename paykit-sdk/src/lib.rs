@@ -110,7 +110,9 @@ pub use pubky_session::{
     PubkySessionSecret, PAYKIT_AUTHORIZER_SESSION_CAPABILITIES, PAYKIT_SESSION_CAPABILITIES,
 };
 #[doc(inline)]
-pub use runtime::{Clock, PaykitAppRemovalBlockers, PaykitSdk, SystemClock};
+pub use runtime::{
+    Clock, PaykitAppRemovalBlockers, PaykitSdk, PaykitStateObservation, SystemClock,
+};
 #[doc(inline)]
 pub use storage::{InMemoryStorage, PubkySharedStateStorage, StorageAdapter, StorageTransaction};
 

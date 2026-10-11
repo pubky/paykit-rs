@@ -392,27 +392,36 @@ where
         };
         self.storage
             .transaction(|tx| {
-                let snapshot = tx.export_storage_state();
-                let mut conflicts = HashMap::new();
-                let mut records = snapshot
-                    .receipt_records
-                    .into_values()
-                    .filter(|record| record.recipient_public_key == local_public_key)
-                    .filter(|record| {
-                        !snapshot
-                            .linked_peers
-                            .get(&record.issuer)
-                            .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
-                    })
-                    .filter(|record| {
-                        Self::validate_receipt_record_accesses(tx, record, None, &mut conflicts)
-                            .is_ok()
-                    })
-                    .collect::<Vec<_>>();
-                records.sort_by_key(|record| Reverse(record.retrieved_at));
-                Ok(records)
+                Ok(Self::receipt_observations_in_transaction(
+                    tx,
+                    &local_public_key,
+                ))
             })
             .await
+    }
+
+    pub(in crate::runtime) fn receipt_observations_in_transaction(
+        tx: &dyn StorageTransaction,
+        local_public_key: &PubkyPublicKey,
+    ) -> Vec<ReceiptRecord> {
+        let snapshot = tx.export_storage_state();
+        let mut conflicts = HashMap::new();
+        let mut records = snapshot
+            .receipt_records
+            .into_values()
+            .filter(|record| &record.recipient_public_key == local_public_key)
+            .filter(|record| {
+                !snapshot
+                    .linked_peers
+                    .get(&record.issuer)
+                    .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
+            })
+            .filter(|record| {
+                Self::validate_receipt_record_accesses(tx, record, None, &mut conflicts).is_ok()
+            })
+            .collect::<Vec<_>>();
+        records.sort_by_key(|record| Reverse(record.retrieved_at));
+        records
     }
 
     async fn available_receipt_apps_for_peer(

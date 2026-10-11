@@ -698,6 +698,7 @@ mod identity;
 mod key_rotation;
 mod linked_peers;
 mod not_found_classifier;
+mod observation;
 mod outbound_private;
 mod payment_requests;
 mod payment_resolution;

@@ -63,3 +63,4 @@ PaykitProfileRecord
 PubkyProfileRecord
 PaykitBlobRecord
 SdkStateBlobSnapshot
+PaykitStateObservation

@@ -2011,6 +2011,17 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func observeEncryptedLinkRecoveryMarker(counterparty: String) async throws  -> EncryptedLinkRecoveryMarkerReport
 
     /**
+     * Refresh display observations together through one shared-state operation.
+     *
+     * Requires an initialized identity and live private-link-capable session.
+     * Call from a coalesced refresh worker; display the app's last cached view
+     * without waiting for this operation. The result does not authorize payment,
+     * refresh peer messages or confirm current remote app permissions. Discard
+     * cached views when session access, identity or key generation changes.
+     */
+    func observeState() async throws  -> PaykitStateObservation
+
+    /**
      * Return completed shared-state backup metadata without storage or session calls.
      *
      * This is an observation, not current remote state or authorization. Returns
@@ -3655,6 +3666,32 @@ open func observeEncryptedLinkRecoveryMarker(counterparty: String)async throws  
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeEncryptedLinkRecoveryMarkerReport_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Refresh display observations together through one shared-state operation.
+     *
+     * Requires an initialized identity and live private-link-capable session.
+     * Call from a coalesced refresh worker; display the app's last cached view
+     * without waiting for this operation. The result does not authorize payment,
+     * refresh peer messages or confirm current remote app permissions. Discard
+     * cached views when session access, identity or key generation changes.
+     */
+open func observeState()async throws  -> PaykitStateObservation  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_observe_state(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaykitStateObservation_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -12425,6 +12462,123 @@ public func FfiConverterTypePaykitSdkConfig_lift(_ buf: RustBuffer) throws -> Pa
 #endif
 public func FfiConverterTypePaykitSdkConfig_lower(_ value: PaykitSdkConfig) -> RustBuffer {
     return FfiConverterTypePaykitSdkConfig.lower(value)
+}
+
+
+/**
+ * Stored Paykit data for display, never for payment authorization or execution.
+ */
+public struct PaykitStateObservation {
+    /**
+     * Identity owning this observation; discard cached views on identity changes.
+     */
+    public var publicKey: String
+    /**
+     * Paykit key generation; discard cached views when the generation changes.
+     */
+    public var keyGeneration: UInt64
+    /**
+     * RFC3339 local observation time, not a remote freshness guarantee.
+     */
+    public var observedAt: String
+    /**
+     * Previously stored Contact Records.
+     */
+    public var contacts: [ContactRecord]
+    /**
+     * Previously stored link states, not current peer reachability.
+     */
+    public var linkedPeers: [LinkedPeerRecord]
+    /**
+     * Previously stored Payment Requests from non-blocked counterparties.
+     */
+    public var paymentRequests: [PaymentRequestRecord]
+    /**
+     * Previously decrypted Receipts with valid stored access.
+     */
+    public var receipts: [ReceiptRecord]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Identity owning this observation; discard cached views on identity changes.
+         */publicKey: String,
+        /**
+         * Paykit key generation; discard cached views when the generation changes.
+         */keyGeneration: UInt64,
+        /**
+         * RFC3339 local observation time, not a remote freshness guarantee.
+         */observedAt: String,
+        /**
+         * Previously stored Contact Records.
+         */contacts: [ContactRecord],
+        /**
+         * Previously stored link states, not current peer reachability.
+         */linkedPeers: [LinkedPeerRecord],
+        /**
+         * Previously stored Payment Requests from non-blocked counterparties.
+         */paymentRequests: [PaymentRequestRecord],
+        /**
+         * Previously decrypted Receipts with valid stored access.
+         */receipts: [ReceiptRecord]) {
+        self.publicKey = publicKey
+        self.keyGeneration = keyGeneration
+        self.observedAt = observedAt
+        self.contacts = contacts
+        self.linkedPeers = linkedPeers
+        self.paymentRequests = paymentRequests
+        self.receipts = receipts
+    }
+}
+
+#if compiler(>=6)
+extension PaykitStateObservation: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaykitStateObservation: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaykitStateObservation {
+        return
+            try PaykitStateObservation(
+                publicKey: FfiConverterString.read(from: &buf),
+                keyGeneration: FfiConverterUInt64.read(from: &buf),
+                observedAt: FfiConverterString.read(from: &buf),
+                contacts: FfiConverterSequenceTypeContactRecord.read(from: &buf),
+                linkedPeers: FfiConverterSequenceTypeLinkedPeerRecord.read(from: &buf),
+                paymentRequests: FfiConverterSequenceTypePaymentRequestRecord.read(from: &buf),
+                receipts: FfiConverterSequenceTypeReceiptRecord.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PaykitStateObservation, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.publicKey, into: &buf)
+        FfiConverterUInt64.write(value.keyGeneration, into: &buf)
+        FfiConverterString.write(value.observedAt, into: &buf)
+        FfiConverterSequenceTypeContactRecord.write(value.contacts, into: &buf)
+        FfiConverterSequenceTypeLinkedPeerRecord.write(value.linkedPeers, into: &buf)
+        FfiConverterSequenceTypePaymentRequestRecord.write(value.paymentRequests, into: &buf)
+        FfiConverterSequenceTypeReceiptRecord.write(value.receipts, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaykitStateObservation_lift(_ buf: RustBuffer) throws -> PaykitStateObservation {
+    return try FfiConverterTypePaykitStateObservation.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaykitStateObservation_lower(_ value: PaykitStateObservation) -> RustBuffer {
+    return FfiConverterTypePaykitStateObservation.lower(value)
 }
 
 
@@ -25277,6 +25431,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_observe_encrypted_link_recovery_marker() != 51945) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_observe_state() != 47165) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_observed_backup_state_revision() != 29510) {
