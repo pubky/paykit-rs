@@ -133,12 +133,21 @@ outside the backup. The live encrypted shared resource and backups are different
 with current access, apps reopen live state after sign-out/reinstall; keys alone
 cannot reconstruct deleted private history.
 
-Normal `restore_backup_state(backup)` / `restoreBackupString(backup)` requires
-empty or matching identity-only storage. Never overwrite healthy shared state
-with a stale app backup. Republish participating App Registry entries after
-restore and reconcile complete wallet execution history before automation.
-Restore retains peer authorization pins; a saved snapshot does not bypass checks
-against current signed keys.
+Normal `restore_backup_state(backup, link_policy)` /
+`restoreBackupString(backup, linkPolicy)` requires empty or matching
+identity-only storage. Never overwrite healthy shared state with a stale app
+backup. Republish participating App Registry entries after restore and reconcile
+complete wallet execution history before automation. Restore retains peer
+authorization pins; a saved snapshot does not bypass checks against current
+signed keys.
+
+The restored link policy is required because the SDK cannot tell whether a
+backup is current. Pass `RequireRecovery` unless the app knows no runtime for
+this identity sent or received private messages after the backup was exported,
+then relink every peer in `recovery_required_peers`. The SDK also sends on its
+own (Delivery Confirmations, Private Payment List syncs, retries). `Resume` on a
+stale backup reuses a transport key and nonce and overwrites a published
+message slot.
 
 For missing/corrupt Pubky shared state, use
 `recover_shared_state_from_backup(backup, replacement_key)` (FFI takes an

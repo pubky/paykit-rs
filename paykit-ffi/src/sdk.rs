@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex};
 
-use paykit_sdk::{IdentityStatus, PaykitSdk, PubkySharedStateStorage, RestoreReport};
+use paykit_sdk::{
+    IdentityStatus, PaykitSdk, PubkySharedStateStorage, RestoreReport, RestoredLinkPolicy,
+};
 
 use crate::config::{default_pubky_client_config, FfiPaykitSdkConfig, FfiPubkyClientConfig};
 use crate::errors::{storage_error, validation_error, PaykitFfiError};
@@ -35,6 +37,34 @@ pub struct FfiObservedBackupStateRevision {
     pub backup_revision: String,
 }
 
+/// How backup restore treats saved Encrypted Link and handshake snapshots.
+///
+/// A backup cannot prove that no private message was sent after its export, and
+/// the SDK cannot check that for the app. Every restore states this choice.
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfiRestoredLinkPolicy {
+    /// Resume each Encrypted Link and handshake from its saved snapshot when its
+    /// retained authorization still matches.
+    ///
+    /// Safe only if no runtime for this identity sent or received private
+    /// messages, or advanced an Encrypted Link Handshake, after the backup was
+    /// exported. The SDK also sends on its own: Delivery Confirmations for
+    /// received Event Messages, Private Payment List syncs (repeated after each
+    /// restart), and retries. Otherwise the next send reuses a transport key and
+    /// nonce and overwrites a published outbox slot, which leaks plaintext to
+    /// anyone holding both ciphertexts and loses one of the two messages.
+    /// Holding the latest available backup is not enough if the exporting
+    /// runtime ran again.
+    Resume,
+    /// Discard saved snapshots and require a fresh Encrypted Link Handshake.
+    ///
+    /// Use for an old or uncertain backup. Every peer that had a snapshot is
+    /// listed in `recovery_required_peers` and restored as recovery-required; a
+    /// blocked peer stays blocked. Private messages the backup had not yet
+    /// received are not read from the old link.
+    RequireRecovery,
+}
+
 /// Report returned after restoring SDK-managed backup state.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct FfiRestoreReport {
@@ -64,7 +94,7 @@ pub struct FfiRestoreReport {
     pub receipt_records: u64,
     /// Number of restored local receipt issuance records.
     pub receipt_issuance_records: u64,
-    /// Counterparties restored as recovery-required.
+    /// Counterparties that need a fresh Encrypted Link Handshake after restore.
     pub recovery_required_peers: Vec<String>,
 }
 
@@ -323,13 +353,18 @@ impl FfiPaykitSdk {
     }
 
     /// Restore SDK-managed backup state from an opaque blob.
+    ///
+    /// `link_policy` decides whether saved Encrypted Links resume or require a
+    /// fresh Encrypted Link Handshake. Resuming a backup that is not current
+    /// reuses a transport key and nonce.
     pub async fn restore_backup_state(
         &self,
         backup: Arc<FfiSdkBackupBlob>,
+        link_policy: FfiRestoredLinkPolicy,
     ) -> Result<FfiRestoreReport, PaykitFfiError> {
         let backup = decode_backup_state(&backup.export_bytes())?;
         self.runtime
-            .restore_backup_state(backup)
+            .restore_backup_state(backup, link_policy.into())
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -358,13 +393,18 @@ impl FfiPaykitSdk {
     }
 
     /// Restore SDK-managed backup state from a hex string.
+    ///
+    /// `link_policy` decides whether saved Encrypted Links resume or require a
+    /// fresh Encrypted Link Handshake. Resuming a backup that is not current
+    /// reuses a transport key and nonce.
     pub async fn restore_backup_string(
         &self,
         backup: String,
+        link_policy: FfiRestoredLinkPolicy,
     ) -> Result<FfiRestoreReport, PaykitFfiError> {
         let bytes = hex::decode(backup.trim())
             .map_err(|err| validation_error(format!("invalid SDK backup string: {err}")))?;
-        self.restore_backup_state(Arc::new(FfiSdkBackupBlob::new(bytes)))
+        self.restore_backup_state(Arc::new(FfiSdkBackupBlob::new(bytes)), link_policy)
             .await
     }
 }
@@ -402,6 +442,15 @@ impl From<IdentityStatus> for FfiIdentityStatus {
         Self {
             public_key: value.public_key.map(|key| app_public_key(&key)),
             capability: value.capability.into(),
+        }
+    }
+}
+
+impl From<FfiRestoredLinkPolicy> for RestoredLinkPolicy {
+    fn from(value: FfiRestoredLinkPolicy) -> Self {
+        match value {
+            FfiRestoredLinkPolicy::Resume => Self::Resume,
+            FfiRestoredLinkPolicy::RequireRecovery => Self::RequireRecovery,
         }
     }
 }
