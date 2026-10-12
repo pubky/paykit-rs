@@ -87,6 +87,12 @@ pub enum PaykitFfiError {
 
 impl From<PaykitSdkError> for PaykitFfiError {
     fn from(err: PaykitSdkError) -> Self {
+        // Only the type of the cause selects this code; the cause is still dropped.
+        let policy_code = if err.is_retention_limit_reached() {
+            "retention_limit_reached"
+        } else {
+            "policy_error"
+        };
         match err {
             PaykitSdkError::SharedStateBusy { context, source } => {
                 callback_ffi_error(source.as_ref(), &context).unwrap_or_else(|| {
@@ -140,7 +146,7 @@ impl From<PaykitSdkError> for PaykitFfiError {
             },
             PaykitSdkError::Policy { context, source } => {
                 callback_ffi_error(source.as_ref(), &context).unwrap_or_else(|| Self::Policy {
-                    code: "policy_error".into(),
+                    code: policy_code.into(),
                     context,
                 })
             }

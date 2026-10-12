@@ -204,12 +204,49 @@ Common workflows:
   read-only, then committed atomically with their checkpoint only if the link and
   authorization remain current and no peer lease intervenes. App authorization
   updates share the first message commit. Recovery reloads state under a lease;
-  message processing remains one peer at a time
+  message processing remains one peer at a time. One call handles at most 100
+  messages; call again to drain more. Each counterparty may have at most 4,096
+  retained private stream items: past that, receive fails with a `Policy` error
+  for that counterparty only and its messages stay unacknowledged. Superseded
+  Private Payment Lists do not use up the limit: they are deleted before a
+  message is refused. The limit only bounds what a counterparty adds on its
+  own: it no longer applies once you have queued or sent that counterparty a
+  Payment Request, a Payment Request Acceptance, a Payment Proof, an Allowance
+  proposal, or an Allowance Acceptance, or while you have it saved as a
+  contact with `save_contact`. Save a payee you only pay through public Payment
+  Endpoints as a contact so its Receipt Access is never refused. Detect the
+  refusal with `PaykitSdkError::is_retention_limit_reached` on the
+  single-counterparty call; batch reports carry only error text
+- call `forget_peer` to delete what a blocked counterparty sent when you never
+  acted on it, for example an unsolicited flood that reached that limit. It
+  requires `block_peer` first, is local and irreversible, and applies to every
+  Paykit App on the identity. It is refused with `Policy` when you have payment
+  history with that counterparty (a Payment Request or Allowance message you
+  queued or sent, an execution claim, a wallet accounting occurrence or
+  association, or a retrieved Receipt), so it never deletes history you acted
+  on or a Receipt you retrieved, and cannot yet release such a counterparty
+  that is at the limit. It
+  deletes the received private stream items, including Private Payment Lists,
+  with their dedupe and Receipt Access records and your Delivery Confirmations
+  for them. That includes Receipt Access you have not retrieved, which the
+  issuer does not send again, so retrieve a Receipt you need before blocking; a
+  retrieved Receipt then counts as payment history. Resume with `unblock_peer`
+  and a fresh Encrypted Link Handshake; ids the counterparty sends again are
+  new proposals. `accept_allowance`, `accept_payment_request`, and
+  `claim_and_accept_payment_request` take the `proposal_stream_item_id` of the
+  record whose terms were approved and are refused with `Policy` when the
+  current proposal is a different stream item. Pass the id you displayed, not
+  one read just before the call. `claim_payment_request_for_execution` returns
+  the record it claimed; compare its `proposal_stream_item_id` with the one you
+  displayed before preparing a payment
 - list saved Payment Requests with `payment_requests` or `list_payment_requests`;
   all counterparties and filters use one shared-state read, without network intake
 - use `propose_allowance`, `accept_allowance`, `reject_allowance`, and
   `end_allowance` for durable lifecycle intent; drain the normal outbound queue
   and use `allowance_record` or `list_allowances` for derived views
+- pass `accept_allowance` the `proposal_stream_item_id` of the record whose
+  terms were approved, as displayed. On a `Policy` refusal for a different
+  stream item, read the record again and ask for approval again
 - call `resolve_private_contact_payment` for Private Payment List endpoints or
   `resolve_public_contact_payment` for public Payment Endpoints; each returns a
   source-specific result with ordered adapter-built `PaymentTarget` values;

@@ -127,12 +127,22 @@ async fn enqueue_allowance_acceptance(
     allowance_id: AllowanceId,
     now: DateTime<Utc>,
 ) -> crate::Result<AllowanceRecord> {
+    // Accept whichever proposal is current; a missing one still reaches the
+    // command's own checks. The expected-proposal check has its own tests.
+    let expected_proposal_stream_item_id = allowance_record(storage, &peer, &allowance_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|record| record.proposal_stream_item_id)
+        .unwrap_or_default();
     enqueue_allowance_response(
         storage,
         peer,
         app_id,
         allowance_id,
-        AllowanceResponse::Acceptance,
+        AllowanceResponse::Acceptance {
+            expected_proposal_stream_item_id,
+        },
         now,
     )
     .await
@@ -585,6 +595,57 @@ async fn test_allowance_acceptance_precondition_and_append_are_atomic() {
     assert_eq!(after.len(), before.len() + 1);
     assert_eq!(&after[..before.len()], before.as_slice());
     assert_eq!(after.last().unwrap().kind, "paykit.allowance_acceptance");
+}
+
+#[tokio::test]
+async fn test_allowance_acceptance_requires_expected_proposal_without_queue_mutation() {
+    let storage = registered_storage();
+    let peer = counterparty();
+    seed_active_link(&storage, peer.clone()).await;
+    persist_inbound(
+        &storage,
+        peer.clone(),
+        vec![proposal(PROPOSAL_ID, AllowanceRole::Allower)],
+        timestamp(),
+    )
+    .await;
+    let proposal_stream_item_id = derived(&storage, &peer)
+        .await
+        .proposal_stream_item_id
+        .unwrap();
+    let accept = |expected_proposal_stream_item_id: u64| {
+        enqueue_allowance_response(
+            &storage,
+            peer.clone(),
+            paykit_lib::PaykitAppId::new("bitkit").unwrap(),
+            allowance_id(),
+            AllowanceResponse::Acceptance {
+                expected_proposal_stream_item_id,
+            },
+            timestamp(),
+        )
+    };
+    let before = storage.snapshot().unwrap().outbound_private_messages;
+
+    let refused = accept(proposal_stream_item_id + 1).await;
+
+    assert!(matches!(refused, Err(PaykitSdkError::Policy { .. })));
+    assert_eq!(
+        storage.snapshot().unwrap().outbound_private_messages,
+        before
+    );
+    assert_eq!(
+        derived(&storage, &peer).await.state,
+        AllowanceLifecycleState::Proposed
+    );
+
+    let accepted = accept(proposal_stream_item_id).await.unwrap();
+
+    assert_eq!(accepted.state, AllowanceLifecycleState::Accepted);
+    assert_eq!(
+        storage.snapshot().unwrap().outbound_private_messages.len(),
+        before.len() + 1
+    );
 }
 
 #[tokio::test]

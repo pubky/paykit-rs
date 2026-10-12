@@ -31,6 +31,26 @@ async fn allowance(
         .expect("Allowance should exist on this exact Encrypted Link")
 }
 
+/// Queue acceptance for the proposal `local` currently holds from `counterparty`.
+async fn accept_allowance(
+    local: &TestUser,
+    counterparty: &TestUser,
+    allowance_id: &AllowanceId,
+) -> Result<paykit_sdk::AllowanceRecord, PaykitSdkError> {
+    let proposal_stream_item_id = allowance(local, counterparty, allowance_id)
+        .await
+        .proposal_stream_item_id
+        .expect("a received Allowance proposal should name its stream item");
+    local
+        .sdk
+        .accept_allowance(
+            counterparty.public_key.clone(),
+            allowance_id,
+            proposal_stream_item_id,
+        )
+        .await
+}
+
 /// Assert both peers derive the same lifecycle state from their own view of
 /// the exact Encrypted Link and agree on the transition's Event ID.
 async fn assert_lifecycle_state_shared(
@@ -76,9 +96,26 @@ async fn test_allowance_lifecycle_roundtrip_between_linked_peers() {
     assert_eq!(bob_proposed.state, AllowanceLifecycleState::Proposed);
     assert_eq!(bob_proposed.local_role, Some(AllowanceLocalRole::Allowee));
 
-    pair.bob
+    // An approval that names another proposal is refused and queues nothing.
+    let stale = pair
+        .bob
         .sdk
-        .accept_allowance(pair.alice.public_key.clone(), &accepted_allowance_id)
+        .accept_allowance(
+            pair.alice.public_key.clone(),
+            &accepted_allowance_id,
+            bob_proposed.proposal_stream_item_id.unwrap() + 1,
+        )
+        .await
+        .expect_err("acceptance must name the proposal Bob read");
+    assert!(matches!(stale, PaykitSdkError::Policy { .. }));
+    assert_eq!(
+        allowance(&pair.bob, &pair.alice, &accepted_allowance_id)
+            .await
+            .state,
+        AllowanceLifecycleState::Proposed
+    );
+
+    accept_allowance(&pair.bob, &pair.alice, &accepted_allowance_id)
         .await
         .expect("Bob should queue the Allowance acceptance");
     deliver(&pair.bob, &pair.alice).await;
@@ -254,9 +291,7 @@ async fn test_allowance_survives_restart_restore_and_link_recovery() {
         AllowanceHistoryStatus::RecoveryRequired
     );
 
-    let blocked = restored_bob
-        .sdk
-        .accept_allowance(pair.alice.public_key.clone(), &allowance_id)
+    let blocked = accept_allowance(&restored_bob, &pair.alice, &allowance_id)
         .await
         .expect_err("Allowance commands must fail closed during link recovery");
     assert!(matches!(blocked, PaykitSdkError::RecoveryRequired { .. }));
@@ -270,9 +305,7 @@ async fn test_allowance_survives_restart_restore_and_link_recovery() {
         assert_eq!(record.history_status, AllowanceHistoryStatus::Consistent);
     }
 
-    restored_bob
-        .sdk
-        .accept_allowance(pair.alice.public_key.clone(), &allowance_id)
+    accept_allowance(&restored_bob, &pair.alice, &allowance_id)
         .await
         .expect("restored Bob should continue the Allowance lifecycle");
     deliver(&restored_bob, &pair.alice).await;

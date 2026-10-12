@@ -219,6 +219,94 @@ async fn test_contact_batches_validate_before_atomic_write() {
 }
 
 #[tokio::test]
+async fn test_forget_peer_rewrites_blob_only_for_a_blocked_peer() {
+    struct BlobStore(Mutex<FfiSdkStateBlobSnapshot>);
+
+    impl FfiSdkStateBlobStore for BlobStore {
+        fn load_state_blob(&self) -> Result<Option<FfiSdkStateBlobSnapshot>, PaykitFfiError> {
+            Ok(Some(self.0.lock().unwrap().clone()))
+        }
+
+        fn save_state_blob_atomically(
+            &self,
+            blob: Arc<FfiSdkStateBlob>,
+            expected_revision: Option<String>,
+        ) -> Result<String, PaykitFfiError> {
+            let mut snapshot = self.0.lock().unwrap();
+            assert_eq!(
+                expected_revision.as_deref(),
+                Some(snapshot.revision.as_str())
+            );
+            let revision = next_test_revision(Some(&snapshot.revision));
+            *snapshot = FfiSdkStateBlobSnapshot {
+                blob,
+                revision: revision.clone(),
+            };
+            Ok(revision)
+        }
+    }
+
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let other = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let mut state = outbound_state(&[], 0);
+    state.private_stream_items = [&counterparty, &other]
+        .into_iter()
+        .zip(0..)
+        .map(|(owner, stream_item_id)| paykit_sdk::storage::PrivateStreamItemRecord {
+            stream_item_id,
+            counterparty: owner.clone(),
+            receive_batch_id: 0,
+            raw_json: r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"bitkit","payment_endpoints":{}}"#.into(),
+            parsed_version: Some(1),
+            parsed_kind: Some("paykit.private_payment_list".into()),
+            parsed_app_id: Some("bitkit".into()),
+            known_paykit_kind: Some("paykit.private_payment_list".into()),
+            parse_status: PrivateStreamParseStatus::Valid,
+            parse_error: None,
+            received_at: Utc.with_ymd_and_hms(2026, 6, 22, 12, 0, 0).unwrap(),
+        })
+        .collect();
+    state.next_receive_batch_id = 1;
+    state.next_private_stream_item_id = 2;
+    let store = Arc::new(BlobStore(Mutex::new(FfiSdkStateBlobSnapshot {
+        blob: Arc::new(FfiSdkStateBlob::new(encode_storage_state(&state).unwrap())),
+        revision: "revision-0".into(),
+    })));
+    let sdk = FfiPaykitSdk::new(
+        store.clone(),
+        Arc::new(NoSessionProvider),
+        default_config("bitkit".into()).unwrap(),
+    )
+    .unwrap();
+
+    // A counterparty that is not blocked keeps its history and nothing is written.
+    let error = sdk
+        .forget_peer(counterparty.to_app_key())
+        .await
+        .unwrap_err();
+    assert!(matches!(&error, PaykitFfiError::Policy { code, .. } if code == "policy_error"));
+    assert!(sdk.forget_peer("not-a-public-key".into()).await.is_err());
+    let unchanged = store.load_state_blob().unwrap().unwrap();
+    assert_eq!(unchanged.revision, "revision-0");
+    assert_eq!(
+        decode_storage_state(&unchanged.blob.export_bytes()).unwrap(),
+        state
+    );
+
+    sdk.block_peer(counterparty.to_app_key()).await.unwrap();
+    let record = sdk.forget_peer(counterparty.to_app_key()).await.unwrap();
+
+    assert_eq!(record.state, FfiLinkedPeerState::Blocked);
+    let snapshot = store.load_state_blob().unwrap().unwrap();
+    assert_eq!(snapshot.revision, "revision-2");
+    // Decoding validates the stored blob, as every later load will.
+    let stored = decode_storage_state(&snapshot.blob.export_bytes()).unwrap();
+    assert_eq!(stored.private_stream_items.len(), 1);
+    assert_eq!(stored.private_stream_items[0].counterparty, other);
+    assert_eq!(stored.next_private_stream_item_id, 2);
+}
+
+#[tokio::test]
 async fn test_shared_storage_operation_requires_active_session() {
     let config = default_pubky_client_config();
     let storage = FfiSdkStorageAdapter::PubkyShared(PubkySharedStateStorage::new(

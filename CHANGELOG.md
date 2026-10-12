@@ -7,6 +7,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc74 - 2026-10-12
+
+### Added
+
+- `forget_peer` in Rust and `forgetPeer` in Swift and Kotlin, which deletes what
+  a `Blocked` counterparty sent when the local identity never acted on it and
+  so releases it from its retained private stream item limit. It is local and
+  irreversible and applies to every Paykit App on the identity. It removes the
+  received private stream items with their Event Message dedupe and Receipt
+  Access records and the local Delivery Confirmations for them. It is refused
+  with `Policy` when the local identity has payment history with that
+  counterparty (a queued or sent Payment Request or Allowance Event Message, an
+  execution claim, a wallet accounting occurrence or association, or a
+  retrieved Receipt), because those records name only ids the counterparty
+  could send again with different terms. Such a counterparty stays refused if
+  it is at the limit. Receipt Access that was never retrieved is deleted with its
+  Receipt Decryption Key. Apps that mock the generated SDK
+  protocol or interface must add the method.
+
 ### Changed
 
 - **Breaking (Rust and FFI API):** `restore_backup_state` and the FFI
@@ -15,6 +34,26 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   discards saved Encrypted Link and handshake snapshots, lists the affected
   peers in `recovery_required_peers`, and leaves their queued private messages
   waiting for a fresh Encrypted Link Handshake. The backup format is unchanged.
+- **Breaking (Rust and FFI API):** `accept_allowance`,
+  `accept_payment_request`, and `claim_and_accept_payment_request`, and the FFI
+  `acceptAllowance`, `acceptPaymentRequest`, and
+  `claimAndAcceptPaymentRequest`, take a required
+  `expected_proposal_stream_item_id` (`expectedProposalStreamItemId`): the
+  `proposal_stream_item_id` of the record whose terms were approved, as
+  displayed. Acceptance is refused with `Policy` when the current proposal for
+  that id is a different stream item, so an approval cannot land on terms that
+  replaced the approved ones after `forget_peer`.
+- Identify the retained private stream item limit refusal with
+  `PaykitSdkError::is_retention_limit_reached` and the `retention_limit_reached`
+  FFI policy code. It is still a `Policy` error and the generated Swift/Kotlin
+  error shape is unchanged.
+
+### Fixed
+
+- `observe_state` reports an unbound stored Noise key separately from an
+  identity or key mismatch. Callers must initialize with a private-link-capable
+  session before observing private state; a rejected observation leaves storage
+  unchanged.
 
 ### Security
 
@@ -46,6 +85,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   is unchanged and restores the record. A record that no reachable relay caches
   still counts as none, so a caller that knows an identity's homeserver should
   compare it with the request's `homeserver_public_key` before approving.
+- Bound the private stream state one Linked Peer can make the SDK retain on
+  its own. The limit applies until the local identity has queued or sent that
+  counterparty a Payment Request, a Payment Request Acceptance, a Payment Proof,
+  an Allowance proposal, or an Allowance Acceptance, or has it saved as a
+  contact; a counterparty it chose this way is not refused for the number of
+  retained items. Until then a
+  counterparty may have at most 4,096 retained private stream items; a message
+  past that limit fails `receive_private_messages` with a `Policy` error and
+  stays unacknowledged. Before refusing, the SDK deletes that counterparty's
+  Private Payment Lists that a later valid list from the same Paykit App
+  superseded, on every storage adapter; nothing else is pruned automatically.
+  Re-sends identical to the first stored copy of an Event Message are retained
+  at most twice, then confirmed again without new state; conflicting payloads
+  are still retained and count toward the limit.
 
 ## 0.1.0-rc73 - 2026-10-11
 

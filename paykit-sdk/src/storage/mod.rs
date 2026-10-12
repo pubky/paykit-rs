@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 mod compaction;
+pub(crate) use compaction::compact_received_private_payment_lists;
 mod in_memory;
 mod pubky_shared;
 mod queue;

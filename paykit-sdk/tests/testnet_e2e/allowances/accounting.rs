@@ -47,11 +47,7 @@ async fn accepted_allowance(payer: &TestUser, payee: &TestUser) -> AllowanceId {
         .unwrap();
     let id = AllowanceId::new(record.allowance_id).unwrap();
     deliver(payer, payee).await;
-    payee
-        .sdk
-        .accept_allowance(payer.public_key.clone(), &id)
-        .await
-        .unwrap();
+    accept_allowance(payee, payer, &id).await.unwrap();
     deliver(payee, payer).await;
     id
 }
@@ -517,6 +513,14 @@ async fn test_allowance_accounting_manual_and_automatic_acceptance_interleave() 
     initialize_accounting(&pair.alice, Utc::now()).await;
     for pause_manual in [true, false] {
         let scope = proposed_request(&pair.alice, &pair.bob, None).await;
+        // Read through the unpaused runtime so the paused provider's load
+        // count, which times the interleaving, is unchanged.
+        let proposal_item = crate::harness::proposal_item(
+            &pair.alice.sdk,
+            &scope.counterparty,
+            &scope.payment_request_id,
+        )
+        .await;
         let time = Utc::now();
         pair.alice
             .sdk
@@ -553,7 +557,11 @@ async fn test_allowance_accounting_manual_and_automatic_acceptance_interleave() 
                 entered.notified().await;
             }
             let result = manual_sdk
-                .accept_payment_request(scope.counterparty.clone(), &scope.payment_request_id)
+                .accept_payment_request(
+                    scope.counterparty.clone(),
+                    &scope.payment_request_id,
+                    proposal_item,
+                )
                 .await;
             if !pause_manual {
                 release.notify_one();

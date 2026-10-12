@@ -159,10 +159,34 @@ impl fmt::Debug for PaykitSdkError {
     }
 }
 
+/// Cause carried by the [`PaykitSdkError::Policy`] that refuses private stream
+/// intake for a counterparty at its retained private stream item limit.
+///
+/// Check for it with [`PaykitSdkError::is_retention_limit_reached`].
+#[derive(Debug, Error)]
+#[error("counterparty reached its retained private stream item limit")]
+pub struct RetentionLimitReached;
+
 impl PaykitSdkError {
     /// Return whether retrying from current shared state after contention is appropriate.
     pub fn is_concurrent_update(&self) -> bool {
         matches!(self, Self::ConcurrentUpdate { .. })
+    }
+
+    /// Return whether intake was refused because the counterparty reached its
+    /// retained private stream item limit.
+    ///
+    /// Intake for that counterparty stays refused until
+    /// [`PaykitSdk::forget_peer`](crate::PaykitSdk::forget_peer) forgets it,
+    /// which is refused when there is payment history with it.
+    pub fn is_retention_limit_reached(&self) -> bool {
+        matches!(
+            self,
+            Self::Policy {
+                source: Some(source),
+                ..
+            } if source.is::<RetentionLimitReached>()
+        )
     }
 }
 

@@ -67,8 +67,9 @@ publication.
   views, snapshots, retries, recovery state, and app-facing getters.
 - Treat private state as identity-wide. App IDs attribute endpoints and
   messages; they do not partition Encrypted Links or private streams.
-- Preserve the private stream. Receive all Private Application Messages in
-  order and persist them before advancing the Encrypted Link checkpoint.
+- Preserve the private stream. Receive Private Application Messages in order
+  and persist them before advancing the Encrypted Link checkpoint, up to the
+  per-counterparty retention limit.
 - Own the Pubky integration needed by Paykit. Since Pubky is Paykit's only
   transport/storage backend, apps should not need a separate Pubky integration
   just to use Paykit SDK.
@@ -328,7 +329,62 @@ Changed-state commits compact obsolete Private Payment Lists per counterparty
 and App ID. They retain the latest valid inbound list (including an empty clear),
 pending or prepared sends, reservation evidence, and the latest outbound intent,
 publication, and attempted send. Event Message history and deduplication records
-are not pruned, so the 64 MiB limit still applies to growing payment history.
+are never pruned automatically, so the 64 MiB limit still applies to growing
+payment history. Only an explicit
+[`forget_peer`](#forget-a-blocked-peer) removes them, for one blocked
+counterparty at a time and never for a counterparty the local identity has
+payment history with. Callback and custom storage do not compact superseded
+Private Payment Lists at commit; intake reclaims them when a counterparty
+approaches the limit below.
+
+Private stream intake bounds what one counterparty can add to that history on
+its own. The limit below applies until the local identity chooses that
+counterparty, in either of two ways. It transacts with it: once it has queued
+or sent that counterparty a Payment Request, a Payment Request Acceptance, a
+Payment Proof, an Allowance proposal, or an Allowance Acceptance, in any
+delivery status. Or it saves it as a contact: while a Contact Record exists
+for that counterparty. A Contact Record is the explicit local opt-in for a
+relationship the SDK cannot see, such as paying through public Payment
+Endpoints and retrieving Receipts; removing it restores the limit. Intake from
+a chosen counterparty is not refused for the number of retained items, as
+before the limit existed. Nothing else lifts the limit. A rejection,
+cancellation, Allowance End, execution claim, retrieved Receipt, Delivery
+Confirmation, Private Payment List, or Receipt Access MUST NOT lift it, because
+each can follow from one unsolicited message without a local choice.
+
+- At most 4,096 private stream items are retained per counterparty, counted
+  across every message kind and parse status. When a receive transaction could
+  reach the limit, the SDK first deletes that counterparty's Private Payment
+  Lists that a later valid list from the same App ID superseded. This runs on
+  every storage adapter, because app-owned blob storage does not compact them
+  at commit. A message that would still exceed the limit fails its receive
+  transaction with `Policy`. `is_retention_limit_reached` identifies that error
+  in Rust and bindings report it with the `retention_limit_reached` code.
+  Nothing else is pruned, the Encrypted Link checkpoint does not advance, and
+  the message stays in the sender's outbox. Messages committed earlier in the
+  same receive call stay committed. Intake from other counterparties is
+  unaffected.
+- At most two re-sends identical to the first stored payload of an Event ID are
+  retained as stream items. Later identical re-sends are consumed and confirmed
+  again without a new stream item or dedupe entry; for a counterparty at the
+  limit, every such re-send is. Their receive report carries a receive batch id
+  and no stream item id. A re-send that reuses the Event ID with a different
+  payload is always retained as a conflict and counts toward the limit.
+
+At roughly 1.4 KB per item the limit pins about 6 MB per counterparty it
+applies to. It does not bound the total across counterparties or what a
+counterparty the local identity chose can add. Intake for a counterparty that
+reached it stays refused until the local identity chooses it. Saving it as a
+contact resumes its intake and keeps what it retained. To remove what it
+retained instead, the app blocks that counterparty and calls
+[`forget_peer`](#forget-a-blocked-peer), which is refused when the local
+identity has payment history with it, including history that does not lift the
+limit such as a rejection or a retrieved Receipt.
+`resolve_private_contact_payment` reports `RecoveryPending` for a counterparty
+at the limit when no cached Private Payment List endpoint is available, because
+its refresh receive is refused. Batch receive reports carry only error text, so
+apps classify the refusal with the single-counterparty
+`receive_private_messages`.
 
 Before each state PUT, the adapter publishes an empty, uniquely named marker
 under `/pub/paykit/v0/shared-state-writes/`. A confirmed PUT or an explicit PUT
@@ -794,7 +850,9 @@ counterparty before restoring them.
 
 ### PrivateStreamItem
 
-Append-only raw private stream item:
+Append-only raw private stream item. Stored items are removed only by Private
+Payment List compaction, which only Pubky shared-state storage performs, and by
+[`forget_peer`](#forget-a-blocked-peer):
 
 - local identity
 - counterparty
@@ -1025,8 +1083,10 @@ For each receive cycle:
    to identify version, kind, and source App ID when the payload is valid JSON.
 5. In one transaction, insert raw stream items, update Event Message dedupe
    records, queue their Delivery Confirmations (or apply received confirmations),
-   and save the advanced link snapshot.
-6. Acknowledge the prepared receive, then repeat until no message is available.
+   and save the advanced link snapshot. The transaction fails with `Policy`
+   when the counterparty reached its retained stream item limit.
+6. Acknowledge the prepared receive, then repeat until no message is available
+   or 100 messages were handled. Callers receive again to drain the rest.
 7. Release the lease.
 
 If the app crashes after messages are stored but before the snapshot is stored,
@@ -1216,7 +1276,8 @@ Payment Requests, Payment Proofs, and Receipts.
 1. Claim the peer link operation lease.
 2. Restore or establish Encrypted Link.
 3. Receive ordered Private Application Messages through `paykit-lib`.
-4. Persist raw messages and parse results.
+4. Persist raw messages and parse results, refusing with `Policy` a message
+   that exceeds the counterparty's retained stream item limit.
 5. Update Event Message dedupe records.
 6. Persist the updated Encrypted Link snapshot in the same transaction.
 7. Index Receipt Access events. Private Payment List views are derived on read
@@ -1227,6 +1288,80 @@ Receive routing should extend the same raw stream log to Payment Requests,
 Payment Proofs, Allowance lifecycle events, and any other Event Message kinds.
 Allowance lifecycle/history views derive from retained events on the exact
 Encrypted Link and preserve invalid or unresolved evidence for recovery.
+
+### Forget A Blocked Peer
+
+Apart from Private Payment List compaction on Pubky shared-state storage,
+`forget_peer` is the only operation that deletes received private history. It
+forgets what a blocked counterparty sent when the local identity never acted on
+it, which releases such a counterparty from its retained stream item limit. It
+is local and irreversible, applies to every Paykit App on the identity, and
+notifies neither the counterparty nor other Paykit Apps.
+
+1. Claim and release the peer link operation lease in the storage transaction,
+   so a live peer operation makes the call fail with `ConcurrentUpdate`.
+2. Refuse with `Policy` unless the Linked Peer is `Blocked`. Blocking already
+   cleared the Encrypted Link, so no intake, send, or private automation can
+   run for that counterparty.
+3. Refuse with `Policy` when the local identity has payment history with that
+   counterparty: a local outbound Payment Request or Allowance Event Message
+   in any status, a Payment Request execution claim, a wallet accounting
+   occurrence or association, or a retrieved Receipt it issued. An accounting
+   watermark alone is not history: evaluating a received proposal writes one
+   without any local decision, and it only keeps trusted time from going
+   backwards.
+4. Remove, for that counterparty: private stream items (including its Private
+   Payment Lists), Event Message dedupe records, Receipt Access records, and
+   the local outbound Delivery Confirmations.
+5. Validate the resulting state and commit it in the same transaction.
+
+Payment history is never forgotten because local responses, execution claims,
+accounting records, and Receipts name only ids. An acceptance, for example,
+names the Payment Request ID or proposal Event ID it answers. With the dedupe
+records gone, the counterparty could send those ids again with different terms
+and the kept local record would pair with them. Refusing is also the only
+choice that never deletes a record of a payment the local identity made,
+claimed, or accounted for, or a Receipt it retrieved. A counterparty with
+payment history that reaches the limit therefore stays refused; releasing it
+needs a retention design that is out of scope here.
+
+Receipt Access that was never retrieved is removed with its Receipt Decryption
+Key, and the issuer does not send it again. The SDK holds no other record of a
+payment made without a Payment Request, so an app retrieves any Receipt it
+needs before blocking. A retrieved Receipt is payment history, so `forget_peer`
+is then refused for that counterparty.
+
+Delivery Confirmations are removed with the Event Messages they confirm. This
+matters for confirmations not yet delivered: sent after a later relink, one
+would tell the counterparty that a forgotten Event Message is still held. An
+Event Message whose confirmation already reached the counterparty is not sent
+again.
+
+Everything else is kept: the `Blocked` Linked Peer record and its pinned Noise
+key authorization, the Encrypted Link state record and generation, local
+outbound Private Payment Lists and Payment Endpoint Reservations, Receipt
+issuance records with their outbound Receipt Access, Contact Records, and every
+id counter, so a stream item id is not assigned again in this storage history.
+
+After the call the counterparty stays `Blocked`. Private workflows resume only
+after `unblock_peer` and a fresh Encrypted Link Handshake. Ids from the
+forgotten history are not reserved: the counterparty can reuse a Payment Request
+ID, Allowance ID, or Event ID with different terms, and such a message is an
+ordinary new proposal that waits for a local decision. Other Paykit Apps and
+devices on the identity are not told that a forget happened, so an approval
+already in progress can name terms that were replaced. `accept_allowance`,
+`accept_payment_request`, and `claim_and_accept_payment_request` therefore take
+the `proposal_stream_item_id` of the record whose terms were approved, and the
+SDK MUST refuse, in the transaction that queues the Acceptance, when the
+current proposal for that id is a different stream item. A caller passes the id
+it displayed, not one it read just before the call.
+`claim_payment_request_for_execution` takes no such argument: it returns the
+record it claimed, and an app compares that record's `proposal_stream_item_id`
+with the one it displayed before it prepares a payment.
+`accept_payment_request_automatically` needs accepted Allowance authority,
+which is payment history, so its counterparty cannot have been forgotten. A
+backup exported before the call still contains the forgotten history and
+restores it, and restoring any backup can assign stream item ids again.
 
 ### Resolve Public Payment
 
@@ -1341,6 +1476,9 @@ the claim.
 queue update atomically. Apps that claim a request before preparing payment keep
 that earlier claim; the combined operation revalidates it. Success means the
 acceptance is saved, not delivered, and does not authorize payment execution.
+Both it and `accept_payment_request` take the `proposal_stream_item_id` of the
+record whose terms were approved and are refused when the current request is a
+different stream item (see Forget A Blocked Peer).
 
 For outbound lifecycle events:
 
@@ -1632,7 +1770,10 @@ SDK errors should be structured:
 - `Transport`: Pubky or Encrypted Link transport failure
 - `NotFound`: required local or Pubky resource is missing
 - `Protocol`: invalid Paykit message, conflict, or unsupported version
-- `Policy`: operation blocked by configuration or privacy policy
+- `Policy`: operation blocked by configuration, privacy policy, or a
+  per-counterparty retention limit. The retention limit refusal carries a typed
+  cause (`is_retention_limit_reached`) and the binding code
+  `retention_limit_reached`
 - `PaymentAdapter`: payment adapter failure
 - `RecoveryRequired`: local state is inconsistent and automatic execution is
   blocked until recovery completes

@@ -37,7 +37,7 @@ internal suspend fun compileAllowanceBindingsSurface(
         AllowanceLocalRole.ALLOWEE,
         terms,
     )
-    val accepted: AllowanceRecord = sdk.acceptAllowance(counterparty, allowanceId)
+    val accepted: AllowanceRecord = sdk.acceptAllowance(counterparty, allowanceId, 1uL)
     val rejected: AllowanceRecord = sdk.rejectAllowance(counterparty, allowanceId)
     val ended: AllowanceRecord = sdk.endAllowance(counterparty, allowanceId)
     val proof = PrivateJsonObject(text = "{}")

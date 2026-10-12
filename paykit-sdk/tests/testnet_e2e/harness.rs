@@ -485,6 +485,33 @@ impl TestUser {
 
 pub type TestSdk = PaykitSdk<InMemoryStorage, TestnetSessionProvider, TestnetPaymentAdapter>;
 
+/// Stream item id of the Payment Request proposal `sdk` holds, which an
+/// acceptance must name.
+///
+/// Tests that are not about that check accept whichever request is current. A
+/// request that cannot be read yields 0, so the call under test still reaches
+/// the SDK's own checks.
+pub async fn proposal_item<S, K, P, C>(
+    sdk: &PaykitSdk<S, K, P, C>,
+    counterparty: &PubkyPublicKey,
+    payment_request_id: &paykit_lib::PaymentRequestId,
+) -> u64
+where
+    S: paykit_sdk::StorageAdapter,
+    K: PubkySessionProvider,
+    P: PaymentAdapter,
+    C: paykit_sdk::Clock,
+{
+    sdk.payment_requests_with(counterparty)
+        .await
+        .ok()
+        .into_iter()
+        .flatten()
+        .find(|record| record.payment_request_id == payment_request_id.as_str())
+        .and_then(|record| record.proposal_stream_item_id)
+        .unwrap_or_default()
+}
+
 /// Construct and initialize an SDK over `storage` with a live testnet session.
 async fn build_initialized_sdk(
     storage: InMemoryStorage,

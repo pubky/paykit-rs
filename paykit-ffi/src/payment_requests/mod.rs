@@ -474,28 +474,48 @@ impl FfiPaykitSdk {
     }
 
     /// Queue acceptance before external payment execution and return local derived state.
+    ///
+    /// Pass the `proposal_stream_item_id` of the record whose terms were
+    /// approved, as it was displayed. Acceptance fails with a policy error when
+    /// the current request for this Payment Request ID is a different stream
+    /// item, which happens when the counterparty was forgotten and sent the id
+    /// again.
     pub async fn accept_payment_request(
         &self,
         counterparty: String,
         payment_request_id: String,
+        expected_proposal_stream_item_id: u64,
     ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
         let payment_request_id = parse_payment_request_id(payment_request_id)?;
         self.runtime
-            .accept_payment_request(parse_public_key(counterparty)?, &payment_request_id)
+            .accept_payment_request(
+                parse_public_key(counterparty)?,
+                &payment_request_id,
+                expected_proposal_stream_item_id,
+            )
             .await
             .map_err(Into::into)
             .and_then(FfiPaymentRequestRecord::try_from)
     }
 
     /// Atomically claim a received Payment Request and durably queue acceptance, without sending it.
+    ///
+    /// Pass the `proposal_stream_item_id` of the record whose terms were
+    /// approved, as it was displayed. On a mismatch nothing is claimed or
+    /// queued and the call fails with a policy error.
     pub async fn claim_and_accept_payment_request(
         &self,
         counterparty: String,
         payment_request_id: String,
+        expected_proposal_stream_item_id: u64,
     ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
         let payment_request_id = parse_payment_request_id(payment_request_id)?;
         self.runtime
-            .claim_and_accept_payment_request(parse_public_key(counterparty)?, &payment_request_id)
+            .claim_and_accept_payment_request(
+                parse_public_key(counterparty)?,
+                &payment_request_id,
+                expected_proposal_stream_item_id,
+            )
             .await
             .map_err(Into::into)
             .and_then(FfiPaymentRequestRecord::try_from)

@@ -91,7 +91,7 @@ pub use domain::records::{AmountRecord, BillingPeriodRecord};
 #[doc(inline)]
 pub use domain::recovery::EncryptedLinkRecoveryMarkerReport;
 #[doc(inline)]
-pub use error::PaykitSdkError;
+pub use error::{PaykitSdkError, RetentionLimitReached};
 #[doc(inline)]
 pub use identity::{
     IdentityState, IdentityStatus, PaykitIdentitySecretKey, PubkyIdentityCapability,

@@ -25,7 +25,7 @@ async fn test_allowance_mutations_reject_concurrent_identity_operation() {
                 .unwrap(),
         )
         .await,
-        sdk.accept_allowance(counterparty.clone(), &allowance_id)
+        sdk.accept_allowance(counterparty.clone(), &allowance_id, 1)
             .await,
         sdk.reject_allowance(counterparty.clone(), &allowance_id)
             .await,
@@ -56,7 +56,7 @@ async fn test_app_removal_preserves_identity_wide_allowance_authority() {
         .await
         .unwrap();
     let allowance_id = AllowanceId::new_v4();
-    persist_private_stream_batch(
+    let proposal_stream_item_id = persist_private_stream_batch(
         &storage,
         counterparty.clone(),
         vec![allowance_message(
@@ -68,7 +68,8 @@ async fn test_app_removal_preserves_identity_wide_allowance_authority() {
         FixedClock.now(),
     )
     .await
-    .unwrap();
+    .unwrap()
+    .stream_item_ids[0];
     let proposal_confirmation = storage
         .snapshot()
         .unwrap()
@@ -85,7 +86,9 @@ async fn test_app_removal_preserves_identity_wide_allowance_authority() {
         counterparty.clone(),
         app_id(),
         allowance_id.clone(),
-        AllowanceResponse::Acceptance,
+        AllowanceResponse::Acceptance {
+            expected_proposal_stream_item_id: proposal_stream_item_id,
+        },
         FixedClock.now(),
     )
     .await
@@ -317,7 +320,7 @@ async fn test_allowance_commands_require_session_without_queue_mutation() {
         )
         .await;
     let accepted = sdk
-        .accept_allowance(counterparty.clone(), &allowance_id)
+        .accept_allowance(counterparty.clone(), &allowance_id, 1)
         .await;
     let rejected = sdk
         .reject_allowance(counterparty.clone(), &allowance_id)
