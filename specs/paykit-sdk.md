@@ -338,15 +338,19 @@ Private Payment Lists at commit; intake reclaims them when a counterparty
 approaches the limit below.
 
 Private stream intake bounds what one counterparty can add to that history on
-its own. The limit below applies until the local identity chooses to transact
-with that counterparty: once it has queued or sent that counterparty a Payment
-Request, a Payment Request Acceptance, a Payment Proof, an Allowance proposal,
-or an Allowance Acceptance, in any delivery status, intake from it is not
-refused for the number of retained items, as before the limit existed. Nothing
-else lifts the limit. A rejection, cancellation, Allowance End, execution
-claim, retrieved Receipt, Delivery Confirmation, Private Payment List, or
-Receipt Access MUST NOT lift it, because each can follow from one unsolicited
-message without a decision to transact.
+its own. The limit below applies until the local identity chooses that
+counterparty, in either of two ways. It transacts with it: once it has queued
+or sent that counterparty a Payment Request, a Payment Request Acceptance, a
+Payment Proof, an Allowance proposal, or an Allowance Acceptance, in any
+delivery status. Or it saves it as a contact: while a Contact Record exists
+for that counterparty. A Contact Record is the explicit local opt-in for a
+relationship the SDK cannot see, such as paying through public Payment
+Endpoints and retrieving Receipts; removing it restores the limit. Intake from
+a chosen counterparty is not refused for the number of retained items, as
+before the limit existed. Nothing else lifts the limit. A rejection,
+cancellation, Allowance End, execution claim, retrieved Receipt, Delivery
+Confirmation, Private Payment List, or Receipt Access MUST NOT lift it, because
+each can follow from one unsolicited message without a local choice.
 
 - At most 4,096 private stream items are retained per counterparty, counted
   across every message kind and parse status. When a receive transaction could
@@ -369,12 +373,13 @@ message without a decision to transact.
 
 At roughly 1.4 KB per item the limit pins about 6 MB per counterparty it
 applies to. It does not bound the total across counterparties or what a
-counterparty the local identity transacts with can add. Intake for a
-counterparty that reached it stays refused. The app can release it by blocking
-that counterparty and calling [`forget_peer`](#forget-a-blocked-peer), but only
-when the local identity has no payment history with it. A counterparty at the
-limit can still have payment history that does not lift the limit, such as a
-rejection or a retrieved Receipt; no workflow yet releases that counterparty.
+counterparty the local identity chose can add. Intake for a counterparty that
+reached it stays refused until the local identity chooses it. Saving it as a
+contact resumes its intake and keeps what it retained. To remove what it
+retained instead, the app blocks that counterparty and calls
+[`forget_peer`](#forget-a-blocked-peer), which is refused when the local
+identity has payment history with it, including history that does not lift the
+limit such as a rejection or a retrieved Receipt.
 `resolve_private_contact_payment` reports `RecoveryPending` for a counterparty
 at the limit when no cached Private Payment List endpoint is available, because
 its refresh receive is refused. Batch receive reports carry only error text, so

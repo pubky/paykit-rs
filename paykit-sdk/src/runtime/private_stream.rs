@@ -99,12 +99,13 @@ where
     /// A report with a `receive_batch_id` and no stream items means identical
     /// re-sends were consumed without new state, so more messages may be pending.
     /// Returns [`PaykitSdkError::Policy`] when the counterparty reached its
-    /// retained private stream item limit and the local identity has not chosen
-    /// to transact with it. That message stays unacknowledged and messages
-    /// committed earlier in the call stay committed.
+    /// retained private stream item limit and the local identity has neither
+    /// transacted with it nor saved it as a contact. That message stays
+    /// unacknowledged and messages committed earlier in the call stay committed.
     /// [`PaykitSdkError::is_retention_limit_reached`] identifies this refusal.
-    /// It lasts until [`Self::forget_peer`] forgets the blocked counterparty,
-    /// which is refused when there is payment history with it.
+    /// Saving the counterparty as a contact resumes intake.
+    /// [`Self::forget_peer`] removes what a blocked counterparty retained, and
+    /// is refused when there is payment history with it.
     pub async fn receive_private_messages(
         &self,
         counterparty: PubkyPublicKey,

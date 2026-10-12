@@ -1450,6 +1450,50 @@ async fn test_persist_private_stream_batch_does_not_limit_counterparty_local_ide
 }
 
 #[tokio::test]
+async fn test_persist_private_stream_batch_does_not_limit_saved_contact() {
+    let peer = counterparty();
+    let other = counterparty();
+    let storage = InMemoryStorage::from_state(storage_at_retention_quota(&peer).await);
+    let save_contact = |public_key: &PubkyPublicKey| {
+        let update = crate::ContactUpdate {
+            public_key: public_key.clone(),
+            label: None,
+        };
+        storage.transaction(move |tx| {
+            tx.save_contact_record(crate::ContactRecord::from_update(update, None, timestamp()));
+            Ok(())
+        })
+    };
+    let is_refused = |result: Result<PrivateStreamIntakeReport>| {
+        matches!(result, Err(PaykitSdkError::Policy { .. }))
+    };
+
+    // A contact saved for another counterparty does not lift this one's limit.
+    save_contact(&other).await.unwrap();
+    assert!(is_refused(receive_one_past_quota(&storage, &peer).await));
+
+    // Saving the counterparty as a contact is the local opt-in.
+    save_contact(&peer).await.unwrap();
+    receive_one_past_quota(&storage, &peer).await.unwrap();
+    assert_eq!(
+        retained_stream_items(&storage, &peer),
+        MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY + 1
+    );
+
+    // Removing the contact restores the limit.
+    storage
+        .transaction(|tx| {
+            tx.remove_contact_record(&peer);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let before = storage.snapshot().unwrap();
+    assert!(is_refused(receive_one_past_quota(&storage, &peer).await));
+    assert!(storage.snapshot().unwrap() == before);
+}
+
+#[tokio::test]
 async fn test_persist_private_stream_batch_keeps_limit_without_a_decision_to_transact() {
     use paykit_lib::PrivateMessageKind as Kind;
     let peer = counterparty();

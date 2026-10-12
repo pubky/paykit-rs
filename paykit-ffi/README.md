@@ -102,7 +102,9 @@ Paykit-side workflow.
   sent, for every Paykit App on the identity, when the local identity never
   acted on it. It releases a counterparty whose `receivePrivateMessages` fails
   with the policy code `retention_limit_reached`: call `blockPeer`,
-  `forgetPeer`, `unblockPeer`, then link again. It fails with a policy error
+  `forgetPeer`, `unblockPeer`, then link again. For a counterparty the user
+  knows, `saveContact` resumes intake without deleting anything. It fails with
+  a policy error
   when there is payment history with that counterparty (a queued or sent
   Payment Request or Allowance message, an execution claim, a wallet accounting
   occurrence or association, or a retrieved Receipt), so history you acted on

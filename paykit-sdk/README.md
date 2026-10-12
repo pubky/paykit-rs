@@ -212,9 +212,11 @@ Common workflows:
   message is refused. The limit only bounds what a counterparty adds on its
   own: it no longer applies once you have queued or sent that counterparty a
   Payment Request, a Payment Request Acceptance, a Payment Proof, an Allowance
-  proposal, or an Allowance Acceptance. Detect the refusal with
-  `PaykitSdkError::is_retention_limit_reached` on the single-counterparty call;
-  batch reports carry only error text
+  proposal, or an Allowance Acceptance, or while you have it saved as a
+  contact with `save_contact`. Save a payee you only pay through public Payment
+  Endpoints as a contact so its Receipt Access is never refused. Detect the
+  refusal with `PaykitSdkError::is_retention_limit_reached` on the
+  single-counterparty call; batch reports carry only error text
 - call `forget_peer` to delete what a blocked counterparty sent when you never
   acted on it, for example an unsolicited flood that reached that limit. It
   requires `block_peer` first, is local and irreversible, and applies to every
