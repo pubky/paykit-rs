@@ -105,7 +105,11 @@ async fn request_record(
 async fn restored_user(user: &TestUser) -> TestUser {
     let backup = user.sdk.export_backup_state().await.unwrap();
     let restored = user.restart_with_storage(InMemoryStorage::new()).await;
-    let report = restored.sdk.restore_backup_state(backup).await.unwrap();
+    let report = restored
+        .sdk
+        .restore_backup_state(backup, paykit_sdk::RestoredLinkPolicy::Resume)
+        .await
+        .unwrap();
     assert!(report.recovery_required_peers.is_empty());
     restored
 }

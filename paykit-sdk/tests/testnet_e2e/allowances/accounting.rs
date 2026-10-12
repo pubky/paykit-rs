@@ -249,7 +249,10 @@ async fn test_allowance_accounting_handoff_restart_and_stale_restore() {
     let restored = restarted.restart_with_storage(InMemoryStorage::new()).await;
     restored
         .sdk
-        .restore_backup_state(stale_backup)
+        .restore_backup_state(
+            stale_backup,
+            paykit_sdk::RestoredLinkPolicy::RequireRecovery,
+        )
         .await
         .unwrap();
     let state = restored

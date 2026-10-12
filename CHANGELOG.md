@@ -7,6 +7,46 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (Rust and FFI API):** `restore_backup_state` and the FFI
+  `restoreBackupState` and `restoreBackupString` take a required
+  `RestoredLinkPolicy`. `Resume` keeps the previous behavior. `RequireRecovery`
+  discards saved Encrypted Link and handshake snapshots, lists the affected
+  peers in `recovery_required_peers`, and leaves their queued private messages
+  waiting for a fresh Encrypted Link Handshake. The backup format is unchanged.
+
+### Security
+
+- Restoring a backup older than the last private send and resuming its links
+  reused a transport key and nonce and overwrote a published outbox slot. The
+  SDK cannot tell whether a backup is current, so apps must now choose: pass
+  `RequireRecovery` for an old or uncertain backup, and `Resume` only when no
+  runtime for this identity sent or received private messages after the export.
+- Approving a signup auth request no longer moves an identity that has a
+  homeserver record to the homeserver chosen by the requester. `approve_auth` and
+  `approve_auth_with_companion_claim` in Rust, and `approveAuth` and
+  `approveAuthWithCompanionClaim` in Swift and Kotlin, now look up the approving
+  identity's homeserver record before anything reaches the requester. A request
+  naming a different homeserver fails with a policy error. A request naming the
+  published homeserver is approved without signing up or republishing. A record
+  that no longer resolves but is still cached by a relay or the client fails the
+  approval until `republish_identity` (`republishIdentity`) rebroadcasts it, and
+  a lookup error fails the approval. Signup still runs when no record at all is
+  found for the identity. An identity whose PKARR record names no homeserver is
+  not signed up by an approval, because that record can be older than a
+  homeserver record. It signs up with `sign_up` (`signUp`) and a homeserver the
+  caller already trusts.
+- Companion claim approval applies the same checks before the claim is signed or
+  delivered and reports a refusal as an invalid request, so a refused signup
+  request receives neither the claim nor the grant.
+- An account-already-exists answer to that signup now fails the approval instead
+  of republishing the homeserver record. `sign_up` (`signUp`), called with a
+  homeserver the caller already trusts rather than one taken from the auth URL,
+  is unchanged and restores the record. A record that no reachable relay caches
+  still counts as none, so a caller that knows an identity's homeserver should
+  compare it with the request's `homeserver_public_key` before approving.
+
 ## 0.1.0-rc73 - 2026-10-11
 
 ### Added

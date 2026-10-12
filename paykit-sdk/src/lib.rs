@@ -16,8 +16,8 @@ mod test_utils;
 
 #[doc(inline)]
 pub use backup::{
-    export_backup_state, validation::validate_storage_state, RestoreReport, SdkBackupState,
-    SDK_BACKUP_VERSION,
+    export_backup_state, validation::validate_storage_state, RestoreReport, RestoredLinkPolicy,
+    SdkBackupState, SDK_BACKUP_VERSION,
 };
 #[doc(inline)]
 pub use config::{EndpointManagementScope, PaykitSdkConfig, PublicContactSharingPolicy};

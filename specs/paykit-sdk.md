@@ -472,6 +472,33 @@ and must be stored or displayed only for their intended flow.
 Bindings should wrap these helpers so mobile apps do not need a second Pubky
 SDK dependency for ordinary Paykit onboarding.
 
+Approving a signup auth request never replaces a homeserver record that PKARR
+still holds for the approving identity, because the requester chooses the
+requested homeserver. The approve helper first looks up the identity's
+homeserver record. It fails with a `Policy` error when the record names a
+different homeserver, and approves without signing up or republishing when the
+record names the requested homeserver. When the lookup finds no homeserver
+record, the helper reads the PKARR caches: a record that no longer resolves but
+is still cached by a relay or the client fails the approval until the caller
+rebroadcasts it with `republish_identity`. Relay caches are read only while the
+client caches no record for the identity. The lookup can also answer from the
+client's cached copy of the identity's record, so the helper then asks the
+network without that cache, looks again, and reads the caches again. A cached
+copy that predates the homeserver record is therefore not read as none while
+the network returns the newer record. A lookup error fails the approval.
+Only when no record at all is found for the identity does the helper sign up on
+the requested homeserver. A record that names no homeserver fails the approval,
+because it can be older than a homeserver record that the network no longer
+returns; such an identity signs up with the signup helper and a homeserver the
+caller already trusts. A signup that the requested homeserver rejects, including
+because the account already exists, fails the approval and publishes nothing;
+the signup helper, called with a homeserver the caller already trusts rather
+than one taken from the auth URL, restores the record of an existing account. A
+record
+that no reachable relay caches still counts as none, so a caller that knows the
+identity's homeserver should compare it with the request's homeserver before
+approving.
+
 Applications can attach an app-defined companion claim to a Pubky Auth
 approval. The integrator supplies the claim query parameter, claim type,
 expected capability, and serialized unsigned payload. The SDK owns request
@@ -1455,10 +1482,12 @@ Normal restore flow:
 1. Require an otherwise empty SDK state backing, then validate the local
    identity. A portable backup must not replace newer shared state.
 2. Validate backup record shape plus every link snapshot recipient.
-3. Preserve valid active Encrypted Link snapshots and in-progress handshake
-   snapshots so the SDK can catch up from the restored checkpoint.
-4. Mark peers recovery-required only when no safe restored checkpoint exists,
-   the peer was already recovery-required, or outbound private work needs a link
+3. Apply the caller's restored link policy. `Resume` preserves valid active
+   Encrypted Link snapshots and in-progress handshake snapshots so the SDK can
+   catch up from the restored checkpoint. `RequireRecovery` discards them.
+4. Mark peers recovery-required when the policy is `RequireRecovery` and the
+   peer had a snapshot, when no safe restored checkpoint exists, when the peer
+   was already recovery-required, or when outbound private work needs a link
    snapshot that is missing.
 5. Load backup into storage under a restore transaction.
 6. Do not execute automatic payments until private stream and request state are
@@ -1470,11 +1499,34 @@ For Allowance V1, restored or recovery-incomplete execution state must remain
 ineligible until wallet reconciliation establishes that no later successful or
 unresolved payment is missing.
 
+The SDK cannot tell whether a backup is current, so every restore passes a
+restored link policy and there is no default. `Resume` is safe only if no
+runtime for this identity sent or received private messages, or advanced an
+Encrypted Link Handshake, after the backup was exported. The SDK also sends on
+its own: Delivery Confirmations for received Event Messages, Private Payment
+List syncs (repeated after each restart), and retries. A stale snapshot rolls
+back the sending nonce and outbox slot: the next send reuses a transport key
+and nonce and overwrites a published slot, which leaks plaintext to anyone
+holding both ciphertexts, and one of the two messages is never read. A stale
+handshake snapshot replays to the same transport keys. Holding the latest
+available backup is not enough if the exporting runtime ran again.
+
+Apps that cannot rule that out pass `RequireRecovery`. Each peer that had a
+snapshot then needs a fresh
+[Encrypted Link Handshake](#establish-encrypted-link). Its queued and prepared
+outbound private messages stay recovery-required until the replacement link
+completes and their app is published again; Delivery Confirmations need only
+the link. Private messages the backup had not yet received are not read from
+the old link. Unconfirmed Event Messages are replayed on the replacement link;
+anything else is not repaired and requires separate state reconciliation, as
+[Delivery Confirmations](payment-requests.md#delivery-confirmations) notes.
+Neither policy detects rollback of the state backing itself.
+
 Backup restore preserves history, derived records, and peer authorization pins.
-Checkpoints resume only after [current signed-key checks](#establish-encrypted-link);
-missing or unsafe checkpoints pause private automation until relink. Concurrent
-multi-app updates use homeserver-enforced write locks and crash-safe
-prepared Noise operations.
+Under `Resume`, checkpoints resume only after
+[current signed-key checks](#establish-encrypted-link); missing or unsafe
+checkpoints pause private automation until relink. Concurrent multi-app updates
+use homeserver-enforced write locks and crash-safe prepared Noise operations.
 
 `recover_shared_state_from_backup` requires a matching trusted backup, an active
 `PAYKIT_AUTHORIZER_SESSION_CAPABILITIES` session, the Pubky identity secret,
@@ -1660,7 +1712,8 @@ Core tests:
 - Payment Request role/lifecycle checks
 - Receipt Access dedupe and receipt retrieval
 - profile serialization and Contact Record storage
-- backup/restore validates snapshot recipient and pauses unsafe automation
+- backup/restore validates snapshot recipient, pauses unsafe automation, and
+  discards link and handshake snapshots under `RequireRecovery`
 
 Platform tests:
 
