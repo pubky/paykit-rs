@@ -209,7 +209,10 @@ Common workflows:
   retained private stream items: past that, receive fails with a `Policy` error
   for that counterparty only and its messages stay unacknowledged. Superseded
   Private Payment Lists do not use up the limit: they are deleted before a
-  message is refused
+  message is refused. The limit only bounds what a counterparty adds on its
+  own: it no longer applies once you have queued or sent that counterparty a
+  Payment Request, a Payment Request Acceptance, a Payment Proof, an Allowance
+  proposal, or an Allowance Acceptance
 - list saved Payment Requests with `payment_requests` or `list_payment_requests`;
   all counterparties and filters use one shared-state read, without network intake
 - use `propose_allowance`, `accept_allowance`, `reject_allowance`, and

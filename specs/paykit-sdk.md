@@ -331,7 +331,16 @@ pending or prepared sends, reservation evidence, and the latest outbound intent,
 publication, and attempted send. Event Message history and deduplication records
 are not pruned, so the 64 MiB limit still applies to growing payment history.
 
-Private stream intake bounds what one counterparty can add to that history:
+Private stream intake bounds what one counterparty can add to that history on
+its own. The limit below applies until the local identity chooses to transact
+with that counterparty: once it has queued or sent that counterparty a Payment
+Request, a Payment Request Acceptance, a Payment Proof, an Allowance proposal,
+or an Allowance Acceptance, in any delivery status, intake from it is not
+refused for the number of retained items, as before the limit existed. Nothing
+else lifts the limit. A rejection, cancellation, Allowance End, execution
+claim, retrieved Receipt, Delivery Confirmation, Private Payment List, or
+Receipt Access MUST NOT lift it, because each can follow from one unsolicited
+message without a decision to transact.
 
 - At most 4,096 private stream items are retained per counterparty, counted
   across every message kind and parse status. When a receive transaction could
@@ -350,9 +359,10 @@ Private stream intake bounds what one counterparty can add to that history:
   and no stream item id. A re-send that reuses the Event ID with a different
   payload is always retained as a conflict and counts toward the limit.
 
-At roughly 1.4 KB per item the limit pins about 6 MB per counterparty. It does
-not bound the total across counterparties, and no workflow yet releases a
-counterparty that reached it. `resolve_private_contact_payment` reports
+At roughly 1.4 KB per item the limit pins about 6 MB per counterparty it
+applies to. It does not bound the total across counterparties or what a
+counterparty the local identity transacts with can add, and no workflow yet
+releases a counterparty that reached it. `resolve_private_contact_payment` reports
 `RecoveryPending` for such a counterparty when no cached Private Payment List
 endpoint is available, because its refresh receive is refused.
 
