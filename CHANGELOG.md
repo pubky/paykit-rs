@@ -7,6 +7,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc73 - 2026-10-11
+
+### Added
+
+- `PaykitSdk::observe_state` in Rust and `observeState` in Swift and Kotlin
+  for coherent, identity/key-validated display observations of stored Contact
+  Records, Linked Peer states, Payment Requests and decrypted Receipts through
+  one guarded storage transaction.
+- Observations are display-only, not payment authority or a remote freshness
+  guarantee. They do not receive peer messages, retrieve Receipts or refresh
+  remote authorization. Keep display data scoped to identity and key generation,
+  discard it when session access is cleared, and retain authoritative payment APIs.
+
 ## 0.1.0-rc72 - 2026-10-08
 
 ### Added
