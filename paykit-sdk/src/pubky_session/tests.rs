@@ -232,3 +232,5 @@ fn pubky_server_error(status: u16, message: &str) -> pubky::Error {
         message: message.into(),
     })
 }
+
+mod signup_grant_approval;

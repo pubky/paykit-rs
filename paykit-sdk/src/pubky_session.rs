@@ -8,8 +8,10 @@ pub use companion_claim::{PubkyAuthCompanionClaim, PubkyAuthCompanionClaimApprov
 use std::{fmt, str::FromStr};
 
 use pubky::{
-    deep_links::DeepLink, AuthFlowKind, Capabilities, Capability, ClientId, GrantAuthFlowState,
-    Pubky, PubkyGrantAuthFlow, PubkyResource, PubkySession,
+    deep_links::{DeepLink, SignupGrantDeepLink},
+    pkarr::{errors::ResolveError, ResolvePolicy},
+    AuthFlowKind, Capabilities, Capability, ClientId, GrantAuthFlowState, Pubky,
+    PubkyGrantAuthFlow, PubkyResource, PubkySession,
 };
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -342,7 +344,8 @@ impl PubkySessionBootstrap {
     ///
     /// After creating the account, this uses Pubky grant auth to issue a
     /// session with exactly `required_capabilities`. The auth relay must be
-    /// reachable.
+    /// reachable. Signing up an identity that already has an account on that
+    /// homeserver publishes its homeserver record again.
     pub async fn sign_up(
         &self,
         secret_key: &PubkyLocalSecretKey,
@@ -511,14 +514,65 @@ impl PubkySessionBootstrap {
     ///
     /// The requested capabilities must exactly match `expected_capabilities`.
     /// The request client ID must match this bootstrap's client ID.
-    /// A signup request creates the identity on its requested homeserver before
-    /// approving the application grant.
+    ///
+    /// A signup request names a homeserver chosen by the requester, so
+    /// approval never moves an identity away from a homeserver record that
+    /// PKARR still holds. The identity's homeserver record is looked up before
+    /// anything reaches the requester:
+    ///
+    /// - If it names a different homeserver, approval fails with
+    ///   [`PaykitSdkError::Policy`].
+    /// - If it names the requested homeserver, the application grant is
+    ///   approved without signing up or republishing.
+    /// - If it no longer resolves but a relay or this client still caches it,
+    ///   approval fails. Rebroadcast it with [`Self::republish_identity`] and
+    ///   approve again.
+    /// - Only when no record is found is the identity signed up on the
+    ///   requested homeserver before the application grant is approved.
+    ///
+    /// A lookup error fails the approval. "No record" is still what PKARR
+    /// reports, not proof: a record that no reachable relay caches counts as
+    /// none. A caller that knows the identity's homeserver should compare it
+    /// with the `homeserver_public_key` from [`parse_pubky_auth_url`] before
+    /// approving.
+    ///
+    /// A signup that the requested homeserver rejects, including because the
+    /// account already exists, also fails the approval, and nothing is
+    /// published on that answer. To restore the record of an existing account,
+    /// call [`Self::sign_up`] with a homeserver the caller already trusts, not
+    /// one taken from the auth URL.
     pub async fn approve_auth(
         &self,
         auth_url: &str,
         expected_capabilities: &str,
         secret_key: &PubkyLocalSecretKey,
     ) -> Result<()> {
+        let signer = self.pubky.signer(secret_key.keypair());
+        let signup = self
+            .check_auth_approval(auth_url, expected_capabilities, &signer)
+            .await?;
+        approve_checked_auth(&signer, auth_url, signup).await
+    }
+
+    /// Run every check that can refuse `auth_url`, before anything reaches the
+    /// requester.
+    ///
+    /// Returns the signup request to run first when no record is found for the
+    /// approving identity.
+    ///
+    /// SECURITY: a signup auth URL names a homeserver chosen by the requester,
+    /// and signing up there publishes it as the identity's homeserver. That
+    /// must never replace a homeserver record that PKARR still holds, so
+    /// signup is allowed only when the lookup, the network, and the PKARR
+    /// caches all find no record for the identity. A record that names no
+    /// homeserver does not count as none, because it can be older than one
+    /// that does. A lookup error is returned, never read as "no record".
+    async fn check_auth_approval(
+        &self,
+        auth_url: &str,
+        expected_capabilities: &str,
+        signer: &pubky::PubkySigner,
+    ) -> Result<Option<SignupGrantDeepLink>> {
         validate_grant_auth_url(auth_url)?;
         validate_auth_url_capabilities(auth_url, expected_capabilities)?;
         validate_auth_url_client_id(auth_url, &self.client_id)?;
@@ -526,16 +580,127 @@ impl PubkySessionBootstrap {
             context: format!("invalid Pubky auth URL: {err}"),
             source: None,
         })?;
-        let signer = self.pubky.signer(secret_key.keypair());
-        if let DeepLink::SignupGrant(link) = deep_link {
-            let params = link.params();
-            ensure_pubky_account(&signer, &params.homeserver, params.signup_token.as_deref())
+        let DeepLink::SignupGrant(signup) = deep_link else {
+            return Ok(None);
+        };
+        let lookup = || async {
+            signer
+                .pkdns()
+                .get_homeserver()
+                .await
+                .map_err(|err| map_pubky_identity_error("resolve Pubky homeserver record", err))
+        };
+        let mut published = lookup().await?;
+        if published.is_none() {
+            // SECURITY: read the caches before the network is asked. Relay
+            // caches are read only while this client caches no record for the
+            // identity, and the network can return an older record that names
+            // no homeserver, which this client then caches.
+            self.ensure_homeserver_record_absent(&signer.public_key())
                 .await?;
+            // SECURITY: the lookup answers from this client's cached identity
+            // record while that record is within its TTL, and a cached record
+            // can predate the homeserver record. "No record" only counts once
+            // the network was asked. A newer record from the network replaces
+            // the cached one, so the second lookup reads it.
+            if self.refresh_identity_record(&signer.public_key()).await? {
+                published = lookup().await?;
+            }
         }
-        signer
-            .approve_auth(auth_url)
-            .await
-            .map_err(|err| map_pubky_identity_error("approve Pubky auth flow", err))
+        let requested = &signup.params().homeserver;
+        match published {
+            Some(published) if published == *requested => Ok(None),
+            Some(published) => Err(PaykitSdkError::Policy {
+                context: format!(
+                    "Pubky auth URL signup homeserver `{}` did not match published homeserver `{}`",
+                    requested.z32(),
+                    published.z32(),
+                ),
+                source: None,
+            }),
+            None => {
+                // SECURITY: read the caches again right before signing up. A
+                // cached record that names no homeserver is not proof that
+                // the identity has none. It can be older than a homeserver
+                // record that the network no longer returns, and while this
+                // client caches it the relay caches are not read.
+                if self
+                    .ensure_homeserver_record_absent(&signer.public_key())
+                    .await?
+                {
+                    return Err(PaykitSdkError::Identity {
+                        context: "Pubky identity record names no homeserver; call sign_up with a trusted homeserver instead of approving a signup request".into(),
+                        source: None,
+                    });
+                }
+                Ok(Some(signup))
+            }
+        }
+    }
+
+    /// Ask the network for the record of `identity`, bypassing this client's
+    /// cache, and return whether it holds one. A record newer than the cached
+    /// one replaces it, and that cache is how the caller's next lookup sees
+    /// it: a client built without a cache gains nothing from this call.
+    ///
+    /// Any failure other than finding no record is an error, because the
+    /// caller needs the network's answer before it trusts its cache.
+    async fn refresh_identity_record(&self, identity: &paykit_lib::PublicKey) -> Result<bool> {
+        let resolved = self
+            .pubky
+            .client()
+            .pkarr()
+            .resolve(identity, ResolvePolicy::NetworkOnly)
+            .await;
+        match resolved {
+            Ok(_) => Ok(true),
+            Err(ResolveError::NotFound) => Ok(false),
+            Err(err) => Err(map_pubky_identity_error(
+                "resolve Pubky identity record",
+                err.into(),
+            )),
+        }
+    }
+
+    /// Fail unless the PKARR caches also hold no homeserver record for
+    /// `identity`. Returns whether they hold a record for it that names no
+    /// homeserver.
+    ///
+    /// SECURITY: "not found" from the cache-first lookup is weak evidence. A
+    /// record that aged out of the DHT is not found although relays and this
+    /// client can still cache it, and one backend's "not found" outvotes the
+    /// failures of the others. Such an identity has a homeserver, so it is
+    /// told to republish its record instead of being signed up where the
+    /// requester chose. A record that no reachable cache holds still counts
+    /// as none, and a client configured without relays has only its own cache
+    /// to read. Relay caches are read only when this client caches no record
+    /// for the identity, so a cached record that names no homeserver hides a
+    /// homeserver record that only a relay cache still holds. The caller must
+    /// not sign up while one is cached.
+    async fn ensure_homeserver_record_absent(
+        &self,
+        identity: &paykit_lib::PublicKey,
+    ) -> Result<bool> {
+        let cached = self
+            .pubky
+            .client()
+            .pkarr()
+            .resolve(identity, ResolvePolicy::CacheOnly)
+            .await;
+        match cached {
+            Ok(record) if record.resource_records("_pubky").next().is_some() => {
+                Err(PaykitSdkError::Identity {
+                    context: "Pubky homeserver record no longer resolves; republish it before approving a signup request".into(),
+                    source: None,
+                })
+            }
+            Ok(_) => Ok(true),
+            Err(ResolveError::NotFound) => Ok(false),
+            Err(err) => Err(map_pubky_identity_error(
+                "resolve Pubky identity record",
+                err.into(),
+            )),
+        }
     }
 
     async fn start_auth(&self, capabilities: &str, kind: AuthFlowKind) -> Result<PubkyAuthRequest> {
@@ -555,6 +720,40 @@ impl PubkySessionBootstrap {
             authorization_url,
         })
     }
+}
+
+/// Approve an auth URL that passed `PubkySessionBootstrap::check_auth_approval`,
+/// running the `signup` it returned first.
+async fn approve_checked_auth(
+    signer: &pubky::PubkySigner,
+    auth_url: &str,
+    signup: Option<SignupGrantDeepLink>,
+) -> Result<()> {
+    if let Some(signup) = signup {
+        let params = signup.params();
+        if let Err(err) = signer
+            .signup(&params.homeserver, params.signup_token.as_deref())
+            .await
+        {
+            // Unlike `ensure_pubky_account`, a conflict stays an error here.
+            // The requester chose this homeserver, so its claim that the
+            // account exists is no reason to publish it as the identity's
+            // homeserver. The context tells the caller how to recover.
+            let context = match &err {
+                pubky::Error::Request(pubky::errors::RequestError::Server { status, .. })
+                    if status.as_u16() == 409 =>
+                {
+                    "requested Pubky homeserver reported an existing account; restore the homeserver record with sign_up"
+                }
+                _ => "sign up Pubky identity",
+            };
+            return Err(map_pubky_identity_error(context, err));
+        }
+    }
+    signer
+        .approve_auth(auth_url)
+        .await
+        .map_err(|err| map_pubky_identity_error("approve Pubky auth flow", err))
 }
 
 async fn ensure_pubky_account(
