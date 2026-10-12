@@ -112,13 +112,23 @@ where
 
     /// Queue acceptance as the authenticated proposal recipient.
     ///
-    /// The lifecycle, role, history, link, and append checks occur in one
-    /// durable transaction. The caller remains responsible for Pubky session
-    /// creation, capability scope, key rotation, and timeouts.
+    /// `expected_proposal_stream_item_id` is the
+    /// [`AllowanceRecord::proposal_stream_item_id`] of the record whose terms
+    /// were approved. Acceptance is refused with `Policy` when the current
+    /// proposal for this Allowance ID is a different stream item, so terms that
+    /// replaced the approved ones after [`Self::forget_peer`] are never
+    /// accepted. Pass the id that was displayed, not one read just before this
+    /// call. On refusal, read the record again and ask for approval again. A
+    /// proposal that was forgotten and not sent again is `NotFound`.
+    ///
+    /// The lifecycle, role, history, link, expected proposal, and append checks
+    /// occur in one durable transaction. The caller remains responsible for
+    /// Pubky session creation, capability scope, key rotation, and timeouts.
     pub async fn accept_allowance(
         &self,
         counterparty: PubkyPublicKey,
         allowance_id: &AllowanceId,
+        expected_proposal_stream_item_id: u64,
     ) -> Result<AllowanceRecord> {
         let _identity_guard = self.claim_identity_operation("accept Allowance")?;
         let _session_access = self
@@ -129,7 +139,9 @@ where
             counterparty,
             self.config.app_id.clone(),
             allowance_id.clone(),
-            AllowanceResponse::Acceptance,
+            AllowanceResponse::Acceptance {
+                expected_proposal_stream_item_id,
+            },
             self.clock.now(),
         )
         .await

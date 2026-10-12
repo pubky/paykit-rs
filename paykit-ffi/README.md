@@ -98,6 +98,19 @@ Paykit-side workflow.
   `advanceLinkHandshake` — establish Encrypted Links with counterparties.
 - `PaykitSdk.linkedPeers`, `blockPeer`, and `unblockPeer` — inspect and
   manage local peer state.
+- `PaykitSdk.forgetPeer`: irreversibly delete what a blocked counterparty
+  sent, for every Paykit App on the identity, when the local identity never
+  acted on it. It releases a counterparty whose `receivePrivateMessages` fails
+  with the policy code `retention_limit_reached`: call `blockPeer`,
+  `forgetPeer`, `unblockPeer`, then link again. For a counterparty the user
+  knows, `saveContact` resumes intake without deleting anything. It fails with
+  a policy error
+  when there is payment history with that counterparty (a queued or sent
+  Payment Request or Allowance message, an execution claim, a wallet accounting
+  occurrence or association, or a retrieved Receipt), so history you acted on
+  and retrieved Receipts are never deleted, and such a counterparty stays
+  refused if it is at the limit. Receipt Access that was never retrieved is deleted with
+  its Receipt Decryption Key. Batch receive reports do not carry the code.
 - `PaykitSdk.receivePrivateMessages` and
   `receivePrivateMessagesFromLinkedPeers` — receive and checkpoint private
   stream data.
@@ -184,6 +197,11 @@ pixel and cache limits, and request timeouts remain app responsibilities.
 - `PaykitSdk.claimAndAcceptPaymentRequest` — atomically claim execution and queue
   acceptance. Keep the earlier preparation claim where needed; success confirms
   durable acceptance, not delivery or permission to execute a payment.
+- `acceptPaymentRequest` and `claimAndAcceptPaymentRequest` take
+  `expectedProposalStreamItemId`: pass `proposalStreamItemId` from the record
+  whose terms the user approved, as displayed. They fail with a policy error
+  when the current request for that Payment Request ID is a different stream
+  item, so read the record again and ask again.
 - `PaykitSdk.paymentRequests`, `paymentRequestsWith`,
   `receivedPaymentRequestsFrom`, `listPaymentRequests`,
   `activeRecurringPaymentRequests`, and `actionableReceivedPaymentRequests` —
@@ -218,6 +236,10 @@ payer app that responds.
 - `PaykitSdk.proposeAllowance`, `acceptAllowance`, `rejectAllowance`, and
   `endAllowance` queue Allowance lifecycle events through the SDK outbound
   stream.
+- `acceptAllowance` takes `expectedProposalStreamItemId`: pass
+  `proposalStreamItemId` from the record whose terms the user approved. It
+  fails with a policy error when the current proposal for that Allowance ID is
+  a different stream item, so read the record again and ask again.
 - `PaykitSdk.listAllowances` and `getAllowance` inspect SDK-derived Allowance
   records without reimplementing lifecycle derivation on the platform.
 - `AllowanceTerms` and its nested range, period, and limit objects validate

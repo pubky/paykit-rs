@@ -37,9 +37,11 @@ use paykit_lib::{
 /// A Linked Peer controls how many Private Application Messages it sends, and
 /// Event Message history is never pruned because it is the source of truth for
 /// derived state. Intake for that counterparty is refused at this count rather
-/// than dropping history. Only superseded Private Payment Lists are reclaimed
-/// first, because not every storage adapter compacts them at commit. At
-/// roughly 1.4 KB per item this pins about 6 MB of state per counterparty.
+/// than dropping history, until the caller explicitly forgets the blocked
+/// counterparty, which is only allowed without payment history. Only
+/// superseded Private Payment Lists are reclaimed first, because not every
+/// storage adapter compacts them at commit. At roughly 1.4 KB per item this
+/// pins about 6 MB of state per counterparty.
 ///
 /// The limit bounds what a counterparty can add on its own. It does not apply
 /// once the local identity has chosen that counterparty (see
@@ -396,7 +398,8 @@ pub(crate) fn persist_private_stream_batch_in_transaction(
                     "counterparty {counterparty} reached the limit of \
                      {MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY} retained private stream items"
                 ),
-                source: None,
+                // The typed cause lets callers tell this refusal from other policy errors.
+                source: Some(crate::RetentionLimitReached.into()),
             });
         }
         retained_stream_items += 1;

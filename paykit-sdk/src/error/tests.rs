@@ -77,3 +77,30 @@ fn test_debug_redacts_source_without_removing_error_chain() {
     assert!(debug.contains("<redacted>"));
     assert!(!debug.contains(sentinel));
 }
+
+#[test]
+fn test_retention_limit_is_detected_only_from_its_policy_cause() {
+    let limit = PaykitSdkError::Policy {
+        context: "counterparty reached the limit".into(),
+        source: Some(RetentionLimitReached.into()),
+    };
+    assert!(limit.is_retention_limit_reached());
+
+    // Neither another policy cause nor the same cause on another variant counts.
+    for other in [
+        PaykitSdkError::Policy {
+            context: "counterparty is blocked".into(),
+            source: None,
+        },
+        PaykitSdkError::Policy {
+            context: "counterparty is blocked".into(),
+            source: Some(anyhow::anyhow!("retained private stream item limit")),
+        },
+        PaykitSdkError::Storage {
+            context: "failed to commit SDK state".into(),
+            source: Some(RetentionLimitReached.into()),
+        },
+    ] {
+        assert!(!other.is_retention_limit_reached());
+    }
+}

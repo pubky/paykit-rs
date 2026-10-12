@@ -102,6 +102,10 @@ where
     /// retained private stream item limit and the local identity has neither
     /// transacted with it nor saved it as a contact. That message stays
     /// unacknowledged and messages committed earlier in the call stay committed.
+    /// [`PaykitSdkError::is_retention_limit_reached`] identifies this refusal.
+    /// Saving the counterparty as a contact resumes intake.
+    /// [`Self::forget_peer`] removes what a blocked counterparty retained, and
+    /// is refused when there is payment history with it.
     pub async fn receive_private_messages(
         &self,
         counterparty: PubkyPublicKey,

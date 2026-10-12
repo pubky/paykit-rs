@@ -44,7 +44,8 @@ private func compileAllowanceBindingsSurface(
     )
     let accepted: AllowanceRecord = try await sdk.acceptAllowance(
         counterparty: counterparty,
-        allowanceId: allowanceId
+        allowanceId: allowanceId,
+        expectedProposalStreamItemId: 1
     )
     let rejected: AllowanceRecord = try await sdk.rejectAllowance(
         counterparty: counterparty,

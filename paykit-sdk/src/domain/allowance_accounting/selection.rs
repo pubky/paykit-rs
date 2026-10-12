@@ -117,6 +117,9 @@ pub(crate) fn select(
             app_id,
             &event,
             input.trusted_time,
+            // Selection needs accepted Allowance authority, which is payment
+            // history, so this counterparty cannot have been forgotten.
+            None,
         )?;
         let raw = paykit_lib::serialize_payment_request_event(app_id, &event)
             .map_err(|_| protocol("Could not encode Payment Request Acceptance"))?;

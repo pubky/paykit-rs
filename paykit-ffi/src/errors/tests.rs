@@ -328,3 +328,26 @@ fn test_string_variant_sources_never_reach_context() {
         );
     }
 }
+
+#[test]
+fn test_retention_limit_cause_selects_policy_code() {
+    // The typed cause only picks the code. Like every cause it never reaches
+    // `context`, and any other policy cause keeps the generic code (see above).
+    let ffi = PaykitFfiError::from(PaykitSdkError::Policy {
+        context: "counterparty reached the limit".into(),
+        source: Some(paykit_sdk::RetentionLimitReached.into()),
+    });
+
+    assert_eq!(
+        parts(&ffi),
+        (
+            "policy",
+            "retention_limit_reached",
+            "counterparty reached the limit"
+        )
+    );
+    assert_eq!(
+        ffi.to_string(),
+        "policy/retention_limit_reached: counterparty reached the limit"
+    );
+}

@@ -362,6 +362,14 @@ where
 
     /// Queue acceptance for a claimed received Payment Request.
     ///
+    /// `expected_proposal_stream_item_id` is the
+    /// [`PaymentRequestRecord::proposal_stream_item_id`] of the record whose
+    /// terms were approved. Acceptance is refused with `Policy` when the
+    /// current request for this Payment Request ID is a different stream item,
+    /// so terms that replaced the approved ones after [`Self::forget_peer`] are
+    /// not accepted. Pass the id that was displayed, not one read just before
+    /// this call.
+    ///
     /// The current App must claim the request first. Success only queues acceptance;
     /// accounting callers must still reserve payment and obtain a fresh handoff.
     /// The execution claim remains until proof, cancellation, or an explicit release,
@@ -372,6 +380,7 @@ where
         &self,
         counterparty: PubkyPublicKey,
         payment_request_id: &PaymentRequestId,
+        expected_proposal_stream_item_id: u64,
     ) -> Result<PaymentRequestRecord> {
         let (_, expected_identity) = self.load_session_access_and_refresh_identity().await?;
         let record = self
@@ -398,6 +407,7 @@ where
             counterparty.clone(),
             &PaymentRequestEvent::Acceptance(event),
             Some(expected_identity),
+            Some(expected_proposal_stream_item_id),
         )
         .await?;
         self.load_payment_request_record(&counterparty, payment_request_id)
@@ -405,6 +415,10 @@ where
     }
 
     /// Atomically claim a received Payment Request and queue its acceptance.
+    ///
+    /// `expected_proposal_stream_item_id` is checked as in
+    /// [`Self::accept_payment_request`]; on a mismatch nothing is claimed or
+    /// queued.
     ///
     /// An existing claim must belong to this App. Callers that reserve work during
     /// preparation should still use [`Self::claim_payment_request_for_execution`]
@@ -414,6 +428,7 @@ where
         &self,
         counterparty: PubkyPublicKey,
         payment_request_id: &PaymentRequestId,
+        expected_proposal_stream_item_id: u64,
     ) -> Result<PaymentRequestRecord> {
         let (session, expected_identity, _) = self
             .load_session_access_and_refresh_identity_with(|tx| {
@@ -474,6 +489,7 @@ where
                     &event,
                     now,
                     Some(&expected_identity),
+                    Some(expected_proposal_stream_item_id),
                 )?;
                 self.payment_request_record_in_transaction(
                     tx,
@@ -524,6 +540,7 @@ where
             counterparty.clone(),
             &PaymentRequestEvent::Rejection(event),
             Some(expected_identity),
+            None,
         )
         .await?;
         self.load_payment_request_record(&counterparty, payment_request_id)
@@ -576,6 +593,7 @@ where
             counterparty.clone(),
             &PaymentRequestEvent::Cancellation(event),
             Some(expected_identity),
+            None,
         )
         .await?;
         self.load_payment_request_record(&counterparty, payment_request_id)
@@ -869,6 +887,7 @@ where
         counterparty: PubkyPublicKey,
         event: &PaymentRequestEvent,
         expected_identity: Option<IdentityState>,
+        expected_proposal_stream_item_id: Option<u64>,
     ) -> Result<OutboundPrivateMessageRecord> {
         self.with_storage_operation(Box::pin(async {
             let _session = self.ensure_private_outbound_ready(&counterparty).await?;
@@ -879,6 +898,7 @@ where
                 event,
                 || self.clock.now(),
                 expected_identity,
+                expected_proposal_stream_item_id,
             )
             .await
         }))
@@ -893,6 +913,7 @@ where
         self.enqueue_raw_payment_request_response(
             counterparty,
             &PaymentRequestEvent::Acceptance(event.clone()),
+            None,
             None,
         )
         .await

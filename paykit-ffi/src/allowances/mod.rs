@@ -428,15 +428,26 @@ impl FfiPaykitSdk {
     }
 
     /// Queue acceptance for a received Allowance proposal.
+    ///
+    /// Pass the `proposal_stream_item_id` of the record whose terms were
+    /// approved, as it was displayed. Acceptance fails with a policy error when
+    /// the current proposal for this Allowance ID is a different stream item,
+    /// which happens when the counterparty was forgotten and sent the id again.
+    /// Read the record again and ask for approval again.
     pub async fn accept_allowance(
         &self,
         counterparty: String,
         allowance_id: String,
+        expected_proposal_stream_item_id: u64,
     ) -> Result<FfiAllowanceRecord, PaykitFfiError> {
         let counterparty = crate::session::parse_public_key(counterparty)?;
         let allowance_id = parse_allowance_id(allowance_id)?;
         self.runtime
-            .accept_allowance(counterparty, &allowance_id)
+            .accept_allowance(
+                counterparty,
+                &allowance_id,
+                expected_proposal_stream_item_id,
+            )
             .await?
             .try_into()
     }

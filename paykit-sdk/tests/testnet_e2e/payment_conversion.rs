@@ -49,7 +49,11 @@ async fn test_recurring_quote_issuance_and_proof_delivery() {
         .unwrap();
     payer
         .sdk
-        .accept_payment_request(payee.public_key.clone(), &id)
+        .accept_payment_request(
+            payee.public_key.clone(),
+            &id,
+            crate::harness::proposal_item(&payer.sdk, &payee.public_key, &id).await,
+        )
         .await
         .unwrap();
     deliver(payer, payee).await;

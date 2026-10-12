@@ -1459,3 +1459,120 @@ async fn test_receive_private_messages_bounds_identical_event_resends() {
     assert_eq!(state.private_stream_items.len(), 4);
     assert_eq!(state.outbound_private_messages.len(), 1);
 }
+
+#[tokio::test]
+async fn test_forget_peer_releases_counterparty_at_retention_limit() {
+    use paykit_lib::{
+        PaymentAmount, PaymentEndpointIdentifier, PaymentReference, PaymentRequestTerms,
+    };
+    use paykit_sdk::{
+        storage::PrivateStreamItemRecord, PaymentRequestLifecycleState, PrivateStreamParseStatus,
+    };
+
+    use crate::harness::{deliver, drive_recovery_to_linked};
+
+    // The SDK's per-counterparty retained private stream item limit.
+    const RETAINED_ITEM_LIMIT: u64 = 4096;
+
+    let pair = linked_two_party().await;
+    let alice = &pair.alice;
+    // Put Bob at the limit for Alice without sending that many messages.
+    let mut state = pair.bob.storage.snapshot().unwrap();
+    let received_at = chrono::Utc::now();
+    for sequence in 0..RETAINED_ITEM_LIMIT {
+        state.private_stream_items.push(PrivateStreamItemRecord {
+            stream_item_id: state.next_private_stream_item_id + sequence,
+            counterparty: alice.public_key.clone(),
+            receive_batch_id: state.next_receive_batch_id,
+            raw_json: format!(
+                r#"{{"version":1,"kind":"paykit.future","app_id":"bitkit","sequence":{sequence}}}"#
+            ),
+            parsed_version: Some(1),
+            parsed_kind: Some("paykit.future".into()),
+            parsed_app_id: Some("bitkit".into()),
+            known_paykit_kind: None,
+            parse_status: PrivateStreamParseStatus::UnknownKind,
+            parse_error: None,
+            received_at,
+        });
+    }
+    state.next_private_stream_item_id += RETAINED_ITEM_LIMIT;
+    state.next_receive_batch_id += 1;
+    let bob = pair
+        .bob
+        .restart_with_storage(InMemoryStorage::from_state(state))
+        .await;
+
+    // Alice's next Event Message is refused and stays unconfirmed in her queue.
+    let request = alice
+        .sdk
+        .propose_payment_request(
+            bob.public_key.clone(),
+            PaymentRequestTerms::builder(
+                PaymentAmount::new("0.001", "btc").unwrap(),
+                PaymentReference::new("after-forget").unwrap(),
+                vec![PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap()],
+            )
+            .build()
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    alice
+        .sdk
+        .process_outbound_private_messages(bob.public_key.clone())
+        .await
+        .unwrap();
+    let refused = bob
+        .sdk
+        .receive_private_messages(alice.public_key.clone())
+        .await
+        .unwrap_err();
+    assert!(refused.is_retention_limit_reached());
+
+    // Only a blocked counterparty can be forgotten.
+    let linked = bob.storage.snapshot().unwrap();
+    let error = bob
+        .sdk
+        .forget_peer(alice.public_key.clone())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, PaykitSdkError::Policy { .. }));
+    assert_eq!(bob.storage.snapshot().unwrap(), linked);
+    bob.sdk.block_peer(alice.public_key.clone()).await.unwrap();
+    bob.sdk.forget_peer(alice.public_key.clone()).await.unwrap();
+    assert!(bob
+        .storage
+        .snapshot()
+        .unwrap()
+        .private_stream_items
+        .is_empty());
+    bob.sdk
+        .unblock_peer(alice.public_key.clone())
+        .await
+        .unwrap();
+
+    // Bob starts a fresh Encrypted Link and Alice follows his recovery marker.
+    let restarted = bob
+        .sdk
+        .ensure_link_with_peer(alice.public_key.clone(), 1)
+        .await
+        .unwrap();
+    assert_ne!(restarted.state, LinkedPeerState::Linked);
+    drive_recovery_to_linked(alice, &bob).await;
+
+    // The refused request is sent again on the new link and stored as new.
+    deliver(alice, &bob).await;
+    let requests = bob
+        .sdk
+        .payment_requests_with(&alice.public_key)
+        .await
+        .unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].payment_request_id, request.payment_request_id);
+    assert_eq!(requests[0].state, PaymentRequestLifecycleState::Proposed);
+    assert_eq!(
+        bob.storage.snapshot().unwrap().private_stream_items.len(),
+        1
+    );
+}
