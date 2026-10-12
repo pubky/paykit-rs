@@ -1024,7 +1024,7 @@ fn require_state(
     }
 }
 
-fn filtered_payment_request_records(
+pub(super) fn filtered_payment_request_records(
     tx: &dyn StorageTransaction,
     filter: &PaymentRequestFilter,
     now: DateTime<Utc>,

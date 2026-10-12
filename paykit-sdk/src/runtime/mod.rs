@@ -136,6 +136,7 @@ mod contacts;
 mod encrypted_links;
 mod key_rotation;
 mod noise_key_authorization;
+mod observation;
 mod outbound_private;
 mod payment_requests;
 mod payment_resolution;
@@ -148,6 +149,7 @@ mod recovery;
 mod reservation_cleanup;
 
 pub use app_removal::PaykitAppRemovalBlockers;
+pub use observation::PaykitStateObservation;
 
 /// Clock abstraction used by SDK workflows and tests.
 pub trait Clock: Clone + Send + Sync + 'static {

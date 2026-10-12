@@ -290,6 +290,22 @@ Common workflows:
   to cancel or finish its active Payment Requests, undelivered private events,
   and incomplete Receipt issuance first
 
+## Display Observations
+
+`observe_state()` returns contacts, link states, Payment Requests and previously
+decrypted Receipts from one storage transaction. It requires an initialized
+identity and live private-link-capable session. Existing blocked-peer and Receipt
+access filters apply; it does not fetch peer messages or refresh remote app
+authorization.
+
+Use a coalesced background refresh to populate the app's protected display cache.
+Scope that cache to the returned identity and Paykit key generation, discard it
+on sign-out or identity/key changes, and reject refresh results from an obsolete
+app session. A failed refresh must not be interpreted as an empty remote state.
+`observed_at` is a local timestamp, not an authoritative remote revision. Keep
+payment eligibility, execution, reservations and all mutations on their existing
+authoritative SDK paths. The observation itself is not a backup or payment proof.
+
 ## Conversion Quotes
 
 Set optional `conversion` and `payment_deadline` fields on Payment Request terms.

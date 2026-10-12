@@ -32,6 +32,13 @@ on low-level `paykit-lib` protocol bindings.
   Paykit state intact; `forgetSessionAccess` performs local-only cleanup.
 - `PaykitSdk.stateRevision` — return the latest observed SDK state revision so
   apps can detect when SDK-managed state changed.
+- `PaykitSdk.observeState` - read a coherent `PaykitStateObservation` for display
+  through one storage transaction. Refresh asynchronously and retain the last
+  validated view in the app's protected identity/key-generation-scoped cache;
+  discard it on session/identity/key changes. This call still uses normal shared
+  storage locking, so display reads should use the cache instead of waiting for
+  it. Observed requests and link states never replace fresh authorization,
+  payment admission or execution checks. A refresh does not receive peer messages.
 - `PaykitSdk.backupStateRevision` — fingerprint backup contents without
   transient operation leases, so empty polls do not trigger app backups.
 - `PaykitSdk.observedBackupStateRevision` - return optional paired storage and

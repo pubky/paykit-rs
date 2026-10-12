@@ -9,6 +9,7 @@ mod harness;
 mod allowances;
 mod encrypted_links;
 mod noise_key_authorization;
+mod observation;
 mod payment_conversion;
 mod private_lists;
 mod profiles;

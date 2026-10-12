@@ -3,6 +3,11 @@ extension ContactRecord: CustomStringConvertible, CustomDebugStringConvertible {
     public var debugDescription: String { description }
 }
 
+extension PaykitStateObservation: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PaykitStateObservation(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
 extension ContactUpdate: CustomStringConvertible, CustomDebugStringConvertible {
     public var description: String { "ContactUpdate(<redacted>)" }
     public var debugDescription: String { description }

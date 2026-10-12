@@ -7,6 +7,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc74 - 2026-10-12
+
 ### Added
 
 - `forget_peer` in Rust and `forgetPeer` in Swift and Kotlin, which deletes what
@@ -45,6 +47,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `PaykitSdkError::is_retention_limit_reached` and the `retention_limit_reached`
   FFI policy code. It is still a `Policy` error and the generated Swift/Kotlin
   error shape is unchanged.
+
+### Fixed
+
+- `observe_state` reports an unbound stored Noise key separately from an
+  identity or key mismatch. Callers must initialize with a private-link-capable
+  session before observing private state; a rejected observation leaves storage
+  unchanged.
 
 ### Security
 
@@ -90,6 +99,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   Re-sends identical to the first stored copy of an Event Message are retained
   at most twice, then confirmed again without new state; conflicting payloads
   are still retained and count toward the limit.
+
+## 0.1.0-rc73 - 2026-10-11
+
+### Added
+
+- `PaykitSdk::observe_state` in Rust and `observeState` in Swift and Kotlin
+  for coherent, identity/key-validated display observations of stored Contact
+  Records, Linked Peer states, Payment Requests and decrypted Receipts through
+  one guarded storage transaction.
+- Observations are display-only, not payment authority or a remote freshness
+  guarantee. They do not receive peer messages, retrieve Receipts or refresh
+  remote authorization. Keep display data scoped to identity and key generation,
+  discard it when session access is cleared, and retain authoritative payment APIs.
 
 ## 0.1.0-rc72 - 2026-10-08
 
