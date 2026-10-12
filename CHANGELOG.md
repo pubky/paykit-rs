@@ -32,7 +32,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   published homeserver is approved without signing up or republishing. A record
   that no longer resolves but is still cached by a relay or the client fails the
   approval until `republish_identity` (`republishIdentity`) rebroadcasts it, and
-  a lookup error fails the approval. Signup still runs when no record is found.
+  a lookup error fails the approval. Signup still runs when no record at all is
+  found for the identity. An identity whose PKARR record names no homeserver is
+  not signed up by an approval, because that record can be older than a
+  homeserver record. It signs up with `sign_up` (`signUp`) and a homeserver the
+  caller already trusts.
 - Companion claim approval applies the same checks before the claim is signed or
   delivered and reports a refusal as an invalid request, so a refused signup
   request receives neither the claim nor the grant.

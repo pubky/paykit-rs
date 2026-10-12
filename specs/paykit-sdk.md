@@ -486,11 +486,15 @@ client's cached copy of the identity's record, so the helper then asks the
 network without that cache, looks again, and reads the caches again. A cached
 copy that predates the homeserver record is therefore not read as none while
 the network returns the newer record. A lookup error fails the approval.
-Only when no record is found does the helper sign up on the requested
-homeserver. A signup that the requested homeserver rejects, including because
-the account already exists, fails the approval and publishes nothing; the signup
-helper, called with a homeserver the caller already trusts rather than one
-taken from the auth URL, restores the record of an existing account. A record
+Only when no record at all is found for the identity does the helper sign up on
+the requested homeserver. A record that names no homeserver fails the approval,
+because it can be older than a homeserver record that the network no longer
+returns; such an identity signs up with the signup helper and a homeserver the
+caller already trusts. A signup that the requested homeserver rejects, including
+because the account already exists, fails the approval and publishes nothing;
+the signup helper, called with a homeserver the caller already trusts rather
+than one taken from the auth URL, restores the record of an existing account. A
+record
 that no reachable relay caches still counts as none, so a caller that knows the
 identity's homeserver should compare it with the request's homeserver before
 approving.
