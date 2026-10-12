@@ -2335,13 +2335,21 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Restore SDK-managed backup state from an opaque blob.
+     *
+     * `link_policy` decides whether saved Encrypted Links resume or require a
+     * fresh Encrypted Link Handshake. Resuming a backup that is not current
+     * reuses a transport key and nonce.
      */
-    func restoreBackupState(backup: SdkBackupBlob) async throws  -> RestoreReport
+    func restoreBackupState(backup: SdkBackupBlob, linkPolicy: RestoredLinkPolicy) async throws  -> RestoreReport
 
     /**
      * Restore SDK-managed backup state from a hex string.
+     *
+     * `link_policy` decides whether saved Encrypted Links resume or require a
+     * fresh Encrypted Link Handshake. Resuming a backup that is not current
+     * reuses a transport key and nonce.
      */
-    func restoreBackupString(backup: String) async throws  -> RestoreReport
+    func restoreBackupString(backup: String, linkPolicy: RestoredLinkPolicy) async throws  -> RestoreReport
 
     /**
      * Fetch, decrypt, and store a receipt from an indexed Receipt Access event.
@@ -4780,14 +4788,18 @@ open func resolvePublicPaymentRequest(counterparty: String, paymentRequestId: St
 
     /**
      * Restore SDK-managed backup state from an opaque blob.
+     *
+     * `link_policy` decides whether saved Encrypted Links resume or require a
+     * fresh Encrypted Link Handshake. Resuming a backup that is not current
+     * reuses a transport key and nonce.
      */
-open func restoreBackupState(backup: SdkBackupBlob)async throws  -> RestoreReport  {
+open func restoreBackupState(backup: SdkBackupBlob, linkPolicy: RestoredLinkPolicy)async throws  -> RestoreReport  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_restore_backup_state(
                     self.uniffiClonePointer(),
-                    FfiConverterTypeSdkBackupBlob_lower(backup)
+                    FfiConverterTypeSdkBackupBlob_lower(backup),FfiConverterTypeRestoredLinkPolicy_lower(linkPolicy)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -4800,14 +4812,18 @@ open func restoreBackupState(backup: SdkBackupBlob)async throws  -> RestoreRepor
 
     /**
      * Restore SDK-managed backup state from a hex string.
+     *
+     * `link_policy` decides whether saved Encrypted Links resume or require a
+     * fresh Encrypted Link Handshake. Resuming a backup that is not current
+     * reuses a transport key and nonce.
      */
-open func restoreBackupString(backup: String)async throws  -> RestoreReport  {
+open func restoreBackupString(backup: String, linkPolicy: RestoredLinkPolicy)async throws  -> RestoreReport  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_restore_backup_string(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(backup)
+                    FfiConverterString.lower(backup),FfiConverterTypeRestoredLinkPolicy_lower(linkPolicy)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -18906,7 +18922,7 @@ public struct RestoreReport {
      */
     public var receiptIssuanceRecords: UInt64
     /**
-     * Counterparties restored as recovery-required.
+     * Counterparties that need a fresh Encrypted Link Handshake after restore.
      */
     public var recoveryRequiredPeers: [String]
 
@@ -18953,7 +18969,7 @@ public struct RestoreReport {
          * Number of restored local receipt issuance records.
          */receiptIssuanceRecords: UInt64,
         /**
-         * Counterparties restored as recovery-required.
+         * Counterparties that need a fresh Encrypted Link Handshake after restore.
          */recoveryRequiredPeers: [String]) {
         self.version = version
         self.restoredIdentity = restoredIdentity
@@ -22409,6 +22425,106 @@ extension ReceiptRetrievalStatus: Codable {}
 
 
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * How backup restore treats saved Encrypted Link and handshake snapshots.
+ *
+ * A backup cannot prove that no private message was sent after its export, and
+ * the SDK cannot check that for the app. Every restore states this choice.
+ */
+
+public enum RestoredLinkPolicy {
+
+    /**
+     * Resume each Encrypted Link and handshake from its saved snapshot when its
+     * retained authorization still matches.
+     *
+     * Safe only if no runtime for this identity sent or received private
+     * messages, or advanced an Encrypted Link Handshake, after the backup was
+     * exported. The SDK also sends on its own: Delivery Confirmations for
+     * received Event Messages, Private Payment List syncs (repeated after each
+     * restart), and retries. Otherwise the next send reuses a transport key and
+     * nonce and overwrites a published outbox slot, which leaks plaintext to
+     * anyone holding both ciphertexts and loses one of the two messages.
+     * Holding the latest available backup is not enough if the exporting
+     * runtime ran again.
+     */
+    case resume
+    /**
+     * Discard saved snapshots and require a fresh Encrypted Link Handshake.
+     *
+     * Use for an old or uncertain backup. Every peer that had a snapshot is
+     * listed in `recovery_required_peers` and restored as recovery-required; a
+     * blocked peer stays blocked. Private messages the backup had not yet
+     * received are not read from the old link.
+     */
+    case requireRecovery
+}
+
+
+#if compiler(>=6)
+extension RestoredLinkPolicy: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRestoredLinkPolicy: FfiConverterRustBuffer {
+    typealias SwiftType = RestoredLinkPolicy
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RestoredLinkPolicy {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .resume
+
+        case 2: return .requireRecovery
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: RestoredLinkPolicy, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .resume:
+            writeInt(&buf, Int32(1))
+
+
+        case .requireRecovery:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRestoredLinkPolicy_lift(_ buf: RustBuffer) throws -> RestoredLinkPolicy {
+    return try FfiConverterTypeRestoredLinkPolicy.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRestoredLinkPolicy_lower(_ value: RestoredLinkPolicy) -> RustBuffer {
+    return FfiConverterTypeRestoredLinkPolicy.lower(value)
+}
+
+
+extension RestoredLinkPolicy: Equatable, Hashable {}
+
+extension RestoredLinkPolicy: Codable {}
+
+
+
+
+
+
 
 /**
  * Error type exposed through generated bindings.
@@ -25502,10 +25618,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_public_payment_request() != 44750) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_state() != 30409) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_state() != 65524) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_string() != 23617) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_string() != 63951) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_retrieve_receipt() != 26622) {

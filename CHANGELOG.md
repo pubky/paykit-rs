@@ -26,6 +26,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Changed
 
+- **Breaking (Rust and FFI API):** `restore_backup_state` and the FFI
+  `restoreBackupState` and `restoreBackupString` take a required
+  `RestoredLinkPolicy`. `Resume` keeps the previous behavior. `RequireRecovery`
+  discards saved Encrypted Link and handshake snapshots, lists the affected
+  peers in `recovery_required_peers`, and leaves their queued private messages
+  waiting for a fresh Encrypted Link Handshake. The backup format is unchanged.
 - Identify the retained private stream item limit refusal with
   `PaykitSdkError::is_retention_limit_reached` and the `retention_limit_reached`
   FFI policy code. It is still a `Policy` error and the generated Swift/Kotlin
@@ -33,6 +39,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Security
 
+- Restoring a backup older than the last private send and resuming its links
+  reused a transport key and nonce and overwrote a published outbox slot. The
+  SDK cannot tell whether a backup is current, so apps must now choose: pass
+  `RequireRecovery` for an old or uncertain backup, and `Resume` only when no
+  runtime for this identity sent or received private messages after the export.
 - Bound the private stream state one Linked Peer can make the SDK retain. Each
   counterparty may have at most 4,096 retained private stream items; a message
   past that limit fails `receive_private_messages` with a `Policy` error and
