@@ -587,7 +587,7 @@ local identity from the supplied session.
 
 **When to snapshot:**
 
-Take a snapshot after the Encrypted Link is established and periodically after exchanging messages. The snapshot includes nonce counters that must stay in sync with the counterparty. Restoring from a stale snapshot may cause nonce desynchronization or replay newer messages. Never send different plaintext from a snapshot taken before a failed send: if the earlier publish reached the homeserver, that reuses the transport key and nonce. Persist any returned Event Messages and caller dedupe state before replacing the stored snapshot with one whose read counter has advanced past those messages.
+Take a snapshot after the Encrypted Link is established and periodically after exchanging messages. The snapshot includes nonce counters that must stay in sync with the counterparty. Restoring a snapshot taken before a later send rolls back the sending nonce and outbox slot, so the next send reuses the transport key and nonce; establish a fresh Encrypted Link instead. Never send different plaintext from a snapshot taken before a failed send: if the earlier publish reached the homeserver, that reuses the transport key and nonce. Persist any returned Event Messages and caller dedupe state before replacing the stored snapshot with one whose read counter has advanced past those messages.
 
 Snapshot bytes include sensitive key material, so they must be treated as secrets (store encrypted at rest; never log or expose them).
 

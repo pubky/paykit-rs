@@ -175,8 +175,38 @@ pub struct RestoreReport {
     pub receipt_records: usize,
     /// Number of restored local receipt issuance records.
     pub receipt_issuance_records: usize,
-    /// Counterparties restored as recovery-required.
+    /// Counterparties that need a fresh Encrypted Link Handshake after restore.
     pub recovery_required_peers: Vec<PubkyPublicKey>,
+}
+
+/// How backup restore treats saved Encrypted Link and handshake snapshots.
+///
+/// A backup cannot prove that no Private Application Message was sent after its
+/// export, and the SDK cannot check that for the caller. Every restore therefore
+/// states this choice explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RestoredLinkPolicy {
+    /// Resume each Encrypted Link and handshake from its saved snapshot when its
+    /// retained authorization still matches.
+    ///
+    /// Safe only if no runtime for this identity sent or received private
+    /// messages, or advanced an Encrypted Link Handshake, after the backup was
+    /// exported. The SDK also sends on its own: Delivery Confirmations for
+    /// received Event Messages, Private Payment List syncs (repeated after each
+    /// restart), and retries. Otherwise the next send reuses a transport key and
+    /// nonce and overwrites a published outbox slot, which leaks plaintext to
+    /// anyone holding both ciphertexts and loses one of the two messages.
+    /// Holding the latest available backup is not enough if the exporting
+    /// runtime ran again.
+    Resume,
+    /// Discard saved snapshots and require a fresh Encrypted Link Handshake.
+    ///
+    /// Use for an old or uncertain backup. Every peer that had a snapshot is
+    /// listed in [`RestoreReport::recovery_required_peers`] and restored as
+    /// recovery-required; a blocked peer stays blocked. Private messages the
+    /// backup had not yet received are not read from the old link.
+    RequireRecovery,
 }
 
 /// Refresh derived message classifications without restoring or resetting transport state.
@@ -228,7 +258,15 @@ pub(crate) async fn restore_backup_state<S>(
 where
     S: StorageAdapter,
 {
-    restore_backup_state_with_identity(storage, backup, None, None, DateTime::<Utc>::MIN_UTC).await
+    restore_backup_state_with_identity(
+        storage,
+        backup,
+        None,
+        None,
+        DateTime::<Utc>::MIN_UTC,
+        RestoredLinkPolicy::Resume,
+    )
+    .await
 }
 
 pub(crate) async fn restore_backup_state_with_identity<S>(
@@ -237,6 +275,7 @@ pub(crate) async fn restore_backup_state_with_identity<S>(
     trusted_identity: Option<IdentityState>,
     trusted_noise_public_key: Option<PubkyPublicKey>,
     now: DateTime<Utc>,
+    link_policy: RestoredLinkPolicy,
 ) -> Result<RestoreReport>
 where
     S: StorageAdapter,
@@ -295,6 +334,7 @@ where
                 trusted_noise_public_key.or(current_state.paykit_noise_public_key.clone()),
                 current_next_peer_link_operation_lease_id,
                 current_next_paykit_app_operation_lease_id,
+                link_policy,
             )?;
             let mut state = state.into_storage_state();
             let current_accounting = if stored_identity.as_ref().and_then(|i| i.public_key.as_ref())
@@ -473,6 +513,7 @@ impl SdkBackupState {
         current_noise_public_key: Option<PubkyPublicKey>,
         next_peer_link_operation_lease_id: u64,
         next_paykit_app_operation_lease_id: u64,
+        link_policy: RestoredLinkPolicy,
     ) -> Result<(ValidatedStorageState, RestoreReport)> {
         self.validate(current_identity)?;
 
@@ -591,6 +632,7 @@ impl SdkBackupState {
             &mut linked_peers,
             &encrypted_link_states,
             &outbound_private_messages,
+            link_policy,
         )?;
         clear_recovery_required_link_snapshots(
             &mut encrypted_link_states,

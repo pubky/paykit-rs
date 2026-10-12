@@ -3,11 +3,12 @@ use paykit_lib::{
     PaymentRequestTerms,
 };
 use paykit_sdk::{
-    InMemoryStorage, LinkedPeerState, PaykitSdk, PaykitSdkConfig, PaykitSdkError,
-    PaymentRequestLifecycleState, PrivatePaymentListReservationUpdate, PubkyPublicKey,
-    PubkySessionAccess, PubkySessionProvider, StorageAdapter,
+    InMemoryStorage, LinkedPeerState, PaykitApp, PaykitAppCapabilities, PaykitSdk, PaykitSdkConfig,
+    PaykitSdkError, PaymentRequestLifecycleState, PrivatePaymentListReservationUpdate,
+    PubkyPublicKey, PubkySessionAccess, PubkySessionProvider, StorageAdapter,
 };
 use std::{
+    collections::BTreeMap,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
@@ -17,8 +18,8 @@ use std::{
 use tokio::sync::oneshot;
 
 use crate::harness::{
-    drive_link_to_linked, linked_two_party, private_receiving_detail, two_party,
-    TestnetSessionProvider,
+    deliver, drive_link_to_linked, drive_recovery_to_linked, linked_two_party,
+    private_receiving_detail, two_party, TestUser, TestnetSessionProvider,
 };
 
 struct PausedPublicReadProvider {
@@ -1819,4 +1820,139 @@ async fn test_mutual_recovery_markers_do_not_block_relink() {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// Every private object the user has published, keyed by absolute path.
+async fn published_private_objects(user: &TestUser) -> BTreeMap<String, Vec<u8>> {
+    let storage = user.access.session.storage();
+    let resources = storage
+        .list(format!("{}/", paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX))
+        .unwrap()
+        .send()
+        .await
+        .unwrap();
+    // One listing page is the whole directory only below the default page size.
+    assert!(resources.len() < 100);
+    let mut objects = BTreeMap::new();
+    for resource in resources {
+        let path = resource.path.as_str().to_owned();
+        let bytes = storage.get(&path).await.unwrap().bytes().await.unwrap();
+        objects.insert(path, bytes.to_vec());
+    }
+    objects
+}
+
+#[tokio::test]
+async fn test_backup_restore_relinks_instead_of_reusing_private_outbox_slots() {
+    use paykit_sdk::{OutboundPrivateMessageStatus, RestoredLinkPolicy};
+
+    let pair = linked_two_party().await;
+    pair.alice
+        .adapter
+        .set_private_details(vec![private_receiving_detail(
+            "btc-lightning-bolt11",
+            "ln-private-before-restore",
+        )]);
+    let queued = pair
+        .alice
+        .sdk
+        .enqueue_private_payment_list(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    // The backup holds the queued message and a link snapshot whose next
+    // sending nonce and outbox slot are still unused. The send then uses both.
+    let backup = pair.alice.sdk.export_backup_state().await.unwrap();
+    let before_send = published_private_objects(&pair.alice).await;
+    deliver(&pair.alice, &pair.bob).await;
+    let published = published_private_objects(&pair.alice).await;
+    assert_eq!(published.len(), before_send.len() + 1);
+    let status_of_queued = |user: &TestUser| {
+        user.storage
+            .snapshot()
+            .unwrap()
+            .outbound_private_messages
+            .into_iter()
+            .find(|message| message.outbound_message_id == queued.outbound_message_id)
+            .unwrap()
+            .status
+    };
+
+    let restored = pair
+        .alice
+        .restart_with_storage(InMemoryStorage::new())
+        .await;
+    // The backup is older than the last send, so the app asks for recovery.
+    let report = restored
+        .sdk
+        .restore_backup_state(backup, RestoredLinkPolicy::RequireRecovery)
+        .await
+        .unwrap();
+    restored
+        .sdk
+        .publish_paykit_app(
+            PaykitApp::new(
+                "Paykit Test App",
+                PaykitAppCapabilities {
+                    private_payments: true,
+                    payment_requests: true,
+                    receipts: true,
+                    outgoing_payments: true,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    restored
+        .adapter
+        .set_private_details(vec![private_receiving_detail(
+            "btc-lightning-bolt11",
+            "ln-private-after-restore",
+        )]);
+    let enqueued = restored
+        .sdk
+        .enqueue_private_payment_list(pair.bob.public_key.clone())
+        .await;
+    let drained = restored
+        .sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await;
+
+    // New plaintext under an already-used transport key and nonce would
+    // replace the bytes of a slot that was already published.
+    let after_attempt = published_private_objects(&pair.alice).await;
+    let rewritten = published
+        .iter()
+        .filter(|(path, bytes)| after_attempt.get(*path) != Some(*bytes))
+        .map(|(path, _)| path)
+        .collect::<Vec<_>>();
+    assert!(
+        rewritten.is_empty(),
+        "restored snapshot rewrote used private outbox slots: {rewritten:?}"
+    );
+    assert!(
+        matches!(enqueued, Err(PaykitSdkError::RecoveryRequired { .. })),
+        "{enqueued:?}"
+    );
+    assert!(drained.unwrap().sent.is_empty());
+    assert_eq!(
+        report.recovery_required_peers,
+        vec![pair.bob.public_key.clone()]
+    );
+    assert_eq!(
+        status_of_queued(&restored),
+        OutboundPrivateMessageStatus::RecoveryRequired
+    );
+
+    // A fresh Encrypted Link Handshake delivers the parked message on new paths.
+    drive_recovery_to_linked(&restored, &pair.bob).await;
+    deliver(&restored, &pair.bob).await;
+    assert_eq!(
+        status_of_queued(&restored),
+        OutboundPrivateMessageStatus::Sent
+    );
+    let after_recovery = published_private_objects(&pair.alice).await;
+    assert!(published
+        .iter()
+        .all(|(path, bytes)| after_recovery.get(path) == Some(bytes)));
 }

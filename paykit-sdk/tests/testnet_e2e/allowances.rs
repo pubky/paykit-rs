@@ -185,7 +185,7 @@ async fn test_allowance_survives_restart_restore_and_link_recovery() {
         .await;
     let restore = restored_bob
         .sdk
-        .restore_backup_state(backup)
+        .restore_backup_state(backup, paykit_sdk::RestoredLinkPolicy::Resume)
         .await
         .expect("Allowance backup restore should succeed");
     assert!(restore.recovery_required_peers.is_empty());

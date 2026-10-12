@@ -7,8 +7,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (Rust and FFI API):** `restore_backup_state` and the FFI
+  `restoreBackupState` and `restoreBackupString` take a required
+  `RestoredLinkPolicy`. `Resume` keeps the previous behavior. `RequireRecovery`
+  discards saved Encrypted Link and handshake snapshots, lists the affected
+  peers in `recovery_required_peers`, and leaves their queued private messages
+  waiting for a fresh Encrypted Link Handshake. The backup format is unchanged.
+
 ### Security
 
+- Restoring a backup older than the last private send and resuming its links
+  reused a transport key and nonce and overwrote a published outbox slot. The
+  SDK cannot tell whether a backup is current, so apps must now choose: pass
+  `RequireRecovery` for an old or uncertain backup, and `Resume` only when no
+  runtime for this identity sent or received private messages after the export.
 - Approving a signup auth request no longer moves an identity that has a
   homeserver record to the homeserver chosen by the requester. `approve_auth` and
   `approve_auth_with_companion_claim` in Rust, and `approveAuth` and
