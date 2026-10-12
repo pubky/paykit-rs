@@ -207,9 +207,11 @@ Common workflows:
   message processing remains one peer at a time. One call handles at most 100
   messages; call again to drain more. Each counterparty may have at most 4,096
   retained private stream items: past that, receive fails with a `Policy` error
-  for that counterparty only and its messages stay unacknowledged. Detect it
-  with `PaykitSdkError::is_retention_limit_reached` on the single-counterparty
-  call; batch reports carry only error text
+  for that counterparty only and its messages stay unacknowledged. Superseded
+  Private Payment Lists do not use up the limit: they are deleted before a
+  message is refused. Detect the refusal with
+  `PaykitSdkError::is_retention_limit_reached` on the single-counterparty call;
+  batch reports carry only error text
 - call `forget_peer` to delete what a blocked counterparty sent when you never
   acted on it, for example an unsolicited flood that reached that limit. It
   requires `block_peer` first, is local and irreversible, and applies to every

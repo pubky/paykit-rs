@@ -334,19 +334,23 @@ payment history. Only an explicit
 [`forget_peer`](#forget-a-blocked-peer) removes them, for one blocked
 counterparty at a time and never for a counterparty the local identity has
 payment history with. Callback and custom storage do not compact superseded
-Private Payment Lists, so there every received list counts toward the limit
-below.
+Private Payment Lists at commit; intake reclaims them when a counterparty
+approaches the limit below.
 
 Private stream intake bounds what one counterparty can add to that history:
 
 - At most 4,096 private stream items are retained per counterparty, counted
-  across every message kind and parse status. A message that would exceed the
-  limit fails its receive transaction with `Policy`. `is_retention_limit_reached`
-  identifies that error in Rust and bindings report it with the
-  `retention_limit_reached` code. Nothing is pruned, the
-  Encrypted Link checkpoint does not advance, and the message stays in the
-  sender's outbox. Messages committed earlier in the same receive call stay
-  committed. Intake from other counterparties is unaffected.
+  across every message kind and parse status. When a receive transaction could
+  reach the limit, the SDK first deletes that counterparty's Private Payment
+  Lists that a later valid list from the same App ID superseded. This runs on
+  every storage adapter, because app-owned blob storage does not compact them
+  at commit. A message that would still exceed the limit fails its receive
+  transaction with `Policy`. `is_retention_limit_reached` identifies that error
+  in Rust and bindings report it with the `retention_limit_reached` code.
+  Nothing else is pruned, the Encrypted Link checkpoint does not advance, and
+  the message stays in the sender's outbox. Messages committed earlier in the
+  same receive call stay committed. Intake from other counterparties is
+  unaffected.
 - At most two re-sends identical to the first stored payload of an Event ID are
   retained as stream items. Later identical re-sends are consumed and confirmed
   again without a new stream item or dedupe entry; for a counterparty at the

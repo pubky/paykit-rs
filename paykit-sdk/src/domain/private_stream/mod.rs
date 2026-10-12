@@ -36,13 +36,13 @@ use paykit_lib::{
 ///
 /// A Linked Peer controls how many Private Application Messages it sends, and
 /// Event Message history is never pruned because it is the source of truth for
-/// derived state; only Pubky shared-state storage compacts superseded Private
-/// Payment Lists at commit. Intake for that counterparty is refused at this
-/// count rather than dropping history, until the caller explicitly forgets the
-/// blocked counterparty, which is only allowed without payment history. The
-/// count is taken before commit compaction. At roughly
-/// 1.4 KB per item this pins about 6 MB of state per counterparty, and leaves
-/// room for about 1,000 paid one-time Payment Request lifecycles.
+/// derived state. Intake for that counterparty is refused at this count rather
+/// than dropping history, until the caller explicitly forgets the blocked
+/// counterparty, which is only allowed without payment history. Only
+/// superseded Private Payment Lists are reclaimed first, because not every
+/// storage adapter compacts them at commit. At roughly 1.4 KB per item this
+/// pins about 6 MB of state per counterparty, and leaves room for about 1,000
+/// paid one-time Payment Request lifecycles.
 pub(crate) const MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY: usize = 4096;
 
 /// Most identical re-sends of one Event Message retained as stream items.
@@ -227,6 +227,29 @@ where
     .await
 }
 
+/// Delete `counterparty`'s superseded Private Payment Lists and return how many
+/// private stream items it still retains.
+///
+/// A Private Payment List is a Latest-State Message: the latest valid list from
+/// one Paykit App replaces the earlier ones. Storage that does not compact them
+/// at commit would otherwise count every list update toward the limit forever.
+fn reclaim_superseded_private_payment_lists(
+    tx: &mut dyn crate::storage::StorageTransaction,
+    counterparty: &PubkyPublicKey,
+) -> Result<usize> {
+    let mut state = tx.export_storage_state();
+    let before = state.private_stream_items.len();
+    crate::storage::compact_received_private_payment_lists(&mut state, Some(counterparty));
+    if state.private_stream_items.len() != before {
+        // SECURITY: only superseded Latest-State payloads are removed. Event
+        // Messages, their dedupe records, and invalid lists stay, so replay
+        // detection and derived payment state are unchanged.
+        crate::validate_storage_state(&state)?;
+        tx.replace_storage_state(crate::storage::ValidatedStorageState::new(state));
+    }
+    Ok(tx.private_stream_items(counterparty).len())
+}
+
 /// Persist stream items and their resulting Encrypted Link checkpoint.
 #[cfg(test)]
 pub(crate) async fn persist_private_stream_batch_write<S>(
@@ -279,6 +302,11 @@ pub(crate) fn persist_private_stream_batch_in_transaction(
     } else {
         tx.private_stream_items(&counterparty).len()
     };
+    if retained_stream_items + messages.len() > MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY {
+        // This batch could reach the limit, so reclaim what is safe to reclaim
+        // before anything is refused.
+        retained_stream_items = reclaim_superseded_private_payment_lists(tx, &counterparty)?;
+    }
     for message in messages {
         let receive_batch_id = receive_batch_id.expect("nonempty batch has an id");
         let PrivateStreamMessageClassification {
