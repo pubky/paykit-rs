@@ -209,7 +209,10 @@ Common workflows:
   retained private stream items: past that, receive fails with a `Policy` error
   for that counterparty only and its messages stay unacknowledged. Superseded
   Private Payment Lists do not use up the limit: they are deleted before a
-  message is refused. Detect the refusal with
+  message is refused. The limit only bounds what a counterparty adds on its
+  own: it no longer applies once you have queued or sent that counterparty a
+  Payment Request, a Payment Request Acceptance, a Payment Proof, an Allowance
+  proposal, or an Allowance Acceptance. Detect the refusal with
   `PaykitSdkError::is_retention_limit_reached` on the single-counterparty call;
   batch reports carry only error text
 - call `forget_peer` to delete what a blocked counterparty sent when you never
@@ -219,7 +222,8 @@ Common workflows:
   history with that counterparty (a Payment Request or Allowance message you
   queued or sent, an execution claim, a wallet accounting occurrence or
   association, or a retrieved Receipt), so it never deletes history you acted
-  on or a Receipt you retrieved, and cannot yet release such a counterparty. It
+  on or a Receipt you retrieved, and cannot yet release such a counterparty
+  that is at the limit. It
   deletes the received private stream items, including Private Payment Lists,
   with their dedupe and Receipt Access records and your Delivery Confirmations
   for them. That includes Receipt Access you have not retrieved, which the

@@ -337,7 +337,16 @@ payment history with. Callback and custom storage do not compact superseded
 Private Payment Lists at commit; intake reclaims them when a counterparty
 approaches the limit below.
 
-Private stream intake bounds what one counterparty can add to that history:
+Private stream intake bounds what one counterparty can add to that history on
+its own. The limit below applies until the local identity chooses to transact
+with that counterparty: once it has queued or sent that counterparty a Payment
+Request, a Payment Request Acceptance, a Payment Proof, an Allowance proposal,
+or an Allowance Acceptance, in any delivery status, intake from it is not
+refused for the number of retained items, as before the limit existed. Nothing
+else lifts the limit. A rejection, cancellation, Allowance End, execution
+claim, retrieved Receipt, Delivery Confirmation, Private Payment List, or
+Receipt Access MUST NOT lift it, because each can follow from one unsolicited
+message without a decision to transact.
 
 - At most 4,096 private stream items are retained per counterparty, counted
   across every message kind and parse status. When a receive transaction could
@@ -358,16 +367,19 @@ Private stream intake bounds what one counterparty can add to that history:
   and no stream item id. A re-send that reuses the Event ID with a different
   payload is always retained as a conflict and counts toward the limit.
 
-At roughly 1.4 KB per item the limit pins about 6 MB per counterparty. It does
-not bound the total across counterparties. Intake for a counterparty that
-reached it stays refused. The app can release it by blocking that counterparty
-and calling [`forget_peer`](#forget-a-blocked-peer), but only when the local
-identity has no payment history with it; no workflow yet releases a
-counterparty that has. `resolve_private_contact_payment` reports
-`RecoveryPending` for a counterparty at the limit when no cached Private Payment
-List endpoint is available, because its refresh receive is refused. Batch
-receive reports carry only error text, so apps classify the refusal with the
-single-counterparty `receive_private_messages`.
+At roughly 1.4 KB per item the limit pins about 6 MB per counterparty it
+applies to. It does not bound the total across counterparties or what a
+counterparty the local identity transacts with can add. Intake for a
+counterparty that reached it stays refused. The app can release it by blocking
+that counterparty and calling [`forget_peer`](#forget-a-blocked-peer), but only
+when the local identity has no payment history with it. A counterparty at the
+limit can still have payment history that does not lift the limit, such as a
+rejection or a retrieved Receipt; no workflow yet releases that counterparty.
+`resolve_private_contact_payment` reports `RecoveryPending` for a counterparty
+at the limit when no cached Private Payment List endpoint is available, because
+its refresh receive is refused. Batch receive reports carry only error text, so
+apps classify the refusal with the single-counterparty
+`receive_private_messages`.
 
 Before each state PUT, the adapter publishes an empty, uniquely named marker
 under `/pub/paykit/v0/shared-state-writes/`. A confirmed PUT or an explicit PUT

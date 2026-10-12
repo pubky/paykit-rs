@@ -41,8 +41,12 @@ use paykit_lib::{
 /// counterparty, which is only allowed without payment history. Only
 /// superseded Private Payment Lists are reclaimed first, because not every
 /// storage adapter compacts them at commit. At roughly 1.4 KB per item this
-/// pins about 6 MB of state per counterparty, and leaves room for about 1,000
-/// paid one-time Payment Request lifecycles.
+/// pins about 6 MB of state per counterparty.
+///
+/// The limit bounds what a counterparty can add on its own. It does not apply
+/// once the local identity has chosen to transact with that counterparty (see
+/// [`local_identity_transacts_with`]), so a payment relationship is never
+/// refused for its length.
 pub(crate) const MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY: usize = 4096;
 
 /// Most identical re-sends of one Event Message retained as stream items.
@@ -227,6 +231,36 @@ where
     .await
 }
 
+/// Whether the local identity has chosen to transact with `counterparty`.
+///
+/// SECURITY: a `true` answer lifts the retained item limit, so only messages
+/// the local identity queues by its own decision to transact count: a Payment
+/// Request, a Payment Request Acceptance, a Payment Proof, an Allowance
+/// proposal, or an Allowance Acceptance, in any delivery status. Nothing else
+/// counts. Delivery Confirmations are queued by intake itself. A rejection,
+/// cancellation, Allowance End, execution claim or retrieved Receipt can follow
+/// from a single unsolicited message without any decision to transact, so
+/// counting one would let a counterparty lift its own limit.
+fn local_identity_transacts_with(
+    tx: &dyn crate::storage::StorageTransaction,
+    counterparty: &PubkyPublicKey,
+) -> bool {
+    tx.outbound_private_messages(counterparty)
+        .iter()
+        .any(|message| {
+            matches!(
+                PrivateMessageKind::parse(&message.kind),
+                Some(
+                    PrivateMessageKind::PaymentRequest
+                        | PrivateMessageKind::PaymentRequestAcceptance
+                        | PrivateMessageKind::PaymentProof
+                        | PrivateMessageKind::AllowanceProposal
+                        | PrivateMessageKind::AllowanceAcceptance
+                )
+            )
+        })
+}
+
 /// Delete `counterparty`'s superseded Private Payment Lists and return how many
 /// private stream items it still retains.
 ///
@@ -307,6 +341,8 @@ pub(crate) fn persist_private_stream_batch_in_transaction(
         // before anything is refused.
         retained_stream_items = reclaim_superseded_private_payment_lists(tx, &counterparty)?;
     }
+    // Looked up at most once: intake queues nothing that changes the answer.
+    let mut transacts = None;
     for message in messages {
         let receive_batch_id = receive_batch_id.expect("nonempty batch has an id");
         let PrivateStreamMessageClassification {
@@ -345,7 +381,9 @@ pub(crate) fn persist_private_stream_batch_in_transaction(
                 continue;
             }
         }
-        if retained_stream_items >= MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY {
+        if retained_stream_items >= MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY
+            && !*transacts.get_or_insert_with(|| local_identity_transacts_with(tx, &counterparty))
+        {
             // Failing the transaction leaves the message unacknowledged in the
             // sender's outbox and the Encrypted Link checkpoint unchanged.
             return Err(PaykitSdkError::Policy {

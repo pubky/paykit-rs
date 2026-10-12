@@ -19,8 +19,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   counterparty (a queued or sent Payment Request or Allowance Event Message, an
   execution claim, a wallet accounting occurrence or association, or a
   retrieved Receipt), because those records name only ids the counterparty
-  could send again with different terms. Such a counterparty stays refused at
-  the limit. Receipt Access that was never retrieved is deleted with its
+  could send again with different terms. Such a counterparty stays refused if
+  it is at the limit. Receipt Access that was never retrieved is deleted with its
   Receipt Decryption Key. Apps that mock the generated SDK
   protocol or interface must add the method.
 
@@ -76,7 +76,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   is unchanged and restores the record. A record that no reachable relay caches
   still counts as none, so a caller that knows an identity's homeserver should
   compare it with the request's `homeserver_public_key` before approving.
-- Bound the private stream state one Linked Peer can make the SDK retain. Each
+- Bound the private stream state one Linked Peer can make the SDK retain on
+  its own. The limit applies until the local identity has queued or sent that
+  counterparty a Payment Request, a Payment Request Acceptance, a Payment Proof,
+  an Allowance proposal, or an Allowance Acceptance; a counterparty it
+  transacts with is not refused for the number of retained items. Until then a
   counterparty may have at most 4,096 retained private stream items; a message
   past that limit fails `receive_private_messages` with a `Policy` error and
   stays unacknowledged. Before refusing, the SDK deletes that counterparty's

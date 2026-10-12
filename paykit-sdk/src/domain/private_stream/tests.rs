@@ -1356,6 +1356,137 @@ async fn test_persist_private_stream_batch_counts_latest_payment_list_of_each_ap
     assert!(storage.0.snapshot().unwrap() == before);
 }
 
+/// Storage where `peer` is at the retained item limit, cloned per case.
+async fn storage_at_retention_quota(peer: &PubkyPublicKey) -> crate::storage::StorageState {
+    let storage = InMemoryStorage::new();
+    persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        (0..MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY)
+            .map(unknown_kind_message)
+            .collect(),
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    storage.snapshot().unwrap()
+}
+
+/// Queue one local outbound message of `kind` to `counterparty`.
+async fn queue_outbound_kind(
+    storage: &InMemoryStorage,
+    counterparty: &PubkyPublicKey,
+    kind: paykit_lib::PrivateMessageKind,
+) {
+    storage
+        .transaction(|tx| {
+            tx.insert_outbound_private_message(crate::storage::NewOutboundPrivateMessage::new(
+                counterparty.clone(),
+                paykit_lib::PaykitAppId::new("bitkit").unwrap(),
+                kind.as_str().to_owned(),
+                format!(
+                    r#"{{"version":1,"kind":"{}","app_id":"bitkit"}}"#,
+                    kind.as_str()
+                ),
+                timestamp(),
+            ))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+async fn receive_one_past_quota(
+    storage: &InMemoryStorage,
+    peer: &PubkyPublicKey,
+) -> Result<PrivateStreamIntakeReport> {
+    persist_private_stream_batch(
+        storage,
+        peer.clone(),
+        vec![unknown_kind_message(
+            MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY,
+        )],
+        None,
+        timestamp(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_persist_private_stream_batch_does_not_limit_counterparty_local_identity_transacts_with(
+) {
+    use paykit_lib::PrivateMessageKind as Kind;
+    let peer = counterparty();
+    let at_quota = storage_at_retention_quota(&peer).await;
+    for kind in [
+        Kind::PaymentRequest,
+        Kind::PaymentRequestAcceptance,
+        Kind::PaymentProof,
+        Kind::AllowanceProposal,
+        Kind::AllowanceAcceptance,
+    ] {
+        let storage = InMemoryStorage::from_state(at_quota.clone());
+        // Refused until the local identity chooses to transact with the peer.
+        assert!(
+            matches!(
+                receive_one_past_quota(&storage, &peer).await,
+                Err(PaykitSdkError::Policy { .. })
+            ),
+            "{kind:?}"
+        );
+        queue_outbound_kind(&storage, &peer, kind).await;
+
+        receive_one_past_quota(&storage, &peer)
+            .await
+            .unwrap_or_else(|error| panic!("{kind:?}: {error:?}"));
+
+        assert_eq!(
+            retained_stream_items(&storage, &peer),
+            MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY + 1,
+            "{kind:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_persist_private_stream_batch_keeps_limit_without_a_decision_to_transact() {
+    use paykit_lib::PrivateMessageKind as Kind;
+    let peer = counterparty();
+    let other = counterparty();
+    let at_quota = storage_at_retention_quota(&peer).await;
+    // None of these is a local decision to transact with the peer.
+    for kind in [
+        Kind::PaymentRequestRejection,
+        Kind::PaymentRequestCancellation,
+        Kind::PaymentConversionQuote,
+        Kind::AllowanceRejection,
+        Kind::AllowanceEnd,
+        Kind::DeliveryConfirmation,
+        Kind::PrivatePaymentList,
+        Kind::ReceiptAccess,
+    ] {
+        let storage = InMemoryStorage::from_state(at_quota.clone());
+        queue_outbound_kind(&storage, &peer, kind).await;
+        let before = storage.snapshot().unwrap();
+
+        let refused = receive_one_past_quota(&storage, &peer).await;
+
+        assert!(
+            matches!(refused, Err(PaykitSdkError::Policy { .. })),
+            "{kind:?}"
+        );
+        assert!(storage.snapshot().unwrap() == before, "{kind:?}");
+    }
+    // Transacting with another counterparty does not lift this one's limit.
+    let storage = InMemoryStorage::from_state(at_quota);
+    queue_outbound_kind(&storage, &other, Kind::PaymentRequestAcceptance).await;
+    assert!(matches!(
+        receive_one_past_quota(&storage, &peer).await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
+}
+
 #[tokio::test]
 async fn test_persist_private_stream_batch_accepts_counterparty_up_to_retention_quota() {
     let storage = InMemoryStorage::new();

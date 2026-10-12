@@ -107,7 +107,7 @@ Paykit-side workflow.
   Payment Request or Allowance message, an execution claim, a wallet accounting
   occurrence or association, or a retrieved Receipt), so history you acted on
   and retrieved Receipts are never deleted, and such a counterparty stays
-  refused at the limit. Receipt Access that was never retrieved is deleted with
+  refused if it is at the limit. Receipt Access that was never retrieved is deleted with
   its Receipt Decryption Key. Batch receive reports do not carry the code.
 - `PaykitSdk.receivePrivateMessages` and
   `receivePrivateMessagesFromLinkedPeers` — receive and checkpoint private
