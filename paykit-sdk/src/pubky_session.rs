@@ -590,13 +590,21 @@ impl PubkySessionBootstrap {
                 .map_err(|err| map_pubky_identity_error("resolve Pubky homeserver record", err))
         };
         let mut published = lookup().await?;
-        // SECURITY: the lookup answers from this client's cached identity
-        // record while that record is within its TTL, and a cached record can
-        // predate the homeserver record. "No record" only counts once the
-        // network was asked. A newer record from the network replaces the
-        // cached one, so the second lookup reads it.
-        if published.is_none() && self.refresh_identity_record(&signer.public_key()).await? {
-            published = lookup().await?;
+        if published.is_none() {
+            // SECURITY: read the caches before the network is asked. Relay
+            // caches are read only while this client caches no record for the
+            // identity, and the network can return an older record that names
+            // no homeserver, which this client then caches.
+            self.ensure_homeserver_record_absent(&signer.public_key())
+                .await?;
+            // SECURITY: the lookup answers from this client's cached identity
+            // record while that record is within its TTL, and a cached record
+            // can predate the homeserver record. "No record" only counts once
+            // the network was asked. A newer record from the network replaces
+            // the cached one, so the second lookup reads it.
+            if self.refresh_identity_record(&signer.public_key()).await? {
+                published = lookup().await?;
+            }
         }
         let requested = &signup.params().homeserver;
         match published {
@@ -610,6 +618,8 @@ impl PubkySessionBootstrap {
                 source: None,
             }),
             None => {
+                // Read the caches again: the lookups above take time, and a
+                // record can have reached a relay cache since the first read.
                 self.ensure_homeserver_record_absent(&signer.public_key())
                     .await?;
                 Ok(Some(signup))
@@ -619,7 +629,8 @@ impl PubkySessionBootstrap {
 
     /// Ask the network for the record of `identity`, bypassing this client's
     /// cache, and return whether it holds one. A record newer than the cached
-    /// one replaces it.
+    /// one replaces it, and that cache is how the caller's next lookup sees
+    /// it: a client built without a cache gains nothing from this call.
     ///
     /// Any failure other than finding no record is an error, because the
     /// caller needs the network's answer before it trusts its cache.

@@ -52,6 +52,14 @@ fn z32(keypair: &Keypair) -> String {
     keypair.public_key().to_z32()
 }
 
+/// A record for the identity that names no homeserver.
+fn identity_record_without_homeserver() -> SignedPacket {
+    SignedPacket::builder()
+        .address(".".try_into().unwrap(), Ipv4Addr::LOCALHOST.into(), 3600)
+        .sign(&identity_record_signer())
+        .unwrap()
+}
+
 /// What one approval attempt did, as seen by the fixtures.
 #[derive(Debug, PartialEq)]
 struct Effects {
@@ -83,6 +91,10 @@ enum LookupFault {
 struct Relay {
     /// PKARR relay payloads by z32 public key.
     records: Mutex<HashMap<String, Vec<u8>>>,
+    /// Older payloads by z32 public key that the relay's DHT returns. A
+    /// lookup that bypasses the relay's cache gets one in place of the stored
+    /// record.
+    dht_records: Mutex<HashMap<String, Vec<u8>>>,
     /// Keys whose lookups do not simply return the stored record.
     lookup_faults: Mutex<HashMap<String, LookupFault>>,
     /// Method and path of every request, in arrival order.
@@ -113,6 +125,12 @@ impl Relay {
             .unwrap()
             .push(format!("{method} {path}"));
 
+        let bypasses_cache = query.split('&').any(|pair| pair == "policy=NetworkOnly");
+        let dht_record = self.dht_records.lock().unwrap().get(key).cloned();
+        if let ("GET", true, Some(record)) = (method, bypasses_cache, dht_record) {
+            return respond(&mut stream, "200 OK", &record);
+        }
+
         let record = self.records.lock().unwrap().get(key).cloned();
         match (method, self.lookup_failure(key, query), record) {
             ("GET", Some(status), _) => respond(&mut stream, status, &[]),
@@ -120,6 +138,7 @@ impl Relay {
             ("PUT", ..) => {
                 // A record that is published again resolves again.
                 self.lookup_faults.lock().unwrap().remove(key);
+                self.dht_records.lock().unwrap().remove(key);
                 self.records.lock().unwrap().insert(key.to_owned(), body);
                 respond(&mut stream, "204 No Content", &[]);
             }
@@ -203,12 +222,22 @@ impl Fixture {
 
     /// Publish a record for the identity that names no homeserver.
     fn publish_identity_record_without_homeserver(&self) {
-        self.relay.put_record(
-            &SignedPacket::builder()
-                .address(".".try_into().unwrap(), Ipv4Addr::LOCALHOST.into(), 3600)
-                .sign(&identity_record_signer())
-                .unwrap(),
+        self.relay.put_record(&identity_record_without_homeserver());
+    }
+
+    /// Let the identity's record pointing at `homeserver` age out of the DHT
+    /// while an older record that names no homeserver is back on it. The
+    /// relay still caches the newer record, so a cache-only lookup returns
+    /// it, a lookup that bypasses the relay's cache returns the older one,
+    /// and any other lookup finds nothing.
+    fn age_out_identity_record_behind_older_record(&self, homeserver: &Keypair) {
+        let older = identity_record_without_homeserver();
+        self.publish_identity_record(homeserver);
+        self.relay.dht_records.lock().unwrap().insert(
+            older.public_key().to_z32(),
+            older.to_relay_payload().to_vec(),
         );
+        self.set_identity_lookup_fault(Some(LookupFault::AgedOut));
     }
 
     /// A bootstrap whose client caches a record for the identity that names
@@ -220,13 +249,12 @@ impl Fixture {
     ) -> PubkySessionBootstrap {
         self.publish_identity_record_without_homeserver();
         let pubky = self.pubky();
-        // Within its TTL, the client answers lookups from this cached copy.
-        let cached = pubky
-            .get_homeserver_of(&identity().keypair().public_key())
-            .await
-            .unwrap();
-        assert_eq!(cached, None);
+        let identity = identity().keypair().public_key();
+        // Within its TTL, the client answers lookups from this cached copy,
+        // also once the relay holds the newer record.
+        assert_eq!(pubky.get_homeserver_of(&identity).await.unwrap(), None);
         self.publish_identity_record(homeserver);
+        assert_eq!(pubky.get_homeserver_of(&identity).await.unwrap(), None);
         PubkySessionBootstrap::with_pubky(pubky, TEST_CLIENT_ID).unwrap()
     }
 
@@ -535,6 +563,35 @@ async fn test_approve_auth_signup_grant_rejects_aged_out_homeserver_record() {
 #[tokio::test]
 async fn test_approve_auth_signup_grant_fails_closed_when_record_cache_is_unreadable() {
     assert_unresolved_homeserver_record_is_not_replaced(LookupFault::CacheUnavailable).await;
+}
+
+#[tokio::test]
+async fn test_approve_auth_signup_grant_rejects_aged_out_homeserver_record_behind_older_record() {
+    let fixture = Fixture::start("204 No Content");
+    fixture.age_out_identity_record_behind_older_record(&published_homeserver());
+
+    let result = fixture
+        .bootstrap()
+        .approve_auth(&fixture.signup_auth_url(), CAPABILITIES, &identity())
+        .await;
+
+    fixture.set_identity_lookup_fault(None);
+    assert_eq!(
+        fixture.effects().await,
+        Effects {
+            homeserver: Some(z32(&published_homeserver())),
+            records_published: 0,
+            inbox_deliveries: 0,
+            homeserver_requests: vec![],
+        }
+    );
+    assert!(
+        matches!(
+            &result,
+            Err(PaykitSdkError::Identity { context, .. }) if context.contains("republish")
+        ),
+        "{result:?}"
+    );
 }
 
 #[tokio::test]
