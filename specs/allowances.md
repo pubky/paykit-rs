@@ -668,7 +668,9 @@ the user explicitly forgets the blocked counterparty that sent them. Forgetting
 is refused when the local identity has queued or sent any Allowance Event
 Message to that counterparty, in any status, or holds a wallet accounting
 occurrence or association for it, so it only removes proposals that never
-received a local response.
+received a local response. A proposal that reuses a forgotten Allowance ID or
+Event ID is a new proposal. An implementation MUST NOT queue an Acceptance for
+it unless the local caller named that exact received proposal.
 
 The optional Payment Proof `allowance_id` is a coordinated pre-release extension
 of Payment Request wire version 1. Implementations predating this extension

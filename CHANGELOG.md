@@ -32,6 +32,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   discards saved Encrypted Link and handshake snapshots, lists the affected
   peers in `recovery_required_peers`, and leaves their queued private messages
   waiting for a fresh Encrypted Link Handshake. The backup format is unchanged.
+- **Breaking (Rust and FFI API):** `accept_allowance`,
+  `accept_payment_request`, and `claim_and_accept_payment_request`, and the FFI
+  `acceptAllowance`, `acceptPaymentRequest`, and
+  `claimAndAcceptPaymentRequest`, take a required
+  `expected_proposal_stream_item_id` (`expectedProposalStreamItemId`): the
+  `proposal_stream_item_id` of the record whose terms were approved, as
+  displayed. Acceptance is refused with `Policy` when the current proposal for
+  that id is a different stream item, so an approval cannot land on terms that
+  replaced the approved ones after `forget_peer`.
 - Identify the retained private stream item limit refusal with
   `PaykitSdkError::is_retention_limit_reached` and the `retention_limit_reached`
   FFI policy code. It is still a `Policy` error and the generated Swift/Kotlin

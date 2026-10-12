@@ -35,11 +35,7 @@ async fn accept_automatic_request(payer: &TestUser, payee: &TestUser) -> Payment
         .unwrap();
     let allowance_id = AllowanceId::new(proposal.allowance_id).unwrap();
     deliver(payer, payee).await;
-    payee
-        .sdk
-        .accept_allowance(payer.public_key.clone(), &allowance_id)
-        .await
-        .unwrap();
+    accept_allowance(payee, payer, &allowance_id).await.unwrap();
     deliver(payee, payer).await;
     let request = payee
         .sdk

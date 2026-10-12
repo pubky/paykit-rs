@@ -121,7 +121,10 @@ identities run receive and outbound workers, including Delivery Confirmations.
    claim and Acceptance can happen together. It also accepts an existing claim
    by this App, never one owned by another App. Success durably queues Acceptance,
    not delivery or payment. A still-proposed request must be accepted successfully
-   before execution; reject instead when consent is declined.
+   before execution; reject instead when consent is declined. Both acceptance
+   calls take the `proposal_stream_item_id` of the record whose terms were
+   approved, as displayed, and fail with a policy error when the request was
+   replaced; read the record again and ask again.
 3. Resolve through the request-specific API and execute only through the wallet.
    Retain one execution identity per occurrence across manual/automatic paths.
    Do not release claims or unresolved reservations to let another app retry an

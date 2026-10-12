@@ -148,7 +148,14 @@ async fn test_cancellation_retains_settled_payment_claim_after_origin_app_remova
         .transaction(|tx| {
             let other = paykit_lib::PaykitAppId::new("other-wallet").unwrap();
             assert!(matches!(
-                require_current_payment_request_action(tx, &peer, &other, &proof, timestamp()),
+                require_current_payment_request_action(
+                    tx,
+                    &peer,
+                    &other,
+                    &proof,
+                    timestamp(),
+                    None
+                ),
                 Err(PaykitSdkError::Policy { .. })
             ));
             Ok(())

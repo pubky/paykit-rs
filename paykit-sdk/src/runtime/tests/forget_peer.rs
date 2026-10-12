@@ -3,7 +3,9 @@ use crate::domain::{
     allowances::allowance_records_in_transaction,
     outbound_private::enqueue_private_message,
     payment_requests::{
-        claim_payment_request_execution, enqueue_payment_request_event,
+        claim_payment_request_execution, claim_payment_request_execution_in_transaction,
+        enqueue_checked_payment_request_action_in_transaction,
+        enqueue_checked_payment_request_action_with_identity, enqueue_payment_request_event,
         payment_request_records_from_transaction,
     },
     private_stream::MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY,
@@ -750,4 +752,193 @@ async fn test_forget_peer_resent_proposals_are_new_input() {
     assert_eq!(requests[0].accepted_event_id, None);
     assert_eq!(requests[0].execution_claim_app_id, None);
     assert_eq!(requests[0].terms.as_ref().unwrap().amount.value, "5");
+}
+
+#[tokio::test]
+async fn test_accept_allowance_refuses_proposal_replaced_after_forget() {
+    let peer = random_counterparty();
+    let storage = linked_storage(&peer, &[]).await;
+    let allowance_id = AllowanceId::new_v4();
+    let event_id = EventId::new_v4();
+    let proposal = |limit: &str| vec![allowance_proposal_message(&event_id, &allowance_id, limit)];
+    let accept = |expected_proposal_stream_item_id: u64| {
+        enqueue_allowance_response(
+            &storage,
+            peer.clone(),
+            app_id(),
+            allowance_id.clone(),
+            AllowanceResponse::Acceptance {
+                expected_proposal_stream_item_id,
+            },
+            FixedClock.now(),
+        )
+    };
+    // An approving app reads this proposal and asks for approval.
+    let approved = receive(&storage, &peer, proposal("1"))
+        .await
+        .unwrap()
+        .stream_item_ids[0];
+
+    // Before the approval arrives the counterparty is forgotten and relinked,
+    // and sends the same ids again with a limit 1,000 times larger.
+    let sdk = forget_test_sdk(&storage);
+    sdk.block_peer(peer.clone()).await.unwrap();
+    sdk.forget_peer(peer.clone()).await.unwrap();
+    sdk.unblock_peer(peer.clone()).await.unwrap();
+    mark_linked(&storage, &peer).await;
+    storage
+        .transaction(|tx| {
+            // Stand in for the fresh Encrypted Link Handshake after the unblock.
+            let mut link = tx.encrypted_link_state(&peer).unwrap();
+            link.link_snapshot = Some(vec![1, 2, 3]);
+            tx.save_encrypted_link_state(link);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let report = receive(&storage, &peer, proposal("1000")).await.unwrap();
+    assert!(report.event_conflicts.is_empty());
+    let replacement = report.stream_item_ids[0];
+    assert_ne!(replacement, approved);
+    let before = storage.snapshot().unwrap();
+
+    // The approval names the proposal that was read, so it cannot land on the
+    // replacement, and nothing is queued.
+    let refused = accept(approved).await.unwrap_err();
+    assert!(
+        matches!(&refused, PaykitSdkError::Policy { context, .. }
+            if context.contains("is not the expected stream item")),
+        "{refused:?}"
+    );
+    assert!(storage.snapshot().unwrap() == before);
+
+    // Approving the replacement itself, by its own stream item, still works.
+    let accepted = accept(replacement).await.unwrap();
+    assert_eq!(accepted.state, crate::AllowanceLifecycleState::Accepted);
+    assert_eq!(accepted.proposal_stream_item_id, Some(replacement));
+    assert_eq!(
+        accepted
+            .terms
+            .as_ref()
+            .unwrap()
+            .lifetime_amount_limit
+            .as_deref(),
+        Some("1000")
+    );
+}
+
+#[tokio::test]
+async fn test_accept_payment_request_refuses_request_replaced_after_forget() {
+    let peer = random_counterparty();
+    let storage = linked_storage(&peer, &[]).await;
+    let request_id = PaymentRequestId::new_v4();
+    let event_id = EventId::new_v4();
+    let request = |amount: &str| {
+        vec![payment_request_message_for_amount(
+            event_id.as_str(),
+            request_id.as_str(),
+            amount,
+        )]
+    };
+    let acceptance = || {
+        paykit_lib::PaymentRequestEvent::Acceptance(paykit_lib::PaymentRequestAcceptance::new(
+            EventId::new_v4(),
+            request_id.clone(),
+        ))
+    };
+    // The transaction body of `claim_and_accept_payment_request`.
+    let claim_and_accept = |expected_proposal_stream_item_id: u64| {
+        let event = acceptance();
+        let (peer, request_id) = (peer.clone(), request_id.clone());
+        storage.transaction(move |tx| {
+            claim_payment_request_execution_in_transaction(
+                tx,
+                &peer,
+                &app_id(),
+                &request_id,
+                FixedClock.now(),
+            )?;
+            enqueue_checked_payment_request_action_in_transaction(
+                tx,
+                &peer,
+                &app_id(),
+                &event,
+                FixedClock.now(),
+                None,
+                Some(expected_proposal_stream_item_id),
+            )
+        })
+    };
+    // The transaction of `accept_payment_request`, which needs an existing claim.
+    let accept = |expected_proposal_stream_item_id: u64| {
+        let event = acceptance();
+        let (storage, peer) = (storage.clone(), peer.clone());
+        async move {
+            enqueue_checked_payment_request_action_with_identity(
+                &storage,
+                peer,
+                &app_id(),
+                &event,
+                || FixedClock.now(),
+                None,
+                Some(expected_proposal_stream_item_id),
+            )
+            .await
+        }
+    };
+    let is_stale = |error: &PaykitSdkError| {
+        matches!(error, PaykitSdkError::Policy { context, .. }
+            if context.contains("is not the expected stream item"))
+    };
+    // An approving app reads this request and asks for approval.
+    let approved = receive(&storage, &peer, request("0.001"))
+        .await
+        .unwrap()
+        .stream_item_ids[0];
+
+    // Before the approval arrives the counterparty is forgotten and relinked,
+    // and sends the same ids again asking for 5,000 times more.
+    let sdk = forget_test_sdk(&storage);
+    sdk.block_peer(peer.clone()).await.unwrap();
+    sdk.forget_peer(peer.clone()).await.unwrap();
+    sdk.unblock_peer(peer.clone()).await.unwrap();
+    mark_linked(&storage, &peer).await;
+    let replacement = receive(&storage, &peer, request("5"))
+        .await
+        .unwrap()
+        .stream_item_ids[0];
+    assert_ne!(replacement, approved);
+    let before = storage.snapshot().unwrap();
+
+    // The combined call names the request that was read: nothing is claimed
+    // or queued for the replacement.
+    let refused = claim_and_accept(approved).await.unwrap_err();
+    assert!(is_stale(&refused), "{refused:?}");
+    assert!(storage.snapshot().unwrap() == before);
+
+    // The two-step call is refused the same way and keeps only the claim.
+    claim_payment_request_execution(
+        &storage,
+        peer.clone(),
+        &app_id(),
+        &request_id,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let claimed = storage.snapshot().unwrap();
+    let refused = accept(approved).await.unwrap_err();
+    assert!(is_stale(&refused), "{refused:?}");
+    assert!(storage.snapshot().unwrap() == claimed);
+
+    // Approving the replacement itself, by its own stream item, still works.
+    accept(replacement).await.unwrap();
+    let record = storage
+        .transaction(|tx| payment_request_records_from_transaction(tx, &peer, FixedClock.now()))
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(record.proposal_stream_item_id, Some(replacement));
+    assert!(record.accepted_event_id.is_some());
+    assert_eq!(record.terms.as_ref().unwrap().amount.value, "5");
 }

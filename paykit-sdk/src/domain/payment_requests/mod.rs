@@ -630,6 +630,7 @@ where
         event,
         || now,
         None,
+        None,
     )
     .await
 }
@@ -642,6 +643,7 @@ pub(crate) async fn enqueue_checked_payment_request_action_with_identity<S>(
     event: &PaymentRequestEvent,
     now: impl Fn() -> DateTime<Utc> + Send + Sync,
     expected_identity: Option<crate::IdentityState>,
+    expected_proposal_stream_item_id: Option<u64>,
 ) -> Result<OutboundPrivateMessageRecord>
 where
     S: StorageAdapter,
@@ -658,6 +660,7 @@ where
                 event,
                 now(),
                 expected_identity.as_ref(),
+                expected_proposal_stream_item_id,
             )
         }
     })
@@ -671,6 +674,7 @@ pub(crate) fn enqueue_checked_payment_request_action_in_transaction(
     event: &PaymentRequestEvent,
     now: DateTime<Utc>,
     expected_identity: Option<&crate::IdentityState>,
+    expected_proposal_stream_item_id: Option<u64>,
 ) -> Result<OutboundPrivateMessageRecord> {
     let kind = match event {
         PaymentRequestEvent::Acceptance(_) => PrivateMessageKind::PaymentRequestAcceptance,
@@ -694,8 +698,14 @@ pub(crate) fn enqueue_checked_payment_request_action_in_transaction(
         });
     }
     require_paykit_app_capability(tx, app_id, PrivateMessageKind::PaymentRequest)?;
-    let release_execution_claim =
-        require_current_payment_request_action(tx, counterparty, app_id, event, now)?;
+    let release_execution_claim = require_current_payment_request_action(
+        tx,
+        counterparty,
+        app_id,
+        event,
+        now,
+        expected_proposal_stream_item_id,
+    )?;
     if !matches!(event, PaymentRequestEvent::Proof(_)) {
         crate::domain::allowance_accounting::manual_response(
             tx,
@@ -889,12 +899,17 @@ where
     .await
 }
 
+/// Check that `event` is a valid local action on the current request state.
+///
+/// `expected_proposal_stream_item_id` applies to an Acceptance only: when set,
+/// the request must still be the received proposal the caller read.
 pub(crate) fn require_current_payment_request_action(
     tx: &dyn StorageTransaction,
     counterparty: &PubkyPublicKey,
     app_id: &paykit_lib::PaykitAppId,
     event: &PaymentRequestEvent,
     now: DateTime<Utc>,
+    expected_proposal_stream_item_id: Option<u64>,
 ) -> Result<bool> {
     let payment_request_id = event.payment_request_id();
     let record = payment_request_records_from_transaction(tx, counterparty, now)?
@@ -924,6 +939,24 @@ pub(crate) fn require_current_payment_request_action(
                 app_id,
                 "accept Payment Request",
             )?;
+            if let Some(expected) = expected_proposal_stream_item_id {
+                // SECURITY: an Acceptance names only the Payment Request ID,
+                // which the counterparty chose and can send again with
+                // different terms after `forget_peer`. The local stream item
+                // id is not chosen by the counterparty and forgetting does not
+                // reset its counter, so it pins the request the caller read.
+                // Checking it here, in the transaction that queues the
+                // Acceptance, leaves no window between check and response.
+                if record.proposal_stream_item_id != Some(expected) {
+                    return Err(PaykitSdkError::Policy {
+                        context: format!(
+                            "cannot accept Payment Request: the proposal for {payment_request_id} \
+                             is not the expected stream item {expected}"
+                        ),
+                        source: None,
+                    });
+                }
+            }
             Ok(false)
         }
         PaymentRequestEvent::Rejection(_) => {

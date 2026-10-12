@@ -545,7 +545,16 @@ async fn test_rejected_request_actions_preserve_app_revocation() {
         let error = if claim_and_accept {
             pair.bitkit
                 .sdk
-                .claim_and_accept_payment_request(pair.bob.public_key.clone(), &request_id)
+                .claim_and_accept_payment_request(
+                    pair.bob.public_key.clone(),
+                    &request_id,
+                    crate::harness::proposal_item(
+                        &pair.bitkit.sdk,
+                        &pair.bob.public_key,
+                        &request_id,
+                    )
+                    .await,
+                )
                 .await
                 .unwrap_err()
         } else {
@@ -656,7 +665,11 @@ async fn test_claim_and_accept_rejects_revoked_app_after_stale_authorization_wri
     );
 
     let error = sdk
-        .claim_and_accept_payment_request(pair.bob.public_key.clone(), &request_id)
+        .claim_and_accept_payment_request(
+            pair.bob.public_key.clone(),
+            &request_id,
+            crate::harness::proposal_item(&sdk, &pair.bob.public_key, &request_id).await,
+        )
         .await
         .unwrap_err();
 
@@ -1352,9 +1365,26 @@ async fn test_unchanged_app_publication_preserves_active_execution_claim() {
         .claim_payment_request_for_execution(pair.bob.public_key.clone(), &request_id)
         .await
         .unwrap();
+    // An approval that names another request is refused and queues nothing.
+    let stale = pair
+        .alice
+        .sdk
+        .accept_payment_request(
+            pair.bob.public_key.clone(),
+            &request_id,
+            crate::harness::proposal_item(&pair.alice.sdk, &pair.bob.public_key, &request_id).await
+                + 1,
+        )
+        .await
+        .expect_err("acceptance must name the request Alice read");
+    assert!(matches!(stale, PaykitSdkError::Policy { .. }));
     pair.alice
         .sdk
-        .accept_payment_request(pair.bob.public_key.clone(), &request_id)
+        .accept_payment_request(
+            pair.bob.public_key.clone(),
+            &request_id,
+            crate::harness::proposal_item(&pair.alice.sdk, &pair.bob.public_key, &request_id).await,
+        )
         .await
         .unwrap();
     let before = pair.alice.storage.snapshot().unwrap();
@@ -3999,7 +4029,16 @@ async fn test_homeserver_backed_apps_complete_private_payment_flow() {
         .expect("the payer should claim execution before accepting");
     pair.bob
         .sdk
-        .accept_payment_request(pair.bitkit.public_key.clone(), &payment_request_id)
+        .accept_payment_request(
+            pair.bitkit.public_key.clone(),
+            &payment_request_id,
+            crate::harness::proposal_item(
+                &pair.bob.sdk,
+                &pair.bitkit.public_key,
+                &payment_request_id,
+            )
+            .await,
+        )
         .await
         .expect("the payer should accept the Payment Request");
     pair.bob
@@ -4818,8 +4857,29 @@ async fn test_claim_and_accept_commits_once_and_preserves_ownership_on_failure()
         PaykitSdkConfig::new(pair.bitkit.app_id.clone()).unwrap(),
     );
 
+    let proposal_item =
+        crate::harness::proposal_item(&sdk, &pair.bob.public_key, &request_id).await;
+    // An approval that names another request is refused and claims nothing.
+    let stale = sdk
+        .claim_and_accept_payment_request(
+            pair.bob.public_key.clone(),
+            &request_id,
+            proposal_item + 1,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(stale, PaykitSdkError::Policy { .. }));
+    let unclaimed = sdk
+        .payment_requests_with(&pair.bob.public_key)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.payment_request_id == request_id.as_str())
+        .unwrap();
+    assert_eq!(unclaimed.state, PaymentRequestLifecycleState::Proposed);
+    assert_eq!(unclaimed.execution_claim_app_id, None);
     let accepted = sdk
-        .claim_and_accept_payment_request(pair.bob.public_key.clone(), &request_id)
+        .claim_and_accept_payment_request(pair.bob.public_key.clone(), &request_id, proposal_item)
         .await
         .unwrap();
 
@@ -4847,7 +4907,7 @@ async fn test_claim_and_accept_commits_once_and_preserves_ownership_on_failure()
         .unwrap();
     let before = pair.server.storage_state().await;
     assert!(sdk
-        .claim_and_accept_payment_request(pair.bob.public_key.clone(), &request_id)
+        .claim_and_accept_payment_request(pair.bob.public_key.clone(), &request_id, proposal_item)
         .await
         .is_err());
     assert_eq!(pair.server.storage_state().await, before);
@@ -4859,7 +4919,7 @@ async fn test_claim_and_accept_commits_once_and_preserves_ownership_on_failure()
         .unwrap();
     let before = pair.server.storage_state().await;
     assert!(sdk
-        .claim_and_accept_payment_request(pair.bob.public_key.clone(), &request_id)
+        .claim_and_accept_payment_request(pair.bob.public_key.clone(), &request_id, proposal_item)
         .await
         .is_err());
     assert_eq!(pair.server.storage_state().await, before);
@@ -4921,13 +4981,23 @@ async fn test_independent_apps_claim_and_handoff_one_payment_request() {
     if winner == pair.bitkit.app_id {
         pair.bitkit
             .sdk
-            .accept_payment_request(pair.bob.public_key.clone(), &request_id)
+            .accept_payment_request(
+                pair.bob.public_key.clone(),
+                &request_id,
+                crate::harness::proposal_item(&pair.bitkit.sdk, &pair.bob.public_key, &request_id)
+                    .await,
+            )
             .await
             .expect("the winning application should accept the request");
     } else {
         pair.server
             .sdk
-            .accept_payment_request(pair.bob.public_key.clone(), &request_id)
+            .accept_payment_request(
+                pair.bob.public_key.clone(),
+                &request_id,
+                crate::harness::proposal_item(&pair.server.sdk, &pair.bob.public_key, &request_id)
+                    .await,
+            )
             .await
             .expect("the winning application should accept the request");
     }
@@ -5033,7 +5103,16 @@ async fn test_two_apps_share_private_request_state_and_app_lifecycle() {
         .expect("the remaining application should claim payment execution");
     let accepted = alice_server
         .sdk
-        .accept_payment_request(pair.bob.public_key.clone(), &request_id(&request))
+        .accept_payment_request(
+            pair.bob.public_key.clone(),
+            &request_id(&request),
+            crate::harness::proposal_item(
+                &alice_server.sdk,
+                &pair.bob.public_key,
+                &request_id(&request),
+            )
+            .await,
+        )
         .await
         .expect("the remaining application should claim the payer response");
     assert_eq!(

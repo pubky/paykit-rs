@@ -1736,8 +1736,14 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Queue acceptance for a received Allowance proposal.
+     *
+     * Pass the `proposal_stream_item_id` of the record whose terms were
+     * approved, as it was displayed. Acceptance fails with a policy error when
+     * the current proposal for this Allowance ID is a different stream item,
+     * which happens when the counterparty was forgotten and sent the id again.
+     * Read the record again and ask for approval again.
      */
-    func acceptAllowance(counterparty: String, allowanceId: String) async throws  -> AllowanceRecord
+    func acceptAllowance(counterparty: String, allowanceId: String, expectedProposalStreamItemId: UInt64) async throws  -> AllowanceRecord
 
     /**
      * Start an Encrypted Link Handshake as the responder.
@@ -1746,8 +1752,14 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Queue acceptance before external payment execution and return local derived state.
+     *
+     * Pass the `proposal_stream_item_id` of the record whose terms were
+     * approved, as it was displayed. Acceptance fails with a policy error when
+     * the current request for this Payment Request ID is a different stream
+     * item, which happens when the counterparty was forgotten and sent the id
+     * again.
      */
-    func acceptPaymentRequest(counterparty: String, paymentRequestId: String) async throws  -> PaymentRequestRecord
+    func acceptPaymentRequest(counterparty: String, paymentRequestId: String, expectedProposalStreamItemId: UInt64) async throws  -> PaymentRequestRecord
 
     /**
      * Select and queue automatic Acceptance after SDK validation. This does not reserve or execute a payment.
@@ -1810,8 +1822,12 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Atomically claim a received Payment Request and durably queue acceptance, without sending it.
+     *
+     * Pass the `proposal_stream_item_id` of the record whose terms were
+     * approved, as it was displayed. On a mismatch nothing is claimed or
+     * queued and the call fails with a policy error.
      */
-    func claimAndAcceptPaymentRequest(counterparty: String, paymentRequestId: String) async throws  -> PaymentRequestRecord
+    func claimAndAcceptPaymentRequest(counterparty: String, paymentRequestId: String, expectedProposalStreamItemId: UInt64) async throws  -> PaymentRequestRecord
 
     /**
      * Claim a received Payment Request before preparing payment execution.
@@ -1963,8 +1979,9 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * else is kept.
      *
      * Resume by unblocking the peer and linking again. Ids from the forgotten
-     * history are not reserved: a proposal that reuses one is new input, so
-     * read it again before accepting.
+     * history are not reserved: a proposal that reuses one is new input.
+     * The acceptance calls refuse a proposal other than the one named by its
+     * stream item id.
      */
     func forgetPeer(counterparty: String) async throws  -> LinkedPeerRecord
 
@@ -2649,14 +2666,20 @@ public static func withPubkySharedStateAndClientConfig(sessionProvider: SdkPubky
 
     /**
      * Queue acceptance for a received Allowance proposal.
+     *
+     * Pass the `proposal_stream_item_id` of the record whose terms were
+     * approved, as it was displayed. Acceptance fails with a policy error when
+     * the current proposal for this Allowance ID is a different stream item,
+     * which happens when the counterparty was forgotten and sent the id again.
+     * Read the record again and ask for approval again.
      */
-open func acceptAllowance(counterparty: String, allowanceId: String)async throws  -> AllowanceRecord  {
+open func acceptAllowance(counterparty: String, allowanceId: String, expectedProposalStreamItemId: UInt64)async throws  -> AllowanceRecord  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_accept_allowance(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(allowanceId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(allowanceId),FfiConverterUInt64.lower(expectedProposalStreamItemId)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2689,14 +2712,20 @@ open func acceptLinkWithPeer(counterparty: String)async throws  -> LinkedPeerHan
 
     /**
      * Queue acceptance before external payment execution and return local derived state.
+     *
+     * Pass the `proposal_stream_item_id` of the record whose terms were
+     * approved, as it was displayed. Acceptance fails with a policy error when
+     * the current request for this Payment Request ID is a different stream
+     * item, which happens when the counterparty was forgotten and sent the id
+     * again.
      */
-open func acceptPaymentRequest(counterparty: String, paymentRequestId: String)async throws  -> PaymentRequestRecord  {
+open func acceptPaymentRequest(counterparty: String, paymentRequestId: String, expectedProposalStreamItemId: UInt64)async throws  -> PaymentRequestRecord  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_accept_payment_request(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(paymentRequestId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(paymentRequestId),FfiConverterUInt64.lower(expectedProposalStreamItemId)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -2918,14 +2947,18 @@ open func cancelPaymentRequest(counterparty: String, paymentRequestId: String, r
 
     /**
      * Atomically claim a received Payment Request and durably queue acceptance, without sending it.
+     *
+     * Pass the `proposal_stream_item_id` of the record whose terms were
+     * approved, as it was displayed. On a mismatch nothing is claimed or
+     * queued and the call fails with a policy error.
      */
-open func claimAndAcceptPaymentRequest(counterparty: String, paymentRequestId: String)async throws  -> PaymentRequestRecord  {
+open func claimAndAcceptPaymentRequest(counterparty: String, paymentRequestId: String, expectedProposalStreamItemId: UInt64)async throws  -> PaymentRequestRecord  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_claim_and_accept_payment_request(
                     self.uniffiClonePointer(),
-                    FfiConverterString.lower(counterparty),FfiConverterString.lower(paymentRequestId)
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(paymentRequestId),FfiConverterUInt64.lower(expectedProposalStreamItemId)
                 )
             },
             pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
@@ -3451,8 +3484,9 @@ open func fetchPubkyText(uri: String, maxBytes: UInt64)async throws  -> String? 
      * else is kept.
      *
      * Resume by unblocking the peer and linking again. Ids from the forgotten
-     * history are not reserved: a proposal that reuses one is new input, so
-     * read it again before accepting.
+     * history are not reserved: a proposal that reuses one is new input.
+     * The acceptance calls refuse a proposal other than the one named by its
+     * stream item id.
      */
 open func forgetPeer(counterparty: String)async throws  -> LinkedPeerRecord  {
     return
@@ -25350,13 +25384,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitidentitysecretkey_key_generation() != 58064) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_allowance() != 41447) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_allowance() != 19257) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_link_with_peer() != 32868) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request() != 54510) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request() != 16435) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request_automatically() != 49289) {
@@ -25389,7 +25423,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_cancel_payment_request() != 58269) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_claim_and_accept_payment_request() != 47604) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_claim_and_accept_payment_request() != 49298) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_claim_payment_request_for_execution() != 22993) {
@@ -25467,7 +25501,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_pubky_text() != 46340) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_forget_peer() != 29860) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_forget_peer() != 15344) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_forget_session_access() != 59961) {

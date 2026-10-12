@@ -19,11 +19,7 @@ async fn accepted_allowance(allower: &TestUser, allowee: &TestUser) -> Allowance
         .unwrap();
     let id = AllowanceId::new(proposed.allowance_id).unwrap();
     deliver(allower, allowee).await;
-    allowee
-        .sdk
-        .accept_allowance(allower.public_key.clone(), &id)
-        .await
-        .unwrap();
+    accept_allowance(allowee, allower, &id).await.unwrap();
     deliver(allowee, allower).await;
     id
 }
@@ -59,7 +55,11 @@ async fn accepted_request(
         .unwrap();
     payer
         .sdk
-        .accept_payment_request(payee.public_key.clone(), &id)
+        .accept_payment_request(
+            payee.public_key.clone(),
+            &id,
+            crate::harness::proposal_item(&payer.sdk, &payee.public_key, &id).await,
+        )
         .await
         .unwrap();
     deliver(payer, payee).await;

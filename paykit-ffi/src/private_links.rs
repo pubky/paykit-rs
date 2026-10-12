@@ -316,8 +316,9 @@ impl FfiPaykitSdk {
     /// else is kept.
     ///
     /// Resume by unblocking the peer and linking again. Ids from the forgotten
-    /// history are not reserved: a proposal that reuses one is new input, so
-    /// read it again before accepting.
+    /// history are not reserved: a proposal that reuses one is new input.
+    /// The acceptance calls refuse a proposal other than the one named by its
+    /// stream item id.
     pub async fn forget_peer(
         &self,
         counterparty: String,

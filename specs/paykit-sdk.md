@@ -1320,18 +1320,27 @@ Everything else is kept: the `Blocked` Linked Peer record and its pinned Noise
 key authorization, the Encrypted Link state record and generation, local
 outbound Private Payment Lists and Payment Endpoint Reservations, Receipt
 issuance records with their outbound Receipt Access, Contact Records, and every
-id counter. Stream item ids are never reused.
+id counter, so a stream item id is not assigned again in this storage history.
 
 After the call the counterparty stays `Blocked`. Private workflows resume only
 after `unblock_peer` and a fresh Encrypted Link Handshake. Ids from the
 forgotten history are not reserved: the counterparty can reuse a Payment Request
 ID, Allowance ID, or Event ID with different terms, and such a message is an
 ordinary new proposal that waits for a local decision. Other Paykit Apps and
-devices on the identity are not told that a forget happened. Every app
-therefore binds an approval to the proposal it displayed, for example by its
-`proposal_stream_item_id`, which is never reused, and reads the record again
-immediately before accepting. A backup exported before the call still contains
-the forgotten history and restores it.
+devices on the identity are not told that a forget happened, so an approval
+already in progress can name terms that were replaced. `accept_allowance`,
+`accept_payment_request`, and `claim_and_accept_payment_request` therefore take
+the `proposal_stream_item_id` of the record whose terms were approved, and the
+SDK MUST refuse, in the transaction that queues the Acceptance, when the
+current proposal for that id is a different stream item. A caller passes the id
+it displayed, not one it read just before the call.
+`claim_payment_request_for_execution` takes no such argument: it returns the
+record it claimed, and an app compares that record's `proposal_stream_item_id`
+with the one it displayed before it prepares a payment.
+`accept_payment_request_automatically` needs accepted Allowance authority,
+which is payment history, so its counterparty cannot have been forgotten. A
+backup exported before the call still contains the forgotten history and
+restores it, and restoring any backup can assign stream item ids again.
 
 ### Resolve Public Payment
 
@@ -1446,6 +1455,9 @@ the claim.
 queue update atomically. Apps that claim a request before preparing payment keep
 that earlier claim; the combined operation revalidates it. Success means the
 acceptance is saved, not delivered, and does not authorize payment execution.
+Both it and `accept_payment_request` take the `proposal_stream_item_id` of the
+record whose terms were approved and are refused when the current request is a
+different stream item (see Forget A Blocked Peer).
 
 For outbound lifecycle events:
 

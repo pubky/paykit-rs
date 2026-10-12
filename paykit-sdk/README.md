@@ -224,12 +224,21 @@ Common workflows:
   issuer does not send again, so retrieve a Receipt you need before blocking; a
   retrieved Receipt then counts as payment history. Resume with `unblock_peer`
   and a fresh Encrypted Link Handshake; ids the counterparty sends again are
-  new proposals, so read a proposal again before accepting it
+  new proposals. `accept_allowance`, `accept_payment_request`, and
+  `claim_and_accept_payment_request` take the `proposal_stream_item_id` of the
+  record whose terms were approved and are refused with `Policy` when the
+  current proposal is a different stream item. Pass the id you displayed, not
+  one read just before the call. `claim_payment_request_for_execution` returns
+  the record it claimed; compare its `proposal_stream_item_id` with the one you
+  displayed before preparing a payment
 - list saved Payment Requests with `payment_requests` or `list_payment_requests`;
   all counterparties and filters use one shared-state read, without network intake
 - use `propose_allowance`, `accept_allowance`, `reject_allowance`, and
   `end_allowance` for durable lifecycle intent; drain the normal outbound queue
   and use `allowance_record` or `list_allowances` for derived views
+- pass `accept_allowance` the `proposal_stream_item_id` of the record whose
+  terms were approved, as displayed. On a `Policy` refusal for a different
+  stream item, read the record again and ask for approval again
 - call `resolve_private_contact_payment` for Private Payment List endpoints or
   `resolve_public_contact_payment` for public Payment Endpoints; each returns a
   source-specific result with ordered adapter-built `PaymentTarget` values;

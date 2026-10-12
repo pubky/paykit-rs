@@ -195,6 +195,11 @@ pixel and cache limits, and request timeouts remain app responsibilities.
 - `PaykitSdk.claimAndAcceptPaymentRequest` — atomically claim execution and queue
   acceptance. Keep the earlier preparation claim where needed; success confirms
   durable acceptance, not delivery or permission to execute a payment.
+- `acceptPaymentRequest` and `claimAndAcceptPaymentRequest` take
+  `expectedProposalStreamItemId`: pass `proposalStreamItemId` from the record
+  whose terms the user approved, as displayed. They fail with a policy error
+  when the current request for that Payment Request ID is a different stream
+  item, so read the record again and ask again.
 - `PaykitSdk.paymentRequests`, `paymentRequestsWith`,
   `receivedPaymentRequestsFrom`, `listPaymentRequests`,
   `activeRecurringPaymentRequests`, and `actionableReceivedPaymentRequests` —
@@ -229,6 +234,10 @@ payer app that responds.
 - `PaykitSdk.proposeAllowance`, `acceptAllowance`, `rejectAllowance`, and
   `endAllowance` queue Allowance lifecycle events through the SDK outbound
   stream.
+- `acceptAllowance` takes `expectedProposalStreamItemId`: pass
+  `proposalStreamItemId` from the record whose terms the user approved. It
+  fails with a policy error when the current proposal for that Allowance ID is
+  a different stream item, so read the record again and ask again.
 - `PaykitSdk.listAllowances` and `getAllowance` inspect SDK-derived Allowance
   records without reimplementing lifecycle derivation on the platform.
 - `AllowanceTerms` and its nested range, period, and limit objects validate

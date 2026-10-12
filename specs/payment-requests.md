@@ -801,7 +801,8 @@ Forgetting is itself a deletion of confirmed history: an Event Message whose
 Delivery Confirmation already reached the counterparty is not replayed, and
 only unconfirmed Event Messages are sent again on the new Encrypted Link.
 Afterwards an Event Message that reuses a forgotten id is an ordinary new
-proposal that waits for a local decision.
+proposal that waits for a local decision. An implementation MUST NOT queue an
+Acceptance for it unless the local caller named that exact received proposal.
 
 ## Open questions
 

@@ -806,7 +806,9 @@ async fn test_accept_payment_request_rejects_expired_proposal_before_enqueue() {
         FixedClock,
     );
 
-    let result = sdk.accept_payment_request(counterparty, &request_id).await;
+    let result = sdk
+        .accept_payment_request(counterparty, &request_id, 0)
+        .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
     assert!(storage
@@ -886,10 +888,10 @@ async fn test_accept_payment_request_does_not_queue_without_private_send_readine
 
     for combined in [false, true] {
         let result = if combined {
-            sdk.claim_and_accept_payment_request(counterparty.clone(), &request_id)
+            sdk.claim_and_accept_payment_request(counterparty.clone(), &request_id, 0)
                 .await
         } else {
-            sdk.accept_payment_request(counterparty.clone(), &request_id)
+            sdk.accept_payment_request(counterparty.clone(), &request_id, 0)
                 .await
         };
         assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
@@ -928,7 +930,9 @@ async fn test_accept_payment_request_rejects_unregistered_origin_app() {
         FixedClock,
     );
 
-    let result = sdk.accept_payment_request(counterparty, &request_id).await;
+    let result = sdk
+        .accept_payment_request(counterparty, &request_id, 0)
+        .await;
 
     assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
     assert!(storage
@@ -1202,6 +1206,7 @@ async fn test_acceptance_samples_time_after_transaction_fence() {
                     request_id,
                 )),
                 || clock.now(),
+                None,
                 None,
             )
             .await

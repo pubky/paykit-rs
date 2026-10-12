@@ -428,11 +428,13 @@ where
     /// Receipt Access records, and the local Delivery Confirmations for them.
     /// Receipt Access that was never retrieved is lost with its decryption key.
     /// Everything else is kept, including the `Blocked` Linked Peer record.
-    /// Stream item ids are never reused.
+    /// Stream item ids are not assigned again in this storage history.
     ///
     /// Resume with `unblock_peer` and a fresh Encrypted Link. Ids from the
     /// forgotten history are not reserved: a proposal that reuses one is new
-    /// input, so read it again before accepting. Restoring a backup exported
+    /// input. [`Self::accept_allowance`], [`Self::accept_payment_request`], and
+    /// [`Self::claim_and_accept_payment_request`] refuse a proposal other than
+    /// the one the caller names by stream item. Restoring a backup exported
     /// before the call brings the history back.
     pub async fn forget_peer(&self, counterparty: PubkyPublicKey) -> Result<LinkedPeerRecord> {
         self.retry_storage_transaction(|| {

@@ -18,7 +18,11 @@ use super::{
 /// Local response to a received Allowance proposal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AllowanceResponse {
-    Acceptance,
+    /// Accept the proposal the caller read, named by the inbound stream item
+    /// that carried it.
+    Acceptance {
+        expected_proposal_stream_item_id: u64,
+    },
     Rejection,
 }
 
@@ -62,7 +66,7 @@ where
 {
     let event_id = EventId::new_v4();
     let action = match response {
-        AllowanceResponse::Acceptance => "accept Allowance",
+        AllowanceResponse::Acceptance { .. } => "accept Allowance",
         AllowanceResponse::Rejection => "reject Allowance",
     };
     storage
@@ -81,9 +85,23 @@ where
                 });
             }
             require_lifecycle(&record, AllowanceLifecycleState::Proposed, action)?;
+            if let AllowanceResponse::Acceptance {
+                expected_proposal_stream_item_id,
+            } = response
+            {
+                // SECURITY: an Acceptance names only the Allowance ID and the
+                // Proposal Event ID, and the counterparty chose both. After
+                // `forget_peer` it can send the same ids again with different
+                // terms. The local stream item id is not chosen by the
+                // counterparty and forgetting does not reset its counter, so it
+                // pins the proposal the caller read. Checking it here, in the
+                // transaction that queues the Acceptance, leaves no window
+                // between the check and the response.
+                require_expected_proposal(&record, expected_proposal_stream_item_id, action)?;
+            }
             let proposal_event_id = bound_proposal_event_id(&record)?;
             let event = match response {
-                AllowanceResponse::Acceptance => AllowanceEvent::Acceptance(
+                AllowanceResponse::Acceptance { .. } => AllowanceEvent::Acceptance(
                     AllowanceAcceptance::new(event_id, allowance_id.clone(), proposal_event_id)?,
                 ),
                 AllowanceResponse::Rejection => AllowanceEvent::Rejection(AllowanceRejection::new(
@@ -280,6 +298,26 @@ fn require_lifecycle(
             context: format!(
                 "cannot {action}: Allowance {} is in state {:?}",
                 record.allowance_id, record.state
+            ),
+            source: None,
+        })
+    }
+}
+
+/// Refuse a response to any proposal other than the one the caller read.
+fn require_expected_proposal(
+    record: &AllowanceRecord,
+    expected_proposal_stream_item_id: u64,
+    action: &str,
+) -> Result<()> {
+    if record.proposal_stream_item_id == Some(expected_proposal_stream_item_id) {
+        Ok(())
+    } else {
+        Err(PaykitSdkError::Policy {
+            context: format!(
+                "cannot {action}: the proposal for Allowance {} is not the expected \
+                 stream item {expected_proposal_stream_item_id}",
+                record.allowance_id
             ),
             source: None,
         })
