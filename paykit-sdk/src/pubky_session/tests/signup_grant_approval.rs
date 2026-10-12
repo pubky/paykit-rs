@@ -201,6 +201,35 @@ impl Fixture {
         );
     }
 
+    /// Publish a record for the identity that names no homeserver.
+    fn publish_identity_record_without_homeserver(&self) {
+        self.relay.put_record(
+            &SignedPacket::builder()
+                .address(".".try_into().unwrap(), Ipv4Addr::LOCALHOST.into(), 3600)
+                .sign(&identity_record_signer())
+                .unwrap(),
+        );
+    }
+
+    /// A bootstrap whose client caches a record for the identity that names
+    /// no homeserver, while the relay already holds a newer one pointing at
+    /// `homeserver`, as after a signup from another device.
+    async fn bootstrap_with_outdated_identity_record(
+        &self,
+        homeserver: &Keypair,
+    ) -> PubkySessionBootstrap {
+        self.publish_identity_record_without_homeserver();
+        let pubky = self.pubky();
+        // Within its TTL, the client answers lookups from this cached copy.
+        let cached = pubky
+            .get_homeserver_of(&identity().keypair().public_key())
+            .await
+            .unwrap();
+        assert_eq!(cached, None);
+        self.publish_identity_record(homeserver);
+        PubkySessionBootstrap::with_pubky(pubky, TEST_CLIENT_ID).unwrap()
+    }
+
     /// Choose how relay lookups of the identity's record fail, if at all.
     fn set_identity_lookup_fault(&self, fault: Option<LookupFault>) {
         let key = z32(&identity_record_signer());
@@ -549,6 +578,105 @@ async fn test_approve_auth_signup_grant_approves_after_aged_out_record_is_republ
 }
 
 #[tokio::test]
+async fn test_approve_auth_signup_grant_rejects_different_homeserver_newer_than_cached_record() {
+    let fixture = Fixture::start("204 No Content");
+    let bootstrap = fixture
+        .bootstrap_with_outdated_identity_record(&published_homeserver())
+        .await;
+
+    let result = bootstrap
+        .approve_auth(&fixture.signup_auth_url(), CAPABILITIES, &identity())
+        .await;
+
+    assert_eq!(
+        fixture.effects().await,
+        Effects {
+            homeserver: Some(z32(&published_homeserver())),
+            records_published: 0,
+            inbox_deliveries: 0,
+            homeserver_requests: vec![],
+        }
+    );
+    assert!(
+        matches!(result, Err(PaykitSdkError::Policy { .. })),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_approve_auth_signup_grant_approves_published_homeserver_newer_than_cached_record() {
+    let fixture = Fixture::start("409 Conflict");
+    let bootstrap = fixture
+        .bootstrap_with_outdated_identity_record(&requested_homeserver())
+        .await;
+
+    let result = bootstrap
+        .approve_auth(&fixture.signup_auth_url(), CAPABILITIES, &identity())
+        .await;
+
+    assert_eq!(
+        fixture.effects().await,
+        Effects {
+            homeserver: Some(z32(&requested_homeserver())),
+            records_published: 0,
+            inbox_deliveries: 1,
+            homeserver_requests: vec![],
+        }
+    );
+    result.unwrap();
+}
+
+#[tokio::test]
+async fn test_approve_auth_signup_grant_fails_closed_when_cached_record_cannot_be_refreshed() {
+    let fixture = Fixture::start("204 No Content");
+    let bootstrap = fixture
+        .bootstrap_with_outdated_identity_record(&published_homeserver())
+        .await;
+    fixture.set_identity_lookup_fault(Some(LookupFault::NetworkUnavailable));
+
+    let result = bootstrap
+        .approve_auth(&fixture.signup_auth_url(), CAPABILITIES, &identity())
+        .await;
+
+    fixture.set_identity_lookup_fault(None);
+    assert_eq!(
+        fixture.effects().await,
+        Effects {
+            homeserver: Some(z32(&published_homeserver())),
+            records_published: 0,
+            inbox_deliveries: 0,
+            homeserver_requests: vec![],
+        }
+    );
+    assert!(
+        matches!(result, Err(PaykitSdkError::Identity { .. })),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_approve_auth_signup_grant_signs_up_identity_whose_record_names_no_homeserver() {
+    let fixture = Fixture::start("204 No Content");
+    fixture.publish_identity_record_without_homeserver();
+
+    let result = fixture
+        .bootstrap()
+        .approve_auth(&fixture.signup_auth_url(), CAPABILITIES, &identity())
+        .await;
+
+    assert_eq!(
+        fixture.effects().await,
+        Effects {
+            homeserver: Some(z32(&requested_homeserver())),
+            records_published: 1,
+            inbox_deliveries: 1,
+            homeserver_requests: vec![SIGNUP_REQUEST.to_owned()],
+        }
+    );
+    result.unwrap();
+}
+
+#[tokio::test]
 async fn test_approve_auth_signin_grant_leaves_homeserver_record_unchanged() {
     let fixture = Fixture::start("204 No Content");
     fixture.publish_identity_record(&published_homeserver());
@@ -577,13 +705,20 @@ async fn test_approve_auth_signin_grant_leaves_homeserver_record_unchanged() {
 async fn approve_signup_with_companion_claim(
     fixture: &Fixture,
 ) -> std::result::Result<(), PubkyAuthCompanionClaimApprovalError> {
+    approve_signup_with_companion_claim_as(fixture, &fixture.bootstrap()).await
+}
+
+/// Like [`approve_signup_with_companion_claim`], through `bootstrap`.
+async fn approve_signup_with_companion_claim_as(
+    fixture: &Fixture,
+    bootstrap: &PubkySessionBootstrap,
+) -> std::result::Result<(), PubkyAuthCompanionClaimApprovalError> {
     let auth_url = format!(
         "{}&{CLAIM_PARAMETER}={CLAIM_TYPE}",
         fixture.signup_auth_url()
     );
     let claim = PubkyAuthCompanionClaim::new(CLAIM_PARAMETER, CLAIM_TYPE, vec![1; 84]).unwrap();
-    fixture
-        .bootstrap()
+    bootstrap
         .approve_auth_with_companion_claim(&auth_url, CAPABILITIES, &identity(), &claim)
         .await
 }
@@ -594,6 +729,34 @@ async fn test_approve_auth_with_companion_claim_rejects_different_homeserver_bef
     fixture.publish_identity_record(&published_homeserver());
 
     let result = approve_signup_with_companion_claim(&fixture).await;
+
+    assert_eq!(
+        fixture.effects().await,
+        Effects {
+            homeserver: Some(z32(&published_homeserver())),
+            records_published: 0,
+            inbox_deliveries: 0,
+            homeserver_requests: vec![],
+        }
+    );
+    assert!(
+        matches!(
+            result,
+            Err(PubkyAuthCompanionClaimApprovalError::InvalidAuthUrl { .. })
+        ),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_approve_auth_with_companion_claim_rejects_different_homeserver_newer_than_cached_record(
+) {
+    let fixture = Fixture::start("204 No Content");
+    let bootstrap = fixture
+        .bootstrap_with_outdated_identity_record(&published_homeserver())
+        .await;
+
+    let result = approve_signup_with_companion_claim_as(&fixture, &bootstrap).await;
 
     assert_eq!(
         fixture.effects().await,

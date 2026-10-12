@@ -563,8 +563,9 @@ impl PubkySessionBootstrap {
     /// SECURITY: a signup auth URL names a homeserver chosen by the requester,
     /// and signing up there publishes it as the identity's homeserver. That
     /// must never replace a homeserver record that PKARR still holds, so
-    /// signup is allowed only when neither the lookup nor the PKARR caches
-    /// find one. A lookup error is returned, never read as "no record".
+    /// signup is allowed only when the lookup, the network, and the PKARR
+    /// caches all find none. A lookup error is returned, never read as "no
+    /// record".
     async fn check_auth_approval(
         &self,
         auth_url: &str,
@@ -581,11 +582,22 @@ impl PubkySessionBootstrap {
         let DeepLink::SignupGrant(signup) = deep_link else {
             return Ok(None);
         };
-        let published = signer
-            .pkdns()
-            .get_homeserver()
-            .await
-            .map_err(|err| map_pubky_identity_error("resolve Pubky homeserver record", err))?;
+        let lookup = || async {
+            signer
+                .pkdns()
+                .get_homeserver()
+                .await
+                .map_err(|err| map_pubky_identity_error("resolve Pubky homeserver record", err))
+        };
+        let mut published = lookup().await?;
+        // SECURITY: the lookup answers from this client's cached identity
+        // record while that record is within its TTL, and a cached record can
+        // predate the homeserver record. "No record" only counts once the
+        // network was asked. A newer record from the network replaces the
+        // cached one, so the second lookup reads it.
+        if published.is_none() && self.refresh_identity_record(&signer.public_key()).await? {
+            published = lookup().await?;
+        }
         let requested = &signup.params().homeserver;
         match published {
             Some(published) if published == *requested => Ok(None),
@@ -605,6 +617,29 @@ impl PubkySessionBootstrap {
         }
     }
 
+    /// Ask the network for the record of `identity`, bypassing this client's
+    /// cache, and return whether it holds one. A record newer than the cached
+    /// one replaces it.
+    ///
+    /// Any failure other than finding no record is an error, because the
+    /// caller needs the network's answer before it trusts its cache.
+    async fn refresh_identity_record(&self, identity: &paykit_lib::PublicKey) -> Result<bool> {
+        let resolved = self
+            .pubky
+            .client()
+            .pkarr()
+            .resolve(identity, ResolvePolicy::NetworkOnly)
+            .await;
+        match resolved {
+            Ok(_) => Ok(true),
+            Err(ResolveError::NotFound) => Ok(false),
+            Err(err) => Err(map_pubky_identity_error(
+                "resolve Pubky identity record",
+                err.into(),
+            )),
+        }
+    }
+
     /// Fail unless the PKARR caches also hold no homeserver record for
     /// `identity`.
     ///
@@ -615,7 +650,9 @@ impl PubkySessionBootstrap {
     /// told to republish its record instead of being signed up where the
     /// requester chose. A record that no reachable cache holds still counts
     /// as none, and a client configured without relays has only its own cache
-    /// to read.
+    /// to read. Relay caches are read only when this client caches no record
+    /// for the identity, so a cached record that names no homeserver hides a
+    /// homeserver record that only a relay cache still holds.
     async fn ensure_homeserver_record_absent(
         &self,
         identity: &paykit_lib::PublicKey,
