@@ -477,10 +477,13 @@ still holds for the approving identity, because the requester chooses the
 requested homeserver. The approve helper first looks up the identity's
 homeserver record. It fails with a `Policy` error when the record names a
 different homeserver, and approves without signing up or republishing when the
-record names the requested homeserver. When the lookup finds no record, the
-helper also reads the PKARR caches: a record that no longer resolves but is
-still cached by a relay or the client fails the approval until the caller
-rebroadcasts it with `republish_identity`. A lookup error fails the approval.
+record names the requested homeserver. The lookup can answer from the client's
+cached copy of the identity's record, so when it finds no homeserver record the
+helper asks the network without that cache and looks again. A cached copy that
+predates the homeserver record is therefore not read as none. The helper then
+reads the PKARR caches: a record that no longer resolves but is still cached by
+a relay or the client fails the approval until the caller rebroadcasts it with
+`republish_identity`. A lookup error fails the approval.
 Only when no record is found does the helper sign up on the requested
 homeserver. A signup that the requested homeserver rejects, including because
 the account already exists, fails the approval and publishes nothing; the signup
