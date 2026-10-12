@@ -116,24 +116,33 @@ async fn test_observation_preserves_read_filters_and_does_not_mutate_state() {
 }
 
 #[tokio::test]
-async fn test_observation_rejects_identity_or_noise_key_mismatch() {
-    let storage = registered_test_storage();
+async fn test_observation_rejects_unbound_or_mismatched_identity_and_key() {
     let owner = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     let other = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-    storage
-        .transaction(|tx| {
-            tx.save_identity_state(IdentityState {
-                public_key: Some(owner.clone()),
-                initialized_at: FixedClock.now(),
-            });
-            tx.save_paykit_noise_public_key(key.clone());
-            Ok(())
-        })
-        .await
-        .unwrap();
-    let before = storage.snapshot().unwrap();
-    for (observed_owner, observed_key) in [(&other, &key), (&owner, &other)] {
+    let mismatch = "Paykit observation session does not match the stored identity and key";
+    let unbound = "Paykit Noise key is not bound yet; call initialize() with a private-link-capable session first";
+    for (observed_owner, observed_key, stored_key, expected) in [
+        (&other, &key, Some(&key), mismatch),
+        (&owner, &other, Some(&key), mismatch),
+        (&owner, &key, None, unbound),
+        (&other, &key, None, mismatch),
+    ] {
+        let storage = registered_test_storage();
+        storage
+            .transaction(|tx| {
+                tx.save_identity_state(IdentityState {
+                    public_key: Some(owner.clone()),
+                    initialized_at: FixedClock.now(),
+                });
+                if let Some(stored_key) = stored_key {
+                    tx.save_paykit_noise_public_key(stored_key.clone());
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let before = storage.snapshot().unwrap();
         let result = storage
             .transaction(|tx| {
                 ObservationSdk::state_observation_in_transaction(
@@ -145,7 +154,10 @@ async fn test_observation_rejects_identity_or_noise_key_mismatch() {
                 )
             })
             .await;
-        assert!(matches!(result, Err(PaykitSdkError::Identity { .. })));
+        assert!(matches!(
+            result,
+            Err(PaykitSdkError::Identity { context, .. }) if context == expected
+        ));
+        assert_eq!(storage.snapshot().unwrap(), before);
     }
-    assert_eq!(storage.snapshot().unwrap(), before);
 }

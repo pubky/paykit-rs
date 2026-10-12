@@ -106,11 +106,20 @@ where
         let identity = initialized_identity_in_transaction(tx, "observe Paykit state")?;
         let snapshot = tx.export_storage_state();
         if &identity != public_key
-            || snapshot.paykit_noise_public_key.as_ref() != Some(noise_public_key)
+            || snapshot
+                .paykit_noise_public_key
+                .as_ref()
+                .is_some_and(|stored| stored != noise_public_key)
         {
             return Err(PaykitSdkError::Identity {
                 context: "Paykit observation session does not match the stored identity and key"
                     .into(),
+                source: None,
+            });
+        }
+        if snapshot.paykit_noise_public_key.is_none() {
+            return Err(PaykitSdkError::Identity {
+                context: "Paykit Noise key is not bound yet; call initialize() with a private-link-capable session first".into(),
                 source: None,
             });
         }
