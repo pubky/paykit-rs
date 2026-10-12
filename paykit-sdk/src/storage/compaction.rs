@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use paykit_lib::PrivateMessageKind;
 
 use super::StorageState;
-use crate::{OutboundPrivateMessageStatus, PrivateStreamParseStatus};
+use crate::{OutboundPrivateMessageStatus, PrivateStreamParseStatus, PubkyPublicKey};
 
 /// Discard only obsolete Latest-State payloads, never Event Message history.
 pub(super) fn compact_private_payment_lists(state: &mut StorageState) {
@@ -57,9 +57,22 @@ pub(super) fn compact_private_payment_lists(state: &mut StorageState) {
             )
     });
 
+    compact_received_private_payment_lists(state, None);
+}
+
+/// Discard received Private Payment Lists that a later valid list from the
+/// same Paykit App superseded, for one counterparty or for all of them.
+///
+/// Invalid lists stay as evidence and Event Message history is untouched.
+pub(crate) fn compact_received_private_payment_lists(
+    state: &mut StorageState,
+    only: Option<&PubkyPublicKey>,
+) {
+    let kind = PrivateMessageKind::PrivatePaymentList.as_str();
     let mut latest = HashMap::new();
     for item in &state.private_stream_items {
-        if item.known_paykit_kind.as_deref() == Some(kind)
+        if only.is_none_or(|counterparty| item.counterparty == *counterparty)
+            && item.known_paykit_kind.as_deref() == Some(kind)
             && item.parse_status == PrivateStreamParseStatus::Valid
         {
             latest.insert(
@@ -69,7 +82,8 @@ pub(super) fn compact_private_payment_lists(state: &mut StorageState) {
         }
     }
     state.private_stream_items.retain(|item| {
-        item.known_paykit_kind.as_deref() != Some(kind)
+        only.is_some_and(|counterparty| item.counterparty != *counterparty)
+            || item.known_paykit_kind.as_deref() != Some(kind)
             || item.parse_status != PrivateStreamParseStatus::Valid
             || latest.get(&(item.counterparty.clone(), item.parsed_app_id.clone()))
                 == Some(&item.stream_item_id)

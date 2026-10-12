@@ -1247,6 +1247,115 @@ async fn test_persist_private_stream_batch_bounds_duplicate_resend_retention() {
     );
 }
 
+fn private_payment_list_message(app_id: &str, sequence: usize) -> PrivateApplicationMessage {
+    private_message(&format!(
+        r#"{{"version":1,"kind":"paykit.private_payment_list","app_id":"{app_id}","payment_endpoints":{{"btc-lightning-bolt11":"ln-{sequence}"}}}}"#
+    ))
+}
+
+#[tokio::test]
+async fn test_persist_private_stream_batch_reclaims_superseded_payment_lists_at_quota() {
+    // Validates like callback storage and, like it, does not compact at commit.
+    let storage = validating_storage();
+    let peer = counterparty();
+    let other = counterparty();
+    let lists = |range: std::ops::Range<usize>| {
+        range
+            .map(|sequence| private_payment_list_message("bitkit", sequence))
+            .collect::<Vec<_>>()
+    };
+    persist_private_stream_batch(&storage, other.clone(), lists(0..3), None, timestamp())
+        .await
+        .unwrap();
+    // One unknown kind, one invalid list, and ordinary list updates up to the limit.
+    let mut messages = vec![
+        unknown_kind_message(0),
+        private_message(
+            r#"{"version":1,"kind":"paykit.private_payment_list","app_id":"bitkit","payment_endpoints":"invalid"}"#,
+        ),
+    ];
+    messages.extend(lists(
+        0..MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY - 2,
+    ));
+    persist_private_stream_batch(&storage, peer.clone(), messages, None, timestamp())
+        .await
+        .unwrap();
+    assert_eq!(
+        retained_stream_items(&storage.0, &peer),
+        MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY
+    );
+
+    // The next update is not refused: every list but the latest was superseded.
+    let report = persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        lists(
+            MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY
+                ..MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY + 1,
+        ),
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    let snapshot = storage.0.snapshot().unwrap();
+    let retained = snapshot
+        .private_stream_items
+        .iter()
+        .filter(|item| item.counterparty == peer)
+        .collect::<Vec<_>>();
+    // Kept: the unknown kind, the invalid list, the latest earlier list, and the new one.
+    assert_eq!(retained.len(), 4);
+    assert_eq!(retained[0].known_paykit_kind, None);
+    assert_eq!(
+        retained[1].parse_status,
+        PrivateStreamParseStatus::MalformedRecognized
+    );
+    assert!(retained[2].raw_json.contains(&format!(
+        "ln-{}",
+        MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY - 3
+    )));
+    assert_eq!(retained[3].stream_item_id, report.stream_item_ids[0]);
+    // Another counterparty's lists are not touched, and ids are not reused.
+    assert_eq!(retained_stream_items(&storage.0, &other), 3);
+    assert_eq!(
+        snapshot.next_private_stream_item_id,
+        MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY as u64 + 4
+    );
+}
+
+#[tokio::test]
+async fn test_persist_private_stream_batch_counts_latest_payment_list_of_each_app() {
+    let storage = validating_storage();
+    let peer = counterparty();
+    // The latest list of each Paykit App is current state, so none is reclaimed.
+    persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        (0..MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY)
+            .map(|app| private_payment_list_message(&format!("app-{app}"), 0))
+            .collect(),
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    let before = storage.0.snapshot().unwrap();
+
+    let refused = persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        vec![private_payment_list_message("one-more-app", 0)],
+        None,
+        timestamp(),
+    )
+    .await;
+
+    assert!(matches!(refused, Err(PaykitSdkError::Policy { .. })));
+    assert!(storage.0.snapshot().unwrap() == before);
+}
+
 #[tokio::test]
 async fn test_persist_private_stream_batch_accepts_counterparty_up_to_retention_quota() {
     let storage = InMemoryStorage::new();

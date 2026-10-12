@@ -334,11 +334,15 @@ are not pruned, so the 64 MiB limit still applies to growing payment history.
 Private stream intake bounds what one counterparty can add to that history:
 
 - At most 4,096 private stream items are retained per counterparty, counted
-  across every message kind and parse status. A message that would exceed the
-  limit fails its receive transaction with `Policy`. Nothing is pruned, the
-  Encrypted Link checkpoint does not advance, and the message stays in the
-  sender's outbox. Messages committed earlier in the same receive call stay
-  committed. Intake from other counterparties is unaffected.
+  across every message kind and parse status. When a receive transaction could
+  reach the limit, the SDK first deletes that counterparty's Private Payment
+  Lists that a later valid list from the same App ID superseded. This runs on
+  every storage adapter, because app-owned blob storage does not compact them
+  at commit. A message that would still exceed the limit fails its receive
+  transaction with `Policy`. Nothing else is pruned, the Encrypted Link
+  checkpoint does not advance, and the message stays in the sender's outbox.
+  Messages committed earlier in the same receive call stay committed. Intake
+  from other counterparties is unaffected.
 - At most two re-sends identical to the first stored payload of an Event ID are
   retained as stream items. Later identical re-sends are consumed and confirmed
   again without a new stream item or dedupe entry; for a counterparty at the
