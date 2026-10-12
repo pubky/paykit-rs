@@ -212,7 +212,9 @@ Common workflows:
   message is refused. The limit only bounds what a counterparty adds on its
   own: it no longer applies once you have queued or sent that counterparty a
   Payment Request, a Payment Request Acceptance, a Payment Proof, an Allowance
-  proposal, or an Allowance Acceptance
+  proposal, or an Allowance Acceptance, or while you have it saved as a
+  contact with `save_contact`. Save a payee you only pay through public Payment
+  Endpoints as a contact so its Receipt Access is never refused
 - list saved Payment Requests with `payment_requests` or `list_payment_requests`;
   all counterparties and filters use one shared-state read, without network intake
 - use `propose_allowance`, `accept_allowance`, `reject_allowance`, and

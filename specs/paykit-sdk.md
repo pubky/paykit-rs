@@ -332,15 +332,19 @@ publication, and attempted send. Event Message history and deduplication records
 are not pruned, so the 64 MiB limit still applies to growing payment history.
 
 Private stream intake bounds what one counterparty can add to that history on
-its own. The limit below applies until the local identity chooses to transact
-with that counterparty: once it has queued or sent that counterparty a Payment
-Request, a Payment Request Acceptance, a Payment Proof, an Allowance proposal,
-or an Allowance Acceptance, in any delivery status, intake from it is not
-refused for the number of retained items, as before the limit existed. Nothing
-else lifts the limit. A rejection, cancellation, Allowance End, execution
-claim, retrieved Receipt, Delivery Confirmation, Private Payment List, or
-Receipt Access MUST NOT lift it, because each can follow from one unsolicited
-message without a decision to transact.
+its own. The limit below applies until the local identity chooses that
+counterparty, in either of two ways. It transacts with it: once it has queued
+or sent that counterparty a Payment Request, a Payment Request Acceptance, a
+Payment Proof, an Allowance proposal, or an Allowance Acceptance, in any
+delivery status. Or it saves it as a contact: while a Contact Record exists
+for that counterparty. A Contact Record is the explicit local opt-in for a
+relationship the SDK cannot see, such as paying through public Payment
+Endpoints and retrieving Receipts; removing it restores the limit. Intake from
+a chosen counterparty is not refused for the number of retained items, as
+before the limit existed. Nothing else lifts the limit. A rejection,
+cancellation, Allowance End, execution claim, retrieved Receipt, Delivery
+Confirmation, Private Payment List, or Receipt Access MUST NOT lift it, because
+each can follow from one unsolicited message without a local choice.
 
 - At most 4,096 private stream items are retained per counterparty, counted
   across every message kind and parse status. When a receive transaction could
@@ -361,8 +365,9 @@ message without a decision to transact.
 
 At roughly 1.4 KB per item the limit pins about 6 MB per counterparty it
 applies to. It does not bound the total across counterparties or what a
-counterparty the local identity transacts with can add, and no workflow yet
-releases a counterparty that reached it. `resolve_private_contact_payment` reports
+counterparty the local identity chose can add. Saving a counterparty that
+reached the limit as a contact resumes its intake; no workflow yet removes
+what it already retained. `resolve_private_contact_payment` reports
 `RecoveryPending` for such a counterparty when no cached Private Payment List
 endpoint is available, because its refresh receive is refused.
 

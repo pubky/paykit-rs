@@ -49,8 +49,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Bound the private stream state one Linked Peer can make the SDK retain on
   its own. The limit applies until the local identity has queued or sent that
   counterparty a Payment Request, a Payment Request Acceptance, a Payment Proof,
-  an Allowance proposal, or an Allowance Acceptance; a counterparty it
-  transacts with is not refused for the number of retained items. Until then a
+  an Allowance proposal, or an Allowance Acceptance, or has it saved as a
+  contact; a counterparty it chose this way is not refused for the number of
+  retained items. Until then a
   counterparty may have at most 4,096 retained private stream items; a message
   past that limit fails `receive_private_messages` with a `Policy` error and
   stays unacknowledged. Before refusing, the SDK deletes that counterparty's
