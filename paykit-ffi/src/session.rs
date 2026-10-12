@@ -256,7 +256,9 @@ impl fmt::Debug for FfiPubkyAuthCompanionClaim {
 /// Failure returned while approving Pubky Auth with a companion claim.
 #[derive(uniffi::Error, Clone, Debug, thiserror::Error)]
 pub enum FfiPubkyAuthCompanionClaimApprovalError {
-    /// The URL, claim type, secret, relay, or capability request is invalid.
+    /// The URL, claim type, secret, relay, or capability request is invalid,
+    /// or a signup request's homeserver was refused or could not be checked.
+    /// Nothing was delivered.
     #[error("invalid Pubky Auth companion request: {reason}")]
     InvalidAuthUrl {
         /// Redacted validation reason.
@@ -544,6 +546,9 @@ impl FfiPubkySessionBootstrap {
     }
 
     /// Sign up on a homeserver and return session access material.
+    ///
+    /// Signing up an identity that already has an account on that homeserver
+    /// publishes its homeserver record again.
     pub async fn sign_up(
         &self,
         local_secret_key: Arc<FfiPubkyLocalSecretKey>,
@@ -648,8 +653,24 @@ impl FfiPubkySessionBootstrap {
     /// Approve a Pubky auth URL with this local secret key.
     ///
     /// The request client ID must match this bootstrap's client ID.
-    /// A signup request creates the identity on its requested homeserver before
-    /// approving the application grant.
+    ///
+    /// A signup request names a homeserver chosen by the requester, so
+    /// approval never moves an identity away from a homeserver record that
+    /// PKARR still holds. Approval fails with a policy error when the record
+    /// names a different homeserver, and approves the application grant
+    /// without signing up again when it names the requested one. If the record
+    /// no longer resolves but is still cached, approval fails with an identity
+    /// error; call `republish_identity` and approve again. Only when no record
+    /// is found is the identity signed up on the requested homeserver before
+    /// the application grant is approved.
+    ///
+    /// A failed lookup, or a signup that the requested homeserver rejects
+    /// (including because the account already exists), fails the approval and
+    /// publishes nothing. To restore the record of an existing account, call
+    /// `sign_up` with a homeserver the caller already trusts, not one taken
+    /// from the auth URL. A record that no reachable relay caches counts as
+    /// none, so a caller that knows the identity's homeserver should compare
+    /// it with the request's `homeserver_public_key` before approving.
     pub async fn approve_auth(
         &self,
         auth_url: String,
@@ -668,7 +689,9 @@ impl FfiPubkySessionBootstrap {
     ///
     /// This high-level operation owns validation, request-bound signing,
     /// channel derivation, encryption, relay delivery, and approval ordering.
-    /// The request client ID must match this bootstrap's client ID.
+    /// The request client ID must match this bootstrap's client ID. A signup
+    /// request follows the homeserver rules of `approve_auth`, checked before
+    /// the claim is delivered.
     pub async fn approve_auth_with_companion_claim(
         &self,
         auth_url: String,
