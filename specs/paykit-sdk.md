@@ -1455,10 +1455,12 @@ Normal restore flow:
 1. Require an otherwise empty SDK state backing, then validate the local
    identity. A portable backup must not replace newer shared state.
 2. Validate backup record shape plus every link snapshot recipient.
-3. Preserve valid active Encrypted Link snapshots and in-progress handshake
-   snapshots so the SDK can catch up from the restored checkpoint.
-4. Mark peers recovery-required only when no safe restored checkpoint exists,
-   the peer was already recovery-required, or outbound private work needs a link
+3. Apply the caller's restored link policy. `Resume` preserves valid active
+   Encrypted Link snapshots and in-progress handshake snapshots so the SDK can
+   catch up from the restored checkpoint. `RequireRecovery` discards them.
+4. Mark peers recovery-required when the policy is `RequireRecovery` and the
+   peer had a snapshot, when no safe restored checkpoint exists, when the peer
+   was already recovery-required, or when outbound private work needs a link
    snapshot that is missing.
 5. Load backup into storage under a restore transaction.
 6. Do not execute automatic payments until private stream and request state are
@@ -1470,11 +1472,34 @@ For Allowance V1, restored or recovery-incomplete execution state must remain
 ineligible until wallet reconciliation establishes that no later successful or
 unresolved payment is missing.
 
+The SDK cannot tell whether a backup is current, so every restore passes a
+restored link policy and there is no default. `Resume` is safe only if no
+runtime for this identity sent or received private messages, or advanced an
+Encrypted Link Handshake, after the backup was exported. The SDK also sends on
+its own: Delivery Confirmations for received Event Messages, Private Payment
+List syncs (repeated after each restart), and retries. A stale snapshot rolls
+back the sending nonce and outbox slot: the next send reuses a transport key
+and nonce and overwrites a published slot, which leaks plaintext to anyone
+holding both ciphertexts, and one of the two messages is never read. A stale
+handshake snapshot replays to the same transport keys. Holding the latest
+available backup is not enough if the exporting runtime ran again.
+
+Apps that cannot rule that out pass `RequireRecovery`. Each peer that had a
+snapshot then needs a fresh
+[Encrypted Link Handshake](#establish-encrypted-link). Its queued and prepared
+outbound private messages stay recovery-required until the replacement link
+completes and their app is published again; Delivery Confirmations need only
+the link. Private messages the backup had not yet received are not read from
+the old link. Unconfirmed Event Messages are replayed on the replacement link;
+anything else is not repaired and requires separate state reconciliation, as
+[Delivery Confirmations](payment-requests.md#delivery-confirmations) notes.
+Neither policy detects rollback of the state backing itself.
+
 Backup restore preserves history, derived records, and peer authorization pins.
-Checkpoints resume only after [current signed-key checks](#establish-encrypted-link);
-missing or unsafe checkpoints pause private automation until relink. Concurrent
-multi-app updates use homeserver-enforced write locks and crash-safe
-prepared Noise operations.
+Under `Resume`, checkpoints resume only after
+[current signed-key checks](#establish-encrypted-link); missing or unsafe
+checkpoints pause private automation until relink. Concurrent multi-app updates
+use homeserver-enforced write locks and crash-safe prepared Noise operations.
 
 `recover_shared_state_from_backup` requires a matching trusted backup, an active
 `PAYKIT_AUTHORIZER_SESSION_CAPABILITIES` session, the Pubky identity secret,
@@ -1660,7 +1685,8 @@ Core tests:
 - Payment Request role/lifecycle checks
 - Receipt Access dedupe and receipt retrieval
 - profile serialization and Contact Record storage
-- backup/restore validates snapshot recipient and pauses unsafe automation
+- backup/restore validates snapshot recipient, pauses unsafe automation, and
+  discards link and handshake snapshots under `RequireRecovery`
 
 Platform tests:
 

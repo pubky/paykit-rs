@@ -107,7 +107,10 @@ async fn test_recover_corrupt_shared_state_checks_registry_keys_and_generation()
         .put(paykit_lib::PAYKIT_SHARED_STATE_PATH, damaged.clone())
         .await
         .unwrap();
-    assert!(sdk.restore_backup_state(backup.clone()).await.is_err());
+    assert!(sdk
+        .restore_backup_state(backup.clone(), paykit_sdk::RestoredLinkPolicy::Resume)
+        .await
+        .is_err());
     let mut wrong_access = access.clone();
     wrong_access.paykit_identity_secret_key =
         Some(paykit_sdk::PaykitIdentitySecretKey::new([9; 32], 1).unwrap());

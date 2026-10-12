@@ -238,6 +238,119 @@ async fn test_restore_backup_state_requires_matching_checkpoint_authorization() 
     }
 }
 
+#[tokio::test]
+async fn test_restore_backup_state_require_recovery_discards_authorized_checkpoints() {
+    let signer = pubky::Keypair::random();
+    let counterparty = PubkyPublicKey::from_public_key(&signer.public_key());
+    let authorization =
+        paykit_lib::PaykitNoiseKeyAuthorization::sign(&signer, &[7; 32], 1).unwrap();
+
+    for state in [LinkedPeerState::Linked, LinkedPeerState::Linking] {
+        for peer_state in [state.clone(), LinkedPeerState::Blocked] {
+            for queued_outbound in [false, true] {
+                let case = format!("{state:?} {peer_state:?} queued={queued_outbound}");
+                // The pin matches, so the Resume policy would keep this checkpoint.
+                let checkpoint =
+                    link_checkpoint(&counterparty, authorization.noise_public_key(), &state);
+                let mut backup = empty_backup(identity(public_key()));
+                backup.encrypted_link_states.push(checkpoint.clone());
+                backup.linked_peers.push(LinkedPeerRecord {
+                    counterparty: counterparty.clone(),
+                    state: peer_state.clone(),
+                    last_sync_at: Some(timestamp()),
+                    last_private_receive_at: None,
+                    failure_count: 0,
+                    local_recovery_attempt_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
+                    local_recovery_marker_created_at: Some(timestamp()),
+                    local_recovery_marker_last_error: None,
+                    remote_recovery_attempt_id: None,
+                    remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: Some(authorization.clone()),
+                });
+                if queued_outbound {
+                    backup
+                        .outbound_private_messages
+                        .push(private_payment_list_outbound(
+                            counterparty.clone(),
+                            1,
+                            "lnbc1example",
+                        ));
+                    let mut sending =
+                        private_payment_list_outbound(counterparty.clone(), 2, "lnbc1prepared");
+                    sending.status = OutboundPrivateMessageStatus::Sending;
+                    sending.attempt_count = 1;
+                    sending.last_attempt_at = Some(timestamp());
+                    sending.prepared_send = Some(PreparedOutboundPrivateSend {
+                        destination_path: format!(
+                            "{}/{}/0",
+                            paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX,
+                            "0".repeat(64)
+                        ),
+                        ciphertext: vec![
+                            0;
+                            pubky_noise::snow_crypto::PUBKY_NOISE_TRANSPORT_PACKET_LEN
+                        ],
+                    });
+                    backup.outbound_private_messages.push(sending);
+                }
+                let storage = InMemoryStorage::new();
+
+                let report = restore_backup_state_with_identity(
+                    &storage,
+                    backup,
+                    None,
+                    None,
+                    DateTime::<Utc>::MIN_UTC,
+                    RestoredLinkPolicy::RequireRecovery,
+                )
+                .await
+                .unwrap();
+
+                let restored = storage.snapshot().unwrap();
+                let peer = &restored.linked_peers[&counterparty];
+                let link = &restored.encrypted_link_states[&counterparty];
+                let expected_state = if peer_state == LinkedPeerState::Blocked {
+                    LinkedPeerState::Blocked
+                } else {
+                    LinkedPeerState::RecoveryRequired
+                };
+                assert_eq!(peer.state, expected_state, "{case}");
+                assert_eq!(
+                    report.recovery_required_peers,
+                    vec![counterparty.clone()],
+                    "{case}"
+                );
+                assert!(link.link_snapshot.is_none(), "{case}");
+                assert!(link.handshake_snapshot.is_none(), "{case}");
+                assert!(link.handshake_role.is_none(), "{case}");
+                assert_eq!(link.generation, checkpoint.generation + 1, "{case}");
+                // The signed pin survives, and the replacement link must not
+                // reuse the old stream paths.
+                assert_eq!(
+                    peer.noise_key_authorization,
+                    Some(authorization.clone()),
+                    "{case}"
+                );
+                assert!(peer.local_recovery_attempt_id.is_none(), "{case}");
+                assert!(peer.local_recovery_marker_created_at.is_none(), "{case}");
+                assert_eq!(
+                    restored.outbound_private_messages.len(),
+                    if queued_outbound { 2 } else { 0 },
+                    "{case}"
+                );
+                for message in &restored.outbound_private_messages {
+                    assert_eq!(
+                        message.status,
+                        OutboundPrivateMessageStatus::RecoveryRequired,
+                        "{case}"
+                    );
+                    assert!(message.prepared_send.is_none(), "{case}");
+                }
+            }
+        }
+    }
+}
+
 fn link_checkpoint(
     counterparty: &PubkyPublicKey,
     noise_public_key: &pubky::PublicKey,
@@ -330,8 +443,13 @@ fn test_restore_reconciliation_preserves_recovery_required_and_blocked_peers() {
             ),
         )]);
 
-        let recovery_required =
-            reconcile_restored_linked_peers(&mut peers, &link_states, &Vec::new()).unwrap();
+        let recovery_required = reconcile_restored_linked_peers(
+            &mut peers,
+            &link_states,
+            &Vec::new(),
+            RestoredLinkPolicy::Resume,
+        )
+        .unwrap();
 
         let expected = if state == LinkedPeerState::RecoveryRequired {
             vec![counterparty.clone()]
@@ -374,8 +492,13 @@ fn test_restore_reconciliation_marks_missing_checkpoint_recovery_required() {
         },
     )]);
 
-    let recovery_required =
-        reconcile_restored_linked_peers(&mut peers, &link_states, &Vec::new()).unwrap();
+    let recovery_required = reconcile_restored_linked_peers(
+        &mut peers,
+        &link_states,
+        &Vec::new(),
+        RestoredLinkPolicy::Resume,
+    )
+    .unwrap();
 
     assert_eq!(recovery_required, vec![counterparty.clone()]);
     assert_eq!(
@@ -405,8 +528,13 @@ fn test_restore_reconciliation_marks_missing_link_state_recovery_required() {
     )]);
     let link_states = std::collections::HashMap::new();
 
-    let recovery_required =
-        reconcile_restored_linked_peers(&mut peers, &link_states, &Vec::new()).unwrap();
+    let recovery_required = reconcile_restored_linked_peers(
+        &mut peers,
+        &link_states,
+        &Vec::new(),
+        RestoredLinkPolicy::Resume,
+    )
+    .unwrap();
 
     assert_eq!(recovery_required, vec![counterparty.clone()]);
     assert_eq!(
