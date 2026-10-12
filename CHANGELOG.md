@@ -46,6 +46,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   is unchanged and restores the record. A record that no reachable relay caches
   still counts as none, so a caller that knows an identity's homeserver should
   compare it with the request's `homeserver_public_key` before approving.
+- Bound the private stream state one Linked Peer can make the SDK retain on
+  its own. The limit applies until the local identity has queued or sent that
+  counterparty a Payment Request, a Payment Request Acceptance, a Payment Proof,
+  an Allowance proposal, or an Allowance Acceptance, or has it saved as a
+  contact; a counterparty it chose this way is not refused for the number of
+  retained items. Until then a
+  counterparty may have at most 4,096 retained private stream items; a message
+  past that limit fails `receive_private_messages` with a `Policy` error and
+  stays unacknowledged. Before refusing, the SDK deletes that counterparty's
+  Private Payment Lists that a later valid list from the same Paykit App
+  superseded, on every storage adapter; nothing else is pruned. Re-sends
+  identical to the first
+  stored copy of an Event Message are retained at most twice, then confirmed
+  again without new state; conflicting payloads are still retained and count
+  toward the limit.
 
 ## 0.1.0-rc72 - 2026-10-08
 
