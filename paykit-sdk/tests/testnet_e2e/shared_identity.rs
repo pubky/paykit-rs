@@ -4857,10 +4857,14 @@ async fn test_claim_and_accept_commits_once_and_preserves_ownership_on_failure()
         PaykitSdkConfig::new(pair.bitkit.app_id.clone()).unwrap(),
     );
 
+    // These reads and the refused approval go through the uncounted runtime,
+    // so the transaction and commit counts below stay those of one call.
     let proposal_item =
-        crate::harness::proposal_item(&sdk, &pair.bob.public_key, &request_id).await;
+        crate::harness::proposal_item(&pair.bitkit.sdk, &pair.bob.public_key, &request_id).await;
     // An approval that names another request is refused and claims nothing.
-    let stale = sdk
+    let stale = pair
+        .bitkit
+        .sdk
         .claim_and_accept_payment_request(
             pair.bob.public_key.clone(),
             &request_id,
@@ -4869,7 +4873,9 @@ async fn test_claim_and_accept_commits_once_and_preserves_ownership_on_failure()
         .await
         .unwrap_err();
     assert!(matches!(stale, PaykitSdkError::Policy { .. }));
-    let unclaimed = sdk
+    let unclaimed = pair
+        .bitkit
+        .sdk
         .payment_requests_with(&pair.bob.public_key)
         .await
         .unwrap()
