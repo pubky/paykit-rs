@@ -154,7 +154,7 @@ impl PubkySessionBootstrap {
     /// [`Self::approve_auth`], checked before the claim is delivered. A
     /// request that those rules refuse, or whose homeserver lookup fails, is
     /// reported as `InvalidAuthUrl` and receives neither the claim nor the
-    /// grant. An identity with no homeserver record is signed up on the
+    /// grant. An identity for which no record is found is signed up on the
     /// requested homeserver after claim delivery and before the application
     /// grant is approved.
     pub async fn approve_auth_with_companion_claim(

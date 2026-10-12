@@ -705,14 +705,52 @@ async fn test_approve_auth_signup_grant_fails_closed_when_cached_record_cannot_b
             homeserver_requests: vec![],
         }
     );
+    // The failed network lookup itself is reported, not a later refusal.
     assert!(
-        matches!(result, Err(PaykitSdkError::Identity { .. })),
+        matches!(
+            result,
+            Err(PaykitSdkError::Identity {
+                source: Some(_),
+                ..
+            })
+        ),
         "{result:?}"
     );
 }
 
 #[tokio::test]
-async fn test_approve_auth_signup_grant_signs_up_identity_whose_record_names_no_homeserver() {
+async fn test_approve_auth_signup_grant_rejects_aged_out_homeserver_record_behind_cached_record() {
+    let fixture = Fixture::start("204 No Content");
+    let bootstrap = fixture
+        .bootstrap_with_outdated_identity_record(&published_homeserver())
+        .await;
+    fixture.set_identity_lookup_fault(Some(LookupFault::AgedOut));
+
+    let result = bootstrap
+        .approve_auth(&fixture.signup_auth_url(), CAPABILITIES, &identity())
+        .await;
+
+    fixture.set_identity_lookup_fault(None);
+    assert_eq!(
+        fixture.effects().await,
+        Effects {
+            homeserver: Some(z32(&published_homeserver())),
+            records_published: 0,
+            inbox_deliveries: 0,
+            homeserver_requests: vec![],
+        }
+    );
+    assert!(
+        matches!(
+            &result,
+            Err(PaykitSdkError::Identity { context, .. }) if context.contains("names no homeserver")
+        ),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_approve_auth_signup_grant_rejects_identity_whose_record_names_no_homeserver() {
     let fixture = Fixture::start("204 No Content");
     fixture.publish_identity_record_without_homeserver();
 
@@ -724,13 +762,19 @@ async fn test_approve_auth_signup_grant_signs_up_identity_whose_record_names_no_
     assert_eq!(
         fixture.effects().await,
         Effects {
-            homeserver: Some(z32(&requested_homeserver())),
-            records_published: 1,
-            inbox_deliveries: 1,
-            homeserver_requests: vec![SIGNUP_REQUEST.to_owned()],
+            homeserver: None,
+            records_published: 0,
+            inbox_deliveries: 0,
+            homeserver_requests: vec![],
         }
     );
-    result.unwrap();
+    assert!(
+        matches!(
+            &result,
+            Err(PaykitSdkError::Identity { context, .. }) if context.contains("names no homeserver")
+        ),
+        "{result:?}"
+    );
 }
 
 #[tokio::test]

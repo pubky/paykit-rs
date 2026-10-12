@@ -557,15 +557,16 @@ impl PubkySessionBootstrap {
     /// Run every check that can refuse `auth_url`, before anything reaches the
     /// requester.
     ///
-    /// Returns the signup request to run first when no homeserver record is
-    /// found for the approving identity.
+    /// Returns the signup request to run first when no record is found for the
+    /// approving identity.
     ///
     /// SECURITY: a signup auth URL names a homeserver chosen by the requester,
     /// and signing up there publishes it as the identity's homeserver. That
     /// must never replace a homeserver record that PKARR still holds, so
     /// signup is allowed only when the lookup, the network, and the PKARR
-    /// caches all find none. A lookup error is returned, never read as "no
-    /// record".
+    /// caches all find no record for the identity. A record that names no
+    /// homeserver does not count as none, because it can be older than one
+    /// that does. A lookup error is returned, never read as "no record".
     async fn check_auth_approval(
         &self,
         auth_url: &str,
@@ -618,10 +619,20 @@ impl PubkySessionBootstrap {
                 source: None,
             }),
             None => {
-                // Read the caches again: the lookups above take time, and a
-                // record can have reached a relay cache since the first read.
-                self.ensure_homeserver_record_absent(&signer.public_key())
-                    .await?;
+                // SECURITY: read the caches again right before signing up. A
+                // cached record that names no homeserver is not proof that
+                // the identity has none. It can be older than a homeserver
+                // record that the network no longer returns, and while this
+                // client caches it the relay caches are not read.
+                if self
+                    .ensure_homeserver_record_absent(&signer.public_key())
+                    .await?
+                {
+                    return Err(PaykitSdkError::Identity {
+                        context: "Pubky identity record names no homeserver; call sign_up with a trusted homeserver instead of approving a signup request".into(),
+                        source: None,
+                    });
+                }
                 Ok(Some(signup))
             }
         }
@@ -652,7 +663,8 @@ impl PubkySessionBootstrap {
     }
 
     /// Fail unless the PKARR caches also hold no homeserver record for
-    /// `identity`.
+    /// `identity`. Returns whether they hold a record for it that names no
+    /// homeserver.
     ///
     /// SECURITY: "not found" from the cache-first lookup is weak evidence. A
     /// record that aged out of the DHT is not found although relays and this
@@ -663,11 +675,12 @@ impl PubkySessionBootstrap {
     /// as none, and a client configured without relays has only its own cache
     /// to read. Relay caches are read only when this client caches no record
     /// for the identity, so a cached record that names no homeserver hides a
-    /// homeserver record that only a relay cache still holds.
+    /// homeserver record that only a relay cache still holds. The caller must
+    /// not sign up while one is cached.
     async fn ensure_homeserver_record_absent(
         &self,
         identity: &paykit_lib::PublicKey,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let cached = self
             .pubky
             .client()
@@ -681,7 +694,8 @@ impl PubkySessionBootstrap {
                     source: None,
                 })
             }
-            Ok(_) | Err(ResolveError::NotFound) => Ok(()),
+            Ok(_) => Ok(true),
+            Err(ResolveError::NotFound) => Ok(false),
             Err(err) => Err(map_pubky_identity_error(
                 "resolve Pubky identity record",
                 err.into(),
