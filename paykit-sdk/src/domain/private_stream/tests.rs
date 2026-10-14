@@ -651,6 +651,62 @@ async fn test_persist_private_stream_batch_confirms_each_payload_of_reused_event
 }
 
 #[tokio::test]
+async fn test_persist_private_stream_batch_requeues_confirmation_with_escaped_payload_hash() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    let raw = payment_request_raw("invoice-2026-0001");
+    persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        vec![private_message(&raw)],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    // Backup restore and custom storage validate records semantically, so a
+    // stored confirmation may spell its payload hash with a JSON escape.
+    let escaped = storage
+        .transaction(|tx| {
+            let mut confirmation = tx.outbound_private_messages(&peer).remove(0);
+            confirmation.raw_json = confirmation
+                .raw_json
+                .replace("\"sha256:", "\"sha256\\u003a");
+            let confirmation =
+                crate::domain::outbound_private::mark_outbound_sent(confirmation, timestamp());
+            tx.save_outbound_private_message(confirmation.clone())?;
+            Ok(confirmation)
+        })
+        .await
+        .unwrap();
+    assert!(!escaped.raw_json.contains(&payload_hash(&raw)));
+    assert_eq!(
+        paykit_lib::parse_delivery_confirmation_json(&escaped.raw_json)
+            .unwrap()
+            .payload_hash(),
+        payload_hash(&raw)
+    );
+
+    persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        vec![private_message(&raw)],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    let outbound = storage.snapshot().unwrap().outbound_private_messages;
+    assert_eq!(outbound.len(), 1);
+    assert_eq!(outbound[0].outbound_message_id, escaped.outbound_message_id);
+    assert_eq!(
+        outbound[0].status,
+        crate::OutboundPrivateMessageStatus::Pending
+    );
+}
+
+#[tokio::test]
 async fn test_persist_private_stream_batch_preserves_cached_receipt_conflict_history() {
     struct Offline;
 

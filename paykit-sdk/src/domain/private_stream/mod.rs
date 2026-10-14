@@ -840,12 +840,12 @@ fn queue_delivery_confirmation(
     use crate::{storage::NewOutboundPrivateMessage, OutboundPrivateMessageStatus};
     let hash = payload_hash(raw_json);
     for mut message in tx.outbound_private_messages(counterparty) {
-        // Stored confirmations come from `serialize_delivery_confirmation`,
-        // which writes the ASCII hash unescaped, so one without it cannot
-        // match. This avoids parsing every stored confirmation per received
-        // Event Message; the parse below stays the authoritative check.
+        // `serialize_delivery_confirmation` writes the hash verbatim and no
+        // backslash. Any JSON escape needs a backslash, so a record with
+        // neither cannot match. This avoids parsing every stored confirmation
+        // per received Event Message; the parse below stays authoritative.
         if message.kind != PrivateMessageKind::DeliveryConfirmation.as_str()
-            || !message.raw_json.contains(&hash)
+            || !(message.raw_json.contains(&hash) || message.raw_json.contains('\\'))
         {
             continue;
         }
