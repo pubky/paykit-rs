@@ -7,7 +7,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-### Fixed
+### Security
 
 - `evaluate_allowance_candidates` derives a counterparty's Allowance history
   once per call instead of once per Allowance, so each unanswered Allowance
