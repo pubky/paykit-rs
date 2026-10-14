@@ -104,10 +104,10 @@ fn assert_linear(rows: usize, timed: impl Fn(&AllowanceAccountingState, usize) -
 fn test_accounting_validation_scales_linearly_with_watermarks() {
     assert_linear(2000, |state, runs| {
         let start = Instant::now();
-        let results: Vec<_> = (0..runs).map(|_| validate_accounting(state)).collect();
-        let elapsed = start.elapsed();
-        results.into_iter().for_each(Result::unwrap);
-        elapsed
+        for _ in 0..runs {
+            validate_accounting(state).unwrap();
+        }
+        start.elapsed()
     });
 }
 
@@ -182,7 +182,6 @@ fn test_accounting_validation_rejects_unmatched_attribution() {
 #[test]
 fn test_accounting_restore_merge_keeps_latest_watermark_per_scope() {
     let current = ledger(2);
-    validate_accounting(&current).unwrap();
     let mut restored = current.clone();
     restored.history.watermarks[1].evaluated_at += Duration::hours(1);
     restored.history.watermarks[2].evaluated_at -= Duration::hours(1);
@@ -193,16 +192,12 @@ fn test_accounting_restore_merge_keeps_latest_watermark_per_scope() {
     let merged = merge_restored_accounting(Some(current.clone()), Some(restored.clone()))
         .unwrap()
         .unwrap();
+    let row = |w: &AllowanceWatermarkRecord| (w.allowance_id.clone(), w.evaluated_at);
     let rows = |state: &AllowanceAccountingState| {
-        state
-            .history
-            .watermarks
-            .iter()
-            .map(|w| (w.allowance_id.clone(), w.evaluated_at))
-            .collect::<Vec<_>>()
+        state.history.watermarks.iter().map(row).collect::<Vec<_>>()
     };
     let mut expected = rows(&current);
     expected[1].1 = restored.history.watermarks[1].evaluated_at;
-    expected.push(rows(&restored)[4].clone());
+    expected.push(row(&restored.history.watermarks[4]));
     assert_eq!(rows(&merged), expected);
 }

@@ -13,8 +13,39 @@ fn scope_key<'a>(scope: &'a PaymentAccountingScope, id: &'a str) -> ScopeKey<'a>
     (&scope.local_public_key, &scope.counterparty, id)
 }
 
+// The key builders below destructure every field, so adding a field to a
+// record type fails to compile until its duplicate check is reconsidered.
 fn request_key(scope: &PaymentAccountingScope) -> ScopeKey<'_> {
-    scope_key(scope, &scope.payment_request_id)
+    let PaymentAccountingScope {
+        local_public_key,
+        counterparty,
+        payment_request_id,
+    } = scope;
+    (local_public_key, counterparty, payment_request_id.as_str())
+}
+
+/// Borrowed request key plus the Billing Period bounds, if any.
+type OccurrenceKey<'a> = (ScopeKey<'a>, Option<(DateTime<Utc>, DateTime<Utc>)>);
+
+fn occurrence_key(key: &PaymentOccurrenceKey) -> OccurrenceKey<'_> {
+    let PaymentOccurrenceKey {
+        request,
+        billing_period,
+    } = key;
+    let period = billing_period
+        .as_ref()
+        .map(|AccountingBillingPeriod { starts_at, ends_at }| (*starts_at, *ends_at));
+    (request_key(request), period)
+}
+
+fn watermark_key(watermark: &AllowanceWatermarkRecord) -> ScopeKey<'_> {
+    let AllowanceWatermarkRecord {
+        local_public_key,
+        counterparty,
+        allowance_id,
+        evaluated_at: _,
+    } = watermark;
+    (local_public_key, counterparty, allowance_id.as_str())
 }
 
 pub(super) fn utc_time(value: &str) -> Result<DateTime<Utc>> {
@@ -78,22 +109,20 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
     uuid(&state.epoch)?;
     // Watermarks are identity-wide, a linked counterparty can add rows, and every
     // storage transaction validates them, so cross-row checks are hash lookups.
-    let mut watermarks = HashMap::new();
+    let mut watermarks = HashMap::with_capacity(state.history.watermarks.len());
     for watermark in &state.history.watermarks {
         valid_time(watermark.evaluated_at)?;
         uuid(&watermark.allowance_id)?;
         AllowanceId::new(watermark.allowance_id.clone())
             .map_err(|_| protocol("Invalid watermark Allowance ID"))?;
-        let scope = (
-            &watermark.local_public_key,
-            &watermark.counterparty,
-            watermark.allowance_id.as_str(),
-        );
-        if watermarks.insert(scope, watermark.evaluated_at).is_some() {
+        if watermarks
+            .insert(watermark_key(watermark), watermark.evaluated_at)
+            .is_some()
+        {
             return Err(protocol("Duplicate accounting watermark"));
         }
     }
-    let mut associations = HashMap::new();
+    let mut associations = HashMap::with_capacity(state.history.associations.len());
     let mut authorizations = HashSet::new();
     for record in &state.history.associations {
         valid_scope(&record.request)?;
@@ -160,7 +189,7 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
             }
         }
     }
-    let mut occurrences = HashSet::new();
+    let mut occurrences = HashSet::with_capacity(state.history.occurrences.len());
     let mut attempt_ids = HashSet::new();
     for record in &state.history.occurrences {
         valid_scope(&record.key.request)?;
@@ -168,12 +197,7 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
         if occupied(record) && matches!(record.disposition, PaymentDisposition::Deferred { .. }) {
             return Err(protocol("Execution evidence cannot be labeled deferred"));
         }
-        let period = record
-            .key
-            .billing_period
-            .as_ref()
-            .map(|period| (period.starts_at, period.ends_at));
-        if !occurrences.insert((request_key(&record.key.request), period)) {
+        if !occurrences.insert(occurrence_key(&record.key)) {
             return Err(protocol("Duplicate payment occurrence"));
         }
         if let Some(period) = &record.key.billing_period {

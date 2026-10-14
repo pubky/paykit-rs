@@ -230,7 +230,8 @@ fn merge(
         }
     }
     // Watermarks are identity-wide and a linked counterparty can add rows, so
-    // recovered rows find their match by scope instead of by scanning.
+    // recovered rows find their match by scope instead of by scanning. Callers
+    // validate `destination` first, so its scopes are unique.
     let watermark_key = |w: &AllowanceWatermarkRecord| {
         (
             w.local_public_key.clone(),
@@ -238,12 +239,12 @@ fn merge(
             w.allowance_id.clone(),
         )
     };
-    let mut positions = HashMap::new();
-    for (position, watermark) in destination.watermarks.iter().enumerate() {
-        positions
-            .entry(watermark_key(watermark))
-            .or_insert(position);
-    }
+    let mut positions: HashMap<_, _> = destination
+        .watermarks
+        .iter()
+        .enumerate()
+        .map(|(position, watermark)| (watermark_key(watermark), position))
+        .collect();
     for incoming in recovered.watermarks {
         match positions.entry(watermark_key(&incoming)) {
             Entry::Occupied(position) => {
