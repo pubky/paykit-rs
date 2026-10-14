@@ -149,6 +149,16 @@ fn allowance_terms(
         .into_iter()
         .find(|record| record.allowance_id == id)
         .ok_or_else(|| policy("Allowance history is unavailable"))?;
+    let terms = proposal_terms(tx, scope, &record)?;
+    Ok((record, terms))
+}
+
+/// Parse the immutable terms from the proposal of an already-derived record.
+fn proposal_terms(
+    tx: &dyn StorageTransaction,
+    scope: &PaymentAccountingScope,
+    record: &crate::AllowanceRecord,
+) -> Result<AllowanceTerms> {
     let raw = if let Some(item_id) = record.proposal_stream_item_id {
         tx.private_stream_items(&scope.counterparty)
             .into_iter()
@@ -175,7 +185,7 @@ fn allowance_terms(
     let Some(paykit_lib::AllowanceEvent::Proposal(proposal)) = parsed.parsed_event() else {
         return Err(policy("Allowance proposal is invalid"));
     };
-    Ok((record, proposal.terms().clone()))
+    Ok(proposal.terms().clone())
 }
 
 fn valid_allowance(record: &crate::AllowanceRecord) -> bool {

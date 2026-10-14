@@ -226,6 +226,68 @@ async fn test_candidate_evaluation_preserves_reconciliation_revision() {
         .unwrap();
 }
 
+/// Guards against re-deriving link history once per Allowance: a peer could
+/// otherwise make each evaluation quadratic by sending unanswered proposals.
+#[tokio::test]
+async fn test_candidate_evaluation_derives_link_history_once() {
+    const UNANSWERED: usize = 8;
+    let fixture = Fixture::new().await;
+    let unanswered = (0..UNANSWERED)
+        .map(|_| AllowanceId::new_v4())
+        .collect::<Vec<_>>();
+    let proposals = unanswered
+        .iter()
+        .map(|allowance| {
+            message(format!(
+                r#"{{"version":1,"app_id":"bitkit","kind":"paykit.allowance_proposal","event_id":"{}","allowance_id":"{}","proposer_role":"allowee","terms":{{"asset":"btc","per_payment_amount":null,"period_limits":[],"lifetime_amount_limit":"1","active_from":null,"expires_at":null,"allowed_payment_endpoint_identifiers":null}}}}"#,
+                new_id(),
+                allowance.as_str()
+            ))
+        })
+        .collect();
+    crate::domain::private_stream::persist_private_stream_batch(
+        &fixture.storage,
+        fixture.occurrence.request.counterparty.clone(),
+        proposals,
+        None,
+        time(),
+    )
+    .await
+    .unwrap();
+    let (candidates, loads) = fixture
+        .storage
+        .transaction(|tx| {
+            use crate::domain::allowances::LINK_HISTORY_LOADS;
+            LINK_HISTORY_LOADS.with(|loads| loads.set(0));
+            let candidates = candidates(tx, fixture.occurrence.request.clone(), time())?;
+            Ok((candidates, LINK_HISTORY_LOADS.with(std::cell::Cell::get)))
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(candidates.len(), UNANSWERED + 1);
+    let (eligible, blocked): (Vec<_>, Vec<_>) = candidates
+        .iter()
+        .partition(|candidate| candidate.blocked.is_none());
+    assert_eq!(eligible.len(), 1);
+    assert_eq!(eligible[0].allowance_id, fixture.allowance.as_str());
+    assert_eq!(
+        eligible[0].eligible_payment_endpoint_identifiers,
+        ["btc-lightning-bolt11"]
+    );
+    assert!(blocked
+        .iter()
+        .all(|candidate| candidate.blocked == Some(AllowanceAccountingBlock::InvalidLifecycle)));
+    let watermarks = fixture.state().history.watermarks;
+    assert!(unanswered
+        .iter()
+        .chain([&fixture.allowance])
+        .all(|allowance| watermarks
+            .iter()
+            .any(|record| record.allowance_id == allowance.as_str())));
+    assert_eq!(loads, 1);
+}
+
 #[tokio::test]
 async fn test_accounting_atomic_manual_and_automatic_exclusion() {
     let fixture = Fixture::new().await;

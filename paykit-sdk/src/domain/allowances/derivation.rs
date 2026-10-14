@@ -44,8 +44,17 @@ pub(super) struct AllowanceLinkHistory {
     link_recovery_required: bool,
 }
 
+// Counts link history loads so tests can prove an evaluation derives it once.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LINK_HISTORY_LOADS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 impl AllowanceLinkHistory {
     pub(super) fn load(tx: &dyn StorageTransaction, counterparty: &PubkyPublicKey) -> Self {
+        #[cfg(test)]
+        LINK_HISTORY_LOADS.with(|loads| loads.set(loads.get() + 1));
         let items = tx.private_stream_items(counterparty);
         let outbound = tx
             .outbound_private_messages(counterparty)
