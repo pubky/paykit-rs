@@ -17,19 +17,20 @@ pub(crate) fn candidates(
     }
     let mut results = Vec::new();
     for record in records {
-        let id = record.allowance_id;
         let mut result = AllowanceCandidate {
-            allowance_id: id.clone(),
+            allowance_id: record.allowance_id.clone(),
             eligible_payment_endpoint_identifiers: Vec::new(),
             blocked: None,
         };
         result.blocked = if let Some(state) = state.as_mut().filter(|s| !s.requires_reconciliation)
         {
-            let previous = watermark(state, &scope, &id, time);
+            let previous = watermark(state, &scope, &record.allowance_id, time);
             if !valid_request(tx, &scope, &request, true) {
                 Some(AllowanceAccountingBlock::InvalidLifecycle)
             } else {
-                match static_check(tx, &scope, &id, &terms, time, previous) {
+                match accepted_terms(tx, &scope, &record)
+                    .and_then(|allowance| check_terms(&allowance, &terms, time, previous))
+                {
                     Ok(endpoints) => {
                         result.eligible_payment_endpoint_identifiers =
                             endpoints.iter().map(|e| e.as_str().to_owned()).collect();
@@ -58,21 +59,17 @@ pub(super) fn static_check(
     previous: DateTime<Utc>,
 ) -> std::result::Result<Vec<paykit_lib::PaymentEndpointIdentifier>, AllowanceAccountingBlock> {
     let terms = accepted_allowance_terms(tx, scope, id)?;
-    paykit_lib::check_allowance_time(&terms, time, previous).map_err(shared)?;
-    paykit_lib::match_allowance_request(&terms, request).map_err(shared)
+    check_terms(&terms, request, time, previous)
 }
 
-fn accepted_allowance_terms(
-    tx: &dyn StorageTransaction,
-    scope: &PaymentAccountingScope,
-    id: &str,
-) -> std::result::Result<AllowanceTerms, AllowanceAccountingBlock> {
-    let (record, terms) =
-        allowance_terms(tx, scope, id).map_err(|_| AllowanceAccountingBlock::InvalidLifecycle)?;
-    if !valid_allowance(&record) {
-        return Err(AllowanceAccountingBlock::InvalidLifecycle);
-    }
-    Ok(terms)
+fn check_terms(
+    terms: &AllowanceTerms,
+    request: &PaymentRequestTerms,
+    time: DateTime<Utc>,
+    previous: DateTime<Utc>,
+) -> std::result::Result<Vec<paykit_lib::PaymentEndpointIdentifier>, AllowanceAccountingBlock> {
+    paykit_lib::check_allowance_time(terms, time, previous).map_err(shared)?;
+    paykit_lib::match_allowance_request(terms, request).map_err(shared)
 }
 
 pub(crate) fn select(

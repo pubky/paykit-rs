@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # Workflows pin every action to a full commit SHA with a version comment.
+  # Dependabot proposes new pins as reviewable pull requests.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Wait a week before proposing a new release, so a compromised release
+    # has time to be noticed and withdrawn first.
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        update-types:
+          - minor
+          - patch

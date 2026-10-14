@@ -21,6 +21,8 @@ pub(crate) use commands::{
     enqueue_allowance_end, enqueue_allowance_proposal, enqueue_allowance_response,
     AllowanceResponse,
 };
+#[cfg(test)]
+pub(crate) use derivation::LINK_HISTORY_LOADS;
 pub(crate) use derivation::{
     allowance_record, allowance_records, allowance_records_in_transaction, allowance_scopes,
     sort_allowances_newest_first,
