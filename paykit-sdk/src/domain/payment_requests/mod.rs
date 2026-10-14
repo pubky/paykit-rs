@@ -1219,24 +1219,33 @@ pub(crate) fn payment_execution_claim_is_resolved(
     claim: &PaymentRequestExecutionClaim,
     now: DateTime<Utc>,
 ) -> Result<bool> {
+    // An unresolved payment keeps the claim, so skip the derivation.
     if request_has_unresolved_payment(tx, &claim.counterparty, &claim.payment_request_id) {
         return Ok(false);
     }
     let records = payment_request_records_from_transaction(tx, &claim.counterparty, now)?;
+    let accounting = tx.allowance_accounting_state();
     Ok(records.iter().any(|record| {
         record.payment_request_id == claim.payment_request_id
-            && !request_has_unreported_successful_payment(
-                tx.allowance_accounting_state().as_ref(),
-                record,
-            )
-            && matches!(
-                record.state,
-                PaymentRequestLifecycleState::Canceled
-                    | PaymentRequestLifecycleState::Rejected
-                    | PaymentRequestLifecycleState::ProofSubmitted
-                    | PaymentRequestLifecycleState::InvalidConflict
-            )
+            && execution_claim_releasable(tx, accounting.as_ref(), record)
     }))
+}
+
+/// Whether the execution claim on `record` can be released: the request is
+/// terminal and no wallet outcome for it remains to resolve or report.
+pub(crate) fn execution_claim_releasable(
+    tx: &dyn StorageTransaction,
+    accounting: Option<&crate::AllowanceAccountingState>,
+    record: &PaymentRequestRecord,
+) -> bool {
+    matches!(
+        record.state,
+        PaymentRequestLifecycleState::Canceled
+            | PaymentRequestLifecycleState::Rejected
+            | PaymentRequestLifecycleState::ProofSubmitted
+            | PaymentRequestLifecycleState::InvalidConflict
+    ) && !request_has_unresolved_payment(tx, &record.counterparty, &record.payment_request_id)
+        && !request_has_unreported_successful_payment(accounting, record)
 }
 
 fn require_execution_claim_owner(

@@ -540,6 +540,17 @@ pub trait StorageTransaction {
         payment_request_id: &str,
     ) -> Option<PaymentRequestExecutionClaim>;
 
+    /// Whether any identity-wide Payment Request execution claim is held for one counterparty.
+    ///
+    /// The default exports the full storage state on every call, so adapters
+    /// should override it with a direct lookup.
+    fn has_payment_request_execution_claims(&self, counterparty: &PubkyPublicKey) -> bool {
+        self.export_storage_state()
+            .payment_request_execution_claims
+            .keys()
+            .any(|(owner, _)| owner == counterparty)
+    }
+
     /// Save one identity-wide Payment Request execution claim.
     fn save_payment_request_execution_claim(&mut self, claim: PaymentRequestExecutionClaim);
 

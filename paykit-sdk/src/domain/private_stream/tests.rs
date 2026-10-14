@@ -2,7 +2,7 @@ use chrono::{TimeZone, Utc};
 
 use super::*;
 use crate::{
-    domain::linked_peers::LinkedPeerState,
+    domain::{linked_peers::LinkedPeerState, payment_requests::PaymentRequestLifecycleState},
     storage::{
         EncryptedLinkStateRecord, InMemoryStorage, LinkedPeerRecord, PaymentRequestExecutionClaim,
     },
@@ -524,6 +524,186 @@ async fn test_persist_private_stream_batch_reconciles_terminal_execution_claims(
             .await
             .unwrap();
     }
+}
+
+#[tokio::test]
+async fn test_persist_private_stream_batch_skips_payment_request_derivation_without_execution_claim(
+) {
+    const REQUEST_ID: &str = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
+    let storage = validating_storage();
+    let peer = counterparty();
+    for message in [
+        private_message(&payment_request_raw("invoice-2026-0001")),
+        unknown_kind_message(0),
+    ] {
+        let before = PAYMENT_REQUEST_HISTORY_DERIVATIONS.get();
+        let report =
+            persist_private_stream_batch(&storage, peer.clone(), vec![message], None, timestamp())
+                .await
+                .unwrap();
+        assert_eq!(report.stream_item_ids.len(), 1);
+        assert_eq!(
+            PAYMENT_REQUEST_HISTORY_DERIVATIONS.get(),
+            before,
+            "intake re-derived the Payment Request history without an execution claim"
+        );
+    }
+
+    // A held claim makes intake derive once and keep the claim on a proposed request.
+    storage
+        .transaction({
+            let peer = peer.clone();
+            move |tx| {
+                tx.save_payment_request_execution_claim(PaymentRequestExecutionClaim {
+                    counterparty: peer,
+                    payment_request_id: REQUEST_ID.into(),
+                    app_id: PaykitAppId::new("wallet").unwrap(),
+                    claimed_at: timestamp(),
+                });
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let before = PAYMENT_REQUEST_HISTORY_DERIVATIONS.get();
+    persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        vec![unknown_kind_message(1)],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(PAYMENT_REQUEST_HISTORY_DERIVATIONS.get(), before + 1);
+    storage
+        .transaction(|tx| {
+            assert!(tx
+                .payment_request_execution_claim(&peer, REQUEST_ID)
+                .is_some());
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_persist_private_stream_batch_confirms_each_payload_of_reused_event_id() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    let first = payment_request_raw("invoice-2026-0001");
+    let conflicting = payment_request_raw("invoice-2026-0002");
+    persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        vec![private_message(&first)],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    storage
+        .transaction(|tx| {
+            let confirmation = tx.outbound_private_messages(&peer).remove(0);
+            tx.save_outbound_private_message(crate::domain::outbound_private::mark_outbound_sent(
+                confirmation,
+                timestamp(),
+            ))
+        })
+        .await
+        .unwrap();
+
+    // The same Event ID with another payload, then a re-send of the first payload.
+    persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        vec![private_message(&conflicting), private_message(&first)],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    let confirmations = storage
+        .snapshot()
+        .unwrap()
+        .outbound_private_messages
+        .into_iter()
+        .map(|message| {
+            let confirmation =
+                paykit_lib::parse_delivery_confirmation_json(&message.raw_json).unwrap();
+            (confirmation.payload_hash().to_owned(), message.status)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        confirmations,
+        [
+            (
+                payload_hash(&first),
+                crate::OutboundPrivateMessageStatus::Pending
+            ),
+            (
+                payload_hash(&conflicting),
+                crate::OutboundPrivateMessageStatus::Pending
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_persist_private_stream_batch_requeues_confirmation_with_escaped_payload_hash() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    let raw = payment_request_raw("invoice-2026-0001");
+    persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        vec![private_message(&raw)],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    // Backup restore and custom storage validate records semantically, so a
+    // stored confirmation may spell its payload hash with a JSON escape.
+    let escaped = storage
+        .transaction(|tx| {
+            let mut confirmation = tx.outbound_private_messages(&peer).remove(0);
+            confirmation.raw_json = confirmation
+                .raw_json
+                .replace("\"sha256:", "\"sha256\\u003a");
+            let confirmation =
+                crate::domain::outbound_private::mark_outbound_sent(confirmation, timestamp());
+            tx.save_outbound_private_message(confirmation.clone())?;
+            Ok(confirmation)
+        })
+        .await
+        .unwrap();
+    assert!(!escaped.raw_json.contains(&payload_hash(&raw)));
+    assert_eq!(
+        paykit_lib::parse_delivery_confirmation_json(&escaped.raw_json)
+            .unwrap()
+            .payload_hash(),
+        payload_hash(&raw)
+    );
+
+    persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        vec![private_message(&raw)],
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    let outbound = storage.snapshot().unwrap().outbound_private_messages;
+    assert_eq!(outbound.len(), 1);
+    assert_eq!(outbound[0].outbound_message_id, escaped.outbound_message_id);
+    assert_eq!(
+        outbound[0].status,
+        crate::OutboundPrivateMessageStatus::Pending
+    );
 }
 
 #[tokio::test]
