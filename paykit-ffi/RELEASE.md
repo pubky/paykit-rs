@@ -70,4 +70,4 @@ https://github.com/synonymdev/vss-rust-client-ffi/pull/22#issuecomment-533022607
 
 The `Gradle Package` workflow triggers automatically on release publish. If it didn't, run it manually from Actions → "Gradle Package" → Run workflow with the version.
 
-Requires the `ORG_PACKAGES_TOKEN` secret with `write:packages` scope.
+The workflow publishes with the job's built-in `GITHUB_TOKEN`, which its `permissions` block grants `packages: write`, so it needs no repository secret.
