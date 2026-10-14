@@ -32,6 +32,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   once per call instead of once per Allowance, so each unanswered Allowance
   proposal a counterparty sends no longer adds a full pass over that history
   to every evaluation. Results and watermarks are unchanged.
+- Validating the wallet accounting ledger took time quadratic in its size, and a
+  linked counterparty can add Allowance watermark rows without a user decision.
+  Validation, which runs whenever stored SDK state is loaded or saved, and the
+  watermark merge on reconcile and backup restore now take linear time.
 
 ## 0.1.0-rc74 - 2026-10-12
 
