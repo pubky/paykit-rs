@@ -7,8 +7,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc75 - 2026-10-14
+
 ### Added
 
+- `list_pubky_directory_page` in Rust and `listPubkyDirectoryPage` in Swift and
+  Kotlin for bounded, shallow public-directory pages with validated cursors.
+  Continue until an empty page and restart to discover earlier insertions;
+  the entry limit does not bound Pubky's response buffering.
+- `import_contacts` in Rust and `importContacts` in Swift and Kotlin to atomically
+  add missing, unblocked contacts for an expected identity. Existing labels and
+  metadata are preserved; retained peer blocks prevent removed contacts from
+  being re-added. No markers are published, peers unblocked or payments approved.
+  Apps mocking the generated SDK interface must implement both new methods.
 - Provided method `StorageTransaction::has_payment_request_execution_claims`,
   which reports whether any Payment Request execution claim is held for one
   counterparty. It has a default, so existing implementors keep compiling, but

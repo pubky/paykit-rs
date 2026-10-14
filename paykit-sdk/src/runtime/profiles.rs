@@ -274,6 +274,50 @@ where
         }))
     }
 
+    /// List one page of immediate children in a public Pubky directory.
+    ///
+    /// `uri` must address a `/pub/` directory ending in `/`. `limit` must be
+    /// between 1 and 100. Pass the last returned URI as `cursor` for the next
+    /// page, and continue until an empty page; homeservers may return fewer
+    /// entries than requested. Missing directories also return an empty page.
+    /// Listings are not snapshots: restart from `None` to discover entries added
+    /// before an earlier cursor. Entries are returned as canonical `pubky://` URIs.
+    ///
+    /// This read uses public storage without authentication. Pubky client
+    /// configuration, sessions, capability scope and key rotation remain the
+    /// caller's responsibility. The entry limit is not a response byte limit:
+    /// the Pubky client buffers the listing before Paykit validates its entries.
+    pub async fn list_pubky_directory_page(
+        &self,
+        uri: &str,
+        cursor: Option<&str>,
+        limit: u16,
+    ) -> Result<Vec<String>> {
+        let (directory, cursor) = public_directory_request(uri, cursor, limit)?;
+        let storage =
+            self.pubky
+                .load_public_storage()
+                .await?
+                .ok_or_else(|| PaykitSdkError::Identity {
+                    context: "no Pubky public storage available for directory listing".into(),
+                    source: None,
+                })?;
+        let mut request = storage
+            .list(directory.clone())
+            .map_err(|err| map_pubky_transport_error("list Pubky directory", err))?
+            .shallow(true)
+            .limit(limit);
+        if let Some(cursor) = cursor.as_deref() {
+            request = request.cursor(cursor);
+        }
+        let entries = match request.send().await {
+            Ok(entries) => entries,
+            Err(err) if is_pubky_not_found(&err) => return Ok(Vec::new()),
+            Err(err) => return Err(map_pubky_transport_error("list Pubky directory", err)),
+        };
+        public_directory_page(&directory, cursor.as_deref(), limit, entries)
+    }
+
     /// Fetch public Pubky app follows.
     pub async fn fetch_pubky_follows(
         &self,
@@ -340,5 +384,152 @@ fn avatar_extension(content_type: &str) -> Result<&'static str> {
             context: format!("unsupported profile avatar content type: {content_type}"),
             source: None,
         }),
+    }
+}
+
+fn directory_error(message: &str) -> PaykitSdkError {
+    PaykitSdkError::Protocol {
+        context: format!("list Pubky directory: {message}"),
+        source: None,
+    }
+}
+
+fn public_directory_child(directory: &pubky::PubkyResource, entry: &pubky::PubkyResource) -> bool {
+    directory.owner == entry.owner
+        && entry
+            .path
+            .as_str()
+            .strip_prefix(directory.path.as_str())
+            .is_some_and(|suffix| !suffix.is_empty() && !suffix.trim_end_matches('/').contains('/'))
+}
+
+fn public_directory_request(
+    uri: &str,
+    cursor: Option<&str>,
+    limit: u16,
+) -> Result<(pubky::PubkyResource, Option<String>)> {
+    let directory: pubky::PubkyResource =
+        uri.parse().map_err(|_| directory_error("invalid URI"))?;
+    if !directory.path.as_str().starts_with("/pub/") || !directory.path.as_str().ends_with('/') {
+        return Err(directory_error(
+            "URI must name a public directory ending in /",
+        ));
+    }
+    if !(1..=100).contains(&limit) {
+        return Err(directory_error("entry limit must be between 1 and 100"));
+    }
+    let cursor = cursor
+        .map(|uri| {
+            let entry: pubky::PubkyResource =
+                uri.parse().map_err(|_| directory_error("invalid cursor"))?;
+            if !public_directory_child(&directory, &entry) {
+                return Err(directory_error(
+                    "cursor must be a child of the requested directory",
+                ));
+            }
+            Ok(entry.to_pubky_url())
+        })
+        .transpose()?;
+    Ok((directory, cursor))
+}
+
+fn public_directory_page(
+    directory: &pubky::PubkyResource,
+    cursor: Option<&str>,
+    limit: u16,
+    entries: Vec<pubky::PubkyResource>,
+) -> Result<Vec<String>> {
+    if entries.len() > usize::from(limit) {
+        return Err(directory_error(
+            "response exceeds the requested entry limit",
+        ));
+    }
+    let mut result = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if !public_directory_child(directory, &entry) {
+            return Err(directory_error(
+                "response contains an entry outside the requested directory",
+            ));
+        }
+        let uri = entry.to_pubky_url();
+        if result
+            .last()
+            .map(String::as_str)
+            .or(cursor)
+            .is_some_and(|previous| uri.as_str() <= previous)
+        {
+            return Err(directory_error("directory cursor did not advance"));
+        }
+        result.push(uri);
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+mod directory_tests {
+    use super::*;
+
+    #[test]
+    fn test_public_directory_validates_scope_limits_and_progress() {
+        let owner = pubky::Keypair::random().public_key().z32();
+        let root = format!("pubky://{owner}/pub/example/");
+        let first = format!("{root}a.json");
+        let second = format!("{root}b.json");
+        let (directory, cursor) = public_directory_request(&root, Some(&first), 2).unwrap();
+        assert_eq!(cursor.as_deref(), Some(first.as_str()));
+        assert_eq!(
+            public_directory_page(
+                &directory,
+                cursor.as_deref(),
+                2,
+                vec![second.parse().unwrap()]
+            )
+            .unwrap(),
+            vec![second.clone()]
+        );
+        for invalid in [
+            format!("pubky://{owner}/priv/example/"),
+            format!("{root}file"),
+            format!("{root}/"),
+        ] {
+            assert!(public_directory_request(&invalid, None, 2).is_err());
+        }
+        for limit in [0, 101, u16::MAX] {
+            assert!(public_directory_request(&root, None, limit).is_err());
+        }
+        for invalid in [
+            root.clone(),
+            format!("{root}nested/a"),
+            format!("pubky://{owner}/pub/other/a"),
+            format!(
+                "pubky://{}/pub/example/a",
+                pubky::Keypair::random().public_key().z32()
+            ),
+        ] {
+            assert!(public_directory_request(&root, Some(&invalid), 2).is_err());
+            assert!(
+                public_directory_page(&directory, None, 2, vec![invalid.parse().unwrap()]).is_err()
+            );
+        }
+        for entries in [
+            vec![first.clone()],
+            vec![second.clone(), first.clone()],
+            vec![second.clone(), second.clone()],
+        ] {
+            assert!(public_directory_page(
+                &directory,
+                Some(&first),
+                2,
+                entries.iter().map(|uri| uri.parse().unwrap()).collect()
+            )
+            .is_err());
+        }
+        assert!(public_directory_page(
+            &directory,
+            None,
+            1,
+            vec![first.parse().unwrap(), second.parse().unwrap()]
+        )
+        .is_err());
     }
 }

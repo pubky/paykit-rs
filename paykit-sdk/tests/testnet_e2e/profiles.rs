@@ -8,6 +8,47 @@ use paykit_sdk::{
 use crate::harness::{two_party, TestnetSessionProvider};
 
 #[tokio::test]
+async fn test_public_directory_pages_cover_all_entries_and_missing_directories() {
+    let pair = two_party().await;
+    let root = format!("pubky://{}/pub/paykit/page-test/", pair.alice.public_key);
+    let mut expected = Vec::new();
+    for index in 0..103 {
+        let name = format!("{index:03}.json");
+        pair.alice
+            .access
+            .session
+            .storage()
+            .put(format!("/pub/paykit/page-test/{name}"), b"{}".to_vec())
+            .await
+            .unwrap();
+        expected.push(format!("{root}{name}"));
+    }
+    let mut found = Vec::new();
+    loop {
+        let page = pair
+            .bob
+            .sdk
+            .list_pubky_directory_page(&root, found.last().map(String::as_str), 100)
+            .await
+            .unwrap();
+        if page.is_empty() {
+            break;
+        }
+        assert!(page.len() <= 100);
+        found.extend(page);
+        assert!(found.len() <= expected.len());
+    }
+    assert_eq!(found, expected);
+    assert!(pair
+        .bob
+        .sdk
+        .list_pubky_directory_page(&format!("{root}missing/"), None, 10)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
 async fn test_public_contact_markers_serialize_intent_and_recheck_pending_work() {
     let pair = two_party().await;
     let mut config = PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap();

@@ -62,6 +62,58 @@ where
             .await
     }
 
+    /// Import missing, unblocked Contact Records in one atomic storage transaction.
+    ///
+    /// The initialized identity must match `expected_identity`, including for an
+    /// empty batch. Existing contacts (including labels and metadata), blocked
+    /// peers and the local identity are left unchanged. Only newly added records
+    /// are returned, in input order without duplicates, with no local label.
+    /// Checks use the transaction's current state, not an earlier observation.
+    ///
+    /// Removals made through `remove_contacts_and_block_peers` remain excluded
+    /// while their peer block is retained. This does not publish Public Contact
+    /// Markers, unblock peers, establish Encrypted Links or approve payments.
+    /// Session creation, capability scope and key rotation remain the caller's
+    /// responsibility.
+    pub async fn import_contacts(
+        &self,
+        expected_identity: PubkyPublicKey,
+        public_keys: Vec<PubkyPublicKey>,
+    ) -> Result<Vec<ContactRecord>> {
+        let now = self.clock.now();
+        self.storage
+            .transaction(move |tx| {
+                let local = initialized_identity_in_transaction(tx, "import contacts")?;
+                if local != expected_identity {
+                    return Err(PaykitSdkError::Identity {
+                        context: "Paykit identity changed before contact import".into(),
+                        source: None,
+                    });
+                }
+                let mut imported = Vec::new();
+                for public_key in public_keys {
+                    if public_key == local
+                        || tx.contact_record(&public_key).is_some()
+                        || tx
+                            .linked_peer(&public_key)
+                            .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
+                    {
+                        continue;
+                    }
+                    imported.push(save_contact_in_transaction(
+                        tx,
+                        ContactUpdate {
+                            public_key,
+                            label: None,
+                        },
+                        now,
+                    ));
+                }
+                Ok(imported)
+            })
+            .await
+    }
+
     /// Save Contact Records and unblock their peers in one atomic transaction.
     ///
     /// Use this when the user explicitly adds or restores contacts, not for label

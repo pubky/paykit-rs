@@ -369,6 +369,25 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
+    /// List immediate children of a public `/pub/` directory ending in `/`.
+    ///
+    /// `limit` is 1 through 100. Use the last returned URI as the next cursor;
+    /// continue until an empty page, even when a page is shorter than `limit`.
+    /// Missing directories return an empty page. Restart without a cursor to
+    /// discover entries added before it. No authenticated session is required.
+    /// Pubky buffers the response; the entry limit is not a byte or time limit.
+    pub async fn list_pubky_directory_page(
+        &self,
+        uri: String,
+        cursor: Option<String>,
+        limit: u16,
+    ) -> Result<Vec<String>, PaykitFfiError> {
+        self.runtime
+            .list_pubky_directory_page(&uri, cursor.as_deref(), limit)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Fetch public Pubky app follows, rejecting lists larger than `max_entries`.
     /// This limit does not truncate or paginate the result.
     pub async fn fetch_pubky_follows(
@@ -442,6 +461,32 @@ impl FfiPaykitSdk {
             .collect::<Result<Vec<_>, _>>()?;
         self.runtime
             .save_contacts(updates)
+            .await
+            .map(|records| records.into_iter().map(Into::into).collect())
+            .map_err(Into::into)
+    }
+
+    /// Import missing, unblocked contacts after checking the expected identity.
+    ///
+    /// All keys are validated before one atomic transaction checks current state.
+    /// Existing records, labels, blocked peers and the local identity are skipped.
+    /// Returns only newly added records, in input order without duplicates. Even
+    /// an empty batch requires the matching initialized identity. Removals through
+    /// `remove_contacts_and_block_peers` remain excluded while their block is
+    /// retained. This does not publish markers, unblock peers or approve payments.
+    /// Session creation, capabilities and key rotation remain caller-owned.
+    pub async fn import_contacts(
+        &self,
+        expected_identity: String,
+        public_keys: Vec<String>,
+    ) -> Result<Vec<FfiContactRecord>, PaykitFfiError> {
+        let expected_identity = parse_public_key(expected_identity)?;
+        let public_keys = public_keys
+            .into_iter()
+            .map(parse_public_key)
+            .collect::<Result<Vec<_>, _>>()?;
+        self.runtime
+            .import_contacts(expected_identity, public_keys)
             .await
             .map(|records| records.into_iter().map(Into::into).collect())
             .map_err(Into::into)

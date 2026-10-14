@@ -156,6 +156,13 @@ Common workflows:
 - use `fetch_pubky_file_bounded` for a caller-selected limit capped at 5 MiB,
   including zero for an empty body. Limits apply while reading successful
   responses; Pubky currently buffers error bodies before returning to Paykit.
+- use `list_pubky_directory_page` for shallow public-directory discovery. Pass
+  the last returned URI as the next cursor until an empty page; a shorter page
+  is not necessarily the end. Restart without a cursor to discover earlier
+  additions. This entry-count limit does not bound Pubky's response buffering.
+- use `import_contacts` with the expected identity to atomically add missing,
+  unblocked contacts without replacing labels or other existing metadata. It
+  does not unblock removed contacts, establish links or approve payments.
 - use bounded `fetch_pubky_profile` and call `fetch_pubky_follows` with an
   explicit entry limit for read-only Pubky app profile and follows data
 - use `resolve_profile` when contact display should prefer Paykit

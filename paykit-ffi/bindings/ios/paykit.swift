@@ -406,6 +406,22 @@ private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
+    typealias FfiType = UInt16
+    typealias SwiftType = UInt16
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt16 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
     typealias FfiType = UInt32
     typealias SwiftType = UInt32
@@ -2004,6 +2020,19 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func identityStatus() async throws  -> IdentityStatus?
 
     /**
+     * Import missing, unblocked contacts after checking the expected identity.
+     *
+     * All keys are validated before one atomic transaction checks current state.
+     * Existing records, labels, blocked peers and the local identity are skipped.
+     * Returns only newly added records, in input order without duplicates. Even
+     * an empty batch requires the matching initialized identity. Removals through
+     * `remove_contacts_and_block_peers` remain excluded while their block is
+     * retained. This does not publish markers, unblock peers or approve payments.
+     * Session creation, capabilities and key rotation remain caller-owned.
+     */
+    func importContacts(expectedIdentity: String, publicKeys: [String]) async throws  -> [ContactRecord]
+
+    /**
      * Initialize durable SDK identity state.
      */
     func initialize() async throws  -> IdentityStatus
@@ -2042,6 +2071,17 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Return Payment Requests matching a local SDK filter.
      */
     func listPaymentRequests(filter: PaymentRequestFilter) async throws  -> [PaymentRequestRecord]
+
+    /**
+     * List immediate children of a public `/pub/` directory ending in `/`.
+     *
+     * `limit` is 1 through 100. Use the last returned URI as the next cursor;
+     * continue until an empty page, even when a page is shorter than `limit`.
+     * Missing directories return an empty page. Restart without a cursor to
+     * discover entries added before it. No authenticated session is required.
+     * Pubky buffers the response; the entry limit is not a byte or time limit.
+     */
+    func listPubkyDirectoryPage(uri: String, cursor: String?, limit: UInt16) async throws  -> [String]
 
     /**
      * Persist a sticky manual-only decision that background candidate matching cannot clear.
@@ -3580,6 +3620,34 @@ open func identityStatus()async throws  -> IdentityStatus?  {
 }
 
     /**
+     * Import missing, unblocked contacts after checking the expected identity.
+     *
+     * All keys are validated before one atomic transaction checks current state.
+     * Existing records, labels, blocked peers and the local identity are skipped.
+     * Returns only newly added records, in input order without duplicates. Even
+     * an empty batch requires the matching initialized identity. Removals through
+     * `remove_contacts_and_block_peers` remain excluded while their block is
+     * retained. This does not publish markers, unblock peers or approve payments.
+     * Session creation, capabilities and key rotation remain caller-owned.
+     */
+open func importContacts(expectedIdentity: String, publicKeys: [String])async throws  -> [ContactRecord]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_import_contacts(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(expectedIdentity),FfiConverterSequenceString.lower(publicKeys)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeContactRecord.lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
      * Initialize durable SDK identity state.
      */
 open func initialize()async throws  -> IdentityStatus  {
@@ -3735,6 +3803,32 @@ open func listPaymentRequests(filter: PaymentRequestFilter)async throws  -> [Pay
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterSequenceTypePaymentRequestRecord.lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * List immediate children of a public `/pub/` directory ending in `/`.
+     *
+     * `limit` is 1 through 100. Use the last returned URI as the next cursor;
+     * continue until an empty page, even when a page is shorter than `limit`.
+     * Missing directories return an empty page. Restart without a cursor to
+     * discover entries added before it. No authenticated session is required.
+     * Pubky buffers the response; the entry limit is not a byte or time limit.
+     */
+open func listPubkyDirectoryPage(uri: String, cursor: String?, limit: UInt16)async throws  -> [String]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_list_pubky_directory_page(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(uri),FfiConverterOptionString.lower(cursor),FfiConverterUInt16.lower(limit)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceString.lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -25667,6 +25761,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_identity_status() != 8559) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_import_contacts() != 48443) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_initialize() != 14069) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -25689,6 +25786,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_list_payment_requests() != 43354) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_list_pubky_directory_page() != 28090) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_mark_payment_manual_only() != 61290) {
