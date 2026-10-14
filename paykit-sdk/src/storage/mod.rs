@@ -540,6 +540,23 @@ pub trait StorageTransaction {
         payment_request_id: &str,
     ) -> Option<PaymentRequestExecutionClaim>;
 
+    /// List identity-wide Payment Request execution claims held for one counterparty.
+    ///
+    /// Claims are ordered by Payment Request ID. The default exports the full
+    /// storage state on every call, so adapters should override it with a
+    /// direct lookup.
+    fn payment_request_execution_claims(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Vec<PaymentRequestExecutionClaim> {
+        execution_claims_held_with(
+            self.export_storage_state()
+                .payment_request_execution_claims
+                .values(),
+            counterparty,
+        )
+    }
+
     /// Save one identity-wide Payment Request execution claim.
     fn save_payment_request_execution_claim(&mut self, claim: PaymentRequestExecutionClaim);
 
@@ -653,6 +670,21 @@ pub trait StorageTransaction {
         &self,
         receipt_id: &str,
     ) -> Option<ReceiptIssuanceRecord>;
+}
+
+/// Clone the claims held with `counterparty`, ordered by Payment Request ID.
+fn execution_claims_held_with<'a>(
+    claims: impl IntoIterator<Item = &'a PaymentRequestExecutionClaim>,
+    counterparty: &PubkyPublicKey,
+) -> Vec<PaymentRequestExecutionClaim> {
+    let mut held = claims
+        .into_iter()
+        .filter(|claim| claim.counterparty == *counterparty)
+        .cloned()
+        .collect::<Vec<_>>();
+    // Storage maps have no stable order.
+    held.sort_by(|left, right| left.payment_request_id.cmp(&right.payment_request_id));
+    held
 }
 
 pub(crate) fn paykit_noise_public_key(key: &PaykitIdentitySecretKey) -> PubkyPublicKey {

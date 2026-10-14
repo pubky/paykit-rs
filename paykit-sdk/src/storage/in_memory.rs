@@ -438,6 +438,16 @@ impl StorageTransaction for StorageStateTransaction {
             .cloned()
     }
 
+    fn payment_request_execution_claims(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Vec<PaymentRequestExecutionClaim> {
+        execution_claims_held_with(
+            self.state.payment_request_execution_claims.values(),
+            counterparty,
+        )
+    }
+
     fn save_payment_request_execution_claim(&mut self, claim: PaymentRequestExecutionClaim) {
         self.state.payment_request_execution_claims.insert(
             (claim.counterparty.clone(), claim.payment_request_id.clone()),

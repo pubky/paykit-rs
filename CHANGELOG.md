@@ -7,6 +7,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+
+- Provided method `StorageTransaction::payment_request_execution_claims`, which
+  lists the Payment Request execution claims held for one counterparty. It has a
+  default, so existing implementors keep compiling, but the default exports the
+  full storage state on every call, so custom adapters should override it.
+
+### Security
+
+- Private receive no longer re-derives a counterparty's whole Payment Request
+  history for every received message unless the local identity holds a Payment
+  Request execution claim with that counterparty. It also no longer re-parses
+  every stored Delivery Confirmation for each received Event Message. Both costs
+  grew with the counterparty's retained history, which has no item limit once
+  the local identity has chosen that counterparty, so receiving its messages one
+  by one took quadratic time. Per-message cost still grows with retained state
+  on storage adapters that load or save the whole state in each transaction.
+
 ## 0.1.0-rc74 - 2026-10-12
 
 ### Added
