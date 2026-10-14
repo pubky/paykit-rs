@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::{hash_map::Entry, HashMap};
 
 /// Private-state loss invalidates every unissued handoff without releasing usage.
 pub(crate) fn invalidate_accounting(state: &mut AllowanceAccountingState) {
@@ -228,15 +229,31 @@ fn merge(
             destination.occurrences.push(incoming);
         }
     }
+    // Watermarks are identity-wide and a linked counterparty can add rows, so
+    // recovered rows find their match by scope instead of by scanning.
+    let watermark_key = |w: &AllowanceWatermarkRecord| {
+        (
+            w.local_public_key.clone(),
+            w.counterparty.clone(),
+            w.allowance_id.clone(),
+        )
+    };
+    let mut positions = HashMap::new();
+    for (position, watermark) in destination.watermarks.iter().enumerate() {
+        positions
+            .entry(watermark_key(watermark))
+            .or_insert(position);
+    }
     for incoming in recovered.watermarks {
-        if let Some(existing) = destination.watermarks.iter_mut().find(|w| {
-            w.local_public_key == incoming.local_public_key
-                && w.counterparty == incoming.counterparty
-                && w.allowance_id == incoming.allowance_id
-        }) {
-            existing.evaluated_at = existing.evaluated_at.max(incoming.evaluated_at);
-        } else {
-            destination.watermarks.push(incoming);
+        match positions.entry(watermark_key(&incoming)) {
+            Entry::Occupied(position) => {
+                let existing = &mut destination.watermarks[*position.get()];
+                existing.evaluated_at = existing.evaluated_at.max(incoming.evaluated_at);
+            }
+            Entry::Vacant(position) => {
+                position.insert(destination.watermarks.len());
+                destination.watermarks.push(incoming);
+            }
         }
     }
     Ok(())

@@ -1,5 +1,21 @@
 use super::*;
 use paykit_lib::{EventId, PaymentAmount, PaymentRequestId};
+use std::collections::{HashMap, HashSet};
+
+/// Borrowed (payer, counterparty, ID) key; the ID is a Payment Request ID or an Allowance ID.
+type ScopeKey<'a> = (
+    &'a crate::PubkyPublicKey,
+    &'a crate::PubkyPublicKey,
+    &'a str,
+);
+
+fn scope_key<'a>(scope: &'a PaymentAccountingScope, id: &'a str) -> ScopeKey<'a> {
+    (&scope.local_public_key, &scope.counterparty, id)
+}
+
+fn request_key(scope: &PaymentAccountingScope) -> ScopeKey<'_> {
+    scope_key(scope, &scope.payment_request_id)
+}
 
 pub(super) fn utc_time(value: &str) -> Result<DateTime<Utc>> {
     if !value.ends_with('Z') {
@@ -60,13 +76,31 @@ pub(super) fn disposition(value: &PaymentDisposition) -> Result<()> {
 
 pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()> {
     uuid(&state.epoch)?;
-    let mut authorizations = std::collections::HashSet::new();
-    for (index, record) in state.history.associations.iter().enumerate() {
+    // Watermarks are identity-wide, a linked counterparty can add rows, and every
+    // storage transaction validates them, so cross-row checks are hash lookups.
+    let mut watermarks = HashMap::new();
+    for watermark in &state.history.watermarks {
+        valid_time(watermark.evaluated_at)?;
+        uuid(&watermark.allowance_id)?;
+        AllowanceId::new(watermark.allowance_id.clone())
+            .map_err(|_| protocol("Invalid watermark Allowance ID"))?;
+        let scope = (
+            &watermark.local_public_key,
+            &watermark.counterparty,
+            watermark.allowance_id.as_str(),
+        );
+        if watermarks.insert(scope, watermark.evaluated_at).is_some() {
+            return Err(protocol("Duplicate accounting watermark"));
+        }
+    }
+    let mut associations = HashMap::new();
+    let mut authorizations = HashSet::new();
+    for record in &state.history.associations {
         valid_scope(&record.request)?;
         if record.revisions.is_empty()
-            || state.history.associations[..index]
-                .iter()
-                .any(|other| other.request == record.request)
+            || associations
+                .insert(request_key(&record.request), record.revisions.as_slice())
+                .is_some()
         {
             return Err(protocol(
                 "Accounting association history is incomplete or duplicated",
@@ -89,10 +123,10 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
             AllowanceId::new(revision.allowance_id.clone())
                 .map_err(|_| protocol("Invalid accounting Allowance ID"))?;
             valid_time(revision.authorized_at)?;
-            if !state.history.watermarks.iter().any(|watermark| {
-                watermark_scope(watermark, &record.request, &revision.allowance_id)
-                    && watermark.evaluated_at >= revision.authorized_at
-            }) {
+            if watermarks
+                .get(&scope_key(&record.request, &revision.allowance_id))
+                .is_none_or(|evaluated_at| *evaluated_at < revision.authorized_at)
+            {
                 return Err(protocol("Accounting watermark precedes selection history"));
             }
             if authorized_at.is_some_and(|previous| revision.authorized_at < previous) {
@@ -126,17 +160,20 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
             }
         }
     }
-    let mut attempt_ids = std::collections::HashSet::new();
-    for (index, record) in state.history.occurrences.iter().enumerate() {
+    let mut occurrences = HashSet::new();
+    let mut attempt_ids = HashSet::new();
+    for record in &state.history.occurrences {
         valid_scope(&record.key.request)?;
         disposition(&record.disposition)?;
         if occupied(record) && matches!(record.disposition, PaymentDisposition::Deferred { .. }) {
             return Err(protocol("Execution evidence cannot be labeled deferred"));
         }
-        if state.history.occurrences[..index]
-            .iter()
-            .any(|other| other.key == record.key)
-        {
+        let period = record
+            .key
+            .billing_period
+            .as_ref()
+            .map(|period| (period.starts_at, period.ends_at));
+        if !occurrences.insert((request_key(&record.key.request), period)) {
             return Err(protocol("Duplicate payment occurrence"));
         }
         if let Some(period) = &record.key.billing_period {
@@ -147,7 +184,7 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
             }
         }
         validate_attribution(
-            state,
+            &associations,
             &record.key,
             record.allowance_id.as_deref(),
             record.association_revision,
@@ -177,7 +214,7 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
                         return Err(protocol("Automatic attempt has no Allowance"));
                     }
                     validate_attribution(
-                        state,
+                        &associations,
                         &record.key,
                         attempt.allowance_id.as_deref(),
                         attempt.association_revision,
@@ -186,10 +223,10 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
                         .allowance_id
                         .as_deref()
                         .ok_or_else(|| protocol("Automatic attempt lacks Allowance attribution"))?;
-                    if !state.history.watermarks.iter().any(|w| {
-                        watermark_scope(w, &record.key.request, id)
-                            && w.evaluated_at >= attempt.admitted_at
-                    }) {
+                    if watermarks
+                        .get(&scope_key(&record.key.request, id))
+                        .is_none_or(|evaluated_at| *evaluated_at < attempt.admitted_at)
+                    {
                         return Err(protocol("Accounting watermark precedes retained admission"));
                     }
                 }
@@ -202,24 +239,12 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
             }
         }
     }
-    for (index, watermark) in state.history.watermarks.iter().enumerate() {
-        valid_time(watermark.evaluated_at)?;
-        uuid(&watermark.allowance_id)?;
-        AllowanceId::new(watermark.allowance_id.clone())
-            .map_err(|_| protocol("Invalid watermark Allowance ID"))?;
-        if state.history.watermarks[..index].iter().any(|other| {
-            other.local_public_key == watermark.local_public_key
-                && other.counterparty == watermark.counterparty
-                && other.allowance_id == watermark.allowance_id
-        }) {
-            return Err(protocol("Duplicate accounting watermark"));
-        }
-    }
     Ok(())
 }
 
+/// Associations are unique by request, so one lookup finds the only candidate.
 fn validate_attribution(
-    state: &AllowanceAccountingState,
+    associations: &HashMap<ScopeKey<'_>, &[AllowanceAssociationRevision]>,
     key: &PaymentOccurrenceKey,
     id: Option<&str>,
     revision: Option<u64>,
@@ -227,9 +252,10 @@ fn validate_attribution(
     match (id, revision) {
         (None, None) => Ok(()),
         (Some(id), Some(revision))
-            if state.history.associations.iter().any(|a| {
-                a.request == key.request
-                    && a.revisions.iter().any(|r| {
+            if associations
+                .get(&request_key(&key.request))
+                .is_some_and(|revisions| {
+                    revisions.iter().any(|r| {
                         r.revision == revision
                             && r.allowance_id == id
                             && r.effective_from.is_none_or(|from| {
@@ -238,7 +264,7 @@ fn validate_attribution(
                                     .is_some_and(|p| p.starts_at >= from)
                             })
                     })
-            }) =>
+                }) =>
         {
             Ok(())
         }
