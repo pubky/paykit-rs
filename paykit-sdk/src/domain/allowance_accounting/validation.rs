@@ -1,5 +1,52 @@
 use super::*;
 use paykit_lib::{EventId, PaymentAmount, PaymentRequestId};
+use std::collections::{HashMap, HashSet};
+
+/// Borrowed (payer, counterparty, ID) key; the ID is a Payment Request ID or an Allowance ID.
+type ScopeKey<'a> = (
+    &'a crate::PubkyPublicKey,
+    &'a crate::PubkyPublicKey,
+    &'a str,
+);
+
+fn scope_key<'a>(scope: &'a PaymentAccountingScope, id: &'a str) -> ScopeKey<'a> {
+    (&scope.local_public_key, &scope.counterparty, id)
+}
+
+// The key builders below destructure every field, so adding a field to a
+// record type fails to compile until its duplicate check is reconsidered.
+fn request_key(scope: &PaymentAccountingScope) -> ScopeKey<'_> {
+    let PaymentAccountingScope {
+        local_public_key,
+        counterparty,
+        payment_request_id,
+    } = scope;
+    (local_public_key, counterparty, payment_request_id.as_str())
+}
+
+/// Borrowed request key plus the Billing Period bounds, if any.
+type OccurrenceKey<'a> = (ScopeKey<'a>, Option<(DateTime<Utc>, DateTime<Utc>)>);
+
+fn occurrence_key(key: &PaymentOccurrenceKey) -> OccurrenceKey<'_> {
+    let PaymentOccurrenceKey {
+        request,
+        billing_period,
+    } = key;
+    let period = billing_period
+        .as_ref()
+        .map(|AccountingBillingPeriod { starts_at, ends_at }| (*starts_at, *ends_at));
+    (request_key(request), period)
+}
+
+fn watermark_key(watermark: &AllowanceWatermarkRecord) -> ScopeKey<'_> {
+    let AllowanceWatermarkRecord {
+        local_public_key,
+        counterparty,
+        allowance_id,
+        evaluated_at: _,
+    } = watermark;
+    (local_public_key, counterparty, allowance_id.as_str())
+}
 
 pub(super) fn utc_time(value: &str) -> Result<DateTime<Utc>> {
     if !value.ends_with('Z') {
@@ -60,13 +107,29 @@ pub(super) fn disposition(value: &PaymentDisposition) -> Result<()> {
 
 pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()> {
     uuid(&state.epoch)?;
-    let mut authorizations = std::collections::HashSet::new();
-    for (index, record) in state.history.associations.iter().enumerate() {
+    // Watermarks are identity-wide, a linked counterparty can add rows, and every
+    // storage transaction validates them, so cross-row checks are hash lookups.
+    let mut watermarks = HashMap::with_capacity(state.history.watermarks.len());
+    for watermark in &state.history.watermarks {
+        valid_time(watermark.evaluated_at)?;
+        uuid(&watermark.allowance_id)?;
+        AllowanceId::new(watermark.allowance_id.clone())
+            .map_err(|_| protocol("Invalid watermark Allowance ID"))?;
+        if watermarks
+            .insert(watermark_key(watermark), watermark.evaluated_at)
+            .is_some()
+        {
+            return Err(protocol("Duplicate accounting watermark"));
+        }
+    }
+    let mut associations = HashMap::with_capacity(state.history.associations.len());
+    let mut authorizations = HashSet::new();
+    for record in &state.history.associations {
         valid_scope(&record.request)?;
         if record.revisions.is_empty()
-            || state.history.associations[..index]
-                .iter()
-                .any(|other| other.request == record.request)
+            || associations
+                .insert(request_key(&record.request), record.revisions.as_slice())
+                .is_some()
         {
             return Err(protocol(
                 "Accounting association history is incomplete or duplicated",
@@ -89,10 +152,10 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
             AllowanceId::new(revision.allowance_id.clone())
                 .map_err(|_| protocol("Invalid accounting Allowance ID"))?;
             valid_time(revision.authorized_at)?;
-            if !state.history.watermarks.iter().any(|watermark| {
-                watermark_scope(watermark, &record.request, &revision.allowance_id)
-                    && watermark.evaluated_at >= revision.authorized_at
-            }) {
+            if watermarks
+                .get(&scope_key(&record.request, &revision.allowance_id))
+                .is_none_or(|evaluated_at| *evaluated_at < revision.authorized_at)
+            {
                 return Err(protocol("Accounting watermark precedes selection history"));
             }
             if authorized_at.is_some_and(|previous| revision.authorized_at < previous) {
@@ -126,17 +189,15 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
             }
         }
     }
-    let mut attempt_ids = std::collections::HashSet::new();
-    for (index, record) in state.history.occurrences.iter().enumerate() {
+    let mut occurrences = HashSet::with_capacity(state.history.occurrences.len());
+    let mut attempt_ids = HashSet::new();
+    for record in &state.history.occurrences {
         valid_scope(&record.key.request)?;
         disposition(&record.disposition)?;
         if occupied(record) && matches!(record.disposition, PaymentDisposition::Deferred { .. }) {
             return Err(protocol("Execution evidence cannot be labeled deferred"));
         }
-        if state.history.occurrences[..index]
-            .iter()
-            .any(|other| other.key == record.key)
-        {
+        if !occurrences.insert(occurrence_key(&record.key)) {
             return Err(protocol("Duplicate payment occurrence"));
         }
         if let Some(period) = &record.key.billing_period {
@@ -147,7 +208,7 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
             }
         }
         validate_attribution(
-            state,
+            &associations,
             &record.key,
             record.allowance_id.as_deref(),
             record.association_revision,
@@ -177,7 +238,7 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
                         return Err(protocol("Automatic attempt has no Allowance"));
                     }
                     validate_attribution(
-                        state,
+                        &associations,
                         &record.key,
                         attempt.allowance_id.as_deref(),
                         attempt.association_revision,
@@ -186,10 +247,10 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
                         .allowance_id
                         .as_deref()
                         .ok_or_else(|| protocol("Automatic attempt lacks Allowance attribution"))?;
-                    if !state.history.watermarks.iter().any(|w| {
-                        watermark_scope(w, &record.key.request, id)
-                            && w.evaluated_at >= attempt.admitted_at
-                    }) {
+                    if watermarks
+                        .get(&scope_key(&record.key.request, id))
+                        .is_none_or(|evaluated_at| *evaluated_at < attempt.admitted_at)
+                    {
                         return Err(protocol("Accounting watermark precedes retained admission"));
                     }
                 }
@@ -202,24 +263,12 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
             }
         }
     }
-    for (index, watermark) in state.history.watermarks.iter().enumerate() {
-        valid_time(watermark.evaluated_at)?;
-        uuid(&watermark.allowance_id)?;
-        AllowanceId::new(watermark.allowance_id.clone())
-            .map_err(|_| protocol("Invalid watermark Allowance ID"))?;
-        if state.history.watermarks[..index].iter().any(|other| {
-            other.local_public_key == watermark.local_public_key
-                && other.counterparty == watermark.counterparty
-                && other.allowance_id == watermark.allowance_id
-        }) {
-            return Err(protocol("Duplicate accounting watermark"));
-        }
-    }
     Ok(())
 }
 
+/// Relies on unique associations per request and contiguous revisions, both checked earlier.
 fn validate_attribution(
-    state: &AllowanceAccountingState,
+    associations: &HashMap<ScopeKey<'_>, &[AllowanceAssociationRevision]>,
     key: &PaymentOccurrenceKey,
     id: Option<&str>,
     revision: Option<u64>,
@@ -227,18 +276,22 @@ fn validate_attribution(
     match (id, revision) {
         (None, None) => Ok(()),
         (Some(id), Some(revision))
-            if state.history.associations.iter().any(|a| {
-                a.request == key.request
-                    && a.revisions.iter().any(|r| {
-                        r.revision == revision
-                            && r.allowance_id == id
-                            && r.effective_from.is_none_or(|from| {
-                                key.billing_period
-                                    .as_ref()
-                                    .is_some_and(|p| p.starts_at >= from)
-                            })
-                    })
-            }) =>
+            if associations
+                .get(&request_key(&key.request))
+                .and_then(|revisions| {
+                    // Revision n is at index n - 1; revision 0 matches nothing.
+                    let index = usize::try_from(revision.checked_sub(1)?).ok()?;
+                    revisions.get(index)
+                })
+                .is_some_and(|r| {
+                    r.revision == revision
+                        && r.allowance_id == id
+                        && r.effective_from.is_none_or(|from| {
+                            key.billing_period
+                                .as_ref()
+                                .is_some_and(|p| p.starts_at >= from)
+                        })
+                }) =>
         {
             Ok(())
         }
