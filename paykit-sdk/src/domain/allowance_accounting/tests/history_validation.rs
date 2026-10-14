@@ -180,6 +180,59 @@ fn test_accounting_validation_rejects_unmatched_attribution() {
 }
 
 #[test]
+fn test_accounting_validation_attributes_reassociated_revisions() {
+    // Revision 2 moves the first request to a replacement Allowance from `boundary`.
+    let boundary = time() + Duration::days(1);
+    let replacement = AllowanceId::new_v4().as_str().to_owned();
+    let mut base = ledger(0);
+    let history = &mut base.history;
+    history.watermarks.push(AllowanceWatermarkRecord {
+        allowance_id: replacement.clone(),
+        ..history.watermarks[1].clone()
+    });
+    let association = &mut history.associations[0];
+    association.revisions.push(AllowanceAssociationRevision {
+        revision: 2,
+        allowance_id: replacement.clone(),
+        effective_from: Some(boundary),
+        authorization_id: Some(new_id()),
+        authorized_at: time(),
+    });
+    let request = association.request.clone();
+    let initial = association.revisions[0].allowance_id.clone();
+    // Validates `base` plus one recurring occurrence starting at `starts_at`.
+    let attributed = |starts_at: DateTime<Utc>, allowance_id: &str, revision: u64| {
+        let mut state = base.clone();
+        state.history.occurrences.push(PaymentOccurrenceRecord {
+            key: PaymentOccurrenceKey {
+                request: request.clone(),
+                billing_period: Some(AccountingBillingPeriod {
+                    starts_at,
+                    ends_at: starts_at + Duration::days(30),
+                }),
+            },
+            disposition: PaymentDisposition::Automatic,
+            allowance_id: Some(allowance_id.to_owned()),
+            association_revision: Some(revision),
+            attempts: Vec::new(),
+        });
+        validate_accounting(&state)
+    };
+    attributed(boundary, &replacement, 2).unwrap();
+    attributed(time(), &initial, 1).unwrap();
+    let before = boundary - Duration::seconds(1);
+    for (starts_at, revision) in [(before, 2), (boundary, 3), (boundary, 0)] {
+        match attributed(starts_at, &replacement, revision) {
+            Err(PaykitSdkError::Protocol { context, .. }) => assert_eq!(
+                context,
+                "Accounting attribution has no matching association revision"
+            ),
+            other => panic!("revision {revision} from {starts_at}: got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn test_accounting_restore_merge_keeps_latest_watermark_per_scope() {
     let current = ledger(2);
     let mut restored = current.clone();

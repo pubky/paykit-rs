@@ -266,7 +266,7 @@ pub(crate) fn validate_accounting(state: &AllowanceAccountingState) -> Result<()
     Ok(())
 }
 
-/// Associations are unique by request, so one lookup finds the only candidate.
+/// Relies on unique associations per request and contiguous revisions, both checked earlier.
 fn validate_attribution(
     associations: &HashMap<ScopeKey<'_>, &[AllowanceAssociationRevision]>,
     key: &PaymentOccurrenceKey,
@@ -278,16 +278,19 @@ fn validate_attribution(
         (Some(id), Some(revision))
             if associations
                 .get(&request_key(&key.request))
-                .is_some_and(|revisions| {
-                    revisions.iter().any(|r| {
-                        r.revision == revision
-                            && r.allowance_id == id
-                            && r.effective_from.is_none_or(|from| {
-                                key.billing_period
-                                    .as_ref()
-                                    .is_some_and(|p| p.starts_at >= from)
-                            })
-                    })
+                .and_then(|revisions| {
+                    // Revision n is at index n - 1; revision 0 matches nothing.
+                    let index = usize::try_from(revision.checked_sub(1)?).ok()?;
+                    revisions.get(index)
+                })
+                .is_some_and(|r| {
+                    r.revision == revision
+                        && r.allowance_id == id
+                        && r.effective_from.is_none_or(|from| {
+                            key.billing_period
+                                .as_ref()
+                                .is_some_and(|p| p.starts_at >= from)
+                        })
                 }) =>
         {
             Ok(())
