@@ -28,6 +28,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   the wallet pays), intake still re-derives that history, intake still copies
   the counterparty's stream items and outbound messages, and storage adapters
   that load or save the whole state do so in each transaction.
+- `evaluate_allowance_candidates` derives a counterparty's Allowance history
+  once per call instead of once per Allowance, so each unanswered Allowance
+  proposal a counterparty sends no longer adds a full pass over that history
+  to every evaluation. Results and watermarks are unchanged.
 
 ## 0.1.0-rc74 - 2026-10-12
 

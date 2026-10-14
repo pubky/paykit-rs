@@ -139,16 +139,39 @@ fn valid_request(
             .is_some_and(|peer| peer.state == LinkedPeerState::Linked)
 }
 
-fn allowance_terms(
+fn accepted_allowance_terms(
     tx: &dyn StorageTransaction,
     scope: &PaymentAccountingScope,
     id: &str,
-) -> Result<(crate::AllowanceRecord, AllowanceTerms)> {
+) -> std::result::Result<AllowanceTerms, AllowanceAccountingBlock> {
     use crate::domain::allowances::allowance_records_in_transaction;
     let record = allowance_records_in_transaction(tx, &scope.counterparty)
         .into_iter()
         .find(|record| record.allowance_id == id)
-        .ok_or_else(|| policy("Allowance history is unavailable"))?;
+        .ok_or(AllowanceAccountingBlock::InvalidLifecycle)?;
+    accepted_terms(tx, scope, &record)
+}
+
+/// Terms of an already-derived record the local wallet may pay as Allower.
+fn accepted_terms(
+    tx: &dyn StorageTransaction,
+    scope: &PaymentAccountingScope,
+    record: &crate::AllowanceRecord,
+) -> std::result::Result<AllowanceTerms, AllowanceAccountingBlock> {
+    // Lifecycle comes before the proposal lookup so an unanswered peer
+    // proposal costs no history work.
+    if !valid_allowance(record) {
+        return Err(AllowanceAccountingBlock::InvalidLifecycle);
+    }
+    proposal_terms(tx, scope, record).map_err(|_| AllowanceAccountingBlock::InvalidLifecycle)
+}
+
+/// Parse the immutable terms from the proposal of an already-derived record.
+fn proposal_terms(
+    tx: &dyn StorageTransaction,
+    scope: &PaymentAccountingScope,
+    record: &crate::AllowanceRecord,
+) -> Result<AllowanceTerms> {
     let raw = if let Some(item_id) = record.proposal_stream_item_id {
         tx.private_stream_items(&scope.counterparty)
             .into_iter()
@@ -175,7 +198,7 @@ fn allowance_terms(
     let Some(paykit_lib::AllowanceEvent::Proposal(proposal)) = parsed.parsed_event() else {
         return Err(policy("Allowance proposal is invalid"));
     };
-    Ok((record, proposal.terms().clone()))
+    Ok(proposal.terms().clone())
 }
 
 fn valid_allowance(record: &crate::AllowanceRecord) -> bool {
