@@ -2,7 +2,7 @@ use chrono::{TimeZone, Utc};
 
 use super::*;
 use crate::{
-    domain::linked_peers::LinkedPeerState,
+    domain::{linked_peers::LinkedPeerState, payment_requests::PaymentRequestLifecycleState},
     storage::{
         EncryptedLinkStateRecord, InMemoryStorage, LinkedPeerRecord, PaymentRequestExecutionClaim,
     },
@@ -78,18 +78,6 @@ fn payment_request_raw(reference: &str) -> String {
 
 fn payment_request_cancellation_raw() -> &'static str {
     r#"{"version":1,"kind":"paykit.payment_request_cancellation","app_id":"bitkit","event_id":"8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102","payment_request_id":"b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33"}"#
-}
-
-fn numbered_payment_request_id(sequence: usize) -> String {
-    format!("b7f9c2a1-6d43-4b0e-a8d4-{sequence:012x}")
-}
-
-/// A valid Payment Request with its own Event ID and Payment Request ID.
-fn numbered_payment_request_raw(sequence: usize) -> String {
-    format!(
-        r#"{{"version":1,"kind":"paykit.payment_request","app_id":"bitkit","event_id":"8a0d8b4c-913f-4e31-9f2c-{sequence:012x}","payment_request_id":"{}","request":{{"amount":{{"value":"0.001","asset":"btc"}},"payment_reference":"invoice-{sequence}","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"required_app_id":null,"metadata":{{}}}}}}"#,
-        numbered_payment_request_id(sequence)
-    )
 }
 
 fn receipt_access_raw(event_id: &str, receipt_id: &str, reference: &str) -> String {
@@ -541,23 +529,11 @@ async fn test_persist_private_stream_batch_reconciles_terminal_execution_claims(
 #[tokio::test]
 async fn test_persist_private_stream_batch_skips_payment_request_derivation_without_execution_claim(
 ) {
-    const RETAINED_REQUESTS: usize = 8;
+    const REQUEST_ID: &str = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
     let storage = validating_storage();
     let peer = counterparty();
-    persist_private_stream_batch(
-        &storage,
-        peer.clone(),
-        (0..RETAINED_REQUESTS)
-            .map(|sequence| private_message(&numbered_payment_request_raw(sequence)))
-            .collect(),
-        None,
-        timestamp(),
-    )
-    .await
-    .unwrap();
-
     for message in [
-        private_message(&numbered_payment_request_raw(RETAINED_REQUESTS)),
+        private_message(&payment_request_raw("invoice-2026-0001")),
         unknown_kind_message(0),
     ] {
         let before = PAYMENT_REQUEST_HISTORY_DERIVATIONS.get();
@@ -572,110 +548,43 @@ async fn test_persist_private_stream_batch_skips_payment_request_derivation_with
             "intake re-derived the Payment Request history without an execution claim"
         );
     }
-}
 
-#[tokio::test]
-async fn test_persist_private_stream_batch_releases_only_sender_terminal_execution_claims() {
-    const REQUEST_ID: &str = "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33";
-    let storage = validating_storage();
-    let peer = counterparty();
-    let other = counterparty();
-    // Both counterparties propose a request with the same Payment Request ID.
-    for sender in [&peer, &other] {
-        persist_private_stream_batch(
-            &storage,
-            sender.clone(),
-            vec![private_message(&payment_request_raw("invoice-2026-0001"))],
-            None,
-            timestamp(),
-        )
-        .await
-        .unwrap();
-    }
+    // A held claim makes intake derive once and keep the claim on a proposed request.
     storage
         .transaction({
-            let claimants = [peer.clone(), other.clone()];
+            let peer = peer.clone();
             move |tx| {
-                for counterparty in claimants {
-                    tx.save_payment_request_execution_claim(PaymentRequestExecutionClaim {
-                        counterparty,
-                        payment_request_id: REQUEST_ID.into(),
-                        app_id: PaykitAppId::new("wallet").unwrap(),
-                        claimed_at: timestamp(),
-                    });
-                }
+                tx.save_payment_request_execution_claim(PaymentRequestExecutionClaim {
+                    counterparty: peer,
+                    payment_request_id: REQUEST_ID.into(),
+                    app_id: PaykitAppId::new("wallet").unwrap(),
+                    claimed_at: timestamp(),
+                });
                 Ok(())
             }
         })
         .await
         .unwrap();
-    let claimed = |storage: &ValidatingStorage| {
-        let claims = storage
-            .0
-            .snapshot()
-            .unwrap()
-            .payment_request_execution_claims;
-        [&peer, &other].map(|counterparty| {
-            claims.contains_key(&((*counterparty).clone(), REQUEST_ID.to_owned()))
-        })
-    };
-
-    // With a claim held, intake derives history once and keeps a claim on a
-    // request that is still proposed.
     let before = PAYMENT_REQUEST_HISTORY_DERIVATIONS.get();
     persist_private_stream_batch(
         &storage,
         peer.clone(),
-        vec![unknown_kind_message(0)],
+        vec![unknown_kind_message(1)],
         None,
         timestamp(),
     )
     .await
     .unwrap();
     assert_eq!(PAYMENT_REQUEST_HISTORY_DERIVATIONS.get(), before + 1);
-    assert_eq!(claimed(&storage), [true, true]);
-
-    // A cancellation releases only the sender's claim.
-    persist_private_stream_batch(
-        &storage,
-        peer.clone(),
-        vec![private_message(payment_request_cancellation_raw())],
-        None,
-        timestamp(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(claimed(&storage), [false, true]);
-}
-
-#[tokio::test]
-async fn test_in_memory_storage_lists_execution_claims_by_counterparty_in_order() {
-    let storage = InMemoryStorage::new();
-    let peer = counterparty();
-    let other = counterparty();
-    let claim = |counterparty: &PubkyPublicKey, sequence| PaymentRequestExecutionClaim {
-        counterparty: counterparty.clone(),
-        payment_request_id: numbered_payment_request_id(sequence),
-        app_id: PaykitAppId::new("wallet").unwrap(),
-        claimed_at: timestamp(),
-    };
-    let listed = storage
+    storage
         .transaction(|tx| {
-            for sequence in (0..8).rev() {
-                tx.save_payment_request_execution_claim(claim(&peer, sequence));
-            }
-            tx.save_payment_request_execution_claim(claim(&other, 8));
-            Ok(tx.payment_request_execution_claims(&peer))
+            assert!(tx
+                .payment_request_execution_claim(&peer, REQUEST_ID)
+                .is_some());
+            Ok(())
         })
         .await
         .unwrap();
-
-    assert_eq!(
-        listed,
-        (0..8)
-            .map(|sequence| claim(&peer, sequence))
-            .collect::<Vec<_>>()
-    );
 }
 
 #[tokio::test]

@@ -438,14 +438,11 @@ impl StorageTransaction for StorageStateTransaction {
             .cloned()
     }
 
-    fn payment_request_execution_claims(
-        &self,
-        counterparty: &PubkyPublicKey,
-    ) -> Vec<PaymentRequestExecutionClaim> {
-        execution_claims_held_with(
-            self.state.payment_request_execution_claims.values(),
-            counterparty,
-        )
+    fn has_payment_request_execution_claims(&self, counterparty: &PubkyPublicKey) -> bool {
+        self.state
+            .payment_request_execution_claims
+            .keys()
+            .any(|(owner, _)| owner == counterparty)
     }
 
     fn save_payment_request_execution_claim(&mut self, claim: PaymentRequestExecutionClaim) {

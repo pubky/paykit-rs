@@ -12,10 +12,7 @@ use crate::storage::{retry_storage_transaction, StorageAdapter};
 use crate::{
     domain::{
         outbound_private::OutboundPrivateMessageStatus,
-        payment_requests::{
-            payment_request_records_from_transaction, PaymentRequestLifecycleState,
-        },
-        receipts::ReceiptAccessRecord,
+        payment_requests::payment_request_records_from_transaction, receipts::ReceiptAccessRecord,
     },
     storage::{
         require_peer_link_operation_lease, EncryptedLinkStateRecord, EventDedupRecord,
@@ -515,30 +512,16 @@ fn release_terminal_execution_claims(
     counterparty: &PubkyPublicKey,
     now: DateTime<Utc>,
 ) -> Result<()> {
-    let claims = tx.payment_request_execution_claims(counterparty);
-    if claims.is_empty() {
+    if !tx.has_payment_request_execution_claims(counterparty) {
         return Ok(());
     }
     // Conflicts can invalidate earlier events, not only requests named by this batch.
     let records = payment_request_records_from_transaction(tx, counterparty, now)?;
     let accounting = tx.allowance_accounting_state();
     for record in records {
-        if claims
-            .iter()
-            .any(|claim| claim.payment_request_id == record.payment_request_id)
-            && matches!(
-                record.state,
-                PaymentRequestLifecycleState::Canceled
-                    | PaymentRequestLifecycleState::Rejected
-                    | PaymentRequestLifecycleState::ProofSubmitted
-                    | PaymentRequestLifecycleState::InvalidConflict
-            )
-            && !crate::domain::payment_requests::request_has_unresolved_payment(
+        if record.execution_claim_app_id.is_some()
+            && crate::domain::payment_requests::execution_claim_releasable(
                 tx,
-                counterparty,
-                &record.payment_request_id,
-            )
-            && !crate::domain::payment_requests::request_has_unreported_successful_payment(
                 accounting.as_ref(),
                 &record,
             )
