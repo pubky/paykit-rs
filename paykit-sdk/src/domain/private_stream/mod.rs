@@ -12,10 +12,7 @@ use crate::storage::{retry_storage_transaction, StorageAdapter};
 use crate::{
     domain::{
         outbound_private::OutboundPrivateMessageStatus,
-        payment_requests::{
-            payment_request_records_from_transaction, PaymentRequestLifecycleState,
-        },
-        receipts::ReceiptAccessRecord,
+        payment_requests::payment_request_records_from_transaction, receipts::ReceiptAccessRecord,
     },
     storage::{
         require_peer_link_operation_lease, EncryptedLinkStateRecord, EventDedupRecord,
@@ -56,6 +53,16 @@ pub(crate) const MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY: usize = 409
 /// confirmed, but add no state: the first stream item already holds the exact
 /// payload. A counterparty at its retained item limit retains none of them.
 pub(crate) const MAX_RETAINED_EVENT_DUPLICATES: usize = 2;
+
+#[cfg(test)]
+thread_local! {
+    /// Whole-history Payment Request derivations run on this thread.
+    ///
+    /// `payment_request_records_from_transaction` counts itself here so intake
+    /// tests can check what receiving one message costs.
+    pub(crate) static PAYMENT_REQUEST_HISTORY_DERIVATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
 
 /// Read surface shared by every typed Event Message parser in `paykit-lib`.
 ///
@@ -474,29 +481,7 @@ pub(crate) fn persist_private_stream_batch_in_transaction(
     }
 
     if !report.stream_item_ids.is_empty() {
-        // Conflicts can invalidate earlier events, not only requests named by this batch.
-        let records = payment_request_records_from_transaction(tx, &counterparty, received_at)?;
-        for record in records {
-            if matches!(
-                record.state,
-                PaymentRequestLifecycleState::Canceled
-                    | PaymentRequestLifecycleState::Rejected
-                    | PaymentRequestLifecycleState::ProofSubmitted
-                    | PaymentRequestLifecycleState::InvalidConflict
-            ) && !crate::domain::payment_requests::request_has_unresolved_payment(
-                tx,
-                &counterparty,
-                &record.payment_request_id,
-            ) && !crate::domain::payment_requests::request_has_unreported_successful_payment(
-                tx.allowance_accounting_state().as_ref(),
-                &record,
-            ) {
-                tx.remove_payment_request_execution_claim(
-                    &counterparty,
-                    &record.payment_request_id,
-                );
-            }
-        }
+        release_terminal_execution_claims(tx, &counterparty, received_at)?;
     }
 
     let checkpointed_link = link_state.is_some();
@@ -514,6 +499,37 @@ pub(crate) fn persist_private_stream_batch_in_transaction(
     }
 
     Ok(report)
+}
+
+/// Release `counterparty`'s execution claims on requests that are now terminal
+/// and have no payment outcome left to resolve or report.
+///
+/// SECURITY: the counterparty controls how much history is retained, so intake
+/// must not re-derive it per message unless a local execution claim could be
+/// released. Without a claim the derivation has no effect, so it is skipped.
+fn release_terminal_execution_claims(
+    tx: &mut dyn crate::storage::StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    if !tx.has_payment_request_execution_claims(counterparty) {
+        return Ok(());
+    }
+    // Conflicts can invalidate earlier events, not only requests named by this batch.
+    let records = payment_request_records_from_transaction(tx, counterparty, now)?;
+    let accounting = tx.allowance_accounting_state();
+    for record in records {
+        if record.execution_claim_app_id.is_some()
+            && crate::domain::payment_requests::execution_claim_releasable(
+                tx,
+                accounting.as_ref(),
+                &record,
+            )
+        {
+            tx.remove_payment_request_execution_claim(counterparty, &record.payment_request_id);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) struct PrivateStreamMessageClassification {
@@ -824,7 +840,13 @@ fn queue_delivery_confirmation(
     use crate::{storage::NewOutboundPrivateMessage, OutboundPrivateMessageStatus};
     let hash = payload_hash(raw_json);
     for mut message in tx.outbound_private_messages(counterparty) {
-        if message.kind != PrivateMessageKind::DeliveryConfirmation.as_str() {
+        // `serialize_delivery_confirmation` writes the hash verbatim and no
+        // backslash. Any JSON escape needs a backslash, so a record with
+        // neither cannot match. This avoids parsing every stored confirmation
+        // per received Event Message; the parse below stays authoritative.
+        if message.kind != PrivateMessageKind::DeliveryConfirmation.as_str()
+            || !(message.raw_json.contains(&hash) || message.raw_json.contains('\\'))
+        {
             continue;
         }
         let Ok(confirmation) = paykit_lib::parse_delivery_confirmation_json(&message.raw_json)

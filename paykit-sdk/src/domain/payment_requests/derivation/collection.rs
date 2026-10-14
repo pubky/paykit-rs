@@ -67,6 +67,9 @@ pub(crate) fn payment_request_records_from_transaction(
     counterparty: &PubkyPublicKey,
     now: DateTime<Utc>,
 ) -> Result<Vec<PaymentRequestRecord>> {
+    #[cfg(test)]
+    crate::domain::private_stream::PAYMENT_REQUEST_HISTORY_DERIVATIONS
+        .with(|derivations| derivations.set(derivations.get() + 1));
     let items = tx.private_stream_items(counterparty);
     let outbound = tx.outbound_private_messages(counterparty);
     let outbound_carriers = outbound_event_carriers(&outbound);

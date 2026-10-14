@@ -438,6 +438,13 @@ impl StorageTransaction for StorageStateTransaction {
             .cloned()
     }
 
+    fn has_payment_request_execution_claims(&self, counterparty: &PubkyPublicKey) -> bool {
+        self.state
+            .payment_request_execution_claims
+            .keys()
+            .any(|(owner, _)| owner == counterparty)
+    }
+
     fn save_payment_request_execution_claim(&mut self, claim: PaymentRequestExecutionClaim) {
         self.state.payment_request_execution_claims.insert(
             (claim.counterparty.clone(), claim.payment_request_id.clone()),
