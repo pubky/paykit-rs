@@ -223,6 +223,33 @@ async fn test_transaction_commits_records() {
 }
 
 #[tokio::test]
+async fn test_storage_reports_execution_claims_by_counterparty() {
+    let storage = InMemoryStorage::new();
+    let claimant = counterparty();
+    let other = counterparty();
+
+    let held = storage
+        .transaction(|tx| {
+            let before = tx.has_payment_request_execution_claims(&claimant);
+            tx.save_payment_request_execution_claim(PaymentRequestExecutionClaim {
+                counterparty: claimant.clone(),
+                payment_request_id: "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33".into(),
+                app_id: app_id(),
+                claimed_at: timestamp(),
+            });
+            Ok((
+                before,
+                tx.has_payment_request_execution_claims(&claimant),
+                tx.has_payment_request_execution_claims(&other),
+            ))
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(held, (false, true, false));
+}
+
+#[tokio::test]
 async fn test_storage_keeps_app_owned_endpoint_and_reservation_records_separate() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();
