@@ -10,18 +10,32 @@ use crate::harness::{two_party, TestnetSessionProvider};
 #[tokio::test]
 async fn test_public_directory_pages_cover_all_entries_and_missing_directories() {
     let pair = two_party().await;
-    let root = format!("pubky://{}/pub/paykit/page-test/", pair.alice.public_key);
+    let path = "/pub/paykit/page-test-\u{e9}/";
+    let resource = pubky::PubkyResource::new(pair.alice.access.session.public_key(), path).unwrap();
+    let root = resource.to_pubky_url();
+    let mut names: Vec<_> = (0..99).map(|index| format!("{index:03}.json")).collect();
+    names.extend(["a", "z", "\u{e9}", "\u{ea}", "100% ready"].map(String::from));
+    names.sort();
+    let session = &pair.alice.access.session;
+    let bearer = session.as_grant().unwrap().current_bearer().await;
     let mut expected = Vec::new();
-    for index in 0..103 {
-        let name = format!("{index:03}.json");
-        pair.alice
-            .access
-            .session
-            .storage()
-            .put(format!("/pub/paykit/page-test/{name}"), b"{}".to_vec())
+    for name in names {
+        let entry =
+            pubky::PubkyResource::new(resource.owner.clone(), format!("{path}{name}")).unwrap();
+        // SessionStorage re-encodes ResourcePath; write the intended Unicode fixture directly.
+        session
+            .client()
+            .request_async(reqwest::Method::PUT, entry.to_transport_url().unwrap())
             .await
+            .unwrap()
+            .bearer_auth(&bearer)
+            .body("{}")
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
             .unwrap();
-        expected.push(format!("{root}{name}"));
+        expected.push(entry.to_pubky_url());
     }
     let mut found = Vec::new();
     loop {

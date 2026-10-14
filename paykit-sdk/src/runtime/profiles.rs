@@ -307,15 +307,16 @@ where
             .map_err(|err| map_pubky_transport_error("list Pubky directory", err))?
             .shallow(true)
             .limit(limit);
-        if let Some(cursor) = cursor.as_deref() {
-            request = request.cursor(cursor);
+        if let Some(cursor) = cursor.as_ref() {
+            // The homeserver expects a decoded storage cursor inside the query value.
+            request = request.cursor(decode_directory_uri(&cursor.to_pubky_url())?.as_ref());
         }
         let entries = match request.send().await {
             Ok(entries) => entries,
             Err(err) if is_pubky_not_found(&err) => return Ok(Vec::new()),
             Err(err) => return Err(map_pubky_transport_error("list Pubky directory", err)),
         };
-        public_directory_page(&directory, cursor.as_deref(), limit, entries)
+        public_directory_page(&directory, cursor.as_ref(), limit, entries)
     }
 
     /// Fetch public Pubky app follows.
@@ -394,6 +395,12 @@ fn directory_error(message: &str) -> PaykitSdkError {
     }
 }
 
+fn decode_directory_uri(uri: &str) -> Result<std::borrow::Cow<'_, str>> {
+    percent_encoding::percent_decode_str(uri)
+        .decode_utf8()
+        .map_err(|_| directory_error("URI must contain valid UTF-8"))
+}
+
 fn public_directory_child(directory: &pubky::PubkyResource, entry: &pubky::PubkyResource) -> bool {
     directory.owner == entry.owner
         && entry
@@ -407,9 +414,10 @@ fn public_directory_request(
     uri: &str,
     cursor: Option<&str>,
     limit: u16,
-) -> Result<(pubky::PubkyResource, Option<String>)> {
-    let directory: pubky::PubkyResource =
-        uri.parse().map_err(|_| directory_error("invalid URI"))?;
+) -> Result<(pubky::PubkyResource, Option<pubky::PubkyResource>)> {
+    let directory: pubky::PubkyResource = decode_directory_uri(uri)?
+        .parse()
+        .map_err(|_| directory_error("invalid URI"))?;
     if !directory.path.as_str().starts_with("/pub/") || !directory.path.as_str().ends_with('/') {
         return Err(directory_error(
             "URI must name a public directory ending in /",
@@ -420,14 +428,15 @@ fn public_directory_request(
     }
     let cursor = cursor
         .map(|uri| {
-            let entry: pubky::PubkyResource =
-                uri.parse().map_err(|_| directory_error("invalid cursor"))?;
+            let entry: pubky::PubkyResource = decode_directory_uri(uri)?
+                .parse()
+                .map_err(|_| directory_error("invalid cursor"))?;
             if !public_directory_child(&directory, &entry) {
                 return Err(directory_error(
                     "cursor must be a child of the requested directory",
                 ));
             }
-            Ok(entry.to_pubky_url())
+            Ok(entry)
         })
         .transpose()?;
     Ok((directory, cursor))
@@ -435,7 +444,7 @@ fn public_directory_request(
 
 fn public_directory_page(
     directory: &pubky::PubkyResource,
-    cursor: Option<&str>,
+    cursor: Option<&pubky::PubkyResource>,
     limit: u16,
     entries: Vec<pubky::PubkyResource>,
 ) -> Result<Vec<String>> {
@@ -445,22 +454,23 @@ fn public_directory_page(
         ));
     }
     let mut result = Vec::with_capacity(entries.len());
+    // Homeserver COLLATE C order is decoded storage-path byte order, not URI order.
+    let storage_key = |entry: &pubky::PubkyResource| {
+        percent_encoding::percent_decode_str(entry.path.as_str()).collect::<Vec<_>>()
+    };
+    let mut previous = cursor.map(storage_key);
     for entry in entries {
         if !public_directory_child(directory, &entry) {
             return Err(directory_error(
                 "response contains an entry outside the requested directory",
             ));
         }
-        let uri = entry.to_pubky_url();
-        if result
-            .last()
-            .map(String::as_str)
-            .or(cursor)
-            .is_some_and(|previous| uri.as_str() <= previous)
-        {
+        let key = storage_key(&entry);
+        if previous.as_ref().is_some_and(|previous| key <= *previous) {
             return Err(directory_error("directory cursor did not advance"));
         }
-        result.push(uri);
+        previous = Some(key);
+        result.push(entry.to_pubky_url());
     }
     Ok(result)
 }
@@ -470,17 +480,70 @@ mod directory_tests {
     use super::*;
 
     #[test]
+    fn test_public_directory_orders_decoded_storage_paths() {
+        let owner = pubky::Keypair::random().public_key();
+        let directory = pubky::PubkyResource::new(owner.clone(), "/pub/example/").unwrap();
+        let entries: Vec<_> = ["a", "\u{e9}", "\u{ea}"]
+            .into_iter()
+            .map(|name| {
+                pubky::PubkyResource::new(owner.clone(), format!("/pub/example/{name}")).unwrap()
+            })
+            .collect();
+        let expected: Vec<_> = entries.iter().map(|entry| entry.to_pubky_url()).collect();
+        assert_eq!(
+            public_directory_page(&directory, None, 3, entries.clone()).unwrap(),
+            expected
+        );
+        for index in 0..entries.len() - 1 {
+            assert_eq!(
+                public_directory_page(
+                    &directory,
+                    Some(&entries[index]),
+                    1,
+                    vec![entries[index + 1].clone()]
+                )
+                .unwrap(),
+                vec![expected[index + 1].clone()]
+            );
+        }
+        assert!(
+            public_directory_page(&directory, Some(&entries[1]), 1, vec![entries[1].clone()])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_public_directory_roundtrips_encoded_paths_and_cursors() {
+        let owner = pubky::Keypair::random().public_key();
+        for path in ["/pub/example/", "/pub/\u{e9}/", "/pub/100% ready/"] {
+            let directory = pubky::PubkyResource::new(owner.clone(), path).unwrap();
+            for name in ["\u{e9}", "100% ready", "%C3%A9"] {
+                let entry =
+                    pubky::PubkyResource::new(owner.clone(), format!("{path}{name}")).unwrap();
+                let uri = entry.to_pubky_url();
+                let (parsed, cursor) =
+                    public_directory_request(&directory.to_pubky_url(), Some(&uri), 1).unwrap();
+                assert_eq!(parsed, directory);
+                assert_eq!(cursor, Some(entry));
+            }
+        }
+    }
+
+    #[test]
     fn test_public_directory_validates_scope_limits_and_progress() {
         let owner = pubky::Keypair::random().public_key().z32();
         let root = format!("pubky://{owner}/pub/example/");
         let first = format!("{root}a.json");
         let second = format!("{root}b.json");
         let (directory, cursor) = public_directory_request(&root, Some(&first), 2).unwrap();
-        assert_eq!(cursor.as_deref(), Some(first.as_str()));
+        assert_eq!(
+            cursor.as_ref().map(|entry| entry.to_pubky_url()),
+            Some(first.clone())
+        );
         assert_eq!(
             public_directory_page(
                 &directory,
-                cursor.as_deref(),
+                cursor.as_ref(),
                 2,
                 vec![second.parse().unwrap()]
             )
@@ -491,6 +554,8 @@ mod directory_tests {
             format!("pubky://{owner}/priv/example/"),
             format!("{root}file"),
             format!("{root}/"),
+            format!("{root}%FF/"),
+            format!("{root}%2e%2e/"),
         ] {
             assert!(public_directory_request(&invalid, None, 2).is_err());
         }
@@ -511,6 +576,7 @@ mod directory_tests {
                 public_directory_page(&directory, None, 2, vec![invalid.parse().unwrap()]).is_err()
             );
         }
+        assert!(public_directory_request(&root, Some(&format!("{root}nested%2Fa")), 2).is_err());
         for entries in [
             vec![first.clone()],
             vec![second.clone(), first.clone()],
@@ -518,7 +584,7 @@ mod directory_tests {
         ] {
             assert!(public_directory_page(
                 &directory,
-                Some(&first),
+                Some(&first.parse().unwrap()),
                 2,
                 entries.iter().map(|uri| uri.parse().unwrap()).collect()
             )

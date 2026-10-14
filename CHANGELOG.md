@@ -7,6 +7,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc76 - 2026-10-14
+
+### Fixed
+
+- Public directory pagination preserves percent-encoded paths and cursors and
+  checks progress using decoded storage-path byte order, matching Homeserver
+  listings for non-ASCII names and literal percent signs.
+
 ### Security
 
 - `evaluate_allowance_candidates` derives a counterparty's Allowance history
@@ -50,6 +58,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   the wallet pays), intake still re-derives that history, intake still copies
   the counterparty's stream items and outbound messages, and storage adapters
   that load or save the whole state do so in each transaction.
+
 ## 0.1.0-rc74 - 2026-10-12
 
 ### Added
