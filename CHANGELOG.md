@@ -10,9 +10,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 ### Fixed
 
 - `evaluate_allowance_candidates` derives a counterparty's Allowance history
-  once per call instead of once per Allowance, so a counterparty that sends
-  many unanswered Allowance proposals can no longer make each evaluation take
-  quadratic time. Results and watermarks are unchanged.
+  once per call instead of once per Allowance, so each unanswered Allowance
+  proposal a counterparty sends no longer adds a full pass over that history
+  to every evaluation. Results and watermarks are unchanged.
 
 ## 0.1.0-rc74 - 2026-10-12
 

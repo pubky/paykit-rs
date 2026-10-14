@@ -238,10 +238,18 @@ async fn test_candidate_evaluation_derives_link_history_once() {
     let proposals = unanswered
         .iter()
         .map(|allowance| {
-            message(format!(
-                r#"{{"version":1,"app_id":"bitkit","kind":"paykit.allowance_proposal","event_id":"{}","allowance_id":"{}","proposer_role":"allowee","terms":{{"asset":"btc","per_payment_amount":null,"period_limits":[],"lifetime_amount_limit":"1","active_from":null,"expires_at":null,"allowed_payment_endpoint_identifiers":null}}}}"#,
-                new_id(),
-                allowance.as_str()
+            // The peer proposes as Allowee, so the local wallet would be the paying Allower.
+            let proposal = paykit_lib::AllowanceProposal::new(
+                paykit_lib::EventId::new_v4(),
+                allowance.clone(),
+                paykit_lib::AllowanceRole::Allowee,
+                AllowanceTerms::builder("btc")
+                    .lifetime_amount_limit("1")
+                    .build()
+                    .unwrap(),
+            );
+            crate::test_utils::allowance_application_message(&paykit_lib::AllowanceEvent::Proposal(
+                proposal,
             ))
         })
         .collect();

@@ -180,14 +180,11 @@ fn reserve_checked(
         if Some(selected.revision) != expected_revision {
             return blocked(AllowanceAccountingBlock::StaleRevision);
         }
-        let Ok((allowance, allowance_terms)) =
-            allowance_terms(tx, &key.request, &selected.allowance_id)
-        else {
-            return blocked(AllowanceAccountingBlock::InvalidLifecycle);
-        };
-        if !valid_allowance(&allowance) {
-            return blocked(AllowanceAccountingBlock::InvalidLifecycle);
-        }
+        let allowance_terms =
+            match accepted_allowance_terms(tx, &key.request, &selected.allowance_id) {
+                Ok(terms) => terms,
+                Err(reason) => return blocked(reason),
+            };
         let Ok(usage) = allowance_usage(state, &key.request, &selected.allowance_id) else {
             return blocked(AllowanceAccountingBlock::ReconciliationRequired);
         };

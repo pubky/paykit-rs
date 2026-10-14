@@ -28,7 +28,9 @@ pub(crate) fn candidates(
             if !valid_request(tx, &scope, &request, true) {
                 Some(AllowanceAccountingBlock::InvalidLifecycle)
             } else {
-                match candidate_check(tx, &scope, &record, &terms, time, previous) {
+                match accepted_terms(tx, &scope, &record)
+                    .and_then(|allowance| check_terms(&allowance, &terms, time, previous))
+                {
                     Ok(endpoints) => {
                         result.eligible_payment_endpoint_identifiers =
                             endpoints.iter().map(|e| e.as_str().to_owned()).collect();
@@ -60,25 +62,6 @@ pub(super) fn static_check(
     check_terms(&terms, request, time, previous)
 }
 
-/// [`static_check`] for a record the caller already derived from link history.
-fn candidate_check(
-    tx: &dyn StorageTransaction,
-    scope: &PaymentAccountingScope,
-    record: &crate::AllowanceRecord,
-    request: &PaymentRequestTerms,
-    time: DateTime<Utc>,
-    previous: DateTime<Utc>,
-) -> std::result::Result<Vec<paykit_lib::PaymentEndpointIdentifier>, AllowanceAccountingBlock> {
-    // Lifecycle comes before the proposal lookup so an unanswered peer
-    // proposal costs no history work and is still InvalidLifecycle.
-    if !valid_allowance(record) {
-        return Err(AllowanceAccountingBlock::InvalidLifecycle);
-    }
-    let terms = proposal_terms(tx, scope, record)
-        .map_err(|_| AllowanceAccountingBlock::InvalidLifecycle)?;
-    check_terms(&terms, request, time, previous)
-}
-
 fn check_terms(
     terms: &AllowanceTerms,
     request: &PaymentRequestTerms,
@@ -87,19 +70,6 @@ fn check_terms(
 ) -> std::result::Result<Vec<paykit_lib::PaymentEndpointIdentifier>, AllowanceAccountingBlock> {
     paykit_lib::check_allowance_time(terms, time, previous).map_err(shared)?;
     paykit_lib::match_allowance_request(terms, request).map_err(shared)
-}
-
-fn accepted_allowance_terms(
-    tx: &dyn StorageTransaction,
-    scope: &PaymentAccountingScope,
-    id: &str,
-) -> std::result::Result<AllowanceTerms, AllowanceAccountingBlock> {
-    let (record, terms) =
-        allowance_terms(tx, scope, id).map_err(|_| AllowanceAccountingBlock::InvalidLifecycle)?;
-    if !valid_allowance(&record) {
-        return Err(AllowanceAccountingBlock::InvalidLifecycle);
-    }
-    Ok(terms)
 }
 
 pub(crate) fn select(
