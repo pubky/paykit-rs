@@ -7,6 +7,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc77 - 2026-10-15
+
 ### Fixed
 
 - Public file and text fetches and URI helpers accept percent-encoded Pubky URIs
