@@ -106,6 +106,7 @@ use crate::{
     },
     domain::recovery::{recovery_marker_report, EncryptedLinkRecoveryMarkerReport},
     identity::{IdentityState, IdentityStatus, PubkyIdentityCapability},
+    pubky_session::decode_pubky_uri,
     storage::{
         outbound_private_queue_head_is_claimable,
         retry_storage_transaction as retry_storage_transaction_with_adapter,
@@ -755,7 +756,7 @@ async fn fetch_public_file_uri(
     context: &'static str,
     max_bytes: usize,
 ) -> Result<Option<Vec<u8>>> {
-    let resource = uri
+    let resource = decode_pubky_uri(uri, context)?
         .parse::<pubky::PubkyResource>()
         .map_err(|err| PaykitSdkError::Protocol {
             context: format!("{context}: invalid Pubky URI: {err}"),

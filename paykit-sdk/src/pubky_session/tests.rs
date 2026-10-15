@@ -79,15 +79,60 @@ fn test_parse_pubky_auth_url_rejects_duplicate_grant_parameters() {
 #[test]
 fn test_parse_pubky_resource_normalizes_uri() {
     let public_key = PubkyLocalSecretKey::new([4; 32]).public_key();
-    let resource = parse_pubky_resource(&format!(
-        "pubky://{}/pub/paykit/profile.json",
-        public_key.as_str()
-    ))
-    .unwrap();
-
-    assert_eq!(resource.public_key, public_key);
-    assert_eq!(resource.path, "/pub/paykit/profile.json");
-    assert!(resource.transport_url.starts_with("https://"));
+    for path in [
+        "/pub/paykit/profile.json",
+        "/pub/dir/100%25%20ready",
+        "/pub/dir/%C3%A9",
+        "/pub/dir/%25C3%25A9",
+        "/pub/dir/%255C",
+        "/pub/dir/%250A",
+        "/pub/dir/a%23b",
+        "/pub/dir/a%3Fb",
+    ] {
+        let uri = format!("pubky://{}{path}", public_key.as_str());
+        let resource = parse_pubky_resource(&uri).unwrap();
+        let transport_url = format!(
+            "https://_pubky.{}/storage/{}{path}",
+            public_key.as_str(),
+            public_key.as_str()
+        );
+        assert_eq!(resource.public_key, public_key);
+        assert_eq!(resource.path, path);
+        assert_eq!(resource.transport_url, transport_url);
+        assert_eq!(resolve_pubky_url(&uri).unwrap(), transport_url);
+    }
+    let names = (b' '..=b'~')
+        .filter(|byte| !matches!(byte, b'/' | b'\\'))
+        .map(|byte| format!("a{}b", char::from(byte)))
+        .chain(["\u{e9}", "\u{6f22}", "%2F", "%09", "%252e%252e"].map(String::from));
+    for name in names {
+        let encoded =
+            percent_encoding::utf8_percent_encode(&name, percent_encoding::NON_ALPHANUMERIC);
+        let path = format!("/pub/dir/{encoded}");
+        for uri in [
+            format!("pubky://{public_key}{path}"),
+            format!("pubky{public_key}{path}"),
+        ] {
+            let parsed = parse_pubky_resource(&uri).unwrap();
+            assert_eq!(parsed.public_key, public_key);
+            assert_eq!(
+                percent_encoding::percent_decode_str(&parsed.path)
+                    .decode_utf8()
+                    .unwrap(),
+                format!("/pub/dir/{name}")
+            );
+            let transport: url::Url = parsed.transport_url.parse().unwrap();
+            assert_eq!(
+                transport.host_str(),
+                Some(format!("_pubky.{public_key}").as_str())
+            );
+            assert_eq!(
+                transport.path(),
+                format!("/storage/{public_key}{}", parsed.path)
+            );
+            assert_eq!(resolve_pubky_url(&uri).unwrap(), parsed.transport_url);
+        }
+    }
 }
 
 #[test]
@@ -104,10 +149,42 @@ fn test_parse_pubky_resource_accepts_pubky_identifier_form() {
 }
 
 #[test]
-fn test_parse_pubky_resource_rejects_missing_path() {
+fn test_pubky_resource_helpers_reject_invalid_uris() {
     let public_key = PubkyLocalSecretKey::new([6; 32]).public_key();
 
-    assert!(parse_pubky_resource(public_key.as_str()).is_err());
+    let mut uris = vec![
+        public_key.as_str().to_string(),
+        format!("pubky://{}/pub/%FF", public_key.as_str()),
+        format!(
+            "pubky://{}/pub/x/..%5C..%5Cpriv%5Csecret",
+            public_key.as_str()
+        ),
+        format!("pubky://{}/pub/x/..\\..\\priv\\secret", public_key.as_str()),
+    ];
+    for byte in (0u8..=0x1f).chain([0x7f]) {
+        uris.push(format!(
+            "pubky://{}/pub/a{}b",
+            public_key.as_str(),
+            char::from(byte)
+        ));
+        uris.push(format!("pubky://{}/pub/a%{byte:02X}b", public_key.as_str()));
+    }
+    for uri in uris {
+        assert!(
+            matches!(
+                parse_pubky_resource(&uri),
+                Err(PaykitSdkError::Protocol { .. })
+            ),
+            "parse accepted {uri:?}"
+        );
+        assert!(
+            matches!(
+                resolve_pubky_url(&uri),
+                Err(PaykitSdkError::Protocol { .. })
+            ),
+            "resolve accepted {uri:?}"
+        );
+    }
 }
 
 #[test]

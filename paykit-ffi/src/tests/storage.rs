@@ -216,6 +216,78 @@ async fn test_contact_batches_validate_before_atomic_write() {
     let state = decode_storage_state(&snapshot.blob.export_bytes()).unwrap();
     assert_eq!(state.linked_peers[&first].state, LinkedPeerState::NotLinked);
     assert_eq!(state.linked_peers[&second].state, LinkedPeerState::Blocked);
+
+    let identity = state
+        .identity_state
+        .as_ref()
+        .unwrap()
+        .public_key
+        .as_ref()
+        .unwrap()
+        .to_app_key();
+    let third = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    for (owner, keys) in [
+        (identity.clone(), vec![third.to_app_key(), "invalid".into()]),
+        ("invalid".into(), vec![third.to_app_key()]),
+        (third.to_app_key(), vec![third.to_app_key()]),
+        (third.to_app_key(), vec![]),
+    ] {
+        assert!(sdk.import_contacts(owner, keys).await.is_err());
+        let unchanged = store.load_state_blob().unwrap().unwrap();
+        assert_eq!(unchanged.blob.export_bytes(), snapshot.blob.export_bytes());
+        assert_eq!(unchanged.revision, snapshot.revision);
+    }
+    store.reject_writes.store(true, Ordering::SeqCst);
+    assert!(sdk
+        .import_contacts(identity.clone(), vec![third.to_app_key()])
+        .await
+        .is_err());
+    assert_eq!(
+        store
+            .load_state_blob()
+            .unwrap()
+            .unwrap()
+            .blob
+            .export_bytes(),
+        snapshot.blob.export_bytes()
+    );
+    store.reject_writes.store(false, Ordering::SeqCst);
+    let keys = vec![
+        first.to_app_key(),
+        second.to_app_key(),
+        third.to_app_key(),
+        third.to_app_key(),
+        identity.clone(),
+    ];
+    let imported = sdk
+        .import_contacts(identity.clone(), keys.clone())
+        .await
+        .unwrap();
+    assert_eq!(imported.len(), 1);
+    assert_eq!(imported[0].public_key, third.to_app_key());
+    assert_eq!(
+        sdk.contact_record(first.to_app_key())
+            .await
+            .unwrap()
+            .unwrap()
+            .label
+            .as_deref(),
+        Some("Restored")
+    );
+    assert!(sdk
+        .contact_record(second.to_app_key())
+        .await
+        .unwrap()
+        .is_none());
+    assert!(sdk
+        .import_contacts(identity, keys)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        store.load_state_blob().unwrap().unwrap().revision,
+        "revision-4"
+    );
 }
 
 #[tokio::test]

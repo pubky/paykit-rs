@@ -239,6 +239,111 @@ async fn test_save_contacts_preserves_input_order_and_existing_metadata() {
 }
 
 #[tokio::test]
+async fn test_import_contacts_preserves_current_labels_blocks_and_metadata() {
+    let local = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let keys: Vec<_> = (0..4)
+        .map(|_| PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()))
+        .collect();
+    let inner = InMemoryStorage::from_state(crate::storage::StorageState {
+        identity_state: Some(IdentityState {
+            public_key: Some(local.clone()),
+            initialized_at: FixedClock.now(),
+        }),
+        ..Default::default()
+    });
+    let transactions = Arc::new(AtomicUsize::new(0));
+    let sdk = PaykitSdk::with_clock(
+        ContactTestStorage {
+            inner: inner.clone(),
+            transactions: transactions.clone(),
+        },
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    // Discovery can precede an explicit contact edit or removal.
+    assert!(sdk.contact_records().await.unwrap().is_empty());
+    let existing = sdk
+        .save_contact(ContactUpdate {
+            public_key: keys[0].clone(),
+            label: Some("My edited label".into()),
+        })
+        .await
+        .unwrap();
+    sdk.save_contact(ContactUpdate {
+        public_key: keys[1].clone(),
+        label: None,
+    })
+    .await
+    .unwrap();
+    sdk.remove_contacts_and_block_peers(vec![keys[1].clone()])
+        .await
+        .unwrap();
+    let before = inner.snapshot().unwrap();
+    transactions.store(0, Ordering::SeqCst);
+    let mut input = keys.clone();
+    input.extend([keys[2].clone(), local.clone()]);
+    let imported = sdk
+        .import_contacts(local.clone(), input.clone())
+        .await
+        .unwrap();
+    assert_eq!(transactions.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        imported
+            .iter()
+            .map(|record| &record.public_key)
+            .collect::<Vec<_>>(),
+        vec![&keys[2], &keys[3]]
+    );
+    assert!(imported.iter().all(|record| record.label.is_none()
+        && record.public_contact_marker_status == PublicationStatus::NotPublished));
+    let after = inner.snapshot().unwrap();
+    let mut expected = before;
+    for record in imported {
+        expected
+            .contact_records
+            .insert(record.public_key.clone(), record);
+    }
+    assert_eq!(after, expected);
+    assert_eq!(after.contact_records[&keys[0]], existing);
+    assert!(!after.contact_records.contains_key(&keys[1]));
+    assert_eq!(after.linked_peers[&keys[1]].state, LinkedPeerState::Blocked);
+    assert!(sdk.import_contacts(local, input).await.unwrap().is_empty());
+    assert_eq!(inner.snapshot().unwrap(), after);
+}
+
+#[tokio::test]
+async fn test_import_contacts_rejects_wrong_or_uninitialized_identity_without_mutation() {
+    let expected = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let other = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    for identity in [None, Some(other.clone())] {
+        let inner = InMemoryStorage::from_state(crate::storage::StorageState {
+            identity_state: identity.map(|public_key| IdentityState {
+                public_key: Some(public_key),
+                initialized_at: FixedClock.now(),
+            }),
+            ..Default::default()
+        });
+        let sdk = PaykitSdk::with_clock(
+            ContactTestStorage {
+                inner: inner.clone(),
+                transactions: Arc::new(AtomicUsize::new(0)),
+            },
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::new("test-app").unwrap(),
+            FixedClock,
+        );
+        let before = inner.snapshot().unwrap();
+        for keys in [vec![], vec![other.clone()]] {
+            assert!(sdk.import_contacts(expected.clone(), keys).await.is_err());
+            assert_eq!(inner.snapshot().unwrap(), before);
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_save_contacts_61_records_use_one_transaction() {
     let inner = InMemoryStorage::from_state(crate::storage::StorageState {
         identity_state: Some(IdentityState {

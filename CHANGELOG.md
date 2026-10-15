@@ -7,8 +7,69 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0-rc77 - 2026-10-15
+
+### Fixed
+
+- Public file and text fetches and URI helpers accept percent-encoded Pubky URIs
+  returned by directory listings, including paths with spaces, Unicode and literal
+  percent signs, without encoding them a second time.
+
+### Security
+
+- Public Pubky URI parsing, resolution, listing, file fetches and Paykit blob
+  deletion reject decoded backslashes and ASCII control characters instead of
+  allowing URL parsing to reinterpret the requested resource.
+- Parse errors for a counterparty's public Encrypted Link recovery marker and
+  for any identity's public Paykit App Registry no longer echo the remote
+  document (the marker or registry `kind`, App IDs, Payment Endpoint Identifier
+  keys, and serde error fragments quoting the JSON) into
+  `PaykitSdkError::LinkObservation` or `Protocol` contexts, generated
+  Swift/Kotlin exception messages, or the private receive intake report. The
+  contexts are now static labels and the serde cause is dropped.
+- Payment Request and Payment Proof validation errors no longer echo decrypted
+  field values. The unsupported Recurrence unit error is now static, and the
+  Payment Endpoint Identifier forbidden-character error reports only the code
+  point and byte offset instead of the character and the whole identifier.
+  Event ID and Payment Request ID errors no longer include the UUID parser's
+  text either, so their wording cannot depend on that crate. So text a
+  counterparty sends over the Encrypted Link no longer reaches
+  `validation_error()`, the persisted parse error, or the `invalid_reason`
+  field the bindings expose. The same messages are rejected as before, with
+  the same error variants.
+
+## 0.1.0-rc76 - 2026-10-14
+
+### Fixed
+
+- Public directory pagination preserves percent-encoded paths and cursors and
+  checks progress using decoded storage-path byte order, matching Homeserver
+  listings for non-ASCII names and literal percent signs.
+
+### Security
+
+- `evaluate_allowance_candidates` derives a counterparty's Allowance history
+  once per call instead of once per Allowance, so each unanswered Allowance
+  proposal a counterparty sends no longer adds a full pass over that history
+  to every evaluation. Results and watermarks are unchanged.
+- Validating the wallet accounting ledger took time quadratic in its size, and a
+  linked counterparty can add Allowance watermark rows without a user decision.
+  Validation, which runs whenever stored SDK state is loaded or saved, and the
+  watermark merge on reconcile and backup restore now take linear time.
+
+## 0.1.0-rc75 - 2026-10-14
+
 ### Added
 
+- `list_pubky_directory_page` in Rust and `listPubkyDirectoryPage` in Swift and
+  Kotlin for bounded, shallow public-directory pages with validated cursors.
+  Continue until an empty page and restart to discover earlier insertions;
+  the entry limit does not bound Pubky's response buffering.
+- `import_contacts` in Rust and `importContacts` in Swift and Kotlin to atomically
+  add missing, unblocked contacts for an expected identity. Existing labels and
+  metadata are preserved; retained peer blocks prevent removed contacts from
+  being re-added. No markers are published, peers unblocked or payments approved.
+  Apps mocking the generated SDK interface must implement both new methods.
 - Provided method `StorageTransaction::has_payment_request_execution_claims`,
   which reports whether any Payment Request execution claim is held for one
   counterparty. It has a default, so existing implementors keep compiling, but
@@ -28,31 +89,6 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   the wallet pays), intake still re-derives that history, intake still copies
   the counterparty's stream items and outbound messages, and storage adapters
   that load or save the whole state do so in each transaction.
-- `evaluate_allowance_candidates` derives a counterparty's Allowance history
-  once per call instead of once per Allowance, so each unanswered Allowance
-  proposal a counterparty sends no longer adds a full pass over that history
-  to every evaluation. Results and watermarks are unchanged.
-- Validating the wallet accounting ledger took time quadratic in its size, and a
-  linked counterparty can add Allowance watermark rows without a user decision.
-  Validation, which runs whenever stored SDK state is loaded or saved, and the
-  watermark merge on reconcile and backup restore now take linear time.
-- Parse errors for a counterparty's public Encrypted Link recovery marker and
-  for any identity's public Paykit App Registry no longer echo the remote
-  document (the marker or registry `kind`, App IDs, Payment Endpoint Identifier
-  keys, and serde error fragments quoting the JSON) into
-  `PaykitSdkError::LinkObservation` or `Protocol` contexts, generated
-  Swift/Kotlin exception messages, or the private receive intake report. The
-  contexts are now static labels and the serde cause is dropped.
-- Payment Request and Payment Proof validation errors no longer echo decrypted
-  field values. The unsupported Recurrence unit error is now static, and the
-  Payment Endpoint Identifier forbidden-character error reports only the code
-  point and byte offset instead of the character and the whole identifier.
-  Event ID and Payment Request ID errors no longer include the UUID parser's
-  text either, so their wording cannot depend on that crate. So text a
-  counterparty sends over the Encrypted Link no longer reaches
-  `validation_error()`, the persisted parse error, or the `invalid_reason`
-  field the bindings expose. The same messages are rejected as before, with
-  the same error variants.
 
 ## 0.1.0-rc74 - 2026-10-12
 

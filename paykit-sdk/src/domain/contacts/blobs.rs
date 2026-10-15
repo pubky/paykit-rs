@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{PaykitSdkError, PubkyPublicKey, Result};
+use crate::{pubky_session::decode_pubky_uri, PaykitSdkError, PubkyPublicKey, Result};
 
 pub(crate) const PAYKIT_PROFILE_BLOB_PATH_PREFIX: &str = "/pub/paykit/blobs/";
 const MAX_PAYKIT_BLOB_NAME_BYTES: usize = 128;
@@ -67,12 +67,12 @@ pub(crate) fn paykit_blob_path_from_uri_or_path(
     uri_or_path: &str,
 ) -> Result<String> {
     if uri_or_path.starts_with("pubky://") || uri_or_path.starts_with("pubky") {
-        let resource = uri_or_path.parse::<pubky::PubkyResource>().map_err(|err| {
-            PaykitSdkError::Protocol {
+        let resource = decode_pubky_uri(uri_or_path, "parse Paykit blob URI")?
+            .parse::<pubky::PubkyResource>()
+            .map_err(|err| PaykitSdkError::Protocol {
                 context: format!("invalid Pubky blob URI: {err}"),
                 source: None,
-            }
-        })?;
+            })?;
         let owner = PubkyPublicKey::from_public_key(&resource.owner);
         if &owner != public_key {
             return Err(PaykitSdkError::Protocol {

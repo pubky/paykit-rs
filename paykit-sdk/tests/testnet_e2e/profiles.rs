@@ -8,6 +8,131 @@ use paykit_sdk::{
 use crate::harness::{two_party, TestnetSessionProvider};
 
 #[tokio::test]
+async fn test_public_directory_pages_cover_all_entries_and_missing_directories() {
+    let pair = two_party().await;
+    let path = "/pub/paykit/page-test-\u{e9}/";
+    let resource = pubky::PubkyResource::new(pair.alice.access.session.public_key(), path).unwrap();
+    let root = resource.to_pubky_url();
+    let mut names: Vec<_> = (0..99).map(|index| format!("{index:03}.json")).collect();
+    names.extend(
+        [
+            "a",
+            "z",
+            "\u{e9}",
+            "\u{ea}",
+            "100% ready",
+            "%C3%A9",
+            "%5C",
+            "%0A",
+            "a#b",
+            "a?b",
+        ]
+        .map(String::from),
+    );
+    names.sort();
+    let session = &pair.alice.access.session;
+    let bearer = session.as_grant().unwrap().current_bearer().await;
+    let mut expected = Vec::new();
+    let mut contents = Vec::new();
+    for name in names {
+        let body = format!("contents for {name}");
+        let entry =
+            pubky::PubkyResource::new(resource.owner.clone(), format!("{path}{name}")).unwrap();
+        // SessionStorage re-encodes ResourcePath; write the intended Unicode fixture directly.
+        session
+            .client()
+            .request_async(reqwest::Method::PUT, entry.to_transport_url().unwrap())
+            .await
+            .unwrap()
+            .bearer_auth(&bearer)
+            .body(body.clone())
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        expected.push(entry.to_pubky_url());
+        contents.push((
+            body,
+            entry.path.as_str().to_string(),
+            entry.to_transport_url().unwrap(),
+        ));
+    }
+    let mut found = Vec::new();
+    loop {
+        let page = pair
+            .bob
+            .sdk
+            .list_pubky_directory_page(&root, found.last().map(String::as_str), 100)
+            .await
+            .unwrap();
+        if page.is_empty() {
+            break;
+        }
+        assert!(page.len() <= 100);
+        found.extend(page);
+        assert!(found.len() <= expected.len());
+    }
+    assert_eq!(found, expected);
+    for (uri, (body, path, transport_url)) in found.iter().zip(contents) {
+        let parsed = paykit_sdk::parse_pubky_resource(uri).unwrap();
+        let resolved = paykit_sdk::resolve_pubky_url(uri).unwrap();
+        assert_eq!(parsed.public_key, pair.alice.public_key);
+        assert_eq!(parsed.path, path);
+        assert_eq!(parsed.transport_url, transport_url.as_str());
+        assert_eq!(resolved, transport_url.as_str());
+        let response = pair
+            .bob
+            .access
+            .session
+            .client()
+            .request_async(reqwest::Method::GET, resolved.parse().unwrap())
+            .await
+            .unwrap()
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(response.bytes().await.unwrap().as_ref(), body.as_bytes());
+        assert_eq!(
+            pair.bob
+                .sdk
+                .fetch_pubky_file(uri, body.len())
+                .await
+                .unwrap(),
+            Some(body.as_bytes().to_vec()),
+            "fetch bytes from listed URI {uri}"
+        );
+        assert_eq!(
+            pair.bob
+                .sdk
+                .fetch_pubky_file_bounded(uri, body.len() as u64)
+                .await
+                .unwrap(),
+            Some(body.as_bytes().to_vec()),
+            "fetch bounded bytes from listed URI {uri}"
+        );
+        assert_eq!(
+            pair.bob
+                .sdk
+                .fetch_pubky_text(uri, body.len())
+                .await
+                .unwrap(),
+            Some(body),
+            "fetch text from listed URI {uri}"
+        );
+    }
+    assert!(pair
+        .bob
+        .sdk
+        .list_pubky_directory_page(&format!("{root}missing/"), None, 10)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
 async fn test_public_contact_markers_serialize_intent_and_recheck_pending_work() {
     let pair = two_party().await;
     let mut config = PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap();
@@ -160,8 +285,70 @@ async fn test_paykit_profile_publish_and_fetch_roundtrip() {
 }
 
 #[tokio::test]
-async fn test_public_file_fetch_enforces_caller_and_sdk_limits() {
+async fn test_paykit_blob_delete_rejects_ambiguous_uris_without_removing_blob() {
     let pair = two_party().await;
+    let blob = pair
+        .alice
+        .sdk
+        .publish_paykit_blob("ab".into(), b"preserved".to_vec())
+        .await
+        .unwrap();
+    let prefix = blob.uri.strip_suffix("ab").unwrap();
+    for separator in ["\t", "\n", "\r", "%09", "%0A", "%0D"] {
+        let uri = format!("{prefix}a{separator}b");
+        let result = pair.alice.sdk.delete_paykit_blob(&uri).await;
+        assert_eq!(
+            pair.bob.sdk.fetch_pubky_file(&blob.uri, 9).await.unwrap(),
+            Some(b"preserved".to_vec()),
+            "malformed URI must not delete the stored blob: {uri:?}"
+        );
+        assert!(matches!(
+            result,
+            Err(paykit_sdk::PaykitSdkError::Protocol { .. })
+        ));
+    }
+    assert!(matches!(
+        pair.bob.sdk.delete_paykit_blob(&blob.uri).await,
+        Err(paykit_sdk::PaykitSdkError::Protocol { .. })
+    ));
+    assert_eq!(
+        pair.bob.sdk.fetch_pubky_file(&blob.uri, 9).await.unwrap(),
+        Some(b"preserved".to_vec())
+    );
+    pair.alice
+        .sdk
+        .delete_paykit_blob(&format!("{prefix}%61%62"))
+        .await
+        .unwrap();
+    assert_eq!(
+        pair.bob.sdk.fetch_pubky_file(&blob.uri, 9).await.unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn test_public_file_fetch_validates_uris_and_body_limits() {
+    let pair = two_party().await;
+    for path in ["%FF", "x/..%5C..%5Cpriv%5Csecret", "a%0Ab"] {
+        let invalid_uri = format!("pubky://{}/pub/{path}", pair.alice.public_key);
+        for result in [
+            pair.bob.sdk.fetch_pubky_file(&invalid_uri, 10).await,
+            pair.bob
+                .sdk
+                .fetch_pubky_file_bounded(&invalid_uri, 10)
+                .await,
+            pair.bob
+                .sdk
+                .fetch_pubky_text(&invalid_uri, 10)
+                .await
+                .map(|text| text.map(String::into_bytes)),
+        ] {
+            assert!(matches!(
+                result.unwrap_err(),
+                paykit_sdk::PaykitSdkError::Protocol { .. }
+            ));
+        }
+    }
     let blob = pair
         .alice
         .sdk

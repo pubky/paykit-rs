@@ -36,7 +36,7 @@ const GRANT_REVOCATION_MAX_ATTEMPTS: usize = 4;
 pub struct PubkyResourceRef {
     /// Resource owner.
     pub public_key: PubkyPublicKey,
-    /// Absolute resource path.
+    /// Absolute resource path with canonical percent-encoding.
     pub path: String,
     /// Transport URL resolved by the Pubky client.
     pub transport_url: String,
@@ -819,8 +819,13 @@ pub fn parse_pubky_auth_url(auth_url: &str) -> Result<PubkyAuthDetails> {
 }
 
 /// Resolve a Pubky URI into the transport URL used by Pubky storage.
+///
+/// Pass percent-encoded URI paths unchanged, including URIs returned by directory
+/// listings. Use `%20` for a space and `%25` for a literal percent sign.
+/// Decoded backslashes and ASCII control characters are rejected because URL
+/// parsing can reinterpret them and change the addressed resource.
 pub fn resolve_pubky_url(uri: &str) -> Result<String> {
-    pubky::resolve_pubky(uri)
+    pubky::resolve_pubky(decode_pubky_uri(uri, "resolve Pubky URI")?)
         .map(|url| url.to_string())
         .map_err(|err| PaykitSdkError::Protocol {
             context: format!("invalid Pubky URI: {err}"),
@@ -829,11 +834,15 @@ pub fn resolve_pubky_url(uri: &str) -> Result<String> {
 }
 
 /// Parse a `pubky://<public-key>/<path>` resource into stable parts.
+///
+/// Accepts the same percent-encoded URI convention as [`resolve_pubky_url`].
+/// The returned path remains percent-encoded; do not encode it a second time.
 pub fn parse_pubky_resource(uri: &str) -> Result<PubkyResourceRef> {
-    let resource = PubkyResource::from_str(uri).map_err(|err| PaykitSdkError::Protocol {
-        context: format!("invalid Pubky resource: {err}"),
-        source: None,
-    })?;
+    let resource = PubkyResource::from_str(&decode_pubky_uri(uri, "parse Pubky resource")?)
+        .map_err(|err| PaykitSdkError::Protocol {
+            context: format!("invalid Pubky resource: {err}"),
+            source: None,
+        })?;
     let public_key = PubkyPublicKey::from_public_key(&resource.owner);
     let path = resource.path.as_str().to_string();
     let normalized = resource.to_pubky_url();
@@ -842,6 +851,32 @@ pub fn parse_pubky_resource(uri: &str) -> Result<PubkyResourceRef> {
         path,
         transport_url: resolve_pubky_url(&normalized)?,
     })
+}
+
+pub(crate) fn decode_pubky_uri<'a>(
+    uri: &'a str,
+    context: &'static str,
+) -> Result<std::borrow::Cow<'a, str>> {
+    // PubkyResource expects raw paths and percent-encodes them during parsing.
+    let decoded = percent_encoding::percent_decode_str(uri)
+        .decode_utf8()
+        .map_err(|_| PaykitSdkError::Protocol {
+            context: format!("{context}: URI must contain valid UTF-8"),
+            source: None,
+        })?;
+    // Pubky and HTTPS URL parsing must agree on path separators and characters.
+    if decoded
+        .bytes()
+        .any(|byte| byte == b'\\' || byte.is_ascii_control())
+    {
+        return Err(PaykitSdkError::Protocol {
+            context: format!(
+                "{context}: URI must not contain backslashes or ASCII control characters"
+            ),
+            source: None,
+        });
+    }
+    Ok(decoded)
 }
 
 async fn session_result(
