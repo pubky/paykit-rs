@@ -36,6 +36,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   linked counterparty can add Allowance watermark rows without a user decision.
   Validation, which runs whenever stored SDK state is loaded or saved, and the
   watermark merge on reconcile and backup restore now take linear time.
+- Parse errors for a counterparty's public Encrypted Link recovery marker and
+  for any identity's public Paykit App Registry no longer echo the remote
+  document (the marker or registry `kind`, App IDs, Payment Endpoint Identifier
+  keys, and serde error fragments quoting the JSON) into
+  `PaykitSdkError::LinkObservation` or `Protocol` contexts, generated
+  Swift/Kotlin exception messages, or the private receive intake report. The
+  contexts are now static labels and the serde cause is dropped.
 - Payment Request and Payment Proof validation errors no longer echo decrypted
   field values. The unsupported Recurrence unit error is now static, and the
   Payment Endpoint Identifier forbidden-character error reports only the code

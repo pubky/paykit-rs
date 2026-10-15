@@ -41,6 +41,27 @@ fn registry() -> PaykitAppRegistry {
     registry
 }
 
+fn registry_json_with(edit: impl FnOnce(&mut serde_json::Value)) -> String {
+    let mut document: serde_json::Value =
+        serde_json::from_str(&serialize_paykit_app_registry(&registry()).unwrap()).unwrap();
+    edit(&mut document);
+    document.to_string()
+}
+
+fn assert_registry_error_redacts(raw: &str, expected_context: &str, sentinel: &str) -> PaykitError {
+    let error = parse_paykit_app_registry_json(raw).unwrap_err();
+    assert!(
+        matches!(error, PaykitError::InvalidData { .. }),
+        "{error:?}"
+    );
+    let message = error.to_string();
+    assert!(message.contains(expected_context), "{message:?}");
+    assert!(!message.contains(sentinel), "{message:?}");
+    assert!(!message.chars().any(char::is_control), "{message:?}");
+    assert!(!format!("{error:?}").contains(sentinel), "{error:?}");
+    error
+}
+
 #[test]
 fn test_app_registry_json_round_trips() {
     let registry = registry();
@@ -129,6 +150,73 @@ fn test_remote_registry_reports_invalid_app_without_noise_key() {
 
     assert!(message.contains("invalid application"));
     assert!(!message.contains("too many applications"));
+}
+
+#[test]
+fn test_app_registry_parse_errors_redact_remote_payload() {
+    let sentinel = "SENTINEL_REMOTE_REGISTRY";
+    let payload = format!("{sentinel}\n\u{1b}");
+    let app = json!({ "display_name": "Bitkit", "capabilities": capabilities() });
+    let redacted_cases = [
+        (
+            "JSON is invalid",
+            registry_json_with(|doc| doc["version"] = json!(payload)),
+        ),
+        (
+            "JSON is invalid",
+            registry_json_with(|doc| doc[payload.as_str()] = json!(1)),
+        ),
+        (
+            "version/kind",
+            registry_json_with(|doc| doc["kind"] = json!(payload)),
+        ),
+        (
+            "invalid App ID",
+            registry_json_with(|doc| doc["apps"][payload.as_str()] = app),
+        ),
+        (
+            "invalid App ID",
+            registry_json_with(|doc| doc["default_app_id"] = json!(payload)),
+        ),
+        (
+            "invalid Payment Endpoint Identifier",
+            registry_json_with(|doc| {
+                doc["default_apps_by_endpoint"][payload.as_str()] = json!("bitkit")
+            }),
+        ),
+        (
+            "invalid App ID",
+            registry_json_with(|doc| {
+                doc["default_apps_by_endpoint"]["btc-lightning-bolt11"] = json!(payload)
+            }),
+        ),
+        (
+            "unregistered App ID",
+            registry_json_with(|doc| doc["default_apps_by_endpoint"][sentinel] = json!("ghost")),
+        ),
+    ];
+    // These checks keep an upstream cause whose Display is static text.
+    let static_cause_cases = [
+        (
+            "Noise public key is invalid",
+            registry_json_with(|doc| doc["noise_public_key"] = json!(payload)),
+        ),
+        (
+            "display name",
+            registry_json_with(|doc| doc["apps"]["bitkit"]["display_name"] = json!(payload)),
+        ),
+    ];
+
+    for (expected_context, raw) in redacted_cases {
+        let error = assert_registry_error_redacts(&raw, expected_context, sentinel);
+        assert!(
+            matches!(error, PaykitError::InvalidData { source: None, .. }),
+            "{error:?}"
+        );
+    }
+    for (expected_context, raw) in static_cause_cases {
+        assert_registry_error_redacts(&raw, expected_context, sentinel);
+    }
 }
 
 #[test]
