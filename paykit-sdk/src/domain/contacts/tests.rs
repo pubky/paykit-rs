@@ -392,15 +392,16 @@ fn test_paykit_blob_path_from_uri_or_path_accepts_owned_blob_only() {
         .unwrap(),
         "/pub/paykit/blobs/avatar.jpg"
     );
-    assert_eq!(
-        paykit_blob_path_from_uri_or_path(
-            &owner_public_key,
-            &prefix,
-            &format!("pubky://{}/pub/paykit/blobs/avatar.jpg", owner_public_key)
-        )
-        .unwrap(),
-        "/pub/paykit/blobs/avatar.jpg"
-    );
+    for uri in [
+        format!("pubky://{owner_public_key}/pub/paykit/blobs/avatar.jpg"),
+        format!("pubky{owner_public_key}/pub/paykit/blobs/avatar.jpg"),
+        format!("pubky://{owner_public_key}/pub/paykit/blobs/%61vatar%2Ejpg"),
+    ] {
+        assert_eq!(
+            paykit_blob_path_from_uri_or_path(&owner_public_key, &prefix, &uri).unwrap(),
+            "/pub/paykit/blobs/avatar.jpg"
+        );
+    }
     assert!(matches!(
         paykit_blob_path_from_uri_or_path(
             &owner_public_key,
@@ -413,6 +414,45 @@ fn test_paykit_blob_path_from_uri_or_path_accepts_owned_blob_only() {
         paykit_blob_path_from_uri_or_path(&owner_public_key, &prefix, &paykit_profile_path()),
         Err(PaykitSdkError::Protocol { .. })
     ));
+    for name in [
+        "%61vatar.jpg",
+        "%2561vatar.jpg",
+        "%2e%2e",
+        "a%2Fb",
+        "a%3Fb",
+        "a%23b",
+    ] {
+        let path = format!("{prefix}{name}");
+        assert!(paykit_blob_path_from_uri_or_path(&owner_public_key, &prefix, &path).is_err());
+    }
+    for name in ["%2561vatar.jpg", "%2e%2e", "a%2Fb", "a%3Fb", "a%23b"] {
+        let uri = format!("pubky://{owner_public_key}{prefix}{name}");
+        assert!(paykit_blob_path_from_uri_or_path(&owner_public_key, &prefix, &uri).is_err());
+    }
+}
+
+#[test]
+fn test_paykit_blob_uri_rejects_ambiguous_characters() {
+    let owner = public_key();
+    let prefix = paykit_blob_prefix();
+    for byte in (0u8..=0x1f).chain([0x7f, b'\\']) {
+        for name in [format!("a{}b", char::from(byte)), format!("a%{byte:02X}b")] {
+            let path = format!("{prefix}{name}");
+            for input in [
+                path.clone(),
+                format!("pubky://{owner}{path}"),
+                format!("pubky{owner}{path}"),
+            ] {
+                assert!(
+                    matches!(
+                        paykit_blob_path_from_uri_or_path(&owner, &prefix, &input),
+                        Err(PaykitSdkError::Protocol { .. })
+                    ),
+                    "accepted ambiguous blob input {input:?}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

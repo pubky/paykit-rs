@@ -285,6 +285,48 @@ async fn test_paykit_profile_publish_and_fetch_roundtrip() {
 }
 
 #[tokio::test]
+async fn test_paykit_blob_delete_rejects_ambiguous_uris_without_removing_blob() {
+    let pair = two_party().await;
+    let blob = pair
+        .alice
+        .sdk
+        .publish_paykit_blob("ab".into(), b"preserved".to_vec())
+        .await
+        .unwrap();
+    let prefix = blob.uri.strip_suffix("ab").unwrap();
+    for separator in ["\t", "\n", "\r", "%09", "%0A", "%0D"] {
+        let uri = format!("{prefix}a{separator}b");
+        let result = pair.alice.sdk.delete_paykit_blob(&uri).await;
+        assert_eq!(
+            pair.bob.sdk.fetch_pubky_file(&blob.uri, 9).await.unwrap(),
+            Some(b"preserved".to_vec()),
+            "malformed URI must not delete the stored blob: {uri:?}"
+        );
+        assert!(matches!(
+            result,
+            Err(paykit_sdk::PaykitSdkError::Protocol { .. })
+        ));
+    }
+    assert!(matches!(
+        pair.bob.sdk.delete_paykit_blob(&blob.uri).await,
+        Err(paykit_sdk::PaykitSdkError::Protocol { .. })
+    ));
+    assert_eq!(
+        pair.bob.sdk.fetch_pubky_file(&blob.uri, 9).await.unwrap(),
+        Some(b"preserved".to_vec())
+    );
+    pair.alice
+        .sdk
+        .delete_paykit_blob(&format!("{prefix}%61%62"))
+        .await
+        .unwrap();
+    assert_eq!(
+        pair.bob.sdk.fetch_pubky_file(&blob.uri, 9).await.unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
 async fn test_public_file_fetch_validates_uris_and_body_limits() {
     let pair = two_party().await;
     for path in ["%FF", "x/..%5C..%5Cpriv%5Csecret", "a%0Ab"] {

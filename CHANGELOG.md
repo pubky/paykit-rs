@@ -15,9 +15,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Security
 
-- Public Pubky URI parsing, resolution, listing and file fetches reject decoded
-  backslashes and ASCII control characters instead of allowing URL parsing to
-  reinterpret the requested resource.
+- Public Pubky URI parsing, resolution, listing, file fetches and Paykit blob
+  deletion reject decoded backslashes and ASCII control characters instead of
+  allowing URL parsing to reinterpret the requested resource.
 - Parse errors for a counterparty's public Encrypted Link recovery marker and
   for any identity's public Paykit App Registry no longer echo the remote
   document (the marker or registry `kind`, App IDs, Payment Endpoint Identifier

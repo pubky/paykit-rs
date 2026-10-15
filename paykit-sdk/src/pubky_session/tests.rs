@@ -101,6 +101,38 @@ fn test_parse_pubky_resource_normalizes_uri() {
         assert_eq!(resource.transport_url, transport_url);
         assert_eq!(resolve_pubky_url(&uri).unwrap(), transport_url);
     }
+    let names = (b' '..=b'~')
+        .filter(|byte| !matches!(byte, b'/' | b'\\'))
+        .map(|byte| format!("a{}b", char::from(byte)))
+        .chain(["\u{e9}", "\u{6f22}", "%2F", "%09", "%252e%252e"].map(String::from));
+    for name in names {
+        let encoded =
+            percent_encoding::utf8_percent_encode(&name, percent_encoding::NON_ALPHANUMERIC);
+        let path = format!("/pub/dir/{encoded}");
+        for uri in [
+            format!("pubky://{public_key}{path}"),
+            format!("pubky{public_key}{path}"),
+        ] {
+            let parsed = parse_pubky_resource(&uri).unwrap();
+            assert_eq!(parsed.public_key, public_key);
+            assert_eq!(
+                percent_encoding::percent_decode_str(&parsed.path)
+                    .decode_utf8()
+                    .unwrap(),
+                format!("/pub/dir/{name}")
+            );
+            let transport: url::Url = parsed.transport_url.parse().unwrap();
+            assert_eq!(
+                transport.host_str(),
+                Some(format!("_pubky.{public_key}").as_str())
+            );
+            assert_eq!(
+                transport.path(),
+                format!("/storage/{public_key}{}", parsed.path)
+            );
+            assert_eq!(resolve_pubky_url(&uri).unwrap(), parsed.transport_url);
+        }
+    }
 }
 
 #[test]

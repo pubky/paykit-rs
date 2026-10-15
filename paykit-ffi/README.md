@@ -201,6 +201,11 @@ error, whether supplied raw or percent-encoded, to prevent URL parsing from
 changing the addressed resource. Literal text such as `%5C` remains valid when
 supplied as `%255C`.
 
+`deletePaykitBlob` applies the same URI decoding and character validation before
+checking the owner, Paykit blob prefix and restricted blob name. Its alternative
+raw storage-path input is not URI-decoded. Neither form permits control
+characters, backslashes or path traversal.
+
 `fetchPubkyFile(uri, maxBytes)` and `fetchPubkyText(uri, maxBytes)` require a
 positive byte limit. `fetchPubkyFileBounded(uri, maxBytes)` additionally caps
 the limit at 5 MiB and permits zero for an empty body. Missing files return

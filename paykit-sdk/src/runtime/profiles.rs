@@ -148,6 +148,10 @@ where
     }
 
     /// Delete a public blob from the identity-wide Paykit blob prefix.
+    ///
+    /// Accepts a percent-encoded Pubky URI or a raw storage path. URI decoding
+    /// rejects backslashes and ASCII controls before parsing. Both forms must
+    /// retain a valid blob name, and URI owners must match the local identity.
     pub async fn delete_paykit_blob(&self, uri_or_path: &str) -> Result<()> {
         let session_access = self
             .load_session_access_for_initialized_identity("delete Paykit blob")
@@ -583,6 +587,13 @@ mod directory_tests {
             );
         }
         assert!(public_directory_request(&root, Some(&format!("{root}nested%2Fa")), 2).is_err());
+        for byte in (0u8..=0x1f).chain([0x7f, b'\\']) {
+            for name in [format!("a{}b", char::from(byte)), format!("a%{byte:02X}b")] {
+                let entry = format!("{root}{name}");
+                assert!(public_directory_request(&format!("{entry}/"), None, 2).is_err());
+                assert!(public_directory_request(&root, Some(&entry), 2).is_err());
+            }
+        }
         for entries in [
             vec![first.clone()],
             vec![second.clone(), first.clone()],
