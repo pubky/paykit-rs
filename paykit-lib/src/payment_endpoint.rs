@@ -70,9 +70,12 @@ impl PaymentEndpointIdentifier {
             .char_indices()
             .find(|&(_, ch)| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.'))
         {
+            // SECURITY / REDACTION: the identifier can come from decrypted
+            // private-message plaintext or remote public data. Report only the
+            // code point and byte offset, as `PaymentReference::new` does.
             return Err(PaykitError::Validation(format!(
-                "PaymentEndpointIdentifier contains forbidden character '{}' at byte {pos} in \"{id}\"",
-                ch
+                "PaymentEndpointIdentifier contains forbidden character U+{:04X} at byte {pos}",
+                ch as u32
             )));
         }
 
@@ -558,6 +561,18 @@ mod validation_tests {
     fn test_payment_endpoint_identifier_reject_reserved_values() {
         let err = PaymentEndpointIdentifier::new("private").unwrap_err();
         assert!(matches!(err, PaykitError::Validation(msg) if msg.contains("reserved")));
+    }
+
+    #[test]
+    fn test_payment_endpoint_identifier_forbidden_character_error_redacts_value() {
+        let err = PaymentEndpointIdentifier::new("evil_SENTINEL\tid").unwrap_err();
+        assert!(
+            matches!(&err, PaykitError::Validation(msg)
+                if msg.contains("U+0009 at byte 13")
+                    && !msg.contains("SENTINEL")
+                    && !msg.contains('\t')),
+            "{err:?}"
+        );
     }
 
     // ── PaymentEndpointPayload: basic accessors ───────────────────────────────────

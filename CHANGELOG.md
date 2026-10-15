@@ -43,6 +43,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `PaykitSdkError::LinkObservation` or `Protocol` contexts, generated
   Swift/Kotlin exception messages, or the private receive intake report. The
   contexts are now static labels and the serde cause is dropped.
+- Payment Request and Payment Proof validation errors no longer echo decrypted
+  field values. The unsupported Recurrence unit error is now static, and the
+  Payment Endpoint Identifier forbidden-character error reports only the code
+  point and byte offset instead of the character and the whole identifier.
+  Event ID and Payment Request ID errors no longer include the UUID parser's
+  text either, so their wording cannot depend on that crate. So text a
+  counterparty sends over the Encrypted Link no longer reaches
+  `validation_error()`, the persisted parse error, or the `invalid_reason`
+  field the bindings expose. The same messages are rejected as before, with
+  the same error variants.
 
 ## 0.1.0-rc74 - 2026-10-12
 
