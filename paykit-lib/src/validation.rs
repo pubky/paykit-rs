@@ -1,9 +1,11 @@
 use crate::{PaykitError, PrivateMessageKind, Result};
 
 pub(crate) fn validate_uuid_v4(value: String, label: &'static str) -> Result<String> {
-    let uuid = uuid::Uuid::try_parse(&value).map_err(|err| {
-        PaykitError::Validation(format!("{label} must be a UUID v4 string: {err}"))
-    })?;
+    // SECURITY / REDACTION: callers pass decrypted private-message fields (Event IDs,
+    // Payment Request IDs) and public data, and this text reaches persisted and FFI-visible
+    // errors, so the uuid error's Display is left out: it must never carry input characters.
+    let uuid = uuid::Uuid::try_parse(&value)
+        .map_err(|_| PaykitError::Validation(format!("{label} must be a UUID v4 string")))?;
     if uuid.get_version_num() != 4 || uuid.get_variant() != uuid::Variant::RFC4122 {
         return Err(PaykitError::Validation(format!(
             "{label} must be an RFC4122 UUID v4 string"
