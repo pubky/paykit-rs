@@ -353,9 +353,9 @@ pub fn serialize_paykit_app_registry(registry: &PaykitAppRegistry) -> Result<Str
 pub fn parse_paykit_app_registry_json(raw_json: &str) -> Result<PaykitAppRegistry> {
     // SECURITY / REDACTION: the registry is any identity's public data, and
     // payment resolution carries these error contexts into FFI exception text.
-    // Contexts hold only static labels and already-validated IDs. A cause is
-    // kept only when its Display is static, so serde errors (which quote the
-    // JSON) are dropped.
+    // Every context on this path is a static label. Serde errors quote the JSON
+    // and identifier validators may echo the value, so those causes are
+    // dropped; the causes kept below have static Displays.
     if raw_json.len() > PAYKIT_APP_REGISTRY_MAX_BYTES {
         return Err(invalid_data(
             format!("Paykit App Registry exceeds {PAYKIT_APP_REGISTRY_MAX_BYTES} bytes"),
@@ -424,7 +424,7 @@ pub fn parse_paykit_app_registry_json(raw_json: &str) -> Result<PaykitAppRegistr
 
     registry.default_app_id = wire.default_app_id.map(parse_remote_app_id).transpose()?;
     for (raw_identifier, raw_app_id) in wire.default_apps_by_endpoint {
-        let identifier = PaymentEndpointIdentifier::new(&raw_identifier).map_err(|_| {
+        let identifier = PaymentEndpointIdentifier::new(raw_identifier).map_err(|_| {
             invalid_data(
                 "Paykit App Registry contains an invalid Payment Endpoint Identifier",
                 None,
@@ -529,12 +529,8 @@ fn validate_registry_defaults(registry: &PaykitAppRegistry) -> Result<()> {
     if let Some(app_id) = registry.default_app_id() {
         validate_registered_default(registry, app_id, "identity default")?;
     }
-    for (identifier, app_id) in registry.default_apps_by_endpoint() {
-        validate_registered_default(
-            registry,
-            app_id,
-            &format!("default for Payment Endpoint Identifier '{identifier}'"),
-        )?;
+    for app_id in registry.default_apps_by_endpoint().values() {
+        validate_registered_default(registry, app_id, "endpoint default")?;
     }
     Ok(())
 }
@@ -571,13 +567,13 @@ fn app_uses_private_protocol(capabilities: PaykitAppCapabilities) -> bool {
 fn validate_registered_default(
     registry: &PaykitAppRegistry,
     app_id: &PaykitAppId,
-    label: &str,
+    label: &'static str,
 ) -> Result<()> {
     if registry.apps.contains_key(app_id) {
         return Ok(());
     }
     Err(invalid_data(
-        format!("Paykit App Registry {label} refers to unregistered App ID '{app_id}'"),
+        format!("Paykit App Registry {label} refers to an unregistered App ID"),
         None,
     ))
 }

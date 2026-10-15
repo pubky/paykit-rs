@@ -90,9 +90,8 @@ impl TryFrom<RecoveryMarkerWire> for EncryptedLinkRecoveryMarker {
 
     fn try_from(wire: RecoveryMarkerWire) -> Result<Self> {
         if wire.version != 1 || wire.kind != RECOVERY_MARKER_KIND {
-            // SECURITY / REDACTION: the marker is peer-published public data.
-            // Its values must not reach `LinkObservation` contexts or FFI
-            // exception text, so only a static label crosses.
+            // SECURITY / REDACTION: static context only; see
+            // `parse_encrypted_link_recovery_marker_json`.
             return Err(invalid_data(
                 "unsupported Encrypted Link recovery marker version/kind",
                 None,
@@ -124,10 +123,10 @@ pub fn parse_encrypted_link_recovery_marker_json(
             None,
         ));
     }
-    // SECURITY / REDACTION: the marker is peer-published public data, and
-    // serde_json's error Display quotes document fragments. Keep a static
-    // context and drop the cause so marker values cannot reach
-    // `LinkObservation` contexts or FFI exception text.
+    // SECURITY / REDACTION: the marker is peer-published public data that
+    // reaches `LinkObservation` contexts and FFI exception text. Every error on
+    // this path, including `TryFrom`, uses a static context; serde causes quote
+    // the JSON and are dropped.
     let wire = serde_json::from_str::<RecoveryMarkerWire>(raw_json)
         .map_err(|_| invalid_data("Encrypted Link recovery marker JSON is invalid", None))?;
     wire.try_into()

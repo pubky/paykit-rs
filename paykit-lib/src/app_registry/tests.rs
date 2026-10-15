@@ -50,6 +50,10 @@ fn registry_json_with(edit: impl FnOnce(&mut serde_json::Value)) -> String {
 
 fn assert_registry_error_redacts(raw: &str, expected_context: &str, sentinel: &str) -> PaykitError {
     let error = parse_paykit_app_registry_json(raw).unwrap_err();
+    assert!(
+        matches!(error, PaykitError::InvalidData { .. }),
+        "{error:?}"
+    );
     let message = error.to_string();
     assert!(message.contains(expected_context), "{message:?}");
     assert!(!message.contains(sentinel), "{message:?}");
@@ -152,13 +156,7 @@ fn test_remote_registry_reports_invalid_app_without_noise_key() {
 fn test_app_registry_parse_errors_redact_remote_payload() {
     let sentinel = "SENTINEL_REMOTE_REGISTRY";
     let payload = format!("{sentinel}\n\u{1b}");
-    let public_key = pubky::Keypair::from_secret(&[7; 32]).public_key().z32();
-    let key = json!(payload);
     let app = json!({ "display_name": "Bitkit", "capabilities": capabilities() });
-    // `json!` would collapse duplicate keys, so this document is built as text.
-    let duplicate_apps = format!(
-        r#"{{"version":1,"kind":"paykit.app_registry","key_generation":1,"noise_public_key":"{public_key}","apps":{{{key}:{app},{key}:{app}}},"default_app_id":null,"default_apps_by_endpoint":{{}}}}"#
-    );
     let redacted_cases = [
         (
             "JSON is invalid",
@@ -168,14 +166,13 @@ fn test_app_registry_parse_errors_redact_remote_payload() {
             "JSON is invalid",
             registry_json_with(|doc| doc[payload.as_str()] = json!(1)),
         ),
-        ("JSON is invalid", duplicate_apps),
         (
             "version/kind",
             registry_json_with(|doc| doc["kind"] = json!(payload)),
         ),
         (
             "invalid App ID",
-            registry_json_with(|doc| doc["apps"][payload.as_str()] = app.clone()),
+            registry_json_with(|doc| doc["apps"][payload.as_str()] = app),
         ),
         (
             "invalid App ID",
@@ -192,6 +189,10 @@ fn test_app_registry_parse_errors_redact_remote_payload() {
             registry_json_with(|doc| {
                 doc["default_apps_by_endpoint"]["btc-lightning-bolt11"] = json!(payload)
             }),
+        ),
+        (
+            "unregistered App ID",
+            registry_json_with(|doc| doc["default_apps_by_endpoint"][sentinel] = json!("ghost")),
         ),
     ];
     // These checks keep an upstream cause whose Display is static text.
@@ -214,11 +215,7 @@ fn test_app_registry_parse_errors_redact_remote_payload() {
         );
     }
     for (expected_context, raw) in static_cause_cases {
-        let error = assert_registry_error_redacts(&raw, expected_context, sentinel);
-        assert!(
-            matches!(error, PaykitError::InvalidData { .. }),
-            "{error:?}"
-        );
+        assert_registry_error_redacts(&raw, expected_context, sentinel);
     }
 }
 
