@@ -14,12 +14,26 @@ async fn test_public_directory_pages_cover_all_entries_and_missing_directories()
     let resource = pubky::PubkyResource::new(pair.alice.access.session.public_key(), path).unwrap();
     let root = resource.to_pubky_url();
     let mut names: Vec<_> = (0..99).map(|index| format!("{index:03}.json")).collect();
-    names.extend(["a", "z", "\u{e9}", "\u{ea}", "100% ready"].map(String::from));
+    names.extend(
+        [
+            "a",
+            "z",
+            "\u{e9}",
+            "\u{ea}",
+            "100% ready",
+            "%C3%A9",
+            "a#b",
+            "a?b",
+        ]
+        .map(String::from),
+    );
     names.sort();
     let session = &pair.alice.access.session;
     let bearer = session.as_grant().unwrap().current_bearer().await;
     let mut expected = Vec::new();
+    let mut contents = Vec::new();
     for name in names {
+        let body = format!("contents for {name}");
         let entry =
             pubky::PubkyResource::new(resource.owner.clone(), format!("{path}{name}")).unwrap();
         // SessionStorage re-encodes ResourcePath; write the intended Unicode fixture directly.
@@ -29,13 +43,14 @@ async fn test_public_directory_pages_cover_all_entries_and_missing_directories()
             .await
             .unwrap()
             .bearer_auth(&bearer)
-            .body("{}")
+            .body(body.clone())
             .send()
             .await
             .unwrap()
             .error_for_status()
             .unwrap();
         expected.push(entry.to_pubky_url());
+        contents.push(body);
     }
     let mut found = Vec::new();
     loop {
@@ -53,6 +68,35 @@ async fn test_public_directory_pages_cover_all_entries_and_missing_directories()
         assert!(found.len() <= expected.len());
     }
     assert_eq!(found, expected);
+    for (uri, body) in found.iter().zip(contents) {
+        assert_eq!(
+            pair.bob
+                .sdk
+                .fetch_pubky_file(uri, body.len())
+                .await
+                .unwrap(),
+            Some(body.as_bytes().to_vec()),
+            "fetch bytes from listed URI {uri}"
+        );
+        assert_eq!(
+            pair.bob
+                .sdk
+                .fetch_pubky_file_bounded(uri, body.len() as u64)
+                .await
+                .unwrap(),
+            Some(body.as_bytes().to_vec()),
+            "fetch bounded bytes from listed URI {uri}"
+        );
+        assert_eq!(
+            pair.bob
+                .sdk
+                .fetch_pubky_text(uri, body.len())
+                .await
+                .unwrap(),
+            Some(body),
+            "fetch text from listed URI {uri}"
+        );
+    }
     assert!(pair
         .bob
         .sdk
@@ -215,8 +259,26 @@ async fn test_paykit_profile_publish_and_fetch_roundtrip() {
 }
 
 #[tokio::test]
-async fn test_public_file_fetch_enforces_caller_and_sdk_limits() {
+async fn test_public_file_fetch_validates_uris_and_body_limits() {
     let pair = two_party().await;
+    let invalid_uri = format!("pubky://{}/pub/%FF", pair.alice.public_key);
+    for result in [
+        pair.bob.sdk.fetch_pubky_file(&invalid_uri, 10).await,
+        pair.bob
+            .sdk
+            .fetch_pubky_file_bounded(&invalid_uri, 10)
+            .await,
+        pair.bob
+            .sdk
+            .fetch_pubky_text(&invalid_uri, 10)
+            .await
+            .map(|text| text.map(String::into_bytes)),
+    ] {
+        assert!(matches!(
+            result.unwrap_err(),
+            paykit_sdk::PaykitSdkError::Protocol { .. }
+        ));
+    }
     let blob = pair
         .alice
         .sdk

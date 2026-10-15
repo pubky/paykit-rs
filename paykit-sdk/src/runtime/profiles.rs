@@ -175,6 +175,8 @@ where
 
     /// Fetch a public `pubky://` file referenced by profile metadata.
     ///
+    /// URI paths are percent-encoded: `%20` represents a space and `%25` a literal
+    /// percent sign. Pass URIs returned by `list_pubky_directory_page` unchanged.
     /// The caller supplies a positive byte limit.
     pub async fn fetch_pubky_file(&self, uri: &str, max_bytes: usize) -> Result<Option<Vec<u8>>> {
         require_positive_response_limit(max_bytes, "fetch Pubky file")?;
@@ -190,6 +192,9 @@ where
     }
 
     /// Fetch a public file while limiting the accumulated successful response body.
+    ///
+    /// URI paths are percent-encoded, as in `fetch_pubky_file`. Pass URIs returned
+    /// by `list_pubky_directory_page` unchanged.
     ///
     /// Missing files return `None`. The effective limit is the smaller of `max_bytes`
     /// and 5 MiB. Larger successful bodies return a protocol error, including
@@ -229,6 +234,9 @@ where
     }
 
     /// Fetch a public `pubky://` text file referenced by profile metadata.
+    ///
+    /// URI paths are percent-encoded, as in `fetch_pubky_file`. Pass URIs returned
+    /// by `list_pubky_directory_page` unchanged.
     pub async fn fetch_pubky_text(&self, uri: &str, max_bytes: usize) -> Result<Option<String>> {
         require_positive_response_limit(max_bytes, "fetch Pubky text")?;
         let Some(bytes) = self.fetch_pubky_file(uri, max_bytes).await? else {
@@ -281,7 +289,10 @@ where
     /// page, and continue until an empty page; homeservers may return fewer
     /// entries than requested. Missing directories also return an empty page.
     /// Listings are not snapshots: restart from `None` to discover entries added
-    /// before an earlier cursor. Entries are returned as canonical `pubky://` URIs.
+    /// before an earlier cursor. Inputs and returned `pubky://` URIs use
+    /// percent-encoded paths (`%20` for a space, `%25` for a literal percent sign).
+    /// Pass returned file URIs unchanged to `fetch_pubky_file`,
+    /// `fetch_pubky_file_bounded` or `fetch_pubky_text`.
     ///
     /// This read uses public storage without authentication. Pubky client
     /// configuration, sessions, capability scope and key rotation remain the
@@ -309,7 +320,8 @@ where
             .limit(limit);
         if let Some(cursor) = cursor.as_ref() {
             // The homeserver expects a decoded storage cursor inside the query value.
-            request = request.cursor(decode_directory_uri(&cursor.to_pubky_url())?.as_ref());
+            request = request
+                .cursor(decode_pubky_uri(&cursor.to_pubky_url(), "list Pubky directory")?.as_ref());
         }
         let entries = match request.send().await {
             Ok(entries) => entries,
@@ -395,12 +407,6 @@ fn directory_error(message: &str) -> PaykitSdkError {
     }
 }
 
-fn decode_directory_uri(uri: &str) -> Result<std::borrow::Cow<'_, str>> {
-    percent_encoding::percent_decode_str(uri)
-        .decode_utf8()
-        .map_err(|_| directory_error("URI must contain valid UTF-8"))
-}
-
 fn public_directory_child(directory: &pubky::PubkyResource, entry: &pubky::PubkyResource) -> bool {
     directory.owner == entry.owner
         && entry
@@ -415,7 +421,7 @@ fn public_directory_request(
     cursor: Option<&str>,
     limit: u16,
 ) -> Result<(pubky::PubkyResource, Option<pubky::PubkyResource>)> {
-    let directory: pubky::PubkyResource = decode_directory_uri(uri)?
+    let directory: pubky::PubkyResource = decode_pubky_uri(uri, "list Pubky directory")?
         .parse()
         .map_err(|_| directory_error("invalid URI"))?;
     if !directory.path.as_str().starts_with("/pub/") || !directory.path.as_str().ends_with('/') {
@@ -428,7 +434,7 @@ fn public_directory_request(
     }
     let cursor = cursor
         .map(|uri| {
-            let entry: pubky::PubkyResource = decode_directory_uri(uri)?
+            let entry: pubky::PubkyResource = decode_pubky_uri(uri, "list Pubky directory")?
                 .parse()
                 .map_err(|_| directory_error("invalid cursor"))?;
             if !public_directory_child(&directory, &entry) {

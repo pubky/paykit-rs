@@ -189,6 +189,12 @@ outbound worker run after the link becomes `LINKED`.
 
 ### Public File Downloads
 
+`listPubkyDirectoryPage(uri, cursor, limit)` accepts and returns `pubky://` URIs
+with percent-encoded paths: `%20` represents a space and `%25` a literal percent
+sign. Pass listed file URIs unchanged to `fetchPubkyFile`, `fetchPubkyFileBounded`
+or `fetchPubkyText`; do not decode or encode them again. These fetch methods use
+the same URI convention, including for paths supplied without a directory listing.
+
 `fetchPubkyFile(uri, maxBytes)` and `fetchPubkyText(uri, maxBytes)` require a
 positive byte limit. `fetchPubkyFileBounded(uri, maxBytes)` additionally caps
 the limit at 5 MiB and permits zero for an empty body. Missing files return

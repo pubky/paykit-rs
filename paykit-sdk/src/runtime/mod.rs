@@ -749,13 +749,23 @@ async fn fetch_public_text_with_revision(
     }
 }
 
+fn decode_pubky_uri<'a>(uri: &'a str, context: &'static str) -> Result<std::borrow::Cow<'a, str>> {
+    // PubkyResource expects raw paths and percent-encodes them during parsing.
+    percent_encoding::percent_decode_str(uri)
+        .decode_utf8()
+        .map_err(|_| PaykitSdkError::Protocol {
+            context: format!("{context}: URI must contain valid UTF-8"),
+            source: None,
+        })
+}
+
 async fn fetch_public_file_uri(
     storage: &pubky::PublicStorage,
     uri: &str,
     context: &'static str,
     max_bytes: usize,
 ) -> Result<Option<Vec<u8>>> {
-    let resource = uri
+    let resource = decode_pubky_uri(uri, context)?
         .parse::<pubky::PubkyResource>()
         .map_err(|err| PaykitSdkError::Protocol {
             context: format!("{context}: invalid Pubky URI: {err}"),

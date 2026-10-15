@@ -7,6 +7,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Fixed
+
+- Public file and text fetches accept percent-encoded Pubky URIs returned by
+  directory listings, including paths with spaces, Unicode and literal percent
+  signs, without encoding them a second time.
+
 ## 0.1.0-rc76 - 2026-10-14
 
 ### Fixed
