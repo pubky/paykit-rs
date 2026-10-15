@@ -90,11 +90,11 @@ impl TryFrom<RecoveryMarkerWire> for EncryptedLinkRecoveryMarker {
 
     fn try_from(wire: RecoveryMarkerWire) -> Result<Self> {
         if wire.version != 1 || wire.kind != RECOVERY_MARKER_KIND {
+            // SECURITY / REDACTION: the marker is peer-published public data.
+            // Its values must not reach `LinkObservation` contexts or FFI
+            // exception text, so only a static label crosses.
             return Err(invalid_data(
-                format!(
-                    "unsupported Encrypted Link recovery marker version/kind: {}/{}",
-                    wire.version, wire.kind
-                ),
+                "unsupported Encrypted Link recovery marker version/kind",
                 None,
             ));
         }
@@ -124,12 +124,12 @@ pub fn parse_encrypted_link_recovery_marker_json(
             None,
         ));
     }
-    let wire = serde_json::from_str::<RecoveryMarkerWire>(raw_json).map_err(|err| {
-        invalid_data(
-            format!("Encrypted Link recovery marker JSON is invalid: {err}"),
-            Some(err.into()),
-        )
-    })?;
+    // SECURITY / REDACTION: the marker is peer-published public data, and
+    // serde_json's error Display quotes document fragments. Keep a static
+    // context and drop the cause so marker values cannot reach
+    // `LinkObservation` contexts or FFI exception text.
+    let wire = serde_json::from_str::<RecoveryMarkerWire>(raw_json)
+        .map_err(|_| invalid_data("Encrypted Link recovery marker JSON is invalid", None))?;
     wire.try_into()
 }
 
@@ -276,6 +276,7 @@ fn is_not_found(err: &PubkyError) -> bool {
 #[cfg(test)]
 mod tests {
     use pubky::Keypair;
+    use serde_json::json;
 
     use super::*;
 
@@ -306,6 +307,42 @@ mod tests {
         let result = parse_encrypted_link_recovery_marker_json(raw);
 
         assert!(matches!(result, Err(PaykitError::InvalidData { .. })));
+    }
+
+    #[test]
+    fn test_recovery_marker_parse_errors_redact_remote_payload() {
+        let sentinel = "SENTINEL_REMOTE_MARKER";
+        let payload = format!("{sentinel}\n\u{1b}");
+        let marker = EncryptedLinkRecoveryMarker::new(
+            "650e8400-e29b-41d4-a716-446655440000",
+            "2026-06-03T12:00:00Z",
+        )
+        .unwrap();
+        let with_field = |field: &str, value: serde_json::Value| {
+            let mut document = serde_json::to_value(RecoveryMarkerWire::from(&marker)).unwrap();
+            document[field] = value;
+            document.to_string()
+        };
+        let cases = [
+            ("version/kind", with_field("kind", json!(payload))),
+            ("JSON is invalid", with_field("version", json!(payload))),
+            ("JSON is invalid", with_field(&payload, json!(1))),
+            ("attempt ID", with_field("attempt_id", json!(payload))),
+            ("created_at", with_field("created_at", json!(payload))),
+        ];
+
+        for (expected_context, raw) in cases {
+            let error = parse_encrypted_link_recovery_marker_json(&raw).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains(expected_context), "{message:?}");
+            assert!(!message.contains(sentinel), "{message:?}");
+            assert!(!message.chars().any(char::is_control), "{message:?}");
+            assert!(!format!("{error:?}").contains(sentinel), "{error:?}");
+            assert!(
+                matches!(error, PaykitError::InvalidData { source: None, .. }),
+                "{error:?}"
+            );
+        }
     }
 
     #[test]

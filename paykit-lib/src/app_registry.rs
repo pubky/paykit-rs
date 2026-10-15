@@ -351,24 +351,22 @@ pub fn serialize_paykit_app_registry(registry: &PaykitAppRegistry) -> Result<Str
 
 /// Parse and validate an identity-wide Paykit App Registry.
 pub fn parse_paykit_app_registry_json(raw_json: &str) -> Result<PaykitAppRegistry> {
+    // SECURITY / REDACTION: the registry is any identity's public data, and
+    // payment resolution carries these error contexts into FFI exception text.
+    // Contexts hold only static labels and already-validated IDs. A cause is
+    // kept only when its Display is static, so serde errors (which quote the
+    // JSON) are dropped.
     if raw_json.len() > PAYKIT_APP_REGISTRY_MAX_BYTES {
         return Err(invalid_data(
             format!("Paykit App Registry exceeds {PAYKIT_APP_REGISTRY_MAX_BYTES} bytes"),
             None,
         ));
     }
-    let wire = serde_json::from_str::<AppRegistryWire>(raw_json).map_err(|err| {
-        invalid_data(
-            format!("Paykit App Registry JSON is invalid: {err}"),
-            Some(err.into()),
-        )
-    })?;
+    let wire = serde_json::from_str::<AppRegistryWire>(raw_json)
+        .map_err(|_| invalid_data("Paykit App Registry JSON is invalid", None))?;
     if wire.version != APP_REGISTRY_VERSION || wire.kind != APP_REGISTRY_KIND {
         return Err(invalid_data(
-            format!(
-                "unsupported Paykit App Registry version/kind: {}/{}",
-                wire.version, wire.kind
-            ),
+            "unsupported Paykit App Registry version/kind",
             None,
         ));
     }
@@ -426,12 +424,10 @@ pub fn parse_paykit_app_registry_json(raw_json: &str) -> Result<PaykitAppRegistr
 
     registry.default_app_id = wire.default_app_id.map(parse_remote_app_id).transpose()?;
     for (raw_identifier, raw_app_id) in wire.default_apps_by_endpoint {
-        let identifier = PaymentEndpointIdentifier::new(&raw_identifier).map_err(|err| {
+        let identifier = PaymentEndpointIdentifier::new(&raw_identifier).map_err(|_| {
             invalid_data(
-                format!(
-                    "Paykit App Registry contains invalid Payment Endpoint Identifier '{raw_identifier}'"
-                ),
-                Some(err.into()),
+                "Paykit App Registry contains an invalid Payment Endpoint Identifier",
+                None,
             )
         })?;
         registry
@@ -525,12 +521,8 @@ pub async fn get_paykit_app_registry_with_revision(
 }
 
 fn parse_remote_app_id(value: String) -> Result<PaykitAppId> {
-    PaykitAppId::new(&value).map_err(|err| {
-        invalid_data(
-            format!("Paykit App Registry contains invalid App ID '{value}'"),
-            Some(err.into()),
-        )
-    })
+    PaykitAppId::new(value)
+        .map_err(|_| invalid_data("Paykit App Registry contains an invalid App ID", None))
 }
 
 fn validate_registry_defaults(registry: &PaykitAppRegistry) -> Result<()> {
