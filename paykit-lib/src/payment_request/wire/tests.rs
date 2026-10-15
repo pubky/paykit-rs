@@ -34,6 +34,8 @@ fn test_private_event_parse_errors_redact_plaintext() {
 #[test]
 fn test_private_event_post_parse_errors_redact_plaintext() {
     let marker = "SENTINEL_POST_PARSE";
+    let bad_id = format!("{marker}\nid");
+    let id_reason = "forbidden character U+000A";
     let request: JsonValue =
         serde_json::from_str(&payment_request_json_with("null", "null")).unwrap();
 
@@ -47,15 +49,14 @@ fn test_private_event_post_parse_errors_redact_plaintext() {
     });
     let mut bad_accepted_identifier = request.clone();
     bad_accepted_identifier["request"]["accepted_payment_endpoint_identifiers"] =
-        serde_json::json!([format!("{marker}\tid")]);
+        serde_json::json!([bad_id.clone()]);
     let mut bad_endpoint_key = request;
-    let endpoint_key = format!("{marker}\nid");
     bad_endpoint_key["request"]["required_app_id"] = serde_json::json!("test-app");
-    bad_endpoint_key["request"]["payment_endpoints"] = serde_json::json!({ endpoint_key: "x" });
+    bad_endpoint_key["request"]["payment_endpoints"] = serde_json::json!({ bad_id.clone(): "x" });
     let mut bad_proof_identifier: JsonValue =
         serde_json::from_str(&serialize_payment_proof_json(&app_id(), &payment_proof()).unwrap())
             .unwrap();
-    bad_proof_identifier["payment_endpoint_identifier"] = JsonValue::from(format!("{marker}\nid"));
+    bad_proof_identifier["payment_endpoint_identifier"] = JsonValue::from(bad_id);
 
     let cases = [
         (
@@ -66,17 +67,17 @@ fn test_private_event_post_parse_errors_redact_plaintext() {
         (
             PrivateMessageKind::PaymentRequest,
             bad_accepted_identifier,
-            "forbidden character U+0009 at byte 19",
+            id_reason,
         ),
         (
             PrivateMessageKind::PaymentRequest,
             bad_endpoint_key,
-            "forbidden character U+000A at byte 19",
+            id_reason,
         ),
         (
             PrivateMessageKind::PaymentProof,
             bad_proof_identifier,
-            "forbidden character U+000A at byte 19",
+            id_reason,
         ),
     ];
     for (kind, value, reason) in cases {
@@ -105,10 +106,91 @@ fn test_private_event_post_parse_errors_redact_plaintext() {
             raw_json,
         };
         let parsed = crate::parse_payment_request_event_message(&message).unwrap();
-        assert!(!parsed.is_valid());
         assert_eq!(parsed.validation_error(), Some(display.as_str()));
         assert!(!format!("{parsed:?}").contains(marker));
     }
+}
+
+// Every string field a counterparty controls, swapped for marker text with
+// control characters, must be rejected without echoing the value, except the
+// fields listed as data that is never validated. The test above names the two
+// checks that echoed; this one keeps a new field check from echoing quietly.
+#[test]
+fn test_private_event_errors_never_echo_any_string_field() {
+    let marker = "SENTINEL_FIELD_SWEEP";
+    let injected = format!("{marker}\n\u{1b}[31m");
+    let mut request: JsonValue = serde_json::from_str(&payment_request_json_with(
+        r#""2026-06-01T00:00:00Z""#,
+        r#"{
+                "every": 1,
+                "unit": "month",
+                "starts_at": "2026-06-01T00:00:00Z",
+                "anchor": "2026-06-01T00:00:00Z",
+                "ends_at": "2027-06-01T00:00:00Z"
+            }"#,
+    ))
+    .unwrap();
+    request["request"]["required_app_id"] = serde_json::json!("test-app");
+    request["request"]["payment_endpoints"] =
+        serde_json::json!({ "btc-lightning-bolt11": "private-invoice" });
+    parse_payment_request_json(&request.to_string()).unwrap();
+    let proof: JsonValue =
+        serde_json::from_str(&serialize_payment_proof_json(&app_id(), &payment_proof()).unwrap())
+            .unwrap();
+
+    for (kind, base, unvalidated_data) in [
+        (
+            PrivateMessageKind::PaymentRequest,
+            request,
+            vec!["/request/payment_endpoints/btc-lightning-bolt11"],
+        ),
+        (PrivateMessageKind::PaymentProof, proof, vec![]),
+    ] {
+        let mut accepted = Vec::new();
+        for path in string_value_paths(&base) {
+            let mut value = base.clone();
+            *value.pointer_mut(&path).unwrap() = JsonValue::from(injected.clone());
+            let raw_json = value.to_string();
+            let result = match kind {
+                PrivateMessageKind::PaymentProof => parse_payment_proof_json(&raw_json).map(|_| ()),
+                _ => parse_payment_request_json(&raw_json).map(|_| ()),
+            };
+            let Err(error) = result else {
+                accepted.push(path);
+                continue;
+            };
+            let display = error.to_string();
+            assert!(
+                !display.contains(marker) && !display.contains(char::is_control),
+                "{path} echoes decrypted plaintext: {display:?}"
+            );
+            assert!(!format!("{error:?}").contains(marker), "{path}: {error:?}");
+        }
+        assert_eq!(accepted, unvalidated_data);
+    }
+}
+
+/// JSON Pointer paths of every string value below `value`.
+fn string_value_paths(value: &JsonValue) -> Vec<String> {
+    fn walk(value: &JsonValue, path: &str, out: &mut Vec<String>) {
+        match value {
+            JsonValue::String(_) => out.push(path.to_owned()),
+            JsonValue::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    walk(item, &format!("{path}/{index}"), out);
+                }
+            }
+            JsonValue::Object(map) => {
+                for (key, item) in map {
+                    walk(item, &format!("{path}/{key}"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut paths = Vec::new();
+    walk(value, "", &mut paths);
+    paths
 }
 
 fn request_terms() -> PaymentRequestTerms {
