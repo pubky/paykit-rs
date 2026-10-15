@@ -111,14 +111,24 @@ fn test_private_event_post_parse_errors_redact_plaintext() {
     }
 }
 
-// Every string field a counterparty controls, swapped for marker text with
-// control characters, must be rejected without echoing the value, except the
-// fields listed as data that is never validated. The test above names the two
-// checks that echoed; this one keeps a new field check from echoing quietly.
+// Every string field a counterparty controls must be rejected without echoing
+// the value, except the fields listed as data that is never validated. Each
+// field is tampered twice: swapped for marker text with control characters,
+// and kept with only its last character replaced by '\n', so validators run
+// past a valid prefix (35 UUID characters, a timestamp without its 'Z'). The
+// test above names the two checks that echoed; this one keeps a new field
+// check from echoing quietly.
 #[test]
 fn test_private_event_errors_never_echo_any_string_field() {
     let marker = "SENTINEL_FIELD_SWEEP";
-    let injected = format!("{marker}\n\u{1b}[31m");
+    let swap_for_marker = |_: &str| format!("{marker}\n\u{1b}[31m");
+    let break_last_char = |original: &str| {
+        let mut tampered = original.to_owned();
+        tampered.pop();
+        tampered.push('\n');
+        tampered
+    };
+    let tampers: [&dyn Fn(&str) -> String; 2] = [&swap_for_marker, &break_last_char];
     let mut request: JsonValue = serde_json::from_str(&payment_request_json_with(
         r#""2026-06-01T00:00:00Z""#,
         r#"{
@@ -146,27 +156,32 @@ fn test_private_event_errors_never_echo_any_string_field() {
         ),
         (PrivateMessageKind::PaymentProof, proof, vec![]),
     ] {
-        let mut accepted = Vec::new();
-        for path in string_value_paths(&base) {
-            let mut value = base.clone();
-            *value.pointer_mut(&path).unwrap() = JsonValue::from(injected.clone());
-            let raw_json = value.to_string();
-            let result = match kind {
-                PrivateMessageKind::PaymentProof => parse_payment_proof_json(&raw_json).map(|_| ()),
-                _ => parse_payment_request_json(&raw_json).map(|_| ()),
-            };
-            let Err(error) = result else {
-                accepted.push(path);
-                continue;
-            };
-            let display = error.to_string();
-            assert!(
-                !display.contains(marker) && !display.contains(char::is_control),
-                "{path} echoes decrypted plaintext: {display:?}"
-            );
-            assert!(!format!("{error:?}").contains(marker), "{path}: {error:?}");
+        for tamper in tampers {
+            let mut accepted = Vec::new();
+            for path in string_value_paths(&base) {
+                let original = base.pointer(&path).and_then(JsonValue::as_str).unwrap();
+                let mut value = base.clone();
+                *value.pointer_mut(&path).unwrap() = JsonValue::from(tamper(original));
+                let raw_json = value.to_string();
+                let result = match kind {
+                    PrivateMessageKind::PaymentProof => {
+                        parse_payment_proof_json(&raw_json).map(|_| ())
+                    }
+                    _ => parse_payment_request_json(&raw_json).map(|_| ()),
+                };
+                let Err(error) = result else {
+                    accepted.push(path);
+                    continue;
+                };
+                let display = error.to_string();
+                assert!(
+                    !display.contains(marker) && !display.contains(char::is_control),
+                    "{path} echoes decrypted plaintext: {display:?}"
+                );
+                assert!(!format!("{error:?}").contains(marker), "{path}: {error:?}");
+            }
+            assert_eq!(accepted, unvalidated_data);
         }
-        assert_eq!(accepted, unvalidated_data);
     }
 }
 
