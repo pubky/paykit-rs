@@ -27,6 +27,90 @@ fn test_private_event_parse_errors_redact_plaintext() {
     }
 }
 
+// Once serde succeeds, `invalid_wire` copies each field check's `Validation`
+// text into the `InvalidData` context, and the event message keeps it as
+// `validation_error()`. So those checks must not echo decrypted field values
+// either; the serde step is covered by the test above.
+#[test]
+fn test_private_event_post_parse_errors_redact_plaintext() {
+    let marker = "SENTINEL_POST_PARSE";
+    let request: JsonValue =
+        serde_json::from_str(&payment_request_json_with("null", "null")).unwrap();
+
+    let mut bad_recurrence_unit = request.clone();
+    bad_recurrence_unit["request"]["recurrence"] = serde_json::json!({
+        "every": 1,
+        "unit": format!("{marker}\nFORGED\t\u{1b}[31m"),
+        "starts_at": "2026-06-01T00:00:00Z",
+        "anchor": "2026-06-01T00:00:00Z",
+        "ends_at": null
+    });
+    let mut bad_accepted_identifier = request.clone();
+    bad_accepted_identifier["request"]["accepted_payment_endpoint_identifiers"] =
+        serde_json::json!([format!("{marker}\tid")]);
+    let mut bad_endpoint_key = request;
+    let endpoint_key = format!("{marker}\nid");
+    bad_endpoint_key["request"]["required_app_id"] = serde_json::json!("test-app");
+    bad_endpoint_key["request"]["payment_endpoints"] = serde_json::json!({ endpoint_key: "x" });
+    let mut bad_proof_identifier: JsonValue =
+        serde_json::from_str(&serialize_payment_proof_json(&app_id(), &payment_proof()).unwrap())
+            .unwrap();
+    bad_proof_identifier["payment_endpoint_identifier"] = JsonValue::from(format!("{marker}\nid"));
+
+    let cases = [
+        (
+            PrivateMessageKind::PaymentRequest,
+            bad_recurrence_unit,
+            "unsupported Recurrence unit",
+        ),
+        (
+            PrivateMessageKind::PaymentRequest,
+            bad_accepted_identifier,
+            "forbidden character U+0009 at byte 19",
+        ),
+        (
+            PrivateMessageKind::PaymentRequest,
+            bad_endpoint_key,
+            "forbidden character U+000A at byte 19",
+        ),
+        (
+            PrivateMessageKind::PaymentProof,
+            bad_proof_identifier,
+            "forbidden character U+000A at byte 19",
+        ),
+    ];
+    for (kind, value, reason) in cases {
+        let raw_json = value.to_string();
+        let error = match kind {
+            PrivateMessageKind::PaymentProof => parse_payment_proof_json(&raw_json).map(|_| ()),
+            _ => parse_payment_request_json(&raw_json).map(|_| ()),
+        }
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            PaykitError::InvalidData { source: None, .. }
+        ));
+        let display = error.to_string();
+        assert!(
+            !display.contains(marker) && !display.contains(char::is_control),
+            "error text echoes decrypted plaintext: {display:?}"
+        );
+        assert!(display.contains(reason), "{display:?}");
+        assert!(!format!("{error:?}").contains(marker));
+
+        let message = crate::PrivateApplicationMessage {
+            version: Some(1),
+            kind: Some(kind.as_str().into()),
+            app_id: Some("test-app".into()),
+            raw_json,
+        };
+        let parsed = crate::parse_payment_request_event_message(&message).unwrap();
+        assert!(!parsed.is_valid());
+        assert_eq!(parsed.validation_error(), Some(display.as_str()));
+        assert!(!format!("{parsed:?}").contains(marker));
+    }
+}
+
 fn request_terms() -> PaymentRequestTerms {
     PaymentRequestTerms::builder(
         PaymentAmount::new("0.001".to_string(), "btc".to_string()).unwrap(),

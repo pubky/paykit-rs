@@ -85,9 +85,12 @@ impl RecurrenceUnit {
             "week" => Ok(Self::Week),
             "month" => Ok(Self::Month),
             "year" => Ok(Self::Year),
-            _ => Err(PaykitError::Validation(format!(
-                "unsupported Recurrence unit '{value}'"
-            ))),
+            // SECURITY / REDACTION: from the wire parser `value` is decrypted
+            // private-message plaintext, and this message becomes persisted,
+            // FFI-visible error text, so the value is not echoed.
+            _ => Err(PaykitError::Validation(
+                "unsupported Recurrence unit".into(),
+            )),
         }
     }
 }

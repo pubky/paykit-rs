@@ -425,6 +425,46 @@ async fn test_payment_request_records_keep_malformed_inbound_audit_position() {
 }
 
 #[tokio::test]
+async fn test_payment_request_records_redact_post_parse_validation_error() {
+    let storage = registered_storage();
+    let counterparty = counterparty();
+    let sentinel = "SENTINEL_POST_PARSE";
+    let mut malformed: serde_json::Value = serde_json::from_str(&request_raw(
+        "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d101",
+        "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
+        "invoice-2026-0001",
+        None,
+        None,
+    ))
+    .unwrap();
+    malformed["request"]["recurrence"] = serde_json::json!({
+        "every": 1,
+        "unit": format!("{sentinel}\nFORGED\u{1b}[31m"),
+        "starts_at": "2026-01-01T00:00:00Z",
+        "anchor": "2026-01-01T00:00:00Z",
+        "ends_at": null
+    });
+    persist_messages(
+        &storage,
+        counterparty.clone(),
+        vec![serde_json::to_string(&malformed).unwrap()],
+    )
+    .await;
+
+    let records = payment_request_records(&storage, &counterparty, timestamp())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        records[0].state,
+        PaymentRequestLifecycleState::InvalidConflict
+    );
+    let reason = records[0].invalid_reason.as_ref().unwrap();
+    assert!(reason.contains("unsupported Recurrence unit"), "{reason:?}");
+    assert!(!reason.contains(sentinel), "{reason:?}");
+}
+
+#[tokio::test]
 async fn test_payment_request_records_retain_crossing_acceptance_after_payee_cancellation() {
     let storage = registered_storage();
     let counterparty = counterparty();
