@@ -191,9 +191,11 @@ outbound worker run after the link becomes `LINKED`.
 
 `listPubkyDirectoryPage(uri, cursor, limit)` accepts and returns `pubky://` URIs
 with percent-encoded paths: `%20` represents a space and `%25` a literal percent
-sign. Pass listed file URIs unchanged to `fetchPubkyFile`, `fetchPubkyFileBounded`
-or `fetchPubkyText`; do not decode or encode them again. These fetch methods use
-the same URI convention, including for paths supplied without a directory listing.
+sign. Pass listed file URIs unchanged to `fetchPubkyFile`, `fetchPubkyFileBounded`,
+`fetchPubkyText`, `resolvePubkyUrl` or `parsePubkyResource`; do not decode or encode
+them again. These methods use the same URI convention, including for paths
+supplied without a directory listing. `parsePubkyResource` returns a canonical
+percent-encoded path and a transport URL for the same resource.
 
 `fetchPubkyFile(uri, maxBytes)` and `fetchPubkyText(uri, maxBytes)` require a
 positive byte limit. `fetchPubkyFileBounded(uri, maxBytes)` additionally caps
@@ -412,7 +414,9 @@ object.
 - `PubkyAuthCompanionClaim` — integrator-owned query parameter, claim type, and
   unsigned payload; no channel, signature, nonce, or secretbox primitives cross
   FFI.
-- `resolvePubkyUrl(uri)` and `parsePubkyResource(uri)` — Pubky URI helpers.
+- `resolvePubkyUrl(uri)` and `parsePubkyResource(uri)` — Pubky URI helpers accepting
+  percent-encoded paths, including unchanged directory-listing URIs. The parsed
+  path remains percent-encoded; literal percent signs must be supplied as `%25`.
 
 The companion approval method throws
 `PubkyAuthCompanionClaimApprovalError`, whose cases distinguish invalid auth

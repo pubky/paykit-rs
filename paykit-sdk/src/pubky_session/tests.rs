@@ -79,15 +79,26 @@ fn test_parse_pubky_auth_url_rejects_duplicate_grant_parameters() {
 #[test]
 fn test_parse_pubky_resource_normalizes_uri() {
     let public_key = PubkyLocalSecretKey::new([4; 32]).public_key();
-    let resource = parse_pubky_resource(&format!(
-        "pubky://{}/pub/paykit/profile.json",
-        public_key.as_str()
-    ))
-    .unwrap();
-
-    assert_eq!(resource.public_key, public_key);
-    assert_eq!(resource.path, "/pub/paykit/profile.json");
-    assert!(resource.transport_url.starts_with("https://"));
+    for path in [
+        "/pub/paykit/profile.json",
+        "/pub/dir/100%25%20ready",
+        "/pub/dir/%C3%A9",
+        "/pub/dir/%25C3%25A9",
+        "/pub/dir/a%23b",
+        "/pub/dir/a%3Fb",
+    ] {
+        let uri = format!("pubky://{}{path}", public_key.as_str());
+        let resource = parse_pubky_resource(&uri).unwrap();
+        let transport_url = format!(
+            "https://_pubky.{}/storage/{}{path}",
+            public_key.as_str(),
+            public_key.as_str()
+        );
+        assert_eq!(resource.public_key, public_key);
+        assert_eq!(resource.path, path);
+        assert_eq!(resource.transport_url, transport_url);
+        assert_eq!(resolve_pubky_url(&uri).unwrap(), transport_url);
+    }
 }
 
 #[test]
@@ -104,10 +115,16 @@ fn test_parse_pubky_resource_accepts_pubky_identifier_form() {
 }
 
 #[test]
-fn test_parse_pubky_resource_rejects_missing_path() {
+fn test_pubky_resource_helpers_reject_invalid_uris() {
     let public_key = PubkyLocalSecretKey::new([6; 32]).public_key();
 
-    assert!(parse_pubky_resource(public_key.as_str()).is_err());
+    for uri in [
+        public_key.as_str().to_string(),
+        format!("pubky://{}/pub/%FF", public_key.as_str()),
+    ] {
+        assert!(parse_pubky_resource(&uri).is_err());
+        assert!(resolve_pubky_url(&uri).is_err());
+    }
 }
 
 #[test]

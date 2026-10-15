@@ -50,7 +50,11 @@ async fn test_public_directory_pages_cover_all_entries_and_missing_directories()
             .error_for_status()
             .unwrap();
         expected.push(entry.to_pubky_url());
-        contents.push(body);
+        contents.push((
+            body,
+            entry.path.as_str().to_string(),
+            entry.to_transport_url().unwrap(),
+        ));
     }
     let mut found = Vec::new();
     loop {
@@ -68,7 +72,27 @@ async fn test_public_directory_pages_cover_all_entries_and_missing_directories()
         assert!(found.len() <= expected.len());
     }
     assert_eq!(found, expected);
-    for (uri, body) in found.iter().zip(contents) {
+    for (uri, (body, path, transport_url)) in found.iter().zip(contents) {
+        let parsed = paykit_sdk::parse_pubky_resource(uri).unwrap();
+        let resolved = paykit_sdk::resolve_pubky_url(uri).unwrap();
+        assert_eq!(parsed.public_key, pair.alice.public_key);
+        assert_eq!(parsed.path, path);
+        assert_eq!(parsed.transport_url, transport_url.as_str());
+        assert_eq!(resolved, transport_url.as_str());
+        let response = pair
+            .bob
+            .access
+            .session
+            .client()
+            .request_async(reqwest::Method::GET, resolved.parse().unwrap())
+            .await
+            .unwrap()
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(response.bytes().await.unwrap().as_ref(), body.as_bytes());
         assert_eq!(
             pair.bob
                 .sdk

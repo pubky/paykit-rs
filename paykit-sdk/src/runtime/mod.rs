@@ -106,6 +106,7 @@ use crate::{
     },
     domain::recovery::{recovery_marker_report, EncryptedLinkRecoveryMarkerReport},
     identity::{IdentityState, IdentityStatus, PubkyIdentityCapability},
+    pubky_session::decode_pubky_uri,
     storage::{
         outbound_private_queue_head_is_claimable,
         retry_storage_transaction as retry_storage_transaction_with_adapter,
@@ -747,16 +748,6 @@ async fn fetch_public_text_with_revision(
         Err(err) if is_pubky_not_found(&err) => Ok(None),
         Err(err) => Err(map_pubky_transport_error(context, err)),
     }
-}
-
-fn decode_pubky_uri<'a>(uri: &'a str, context: &'static str) -> Result<std::borrow::Cow<'a, str>> {
-    // PubkyResource expects raw paths and percent-encodes them during parsing.
-    percent_encoding::percent_decode_str(uri)
-        .decode_utf8()
-        .map_err(|_| PaykitSdkError::Protocol {
-            context: format!("{context}: URI must contain valid UTF-8"),
-            source: None,
-        })
 }
 
 async fn fetch_public_file_uri(
