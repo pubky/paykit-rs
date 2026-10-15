@@ -196,6 +196,10 @@ sign. Pass listed file URIs unchanged to `fetchPubkyFile`, `fetchPubkyFileBounde
 them again. These methods use the same URI convention, including for paths
 supplied without a directory listing. `parsePubkyResource` returns a canonical
 percent-encoded path and a transport URL for the same resource.
+Decoded backslashes and ASCII control characters are rejected with a protocol
+error, whether supplied raw or percent-encoded, to prevent URL parsing from
+changing the addressed resource. Literal text such as `%5C` remains valid when
+supplied as `%255C`.
 
 `fetchPubkyFile(uri, maxBytes)` and `fetchPubkyText(uri, maxBytes)` require a
 positive byte limit. `fetchPubkyFileBounded(uri, maxBytes)` additionally caps

@@ -22,6 +22,8 @@ async fn test_public_directory_pages_cover_all_entries_and_missing_directories()
             "\u{ea}",
             "100% ready",
             "%C3%A9",
+            "%5C",
+            "%0A",
             "a#b",
             "a?b",
         ]
@@ -285,23 +287,25 @@ async fn test_paykit_profile_publish_and_fetch_roundtrip() {
 #[tokio::test]
 async fn test_public_file_fetch_validates_uris_and_body_limits() {
     let pair = two_party().await;
-    let invalid_uri = format!("pubky://{}/pub/%FF", pair.alice.public_key);
-    for result in [
-        pair.bob.sdk.fetch_pubky_file(&invalid_uri, 10).await,
-        pair.bob
-            .sdk
-            .fetch_pubky_file_bounded(&invalid_uri, 10)
-            .await,
-        pair.bob
-            .sdk
-            .fetch_pubky_text(&invalid_uri, 10)
-            .await
-            .map(|text| text.map(String::into_bytes)),
-    ] {
-        assert!(matches!(
-            result.unwrap_err(),
-            paykit_sdk::PaykitSdkError::Protocol { .. }
-        ));
+    for path in ["%FF", "x/..%5C..%5Cpriv%5Csecret", "a%0Ab"] {
+        let invalid_uri = format!("pubky://{}/pub/{path}", pair.alice.public_key);
+        for result in [
+            pair.bob.sdk.fetch_pubky_file(&invalid_uri, 10).await,
+            pair.bob
+                .sdk
+                .fetch_pubky_file_bounded(&invalid_uri, 10)
+                .await,
+            pair.bob
+                .sdk
+                .fetch_pubky_text(&invalid_uri, 10)
+                .await
+                .map(|text| text.map(String::into_bytes)),
+        ] {
+            assert!(matches!(
+                result.unwrap_err(),
+                paykit_sdk::PaykitSdkError::Protocol { .. }
+            ));
+        }
     }
     let blob = pair
         .alice

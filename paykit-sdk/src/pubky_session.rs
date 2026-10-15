@@ -822,6 +822,8 @@ pub fn parse_pubky_auth_url(auth_url: &str) -> Result<PubkyAuthDetails> {
 ///
 /// Pass percent-encoded URI paths unchanged, including URIs returned by directory
 /// listings. Use `%20` for a space and `%25` for a literal percent sign.
+/// Decoded backslashes and ASCII control characters are rejected because URL
+/// parsing can reinterpret them and change the addressed resource.
 pub fn resolve_pubky_url(uri: &str) -> Result<String> {
     pubky::resolve_pubky(decode_pubky_uri(uri, "resolve Pubky URI")?)
         .map(|url| url.to_string())
@@ -856,12 +858,25 @@ pub(crate) fn decode_pubky_uri<'a>(
     context: &'static str,
 ) -> Result<std::borrow::Cow<'a, str>> {
     // PubkyResource expects raw paths and percent-encodes them during parsing.
-    percent_encoding::percent_decode_str(uri)
+    let decoded = percent_encoding::percent_decode_str(uri)
         .decode_utf8()
         .map_err(|_| PaykitSdkError::Protocol {
             context: format!("{context}: URI must contain valid UTF-8"),
             source: None,
-        })
+        })?;
+    // Pubky and HTTPS URL parsing must agree on path separators and characters.
+    if decoded
+        .bytes()
+        .any(|byte| byte == b'\\' || byte.is_ascii_control())
+    {
+        return Err(PaykitSdkError::Protocol {
+            context: format!(
+                "{context}: URI must not contain backslashes or ASCII control characters"
+            ),
+            source: None,
+        });
+    }
+    Ok(decoded)
 }
 
 async fn session_result(

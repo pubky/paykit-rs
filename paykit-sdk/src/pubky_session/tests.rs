@@ -84,6 +84,8 @@ fn test_parse_pubky_resource_normalizes_uri() {
         "/pub/dir/100%25%20ready",
         "/pub/dir/%C3%A9",
         "/pub/dir/%25C3%25A9",
+        "/pub/dir/%255C",
+        "/pub/dir/%250A",
         "/pub/dir/a%23b",
         "/pub/dir/a%3Fb",
     ] {
@@ -118,12 +120,38 @@ fn test_parse_pubky_resource_accepts_pubky_identifier_form() {
 fn test_pubky_resource_helpers_reject_invalid_uris() {
     let public_key = PubkyLocalSecretKey::new([6; 32]).public_key();
 
-    for uri in [
+    let mut uris = vec![
         public_key.as_str().to_string(),
         format!("pubky://{}/pub/%FF", public_key.as_str()),
-    ] {
-        assert!(parse_pubky_resource(&uri).is_err());
-        assert!(resolve_pubky_url(&uri).is_err());
+        format!(
+            "pubky://{}/pub/x/..%5C..%5Cpriv%5Csecret",
+            public_key.as_str()
+        ),
+        format!("pubky://{}/pub/x/..\\..\\priv\\secret", public_key.as_str()),
+    ];
+    for byte in (0u8..=0x1f).chain([0x7f]) {
+        uris.push(format!(
+            "pubky://{}/pub/a{}b",
+            public_key.as_str(),
+            char::from(byte)
+        ));
+        uris.push(format!("pubky://{}/pub/a%{byte:02X}b", public_key.as_str()));
+    }
+    for uri in uris {
+        assert!(
+            matches!(
+                parse_pubky_resource(&uri),
+                Err(PaykitSdkError::Protocol { .. })
+            ),
+            "parse accepted {uri:?}"
+        );
+        assert!(
+            matches!(
+                resolve_pubky_url(&uri),
+                Err(PaykitSdkError::Protocol { .. })
+            ),
+            "resolve accepted {uri:?}"
+        );
     }
 }
 
