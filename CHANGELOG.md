@@ -7,6 +7,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+## 0.1.0 - 2026-10-16
+
 ### Changed
 
 - Use Pubky Noise 0.1.0 and Pubky SDK, testnet, and Homeserver 0.16.2.
@@ -1014,7 +1016,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Crate metadata, README documentation, and MIT licensing to prepare the crate for
   publication on crates.io and docs.rs.
 
-[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc56...HEAD
+[Unreleased]: https://github.com/pubky/paykit-rs/compare/v0.1.0...HEAD
 [0.1.0-rc56]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc56
 [0.1.0-rc55]: https://github.com/pubky/paykit-rs/releases/tag/v0.1.0-rc55
 [0.1.0-rc54]: https://github.com/pubky/paykit-rs/compare/v0.1.0-rc52...v0.1.0-rc54

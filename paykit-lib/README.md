@@ -10,18 +10,27 @@ Add `paykit-lib` to your `Cargo.toml`.
 
 ```toml
 [dependencies]
-paykit-lib = { version = "x.x.x" }
-pubky = "0.14.0"
+paykit-lib = "0.1.0"
+pubky = "0.16.2"
 ```
 
-Minimal example — store and retrieve a public Payment Endpoint:
+The caller supplies an authenticated `pubky::PubkySession`, a
+`pubky::PublicStorage` handle, and the payee's public key. Session creation,
+capability scope, and key rotation remain the caller's responsibility.
 
-```rust,ignore
+Minimal example: store and retrieve a public Payment Endpoint.
+
+```rust,no_run
 use paykit_lib::{
     set_payment_endpoint, get_payment_endpoint, get_payment_list,
     PaykitAppId, PaymentEndpointIdentifier, PaymentEndpointPayload,
 };
 
+# async fn example(
+#     session: pubky::PubkySession,
+#     public_storage: pubky::PublicStorage,
+#     payee_pubkey: pubky::PublicKey,
+# ) -> paykit_lib::Result<()> {
 // Create validated types.
 let app_id = PaykitAppId::new("bitkit")?;
 let identifier = PaymentEndpointIdentifier::new("btc-lightning-bolt11")?;
@@ -31,13 +40,17 @@ let payload = PaymentEndpointPayload::new("lnbc1...");
 set_payment_endpoint(&session, &app_id, identifier.clone(), payload).await?;
 
 // Read it back using pubky::PublicStorage.
-let endpoint = get_payment_endpoint(&public_storage, &payee_pubkey, &app_id, &identifier).await?;
+if let Some(endpoint) = get_payment_endpoint(&public_storage, &payee_pubkey, &app_id, &identifier).await? {
+    println!("{}", endpoint.as_str());
+}
 
 // List all Payment Endpoints published by this app for a payee.
 let payment_list = get_payment_list(&public_storage, &payee_pubkey, &app_id).await?;
 for (identifier, payload) in &payment_list.payment_endpoints {
     println!("{}: {}", identifier.as_str(), payload.as_str());
 }
+# Ok(())
+# }
 ```
 
 ## Core Types
