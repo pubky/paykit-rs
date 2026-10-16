@@ -25,6 +25,20 @@ queue. Paykit is the discovery and exchange layer those systems can integrate.
 
 For canonical protocol vocabulary, see [THESAURUS.md](THESAURUS.md).
 
+## Homeserver Requirements
+
+Paykit's supported minimum is **Homeserver 0.16.2**. Pubky-backed shared state
+requires **GCS storage on every serving instance**. Confirm that all instances
+are upgraded and pre-upgrade in-flight writes have finished before deploying
+Paykit shared-state recovery.
+
+Paykit does not automatically verify the server version or storage backend.
+Neither the Pubky client version nor the `webdav-locks` feature proves deployment
+compatibility. Unverified, user-selected homeservers are not supported for
+shared-state recovery. See the
+[SDK storage requirements](paykit-sdk/README.md#profile-and-contacts)
+for the complete safety contract.
+
 ## Paykit Protocol
 
 Paykit Protocol defines the domain rules, data model, and flows for payment

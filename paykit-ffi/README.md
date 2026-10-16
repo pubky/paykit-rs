@@ -563,10 +563,12 @@ with `withPaymentAdapterAndPubkySharedState`. This mode does not use
 `SdkStateBlobStore` callbacks. It requires active session access with current
 Paykit identity key material for every operation. Independent runtimes use
 renewable homeserver write locks across bounded groups of state transactions.
-All serving homeserver instances must run **0.16.2 or newer with GCS storage**;
-updating these bindings does not upgrade the server. Confirm deployment separately
-from the `webdav-locks` capability. Filesystem storage does not satisfy this
-shared-state guarantee.
+The supported minimum is **Homeserver 0.16.2 with GCS storage on every serving
+instance**. Paykit does not automatically verify the server version or backend;
+updating these bindings does not upgrade the server. Confirm deployment and
+drain pre-upgrade writes before rollout, separately from the `webdav-locks`
+capability. Filesystem storage and unverified, user-selected homeservers do not
+satisfy this shared-state contract.
 
 Each changed transaction is durably saved before returning. After contention
 or an uncertain result, inspect durable request/payment records and resume
@@ -577,8 +579,8 @@ provide cryptographic isolation from other authorized apps.
 An unconfirmed state write leaves a homeserver marker. Before exposing marked
 state, the next operation republishes its exact encrypted bytes under the
 renewed lock. The confirmed GCS generation prevents older delayed writes from
-replacing that state. Failure or cancellation leaves recovery pending; there
-is no five-minute cooldown. Ordinary reads without markers do not add a write.
+replacing that state. Failure or cancellation leaves recovery pending.
+Ordinary reads without markers do not add a write.
 A generation conflict requires a fresh operation; do not reuse invalidated state.
 A runtime exhausting lock acquisition receives `SharedStateBusy`
 (`shared_state_busy`). Back off and keep the operation pending. Existing lease

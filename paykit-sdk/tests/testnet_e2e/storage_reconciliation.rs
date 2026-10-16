@@ -257,7 +257,7 @@ impl Fixture {
             }),
         )
         .await
-        .expect("reconciliation must not impose a timed cooldown")
+        .expect("reconciliation must complete within the test deadline")
     }
 }
 
@@ -287,7 +287,7 @@ async fn test_pending_state_is_republished_unchanged_before_use() {
         }),
     )
     .await
-    .expect("pending state must reconcile without a five-minute delay")
+    .expect("pending state must reconcile within the test deadline")
     .unwrap();
     assert_eq!(fixture.bytes().await, original);
     assert!(fixture.access.session.storage().get(&marker).await.is_err());
@@ -357,8 +357,8 @@ async fn test_cancelled_reconciliation_preserves_pending_recovery() {
     assert!(operation.await.unwrap_err().is_cancelled());
     release.send(()).unwrap();
     assert!(fixture.access.session.storage().get(&marker).await.is_ok());
-    // Cancellation retains the normal server lease until its expiry; it must
-    // not retain the former five-minute uncertain-write delay as well.
+    // Cancellation retains the server lease until expiry. Recovery must then
+    // reconcile the pending state before exposing it to another operation.
     tokio::time::timeout(Duration::from_secs(75), async {
         loop {
             match fixture.read().await {

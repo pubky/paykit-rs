@@ -472,9 +472,13 @@ records and resume existing work; a multi-step operation may already have
 committed intent, so do not blindly restart it.
 Apps with shared keys and write access are mutually trusted; App IDs do not
 provide cryptographic isolation from other authorized apps.
-Shared-state deployments require **Homeserver 0.16.2 or newer with GCS storage
-on every serving instance**. Updating the Pubky client does not upgrade the
-homeserver, and the `webdav-locks` capability does not identify these guarantees.
+The supported minimum for shared-state deployments is **Homeserver 0.16.2 with
+GCS storage on every serving instance**; newer versions must preserve the same
+storage guarantees. Paykit does not automatically verify server versions or
+storage backends. Applications must verify the deployment before enabling
+shared-state recovery; unverified, user-selected homeservers are unsupported.
+Updating the Pubky client does not upgrade the homeserver, and the `webdav-locks`
+capability does not identify these guarantees.
 Drain pre-upgrade writes before rollout; mixed server versions are unsupported.
 Every shared-state writer must use lock tokens, as this adapter does. Tokenless
 writes and direct backend edits do not participate in this safety guarantee.
@@ -496,8 +500,8 @@ with a locked DELETE; existing identity/missing-state checks still apply.
 This applies to reads, key rotation and backup recovery, including no-op paths.
 It preserves prepared ciphertext and does not introduce a state-format migration.
 
-There is no five-minute cooldown. Failed or cancelled reconciliation leaves
-recovery pending and does not expose the unconfirmed state to SDK operations.
+Failed or cancelled reconciliation leaves recovery pending and does not expose
+the unconfirmed state to SDK operations.
 A generation conflict (409) or expired lock (412) discards that attempt; the
 caller must start a fresh storage operation, not retry inside an invalidated one.
 Normal reads without pending markers do not add a PUT. Do not use ETags or 304

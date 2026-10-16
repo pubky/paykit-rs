@@ -76,8 +76,11 @@ apps with shared keys/write access can access the same private state.
 
 **Production constraint:** every serving instance must run Homeserver 0.16.2+
 with GCS. Its generation-conditional PUT/DELETE and version-consistent reads are
-required; filesystem storage is outside this guarantee. A Pubky/Noise dependency
-upgrade does not upgrade the server. See the
+required; filesystem storage is outside this guarantee. Paykit does not
+automatically verify server versions or backends. Confirm deployment and drain
+pre-upgrade writes before rollout; do not enable recovery on unverified,
+user-selected homeservers. A Pubky/Noise dependency upgrade does not upgrade the
+server, and `webdav-locks` alone does not establish compatibility. See the
 [SDK storage requirements](https://github.com/pubky/paykit-rs/blob/master/paykit-sdk/README.md#profile-and-contacts).
 Quiesce writers before administrative moves/copies of live state.
 
@@ -85,7 +88,7 @@ Unconfirmed writes retain unique per-attempt markers. Before using marked state,
 the next operation republishes the exact encrypted bytes under its renewed lock;
 confirmed publication advances GCS's generation and fences older requests.
 Failure/cancellation leaves recovery pending without exposing that state.
-There is no five-minute cooldown; ordinary unmarked reads add no write.
+Ordinary unmarked reads add no write.
 Do not trust ETags/304 as authoritative state or erase markers to bypass recovery.
 
 Existing lease expiry, renewal and acquisition backoff remain. Contending calls

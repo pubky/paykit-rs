@@ -97,7 +97,8 @@ pub(crate) fn shared_state_operation_active() -> bool {
 /// Encrypted identity-wide SDK state stored in Pubky.
 ///
 /// All serving homeserver instances must run 0.16.2 or newer with GCS storage.
-/// The client dependency version does not enforce this deployment requirement.
+/// Server versions and backends are not checked automatically; the caller must
+/// verify deployment independently of the client version and `webdav-locks`.
 /// All participating state writers must use lock tokens, and pre-upgrade writes
 /// must be drained before rollout. Direct backend edits are outside this contract.
 /// Each operation reads the latest complete state under a renewed homeserver
@@ -109,8 +110,8 @@ pub(crate) fn shared_state_operation_active() -> bool {
 /// writes leave a remote marker. Before using that state, the next operation
 /// republishes its exact bytes under the renewed lock. The confirmed publication
 /// fences older GCS generations, including writes whose SQL transaction died.
-/// Cancellation or failed publication leaves recovery pending, without a timed
-/// cooldown. This does not make HTTP metadata authoritative for state contents.
+/// Cancellation or failed publication leaves recovery pending and exposes no
+/// unconfirmed state. HTTP metadata is not authoritative for state contents.
 #[derive(Clone)]
 pub struct PubkySharedStateStorage {
     session_provider: Arc<dyn PubkySessionProvider>,

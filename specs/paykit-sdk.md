@@ -390,9 +390,11 @@ Shared-state storage requires Homeserver 0.16.2 or newer with GCS on every
 serving instance. The backend captures an object's generation, confirms its
 original SQL transaction is still alive, then conditionally publishes/deletes.
 Reads must return one object version or fail. A client dependency bump or the
-`webdav-locks` capability alone does not establish deployment. Filesystem
-storage is outside this contract; administrative COPY/MOVE requires quiesced
-writers.
+`webdav-locks` capability alone does not establish deployment. The SDK does not
+automatically check the server version or storage backend; applications must
+verify deployment before enabling shared-state recovery. Unverified homeservers
+and filesystem storage are outside this contract; administrative COPY/MOVE
+requires quiesced writers.
 All participating state writers must supply lock tokens. Drain pre-upgrade
 writes before rollout; tokenless writes, mixed server versions and direct
 backend edits are outside this contract. Existing backend/SQL corruption must
@@ -415,11 +417,11 @@ encrypted state; initialized identities still reject missing state.
 Read-only transactions, key rotation and backup recovery use the same boundary,
 including already-completed/no-op paths.
 
-There is no timed cooldown. Unconfirmed reconciliation exposes no state; a
-conflict requires a new operation and fresh read. Markers arriving after the
-snapshot remain for a subsequent reconciliation. ETags/304 responses are not
-authoritative for encrypted bytes. Existing lock acquisition bounds, renewal
-and lease expiry are unchanged. Contending operations receive `SharedStateBusy`
+Unconfirmed reconciliation exposes no state; a conflict requires a new operation
+and fresh read. Markers arriving after the snapshot remain for a subsequent
+reconciliation. ETags/304 responses are not authoritative for encrypted bytes.
+Existing lock acquisition bounds, renewal and lease expiry are unchanged.
+Contending operations receive `SharedStateBusy`
 and should back off; there is no fixed recovery deadline. Ordinary reads without
 markers add no write. Prepared ciphertext, save-before-send and the encrypted
 state format are unchanged.
