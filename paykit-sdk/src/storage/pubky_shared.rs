@@ -22,7 +22,6 @@ use crate::{
 
 const SHARED_STATE_ENVELOPE_VERSION: u32 = 1;
 const MAX_SHARED_STATE_BYTES: usize = 64 * 1024 * 1024;
-const UNCERTAIN_WRITE_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Serialize)]
 struct EncryptedStateEnvelopeRef<'a> {
@@ -97,19 +96,21 @@ pub(crate) fn shared_state_operation_active() -> bool {
 
 /// Encrypted identity-wide SDK state stored in Pubky.
 ///
-/// All serving homeserver instances must run 0.15 or newer. The client
-/// dependency version does not enforce this deployment requirement.
+/// All serving homeserver instances must run 0.16.2 or newer with GCS storage.
+/// The client dependency version does not enforce this deployment requirement.
+/// All participating state writers must use lock tokens, and pre-upgrade writes
+/// must be drained before rollout. Direct backend edits are outside this contract.
 /// Each operation reads the latest complete state under a renewed homeserver
 /// write lock. Its transactions reuse that state and replace the encrypted
 /// resource whenever it changes, before returning. One instance serializes its
 /// own operations. State is never reused after releasing the homeserver lock.
 /// Encryption protects state contents and integrity, but not resource
 /// existence, size, update timing, or replay by the homeserver. Unconfirmed
-/// writes leave a remote marker; the next transaction waits five minutes under
-/// its renewed lock before reading state. This is a best-effort delay, not a
-/// substitute for homeserver enforcement of lock ownership at publication.
-/// Cancelling the SDK operation interrupts that wait; a later call restarts it.
-/// Whole-operation timeouts must allow the cooldown, unlike HTTP request timeouts.
+/// writes leave a remote marker. Before using that state, the next operation
+/// republishes its exact bytes under the renewed lock. The confirmed publication
+/// fences older GCS generations, including writes whose SQL transaction died.
+/// Cancellation or failed publication leaves recovery pending, without a timed
+/// cooldown. This does not make HTTP metadata authoritative for state contents.
 #[derive(Clone)]
 pub struct PubkySharedStateStorage {
     session_provider: Arc<dyn PubkySessionProvider>,
@@ -207,8 +208,12 @@ impl PubkySharedStateStorage {
         Ok(access)
     }
 
-    async fn load_remote_state(&self, access: &PubkySessionAccess) -> Result<RemoteStateSnapshot> {
-        let Some(encrypted) = load_encrypted_blob(access).await? else {
+    async fn load_remote_state(
+        &self,
+        access: &PubkySessionAccess,
+        lock: &pubky::StorageLock,
+    ) -> Result<RemoteStateSnapshot> {
+        let Some(encrypted) = self.load_stable_encrypted_blob(access, lock).await? else {
             let owner = access.public_key()?.to_public_key()?;
             if paykit_lib::get_paykit_app_registry(&access.outbox_client.public_storage(), &owner)
                 .await?
@@ -230,6 +235,52 @@ impl PubkySharedStateStorage {
         Ok(RemoteStateSnapshot { state, revision })
     }
 
+    async fn load_stable_encrypted_blob(
+        &self,
+        access: &PubkySessionAccess,
+        lock: &pubky::StorageLock,
+    ) -> Result<Option<EncryptedStateBlob>> {
+        // Inspect markers before the read: a late writer can finish and clean
+        // up its marker while the response is still being downloaded.
+        let pending = pending_write_paths(&access.session).await?;
+        let encrypted = load_encrypted_blob(access).await?;
+        if pending.is_empty() {
+            return Ok(encrypted);
+        }
+
+        match &encrypted {
+            Some(blob) => {
+                // A lock alone does not fence an already-issued GCS request.
+                // A confirmed replacement advances the generation without
+                // discarding prepared ciphertext or trusting database ETags.
+                self.commit_encrypted_state(access, lock, blob.bytes.clone())
+                    .await?;
+            }
+            None => {
+                // Keep absence rather than inventing empty SDK state. Once the
+                // entry is deleted, a late publish cannot restore its SQL row;
+                // any orphan blob is hidden and the next PUT replaces it.
+                if let Err(error) = access.session.storage().delete_locked(lock).await {
+                    if is_write_conflict(&error) {
+                        return Err(shared_state_conflict(error));
+                    }
+                    if !is_not_found(&error) {
+                        return Err(shared_write_error(
+                            "confirm absent Pubky shared state",
+                            error,
+                        ));
+                    }
+                }
+            }
+        }
+        // Clear only markers observed before this fence. A delayed marker PUT
+        // can appear later and must be reconciled by a subsequent operation.
+        for path in pending {
+            remove_pending_write(&access.session.storage(), &path).await?;
+        }
+        Ok(encrypted)
+    }
+
     fn record_revision(&self, revision: Option<String>) -> Result<()> {
         *self
             .last_revision
@@ -249,12 +300,12 @@ impl PubkySharedStateStorage {
     ) -> Result<()> {
         let attempted_revision = state_revision(&encrypted);
         let storage = access.session.storage();
-        // Each encrypted attempt has a fresh nonce. A distinct marker prevents
-        // delayed cleanup of one write from clearing another write's marker.
+        // Recovery can republish identical ciphertext. Each attempt still needs
+        // a distinct marker so delayed cleanup cannot clear another attempt.
         let pending_path = format!(
             "{}{}",
             paykit_lib::PAYKIT_SHARED_STATE_WRITE_PATH_PREFIX,
-            blake3::hash(&encrypted).to_hex(),
+            blake3::hash(&XChaCha20Poly1305::generate_nonce(&mut OsRng)).to_hex(),
         );
         if let Err(error) = storage.put(&pending_path, Vec::new()).await {
             // No state PUT was started, even if the marker PUT reached the server.
@@ -269,16 +320,13 @@ impl PubkySharedStateStorage {
         match write_result {
             Ok(_) => {
                 // Cleanup failure must not turn a confirmed commit into a
-                // failed transaction. The leftover marker causes a cooldown.
+                // failed transaction. The leftover marker requires reconciliation.
                 let _ = remove_pending_write(&storage, &pending_path).await;
                 self.record_revision(Some(attempted_revision))
             }
-            Err(write_error) if is_precondition_failed(&write_error) => {
+            Err(write_error) if is_write_conflict(&write_error) => {
                 let _ = remove_pending_write(&storage, &pending_path).await;
-                Err(PaykitSdkError::ConcurrentUpdate {
-                    context: "Pubky shared-state lock expired during transaction".into(),
-                    source: Some(write_error.into()),
-                })
+                Err(shared_state_conflict(write_error))
             }
             Err(write_error) if is_quota_rejection(&write_error) => {
                 // Pubky homeserver quota checks reject before publishing staged bytes.
@@ -330,10 +378,7 @@ impl StorageAdapter for PubkySharedStateStorage {
         let access = self.load_access().await?;
         let session = access.session.clone();
         let (result, state) = with_shared_state_lock(&session, |lock| async move {
-            // A late write can commit and remove its marker during a state read.
-            // Checking markers first prevents accepting that read's stale contents.
-            wait_for_pending_writes(&access.session).await?;
-            let snapshot = self.load_remote_state(&access).await?;
+            let snapshot = self.load_remote_state(&access, &lock).await?;
             if self.last_revision()?.is_some() && snapshot.revision.is_none() {
                 return Err(PaykitSdkError::Storage {
                     context: "previously observed Pubky shared state is missing".into(),
@@ -410,7 +455,6 @@ impl StorageAdapter for PubkySharedStateStorage {
         with_shared_state_lock(
             &session,
             |lock| async move {
-                wait_for_pending_writes(&access.session).await?;
                 let registry = paykit_lib::get_paykit_app_registry(
                     &access.outbox_client.public_storage(),
                     &owner.to_public_key()?,
@@ -431,7 +475,7 @@ impl StorageAdapter for PubkySharedStateStorage {
                         source: None,
                     });
                 }
-                let encrypted = load_encrypted_blob(&access).await?;
+                let encrypted = self.load_stable_encrypted_blob(&access, &lock).await?;
                 if let Some(blob) = &encrypted {
                     if recovery_already_committed(&current_key, &replacement_key, &owner, &blob.bytes)? {
                         self.record_revision(Some(blob.revision.clone()))?;
@@ -522,8 +566,7 @@ impl StorageAdapter for PubkySharedStateStorage {
         with_shared_state_lock(
             &session,
             |lock| async move {
-                wait_for_pending_writes(&access.session).await?;
-                let encrypted = load_encrypted_blob(&access).await?;
+                let encrypted = self.load_stable_encrypted_blob(&access, &lock).await?;
                 let revision = encrypted.as_ref().map(|blob| blob.revision.clone());
                 if self.last_revision()?.is_some() && revision.is_none() {
                     return Err(PaykitSdkError::Storage {
@@ -648,32 +691,6 @@ async fn pending_write_paths(session: &pubky::PubkySession) -> Result<Vec<String
         .collect())
 }
 
-async fn wait_for_pending_writes(session: &pubky::PubkySession) -> Result<()> {
-    let storage = session.storage();
-    let mut waited = false;
-    loop {
-        let pending = pending_write_paths(session).await?;
-        if pending.is_empty() {
-            return Ok(());
-        }
-        if !waited {
-            // Keep the state lock throughout the wait. Cancellation leaves the
-            // markers intact so the next app waits afresh, without clock skew.
-            tracing::warn!(
-                pending_writes = pending.len(),
-                cooldown_seconds = UNCERTAIN_WRITE_COOLDOWN.as_secs(),
-                "waiting under shared-state lock for uncertain writes"
-            );
-            tokio::time::sleep(UNCERTAIN_WRITE_COOLDOWN).await;
-            tracing::info!("shared-state uncertain-write cooldown completed");
-            waited = true;
-        }
-        for path in pending {
-            remove_pending_write(&storage, &path).await?;
-        }
-    }
-}
-
 async fn remove_pending_write(storage: &pubky::SessionStorage, path: &str) -> Result<()> {
     for attempt in 0..3 {
         match storage.delete(path).await {
@@ -681,7 +698,7 @@ async fn remove_pending_write(storage: &pubky::SessionStorage, path: &str) -> Re
             Err(error) if is_not_found(&error) => return Ok(()),
             Err(error) if attempt == 2 => {
                 tracing::warn!(
-                    "pending shared-state write marker could not be removed; next operation will wait"
+                    "pending shared-state write marker could not be removed; reconciliation remains pending"
                 );
                 return Err(shared_write_error(
                     "remove pending Pubky shared-state write",
@@ -697,6 +714,14 @@ async fn remove_pending_write(storage: &pubky::SessionStorage, path: &str) -> Re
 fn shared_write_error(context: &str, error: PubkyError) -> PaykitSdkError {
     PaykitSdkError::Transport {
         context: context.into(),
+        source: Some(error.into()),
+    }
+}
+
+fn shared_state_conflict(error: PubkyError) -> PaykitSdkError {
+    PaykitSdkError::ConcurrentUpdate {
+        context: "Pubky shared state changed or its lock expired; restart the storage operation"
+            .into(),
         source: Some(error.into()),
     }
 }
@@ -989,11 +1014,11 @@ fn is_not_found(err: &PubkyError) -> bool {
     )
 }
 
-fn is_precondition_failed(err: &PubkyError) -> bool {
+fn is_write_conflict(err: &PubkyError) -> bool {
     matches!(
         err,
         PubkyError::Request(RequestError::Server { status, .. })
-            if *status == StatusCode::PRECONDITION_FAILED
+            if *status == StatusCode::PRECONDITION_FAILED || *status == StatusCode::CONFLICT
     )
 }
 

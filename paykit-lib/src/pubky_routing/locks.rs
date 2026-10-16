@@ -25,6 +25,7 @@ pub fn is_write_conflict(error: &PaykitError) -> bool {
         Some(pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }))
             if *status == pubky::StatusCode::LOCKED
                 || *status == pubky::StatusCode::PRECONDITION_FAILED
+                || *status == pubky::StatusCode::CONFLICT
     ))
 }
 
@@ -116,9 +117,11 @@ fn resource_changed() -> PaykitError {
 /// Contended acquisition is retried with bounded backoff before `operation`
 /// runs. The operation itself is never replayed.
 ///
-/// The homeserver must prevent writes from committing after lock ownership is
-/// lost. Session creation, capability scope, key rotation, and request timeouts
-/// remain the caller's responsibility.
+/// Homeserver 0.16.2 with GCS fences stale publications by object generation.
+/// A delayed write may still land before this holder's first publication; a
+/// conflict requires a fresh read, and uncertain shared state needs a confirmed
+/// replacement before use. Session creation, capability scope, key rotation,
+/// and request timeouts remain the caller's responsibility.
 pub async fn with_write_lock<T, E, F, Fut>(
     session: &PubkySession,
     path: &str,
@@ -233,6 +236,26 @@ fn lock_error(context: &str, source: pubky::Error) -> PaykitError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_generation_conflict_requires_fresh_operation() {
+        for (status, conflict) in [
+            (pubky::StatusCode::CONFLICT, true),
+            (pubky::StatusCode::PRECONDITION_FAILED, true),
+            (pubky::StatusCode::LOCKED, true),
+            (pubky::StatusCode::INTERNAL_SERVER_ERROR, false),
+        ] {
+            let source = pubky::Error::Request(pubky::errors::RequestError::Server {
+                status,
+                message: "test response".into(),
+            });
+            let error = PaykitError::Transport {
+                context: "write resource".into(),
+                source: source.into(),
+            };
+            assert_eq!(is_write_conflict(&error), conflict);
+        }
+    }
 
     #[test]
     fn test_lock_refresh_retries_only_transient_server_errors() {

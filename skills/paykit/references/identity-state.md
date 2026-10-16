@@ -74,25 +74,26 @@ checkpoints commit together. Outbound prepared ciphertext and its advanced
 checkpoint commit before publication. App IDs separate ownership, not trust:
 apps with shared keys/write access can access the same private state.
 
-**Production constraint:** the homeserver must fence expired lock holders at
-write commit and durably publish whole files, including after storage or database
-failure. Check the deployed server against the
-[SDK storage requirements](https://github.com/pubky/paykit-rs/blob/master/paykit-sdk/README.md#profile-and-contacts)
-at the application's pin. A Pubky/Noise dependency upgrade does not upgrade the
-server or establish those guarantees. Keep the SDK's uncertain-write cooldown;
-it is a mitigation, not proof that an arbitrarily delayed write cannot publish.
+**Production constraint:** every serving instance must run Homeserver 0.16.2+
+with GCS. Its generation-conditional PUT/DELETE and version-consistent reads are
+required; filesystem storage is outside this guarantee. A Pubky/Noise dependency
+upgrade does not upgrade the server. See the
+[SDK storage requirements](https://github.com/pubky/paykit-rs/blob/master/paykit-sdk/README.md#profile-and-contacts).
+Quiesce writers before administrative moves/copies of live state.
 
-An unconfirmed write leaves a pending marker. The next transaction waits five
-minutes under a renewed lock before reloading. Cancellation restarts that wait
-on the next call; competing operations can receive `SharedStateBusy`
-(`shared_state_busy`). Reads may also block; there is no fixed completion
-deadline. Back off and show pending recovery, not a tight retry loop or blank
-state. `SharedStateBusy` can also mean ordinary lock contention, not just a
-pending-write cooldown. Do not retry it as a revision conflict inside an
-invalidated operation. Do not infer a safe retry from failure to inspect markers.
-Ordinary successful writes have no timed cooldown. HTTP request timeouts belong
-to the Pubky client; whole-operation cancellation must account for this wait.
-After any uncertain multi-step call, inspect durable records and resume intent
+Unconfirmed writes retain unique per-attempt markers. Before using marked state,
+the next operation republishes the exact encrypted bytes under its renewed lock;
+confirmed publication advances GCS's generation and fences older requests.
+Failure/cancellation leaves recovery pending without exposing that state.
+There is no five-minute cooldown; ordinary unmarked reads add no write.
+Do not trust ETags/304 as authoritative state or erase markers to bypass recovery.
+
+Existing lease expiry, renewal and acquisition backoff remain. Contending calls
+may receive `SharedStateBusy` (`shared_state_busy`); show pending recovery and
+back off instead of spinning or inventing empty state. There is still no fixed
+completion deadline. A generation conflict needs a fresh operation, not a retry
+inside an invalidated one. HTTP timeouts remain the Pubky client's responsibility.
+After an uncertain multi-step call, inspect durable records and resume intent
 rather than creating another request/payment.
 
 ## Sign-Out, Removal, and Rotation

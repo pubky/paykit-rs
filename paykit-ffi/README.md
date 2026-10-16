@@ -563,26 +563,28 @@ with `withPaymentAdapterAndPubkySharedState`. This mode does not use
 `SdkStateBlobStore` callbacks. It requires active session access with current
 Paykit identity key material for every operation. Independent runtimes use
 renewable homeserver write locks across bounded groups of state transactions.
-All serving homeserver instances must run 0.15 or newer; updating these bindings
-does not upgrade the server. Confirm deployment separately from the
-`webdav-locks` capability, which does not identify the server version.
+All serving homeserver instances must run **0.16.2 or newer with GCS storage**;
+updating these bindings does not upgrade the server. Confirm deployment separately
+from the `webdav-locks` capability. Filesystem storage does not satisfy this
+shared-state guarantee.
+
 Each changed transaction is durably saved before returning. After contention
 or an uncertain result, inspect durable request/payment records and resume
 existing work; a multi-step operation may already have committed intent.
 Apps with shared keys and write access are mutually trusted; App IDs do not
 provide cryptographic isolation from other authorized apps.
-An unconfirmed state write leaves a homeserver marker. The next operation waits
-five minutes under a renewed lock before reloading state; cancelling restarts
-that wait on the next attempt. A competing runtime that exhausts lock acquisition
-retries receives `SharedStateBusy` (`shared_state_busy`), whether the holder is
-doing normal work or waiting for recovery. Back off and keep the operation
-pending instead of immediately retrying. Reads can also be
-blocked; there is no fixed completion deadline.
-This is a best-effort mitigation, not a safety guarantee. Homeserver 0.15 checks
-lock ownership before publication, but a lost database transaction can still
-release its lock while backend publication remains in flight. Normal successful
-writes have no cooldown. See the [shared-state safety requirements](../paykit-sdk/README.md)
-before deploying multiple writers.
+
+An unconfirmed state write leaves a homeserver marker. Before exposing marked
+state, the next operation republishes its exact encrypted bytes under the
+renewed lock. The confirmed GCS generation prevents older delayed writes from
+replacing that state. Failure or cancellation leaves recovery pending; there
+is no five-minute cooldown. Ordinary reads without markers do not add a write.
+A generation conflict requires a fresh operation; do not reuse invalidated state.
+A runtime exhausting lock acquisition receives `SharedStateBusy`
+(`shared_state_busy`). Back off and keep the operation pending. Existing lease
+expiry and renewal remain unchanged, so recovery still has no fixed deadline.
+See the [shared-state safety requirements](../paykit-sdk/README.md) before
+deploying multiple writers.
 
 Use `identityStatus` to gate product actions. `publicKey` identifies the last
 initialized identity when known. `SignedOut` means Pubky-backed workflows must

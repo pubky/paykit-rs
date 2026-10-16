@@ -2548,6 +2548,7 @@ async fn test_paykit_identity_key_rotation_rekeys_shared_state_and_registry() {
     let replacement = secret
         .derive_paykit_identity_secret_key(2)
         .expect("replacement Paykit key derivation should succeed");
+    mark_shared_state_pending(&access.session).await;
     let registry = sdk
         .rotate_paykit_identity_key(replacement.clone())
         .await
@@ -2731,6 +2732,7 @@ async fn test_recover_missing_shared_state_retries_without_overwriting_progress(
         .is_err());
 
     let replacement = pair.secret.derive_paykit_identity_secret_key(2).unwrap();
+    mark_shared_state_pending(&pair.bitkit.access.session).await;
     let registry_lock = remote
         .lock(
             paykit_lib::PAYKIT_APP_REGISTRY_PATH,
@@ -2809,6 +2811,7 @@ async fn test_recover_missing_shared_state_retries_without_overwriting_progress(
         .await
         .unwrap();
     let revision = replacement_storage.last_revision().unwrap();
+    mark_shared_state_pending(&pair.bitkit.access.session).await;
     assert_eq!(
         pair.bitkit
             .sdk
@@ -2826,6 +2829,7 @@ async fn test_recover_missing_shared_state_retries_without_overwriting_progress(
         before_retry
     );
     assert_eq!(replacement_storage.last_revision().unwrap(), revision);
+    assert_no_pending_shared_state_writes(&pair.bitkit.access.session).await;
     assert_eq!(
         pair.bitkit
             .sdk
@@ -2952,198 +2956,6 @@ async fn test_unknown_pending_write_blocks_shared_state() {
     assert!(remote.get(&marker).await.is_ok());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_pubky_shared_state_waits_for_abandoned_write_before_reading() {
-    let testnet = build_testnet_with_admin().await;
-    let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
-    let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
-    let access = session_bootstrap(&testnet, "bitkit.test")
-        .sign_up(
-            &secret,
-            &homeserver,
-            None,
-            PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
-        )
-        .await
-        .unwrap()
-        .access;
-    let provider = TestnetSessionProvider::new(access.clone());
-    let storage = PubkySharedStateStorage::new(provider.clone());
-    let sdk = PaykitSdk::new(
-        storage.clone(),
-        provider,
-        TestnetPaymentAdapter::default(),
-        PaykitSdkConfig::new("bitkit").unwrap(),
-    );
-    sdk.initialize().await.unwrap();
-    let remote = access.session.storage();
-    let original = remote
-        .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
-        .await
-        .unwrap()
-        .bytes()
-        .await
-        .unwrap();
-    let late_initialized_at = storage
-        .transaction(|tx| {
-            let mut identity = tx.load_identity_state().unwrap();
-            identity.initialized_at += chrono::Duration::seconds(1);
-            let initialized_at = identity.initialized_at;
-            tx.save_identity_state(identity);
-            Ok(initialized_at)
-        })
-        .await
-        .unwrap();
-    let late_state = remote
-        .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
-        .await
-        .unwrap()
-        .bytes()
-        .await
-        .unwrap();
-    remote
-        .put(paykit_lib::PAYKIT_SHARED_STATE_PATH, original)
-        .await
-        .unwrap();
-    let marker = format!(
-        "{}{}",
-        paykit_lib::PAYKIT_SHARED_STATE_WRITE_PATH_PREFIX,
-        blake3::hash(&late_state).to_hex()
-    );
-    remote.put(&marker, Vec::<u8>::new()).await.unwrap();
-
-    let server_access = session_bootstrap(&testnet, "paykit-server.test")
-        .sign_in(&secret, PAYKIT_SESSION_CAPABILITIES)
-        .await
-        .unwrap()
-        .access;
-    let reader = PubkySharedStateStorage::new(TestnetSessionProvider::new(server_access));
-    let callback_ran = Arc::new(AtomicBool::new(false));
-    let observed_callback = Arc::clone(&callback_ran);
-    let started = Instant::now();
-    let mut read = tokio::spawn(async move {
-        loop {
-            let result = reader
-                .transaction(|tx| {
-                    observed_callback.store(true, Ordering::SeqCst);
-                    Ok(tx.load_identity_state().unwrap().initialized_at)
-                })
-                .await;
-            // The lock probe below may acquire the lease before this task starts.
-            if result.as_ref().is_err_and(|error| {
-                error.is_concurrent_update()
-                    || matches!(error, PaykitSdkError::SharedStateBusy { .. })
-            }) && started.elapsed() < Duration::from_secs(10)
-            {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-                continue;
-            }
-            break result;
-        }
-    });
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            assert!(
-                !read.is_finished(),
-                "the read must wait for the pending write"
-            );
-            match remote
-                .lock(
-                    paykit_lib::PAYKIT_SHARED_STATE_PATH,
-                    Duration::from_secs(60),
-                )
-                .await
-            {
-                Ok(lock) => remote.unlock(&lock).await.unwrap(),
-                Err(pubky::Error::Request(pubky::errors::RequestError::Server {
-                    status, ..
-                })) if status == pubky::StatusCode::LOCKED => break,
-                Err(error) => panic!("unexpected lock error: {error}"),
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("the independent reader should acquire the shared-state lock");
-
-    // Wait beyond the initial lease to exercise renewal during the real cooldown.
-    tokio::time::sleep(Duration::from_secs(70)).await;
-    assert!(!read.is_finished());
-    assert!(!callback_ran.load(Ordering::SeqCst));
-    assert!(remote
-        .get(&marker)
-        .await
-        .unwrap()
-        .bytes()
-        .await
-        .unwrap()
-        .is_empty());
-    let competing_callback_ran = AtomicBool::new(false);
-    let error = tokio::time::timeout(
-        Duration::from_secs(10),
-        storage.transaction(|tx| {
-            competing_callback_ran.store(true, Ordering::SeqCst);
-            Ok(tx.export_storage_state())
-        }),
-    )
-    .await
-    .expect("a competing transaction should fail without joining the cooldown")
-    .expect_err("the cooldown must retain the exclusive state lock");
-    assert!(matches!(error, PaykitSdkError::SharedStateBusy { .. }));
-    assert!(!error.is_concurrent_update());
-    assert!(!competing_callback_ran.load(Ordering::SeqCst));
-
-    // Admin DAV bypasses the client lock, simulating a previously admitted late publication.
-    let admin = testnet.homeserver_app().admin_server().unwrap();
-    reqwest::Client::new()
-        .put(format!(
-            "http://{}/dav/{}{}",
-            admin.listen_socket(),
-            secret.public_key().to_public_key().unwrap().z32(),
-            paykit_lib::PAYKIT_SHARED_STATE_PATH
-        ))
-        .basic_auth(
-            "admin",
-            Some(
-                pubky_testnet::pubky_homeserver::ConfigToml::default_test_config()
-                    .admin
-                    .admin_password,
-            ),
-        )
-        .body(late_state)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
-
-    let reloaded_at = tokio::time::timeout(Duration::from_secs(360), &mut read)
-        .await
-        .expect("the abandoned write cooldown should finish")
-        .unwrap()
-        .unwrap();
-    assert!(started.elapsed() >= Duration::from_secs(300));
-    assert!(callback_ran.load(Ordering::SeqCst));
-    assert_eq!(reloaded_at, late_initialized_at);
-    assert_no_pending_shared_state_writes(&access.session).await;
-
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        storage.transaction(|tx| {
-            let mut identity = tx.load_identity_state().unwrap();
-            assert_eq!(identity.initialized_at, late_initialized_at);
-            identity.initialized_at += chrono::Duration::seconds(1);
-            tx.save_identity_state(identity);
-            Ok(())
-        }),
-    )
-    .await
-    .expect("normal transactions should not wait once pending markers are removed")
-    .unwrap();
-    assert_no_pending_shared_state_writes(&access.session).await;
-}
-
 #[tokio::test]
 async fn test_pubky_shared_state_does_not_write_when_marker_publication_is_rejected() {
     let testnet = build_testnet_with_admin().await;
@@ -3248,6 +3060,21 @@ async fn test_pubky_shared_state_does_not_write_when_marker_publication_is_rejec
         .put(paykit_lib::PAYKIT_SHARED_STATE_PATH, original)
         .await
         .expect("the state path itself should still permit writes");
+}
+
+async fn mark_shared_state_pending(session: &pubky::PubkySession) {
+    session
+        .storage()
+        .put(
+            &format!(
+                "{}{}",
+                paykit_lib::PAYKIT_SHARED_STATE_WRITE_PATH_PREFIX,
+                "b".repeat(64)
+            ),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
 }
 
 async fn assert_no_pending_shared_state_writes(session: &pubky::PubkySession) {
