@@ -3474,6 +3474,8 @@ version = "0.1.0-rc77"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
+ "axum-server",
  "base64 0.22.1",
  "bip39",
  "blake3",

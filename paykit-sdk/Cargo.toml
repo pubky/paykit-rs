@@ -40,6 +40,8 @@ url = "2"
 zeroize = "1"
 
 [dev-dependencies]
+axum = "0.8"
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 http-relay = { version = "0.7.0", default-features = false, features = ["server"] }
 mainline = "8.0.0"
 pkarr-relay = "2.0.0"

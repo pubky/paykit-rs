@@ -386,24 +386,51 @@ its refresh receive is refused. Batch receive reports carry only error text, so
 apps classify the refusal with the single-counterparty
 `receive_private_messages`.
 
-Before each state PUT, the adapter publishes an empty, uniquely named marker
-under `/pub/paykit/v0/shared-state-writes/`. A confirmed PUT or an explicit PUT
-rejection for lock expiry (412), rate limiting (429), or storage quota (507)
-removes that attempt's marker, provided cleanup succeeds. All other failures
-are treated as uncertain writes; these and cancellation leave the marker.
-Marker cleanup failure does not undo a confirmed commit. A transaction finding
-pending markers holds and renews the state lock for five minutes, removes the
-observed markers, then loads fresh state. Read-only transactions and key rotation
-use the same barrier. Cancelling the wait leaves the markers for the next caller.
-Competing runtimes that cannot acquire the lock while markers exist receive
-`SharedStateBusy`, including on reads. They should back off for recovery, not
-immediately retry; cancellation can restart the wait, so there is no fixed deadline.
+Shared-state storage requires Homeserver 0.16.2 or newer with GCS on every
+serving instance. The backend captures an object's generation, confirms its
+original SQL transaction is still alive, then conditionally publishes/deletes.
+Reads must return one object version or fail. A client dependency bump or the
+`webdav-locks` capability alone does not establish deployment. The SDK does not
+automatically check the server version or storage backend; applications must
+verify deployment before enabling shared-state recovery. Unverified homeservers
+and filesystem storage are outside this contract; administrative COPY/MOVE
+requires quiesced writers.
+All participating state writers must supply lock tokens. Drain pre-upgrade
+writes before rollout; tokenless writes, mixed server versions and direct
+backend edits are outside this contract. Existing backend/SQL corruption must
+be repaired separately.
 
-This cooldown is a best-effort mitigation for Pubky 0.14's missing commit-time
-lock enforcement, not a production concurrency guarantee. A write delayed beyond
-the cooldown can still overwrite newer state; a successful readback does not end
-uncertainty.
-Normal writes add marker publication and cleanup requests but no timed delay.
+Before each state mutation, the adapter publishes an empty, uniquely named marker
+under `/pub/paykit/v0/shared-state-writes/`. Names are per mutation attempt so
+delayed cleanup cannot remove a later attempt's marker. A confirmed PUT or
+an explicit rejection for generation conflict (409), lock expiry (412), rate
+limiting (429), or storage quota (507) removes that attempt's marker if cleanup
+succeeds. Other failures and cancellation retain it. Marker cleanup failure
+does not undo a confirmed commit.
+
+Under its renewed lock, an operation inspects markers before reading the complete
+encrypted state. If any exist, it republishes the exact bytes and waits for a
+confirmed result before exposing state or clearing the observed markers.
+This identical-byte replacement allocates no new marker and can proceed at full
+quota if it adds no accounted bytes. A rejected replacement, including 507,
+leaves the observed markers pending; free space or raise the quota before retrying
+a quota rejection. Reconciliation does not bypass server quota enforcement.
+Only replaying the exact bytes read under the current lock uses this path;
+mutations, key rotation and backup replacement still create their own markers.
+The replacement advances GCS's generation and fences older in-flight writes.
+Absent state is reconciled by locked DELETE without synthesizing an empty
+encrypted state; initialized identities still reject missing state.
+Read-only transactions, key rotation and backup recovery use the same boundary,
+including already-completed/no-op paths.
+
+Unconfirmed reconciliation exposes no state; a conflict requires a new operation
+and fresh read. Markers arriving after the snapshot remain for a subsequent
+reconciliation. ETags/304 responses are not authoritative for encrypted bytes.
+Existing lock acquisition bounds, renewal and lease expiry are unchanged.
+Contending operations receive `SharedStateBusy`
+and should back off; there is no fixed recovery deadline. Ordinary reads without
+markers add no write. Prepared ciphertext, save-before-send and the encrypted
+state format are unchanged.
 
 ### PubkySessionProvider
 

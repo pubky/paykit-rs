@@ -472,37 +472,61 @@ records and resume existing work; a multi-step operation may already have
 committed intent, so do not blindly restart it.
 Apps with shared keys and write access are mutually trusted; App IDs do not
 provide cryptographic isolation from other authorized apps.
-The homeserver must fence writes through commit when lock ownership expires
-and publish complete files durably. Locks alone do not provide storage crash safety.
+The supported minimum for shared-state deployments is **Homeserver 0.16.2 with
+GCS storage on every serving instance**; newer versions must preserve the same
+storage guarantees. Paykit does not automatically verify server versions or
+storage backends. Applications must verify the deployment before enabling
+shared-state recovery; unverified, user-selected homeservers are unsupported.
+Updating the Pubky client does not upgrade the homeserver, and the `webdav-locks`
+capability does not identify these guarantees.
+Drain pre-upgrade writes before rollout; mixed server versions are unsupported.
+Every shared-state writer must use lock tokens, as this adapter does. Tokenless
+writes and direct backend edits do not participate in this safety guarantee.
+The GCS backend conditionally publishes and deletes by object generation after
+checking the original SQL transaction is alive. Reads return one object version
+or fail. Filesystem storage is not supported for this shared-state guarantee.
+Administrative moves/copies of live state require quiescing its writers.
+Deployment must preserve normal GCS/SQL ordering; pre-existing backend corruption
+(such as a database entry whose object was deleted directly) requires separate
+repair, not automatic initialization as a new identity.
 
-Shared-state deployments require Homeserver 0.15 or newer on every serving
-instance. Updating the Pubky client does not upgrade the homeserver, and the
-`webdav-locks` capability alone does not identify its finalization guarantees.
-Homeserver 0.15 checks the lock token again before publishing and holds the
-database lock through finalization. This prevents stale publication after
-ordinary lease expiry, but database-transaction loss can still release that
-lock while backend publication is in flight. Do not use conditional reads as
-proof of current encrypted state: blob contents and database metadata can
-disagree after a failed finalization.
+A lock alone does not settle an already-issued storage request. Each state
+mutation therefore publishes a unique pending marker before writing. When markers
+exist, the next operation reads the complete encrypted bytes and republishes
+those **exact bytes under its renewed lock before using the state**. A confirmed
+publication advances GCS's generation, preventing older in-flight writes from
+replacing it. It then removes the observed markers. Missing state is reconciled
+with a locked DELETE; existing identity/missing-state checks still apply.
+This applies to reads, key rotation and backup recovery, including no-op paths.
+It preserves prepared ciphertext and does not introduce a state-format migration.
+Exact-byte reconciliation uses the observed markers without allocating a new
+file, so it can proceed at full quota when the replacement adds no accounted
+bytes. It does not bypass quota enforcement: a replacement rejected with 507
+leaves recovery pending until space is freed or the quota is increased.
 
-Shared-state writes therefore still publish a unique pending marker before their
-PUT and remove it after a confirmed result. An unconfirmed write leaves its
-marker; the next transaction waits five minutes under a renewed lock, then
-reloads state. Cancellation leaves the marker and restarts the wait on the next
-attempt. A runtime that exhausts lock acquisition retries receives
-`SharedStateBusy`, not a revision-conflict `ConcurrentUpdate`. The holder may
-be doing normal work or waiting for recovery; back off and keep the operation
-pending. This can also block reads, and there is no fixed completion
-deadline. The cooldown adds no timed delay to normal successful writes,
-but cannot rule out a write completing after five
-minutes and does not replace storage-side fencing through publication.
-Explicit PUT rejections for lock expiry (412), rate limiting (429), or storage
-quota (507) clear that attempt's pending marker without a cooldown, provided
-cleanup succeeds.
-Rate-limit errors remain transport errors; callers should back off before
-resuming from freshly loaded state. Any other failure, including timeouts,
-connection errors, and other 4xx/5xx responses, keeps the pending marker because
-publication is uncertain.
+Failed or cancelled reconciliation leaves recovery pending and does not expose
+the unconfirmed state to SDK operations.
+A generation conflict (409) or expired lock (412) discards that attempt; the
+caller must start a fresh storage operation, not retry inside an invalidated one.
+Normal reads without pending markers do not add a PUT. Do not use ETags or 304
+responses as proof of current encrypted state: blob contents and database
+metadata can still disagree after failed finalization.
+
+A runtime that exhausts lock acquisition retries receives `SharedStateBusy`,
+not `ConcurrentUpdate`. Back off and keep its operation pending. Existing lease
+durations, renewal and acquisition backoff are unchanged. Reads may also block;
+network failures and contention mean there is still no fixed recovery deadline.
+After an uncertain multi-step call, inspect durable records and resume existing
+intent rather than creating another request or payment.
+
+For state mutations, a confirmed PUT or explicit PUT rejection for generation
+conflict (409), lock expiry (412), rate limiting (429), or storage quota (507)
+clears that attempt's marker, provided cleanup succeeds. Marker cleanup failure does not undo a
+confirmed commit. Rate-limit errors remain transport errors. Other failures,
+including timeouts and connection errors, retain markers because publication
+is uncertain. Marker names are unique per mutation attempt, so delayed cleanup
+cannot erase a later attempt's marker. Reconciliation does not clear observed
+markers on rejection because they describe prior uncertain writes.
 Malformed pending markers block shared state instead of being ignored or
 deleted automatically. Investigate them with participating apps stopped before
 removing anything that could represent an unfinished write.
