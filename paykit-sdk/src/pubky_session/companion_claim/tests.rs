@@ -118,6 +118,31 @@ fn test_companion_auth_request_parses_relay_and_secret() {
     assert_eq!(request.secret, secret);
 }
 
+#[tokio::test]
+async fn test_companion_auth_request_rejects_hpke_channel() {
+    let flow = pubky::PubkyGrantAuthFlow::builder(
+        &Capabilities::try_from(CAPABILITY).unwrap(),
+        pubky::AuthFlowKind::signin(),
+        pubky::ClientId::new(CLIENT_ID).unwrap(),
+    )
+    .approval_format(pubky::deep_links::GrantApprovalFormat::SignedApprovalV1)
+    .relay(Url::parse("http://127.0.0.1:1/inbox").unwrap())
+    .start()
+    .unwrap();
+    let auth_url = format!(
+        "{}&{QUERY_PARAMETER}={CLAIM_TYPE}",
+        flow.authorization_url()
+    );
+    assert!(matches!(
+        parse_pubky_auth_request(&auth_url),
+        Err(PubkyAuthCompanionClaimApprovalError::InvalidAuthUrl { .. })
+    ));
+    assert!(matches!(
+        parse_companion_auth_request(&auth_url, CAPABILITY, &test_claim()),
+        Err(PubkyAuthCompanionClaimApprovalError::InvalidAuthUrl { .. })
+    ));
+}
+
 #[test]
 fn test_companion_auth_request_rejects_duplicate_secret() {
     let relay = Url::parse("https://relay.example/inbox").unwrap();

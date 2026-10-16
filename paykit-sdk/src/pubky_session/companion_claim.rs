@@ -8,7 +8,9 @@ use crypto_secretbox::{
     XSalsa20Poly1305,
 };
 use pubky::{
-    deep_links::DeepLink, errors::RequestError, Error as PubkyError, HttpRelayInboxChannel,
+    deep_links::{DeepLink, GrantRelayChannel},
+    errors::RequestError,
+    Error as PubkyError, HttpRelayInboxChannel,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -144,6 +146,8 @@ impl PubkySessionBootstrap {
     /// `query_parameter` and `claim_type`. Its requested capabilities must
     /// exactly match `expected_capabilities`, and its client ID must match this
     /// bootstrap's client ID.
+    /// Only shared-secret grant URLs are supported; an HPKE public key cannot
+    /// serve as the companion claim's encryption secret.
     ///
     /// The claim is delivered before the Pubky grant. A claim
     /// validation, encryption, or relay delivery failure therefore leaves the
@@ -233,9 +237,9 @@ fn parse_pubky_auth_request(
     auth_url: &str,
 ) -> Result<CompanionAuthRequest, PubkyAuthCompanionClaimApprovalError> {
     let deep_link: DeepLink = auth_url.parse().map_err(invalid_auth_url)?;
-    let (relay, secret) = match deep_link {
-        DeepLink::SigninGrant(link) => (link.params().relay.clone(), link.params().secret),
-        DeepLink::SignupGrant(link) => (link.params().relay.clone(), link.params().secret),
+    let (relay, channel) = match deep_link {
+        DeepLink::SigninGrant(link) => (link.params().relay.clone(), link.params().relay_channel),
+        DeepLink::SignupGrant(link) => (link.params().relay.clone(), link.params().relay_channel),
         DeepLink::Signin(_)
         | DeepLink::Signup(_)
         | DeepLink::DirectSignup(_)
@@ -244,6 +248,11 @@ fn parse_pubky_auth_request(
                 "only Pubky grant auth URLs can carry companion claims",
             ))
         }
+    };
+    let GrantRelayChannel::SharedSecret(secret) = channel else {
+        return Err(invalid_auth_url(
+            "companion claims require a shared-secret relay channel",
+        ));
     };
     Ok(CompanionAuthRequest { relay, secret })
 }

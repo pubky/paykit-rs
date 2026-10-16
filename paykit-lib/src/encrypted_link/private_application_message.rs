@@ -332,7 +332,13 @@ fn is_retryable_private_send_error(err: &pubky_noise::PubkyNoiseError) -> bool {
 }
 
 fn is_retryable_private_receive_error(err: &pubky_noise::PubkyNoiseError) -> bool {
-    matches!(err, pubky_noise::PubkyNoiseError::HomeserverResponseError)
+    // HTTP failures do not establish corrupt link state. Retry policy stays
+    // with the caller, including authentication and rate-limit failures.
+    matches!(
+        err,
+        pubky_noise::PubkyNoiseError::HomeserverResponseError
+            | pubky_noise::PubkyNoiseError::HomeserverHttpError { .. }
+    )
 }
 
 fn is_not_found(err: &PubkyError) -> bool {

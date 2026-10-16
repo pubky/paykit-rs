@@ -80,6 +80,11 @@ fn test_private_receive_retry_classification() {
     assert!(is_retryable_private_receive_error(
         &pubky_noise::PubkyNoiseError::HomeserverResponseError,
     ));
+    for status in [401, 403, 408, 429, 500, 503] {
+        assert!(is_retryable_private_receive_error(
+            &pubky_noise::PubkyNoiseError::HomeserverHttpError { status },
+        ));
+    }
 
     for err in [
         pubky_noise::PubkyNoiseError::BadLengthCiphertext,

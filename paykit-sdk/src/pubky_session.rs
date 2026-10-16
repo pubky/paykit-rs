@@ -8,7 +8,7 @@ pub use companion_claim::{PubkyAuthCompanionClaim, PubkyAuthCompanionClaimApprov
 use std::{fmt, str::FromStr};
 
 use pubky::{
-    deep_links::{DeepLink, SignupGrantDeepLink},
+    deep_links::{DeepLink, GrantApprovalFormat, GrantRelayChannel, SignupGrantDeepLink},
     pkarr::{errors::ResolveError, ResolvePolicy},
     AuthFlowKind, Capabilities, Capability, ClientId, GrantAuthFlowState, Pubky,
     PubkyGrantAuthFlow, PubkyResource, PubkySession,
@@ -199,6 +199,7 @@ impl PubkyAuthRequestState {
         GrantAuthFlowState {
             authorization_url: self.authorization_url.clone(),
             client_key_secret: self.client_key_secret,
+            approval_key_secret: None,
         }
     }
 }
@@ -706,6 +707,7 @@ impl PubkySessionBootstrap {
     async fn start_auth(&self, capabilities: &str, kind: AuthFlowKind) -> Result<PubkyAuthRequest> {
         let capabilities = parse_capabilities(capabilities)?;
         let mut builder = PubkyGrantAuthFlow::builder(&capabilities, kind, self.client_id.clone())
+            .approval_format(GrantApprovalFormat::BareGrant)
             .client(self.pubky.client().clone());
         if let Some(auth_relay_url) = &self.auth_relay_url {
             builder = builder.relay(auth_relay_url.clone());
@@ -777,6 +779,9 @@ async fn ensure_pubky_account(
 }
 
 /// Parse an auth deep link into public request details.
+///
+/// Paykit supports shared-secret, bare-grant requests. HPKE approval envelopes
+/// and their additional encryption keys are not supported by these helpers.
 pub fn parse_pubky_auth_url(auth_url: &str) -> Result<PubkyAuthDetails> {
     let deep_link = DeepLink::from_str(auth_url).map_err(|err| PaykitSdkError::Protocol {
         context: format!("invalid Pubky auth URL: {err}"),
@@ -787,6 +792,7 @@ pub fn parse_pubky_auth_url(auth_url: &str) -> Result<PubkyAuthDetails> {
         DeepLink::SigninGrant(link) => {
             validate_unique_query_parameters(auth_url, &["caps", "relay", "secret", "cid", "cpk"])?;
             let params = link.params();
+            validate_grant_relay_channel(params.relay_channel)?;
             Ok(PubkyAuthDetails {
                 kind: PubkyAuthRequestKind::SignIn,
                 capabilities: params.capabilities.clone().normalize().to_string(),
@@ -801,6 +807,7 @@ pub fn parse_pubky_auth_url(auth_url: &str) -> Result<PubkyAuthDetails> {
                 &["caps", "relay", "secret", "hs", "st", "cid", "cpk"],
             )?;
             let params = link.params();
+            validate_grant_relay_channel(params.relay_channel)?;
             Ok(PubkyAuthDetails {
                 kind: PubkyAuthRequestKind::SignUp,
                 capabilities: params.capabilities.clone().normalize().to_string(),
@@ -937,6 +944,15 @@ fn parse_client_id(value: &str) -> Result<ClientId> {
 
 fn validate_grant_auth_url(auth_url: &str) -> Result<()> {
     parse_pubky_auth_url(auth_url).map(|_| ())
+}
+
+fn validate_grant_relay_channel(channel: GrantRelayChannel) -> Result<()> {
+    match channel {
+        GrantRelayChannel::SharedSecret(_) => Ok(()),
+        GrantRelayChannel::Hpke { .. } => Err(unsupported_auth_url_error(
+            "only shared-secret Pubky grant auth URLs are supported",
+        )),
+    }
 }
 
 fn validate_auth_state_client_key(auth_url: &str, client_key_secret: &[u8; 32]) -> Result<()> {

@@ -172,7 +172,9 @@ Common workflows:
   auth handoff, and `pubky://` normalization flows before exposing live access
   through a `PubkySessionProvider`; exported session secrets contain the grant
   and proof-of-possession key, while pending auth state contains the
-  secret-bearing URL and client key, so both belong in secure storage
+  secret-bearing URL and client key, so both belong in secure storage.
+  These helpers use shared-secret, bare-grant requests; HPKE approval
+  envelopes are not supported, including for companion claims.
 - call `PubkyAuthRequest::save_state` when an unapproved external auth request
   must survive process loss, then pass that complete state to
   `PubkySessionBootstrap::resume_auth`; the authorization URL alone cannot

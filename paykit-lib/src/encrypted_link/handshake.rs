@@ -445,11 +445,11 @@ pub async fn advance_handshake(
             debug!("handshake terminal, transitioning to transport");
             finish_handshake(handshake).map_err(Into::into)
         }
-        Err(pubky_noise::PubkyNoiseError::HomeserverResponseError) => Err(HandshakeAdvanceError {
-            error: handshake_error(
-                "handshake step failed",
-                pubky_noise::PubkyNoiseError::HomeserverResponseError,
-            ),
+        Err(
+            err @ (pubky_noise::PubkyNoiseError::HomeserverResponseError
+            | pubky_noise::PubkyNoiseError::HomeserverHttpError { .. }),
+        ) => Err(HandshakeAdvanceError {
+            error: handshake_error("handshake step failed", err),
             retry_handshake: Some(Box::new(handshake)),
         }),
         Err(pubky_noise::PubkyNoiseError::HomeserverWriteError) => {
@@ -514,6 +514,7 @@ fn handshake_error(context: &str, err: pubky_noise::PubkyNoiseError) -> PaykitEr
     let source = anyhow::anyhow!("pubky-noise handshake failed: {err:?}");
     match err {
         pubky_noise::PubkyNoiseError::HomeserverResponseError
+        | pubky_noise::PubkyNoiseError::HomeserverHttpError { .. }
         | pubky_noise::PubkyNoiseError::HomeserverWriteError => {
             PaykitError::Transport { context, source }
         }
@@ -664,6 +665,12 @@ mod tests {
         for error in [
             pubky_noise::PubkyNoiseError::HomeserverResponseError,
             pubky_noise::PubkyNoiseError::HomeserverWriteError,
+            pubky_noise::PubkyNoiseError::HomeserverHttpError { status: 401 },
+            pubky_noise::PubkyNoiseError::HomeserverHttpError { status: 403 },
+            pubky_noise::PubkyNoiseError::HomeserverHttpError { status: 408 },
+            pubky_noise::PubkyNoiseError::HomeserverHttpError { status: 429 },
+            pubky_noise::PubkyNoiseError::HomeserverHttpError { status: 500 },
+            pubky_noise::PubkyNoiseError::HomeserverHttpError { status: 503 },
         ] {
             assert!(matches!(
                 handshake_error("handshake failed", error),

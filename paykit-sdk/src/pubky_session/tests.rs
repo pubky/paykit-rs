@@ -267,6 +267,57 @@ fn test_pubky_auth_request_state_rejects_mismatched_client_key() {
     assert!(PubkyAuthRequestState::new(auth_url, [43; 32]).is_err());
 }
 
+#[tokio::test]
+async fn test_pubky_auth_request_state_round_trips_shared_secret_grants() {
+    let bootstrap = PubkySessionBootstrap::with_pubky(Pubky::new().unwrap(), TEST_CLIENT_ID)
+        .unwrap()
+        .with_auth_relay("http://127.0.0.1:1/inbox")
+        .unwrap();
+    for kind in [
+        AuthFlowKind::signin(),
+        AuthFlowKind::signup(
+            PubkyLocalSecretKey::new([7; 32]).keypair().public_key(),
+            None,
+        ),
+    ] {
+        let request = bootstrap.start_auth("/:rw", kind).await.unwrap();
+        let state = request.save_state().unwrap();
+        assert!(state.to_grant_state().approval_key_secret.is_none());
+        let serialized = serde_json::to_string(&state).unwrap();
+        let restored: PubkyAuthRequestState = serde_json::from_str(&serialized).unwrap();
+        let resumed = bootstrap.resume_auth(&restored, "/:rw").await.unwrap();
+        assert_eq!(resumed.authorization_url(), request.authorization_url());
+        assert_eq!(resumed.save_state().unwrap(), state);
+    }
+}
+
+#[tokio::test]
+async fn test_pubky_auth_helpers_reject_hpke_grants() {
+    for kind in [
+        AuthFlowKind::signin(),
+        AuthFlowKind::signup(
+            PubkyLocalSecretKey::new([7; 32]).keypair().public_key(),
+            None,
+        ),
+    ] {
+        let flow = PubkyGrantAuthFlow::builder(
+            &parse_capabilities("/:rw").unwrap(),
+            kind,
+            parse_client_id(TEST_CLIENT_ID).unwrap(),
+        )
+        .approval_format(GrantApprovalFormat::SignedApprovalV1)
+        .relay(Url::parse("http://127.0.0.1:1/inbox").unwrap())
+        .start()
+        .unwrap();
+        let state = flow.save_local().unwrap();
+        assert!(state.approval_key_secret.is_some());
+        assert!(parse_pubky_auth_url(&state.authorization_url).is_err());
+        assert!(
+            PubkyAuthRequestState::new(state.authorization_url, state.client_key_secret).is_err()
+        );
+    }
+}
+
 #[test]
 fn test_confirmed_inactive_grant_error_accepts_only_explicit_revocation_or_expiry() {
     for message in [
