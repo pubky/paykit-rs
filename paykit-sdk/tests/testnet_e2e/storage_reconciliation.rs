@@ -130,12 +130,15 @@ impl Drop for Fixture {
 
 impl Fixture {
     async fn new(initialize: bool) -> Self {
+        Self::with_config(initialize, ConfigToml::minimal_test_config()).await
+    }
+
+    async fn with_config(initialize: bool, mut config: ConfigToml) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         // EphemeralTestnet's documented default server key is deterministic.
         let server_key = pubky::Keypair::from_secret(&[0; 32]);
         let tls = server_key.to_rpk_rustls_server_config();
-        let mut config = ConfigToml::minimal_test_config();
         config.pkdns.public_pubky_tls_port = Some(listener.local_addr().unwrap().port());
         let testnet = build_testnet_with_config(config).await;
         assert_eq!(
@@ -262,6 +265,58 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn test_pending_state_reconciles_at_storage_quota() {
+    let mut config = ConfigToml::minimal_test_config();
+    config.storage.default_quota_mb = Some(1);
+    let fixture = Fixture::with_config(true, config).await;
+    let marker = fixture.mark().await;
+    let original = fixture.bytes().await;
+    let storage = fixture.access.session.storage();
+    let entries = storage
+        .list("/pub/")
+        .unwrap()
+        .shallow(false)
+        .limit(100)
+        .send()
+        .await
+        .unwrap();
+    // Homeserver accounts for 256 metadata bytes per file, including empty files.
+    let mut used = 0;
+    for entry in entries {
+        used += storage
+            .get(entry.path.as_str())
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .len()
+            + 256;
+    }
+    storage
+        .put(
+            "/pub/paykit/blobs/quota-padding",
+            vec![0; 1024 * 1024 - used - 256],
+        )
+        .await
+        .unwrap();
+    let rejected = storage
+        .put(format!("{MARKERS}{}", "b".repeat(64)), Vec::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        rejected,
+        pubky::Error::Request(pubky::errors::RequestError::Server { status, .. })
+            if status == pubky::StatusCode::INSUFFICIENT_STORAGE
+    ));
+
+    fixture.read().await.unwrap();
+
+    assert_eq!(fixture.bytes().await, original);
+    assert!(storage.get(&marker).await.is_err());
+}
+
+#[tokio::test]
 async fn test_pending_state_is_republished_unchanged_before_use() {
     let fixture = Fixture::new(true).await;
     let original = fixture.bytes().await;
@@ -297,13 +352,17 @@ async fn test_pending_state_is_republished_unchanged_before_use() {
 async fn test_reconciliation_failure_keeps_state_unavailable_and_markers_pending() {
     let fixture = Fixture::new(true).await;
     let original = fixture.bytes().await;
+    fixture.observations.lock().unwrap().writes.clear();
     for fault in [
         Fault::Reject(http::StatusCode::CONFLICT),
         Fault::Reject(http::StatusCode::PRECONDITION_FAILED),
+        Fault::Reject(http::StatusCode::INSUFFICIENT_STORAGE),
+        Fault::Reject(http::StatusCode::TOO_MANY_REQUESTS),
         Fault::Reject(http::StatusCode::INTERNAL_SERVER_ERROR),
         Fault::LoseResponse,
     ] {
         let conflict = matches!(fault, Fault::Reject(status) if status == http::StatusCode::CONFLICT || status == http::StatusCode::PRECONDITION_FAILED);
+        let quota = matches!(fault, Fault::Reject(http::StatusCode::INSUFFICIENT_STORAGE));
         let marker = fixture.mark().await;
         fixture.fault(fault);
         let result = tokio::time::timeout(
@@ -316,24 +375,23 @@ async fn test_reconciliation_failure_keeps_state_unavailable_and_markers_pending
         .unwrap();
         let error = result.unwrap_err();
         assert_eq!(error.is_concurrent_update(), conflict, "{error}");
+        if quota {
+            assert!(
+                matches!(&error, paykit_sdk::PaykitSdkError::Transport { context, .. }
+                if context == "Pubky shared-state reconciliation rejected by storage quota")
+            );
+        }
         assert!(fixture.access.session.storage().get(&marker).await.is_ok());
         fixture.read().await.unwrap();
         assert_eq!(fixture.bytes().await, original);
         assert!(fixture.access.session.storage().get(&marker).await.is_err());
     }
     let observations = fixture.observations.lock().unwrap();
-    let attempts: Vec<_> = observations
+    assert!(observations
         .writes
         .iter()
-        .filter(|(path, _)| path.contains(MARKERS) && !path.ends_with(&"a".repeat(64)))
-        .map(|(path, _)| path)
-        .collect();
-    let unique: std::collections::HashSet<_> = attempts.iter().collect();
-    assert_eq!(
-        attempts.len(),
-        unique.len(),
-        "identical ciphertext must use distinct attempt markers"
-    );
+        .filter(|(path, _)| path.contains(MARKERS))
+        .all(|(path, _)| path.ends_with(&"a".repeat(64))));
 }
 
 #[tokio::test]

@@ -580,6 +580,8 @@ An unconfirmed state write leaves a homeserver marker. Before exposing marked
 state, the next operation republishes its exact encrypted bytes under the
 renewed lock. The confirmed GCS generation prevents older delayed writes from
 replacing that state. Failure or cancellation leaves recovery pending.
+Reconciliation allocates no new marker. A quota-rejected replacement still
+blocks state access until space is freed or the quota is increased.
 Ordinary reads without markers do not add a write.
 A generation conflict requires a fresh operation; do not reuse invalidated state.
 A runtime exhausting lock acquisition receives `SharedStateBusy`

@@ -88,6 +88,9 @@ Unconfirmed writes retain unique per-attempt markers. Before using marked state,
 the next operation republishes the exact encrypted bytes under its renewed lock;
 confirmed publication advances GCS's generation and fences older requests.
 Failure/cancellation leaves recovery pending without exposing that state.
+Reconciliation reuses observed markers rather than allocating another file.
+If the replacement itself exceeds quota, recovery stays pending until space is
+freed or the quota is increased; do not discard markers to get past the error.
 Ordinary unmarked reads add no write.
 Do not trust ETags/304 as authoritative state or erase markers to bypass recovery.
 

@@ -490,8 +490,8 @@ Deployment must preserve normal GCS/SQL ordering; pre-existing backend corruptio
 (such as a database entry whose object was deleted directly) requires separate
 repair, not automatic initialization as a new identity.
 
-A lock alone does not settle an already-issued storage request. Each state PUT
-therefore still publishes a unique pending marker before writing. When markers
+A lock alone does not settle an already-issued storage request. Each state
+mutation therefore publishes a unique pending marker before writing. When markers
 exist, the next operation reads the complete encrypted bytes and republishes
 those **exact bytes under its renewed lock before using the state**. A confirmed
 publication advances GCS's generation, preventing older in-flight writes from
@@ -499,6 +499,10 @@ replacing it. It then removes the observed markers. Missing state is reconciled
 with a locked DELETE; existing identity/missing-state checks still apply.
 This applies to reads, key rotation and backup recovery, including no-op paths.
 It preserves prepared ciphertext and does not introduce a state-format migration.
+Exact-byte reconciliation uses the observed markers without allocating a new
+file, so it can proceed at full quota when the replacement adds no accounted
+bytes. It does not bypass quota enforcement: a replacement rejected with 507
+leaves recovery pending until space is freed or the quota is increased.
 
 Failed or cancelled reconciliation leaves recovery pending and does not expose
 the unconfirmed state to SDK operations.
@@ -515,13 +519,14 @@ network failures and contention mean there is still no fixed recovery deadline.
 After an uncertain multi-step call, inspect durable records and resume existing
 intent rather than creating another request or payment.
 
-A confirmed PUT or explicit PUT rejection for generation conflict (409), lock
-expiry (412), rate limiting (429), or storage quota (507) clears that attempt's
-marker, provided cleanup succeeds. Marker cleanup failure does not undo a
+For state mutations, a confirmed PUT or explicit PUT rejection for generation
+conflict (409), lock expiry (412), rate limiting (429), or storage quota (507)
+clears that attempt's marker, provided cleanup succeeds. Marker cleanup failure does not undo a
 confirmed commit. Rate-limit errors remain transport errors. Other failures,
 including timeouts and connection errors, retain markers because publication
-is uncertain. Marker names are unique per attempt, even for identical ciphertext,
-so delayed cleanup cannot erase a later attempt's marker.
+is uncertain. Marker names are unique per mutation attempt, so delayed cleanup
+cannot erase a later attempt's marker. Reconciliation does not clear observed
+markers on rejection because they describe prior uncertain writes.
 Malformed pending markers block shared state instead of being ignored or
 deleted automatically. Investigate them with participating apps stopped before
 removing anything that could represent an unfinished write.

@@ -400,9 +400,9 @@ writes before rollout; tokenless writes, mixed server versions and direct
 backend edits are outside this contract. Existing backend/SQL corruption must
 be repaired separately.
 
-Before each state PUT, the adapter publishes an empty, uniquely named marker
-under `/pub/paykit/v0/shared-state-writes/`. Names are per attempt, not per
-ciphertext, because recovery can republish identical bytes. A confirmed PUT or
+Before each state mutation, the adapter publishes an empty, uniquely named marker
+under `/pub/paykit/v0/shared-state-writes/`. Names are per mutation attempt so
+delayed cleanup cannot remove a later attempt's marker. A confirmed PUT or
 an explicit rejection for generation conflict (409), lock expiry (412), rate
 limiting (429), or storage quota (507) removes that attempt's marker if cleanup
 succeeds. Other failures and cancellation retain it. Marker cleanup failure
@@ -411,6 +411,12 @@ does not undo a confirmed commit.
 Under its renewed lock, an operation inspects markers before reading the complete
 encrypted state. If any exist, it republishes the exact bytes and waits for a
 confirmed result before exposing state or clearing the observed markers.
+This identical-byte replacement allocates no new marker and can proceed at full
+quota if it adds no accounted bytes. A rejected replacement, including 507,
+leaves the observed markers pending; free space or raise the quota before retrying
+a quota rejection. Reconciliation does not bypass server quota enforcement.
+Only replaying the exact bytes read under the current lock uses this path;
+mutations, key rotation and backup replacement still create their own markers.
 The replacement advances GCS's generation and fences older in-flight writes.
 Absent state is reconciled by locked DELETE without synthesizing an empty
 encrypted state; initialized identities still reject missing state.

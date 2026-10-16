@@ -12,8 +12,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Pubky shared-state storage now requires Homeserver 0.16.2+ with GCS on every
   serving instance. Pending writes are reconciled by confirmed exact-ciphertext
   republication under the state lock instead of a five-minute cooldown. Failed
-  reconciliation remains pending; lease durations and save-before-send are
-  unchanged. Generation conflicts require a fresh operation. No state-format
+  reconciliation remains pending. Reconciliation adds no marker file, allowing
+  an equal-accounted-size replacement at full quota; lease durations and
+  save-before-send are unchanged. Generation conflicts require a fresh operation. No state-format
   or binding API change is required.
 
 ## 0.1.0-rc77 - 2026-10-15

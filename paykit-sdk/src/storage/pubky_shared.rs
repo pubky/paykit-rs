@@ -254,8 +254,26 @@ impl PubkySharedStateStorage {
                 // A lock alone does not fence an already-issued GCS request.
                 // A confirmed replacement advances the generation without
                 // discarding prepared ciphertext or trusting database ETags.
-                self.commit_encrypted_state(access, lock, blob.bytes.clone())
-                    .await?;
+                // Replaying the exact observed bytes introduces no new state;
+                // retain the observed markers without allocating another file.
+                if let Err(error) = access
+                    .session
+                    .storage()
+                    .put_locked(lock, blob.bytes.clone())
+                    .await
+                {
+                    if is_write_conflict(&error) {
+                        return Err(shared_state_conflict(error));
+                    }
+                    let context = if is_quota_rejection(&error) {
+                        "Pubky shared-state reconciliation rejected by storage quota"
+                    } else if is_rate_limit_rejection(&error) {
+                        "Pubky shared-state reconciliation rejected by rate limit"
+                    } else {
+                        "reconcile encrypted Pubky shared state could not be confirmed"
+                    };
+                    return Err(shared_write_error(context, error));
+                }
             }
             None => {
                 // Keep absence rather than inventing empty SDK state. Once the
@@ -301,8 +319,8 @@ impl PubkySharedStateStorage {
     ) -> Result<()> {
         let attempted_revision = state_revision(&encrypted);
         let storage = access.session.storage();
-        // Recovery can republish identical ciphertext. Each attempt still needs
-        // a distinct marker so delayed cleanup cannot clear another attempt.
+        // Each state mutation needs a distinct marker so delayed cleanup
+        // cannot clear another attempt's pending write.
         let pending_path = format!(
             "{}{}",
             paykit_lib::PAYKIT_SHARED_STATE_WRITE_PATH_PREFIX,
