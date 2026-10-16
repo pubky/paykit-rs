@@ -7,7 +7,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
-## 0.1.0 - 2026-10-16
+## [0.1.0] - 2026-10-16
 
 ### Changed
 
@@ -1001,11 +1001,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Downstream bindings (Swift/RN/Kotlin) that construct `MethodId` must be updated to
   handle the `Result` returned by `new()`.
 
-## [0.1.0] - 2025-11-21
+## Initial Development - 2025-11-21
+
+These notes describe the initial public development snapshot, not the final
+0.1.0 release.
 
 ### Added
-- Initial public release of `paykit-lib`, exposing a stateless transport layer for the
-  Paykit protocol.
+- Initial public development snapshot of `paykit-lib`, exposing a stateless
+  transport layer for the Paykit protocol.
 - Trait-based abstraction (`AuthenticatedTransport`, `UnauthenticatedTransportRead`)
   so integrators can inject their own SDKs or mocks.
 - Feature-gated `pubky` adapters providing ready-made transport implementations plus

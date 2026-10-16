@@ -25,14 +25,13 @@ updated as we investigate.
 
 ## Supported Versions
 
-Paykit is pre-1.0 and published as release candidates. Only the most recent
-release candidate — and `master` — receives security fixes; older
-`0.1.0-rc*` tags are not back-patched.
+Paykit remains pre-1.0. The final `0.1.0` release and `master` receive security
+fixes. Release candidates (`0.1.0-rc*`) are no longer back-patched.
 
-| Version                       | Supported |
-| ----------------------------- | --------- |
-| latest `0.1.0-rc*` / `master` | ✅        |
-| older `0.1.0-rc*`             | ❌        |
+| Version            | Supported |
+| ------------------ | --------- |
+| `0.1.0` / `master`  | Yes       |
+| `0.1.0-rc*`         | No        |
 
 ## Scope
 
