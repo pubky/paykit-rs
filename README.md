@@ -1,7 +1,5 @@
 # Paykit
 
-> WIP - not for production.
-
 [![CI](https://github.com/pubky/paykit-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/pubky/paykit-rs/actions/workflows/ci.yml)
 [![Coverage](https://raw.githubusercontent.com/pubky/paykit-rs/badges/coverage.svg)](https://github.com/pubky/paykit-rs/actions/workflows/ci.yml)
 
@@ -207,8 +205,8 @@ unpaid Billing Periods. Existing payment and reservation history survives that
 change, preventing duplicate payment across old and replacement Allowances.
 Payment Proofs may optionally identify the Allowance actually used for an
 execution. This is informational attribution; proofs do not update usage
-accounting. The optional field requires peers that support the coordinated
-pre-release wire extension.
+accounting. Both peers must support Allowance attribution before this optional
+field is sent.
 
 The Library provides stateless matching and limit calculations. The SDK/runtime
 uses them for candidate evaluation, persists the wallet's selection, and
