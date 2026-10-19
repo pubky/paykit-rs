@@ -79,7 +79,7 @@ Implemented in this Rust SDK crate:
   receipt issuance, and receipt retrieval
 - Paykit-facing profile/contact helpers and SDK backup/restore
 
-Not implemented in this crate yet:
+Outside this Rust SDK crate:
 
 - first-party durable mobile storage helpers
 - payment execution, settlement confirmation, balances, fees, or route policy

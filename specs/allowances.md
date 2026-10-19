@@ -672,11 +672,11 @@ received a local response. A proposal that reuses a forgotten Allowance ID or
 Event ID is a new proposal. An implementation MUST NOT queue an Acceptance for
 it unless the local caller named that exact received proposal.
 
-The optional Payment Proof `allowance_id` is a coordinated pre-release extension
-of Payment Request wire version 1. Implementations predating this extension
-reject it as an unknown field. Absence preserves the prior proof shape; this
-change is not transparent compatibility with those older readers. Both peers
-must support the extension before a payer sends attributed proofs.
+The optional Payment Proof `allowance_id` extends Payment Request wire version 1.
+Implementations predating this extension reject it as an unknown field. Absence
+preserves the prior proof shape; this change is not transparent compatibility
+with those older readers. Both peers must support the extension before a payer
+sends attributed proofs.
 
 A message is Allowance-correlated when it is a JSON object whose top-level
 `allowance_id` member is a canonical UUID string as defined above; this probe

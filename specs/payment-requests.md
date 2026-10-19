@@ -531,7 +531,7 @@ For example, an attributed proof adds this member to the object above:
 {"allowance_id": "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab44"}
 ```
 
-The optional member is a coordinated pre-release addition to wire version 1.
+The optional member extends wire version 1.
 Older closed-world readers reject it. Peers MUST support the extension before
 it is sent; proofs without attribution retain their previous wire shape.
 Attribution is informational, not authorization or settlement evidence. Its
