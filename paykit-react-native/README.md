@@ -16,6 +16,22 @@ typed TypeScript and JSI C++.
 - Hermes.
 - iOS 15.1 or later; Android API 24 or later.
 
+### Android TLS initialization
+
+On Android, Paykit checks server certificates with the platform trust store
+through `rustls-platform-verifier`, which needs an Android `Context`. The
+package does this for you: when React Native creates the TurboModule, it calls
+`com.synonym.paykit.PaykitAndroid.initializeOrThrow` with the application
+context. If that fails, module creation throws `IllegalStateException`
+instead of letting every HTTPS request fail later.
+
+Do not add the Kotlin package `com.synonym:paykit-android` to the same app.
+Both ship `com.synonym.paykit.PaykitAndroid` and `libpaykit.so`, so the build
+fails with duplicate classes and native libraries.
+
+The package's consumer R8 rules keep the verifier classes that Rust calls
+through JNI.
+
 ### Expo
 
 Expo Go cannot load this package because it contains native code. Use a
@@ -140,7 +156,8 @@ ubrn writes two kinds of files:
 - The TurboModule glue (`src/index.tsx`, `src/NativeReactNativePaykit.ts`,
   `cpp/`, `ios/`, `android/` and the podspec), rendered from
   `ubrn.config.yaml` and `package.json`. It is committed, and CI fails when it
-  is out of date. Do not edit it by hand.
+  is out of date. Do not edit it by hand, except for the files listed
+  below.
 
 Regenerate both after any change to `paykit-ffi`:
 
@@ -152,12 +169,83 @@ npm run ubrn:generate                 # TypeScript and C++ from the host library
 npm run typecheck && npm run lint && npm test
 ```
 
-`npm run build:native` builds the iOS XCFramework and the Android libraries
-with ubrn. It reuses the Rust build cache in `../target`.
+Four files are hand-edited after ubrn rendered them and are listed under
+`noOverwrite` in `ubrn.config.yaml`: `android/CMakeLists.txt`,
+`android/build.gradle`, the Kotlin TurboModule and the podspec. ubrn leaves
+them alone, so review them by hand when you upgrade ubrn.
+`android/src/main/java/com/synonym/paykit/PaykitAndroid.kt` is not rendered
+by ubrn at all.
 
 `./build.sh all` in `paykit-ffi` builds Swift and Kotlin only. The
 `React Native` CI workflow regenerates and type-checks this package on every
-FFI change.
+FFI change, and builds the native libraries for both platforms.
+
+## Build from source
+
+The npm package ships prebuilt native libraries. To build them from a
+checkout of this repository:
+
+### Prerequisites
+
+- Node.js from `.nvmrc` and npm.
+- Rust stable from [rustup](https://rustup.rs).
+- iOS (macOS only): Xcode with its command line tools, and CocoaPods for
+  `npm run ios:check`. Add the Rust targets:
+
+  ```sh
+  rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+  ```
+
+- Android: JDK 17, the Android SDK with platform 35, NDK r28c
+  (`28.2.13676358`) and cargo-ndk 3.5.4. Add the Rust targets:
+
+  ```sh
+  rustup target add aarch64-linux-android armv7-linux-androideabi \
+    i686-linux-android x86_64-linux-android
+  cargo install cargo-ndk --version 3.5.4 --locked
+  export ANDROID_HOME=<Android SDK>
+  export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358
+  ```
+
+  To build with another installed NDK, point `ANDROID_NDK_HOME` at it and
+  pass `-PReactNativePaykit_ndkVersion=<version>` to Gradle. An app's own
+  `ndkVersion` always takes precedence.
+
+### Build
+
+```sh
+cd paykit-react-native
+npm ci
+npm run build:native   # or build:ios / build:android
+```
+
+`npm run build:native` builds the host library and generates the bindings,
+then builds:
+
+- `SynonymdevReactNativePaykitFramework.xcframework` from `aarch64-apple-ios`
+  and `aarch64-apple-ios-sim`, with `IPHONEOS_DEPLOYMENT_TARGET` 13.4 as in
+  `paykit-ffi/build_ios.sh`;
+- `android/src/main/jniLibs/<abi>/libpaykit.so` for `arm64-v8a`,
+  `armeabi-v7a`, `x86_64` and `x86`, with the 16 KB page-size and linker
+  flags from the workspace `.cargo/config.toml`. The script fails if a
+  library is not 16 KB aligned or does not export the TLS init symbol;
+- `android/libs/rustls-platform-verifier.jar`, the verifier's Kotlin classes,
+  taken from `vendor/rustls-platform-verifier-android`.
+
+It uses this script instead of `ubrn build`, which looks for `libpaykit_ffi`
+instead of `libpaykit`. Builds share the `../target` cache with
+`paykit-ffi/build.sh`.
+
+There is no example app yet, so check the native builds without one:
+
+```sh
+npm run ios:check          # podspec, XCFramework slices, C++ glue compile
+npm run android:assemble   # assembles the library AAR and checks its .so files
+npm run pack:check         # lists what npm would publish, with sizes
+```
+
+`npm run android:assemble` uses the standalone Gradle build in
+`android-check/` and the Gradle wrapper from React Native's Gradle plugin.
 
 ## License
 

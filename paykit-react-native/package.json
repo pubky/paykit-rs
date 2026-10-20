@@ -19,6 +19,7 @@
     "ios",
     "cpp",
     "*.podspec",
+    "SynonymdevReactNativePaykitFramework.xcframework",
     "!ios/build",
     "!android/build",
     "!android/gradle",
@@ -32,10 +33,16 @@
   ],
   "scripts": {
     "ubrn:generate": "node scripts/ubrn-generate.mjs",
-    "build:native": "ubrn build ios --config ubrn.config.yaml --and-generate --release && ubrn build android --config ubrn.config.yaml --and-generate --release",
+    "build:native": "node scripts/build-native.mjs ios android",
+    "build:ios": "node scripts/build-native.mjs ios",
+    "build:android": "node scripts/build-native.mjs android",
+    "android:assemble": "node scripts/android-assemble.mjs",
+    "ios:check": "node scripts/ios-check.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint \"**/*.{js,mjs,ts,tsx}\"",
-    "test": "jest"
+    "test": "jest",
+    "prepack": "bob build",
+    "pack:check": "node scripts/pack-check.mjs"
   },
   "keywords": [
     "paykit",

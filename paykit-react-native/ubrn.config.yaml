@@ -8,6 +8,12 @@ bindings:
   # Generated TypeScript and C++ bindings (gitignored; run `npm run ubrn:generate`).
   ts: src/generated
   cpp: cpp/generated
+# `npm run build:native` (scripts/build-native.mjs) builds the native
+# libraries instead of `ubrn build`. ubrn 0.29.3-1 takes the library name from
+# a `lib` target kind, and paykit-ffi's lib target has the kinds cdylib,
+# staticlib and rlib, so ubrn falls back to the package name and looks for
+# `libpaykit_ffi` instead of `libpaykit`. The targets below are the ones that
+# script builds; src/__tests__/native-build.test.ts keeps them in sync.
 ios:
   # Same targets as paykit-ffi/build_ios.sh.
   targets:
@@ -20,3 +26,18 @@ android:
     - armeabi-v7a
     - x86_64
     - x86
+  # Link libpaykit.so, the cdylib built with the 16 KB page-size and linker
+  # flags from the workspace .cargo/config.toml. It also exports the JNI
+  # symbol that PaykitAndroid.kt binds to.
+  useSharedLibrary: true
+# Rendered once by ubrn, then edited by hand. `ubrn generate` leaves them
+# alone, so the CI drift check does not cover them.
+noOverwrite:
+  # Links libpaykit.so; ubrn renders libpaykit_ffi.so (see above).
+  - android/CMakeLists.txt
+  # Adds the rustls-platform-verifier classes and 16 KB alignment.
+  - android/build.gradle
+  # Initializes the Android TLS verifier (PaykitAndroid.kt).
+  - android/src/main/java/com/synonymdev/reactnativepaykit/ReactNativePaykitModule.kt
+  # Release tags are `v<version>`; ubrn renders `<version>`.
+  - ReactNativePaykit.podspec

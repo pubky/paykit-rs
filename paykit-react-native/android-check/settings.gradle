@@ -1,0 +1,12 @@
+// Standalone Gradle build that assembles the library in ../android without an
+// app, for CI and local checks. Run it with `npm run android:assemble`. Apps
+// include ../android through React Native autolinking and never read this
+// directory; it is not in the npm package.
+//
+// The React Native Gradle plugin resolves node_modules from the parent of the
+// root project, so this directory must stay directly under the package.
+includeBuild("../node_modules/@react-native/gradle-plugin")
+
+rootProject.name = "paykit-react-native-android-check"
+include(":synonymdev_react-native-paykit")
+project(":synonymdev_react-native-paykit").projectDir = file("../android")

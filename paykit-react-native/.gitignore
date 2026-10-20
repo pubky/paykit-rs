@@ -9,9 +9,11 @@ cpp/generated/
 *.xcframework/
 build/
 android/src/main/jniLibs/
+android/libs/
 android/.cxx/
-android/.gradle/
 android/local.properties
+.gradle/
+.kotlin/
 *.a
 *.so
 
