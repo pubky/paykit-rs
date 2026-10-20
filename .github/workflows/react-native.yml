@@ -351,7 +351,8 @@ jobs:
         working-directory: paykit-react-native/example/ios
         run: pod install
 
-      # Release bundles the JS, so no Metro server is needed.
+      # Release bundles the JS, so no Metro server is needed. The XCFramework
+      # has an arm64 simulator slice only, so build arm64 only.
       - name: Build the example app for the simulator
         working-directory: paykit-react-native/example/ios
         run: >-
@@ -359,7 +360,7 @@ jobs:
           -configuration Release -sdk iphonesimulator
           -destination 'generic/platform=iOS Simulator'
           -derivedDataPath "$RUNNER_TEMP/DerivedData"
-          CODE_SIGNING_ALLOWED=NO build
+          ARCHS=arm64 CODE_SIGNING_ALLOWED=NO build
 
       - name: Wait for the local Pubky stack
         run: bash example/scripts/start-local-stack.sh wait "$RUNNER_TEMP/local-stack"

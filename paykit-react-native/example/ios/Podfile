@@ -39,5 +39,20 @@ target 'PaykitExample' do
         build_config.build_settings['CLANG_CXX_LANGUAGE_STANDARD'] = 'c++17'
       end
     end
+    # The package XCFramework has an arm64 simulator slice only, so a
+    # simulator build that also builds x86_64 (Release, or any build with
+    # ONLY_ACTIVE_ARCH=NO) fails to link. Build the simulator for arm64 only.
+    excluded_archs = 'EXCLUDED_ARCHS[sdk=iphonesimulator*]'
+    installer.pods_project.build_configurations.each do |build_config|
+      build_config.build_settings[excluded_archs] = 'x86_64'
+    end
+    installer.aggregate_targets.map(&:user_project).uniq.each do |project|
+      project.native_targets.each do |target|
+        target.build_configurations.each do |build_config|
+          build_config.build_settings[excluded_archs] = 'x86_64'
+        end
+      end
+      project.save
+    end
   end
 end

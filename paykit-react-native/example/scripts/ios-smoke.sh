@@ -22,7 +22,9 @@ xcrun simctl boot "$udid"
 xcrun simctl bootstatus "$udid"
 xcrun simctl install "$udid" "$app_path"
 
-xcrun simctl spawn "$udid" log stream --style compact \
+# React Native logs console.log through os_log at the Info level, which
+# `log stream` leaves out by default.
+xcrun simctl spawn "$udid" log stream --level info --style compact \
   --predicate 'eventMessage CONTAINS "SMOKE_"' >"$log" 2>&1 &
 stream=$!
 trap 'kill "$stream" 2>/dev/null || true; xcrun simctl shutdown "$udid" || true' EXIT

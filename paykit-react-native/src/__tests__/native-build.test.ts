@@ -58,4 +58,31 @@ describe('iOS build', () => {
       `IPHONEOS_DEPLOYMENT_TARGET=${expected} `
     );
   });
+
+  test('test_ios_simulator_builds_are_arm64_only', () => {
+    // The XCFramework has no x86_64 simulator slice, so simulator builds
+    // that also build x86_64 fail to link.
+    expect(read(packageDir, 'ubrn.config.yaml')).not.toContain(
+      'x86_64-apple-ios'
+    );
+    expect(read(packageDir, 'example/ios/Podfile')).toMatch(
+      /'EXCLUDED_ARCHS\[sdk=iphonesimulator\*\]'[\s\S]*= 'x86_64'/
+    );
+    const workflow = read(repoRoot, '.github/workflows/react-native.yml');
+    const simulatorBuilds = workflow
+      .split(/\n\s*\n/)
+      .filter((block) => /xcodebuild[\s\S]*-sdk iphonesimulator/.test(block));
+    expect(simulatorBuilds).not.toHaveLength(0);
+    for (const block of simulatorBuilds) {
+      expect(block).toContain('ARCHS=arm64');
+    }
+  });
+
+  test('test_ios_smoke_streams_info_level_logs', () => {
+    // React Native logs console.log at the os_log Info level, which
+    // `log stream` leaves out by default.
+    expect(read(packageDir, 'example/scripts/ios-smoke.sh')).toMatch(
+      /log stream --level info /
+    );
+  });
 });

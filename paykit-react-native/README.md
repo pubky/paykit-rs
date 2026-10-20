@@ -65,6 +65,37 @@ end
 
 The example app's [`Podfile`](example/ios/Podfile) does this.
 
+### iOS simulator: arm64 only
+
+The XCFramework has an `ios-arm64` device slice and an
+`ios-arm64-simulator` slice, with no x86_64 simulator slice. Apps run on
+Apple silicon simulators only. A simulator build that also builds x86_64
+fails with `ld: library 'paykit' not found`. Release builds do, because
+`ONLY_ACTIVE_ARCH` is `NO`.
+
+Exclude x86_64 from simulator builds in your `Podfile`, after
+`react_native_post_install`:
+
+```ruby
+post_install do |installer|
+  react_native_post_install(installer, config[:reactNativePath])
+  excluded_archs = 'EXCLUDED_ARCHS[sdk=iphonesimulator*]'
+  installer.pods_project.build_configurations.each do |build_config|
+    build_config.build_settings[excluded_archs] = 'x86_64'
+  end
+  installer.aggregate_targets.map(&:user_project).uniq.each do |project|
+    project.native_targets.each do |target|
+      target.build_configurations.each do |build_config|
+        build_config.build_settings[excluded_archs] = 'x86_64'
+      end
+    end
+    project.save
+  end
+end
+```
+
+Or pass `ARCHS=arm64` to `xcodebuild`, as the CI `smoke-ios` job does.
+
 ## Usage
 
 The TypeScript API mirrors `paykit-ffi`. Async Rust methods return Promises,
