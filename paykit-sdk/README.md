@@ -286,6 +286,12 @@ Common workflows:
 - call `linked_peers`, `pending_outbound_private_counterparties`,
   `receipt_access_from`, `receipts_from`, and `issued_receipts_to` to drive
   app-visible work queues
+- use `private_message_scheduling_snapshot` when a scheduling pass needs both
+  linked peers and pending outbound counterparties without intervening receives
+  or writes. It reads both lists in one fresh storage operation with the same
+  queue-head, retry, peer and app-specific cleanup filters. Refresh after any
+  receive or write, and discard results on session or identity changes.
+  Scheduling snapshots do not replace execution APIs or their current-state checks
 - call `process_outbound_private_messages` for one counterparty, or
   `process_pending_private_messages` from a broader retry worker
 - call `sync_public_contact_markers` on startup if the app uses public contact

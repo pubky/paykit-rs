@@ -2168,6 +2168,16 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func prepareReceiptIssuance(counterparty: String, draft: ReceiptDraft) async throws  -> ReceiptIssuanceView
 
     /**
+     * Read linked peers and pending outbound work together for scheduling.
+     *
+     * Refresh after receiving messages or mutating state, and discard results
+     * when session or identity changes. This does not authorize sending:
+     * execution APIs retain their own current-state checks.
+     * Session creation, capability scope and key rotation remain caller-owned.
+     */
+    func privateMessageSchedulingSnapshot() async throws  -> PrivateMessageSchedulingSnapshot
+
+    /**
      * Send queued outbound private messages for one counterparty in order.
      */
     func processOutboundPrivateMessages(counterparty: String) async throws  -> OutboundPrivateSendReport
@@ -4098,6 +4108,31 @@ open func prepareReceiptIssuance(counterparty: String, draft: ReceiptDraft)async
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeReceiptIssuanceView_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Read linked peers and pending outbound work together for scheduling.
+     *
+     * Refresh after receiving messages or mutating state, and discard results
+     * when session or identity changes. This does not authorize sending:
+     * execution APIs retain their own current-state checks.
+     * Session creation, capability scope and key rotation remain caller-owned.
+     */
+open func privateMessageSchedulingSnapshot()async throws  -> PrivateMessageSchedulingSnapshot  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_private_message_scheduling_snapshot(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePrivateMessageSchedulingSnapshot_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -15176,6 +15211,73 @@ public func FfiConverterTypePrivateContactPaymentResolution_lower(_ value: Priva
 
 
 /**
+ * Link states and outbound work from one fresh scheduling read.
+ */
+public struct PrivateMessageSchedulingSnapshot {
+    /**
+     * Stored link states, sorted by counterparty.
+     */
+    public var linkedPeers: [LinkedPeerRecord]
+    /**
+     * Retryable message or app-specific reservation cleanup counterparties.
+     */
+    public var pendingOutboundCounterparties: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Stored link states, sorted by counterparty.
+         */linkedPeers: [LinkedPeerRecord],
+        /**
+         * Retryable message or app-specific reservation cleanup counterparties.
+         */pendingOutboundCounterparties: [String]) {
+        self.linkedPeers = linkedPeers
+        self.pendingOutboundCounterparties = pendingOutboundCounterparties
+    }
+}
+
+#if compiler(>=6)
+extension PrivateMessageSchedulingSnapshot: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrivateMessageSchedulingSnapshot: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrivateMessageSchedulingSnapshot {
+        return
+            try PrivateMessageSchedulingSnapshot(
+                linkedPeers: FfiConverterSequenceTypeLinkedPeerRecord.read(from: &buf),
+                pendingOutboundCounterparties: FfiConverterSequenceString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrivateMessageSchedulingSnapshot, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeLinkedPeerRecord.write(value.linkedPeers, into: &buf)
+        FfiConverterSequenceString.write(value.pendingOutboundCounterparties, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrivateMessageSchedulingSnapshot_lift(_ buf: RustBuffer) throws -> PrivateMessageSchedulingSnapshot {
+    return try FfiConverterTypePrivateMessageSchedulingSnapshot.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrivateMessageSchedulingSnapshot_lower(_ value: PrivateMessageSchedulingSnapshot) -> RustBuffer {
+    return FfiConverterTypePrivateMessageSchedulingSnapshot.lower(value)
+}
+
+
+/**
  * Private Payment Endpoint candidate passed to the payment adapter.
  */
 public struct PrivatePaymentEndpointCandidate {
@@ -25828,6 +25930,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_prepare_receipt_issuance() != 41997) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_private_message_scheduling_snapshot() != 51364) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_process_outbound_private_messages() != 52525) {

@@ -1,5 +1,17 @@
 use super::super::*;
 
+async fn pending_counterparties<P: PaymentAdapter>(
+    sdk: &PaykitSdk<InMemoryStorage, TestPubkySessionProvider, P, FixedClock>,
+) -> Vec<PubkyPublicKey> {
+    let before = sdk.storage.snapshot().unwrap();
+    let expected = sdk.pending_outbound_private_counterparties().await.unwrap();
+    let snapshot = sdk.private_message_scheduling_snapshot().await.unwrap();
+    assert_eq!(snapshot.pending_outbound_counterparties, expected);
+    assert_eq!(snapshot.linked_peers, sdk.linked_peers().await.unwrap());
+    assert_eq!(sdk.storage.snapshot().unwrap(), before);
+    expected
+}
+
 #[tokio::test]
 async fn test_pending_outbound_private_counterparties_dedupes_work() {
     let storage = registered_test_storage();
@@ -47,7 +59,7 @@ async fn test_pending_outbound_private_counterparties_dedupes_work() {
         FixedClock,
     );
 
-    let counterparties = sdk.pending_outbound_private_counterparties().await.unwrap();
+    let counterparties = pending_counterparties(&sdk).await;
 
     assert_eq!(counterparties, vec![(first)]);
 }
@@ -80,11 +92,7 @@ async fn test_pending_outbound_private_counterparties_skips_unregistered_app() {
         FixedClock,
     );
 
-    assert!(sdk
-        .pending_outbound_private_counterparties()
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(pending_counterparties(&sdk).await.is_empty());
 }
 
 #[tokio::test]
@@ -128,11 +136,17 @@ async fn test_pending_outbound_private_counterparties_does_not_skip_attempted_in
         FixedClock,
     );
 
-    assert!(sdk
-        .pending_outbound_private_counterparties()
+    assert!(pending_counterparties(&sdk).await.is_empty());
+
+    sdk.storage
+        .transaction(|tx| {
+            tx.retire_paykit_app(paykit_lib::PaykitAppId::new("inactive-app").unwrap());
+            Ok(())
+        })
         .await
-        .unwrap()
-        .is_empty());
+        .unwrap();
+
+    assert_eq!(pending_counterparties(&sdk).await, vec![counterparty]);
 }
 
 #[tokio::test]
@@ -194,9 +208,27 @@ async fn test_pending_outbound_private_counterparties_includes_cleanup_only_work
     );
 
     assert_eq!(
-        sdk.pending_outbound_private_counterparties().await.unwrap(),
+        pending_counterparties(&sdk).await,
         vec![(counterparty.clone())]
     );
+    for state in [LinkedPeerState::Blocked, LinkedPeerState::RecoveryRequired] {
+        storage
+            .transaction({
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    let mut peer = tx.linked_peer(&counterparty).unwrap();
+                    peer.state = state;
+                    tx.save_linked_peer(peer);
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            pending_counterparties(&sdk).await,
+            vec![counterparty.clone()]
+        );
+    }
     let report = sdk
         .process_outbound_private_messages(counterparty)
         .await
@@ -254,11 +286,7 @@ async fn test_pending_outbound_private_counterparties_skips_other_app_cleanup() 
         FixedClock,
     );
 
-    assert!(sdk
-        .pending_outbound_private_counterparties()
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(pending_counterparties(&sdk).await.is_empty());
 }
 
 #[tokio::test]
@@ -293,11 +321,7 @@ async fn test_pending_outbound_private_counterparties_waits_for_stale_sending() 
         FixedClock,
     );
 
-    assert!(sdk
-        .pending_outbound_private_counterparties()
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(pending_counterparties(&sdk).await.is_empty());
 
     storage
         .transaction({
@@ -312,14 +336,11 @@ async fn test_pending_outbound_private_counterparties_waits_for_stale_sending() 
         .await
         .unwrap();
 
-    assert_eq!(
-        sdk.pending_outbound_private_counterparties().await.unwrap(),
-        vec![(counterparty)]
-    );
+    assert_eq!(pending_counterparties(&sdk).await, vec![(counterparty)]);
 }
 
 #[tokio::test]
-async fn test_pending_outbound_private_counterparties_skips_recovery_required_peer() {
+async fn test_pending_outbound_private_counterparties_skips_recovery_required_and_blocked_peers() {
     let storage = registered_test_storage();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     storage
@@ -359,11 +380,19 @@ async fn test_pending_outbound_private_counterparties_skips_recovery_required_pe
         FixedClock,
     );
 
-    assert!(sdk
-        .pending_outbound_private_counterparties()
+    assert!(pending_counterparties(&sdk).await.is_empty());
+
+    sdk.storage
+        .transaction(move |tx| {
+            let mut peer = tx.linked_peer(&counterparty).unwrap();
+            peer.state = LinkedPeerState::Blocked;
+            tx.save_linked_peer(peer);
+            Ok(())
+        })
         .await
-        .unwrap()
-        .is_empty());
+        .unwrap();
+
+    assert!(pending_counterparties(&sdk).await.is_empty());
 }
 
 #[tokio::test]
@@ -407,11 +436,7 @@ async fn test_pending_outbound_private_counterparties_skips_linking_peer() {
         FixedClock,
     );
 
-    assert!(sdk
-        .pending_outbound_private_counterparties()
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(pending_counterparties(&sdk).await.is_empty());
 }
 
 #[tokio::test]
@@ -446,11 +471,7 @@ async fn test_pending_outbound_private_counterparties_waits_for_failed_backoff()
         FixedClock,
     );
 
-    assert!(sdk
-        .pending_outbound_private_counterparties()
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(pending_counterparties(&sdk).await.is_empty());
 
     storage
         .transaction({
@@ -465,10 +486,7 @@ async fn test_pending_outbound_private_counterparties_waits_for_failed_backoff()
         .await
         .unwrap();
 
-    assert_eq!(
-        sdk.pending_outbound_private_counterparties().await.unwrap(),
-        vec![(counterparty)]
-    );
+    assert_eq!(pending_counterparties(&sdk).await, vec![(counterparty)]);
 }
 
 #[tokio::test]
@@ -520,11 +538,7 @@ async fn test_pending_outbound_private_counterparties_respects_queue_head() {
         FixedClock,
     );
 
-    assert!(sdk
-        .pending_outbound_private_counterparties()
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(pending_counterparties(&sdk).await.is_empty());
 
     storage
         .transaction({
@@ -539,8 +553,5 @@ async fn test_pending_outbound_private_counterparties_respects_queue_head() {
         .await
         .unwrap();
 
-    assert_eq!(
-        sdk.pending_outbound_private_counterparties().await.unwrap(),
-        vec![(counterparty)]
-    );
+    assert_eq!(pending_counterparties(&sdk).await, vec![(counterparty)]);
 }

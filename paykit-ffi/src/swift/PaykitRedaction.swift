@@ -8,6 +8,11 @@ extension PaykitStateObservation: CustomStringConvertible, CustomDebugStringConv
     public var debugDescription: String { description }
 }
 
+extension PrivateMessageSchedulingSnapshot: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PrivateMessageSchedulingSnapshot(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
 extension ContactUpdate: CustomStringConvertible, CustomDebugStringConvertible {
     public var description: String { "ContactUpdate(<redacted>)" }
     public var debugDescription: String { description }
