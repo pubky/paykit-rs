@@ -409,6 +409,72 @@ async fn received_request_with_confirmation(
     (pair, request)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_payment_execution_shared_operations() {
+    let (pair, request) = received_request_with_confirmation().await;
+    let operations = Arc::new(AtomicUsize::new(0));
+    let sdk = PaykitSdk::new(
+        CountedStorage {
+            inner: pair.bitkit.storage.clone(),
+            operations: operations.clone(),
+            transactions: Arc::new(AtomicUsize::new(0)),
+            commits: Arc::new(AtomicUsize::new(0)),
+            reject_next_transaction: Arc::new(AtomicBool::new(false)),
+        },
+        TestnetSessionProvider::new(pair.bitkit.access.clone()),
+        pair.bitkit.adapter.clone(),
+        PaykitSdkConfig::new(pair.bitkit.app_id.clone()).unwrap(),
+    );
+    sdk.initialize().await.unwrap();
+    let request_id = request_id(&request);
+    let proposal_item =
+        crate::harness::proposal_item(&sdk, &pair.bob.public_key, &request_id).await;
+    operations.store(0, Ordering::SeqCst);
+    sdk.claim_payment_request_for_execution(pair.bob.public_key.clone(), &request_id)
+        .await
+        .unwrap();
+    assert_eq!(operations.swap(0, Ordering::SeqCst), 1);
+    sdk.claim_and_accept_payment_request(pair.bob.public_key.clone(), &request_id, proposal_item)
+        .await
+        .unwrap();
+    assert_eq!(operations.swap(0, Ordering::SeqCst), 1);
+    let proven = sdk
+        .submit_payment_proof(
+            pair.bob.public_key.clone(),
+            &request_id,
+            Some(BillingPeriod::new("2026-08-01T00:00:00Z", "2026-09-01T00:00:00Z").unwrap()),
+            pair.bitkit.app_id.clone(),
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            JsonMap::from_iter([(
+                "preimage".into(),
+                serde_json::Value::String("test-preimage".into()),
+            )]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(operations.swap(0, Ordering::SeqCst), 1);
+    assert_eq!(proven.payment_proofs.len(), 1);
+    let delivered = sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    assert!(delivered.failed.is_empty());
+    pair.bob
+        .sdk
+        .receive_private_messages(pair.bitkit.public_key.clone())
+        .await
+        .unwrap();
+    let received = request_with_id(
+        pair.bob
+            .sdk
+            .payment_requests_with(&pair.bitkit.public_key)
+            .await
+            .unwrap(),
+        request_id.as_str(),
+    );
+    assert_eq!(received.payment_proofs.len(), 1);
+}
+
 #[tokio::test]
 async fn test_request_preparation_preserves_confirmation_for_restart() {
     let (pair, request) = received_request_with_confirmation().await;
