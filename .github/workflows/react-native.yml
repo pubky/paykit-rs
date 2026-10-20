@@ -1,0 +1,99 @@
+name: React Native
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - '.cargo/**'
+      - '.github/workflows/react-native.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'build.rs'
+      - 'Package.swift'
+      - 'paykit-ffi/**'
+      - 'paykit-lib/**'
+      - 'paykit-react-native/**'
+      - 'paykit-sdk/**'
+      - 'rust-toolchain*'
+      - 'vendor/**'
+  pull_request:
+    paths:
+      - '.cargo/**'
+      - '.github/workflows/react-native.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'build.rs'
+      - 'Package.swift'
+      - 'paykit-ffi/**'
+      - 'paykit-lib/**'
+      - 'paykit-react-native/**'
+      - 'paykit-sdk/**'
+      - 'rust-toolchain*'
+      - 'vendor/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generate-and-typecheck:
+    name: Generate and type-check
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: paykit-react-native
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: paykit-react-native/.nvmrc
+          cache: npm
+          cache-dependency-path: paykit-react-native/package-lock.json
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # After `npm ci`, which deletes node_modules, so the restored ubrn build
+      # survives.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # The second workspace caches the ubrn CLI, which npm ships as Rust
+          # source and builds on first use.
+          workspaces: |
+            . -> target
+            paykit-react-native/node_modules/uniffi-bindgen-react-native -> target
+
+      - name: Build host paykit-ffi library
+        run: cargo build --release --locked -p paykit-ffi
+
+      - name: Generate bindings and TurboModule glue
+        run: npm run ubrn:generate
+
+      - name: Check committed TurboModule glue
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain -- .)" ]; then
+            echo "::error::Committed TurboModule glue is stale. Run 'npm run ubrn:generate' in paykit-react-native and commit the result."
+            git status --porcelain -- .
+            git diff -- .
+            exit 1
+          fi
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test

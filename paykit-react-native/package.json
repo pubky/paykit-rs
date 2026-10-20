@@ -1,0 +1,129 @@
+{
+  "name": "@synonymdev/react-native-paykit",
+  "version": "0.1.0",
+  "description": "React Native bindings for the Paykit SDK, generated with uniffi-bindgen-react-native",
+  "source": "./src/index.tsx",
+  "main": "./lib/module/index.js",
+  "types": "./lib/typescript/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/typescript/src/index.d.ts",
+      "default": "./lib/module/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "lib",
+    "android",
+    "ios",
+    "cpp",
+    "*.podspec",
+    "!ios/build",
+    "!android/build",
+    "!android/gradle",
+    "!android/gradlew",
+    "!android/gradlew.bat",
+    "!android/local.properties",
+    "!**/__tests__",
+    "!**/__fixtures__",
+    "!**/__mocks__",
+    "!**/.*"
+  ],
+  "scripts": {
+    "ubrn:generate": "node scripts/ubrn-generate.mjs",
+    "build:native": "ubrn build ios --config ubrn.config.yaml --and-generate --release && ubrn build android --config ubrn.config.yaml --and-generate --release",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint \"**/*.{js,mjs,ts,tsx}\"",
+    "test": "jest"
+  },
+  "keywords": [
+    "paykit",
+    "pubky",
+    "react-native",
+    "ios",
+    "android",
+    "payments"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pubky/paykit-rs.git",
+    "directory": "paykit-react-native"
+  },
+  "author": "Synonym <info@synonym.to> (https://synonym.to)",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/pubky/paykit-rs/issues"
+  },
+  "homepage": "https://github.com/pubky/paykit-rs/tree/master/paykit-react-native#readme",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "peerDependencies": {
+    "react": "*",
+    "react-native": "*"
+  },
+  "jest": {
+    "preset": "react-native",
+    "modulePathIgnorePatterns": [
+      "<rootDir>/lib/"
+    ],
+    "transformIgnorePatterns": [
+      "node_modules/(?!((jest-)?react-native|@react-native(-community)?|uniffi-bindgen-react-native)/)"
+    ]
+  },
+  "prettier": {
+    "quoteProps": "consistent",
+    "singleQuote": true,
+    "tabWidth": 2,
+    "trailingComma": "es5",
+    "useTabs": false
+  },
+  "react-native-builder-bob": {
+    "source": "src",
+    "output": "lib",
+    "targets": [
+      [
+        "module",
+        {
+          "esm": true
+        }
+      ],
+      [
+        "typescript",
+        {
+          "project": "tsconfig.build.json"
+        }
+      ]
+    ]
+  },
+  "codegenConfig": {
+    "name": "ReactNativePaykitSpec",
+    "type": "modules",
+    "jsSrcsDir": "src",
+    "android": {
+      "javaPackageName": "com.synonymdev.reactnativepaykit"
+    }
+  },
+  "dependencies": {
+    "uniffi-bindgen-react-native": "0.29.3-1"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@react-native/babel-preset": "0.78.2",
+    "@types/jest": "29.5.14",
+    "@types/react": "19.3.0",
+    "eslint": "9.39.5",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-plugin-prettier": "5.5.7",
+    "globals": "16.5.0",
+    "jest": "29.7.0",
+    "prettier": "3.9.10",
+    "react": "19.0.0",
+    "react-native": "0.78.2",
+    "react-native-builder-bob": "0.43.2",
+    "typescript": "5.8.3",
+    "typescript-eslint": "8.72.0"
+  }
+}

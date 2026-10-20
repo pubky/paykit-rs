@@ -1,0 +1,22 @@
+# uniffi-bindgen-react-native configuration.
+# Reference: node_modules/uniffi-bindgen-react-native/docs/src/reference/config-yaml.md
+rust:
+  # Local crate in this repository; never a git checkout.
+  directory: ../paykit-ffi
+  manifestPath: Cargo.toml
+bindings:
+  # Generated TypeScript and C++ bindings (gitignored; run `npm run ubrn:generate`).
+  ts: src/generated
+  cpp: cpp/generated
+ios:
+  # Same targets as paykit-ffi/build_ios.sh.
+  targets:
+    - aarch64-apple-ios
+    - aarch64-apple-ios-sim
+android:
+  # Same ABIs as paykit-ffi/build_android.sh.
+  targets:
+    - arm64-v8a
+    - armeabi-v7a
+    - x86_64
+    - x86
