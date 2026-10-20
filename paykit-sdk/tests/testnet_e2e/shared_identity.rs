@@ -409,6 +409,282 @@ async fn received_request_with_confirmation(
     (pair, request)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_private_message_scheduling_snapshot_reads_once_and_observes_shared_updates() {
+    let (pair, _) = received_request_with_confirmation().await;
+    let operations = Arc::new(AtomicUsize::new(0));
+    let transactions = Arc::new(AtomicUsize::new(0));
+    let commits = Arc::new(AtomicUsize::new(0));
+    let sdk = PaykitSdk::new(
+        CountedStorage {
+            inner: pair.bitkit.storage.clone(),
+            operations: operations.clone(),
+            transactions: transactions.clone(),
+            commits: commits.clone(),
+            reject_next_transaction: Arc::new(AtomicBool::new(false)),
+        },
+        TestnetSessionProvider::new(pair.bitkit.access.clone()),
+        pair.bitkit.adapter.clone(),
+        PaykitSdkConfig::new(pair.bitkit.app_id.clone()).unwrap(),
+    );
+    sdk.initialize().await.unwrap();
+    let before = pair
+        .bitkit
+        .storage
+        .transaction(|tx| Ok(tx.export_storage_state()))
+        .await
+        .unwrap();
+    let peers = sdk.linked_peers().await.unwrap();
+    let pending = sdk.pending_outbound_private_counterparties().await.unwrap();
+    assert_eq!(pending, vec![pair.bob.public_key.clone()]);
+    operations.store(0, Ordering::SeqCst);
+    transactions.store(0, Ordering::SeqCst);
+    commits.store(0, Ordering::SeqCst);
+
+    // Alternate paths against the same real Pubky storage and queued confirmation.
+    // Compare operation counts and data; elapsed time is diagnostic, not a threshold.
+    for sample in 0..5 {
+        for combined in if sample % 2 == 0 {
+            [false, true]
+        } else {
+            [true, false]
+        } {
+            let started = Instant::now();
+            if combined {
+                let snapshot = sdk.private_message_scheduling_snapshot().await.unwrap();
+                assert_eq!(snapshot.linked_peers, peers);
+                assert_eq!(snapshot.pending_outbound_counterparties, pending);
+            } else {
+                assert_eq!(sdk.linked_peers().await.unwrap(), peers);
+                assert_eq!(
+                    sdk.pending_outbound_private_counterparties().await.unwrap(),
+                    pending
+                );
+            }
+            let elapsed_us = started.elapsed().as_micros();
+            assert_eq!(
+                transactions.swap(0, Ordering::SeqCst),
+                if combined { 1 } else { 2 }
+            );
+            // Standalone transactions implicitly acquire their own storage operation.
+            assert_eq!(operations.swap(0, Ordering::SeqCst), usize::from(combined));
+            assert_eq!(commits.swap(0, Ordering::SeqCst), 0);
+            println!("private_message_scheduling_read sample={sample} combined={combined} elapsed_us={elapsed_us}");
+        }
+    }
+    assert_eq!(
+        pair.bitkit
+            .storage
+            .transaction(|tx| Ok(tx.export_storage_state()))
+            .await
+            .unwrap(),
+        before
+    );
+
+    // Entering storage first must fail before attempting to acquire the session gate.
+    assert!(matches!(
+        pair.bitkit
+            .storage
+            .with_operation(async { sdk.private_message_scheduling_snapshot().await })
+            .await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
+    assert_eq!(operations.swap(0, Ordering::SeqCst), 0);
+    assert_eq!(transactions.swap(0, Ordering::SeqCst), 0);
+
+    pair.server
+        .sdk
+        .block_peer(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    let updated = sdk.private_message_scheduling_snapshot().await.unwrap();
+    assert_eq!(updated.linked_peers.len(), 1);
+    assert_eq!(updated.linked_peers[0].counterparty, pair.bob.public_key);
+    assert_eq!(updated.linked_peers[0].state, LinkedPeerState::Blocked);
+    assert!(updated.pending_outbound_counterparties.is_empty());
+    assert_eq!(operations.load(Ordering::SeqCst), 1);
+    assert_eq!(transactions.load(Ordering::SeqCst), 1);
+    assert_eq!(commits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_payment_execution_shared_operations() {
+    let (pair, request) = received_request_with_confirmation().await;
+    let operations = Arc::new(AtomicUsize::new(0));
+    let transactions = Arc::new(AtomicUsize::new(0));
+    let commits = Arc::new(AtomicUsize::new(0));
+    let sdk = PaykitSdk::new(
+        CountedStorage {
+            inner: pair.bitkit.storage.clone(),
+            operations: operations.clone(),
+            transactions: transactions.clone(),
+            commits: commits.clone(),
+            reject_next_transaction: Arc::new(AtomicBool::new(false)),
+        },
+        TestnetSessionProvider::new(pair.bitkit.access.clone()),
+        pair.bitkit.adapter.clone(),
+        PaykitSdkConfig::new(pair.bitkit.app_id.clone()).unwrap(),
+    );
+    sdk.initialize().await.unwrap();
+    let request_id = request_id(&request);
+    let proposal_item =
+        crate::harness::proposal_item(&sdk, &pair.bob.public_key, &request_id).await;
+    operations.store(0, Ordering::SeqCst);
+    sdk.claim_payment_request_for_execution(pair.bob.public_key.clone(), &request_id)
+        .await
+        .unwrap();
+    assert_eq!(operations.swap(0, Ordering::SeqCst), 1);
+    sdk.claim_and_accept_payment_request(pair.bob.public_key.clone(), &request_id, proposal_item)
+        .await
+        .unwrap();
+    assert_eq!(operations.swap(0, Ordering::SeqCst), 1);
+    let proven = sdk
+        .submit_payment_proof(
+            pair.bob.public_key.clone(),
+            &request_id,
+            Some(BillingPeriod::new("2026-08-01T00:00:00Z", "2026-09-01T00:00:00Z").unwrap()),
+            pair.bitkit.app_id.clone(),
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            JsonMap::from_iter([(
+                "preimage".into(),
+                serde_json::Value::String("test-preimage".into()),
+            )]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(operations.swap(0, Ordering::SeqCst), 1);
+    assert_eq!(proven.payment_proofs.len(), 1);
+    let expected_identity = pair.bitkit.sdk.identity_status().await.unwrap();
+    transactions.store(0, Ordering::SeqCst);
+    commits.store(0, Ordering::SeqCst);
+    let read = sdk
+        .read_payment_requests(&pair.bob.public_key, Some(&pair.bitkit.public_key))
+        .await
+        .unwrap();
+    assert_eq!(operations.swap(0, Ordering::SeqCst), 1);
+    assert_eq!(transactions.load(Ordering::SeqCst), 2);
+    assert_eq!(commits.load(Ordering::SeqCst), 0);
+    assert_eq!(read.identity_status, expected_identity);
+    assert_eq!(read.payment_requests, vec![proven]);
+
+    let delivered = sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    assert!(delivered.failed.is_empty());
+    pair.bob
+        .sdk
+        .receive_private_messages(pair.bitkit.public_key.clone())
+        .await
+        .unwrap();
+    let received = request_with_id(
+        pair.bob
+            .sdk
+            .payment_requests_with(&pair.bitkit.public_key)
+            .await
+            .unwrap(),
+        request_id.as_str(),
+    );
+    assert_eq!(received.payment_proofs.len(), 1);
+
+    let updated = pair
+        .bitkit
+        .restarted_sdk(Utc::now())
+        .cancel_payment_request(pair.bob.public_key.clone(), &request_id, None)
+        .await
+        .unwrap();
+    assert_eq!(updated.state, PaymentRequestLifecycleState::Canceled);
+    let committed = pair.bitkit.storage_state().await;
+    operations.store(0, Ordering::SeqCst);
+    transactions.store(0, Ordering::SeqCst);
+    commits.store(0, Ordering::SeqCst);
+    let read = sdk
+        .read_payment_requests(&pair.bob.public_key, Some(&pair.bitkit.public_key))
+        .await
+        .unwrap();
+    assert_eq!(operations.swap(0, Ordering::SeqCst), 1);
+    assert_eq!(transactions.load(Ordering::SeqCst), 2);
+    assert_eq!(commits.load(Ordering::SeqCst), 0);
+    assert_eq!(read.identity_status, expected_identity);
+    assert_eq!(read.payment_requests, vec![updated]);
+    assert_eq!(pair.bitkit.storage_state().await, committed);
+}
+
+#[tokio::test]
+async fn test_payment_request_read_checks_identity_before_refresh() {
+    let testnet = build_testnet().await;
+    let user = TestUser::sign_up(&testnet).await;
+    let other_identity = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let storage = InMemoryStorage::new();
+    let sdk = PaykitSdk::new(
+        storage.clone(),
+        TestnetSessionProvider::new(user.access.clone()),
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new("bitkit").unwrap(),
+    );
+    let before = storage.snapshot().unwrap();
+    let read = sdk
+        .read_payment_requests(&other_identity, None)
+        .await
+        .unwrap();
+    assert!(read.identity_status.is_none());
+    assert!(read.payment_requests.is_empty());
+    assert_eq!(storage.snapshot().unwrap(), before);
+
+    storage
+        .save_identity_state(paykit_sdk::IdentityState {
+            public_key: Some(user.public_key.clone()),
+            initialized_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let before = storage.snapshot().unwrap();
+    let read = sdk
+        .read_payment_requests(&other_identity, Some(&other_identity))
+        .await
+        .unwrap();
+    assert_eq!(
+        read.identity_status.unwrap().capability,
+        PubkyIdentityCapability::PrivateLinkCapable
+    );
+    assert!(read.payment_requests.is_empty());
+    assert_eq!(storage.snapshot().unwrap(), before);
+
+    let mut public_access = user.access.clone();
+    public_access.local_secret_key = None;
+    public_access.paykit_identity_secret_key = None;
+    let public_sdk = PaykitSdk::new(
+        storage.clone(),
+        TestnetSessionProvider::new(public_access),
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new("bitkit").unwrap(),
+    );
+    let read = public_sdk
+        .read_payment_requests(&other_identity, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        read.identity_status.unwrap().capability,
+        PubkyIdentityCapability::PublicOnly
+    );
+    assert!(read.payment_requests.is_empty());
+    assert_eq!(storage.snapshot().unwrap(), before);
+
+    let read = sdk
+        .read_payment_requests(&other_identity, Some(&user.public_key))
+        .await
+        .unwrap();
+    assert_eq!(
+        read.identity_status.unwrap().capability,
+        PubkyIdentityCapability::PrivateLinkCapable
+    );
+    assert!(storage
+        .snapshot()
+        .unwrap()
+        .paykit_noise_public_key
+        .is_some());
+}
+
 #[tokio::test]
 async fn test_request_preparation_preserves_confirmation_for_restart() {
     let (pair, request) = received_request_with_confirmation().await;
@@ -964,6 +1240,13 @@ async fn test_shared_storage_operation_keeps_committed_transactions_after_error(
                 Err(PaykitSdkError::Policy { .. })
             ));
             assert!(matches!(
+                pair.bitkit
+                    .sdk
+                    .read_payment_requests(&pair.bob.public_key, None)
+                    .await,
+                Err(PaykitSdkError::Policy { .. })
+            ));
+            assert!(matches!(
                 pair.bitkit.sdk.publish_paykit_app(test_app("Bitkit")).await,
                 Err(PaykitSdkError::Policy { .. })
             ));
@@ -998,8 +1281,19 @@ async fn test_shared_storage_operation_keeps_committed_transactions_after_error(
     assert!(storage.last_revision().unwrap().is_some());
     assert_eq!(
         pair.server.storage.load_identity_state().await.unwrap(),
-        Some(expected)
+        Some(expected.clone())
     );
+    let read = pair
+        .bitkit
+        .sdk
+        .read_payment_requests(&pair.bob.public_key, Some(&pair.bitkit.public_key))
+        .await
+        .unwrap();
+    assert_eq!(
+        read.identity_status.unwrap().public_key,
+        expected.public_key
+    );
+    assert_eq!(storage.load_identity_state().await.unwrap(), Some(expected));
     pair.server
         .storage
         .save_identity_state(before.clone())
@@ -2896,12 +3190,33 @@ async fn test_initialize_backs_off_when_shared_state_lock_is_busy() {
         .await
         .unwrap();
     let result = tokio::time::timeout(Duration::from_secs(8), user.sdk.initialize()).await;
+    let read_result = tokio::time::timeout(
+        Duration::from_secs(8),
+        user.sdk
+            .read_payment_requests(&pair.bob.public_key, Some(&user.public_key)),
+    )
+    .await;
     remote.unlock(&lock).await.unwrap();
     let error = result
         .expect("initialization must not multiply exhausted acquisition retries")
         .unwrap_err();
     assert!(matches!(error, PaykitSdkError::SharedStateBusy { .. }));
     assert!(!error.is_concurrent_update());
+    let error = read_result
+        .expect("request read must not multiply exhausted acquisition retries")
+        .unwrap_err();
+    assert!(matches!(error, PaykitSdkError::SharedStateBusy { .. }));
+    assert!(!error.is_concurrent_update());
+    let read = user
+        .sdk
+        .read_payment_requests(&pair.bob.public_key, Some(&user.public_key))
+        .await
+        .unwrap();
+    assert_eq!(
+        read.identity_status.unwrap().capability,
+        PubkyIdentityCapability::PrivateLinkCapable
+    );
+    assert!(read.payment_requests.is_empty());
     user.sdk.initialize().await.unwrap();
     assert_eq!(
         remote
@@ -2921,6 +3236,12 @@ async fn test_unknown_pending_write_blocks_shared_state() {
     let testnet = build_testnet().await;
     let user = TestUser::sign_up_with_app(&testnet, app_id("bitkit")).await;
     let storage = PubkySharedStateStorage::new(TestnetSessionProvider::new(user.access.clone()));
+    let sdk = PaykitSdk::new(
+        storage.clone(),
+        TestnetSessionProvider::new(user.access.clone()),
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new("bitkit").unwrap(),
+    );
     let remote = user.access.session.storage();
     let marker = format!(
         "{}unknown",
@@ -2952,6 +3273,11 @@ async fn test_unknown_pending_write_blocks_shared_state() {
         .await
         .unwrap_err();
     assert!(matches!(error, PaykitSdkError::Storage { .. }));
+    assert!(matches!(
+        sdk.read_payment_requests(&user.public_key, Some(&user.public_key))
+            .await,
+        Err(PaykitSdkError::Storage { .. })
+    ));
     assert!(!callback_ran.load(Ordering::SeqCst));
     assert!(remote.get(&marker).await.is_ok());
 }

@@ -314,27 +314,30 @@ where
         counterparty: PubkyPublicKey,
         payment_request_id: &PaymentRequestId,
     ) -> Result<PaymentRequestRecord> {
-        let record = self
-            .load_payment_request_record(&counterparty, payment_request_id)
+        self.with_storage_operation(Box::pin(async {
+            let record = self
+                .load_payment_request_record(&counterparty, payment_request_id)
+                .await?;
+            require_role(
+                &record,
+                PaymentRequestLocalRole::Payer,
+                "claim Payment Request for execution",
+            )?;
+            self.ensure_payment_request_origin_app_authorized(
+                &counterparty,
+                &record,
+                "claim Payment Request for execution",
+            )
             .await?;
-        require_role(
-            &record,
-            PaymentRequestLocalRole::Payer,
-            "claim Payment Request for execution",
-        )?;
-        self.ensure_payment_request_origin_app_authorized(
-            &counterparty,
-            &record,
-            "claim Payment Request for execution",
-        )
-        .await?;
-        claim_payment_request_execution(
-            &self.storage,
-            counterparty,
-            &self.config.app_id,
-            payment_request_id,
-            self.clock.now(),
-        )
+            claim_payment_request_execution(
+                &self.storage,
+                counterparty,
+                &self.config.app_id,
+                payment_request_id,
+                self.clock.now(),
+            )
+            .await
+        }))
         .await
     }
 
@@ -430,75 +433,78 @@ where
         payment_request_id: &PaymentRequestId,
         expected_proposal_stream_item_id: u64,
     ) -> Result<PaymentRequestRecord> {
-        let (session, expected_identity, _) = self
-            .load_session_access_and_refresh_identity_with(|tx| {
-                require_private_automation_ready(
-                    tx.linked_peer(&counterparty).map(|peer| peer.state),
-                    tx.encrypted_link_state(&counterparty)
-                        .is_some_and(|state| state.link_snapshot.is_some()),
-                    &counterparty,
-                )
-            })
-            .await?;
-        let session = session.ok_or_else(|| PaykitSdkError::Identity {
-            context: "no Pubky session available".into(),
-            source: None,
-        })?;
-        if !session.private_link_capable_for_capabilities(PAYKIT_SESSION_CAPABILITIES)? {
-            return Err(PaykitSdkError::Identity {
-                context: "local Pubky identity is not private-link-capable".into(),
+        self.with_storage_operation(Box::pin(async {
+            let (session, expected_identity, _) = self
+                .load_session_access_and_refresh_identity_with(|tx| {
+                    require_private_automation_ready(
+                        tx.linked_peer(&counterparty).map(|peer| peer.state),
+                        tx.encrypted_link_state(&counterparty)
+                            .is_some_and(|state| state.link_snapshot.is_some()),
+                        &counterparty,
+                    )
+                })
+                .await?;
+            let session = session.ok_or_else(|| PaykitSdkError::Identity {
+                context: "no Pubky session available".into(),
                 source: None,
-            });
-        }
-        // Preserve observed permissions even when claim or acceptance is rejected.
-        let (authorization, ()) = self
-            .counterparty_app_authorization_context_with(&counterparty, |tx| {
-                ensure_accounting_identity(tx, &expected_identity)
-            })
-            .await?;
-        let event = PaymentRequestEvent::Acceptance(PaymentRequestAcceptance::new(
-            EventId::new_v4(),
-            payment_request_id.clone(),
-        ));
-        self.storage
-            .transaction(|tx| {
-                let now = self.clock.now();
-                require_private_automation_ready(
-                    tx.linked_peer(&counterparty).map(|peer| peer.state),
-                    tx.encrypted_link_state(&counterparty)
-                        .is_some_and(|state| state.link_snapshot.is_some()),
-                    &counterparty,
-                )?;
-                let record = claim_payment_request_execution_in_transaction(
-                    tx,
-                    &counterparty,
-                    &self.config.app_id,
-                    payment_request_id,
-                    now,
-                )?;
-                // A concurrent cache write must not override this call's observed revocation.
-                require_payment_request_origin_app_authorized(
-                    &record,
-                    authorization.payment_request_apps.as_deref(),
-                    "claim and accept Payment Request",
-                )?;
-                enqueue_checked_payment_request_action_in_transaction(
-                    tx,
-                    &counterparty,
-                    &self.config.app_id,
-                    &event,
-                    now,
-                    Some(&expected_identity),
-                    Some(expected_proposal_stream_item_id),
-                )?;
-                self.payment_request_record_in_transaction(
-                    tx,
-                    &counterparty,
-                    payment_request_id,
-                    true,
-                )
-            })
-            .await
+            })?;
+            if !session.private_link_capable_for_capabilities(PAYKIT_SESSION_CAPABILITIES)? {
+                return Err(PaykitSdkError::Identity {
+                    context: "local Pubky identity is not private-link-capable".into(),
+                    source: None,
+                });
+            }
+            // Preserve observed permissions even when claim or acceptance is rejected.
+            let (authorization, ()) = self
+                .counterparty_app_authorization_context_with(&counterparty, |tx| {
+                    ensure_accounting_identity(tx, &expected_identity)
+                })
+                .await?;
+            let event = PaymentRequestEvent::Acceptance(PaymentRequestAcceptance::new(
+                EventId::new_v4(),
+                payment_request_id.clone(),
+            ));
+            self.storage
+                .transaction(|tx| {
+                    let now = self.clock.now();
+                    require_private_automation_ready(
+                        tx.linked_peer(&counterparty).map(|peer| peer.state),
+                        tx.encrypted_link_state(&counterparty)
+                            .is_some_and(|state| state.link_snapshot.is_some()),
+                        &counterparty,
+                    )?;
+                    let record = claim_payment_request_execution_in_transaction(
+                        tx,
+                        &counterparty,
+                        &self.config.app_id,
+                        payment_request_id,
+                        now,
+                    )?;
+                    // A concurrent cache write must not override this call's observed revocation.
+                    require_payment_request_origin_app_authorized(
+                        &record,
+                        authorization.payment_request_apps.as_deref(),
+                        "claim and accept Payment Request",
+                    )?;
+                    enqueue_checked_payment_request_action_in_transaction(
+                        tx,
+                        &counterparty,
+                        &self.config.app_id,
+                        &event,
+                        now,
+                        Some(&expected_identity),
+                        Some(expected_proposal_stream_item_id),
+                    )?;
+                    self.payment_request_record_in_transaction(
+                        tx,
+                        &counterparty,
+                        payment_request_id,
+                        true,
+                    )
+                })
+                .await
+        }))
+        .await
     }
 
     /// Queue rejection for a received Payment Request and return local derived state.
@@ -661,43 +667,46 @@ where
         payment_request_id: &PaymentRequestId,
         submission: PaymentProofSubmission,
     ) -> Result<PaymentRequestRecord> {
-        let record = self
-            .load_payment_request_record(&counterparty, payment_request_id)
-            .await?;
-        require_role(
-            &record,
-            PaymentRequestLocalRole::Payer,
-            "submit Payment Proof",
-        )?;
-        require_state(
-            &record,
-            payment_proof_allowed_states(&record),
-            "submit Payment Proof",
-        )?;
-        let request = request_from_record(&record).ok_or_else(|| PaykitSdkError::Protocol {
-            context: "Payment Request terms are unavailable".into(),
-            source: None,
-        })?;
-        let mut event = PaymentProof::new(
-            EventId::new_v4(),
-            payment_request_id.clone(),
-            request.request().payment_reference().clone(),
-            submission.billing_period,
-            submission.payment_app_id,
-            submission.payment_endpoint_identifier,
-            submission.proof,
-        );
-        if let Some(allowance_id) = submission.allowance_id {
-            event = event.with_allowance_id(allowance_id);
-        }
-        if let Some(conversion_quote_id) = submission.conversion_quote_id {
-            event = event.with_conversion_quote_id(conversion_quote_id);
-        }
-        validate_proof_conversion(&record, &event, &request)?;
-        self.enqueue_raw_payment_proof(counterparty.clone(), &event)
-            .await?;
-        self.load_payment_request_record(&counterparty, payment_request_id)
-            .await
+        self.with_storage_operation(Box::pin(async {
+            let record = self
+                .load_payment_request_record(&counterparty, payment_request_id)
+                .await?;
+            require_role(
+                &record,
+                PaymentRequestLocalRole::Payer,
+                "submit Payment Proof",
+            )?;
+            require_state(
+                &record,
+                payment_proof_allowed_states(&record),
+                "submit Payment Proof",
+            )?;
+            let request = request_from_record(&record).ok_or_else(|| PaykitSdkError::Protocol {
+                context: "Payment Request terms are unavailable".into(),
+                source: None,
+            })?;
+            let mut event = PaymentProof::new(
+                EventId::new_v4(),
+                payment_request_id.clone(),
+                request.request().payment_reference().clone(),
+                submission.billing_period,
+                submission.payment_app_id,
+                submission.payment_endpoint_identifier,
+                submission.proof,
+            );
+            if let Some(allowance_id) = submission.allowance_id {
+                event = event.with_allowance_id(allowance_id);
+            }
+            if let Some(conversion_quote_id) = submission.conversion_quote_id {
+                event = event.with_conversion_quote_id(conversion_quote_id);
+            }
+            validate_proof_conversion(&record, &event, &request)?;
+            self.enqueue_raw_payment_proof(counterparty.clone(), &event)
+                .await?;
+            self.load_payment_request_record(&counterparty, payment_request_id)
+                .await
+        }))
+        .await
     }
 
     /// Issue immutable rates for an accepted recurring request.

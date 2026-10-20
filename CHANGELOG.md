@@ -21,6 +21,35 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - `FfiPaykitSdk.stateRevision` returns `SharedStateBusy` instead of blocking
   while a state transaction is running.
 
+## [0.1.1-rc1] - 2026-10-20
+
+### Added
+
+- `private_message_scheduling_snapshot` in Rust and
+  `privateMessageSchedulingSnapshot` in Swift and Kotlin return linked peers and
+  pending outbound counterparties from one fresh shared-storage operation.
+- `read_payment_requests` in Rust and `readPaymentRequests` in Swift and Kotlin
+  return identity status and a counterparty's Payment Requests together. An
+  optional expected-payer check rejects an identity mismatch before listing
+  requests can refresh durable identity or key bindings.
+
+### Changed
+
+- Reduce shared-state reads during Payment Request execution claims, acceptance,
+  and Payment Proof submission while preserving authorization checks,
+  independently durable commits, and uncertain-write recovery.
+- Rebuild Swift and Kotlin bindings and native libraries together. There are no
+  wire-format, capability, or stored-state changes.
+
+### Integration
+
+- Apps must call the new combined-read APIs to use their scheduling and request
+  read improvements. Results do not authorize payments and must not be reused
+  across mutations or identity/session changes. Retain authoritative request,
+  quote, and proof checks.
+- Use matching generated bindings and native libraries. Mocks implementing the
+  generated SDK interface must implement the two new methods.
+
 ## [0.1.0] - 2026-10-16
 
 ### Changed

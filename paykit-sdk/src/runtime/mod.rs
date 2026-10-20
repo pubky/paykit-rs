@@ -139,6 +139,7 @@ mod key_rotation;
 mod noise_key_authorization;
 mod observation;
 mod outbound_private;
+mod payment_request_read;
 mod payment_requests;
 mod payment_resolution;
 mod private_lists;
@@ -151,6 +152,8 @@ mod reservation_cleanup;
 
 pub use app_removal::PaykitAppRemovalBlockers;
 pub use observation::PaykitStateObservation;
+pub use outbound_private::PrivateMessageSchedulingSnapshot;
+pub use payment_request_read::PaymentRequestRead;
 
 /// Clock abstraction used by SDK workflows and tests.
 pub trait Clock: Clone + Send + Sync + 'static {

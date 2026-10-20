@@ -183,13 +183,14 @@ or report these types, or any object that contains them:
 `FfiAllowanceReassociationInput`, `FfiPaymentExecutionChecks`,
 `FfiAllowanceCandidate`, `FfiPaymentOutcomeReport`,
 `FfiAllowanceAccountingReconciliation`, `FfiPaymentDisposition`,
-`FfiPaymentRequestRecord`, `FfiPaymentProofRecord`,
-`FfiPaymentConversionQuoteRecord`, `FfiPaymentRequestAmount`,
-`FfiPaymentRequestRecurrence`, `FfiAllowanceRecord`, `FfiLinkedPeerRecord`,
+`FfiPaymentRequestRecord`, `FfiPaymentRequestRead`,
+`FfiPaymentProofRecord`, `FfiPaymentConversionQuoteRecord`,
+`FfiPaymentRequestAmount`, `FfiPaymentRequestRecurrence`,
+`FfiAllowanceRecord`, `FfiLinkedPeerRecord`,
 `FfiPrivatePaymentListEndpoint`, `FfiPrivatePaymentListView`,
 `FfiQueuedPrivateMessage`, `FfiReceiptAccessView`, `FfiPaykitProfileRecord`,
 `FfiPubkyProfileRecord`, `FfiPaykitBlobRecord`, `FfiSdkStateBlobSnapshot`,
-`FfiPaykitStateObservation`
+`FfiPaykitStateObservation`, `FfiPrivateMessageSchedulingSnapshot`
 
 This list comes from
 [`paykit-ffi/redacted_binding_types.txt`](../paykit-ffi/redacted_binding_types.txt).

@@ -233,6 +233,17 @@ pixel and cache limits, and request timeouts remain app responsibilities.
   `receivedPaymentRequestsFrom`, `listPaymentRequests`,
   `activeRecurringPaymentRequests`, and `actionableReceivedPaymentRequests` —
   inspect SDK-derived Payment Request records.
+- `PaykitSdk.readPaymentRequests(counterparty, expectedIdentity)` - read fresh
+  identity/capability and complete counterparty records under one shared-storage
+  operation. Existing storage/session access errors still propagate, including
+  missing keys or scopes required by shared storage. After successful access,
+  a missing identity, insufficient capability or expected-payer mismatch returns
+  no records before identity/key refresh. Keep the caller's identity, request,
+  billing-period and exact-proof checks; this neither
+  authorizes payment nor makes proof submission idempotent. Do not cache the
+  result or carry it across writes. Only shared-storage `SharedStateBusy`
+  indicates failure before the operation began; other failures must not be
+  automatically replayed.
 - `PaymentReference` — redacted Payment Reference object with explicit text
   export for payment execution or display.
 - `PaykitSdk.resolvePrivatePaymentRequest`, `resolvePublicPaymentRequest`, and

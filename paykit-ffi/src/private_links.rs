@@ -4,8 +4,9 @@ use paykit_sdk::storage::LinkedPeerRecord;
 use paykit_sdk::{
     EncryptedLinkHandshakeRole, EncryptedLinkRecoveryMarkerReport, EventIdConflict,
     LinkedPeerHandshakeReport, LinkedPeerState, OutboundPrivateCounterpartySendReport,
-    OutboundPrivateSendFailure, OutboundPrivateSendReport, PrivateStreamCounterpartyIntakeReport,
-    PrivateStreamIntakeReport, RecoveryMarkerPublishFailure, ReservationCleanupFailure,
+    OutboundPrivateSendFailure, OutboundPrivateSendReport, PrivateMessageSchedulingSnapshot,
+    PrivateStreamCounterpartyIntakeReport, PrivateStreamIntakeReport, RecoveryMarkerPublishFailure,
+    ReservationCleanupFailure,
 };
 
 use crate::{
@@ -127,6 +128,27 @@ pub struct FfiLinkedPeerRecord {
     pub remote_recovery_attempt_id: Option<String>,
     /// Time the counterparty recovery marker was observed as RFC3339 text.
     pub remote_recovery_marker_observed_at: Option<String>,
+}
+
+/// Link states and outbound work from one fresh scheduling read.
+#[derive(uniffi::Record, Clone)]
+pub struct FfiPrivateMessageSchedulingSnapshot {
+    /// Stored link states, sorted by counterparty.
+    pub linked_peers: Vec<FfiLinkedPeerRecord>,
+    /// Retryable message or app-specific reservation cleanup counterparties.
+    pub pending_outbound_counterparties: Vec<String>,
+}
+
+impl fmt::Debug for FfiPrivateMessageSchedulingSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FfiPrivateMessageSchedulingSnapshot")
+            .field("linked_peers", &self.linked_peers.len())
+            .field(
+                "pending_outbound_counterparties",
+                &self.pending_outbound_counterparties.len(),
+            )
+            .finish()
+    }
 }
 
 /// Result of starting or advancing an Encrypted Link Handshake.
@@ -425,6 +447,22 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
+    /// Read linked peers and pending outbound work together for scheduling.
+    ///
+    /// Refresh after receiving messages or mutating state, and discard results
+    /// when session or identity changes. This does not authorize sending:
+    /// execution APIs retain their own current-state checks.
+    /// Session creation, capability scope and key rotation remain caller-owned.
+    pub async fn private_message_scheduling_snapshot(
+        &self,
+    ) -> Result<FfiPrivateMessageSchedulingSnapshot, PaykitFfiError> {
+        self.runtime
+            .private_message_scheduling_snapshot()
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
     /// Process queued outbound private messages for every pending counterparty.
     pub async fn process_pending_private_messages(
         &self,
@@ -527,6 +565,19 @@ impl From<LinkedPeerRecord> for FfiLinkedPeerRecord {
             remote_recovery_marker_observed_at: value
                 .remote_recovery_marker_observed_at
                 .map(|time| time.to_rfc3339()),
+        }
+    }
+}
+
+impl From<PrivateMessageSchedulingSnapshot> for FfiPrivateMessageSchedulingSnapshot {
+    fn from(value: PrivateMessageSchedulingSnapshot) -> Self {
+        Self {
+            linked_peers: value.linked_peers.into_iter().map(Into::into).collect(),
+            pending_outbound_counterparties: value
+                .pending_outbound_counterparties
+                .into_iter()
+                .map(|key| app_public_key(&key))
+                .collect(),
         }
     }
 }
