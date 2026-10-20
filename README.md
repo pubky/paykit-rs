@@ -280,8 +280,9 @@ external execution reconciliation, product UI, and platform session storage
 remain with the integrating application and its adapters.
 
 Since `0.1.0-rc55`, `PubkySessionBootstrap::republish_identity(public_key)`
-(`republishIdentity(publicKey)` in Swift and Kotlin) can rebroadcast an existing
-signed Pubky identity record unchanged, without a secret key or restored session.
+(`republishIdentity(publicKey)` in Swift, Kotlin, and React Native) can
+rebroadcast an existing signed Pubky identity record unchanged, without a secret
+key or restored session.
 Applications own scheduling, throttling, retries, and timeouts. See the
 [Pubky Session Bootstrap API](paykit-ffi/README.md#pubky-session-bootstrap)
 for return values and limitations.
@@ -293,6 +294,9 @@ for return values and limitations.
 - [`paykit-sdk`](paykit-sdk/) is the Rust SDK runtime for stateful Paykit
   workflows.
 - [`paykit-ffi`](paykit-ffi/) exposes UniFFI bindings for Swift and Kotlin.
+- [`paykit-react-native`](paykit-react-native/) is the React Native package
+  (`@synonymdev/react-native-paykit`), generated from the same UniFFI metadata
+  with uniffi-bindgen-react-native.
 
 ## Functional Requirements
 
@@ -536,6 +540,17 @@ The mobile build scripts regenerate ignored Android bindgen/JNI outputs and the
 iOS release XCFramework under `paykit-ffi/dist/ios`. See
 [`paykit-ffi/README.md`](paykit-ffi/README.md) for platform-specific build and
 release notes.
+
+`./build.sh all` builds Swift and Kotlin only. The React Native package has its
+own entry point, and the React Native CI workflow regenerates and type-checks it
+on every FFI change:
+
+```sh
+cd paykit-react-native
+npm run build:native
+```
+
+See [`paykit-react-native/README.md`](paykit-react-native/README.md).
 
 ## Resources
 

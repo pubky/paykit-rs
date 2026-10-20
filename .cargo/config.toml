@@ -1,8 +1,14 @@
+# aws-lc declares weak allocator hooks (sdallocx, OPENSSL_memory_*) that it
+# expects to be resolved at static link time. Left undefined, the Android
+# dynamic linker binds them to any library in the load group, and React
+# Native's libreactnative.so exports a data object named sdallocx, so
+# OPENSSL_free jumped into .bss. Pin them to null so aws-lc uses free().
 [target.armv7-linux-androideabi]
 rustflags = [
     "-C", "link-arg=-Wl,--allow-multiple-definition",
     "-C", "link-arg=-Wl,--build-id=sha1",
     "-C", "link-arg=-Wl,-z,max-page-size=16384,-z,common-page-size=16384",
+    "-C", "link-arg=-Wl,--defsym=sdallocx=0,--defsym=OPENSSL_memory_alloc=0,--defsym=OPENSSL_memory_free=0,--defsym=OPENSSL_memory_get_size=0,--defsym=OPENSSL_memory_realloc=0",
 ]
 
 [target.aarch64-linux-android]
@@ -10,6 +16,7 @@ rustflags = [
     "-C", "link-arg=-Wl,--allow-multiple-definition",
     "-C", "link-arg=-Wl,--build-id=sha1",
     "-C", "link-arg=-Wl,-z,max-page-size=16384,-z,common-page-size=16384",
+    "-C", "link-arg=-Wl,--defsym=sdallocx=0,--defsym=OPENSSL_memory_alloc=0,--defsym=OPENSSL_memory_free=0,--defsym=OPENSSL_memory_get_size=0,--defsym=OPENSSL_memory_realloc=0",
 ]
 
 [target.i686-linux-android]
@@ -17,6 +24,7 @@ rustflags = [
     "-C", "link-arg=-Wl,--allow-multiple-definition",
     "-C", "link-arg=-Wl,--build-id=sha1",
     "-C", "link-arg=-Wl,-z,max-page-size=16384,-z,common-page-size=16384",
+    "-C", "link-arg=-Wl,--defsym=sdallocx=0,--defsym=OPENSSL_memory_alloc=0,--defsym=OPENSSL_memory_free=0,--defsym=OPENSSL_memory_get_size=0,--defsym=OPENSSL_memory_realloc=0",
 ]
 
 [target.x86_64-linux-android]
@@ -24,4 +32,5 @@ rustflags = [
     "-C", "link-arg=-Wl,--allow-multiple-definition",
     "-C", "link-arg=-Wl,--build-id=sha1",
     "-C", "link-arg=-Wl,-z,max-page-size=16384,-z,common-page-size=16384",
+    "-C", "link-arg=-Wl,--defsym=sdallocx=0,--defsym=OPENSSL_memory_alloc=0,--defsym=OPENSSL_memory_free=0,--defsym=OPENSSL_memory_get_size=0,--defsym=OPENSSL_memory_realloc=0",
 ]

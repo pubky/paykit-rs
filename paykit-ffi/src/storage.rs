@@ -1,6 +1,6 @@
 use std::{
     any::Any,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, TryLockError},
 };
 
 use async_trait::async_trait;
@@ -165,12 +165,21 @@ impl FfiSdkStorage {
             .transpose()
     }
 
+    /// Read the current revision without waiting for an in-flight transaction.
+    ///
+    /// Transactions hold `transaction_lock` while they call the platform store.
+    /// Bindings such as React Native run those callbacks on the thread that also
+    /// makes this synchronous call, so blocking here could deadlock.
     pub(crate) fn state_revision(&self) -> Result<Option<String>, PaykitFfiError> {
-        let _guard = self.transaction_lock.lock().map_err(|_| {
-            storage_error(
+        let _guard = self.transaction_lock.try_lock().map_err(|err| match err {
+            TryLockError::WouldBlock => PaykitFfiError::SharedStateBusy {
+                code: "state_transaction_in_progress".into(),
+                context: "SDK state transaction in progress".into(),
+            },
+            TryLockError::Poisoned(_) => storage_error(
                 "state_transaction_lock_poisoned",
                 "SDK state transaction lock poisoned",
-            )
+            ),
         })?;
         self.load_validated_state()
             .map(|snapshot| snapshot.map(|(revision, _)| revision))

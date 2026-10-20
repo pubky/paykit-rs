@@ -1,0 +1,375 @@
+name: React Native
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - '.cargo/**'
+      - '.github/actions/rn-android-setup/**'
+      - '.github/workflows/react-native.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'build.rs'
+      - 'Package.swift'
+      - 'paykit-ffi/**'
+      - 'paykit-lib/**'
+      - 'paykit-react-native/**'
+      - 'paykit-sdk/**'
+      - 'rust-toolchain*'
+      - 'vendor/**'
+  pull_request:
+    paths:
+      - '.cargo/**'
+      - '.github/actions/rn-android-setup/**'
+      - '.github/workflows/react-native.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'build.rs'
+      - 'Package.swift'
+      - 'paykit-ffi/**'
+      - 'paykit-lib/**'
+      - 'paykit-react-native/**'
+      - 'paykit-sdk/**'
+      - 'rust-toolchain*'
+      - 'vendor/**'
+  # Nightly run for the `smoke` jobs, which do not run on pull requests.
+  schedule:
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generate-and-typecheck:
+    name: Generate and type-check
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: paykit-react-native
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: paykit-react-native/.nvmrc
+          cache: npm
+          cache-dependency-path: paykit-react-native/package-lock.json
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # After `npm ci`, which deletes node_modules, so the restored ubrn build
+      # survives.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # The second workspace caches the ubrn CLI, which npm ships as Rust
+          # source and builds on first use.
+          workspaces: |
+            . -> target
+            paykit-react-native/node_modules/uniffi-bindgen-react-native -> target
+
+      - name: Build host paykit-ffi library
+        run: cargo build --release --locked -p paykit-ffi
+
+      - name: Generate bindings and TurboModule glue
+        run: npm run ubrn:generate
+
+      - name: Check committed TurboModule glue
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain -- .)" ]; then
+            echo "::error::Committed TurboModule glue is stale. Run 'npm run ubrn:generate' in paykit-react-native and commit the result."
+            git status --porcelain -- .
+            git diff -- .
+            exit 1
+          fi
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+  android:
+    name: Android native build
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: paykit-react-native
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: paykit-react-native/.nvmrc
+          cache: npm
+          cache-dependency-path: paykit-react-native/package-lock.json
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # After `npm ci`, which deletes node_modules, so the restored ubrn CLI
+      # build survives. Like the bindgen workflows, the cross-compiled
+      # ./target is not cached: only the cargo registry and the ubrn CLI,
+      # which npm ships as Rust source and builds on first use.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: paykit-react-native/node_modules/uniffi-bindgen-react-native -> target
+          cache-all-crates: true
+          key: ${{ hashFiles('Cargo.lock') }}
+
+      - uses: ./.github/actions/rn-android-setup
+
+      - name: Build Rust libraries and bindings
+        run: npm run build:android
+
+      - name: Assemble and check the Android library
+        run: npm run android:assemble
+
+  ios:
+    name: iOS native build
+    permissions:
+      contents: read
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: paykit-react-native
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: paykit-react-native/.nvmrc
+          cache: npm
+          cache-dependency-path: paykit-react-native/package-lock.json
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # As in the `android` job.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: paykit-react-native/node_modules/uniffi-bindgen-react-native -> target
+          cache-all-crates: true
+          key: ${{ hashFiles('Cargo.lock') }}
+
+      - name: Build Rust libraries, XCFramework and bindings
+        run: npm run build:ios
+
+      # No app yet, so check the podspec and compile the C++ glue against the
+      # XCFramework instead of building a Pods project.
+      - name: Check podspec and C++ glue
+        run: npm run ios:check
+
+  # The example app against a local Pubky stack on the runner: no staging
+  # credentials, nothing outside the runner. Too slow for every pull request,
+  # so it runs on master pushes, nightly and on demand.
+  smoke:
+    name: Android smoke (emulator)
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: paykit-react-native
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The emulator is x86_64, so only that ABI is built.
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          targets: x86_64-linux-android
+
+      # The local stack's pubky-testnet binary, built by local-stack.mjs.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/local-stack/*/bin
+          key: local-stack-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: paykit-react-native/.nvmrc
+          cache: npm
+          cache-dependency-path: |
+            paykit-react-native/package-lock.json
+            paykit-react-native/example/package-lock.json
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # As in the `android` job.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: paykit-react-native/node_modules/uniffi-bindgen-react-native -> target
+          cache-all-crates: true
+          key: ${{ hashFiles('Cargo.lock') }}
+
+      # Started early, so building pubky-testnet on a cache miss overlaps the
+      # app build. Waited for before the smoke run.
+      - name: Start the local Pubky stack
+        run: bash example/scripts/start-local-stack.sh start "$RUNNER_TEMP/local-stack"
+
+      - uses: ./.github/actions/rn-android-setup
+
+      - name: Build Rust libraries and bindings
+        run: npm run build:android -- --targets x86_64
+
+      - name: Install the packed package into the example app
+        run: npm run example:refresh
+
+      # Release bundles the JS, so no Metro server is needed.
+      - name: Build the example APK
+        working-directory: paykit-react-native/example/android
+        run: ./gradlew assembleRelease -PreactNativeArchitectures=x86_64 --no-daemon
+
+      - name: Enable KVM
+        working-directory: .
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Wait for the local Pubky stack
+        run: bash example/scripts/start-local-stack.sh wait "$RUNNER_TEMP/local-stack"
+
+      - name: Run the smoke test on an emulator
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          working-directory: paykit-react-native/example
+          script: bash scripts/android-smoke.sh android/app/build/outputs/apk/release/app-release.apk 600
+
+      - name: Local stack log
+        if: always()
+        shell: bash
+        run: tail -200 "$RUNNER_TEMP/local-stack/local-stack.log" || true
+
+  # GitHub's macOS runners have no Docker, so Postgres comes from Homebrew and
+  # the local stack uses it through TEST_PUBKY_CONNECTION_STRING.
+  smoke-ios:
+    name: iOS smoke (simulator)
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+    runs-on: macos-15
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: paykit-react-native
+    env:
+      TEST_PUBKY_CONNECTION_STRING: postgres://postgres@127.0.0.1:5432/postgres
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/local-stack/*/bin
+          key: local-stack-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: paykit-react-native/.nvmrc
+          cache: npm
+          cache-dependency-path: |
+            paykit-react-native/package-lock.json
+            paykit-react-native/example/package-lock.json
+
+      # A throwaway cluster that trusts local connections, for the testnet's
+      # ephemeral databases only.
+      - name: Start Postgres
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install postgresql@17
+          pg_bin="$(brew --prefix postgresql@17)/bin"
+          "$pg_bin/initdb" --username=postgres --auth=trust "$RUNNER_TEMP/pgdata"
+          "$pg_bin/pg_ctl" --pgdata="$RUNNER_TEMP/pgdata" --log="$RUNNER_TEMP/postgres.log" \
+            --options="-c listen_addresses=127.0.0.1 -c port=5432" --wait start
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # As in the `android` job.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: paykit-react-native/node_modules/uniffi-bindgen-react-native -> target
+          cache-all-crates: true
+          key: ${{ hashFiles('Cargo.lock') }}
+
+      # Started early, so building pubky-testnet on a cache miss overlaps the
+      # app build. Waited for before the smoke run.
+      - name: Start the local Pubky stack
+        run: bash example/scripts/start-local-stack.sh start "$RUNNER_TEMP/local-stack"
+
+      - name: Build Rust libraries, XCFramework and bindings
+        run: npm run build:ios
+
+      - name: Install the packed package into the example app
+        run: npm run example:refresh
+
+      - name: Install pods
+        working-directory: paykit-react-native/example/ios
+        run: pod install
+
+      # Release bundles the JS, so no Metro server is needed. The XCFramework
+      # has an arm64 simulator slice only, so build arm64 only.
+      - name: Build the example app for the simulator
+        working-directory: paykit-react-native/example/ios
+        run: >-
+          xcodebuild -workspace PaykitExample.xcworkspace -scheme PaykitExample
+          -configuration Release -sdk iphonesimulator
+          -destination 'generic/platform=iOS Simulator'
+          -derivedDataPath "$RUNNER_TEMP/DerivedData"
+          ARCHS=arm64 CODE_SIGNING_ALLOWED=NO build
+
+      - name: Wait for the local Pubky stack
+        run: bash example/scripts/start-local-stack.sh wait "$RUNNER_TEMP/local-stack"
+
+      - name: Run the smoke test on a simulator
+        working-directory: paykit-react-native/example
+        run: bash scripts/ios-smoke.sh "$RUNNER_TEMP/DerivedData/Build/Products/Release-iphonesimulator/PaykitExample.app" 600
+
+      - name: Local stack log
+        if: always()
+        shell: bash
+        run: tail -200 "$RUNNER_TEMP/local-stack/local-stack.log" || true

@@ -1,0 +1,43 @@
+# uniffi-bindgen-react-native configuration.
+# Reference: node_modules/uniffi-bindgen-react-native/docs/src/reference/config-yaml.md
+#
+# `npm run build:native` runs `ubrn build ios` and `ubrn build android` with
+# this file. It is the only list of targets: scripts that need them read it.
+rust:
+  # Local crate in this repository; never a git checkout.
+  directory: ../paykit-ffi
+  manifestPath: Cargo.toml
+bindings:
+  # Generated TypeScript and C++ bindings (gitignored; run `npm run ubrn:generate`).
+  ts: src/generated
+  cpp: cpp/generated
+ios:
+  # Same targets as paykit-ffi/build_ios.sh. The deployment target is set in
+  # the `build:ios` npm script.
+  targets:
+    - aarch64-apple-ios
+    - aarch64-apple-ios-sim
+  cargoExtras:
+    - --locked
+android:
+  # Same ABIs as paykit-ffi/build_android.sh.
+  targets:
+    - arm64-v8a
+    - armeabi-v7a
+    - x86_64
+    - x86
+  # cargo-ndk's own default, which paykit-ffi/build_android.sh also uses.
+  apiLevel: 21
+  cargoExtras:
+    - --locked
+  # Link libpaykit.so, the cdylib built with the 16 KB page-size and linker
+  # flags from the workspace .cargo/config.toml. It also exports the JNI
+  # symbol that PaykitAndroid.kt binds to.
+  useSharedLibrary: true
+# Rendered once by ubrn, then edited by hand. `ubrn generate` leaves them
+# alone, so the CI drift check does not cover them.
+noOverwrite:
+  # Adds the rustls-platform-verifier classes and 16 KB alignment.
+  - android/build.gradle
+  # Initializes the Android TLS verifier (PaykitAndroid.kt).
+  - android/src/main/java/com/synonymdev/reactnativepaykit/ReactNativePaykitModule.kt
