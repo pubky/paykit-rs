@@ -45,6 +45,26 @@ npm install @synonymdev/react-native-paykit
 cd ios && pod install
 ```
 
+### React Native 0.78 with Xcode 26
+
+React Native 0.78 pins the `fmt` pod at 11.0.2, which does not compile as
+C++20 with the Xcode 26 clang. Build it as C++17 in your `Podfile`, after
+`react_native_post_install`:
+
+```ruby
+post_install do |installer|
+  react_native_post_install(installer, config[:reactNativePath])
+  installer.pods_project.targets.each do |target|
+    next unless target.name == 'fmt'
+    target.build_configurations.each do |build_config|
+      build_config.build_settings['CLANG_CXX_LANGUAGE_STANDARD'] = 'c++17'
+    end
+  end
+end
+```
+
+The example app's [`Podfile`](example/ios/Podfile) does this.
+
 ## Usage
 
 The TypeScript API mirrors `paykit-ffi`. Async Rust methods return Promises,
@@ -170,12 +190,13 @@ npm run ubrn:generate                 # TypeScript and C++ from the host library
 npm run typecheck && npm run lint && npm test
 ```
 
-Four files are hand-edited after ubrn rendered them and are listed under
-`noOverwrite` in `ubrn.config.yaml`: `android/CMakeLists.txt`,
-`android/build.gradle`, the Kotlin TurboModule and the podspec. ubrn leaves
-them alone, so review them by hand when you upgrade ubrn.
-`android/src/main/java/com/synonym/paykit/PaykitAndroid.kt` is not rendered
-by ubrn at all.
+`npm run build:native` regenerates the same files from the native libraries.
+
+Two files are hand-edited after ubrn rendered them and are listed under
+`noOverwrite` in `ubrn.config.yaml`: `android/build.gradle` and the Kotlin
+TurboModule. ubrn leaves them alone, so review them by hand when you upgrade
+ubrn. `android/src/main/java/com/synonym/paykit/PaykitAndroid.kt` is not
+rendered by ubrn at all.
 
 `./build.sh all` in `paykit-ffi` builds Swift and Kotlin only. The
 `React Native` CI workflow regenerates and type-checks this package on every
@@ -220,22 +241,32 @@ npm ci
 npm run build:native   # or build:ios / build:android
 ```
 
-`npm run build:native` builds the host library and generates the bindings,
-then builds:
+`npm run build:native` runs `ubrn build ios` and `ubrn build android` with
+`--and-generate --release`, so it also generates the bindings and glue. The
+targets come from `ubrn.config.yaml`. It builds:
 
 - `SynonymdevReactNativePaykitFramework.xcframework` from `aarch64-apple-ios`
   and `aarch64-apple-ios-sim`, with `IPHONEOS_DEPLOYMENT_TARGET` 13.4 as in
   `paykit-ffi/build_ios.sh`;
 - `android/src/main/jniLibs/<abi>/libpaykit.so` for `arm64-v8a`,
   `armeabi-v7a`, `x86_64` and `x86`, with the 16 KB page-size and linker
-  flags from the workspace `.cargo/config.toml`. The script fails if a
-  library is not 16 KB aligned or does not export the TLS init symbol;
+  flags from the workspace `.cargo/config.toml`;
 - `android/libs/rustls-platform-verifier.jar`, the verifier's Kotlin classes,
   taken from `vendor/rustls-platform-verifier-android`.
 
-It uses this script instead of `ubrn build`, which looks for `libpaykit_ffi`
-instead of `libpaykit`. Builds share the `../target` cache with
-`paykit-ffi/build.sh`.
+After `ubrn build android`, `scripts/android-elf.mjs` writes the jar, strips
+the copied libraries and fails if one is not 16 KB aligned or does not
+export the TLS init symbol. It needs `ANDROID_NDK_HOME` for `llvm-strip` and
+`llvm-readelf`.
+
+To build some Android ABIs only, for example for an emulator, pass ubrn's
+`--targets`:
+
+```sh
+npm run build:android -- --targets x86_64
+```
+
+Builds share the `../target` cache with `paykit-ffi/build.sh`.
 
 Check the native builds without an app:
 

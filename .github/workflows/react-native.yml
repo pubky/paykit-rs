@@ -5,6 +5,7 @@ on:
     branches: [master]
     paths:
       - '.cargo/**'
+      - '.github/actions/rn-android-setup/**'
       - '.github/workflows/react-native.yml'
       - 'Cargo.lock'
       - 'Cargo.toml'
@@ -19,6 +20,7 @@ on:
   pull_request:
     paths:
       - '.cargo/**'
+      - '.github/actions/rn-android-setup/**'
       - '.github/workflows/react-native.yml'
       - 'Cargo.lock'
       - 'Cargo.toml'
@@ -118,57 +120,6 @@ jobs:
           toolchain: stable
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
 
-      # Like the bindgen workflows: cache the cargo registry, not the
-      # cross-compiled target directories.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          cache-targets: false
-
-      - name: Install native build dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev cmake protobuf-compiler
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
-        with:
-          packages: platform-tools
-
-      - name: Set up Android NDK
-        id: setup-ndk
-        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
-        with:
-          ndk-version: r28c
-          add-to-path: true
-
-      # cargo-ndk reads the NDK from the environment. The Android Gradle
-      # plugin looks it up by `ndkVersion` (android/gradle.properties) under
-      # $ANDROID_HOME/ndk, so link it there.
-      - name: Export Android NDK paths
-        shell: bash
-        run: |
-          set -euo pipefail
-          ndk="${{ steps.setup-ndk.outputs.ndk-path }}"
-          version=$(sed -n 's/^Pkg.Revision *= *//p' "$ndk/source.properties")
-          expected=$(sed -n 's/^ReactNativePaykit_ndkVersion=//p' android/gradle.properties)
-          if [ "$version" != "$expected" ]; then
-            echo "::error::NDK r28c is $version, but android/gradle.properties expects $expected"
-            exit 1
-          fi
-          if [ ! -e "$ANDROID_HOME/ndk/$version" ]; then
-            mkdir -p "$ANDROID_HOME/ndk"
-            ln -s "$ndk" "$ANDROID_HOME/ndk/$version"
-          fi
-          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ndk" >> "$GITHUB_ENV"
-
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: paykit-react-native/.nvmrc
@@ -178,13 +129,17 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      # Same cargo-ndk version as paykit-ffi/build_android.sh.
-      - name: Install cargo-ndk
-        shell: bash
-        run: |
-          if ! cargo ndk --version 2>/dev/null | grep -q 'cargo-ndk 3.5.4'; then
-            cargo install cargo-ndk --version 3.5.4 --locked --force
-          fi
+      # After `npm ci`, which deletes node_modules, so the restored ubrn CLI
+      # build survives. Like the bindgen workflows, the cross-compiled
+      # ./target is not cached: only the cargo registry and the ubrn CLI,
+      # which npm ships as Rust source and builds on first use.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: paykit-react-native/node_modules/uniffi-bindgen-react-native -> target
+          cache-all-crates: true
+          key: ${{ hashFiles('Cargo.lock') }}
+
+      - uses: ./.github/actions/rn-android-setup
 
       - name: Build Rust libraries and bindings
         run: npm run build:android
@@ -209,12 +164,6 @@ jobs:
           toolchain: stable
           targets: aarch64-apple-ios,aarch64-apple-ios-sim
 
-      # Like the bindgen workflows: cache the cargo registry, not the
-      # cross-compiled target directories.
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          cache-targets: false
-
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: paykit-react-native/.nvmrc
@@ -223,6 +172,13 @@ jobs:
 
       - name: Install npm dependencies
         run: npm ci
+
+      # As in the `android` job.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: paykit-react-native/node_modules/uniffi-bindgen-react-native -> target
+          cache-all-crates: true
+          key: ${{ hashFiles('Cargo.lock') }}
 
       - name: Build Rust libraries, XCFramework and bindings
         run: npm run build:ios
@@ -248,46 +204,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The emulator is x86_64, so only that ABI is built.
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          cache-targets: false
+          targets: x86_64-linux-android
 
       # The local stack's pubky-testnet binary, built by local-stack.mjs.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/local-stack/*/bin
           key: local-stack-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-
-      - name: Install native build dependencies
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev cmake protobuf-compiler
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
-
-      # The example app's ndkVersion (example/android/build.gradle).
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
-        with:
-          packages: platform-tools ndk;27.1.12297006
-
-      # The Rust libraries use NDK r28c, as in the `android` job.
-      - name: Set up Android NDK
-        id: setup-ndk
-        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
-        with:
-          ndk-version: r28c
-          add-to-path: false
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -300,40 +227,27 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Install cargo-ndk
-        shell: bash
-        run: |
-          if ! cargo ndk --version 2>/dev/null | grep -q 'cargo-ndk 3.5.4'; then
-            cargo install cargo-ndk --version 3.5.4 --locked --force
-          fi
+      # As in the `android` job.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: paykit-react-native/node_modules/uniffi-bindgen-react-native -> target
+          cache-all-crates: true
+          key: ${{ hashFiles('Cargo.lock') }}
+
+      # Started early, so building pubky-testnet on a cache miss overlaps the
+      # app build. Waited for before the smoke run.
+      - name: Start the local Pubky stack
+        run: bash example/scripts/start-local-stack.sh start "$RUNNER_TEMP/local-stack"
+
+      - uses: ./.github/actions/rn-android-setup
 
       - name: Build Rust libraries and bindings
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: npm run build:android
+        run: npm run build:android -- --targets x86_64
 
       - name: Install the packed package into the example app
         run: npm run example:refresh
 
-      # Started early: the first run builds pubky-testnet with cargo.
-      - name: Start the local Pubky stack
-        shell: bash
-        working-directory: paykit-react-native/example
-        run: |
-          set -euo pipefail
-          nohup node scripts/local-stack.mjs >"$RUNNER_TEMP/local-stack.log" 2>&1 &
-          for _ in $(seq 1 600); do
-            if grep -q PAYKIT_LOCAL_STACK_READY "$RUNNER_TEMP/local-stack.log"; then
-              grep PAYKIT_LOCAL_STACK_READY "$RUNNER_TEMP/local-stack.log"
-              exit 0
-            fi
-            sleep 2
-          done
-          tail -50 "$RUNNER_TEMP/local-stack.log"
-          exit 1
-
-      # Release bundles the JS, so no Metro server is needed. The emulator is
-      # x86_64.
+      # Release bundles the JS, so no Metro server is needed.
       - name: Build the example APK
         working-directory: paykit-react-native/example/android
         run: ./gradlew assembleRelease -PreactNativeArchitectures=x86_64 --no-daemon
@@ -344,6 +258,9 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+
+      - name: Wait for the local Pubky stack
+        run: bash example/scripts/start-local-stack.sh wait "$RUNNER_TEMP/local-stack"
 
       - name: Run the smoke test on an emulator
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
@@ -358,7 +275,7 @@ jobs:
       - name: Local stack log
         if: always()
         shell: bash
-        run: tail -200 "$RUNNER_TEMP/local-stack.log" || true
+        run: tail -200 "$RUNNER_TEMP/local-stack/local-stack.log" || true
 
   # GitHub's macOS runners have no Docker, so Postgres comes from Homebrew and
   # the local stack uses it through TEST_PUBKY_CONNECTION_STRING.
@@ -374,6 +291,8 @@ jobs:
         working-directory: paykit-react-native
     env:
       TEST_PUBKY_CONNECTION_STRING: postgres://postgres@127.0.0.1:5432/postgres
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -381,10 +300,6 @@ jobs:
         with:
           toolchain: stable
           targets: aarch64-apple-ios,aarch64-apple-ios-sim
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          cache-targets: false
 
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -414,27 +329,23 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      # As in the `android` job.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: paykit-react-native/node_modules/uniffi-bindgen-react-native -> target
+          cache-all-crates: true
+          key: ${{ hashFiles('Cargo.lock') }}
+
+      # Started early, so building pubky-testnet on a cache miss overlaps the
+      # app build. Waited for before the smoke run.
+      - name: Start the local Pubky stack
+        run: bash example/scripts/start-local-stack.sh start "$RUNNER_TEMP/local-stack"
+
       - name: Build Rust libraries, XCFramework and bindings
         run: npm run build:ios
 
       - name: Install the packed package into the example app
         run: npm run example:refresh
-
-      - name: Start the local Pubky stack
-        shell: bash
-        working-directory: paykit-react-native/example
-        run: |
-          set -euo pipefail
-          nohup node scripts/local-stack.mjs >"$RUNNER_TEMP/local-stack.log" 2>&1 &
-          for _ in $(seq 1 600); do
-            if grep -q PAYKIT_LOCAL_STACK_READY "$RUNNER_TEMP/local-stack.log"; then
-              grep PAYKIT_LOCAL_STACK_READY "$RUNNER_TEMP/local-stack.log"
-              exit 0
-            fi
-            sleep 2
-          done
-          tail -50 "$RUNNER_TEMP/local-stack.log"
-          exit 1
 
       - name: Install pods
         working-directory: paykit-react-native/example/ios
@@ -450,6 +361,9 @@ jobs:
           -derivedDataPath "$RUNNER_TEMP/DerivedData"
           CODE_SIGNING_ALLOWED=NO build
 
+      - name: Wait for the local Pubky stack
+        run: bash example/scripts/start-local-stack.sh wait "$RUNNER_TEMP/local-stack"
+
       - name: Run the smoke test on a simulator
         working-directory: paykit-react-native/example
         run: bash scripts/ios-smoke.sh "$RUNNER_TEMP/DerivedData/Build/Products/Release-iphonesimulator/PaykitExample.app" 600
@@ -457,4 +371,4 @@ jobs:
       - name: Local stack log
         if: always()
         shell: bash
-        run: tail -200 "$RUNNER_TEMP/local-stack.log" || true
+        run: tail -200 "$RUNNER_TEMP/local-stack/local-stack.log" || true

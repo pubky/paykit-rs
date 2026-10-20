@@ -1,13 +1,7 @@
 // Check what `npm pack` would publish: the prebuilt iOS XCFramework and
 // Android libraries, the C++ and TypeScript sources and the compiled lib/.
 // Run `npm run build:native` first. Prints the file list and the sizes.
-import { spawnSync } from 'node:child_process';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { ANDROID_ABIS } from './android-elf.mjs';
-
-const packageDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const XCFRAMEWORK = 'SynonymdevReactNativePaykitFramework.xcframework';
+import { XCFRAMEWORK, packJson, ubrnConfig } from './lib.mjs';
 
 const REQUIRED = [
   'package.json',
@@ -15,7 +9,9 @@ const REQUIRED = [
   `${XCFRAMEWORK}/Info.plist`,
   `${XCFRAMEWORK}/ios-arm64/libpaykit.a`,
   `${XCFRAMEWORK}/ios-arm64-simulator/libpaykit.a`,
-  ...ANDROID_ABIS.map((abi) => `android/src/main/jniLibs/${abi}/libpaykit.so`),
+  ...ubrnConfig().android.targets.map(
+    (abi) => `android/src/main/jniLibs/${abi}/libpaykit.so`
+  ),
   'android/libs/rustls-platform-verifier.jar',
   'android/build.gradle',
   'android/CMakeLists.txt',
@@ -41,25 +37,7 @@ const FORBIDDEN = [
   'src/__tests__/',
 ];
 
-function run(command, args) {
-  const result = spawnSync(command, args, {
-    cwd: packageDir,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-    stdio: ['ignore', 'pipe', 'inherit'],
-  });
-  if (result.status !== 0) {
-    console.error(result.stdout);
-    process.exit(result.status ?? 1);
-  }
-  return result.stdout;
-}
-
-// Build lib/ first, then pack without scripts so stdout is only the JSON.
-console.log(run('npx', ['bob', 'build']));
-const [pack] = JSON.parse(
-  run('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'])
-);
+const pack = packJson(['--dry-run']);
 const files = pack.files.map((file) => file.path).sort();
 
 for (const file of files) {

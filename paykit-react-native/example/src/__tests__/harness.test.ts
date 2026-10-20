@@ -203,3 +203,31 @@ describe('example launch config', () => {
     expect(config.signupTokenA).toBeUndefined();
   });
 });
+
+describe('example smoke steps', () => {
+  const { STEPS } = require('../smoke');
+
+  test('test_smoke_steps_keep_names_and_order', () => {
+    // CI and the README refer to the steps by these names.
+    expect(STEPS.map((step: { name: string }) => step.name)).toEqual([
+      'offline',
+      'sign_up',
+      'public_endpoint',
+      'private_payment_list',
+      'payment_request',
+      'restart',
+      'typed_error',
+      'android_https',
+    ]);
+  });
+
+  test('test_smoke_steps_only_restart_has_a_shorter_timeout', () => {
+    const custom = STEPS.filter(
+      (step: { timeoutMs?: number }) => step.timeoutMs !== undefined
+    ).map((step: { name: string; timeoutMs: number }) => [
+      step.name,
+      step.timeoutMs,
+    ]);
+    expect(custom).toEqual([['restart', 30_000]]);
+  });
+});

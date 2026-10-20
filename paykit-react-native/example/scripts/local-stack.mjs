@@ -20,33 +20,22 @@
 // `cargo install --locked`, at the pubky-testnet version in the workspace
 // Cargo.lock, into <repo>/target/local-stack/.
 //
+// It is not built with `cargo build -p pubky-testnet`: pubky-testnet is only a
+// dev-dependency in the workspace, and cargo 1.96 panics when `-p` selects
+// one ("did not find features for pubky-testnet").
+//
 // When everything is up it prints one line:
-//   PAYKIT_LOCAL_STACK_READY homeserver=<key> ... startup_ms=<n>
-import { execFileSync, spawn } from 'node:child_process';
+//   PAYKIT_LOCAL_STACK_READY startup_ms=<n>
+// The homeserver key is LOCAL_HOMESERVER in src/launchConfig.ts.
+import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { repoRoot, run } from '../../scripts/lib.mjs';
 
-const repoRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '..',
-  '..',
-  '..'
-);
-// Fixed by pubky-testnet's StaticTestnet and pubky_common::constants::testnet_ports.
-const HOMESERVER = '8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo';
-const PORTS = {
-  dht_bootstrap: 6881,
-  pkarr_relay: 15411,
-  http_relay: 15412,
-  homeserver_http: 6286,
-  homeserver_pubky_tls: 6287,
-};
 const POSTGRES_IMAGE = 'postgres:17-alpine';
 // The binary logs this once the homeserver is listening.
 const READY_LOG = 'Homeserver Pubky HTTPS';
 
-const startedAt = Date.now();
 let postgresContainer;
 let testnet;
 let stopping = false;
@@ -73,27 +62,23 @@ function testnetBinary() {
   const binary = path.join(root, 'bin', 'pubky-testnet');
   if (!existsSync(binary)) {
     log(`building pubky-testnet ${version} (once)`);
-    execFileSync(
-      'cargo',
-      [
-        'install',
-        'pubky-testnet',
-        '--version',
-        `=${version}`,
-        '--locked',
-        '--root',
-        root,
-        '--target-dir',
-        path.join(repoRoot, 'target', 'local-stack', 'build'),
-      ],
-      { stdio: ['ignore', 'inherit', 'inherit'] }
-    );
+    run('cargo', [
+      'install',
+      'pubky-testnet',
+      '--version',
+      `=${version}`,
+      '--locked',
+      '--root',
+      root,
+      '--target-dir',
+      path.join(repoRoot, 'target', 'local-stack', 'build'),
+    ]);
   }
   return binary;
 }
 
 function docker(args) {
-  return execFileSync('docker', args, { encoding: 'utf8' }).trim();
+  return run('docker', args, { capture: true }).trim();
 }
 
 async function startPostgres() {
@@ -170,7 +155,6 @@ try {
   const binary = testnetBinary();
   const connectionString =
     process.env.TEST_PUBKY_CONNECTION_STRING ?? (await startPostgres());
-  const buildMs = Date.now() - startedAt;
   const launchedAt = Date.now();
 
   testnet = spawn(binary, [], {
@@ -189,18 +173,9 @@ try {
     tail = (tail + chunk.toString()).slice(-4096);
     if (!ready && tail.includes(READY_LOG)) {
       ready = true;
-      const fields = Object.entries({
-        homeserver: HOMESERVER,
-        ...Object.fromEntries(
-          Object.entries(PORTS).map(([name, port]) => [
-            name,
-            `127.0.0.1:${port}`,
-          ])
-        ),
-        startup_ms: Date.now() - launchedAt,
-        setup_ms: buildMs,
-      }).map(([key, value]) => `${key}=${value}`);
-      console.log(`PAYKIT_LOCAL_STACK_READY ${fields.join(' ')}`);
+      console.log(
+        `PAYKIT_LOCAL_STACK_READY startup_ms=${Date.now() - launchedAt}`
+      );
     }
   };
   testnet.stdout.on('data', watch);

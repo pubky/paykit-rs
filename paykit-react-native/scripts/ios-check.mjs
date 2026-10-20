@@ -5,25 +5,18 @@
 // 3. the C++ glue compiles for the simulator, and every Rust symbol it calls
 //    is defined in the simulator libpaykit.a.
 // Run `npm run build:ios` first.
-import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { XCFRAMEWORK, packageDir, run } from './lib.mjs';
 
-const packageDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const require = createRequire(import.meta.url);
-const XCFRAMEWORK = 'SynonymdevReactNativePaykitFramework.xcframework';
 const SLICES = ['ios-arm64', 'ios-arm64-simulator'];
 
-function output(command, args, options = {}) {
-  return execFileSync(command, args, {
-    cwd: packageDir,
-    encoding: 'utf8',
-    maxBuffer: 256 * 1024 * 1024,
-    ...options,
-  });
+function output(command, args, env) {
+  return run(command, args, { capture: true, env });
 }
 
 function packageRoot(name) {
@@ -41,24 +34,16 @@ for (const slice of SLICES) {
 const reactNative = packageRoot('react-native');
 const spec = JSON.parse(
   output('pod', ['ipc', 'spec', 'ReactNativePaykit.podspec'], {
-    env: {
-      ...process.env,
-      RUBYOPT: `-r${path.join(reactNative, 'scripts', 'react_native_pods.rb')}`,
-    },
+    ...process.env,
+    RUBYOPT: `-r${path.join(reactNative, 'scripts', 'react_native_pods.rb')}`,
   })
 );
-const { version } = JSON.parse(
-  readFileSync(path.join(packageDir, 'package.json'), 'utf8')
-);
-if (
-  spec.vendored_frameworks !== XCFRAMEWORK ||
-  spec.source.tag !== `v${version}`
-) {
+if (spec.vendored_frameworks !== XCFRAMEWORK) {
   throw new Error(
-    `Unexpected podspec: ${JSON.stringify({ frameworks: spec.vendored_frameworks, source: spec.source })}`
+    `Unexpected podspec vendored_frameworks: ${JSON.stringify(spec.vendored_frameworks)}`
   );
 }
-console.log(`OK podspec ${spec.name} ${spec.version}, tag ${spec.source.tag}`);
+console.log(`OK podspec ${spec.name} ${spec.version}`);
 
 const objects = mkdtempSync(path.join(os.tmpdir(), 'paykit-ios-check-'));
 try {

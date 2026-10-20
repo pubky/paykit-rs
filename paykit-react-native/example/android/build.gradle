@@ -4,7 +4,10 @@ buildscript {
         minSdkVersion = 24
         compileSdkVersion = 35
         targetSdkVersion = 35
-        ndkVersion = "27.1.12297006"
+        // NDK r28c, the version the library and CI use
+        // (../../android/gradle.properties). Override locally with
+        // -PndkVersion=<installed version>.
+        ndkVersion = findProperty("ndkVersion") ?: "28.2.13676358"
         kotlinVersion = "2.0.21"
     }
     repositories {

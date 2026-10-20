@@ -5,42 +5,18 @@
 //
 // The tarball keeps a fixed name, so the dependency spec committed in
 // example/package.json never changes. The tarball itself is gitignored.
-import { spawnSync } from 'node:child_process';
 import { mkdirSync, renameSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { packJson, packageDir, run } from './lib.mjs';
 
-const packageDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const exampleDir = path.join(packageDir, 'example');
 const tarballDir = path.join(exampleDir, 'tarballs');
 const EXAMPLE_TARBALL = 'synonymdev-react-native-paykit.tgz';
 
-function run(command, args, cwd) {
-  const result = spawnSync(command, args, {
-    cwd,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-    stdio: ['ignore', 'pipe', 'inherit'],
-  });
-  if (result.status !== 0) {
-    console.error(result.stdout);
-    process.exit(result.status ?? 1);
-  }
-  return result.stdout;
-}
-
 rmSync(tarballDir, { recursive: true, force: true });
 mkdirSync(tarballDir, { recursive: true });
 
-// Build lib/ first, then pack without scripts so stdout is only the JSON.
-run('npx', ['bob', 'build'], packageDir);
-const [pack] = JSON.parse(
-  run(
-    'npm',
-    ['pack', '--json', '--ignore-scripts', '--pack-destination', tarballDir],
-    packageDir
-  )
-);
+const pack = packJson(['--pack-destination', tarballDir]);
 renameSync(
   path.join(tarballDir, pack.filename),
   path.join(tarballDir, EXAMPLE_TARBALL)
@@ -55,5 +31,5 @@ rmSync(path.join(exampleDir, 'node_modules', '@synonymdev'), {
   recursive: true,
   force: true,
 });
-run('npm', ['install', '--no-audit', '--no-fund'], exampleDir);
+run('npm', ['install', '--no-audit', '--no-fund'], { cwd: exampleDir });
 console.log(`installed ${EXAMPLE_TARBALL} into example/node_modules`);

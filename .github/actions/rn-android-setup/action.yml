@@ -1,0 +1,79 @@
+name: React Native Android setup
+description: >-
+  Native build packages, JDK 17, Gradle, the Android SDK, NDK r28c and
+  cargo-ndk for building paykit-react-native's Android libraries. Fails when
+  NDK r28c is not the version in paykit-react-native/android/gradle.properties.
+
+inputs:
+  cargo-ndk-version:
+    description: cargo-ndk version to install. Same as paykit-ffi/build_android.sh.
+    required: false
+    default: '3.5.4'
+  gradle-cache:
+    description: "'false' disables the Gradle cache, for jobs whose output is published."
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Install native build dependencies
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev cmake protobuf-compiler
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    - name: Set up Gradle
+      uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
+      with:
+        cache-disabled: ${{ inputs.gradle-cache == 'false' }}
+
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+      with:
+        packages: platform-tools
+
+    - name: Set up Android NDK
+      id: setup-ndk
+      uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
+      with:
+        ndk-version: r28c
+        add-to-path: true
+
+    # cargo-ndk reads the NDK from the environment. The Android Gradle
+    # plugin looks it up by `ndkVersion` under $ANDROID_HOME/ndk, so link it
+    # there. The library (android/gradle.properties) and the example app use
+    # the same version.
+    - name: Export Android NDK paths
+      shell: bash
+      env:
+        NDK_PATH: ${{ steps.setup-ndk.outputs.ndk-path }}
+        GRADLE_PROPERTIES: ${{ github.workspace }}/paykit-react-native/android/gradle.properties
+      run: |
+        set -euo pipefail
+        version=$(sed -n 's/^Pkg.Revision *= *//p' "$NDK_PATH/source.properties")
+        expected=$(sed -n 's/^ReactNativePaykit_ndkVersion=//p' "$GRADLE_PROPERTIES")
+        if [ "$version" != "$expected" ]; then
+          echo "::error::NDK r28c is $version, but android/gradle.properties expects $expected"
+          exit 1
+        fi
+        if [ ! -e "$ANDROID_HOME/ndk/$version" ]; then
+          mkdir -p "$ANDROID_HOME/ndk"
+          ln -s "$NDK_PATH" "$ANDROID_HOME/ndk/$version"
+        fi
+        echo "ANDROID_NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
+        echo "ANDROID_NDK_ROOT=$NDK_PATH" >> "$GITHUB_ENV"
+
+    - name: Install cargo-ndk
+      shell: bash
+      env:
+        CARGO_NDK_VERSION: ${{ inputs.cargo-ndk-version }}
+      run: |
+        set -euo pipefail
+        if ! cargo ndk --version 2>/dev/null | grep -qx "cargo-ndk $CARGO_NDK_VERSION"; then
+          cargo install cargo-ndk --version "$CARGO_NDK_VERSION" --locked --force
+        fi

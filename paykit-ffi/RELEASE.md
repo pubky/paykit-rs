@@ -29,8 +29,8 @@ From `paykit-ffi/`:
 This bumps the version consistently in `paykit-ffi/Cargo.toml`,
 `paykit-lib/Cargo.toml`, `paykit-sdk/Cargo.toml`, the SDK's `paykit-lib`
 dependency, the root `Package.swift`, `gradle.properties`, and the React Native
-`paykit-react-native/package.json` and `package-lock.json`, then builds both
-platforms and updates the `Package.swift` checksum. It does not build the React
+`paykit-react-native/package.json` and `package-lock.json` (with `npm version`,
+so npm must be installed), then builds both platforms and updates the `Package.swift` checksum. It does not build the React
 Native package; CI does that when publishing.
 
 The iOS release zip is generated at:
@@ -78,7 +78,8 @@ The workflow publishes with the job's built-in `GITHUB_TOKEN`, which its `permis
 
 The `npm Package` workflow (`.github/workflows/npm-publish.yml`) triggers
 automatically on release publish. It checks out the release tag, builds the iOS
-XCFramework on macOS and the Android libraries on Ubuntu, and checks that
+XCFramework on macOS and the Android libraries and bindings on Ubuntu with
+`ubrn build`, and checks that
 `paykit-react-native/package.json` has the tag's version. It then runs
 `npm run pack:check` and publishes `@synonymdev/react-native-paykit` with npm
 provenance. Release candidates get the `next` dist-tag, so `latest` stays on the

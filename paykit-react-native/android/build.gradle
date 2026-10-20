@@ -76,12 +76,18 @@ android {
     }
     externalNativeBuild {
       cmake {
-        arguments '-DANDROID_STL=c++_shared'
+        // Paykit: the same 16 KB page-size flags as the workspace
+        // .cargo/config.toml uses for libpaykit.so, for every ABI. NDK r27
+        // and r28 apply them to 64-bit ABIs only. Set here, not in the
+        // ubrn-rendered CMakeLists.txt.
+        arguments '-DANDROID_STL=c++_shared',
+          '-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384,-z,common-page-size=16384'
         abiFilters (*reactNativeArchitectures())
       }
     }
     ndk {
-      abiFilters "arm64-v8a", "armeabi-v7a", "x86_64", "x86"
+      // Paykit: the rendered template lists the ubrn.config.yaml targets.
+      abiFilters (*reactNativeArchitectures())
     }
   }
 

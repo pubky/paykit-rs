@@ -25,12 +25,8 @@ public object PaykitAndroid {
     }
 
     @JvmStatic
-    public fun initialize(context: Context): Boolean =
-        nativeInitialize(context.applicationContext)
-
-    @JvmStatic
     public fun initializeOrThrow(context: Context) {
-        check(initialize(context)) {
+        check(nativeInitialize(context.applicationContext)) {
             "failed to initialize Paykit Android platform verifier"
         }
     }

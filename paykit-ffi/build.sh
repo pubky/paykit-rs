@@ -9,6 +9,12 @@ usage() {
 set_version() {
     local new_version="$1"
 
+    # Checked first, so a missing npm leaves every manifest unchanged.
+    if ! command -v npm &> /dev/null; then
+        echo "Error: npm is required to set the React Native package version"
+        exit 1
+    fi
+
     if sed --version >/dev/null 2>&1; then
         SED_INPLACE=(sed -i)
     else
@@ -22,15 +28,8 @@ set_version() {
     "${SED_INPLACE[@]}" "s/let tag = \"v.*\"/let tag = \"v$new_version\"/" ../Package.swift
     "${SED_INPLACE[@]}" "s/^version=.*/version=$new_version/" bindings/android/gradle.properties
 
-    # React Native package: the root "version" in package.json, and the two
-    # root entries in package-lock.json. Fails if a pattern does not match.
-    NEW_VERSION="$new_version" perl -0pi -e \
-        's/^(  "version": )"[^"]*"/$1"$ENV{NEW_VERSION}"/m or die "package.json: root version not found\n"' \
-        ../paykit-react-native/package.json
-    NEW_VERSION="$new_version" perl -0pi -e \
-        's/\A(\{\n  "name": [^\n]*\n  "version": )"[^"]*"/$1"$ENV{NEW_VERSION}"/ or die "package-lock.json: root version not found\n";
-         s/^(    "": \{\n      "name": [^\n]*\n      "version": )"[^"]*"/$1"$ENV{NEW_VERSION}"/m or die "package-lock.json: root package version not found\n"' \
-        ../paykit-react-native/package-lock.json
+    # React Native package: package.json and package-lock.json.
+    (cd ../paykit-react-native && npm version "$new_version" --no-git-tag-version --allow-same-version)
 }
 
 bump_version() {

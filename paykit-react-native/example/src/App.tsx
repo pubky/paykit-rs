@@ -56,19 +56,15 @@ const DARK: typeof LIGHT = {
 };
 type Palette = typeof LIGHT;
 
-const STATUS_MARK: Record<StepStatus, string> = {
-  pending: '·',
-  running: '',
-  pass: '✓',
-  fail: '✕',
-  skip: '–',
-};
-const STATUS_LABEL: Record<StepStatus, string> = {
-  pending: 'Not run',
-  running: 'Running',
-  pass: 'Passed',
-  fail: 'Failed',
-  skip: 'Skipped',
+const STATUS: Record<
+  StepStatus,
+  { mark: string; label: string; color: keyof Palette }
+> = {
+  pending: { mark: '·', label: 'Not run', color: 'muted' },
+  running: { mark: '', label: 'Running', color: 'muted' },
+  pass: { mark: '✓', label: 'Passed', color: 'pass' },
+  fail: { mark: '✕', label: 'Failed', color: 'fail' },
+  skip: { mark: '–', label: 'Skipped', color: 'skip' },
 };
 
 function initialRows(): StepResult[] {
@@ -80,13 +76,24 @@ function initialRows(): StepResult[] {
   }));
 }
 
-function verdict(rows: StepResult[], running: boolean): string {
-  const failed = rows.filter((row) => row.status === 'fail').length;
-  const done = rows.filter((row) =>
-    ['pass', 'fail', 'skip'].includes(row.status)
-  ).length;
+type Counts = { total: number; done: number; failed: number };
+
+function countRows(rows: StepResult[]): Counts {
+  const counts = { total: rows.length, done: 0, failed: 0 };
+  for (const { status } of rows) {
+    if (status === 'pass' || status === 'fail' || status === 'skip') {
+      counts.done += 1;
+    }
+    if (status === 'fail') {
+      counts.failed += 1;
+    }
+  }
+  return counts;
+}
+
+function verdict({ total, done, failed }: Counts, running: boolean): string {
   if (running) {
-    return `Running step ${Math.min(done + 1, rows.length)} of ${rows.length}`;
+    return `Running step ${Math.min(done + 1, total)} of ${total}`;
   }
   if (done === 0) {
     return 'Not run yet';
@@ -135,8 +142,8 @@ export default function App(props: LaunchProps): React.JSX.Element {
       homeserver: defaultHomeserver(mode),
       localHost: current.localHost || defaultLocalHost(Platform.OS),
     }));
-  const failed = rows.some((row) => row.status === 'fail');
-  const finished = !running && rows.some((row) => row.status !== 'pending');
+  const counts = countRows(rows);
+  const finished = !running && counts.done > 0;
 
   return (
     <SafeAreaView style={styles.screen}>
@@ -151,11 +158,13 @@ export default function App(props: LaunchProps): React.JSX.Element {
         <Text
           style={[
             styles.verdict,
-            finished && { color: failed ? colors.fail : colors.pass },
+            finished && {
+              color: counts.failed > 0 ? colors.fail : colors.pass,
+            },
           ]}
           accessibilityLiveRegion="polite"
         >
-          {verdict(rows, running)}
+          {verdict(counts, running)}
         </Text>
 
         <View style={styles.panel}>
@@ -256,7 +265,7 @@ export default function App(props: LaunchProps): React.JSX.Element {
               key={row.name}
               style={styles.step}
               accessible
-              accessibilityLabel={`${row.title}: ${STATUS_LABEL[row.status]}${
+              accessibilityLabel={`${row.title}: ${STATUS[row.status].label}${
                 row.reason ? `, ${row.reason}` : ''
               }`}
             >
@@ -267,10 +276,10 @@ export default function App(props: LaunchProps): React.JSX.Element {
                   <Text
                     style={[
                       styles.markText,
-                      { color: markColor(colors, row.status) },
+                      { color: colors[STATUS[row.status].color] },
                     ]}
                   >
-                    {STATUS_MARK[row.status]}
+                    {STATUS[row.status].mark}
                   </Text>
                 )}
               </View>
@@ -293,19 +302,6 @@ export default function App(props: LaunchProps): React.JSX.Element {
       </ScrollView>
     </SafeAreaView>
   );
-}
-
-function markColor(colors: Palette, status: StepStatus): string {
-  switch (status) {
-    case 'pass':
-      return colors.pass;
-    case 'fail':
-      return colors.fail;
-    case 'skip':
-      return colors.skip;
-    default:
-      return colors.muted;
-  }
 }
 
 function makeStyles(colors: Palette) {

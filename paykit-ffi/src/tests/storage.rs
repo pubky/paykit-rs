@@ -514,44 +514,8 @@ fn test_state_blob_round_trips_exhausted_id_counter() {
     assert_eq!(decoded, state);
 }
 
-#[test]
-fn test_state_revision_validates_loaded_snapshot() {
-    struct InvalidSnapshotStore;
-
-    impl FfiSdkStateBlobStore for InvalidSnapshotStore {
-        fn load_state_blob(&self) -> Result<Option<FfiSdkStateBlobSnapshot>, PaykitFfiError> {
-            Ok(Some(FfiSdkStateBlobSnapshot {
-                blob: Arc::new(FfiSdkStateBlob::new(
-                    encode_storage_state(&StorageState::default()).unwrap(),
-                )),
-                revision: String::new(),
-            }))
-        }
-
-        fn save_state_blob_atomically(
-            &self,
-            _blob: Arc<FfiSdkStateBlob>,
-            _expected_revision: Option<String>,
-        ) -> Result<String, PaykitFfiError> {
-            unreachable!("state revision lookup must not write")
-        }
-    }
-
-    let storage = FfiSdkStorage {
-        store: Arc::new(InvalidSnapshotStore),
-        transaction_lock: Arc::new(Mutex::new(())),
-    };
-
-    match storage.state_revision().unwrap_err() {
-        PaykitFfiError::Storage { code, context } => {
-            assert_eq!(code, "invalid_state_blob");
-            assert_eq!(context, "load SDK state blob: invalid_state_blob");
-        }
-        other => panic!("unexpected error: {other:?}"),
-    }
-}
-
-struct FixedRevisionStore;
+/// Loads an empty state blob at a fixed revision, and never saves.
+struct FixedRevisionStore(&'static str);
 
 impl FfiSdkStateBlobStore for FixedRevisionStore {
     fn load_state_blob(&self) -> Result<Option<FfiSdkStateBlobSnapshot>, PaykitFfiError> {
@@ -559,7 +523,7 @@ impl FfiSdkStateBlobStore for FixedRevisionStore {
             blob: Arc::new(FfiSdkStateBlob::new(
                 encode_storage_state(&StorageState::default()).unwrap(),
             )),
-            revision: "rev-1".into(),
+            revision: self.0.into(),
         }))
     }
 
@@ -573,21 +537,40 @@ impl FfiSdkStateBlobStore for FixedRevisionStore {
 }
 
 #[test]
-fn test_state_revision_returns_revision_when_uncontended() {
+fn test_state_revision_validates_loaded_snapshot() {
+    // An empty revision makes the loaded snapshot invalid.
     let storage = FfiSdkStorage {
-        store: Arc::new(FixedRevisionStore),
+        store: Arc::new(FixedRevisionStore("")),
         transaction_lock: Arc::new(Mutex::new(())),
     };
+
+    match storage.state_revision().unwrap_err() {
+        PaykitFfiError::Storage { code, context } => {
+            assert_eq!(code, "invalid_state_blob");
+            assert_eq!(context, "load SDK state blob: invalid_state_blob");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+/// Storage over `store` with its own, unheld transaction lock.
+fn callback_storage(store: impl FfiSdkStateBlobStore + 'static) -> FfiSdkStorage {
+    FfiSdkStorage {
+        store: Arc::new(store),
+        transaction_lock: Arc::new(Mutex::new(())),
+    }
+}
+
+#[test]
+fn test_state_revision_returns_revision_when_uncontended() {
+    let storage = callback_storage(FixedRevisionStore("rev-1"));
 
     assert_eq!(storage.state_revision().unwrap().as_deref(), Some("rev-1"));
 }
 
 #[test]
 fn test_state_revision_returns_busy_during_transaction() {
-    let storage = FfiSdkStorage {
-        store: Arc::new(FixedRevisionStore),
-        transaction_lock: Arc::new(Mutex::new(())),
-    };
+    let storage = callback_storage(FixedRevisionStore("rev-1"));
     // Hold the lock on this thread, as an in-flight transaction would. A
     // blocking lock() in state_revision would hang this test forever.
     let _transaction = storage.transaction_lock.lock().unwrap();

@@ -40,38 +40,9 @@ import {
 } from './mocks/sessionProvider';
 import { InMemoryStateBlobStore } from './mocks/stateBlobStore';
 
-export type StepName =
-  | 'offline'
-  | 'sign_up'
-  | 'public_endpoint'
-  | 'private_payment_list'
-  | 'payment_request'
-  | 'restart'
-  | 'typed_error'
-  | 'android_https';
-
 export type StepStatus = 'pending' | 'running' | 'pass' | 'fail' | 'skip';
 
-export type StepResult = {
-  name: StepName;
-  title: string;
-  status: StepStatus;
-  reason: string;
-};
-
-export const STEPS: ReadonlyArray<{ name: StepName; title: string }> = [
-  { name: 'offline', title: 'Configuration and public keys, offline' },
-  { name: 'sign_up', title: 'Sign up A and B on the homeserver' },
-  { name: 'public_endpoint', title: 'Publish and remove a Payment Endpoint' },
-  { name: 'private_payment_list', title: 'Send a Private Payment List' },
-  { name: 'payment_request', title: 'Payment Request round trip' },
-  { name: 'restart', title: 'Restart A from the stored state blob' },
-  { name: 'typed_error', title: 'Invalid Payment Endpoint Identifier' },
-  { name: 'android_https', title: 'HTTPS through Paykit on Android' },
-];
-
 const STEP_TIMEOUT_MS = 90_000;
-const RESTART_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 250;
 const LIGHTNING = 'btc-lightning-bolt11';
 
@@ -165,6 +136,24 @@ function buildSdk(
     party.wallet,
     state.sdkConfig,
     state.pubkyClient
+  );
+}
+
+/** Poll until `payee` sees Payment Request `id` with `payer` in `state`. */
+async function awaitRequestState(
+  what: string,
+  payee: Party,
+  payer: Party,
+  id: string,
+  state: FfiPaymentRequestLifecycleState
+): Promise<void> {
+  await pollUntil(
+    what,
+    () => payee.sdk.paymentRequestsWith(payer.publicKey),
+    (records) =>
+      records.some(
+        (record) => record.paymentRequestId === id && record.state === state
+      )
   );
 }
 
@@ -349,15 +338,12 @@ async function stepPaymentRequest(state: SmokeState): Promise<string> {
     received.proposalStreamItemId
   );
   await deliver(b, a);
-  await pollUntil(
+  await awaitRequestState(
     'A seeing the acceptance',
-    () => a.sdk.paymentRequestsWith(b.publicKey),
-    (records) =>
-      records.some(
-        (record) =>
-          record.paymentRequestId === id &&
-          record.state === FfiPaymentRequestLifecycleState.Accepted
-      )
+    a,
+    b,
+    id,
+    FfiPaymentRequestLifecycleState.Accepted
   );
 
   // B resolves where to pay from A's Private Payment List, "pays" with the
@@ -380,15 +366,12 @@ async function stepPaymentRequest(state: SmokeState): Promise<string> {
     proof: new FfiPrivateJsonObject('{"test_evidence":"paykit-rn-example"}'),
   });
   await deliver(b, a);
-  await pollUntil(
+  await awaitRequestState(
     'A receiving the Payment Proof',
-    () => a.sdk.paymentRequestsWith(b.publicKey),
-    (records) =>
-      records.some(
-        (record) =>
-          record.paymentRequestId === id &&
-          record.state === FfiPaymentRequestLifecycleState.ProofSubmitted
-      )
+    a,
+    b,
+    id,
+    FfiPaymentRequestLifecycleState.ProofSubmitted
   );
   return 'proposed, accepted, resolved, proof received';
 }
@@ -470,15 +453,66 @@ async function stepAndroidHttps(state: SmokeState): Promise<string> {
   return 'resolved through the public pkarr relays';
 }
 
-const STEP_RUNNERS: Record<StepName, (state: SmokeState) => Promise<string>> = {
-  offline: stepOffline,
-  sign_up: stepSignUp,
-  public_endpoint: stepPublicEndpoint,
-  private_payment_list: stepPrivatePaymentList,
-  payment_request: stepPaymentRequest,
-  restart: stepRestart,
-  typed_error: stepTypedError,
-  android_https: stepAndroidHttps,
+type Step = {
+  name: string;
+  title: string;
+  run: (state: SmokeState) => Promise<string>;
+  /** Defaults to STEP_TIMEOUT_MS. */
+  timeoutMs?: number;
+};
+
+/** The steps, in the order they run. */
+export const STEPS = [
+  {
+    name: 'offline',
+    title: 'Configuration and public keys, offline',
+    run: stepOffline,
+  },
+  {
+    name: 'sign_up',
+    title: 'Sign up A and B on the homeserver',
+    run: stepSignUp,
+  },
+  {
+    name: 'public_endpoint',
+    title: 'Publish and remove a Payment Endpoint',
+    run: stepPublicEndpoint,
+  },
+  {
+    name: 'private_payment_list',
+    title: 'Send a Private Payment List',
+    run: stepPrivatePaymentList,
+  },
+  {
+    name: 'payment_request',
+    title: 'Payment Request round trip',
+    run: stepPaymentRequest,
+  },
+  {
+    name: 'restart',
+    title: 'Restart A from the stored state blob',
+    run: stepRestart,
+    timeoutMs: 30_000,
+  },
+  {
+    name: 'typed_error',
+    title: 'Invalid Payment Endpoint Identifier',
+    run: stepTypedError,
+  },
+  {
+    name: 'android_https',
+    title: 'HTTPS through Paykit on Android',
+    run: stepAndroidHttps,
+  },
+] as const satisfies ReadonlyArray<Step>;
+
+export type StepName = (typeof STEPS)[number]['name'];
+
+export type StepResult = {
+  name: StepName;
+  title: string;
+  status: StepStatus;
+  reason: string;
 };
 
 function logStep(result: StepResult): void {
@@ -505,12 +539,13 @@ export async function runSmoke(
     pubkyClient,
   };
   let passed = true;
-  for (const { name, title } of STEPS) {
+  for (const step of STEPS) {
+    const { name, title } = step;
     onUpdate({ name, title, status: 'running', reason: '' });
-    const timeout = name === 'restart' ? RESTART_TIMEOUT_MS : STEP_TIMEOUT_MS;
+    const timeout = 'timeoutMs' in step ? step.timeoutMs : STEP_TIMEOUT_MS;
     let result: StepResult;
     try {
-      const reason = await withTimeout(STEP_RUNNERS[name](state), timeout);
+      const reason = await withTimeout(step.run(state), timeout);
       result = { name, title, status: 'pass', reason };
     } catch (error) {
       const skipped = error instanceof StepSkipped;

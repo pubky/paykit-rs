@@ -36,7 +36,13 @@ records its hash, so after a native rebuild `example/package-lock.json`
 changes; do not commit that change.
 
 Start the app with `npm run example:ios` or `npm run example:android`. Both
-start in `staging` mode. Pick the mode on screen, or pass launch options
+start in `staging` mode.
+
+The Android app uses NDK r28c (`28.2.13676358`), like the library. To build
+with another installed NDK, pass `-PndkVersion=<version>` to Gradle.
+
+For the emulator only, `npm run build:android -- --targets x86_64` builds
+just that ABI; then build the app with `-PreactNativeArchitectures=x86_64`. Pick the mode on screen, or pass launch options
 (below).
 
 ## Staging mode
@@ -65,8 +71,13 @@ pinned in the workspace `Cargo.lock`. The first run builds it with
 `cargo install` into `target/local-stack/`, which takes about two minutes.
 Postgres comes from a throwaway Docker container, or from
 `TEST_PUBKY_CONNECTION_STRING` when that is set. The stack is ready when the
-script prints `PAYKIT_LOCAL_STACK_READY`. Stop it with Ctrl+C; that also
-removes the Postgres container.
+script prints `PAYKIT_LOCAL_STACK_READY startup_ms=<n>`. Stop it with Ctrl+C;
+that also removes the Postgres container.
+
+`scripts/start-local-stack.sh start <dir>` runs the same script in the
+background, with its PID and log in `<dir>`, and
+`scripts/start-local-stack.sh wait <dir>` waits until it is ready. CI uses
+them.
 
 The stack uses fixed ports: 6881/udp, 6286, 6287, 6288, 15411 and 15412.
 They must be free, so stop any other local Pubky testnet first.
@@ -129,8 +140,9 @@ contains secrets, mnemonics, invite codes, payloads or state blob bytes.
 
 The `smoke` and `smoke-ios` jobs in `.github/workflows/react-native.yml` run
 on master pushes, nightly and on demand, not on pull requests. They start the
-local stack on the runner, build a Release app (the JS is bundled, so no
-Metro server is needed), and run `scripts/android-smoke.sh` or
+local stack on the runner in the background, build a Release app (the JS is
+bundled, so no Metro server is needed; Android builds only `x86_64`), wait
+for the stack, and run `scripts/android-smoke.sh` or
 `scripts/ios-smoke.sh`, which launch the app in `local` mode with autorun
 and wait for `SMOKE_RESULT pass`. macOS runners have no Docker, so the iOS
 job uses Postgres from Homebrew through `TEST_PUBKY_CONNECTION_STRING`.
