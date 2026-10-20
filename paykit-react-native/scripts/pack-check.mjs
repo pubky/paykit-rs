@@ -35,6 +35,7 @@ const FORBIDDEN = [
   'android/build/',
   'android/.cxx/',
   'android-check/',
+  'example/',
   'node_modules/',
   'scripts/',
   'src/__tests__/',

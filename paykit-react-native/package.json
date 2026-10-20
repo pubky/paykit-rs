@@ -42,7 +42,10 @@
     "lint": "eslint \"**/*.{js,mjs,ts,tsx}\"",
     "test": "jest",
     "prepack": "bob build",
-    "pack:check": "node scripts/pack-check.mjs"
+    "pack:check": "node scripts/pack-check.mjs",
+    "example:refresh": "node scripts/example-refresh.mjs",
+    "example:ios": "npm --prefix example run ios",
+    "example:android": "npm --prefix example run android"
   },
   "keywords": [
     "paykit",
@@ -74,7 +77,10 @@
   "jest": {
     "preset": "react-native",
     "modulePathIgnorePatterns": [
-      "<rootDir>/lib/"
+      "<rootDir>/lib/",
+      "<rootDir>/example/node_modules/",
+      "<rootDir>/example/android/",
+      "<rootDir>/example/ios/"
     ],
     "transformIgnorePatterns": [
       "node_modules/(?!((jest-)?react-native|@react-native(-community)?|uniffi-bindgen-react-native)/)"

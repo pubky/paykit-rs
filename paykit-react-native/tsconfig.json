@@ -26,5 +26,7 @@
     "strict": true,
     "target": "ESNext",
     "verbatimModuleSyntax": true
-  }
+  },
+  // The example app has its own tsconfig and dependencies.
+  "exclude": ["example", "lib", "node_modules"]
 }

@@ -71,9 +71,10 @@ the call runs on the JS thread and the worker waits for the return value. So:
 
 - Implement every callback synchronously. Do not return Promises.
 - Do not call back into the same `FfiPaykitSdk` handle from a callback.
-- Do not call `FfiPaykitSdk.stateRevision()` while another call on the same
-  handle is still pending. Both wait on the same storage lock, so the JS thread
-  and the Rust worker can block each other forever.
+- `FfiPaykitSdk.stateRevision()` does not wait for other calls on the same
+  handle. While one of them is in a state transaction, it throws
+  `PaykitFfiError.SharedStateBusy` with code `state_transaction_in_progress`.
+  Retry after that call finishes.
 
 ## Security
 
@@ -236,7 +237,7 @@ It uses this script instead of `ubrn build`, which looks for `libpaykit_ffi`
 instead of `libpaykit`. Builds share the `../target` cache with
 `paykit-ffi/build.sh`.
 
-There is no example app yet, so check the native builds without one:
+Check the native builds without an app:
 
 ```sh
 npm run ios:check          # podspec, XCFramework slices, C++ glue compile
@@ -246,6 +247,20 @@ npm run pack:check         # lists what npm would publish, with sizes
 
 `npm run android:assemble` uses the standalone Gradle build in
 `android-check/` and the Gradle wrapper from React Native's Gradle plugin.
+
+## Example app and smoke test
+
+[`example/`](example/) is a React Native app that installs this package from
+an `npm pack` tarball and runs a smoke test against a real Pubky homeserver,
+on staging or on a local Pubky stack:
+
+```sh
+npm run example:refresh   # pack this package and install it into example/
+npm run example:ios       # or example:android
+```
+
+See [`example/README.md`](example/README.md) for the network modes, launch
+options and what each smoke step proves.
 
 ## License
 

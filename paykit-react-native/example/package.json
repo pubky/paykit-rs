@@ -1,0 +1,35 @@
+{
+  "name": "paykit-react-native-example",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Paykit React Native test app and smoke harness",
+  "scripts": {
+    "android": "react-native run-android",
+    "ios": "react-native run-ios",
+    "start": "react-native start",
+    "typecheck": "tsc --noEmit",
+    "local-stack": "node scripts/local-stack.mjs"
+  },
+  "dependencies": {
+    "@synonymdev/react-native-paykit": "file:tarballs/synonymdev-react-native-paykit.tgz",
+    "react": "19.0.0",
+    "react-native": "0.78.2"
+  },
+  "devDependencies": {
+    "@babel/core": "7.29.7",
+    "@babel/preset-env": "7.29.7",
+    "@babel/runtime": "7.29.10",
+    "@react-native-community/cli": "15.0.1",
+    "@react-native-community/cli-platform-android": "15.0.1",
+    "@react-native-community/cli-platform-ios": "15.0.1",
+    "@react-native/babel-preset": "0.78.2",
+    "@react-native/metro-config": "0.78.2",
+    "@react-native/typescript-config": "0.78.2",
+    "@types/jest": "29.5.14",
+    "@types/react": "19.3.0",
+    "typescript": "5.8.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
