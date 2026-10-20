@@ -49,6 +49,7 @@ PaymentOutcomeReport
 AllowanceAccountingReconciliation
 PaymentDisposition
 PaymentRequestRecord
+PaymentRequestRead
 PaymentProofRecord
 PaymentConversionQuoteRecord
 PaymentRequestAmount
