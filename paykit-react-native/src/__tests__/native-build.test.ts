@@ -86,3 +86,16 @@ describe('iOS build', () => {
     );
   });
 });
+
+describe('example tarball install', () => {
+  test('test_example_lock_has_no_tarball_integrity', () => {
+    // With an integrity, npm installs the cached tarball for that hash instead
+    // of the freshly packed one, so the example would run stale natives.
+    const lock = JSON.parse(read(packageDir, 'example/package-lock.json'));
+    const entry = lock.packages['node_modules/@synonymdev/react-native-paykit'];
+    expect(entry.resolved).toBe(
+      'file:tarballs/synonymdev-react-native-paykit.tgz'
+    );
+    expect(entry).not.toHaveProperty('integrity');
+  });
+});

@@ -31,9 +31,10 @@ cd example/ios && pod install
 ```
 
 Run `npm run example:refresh` again after every native rebuild or package
-change. The tarball (`example/tarballs/`) is gitignored. `npm install`
-records its hash, so after a native rebuild `example/package-lock.json`
-changes; do not commit that change.
+change. The tarball (`example/tarballs/`) is gitignored. The refresh keeps
+the tarball's hash out of `example/package-lock.json`: with a hash, npm
+installs its cached copy of an older tarball. It then checks that the
+installed package matches the tarball and fails if it does not.
 
 Start the app with `npm run example:ios` or `npm run example:android`. Both
 start in `staging` mode.
