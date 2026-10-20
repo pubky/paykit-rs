@@ -64,3 +64,4 @@ PubkyProfileRecord
 PaykitBlobRecord
 SdkStateBlobSnapshot
 PaykitStateObservation
+PrivateMessageSchedulingSnapshot

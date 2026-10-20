@@ -425,6 +425,11 @@ async fn test_storage_operation_reuses_caller_guard_while_writer_waits() {
                     Ok(())
                 }))
                 .await?;
+                assert!(sdk
+                    .private_message_scheduling_snapshot()
+                    .await?
+                    .pending_outbound_counterparties
+                    .is_empty());
                 assert!(matches!(
                     sdk.forget_session_access().await,
                     Err(PaykitSdkError::Policy { .. })

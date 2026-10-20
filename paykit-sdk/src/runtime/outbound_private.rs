@@ -1,8 +1,39 @@
+use paykit_lib::PaykitAppId;
+
 use super::*;
 use crate::domain::endpoint_reservations::{
     terminal_private_list_reservation_cancellations_in_transaction,
     PaymentEndpointReservationCancellationRecord,
 };
+use crate::storage::StorageState;
+
+/// Stored link states and outbound work from one scheduling read.
+///
+/// This does not authorize sending or establish current peer reachability.
+/// Refresh after receiving messages, mutating state or changing session/identity;
+/// execution APIs retain their own current-state checks.
+#[derive(Clone, PartialEq)]
+pub struct PrivateMessageSchedulingSnapshot {
+    /// Stored link states, sorted by counterparty.
+    pub linked_peers: Vec<LinkedPeerRecord>,
+    /// Counterparties with retryable messages or this app's reservation cleanup.
+    ///
+    /// Uses the same queue-head, retry and peer filters as
+    /// [`PaykitSdk::pending_outbound_private_counterparties`], sorted by public key.
+    pub pending_outbound_counterparties: Vec<PubkyPublicKey>,
+}
+
+impl std::fmt::Debug for PrivateMessageSchedulingSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrivateMessageSchedulingSnapshot")
+            .field("linked_peers", &self.linked_peers.len())
+            .field(
+                "pending_outbound_counterparties",
+                &self.pending_outbound_counterparties.len(),
+            )
+            .finish()
+    }
+}
 
 enum PrivateSendPreparation {
     Idle,
@@ -68,6 +99,62 @@ pub(super) fn can_defer_pending_confirmations(
                 && message.sent_at.is_none()
                 && message.last_error.is_none()
         })
+}
+
+fn pending_outbound_counterparties_from_snapshot(
+    snapshot: StorageState,
+    app_id: &PaykitAppId,
+    stale_before: DateTime<Utc>,
+    failed_retry_after: DateTime<Utc>,
+) -> Vec<PubkyPublicKey> {
+    let mut by_counterparty = HashMap::new();
+    let mut by_outbound_id = HashMap::new();
+    for message in snapshot.outbound_private_messages {
+        by_outbound_id.insert(message.outbound_message_id, message.clone());
+        by_counterparty
+            .entry(message.counterparty.clone())
+            .or_insert_with(Vec::new)
+            .push(message);
+    }
+
+    let mut message_candidates = HashSet::new();
+    for (counterparty, messages) in by_counterparty {
+        if outbound_private_queue_head_is_claimable(
+            &messages,
+            &snapshot.registered_paykit_apps,
+            &snapshot.retired_paykit_apps,
+            stale_before,
+            failed_retry_after,
+        ) {
+            message_candidates.insert(counterparty);
+        }
+    }
+    let mut cleanup_candidates = HashSet::new();
+    for reservation in snapshot.payment_endpoint_reservations.values() {
+        if &reservation.app_id == app_id
+            && terminal_private_list_reservation_needs_cleanup(reservation, &by_outbound_id)
+        {
+            cleanup_candidates.insert(reservation.counterparty.clone());
+        }
+    }
+
+    message_candidates.retain(|counterparty| {
+        if snapshot.linked_peers.get(counterparty).is_some_and(|peer| {
+            matches!(
+                peer.state,
+                LinkedPeerState::Linking
+                    | LinkedPeerState::RecoveryRequired
+                    | LinkedPeerState::Blocked
+            )
+        }) {
+            return false;
+        }
+        true
+    });
+    message_candidates.extend(cleanup_candidates);
+    let mut counterparties = message_candidates.into_iter().collect::<Vec<_>>();
+    counterparties.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    counterparties
 }
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
@@ -199,60 +286,53 @@ where
         let app_id = self.config.app_id.clone();
         self.storage
             .transaction(move |tx| {
-                let snapshot = tx.export_storage_state();
-                let mut by_counterparty = HashMap::new();
-                let mut by_outbound_id = HashMap::new();
-                for message in snapshot.outbound_private_messages {
-                    by_outbound_id.insert(message.outbound_message_id, message.clone());
-                    by_counterparty
-                        .entry(message.counterparty.clone())
-                        .or_insert_with(Vec::new)
-                        .push(message);
-                }
-
-                let mut message_candidates = HashSet::new();
-                for (counterparty, messages) in by_counterparty {
-                    if outbound_private_queue_head_is_claimable(
-                        &messages,
-                        &snapshot.registered_paykit_apps,
-                        &snapshot.retired_paykit_apps,
-                        stale_before,
-                        failed_retry_after,
-                    ) {
-                        message_candidates.insert(counterparty);
-                    }
-                }
-                let mut cleanup_candidates = HashSet::new();
-                for reservation in snapshot.payment_endpoint_reservations.values() {
-                    if reservation.app_id == app_id
-                        && terminal_private_list_reservation_needs_cleanup(
-                            reservation,
-                            &by_outbound_id,
-                        )
-                    {
-                        cleanup_candidates.insert(reservation.counterparty.clone());
-                    }
-                }
-
-                message_candidates.retain(|counterparty| {
-                    if snapshot.linked_peers.get(counterparty).is_some_and(|peer| {
-                        matches!(
-                            peer.state,
-                            LinkedPeerState::Linking
-                                | LinkedPeerState::RecoveryRequired
-                                | LinkedPeerState::Blocked
-                        )
-                    }) {
-                        return false;
-                    }
-                    true
-                });
-                message_candidates.extend(cleanup_candidates);
-                let mut counterparties = message_candidates.into_iter().collect::<Vec<_>>();
-                counterparties.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-                Ok(counterparties)
+                Ok(pending_outbound_counterparties_from_snapshot(
+                    tx.export_storage_state(),
+                    &app_id,
+                    stale_before,
+                    failed_retry_after,
+                ))
             })
             .await
+    }
+
+    /// Read linked peers and pending outbound work in one fresh storage operation.
+    ///
+    /// Use when scheduling needs both lists without intervening receives or writes.
+    /// Refresh after those operations and discard results if the caller's session
+    /// or identity changes. Sending, receiving and link recovery must still use
+    /// their authoritative SDK APIs; this method only discovers work.
+    /// Session creation, capability scope and key rotation remain caller-owned.
+    pub async fn private_message_scheduling_snapshot(
+        &self,
+    ) -> Result<PrivateMessageSchedulingSnapshot> {
+        let now = self.clock.now();
+        let (stale_before, failed_retry_after) = self.outbound_retry_thresholds(now)?;
+        let app_id = self.config.app_id.clone();
+        self.with_storage_operation(Box::pin(async move {
+            self.storage
+                .transaction(move |tx| {
+                    let snapshot = tx.export_storage_state();
+                    let mut linked_peers =
+                        snapshot.linked_peers.values().cloned().collect::<Vec<_>>();
+                    linked_peers.sort_by(|left, right| {
+                        left.counterparty.as_str().cmp(right.counterparty.as_str())
+                    });
+                    let pending_outbound_counterparties =
+                        pending_outbound_counterparties_from_snapshot(
+                            snapshot,
+                            &app_id,
+                            stale_before,
+                            failed_retry_after,
+                        );
+                    Ok(PrivateMessageSchedulingSnapshot {
+                        linked_peers,
+                        pending_outbound_counterparties,
+                    })
+                })
+                .await
+        }))
+        .await
     }
 
     /// Process queued outbound private messages for every pending counterparty.

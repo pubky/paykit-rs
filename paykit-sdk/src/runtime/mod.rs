@@ -151,6 +151,7 @@ mod reservation_cleanup;
 
 pub use app_removal::PaykitAppRemovalBlockers;
 pub use observation::PaykitStateObservation;
+pub use outbound_private::PrivateMessageSchedulingSnapshot;
 
 /// Clock abstraction used by SDK workflows and tests.
 pub trait Clock: Clone + Send + Sync + 'static {

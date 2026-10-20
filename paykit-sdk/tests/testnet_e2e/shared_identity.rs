@@ -410,6 +410,104 @@ async fn received_request_with_confirmation(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_private_message_scheduling_snapshot_reads_once_and_observes_shared_updates() {
+    let (pair, _) = received_request_with_confirmation().await;
+    let operations = Arc::new(AtomicUsize::new(0));
+    let transactions = Arc::new(AtomicUsize::new(0));
+    let commits = Arc::new(AtomicUsize::new(0));
+    let sdk = PaykitSdk::new(
+        CountedStorage {
+            inner: pair.bitkit.storage.clone(),
+            operations: operations.clone(),
+            transactions: transactions.clone(),
+            commits: commits.clone(),
+            reject_next_transaction: Arc::new(AtomicBool::new(false)),
+        },
+        TestnetSessionProvider::new(pair.bitkit.access.clone()),
+        pair.bitkit.adapter.clone(),
+        PaykitSdkConfig::new(pair.bitkit.app_id.clone()).unwrap(),
+    );
+    sdk.initialize().await.unwrap();
+    let before = pair
+        .bitkit
+        .storage
+        .transaction(|tx| Ok(tx.export_storage_state()))
+        .await
+        .unwrap();
+    let peers = sdk.linked_peers().await.unwrap();
+    let pending = sdk.pending_outbound_private_counterparties().await.unwrap();
+    assert_eq!(pending, vec![pair.bob.public_key.clone()]);
+    operations.store(0, Ordering::SeqCst);
+    transactions.store(0, Ordering::SeqCst);
+    commits.store(0, Ordering::SeqCst);
+
+    // Alternate paths against the same real Pubky storage and queued confirmation.
+    // Compare operation counts and data; elapsed time is diagnostic, not a threshold.
+    for sample in 0..5 {
+        for combined in if sample % 2 == 0 {
+            [false, true]
+        } else {
+            [true, false]
+        } {
+            let started = Instant::now();
+            if combined {
+                let snapshot = sdk.private_message_scheduling_snapshot().await.unwrap();
+                assert_eq!(snapshot.linked_peers, peers);
+                assert_eq!(snapshot.pending_outbound_counterparties, pending);
+            } else {
+                assert_eq!(sdk.linked_peers().await.unwrap(), peers);
+                assert_eq!(
+                    sdk.pending_outbound_private_counterparties().await.unwrap(),
+                    pending
+                );
+            }
+            let elapsed_us = started.elapsed().as_micros();
+            assert_eq!(
+                transactions.swap(0, Ordering::SeqCst),
+                if combined { 1 } else { 2 }
+            );
+            // Standalone transactions implicitly acquire their own storage operation.
+            assert_eq!(operations.swap(0, Ordering::SeqCst), usize::from(combined));
+            assert_eq!(commits.swap(0, Ordering::SeqCst), 0);
+            println!("private_message_scheduling_read sample={sample} combined={combined} elapsed_us={elapsed_us}");
+        }
+    }
+    assert_eq!(
+        pair.bitkit
+            .storage
+            .transaction(|tx| Ok(tx.export_storage_state()))
+            .await
+            .unwrap(),
+        before
+    );
+
+    // Entering storage first must fail before attempting to acquire the session gate.
+    assert!(matches!(
+        pair.bitkit
+            .storage
+            .with_operation(async { sdk.private_message_scheduling_snapshot().await })
+            .await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
+    assert_eq!(operations.swap(0, Ordering::SeqCst), 0);
+    assert_eq!(transactions.swap(0, Ordering::SeqCst), 0);
+
+    pair.server
+        .sdk
+        .block_peer(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    let updated = sdk.private_message_scheduling_snapshot().await.unwrap();
+    assert_eq!(updated.linked_peers.len(), 1);
+    assert_eq!(updated.linked_peers[0].counterparty, pair.bob.public_key);
+    assert_eq!(updated.linked_peers[0].state, LinkedPeerState::Blocked);
+    assert!(updated.pending_outbound_counterparties.is_empty());
+    assert_eq!(operations.load(Ordering::SeqCst), 1);
+    assert_eq!(transactions.load(Ordering::SeqCst), 1);
+    assert_eq!(commits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_payment_execution_shared_operations() {
     let (pair, request) = received_request_with_confirmation().await;
     let operations = Arc::new(AtomicUsize::new(0));
