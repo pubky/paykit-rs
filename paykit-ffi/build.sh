@@ -21,6 +21,16 @@ set_version() {
     "${SED_INPLACE[@]}" "s/paykit-lib = { path = \"..\\/paykit-lib\", version = \".*\" }/paykit-lib = { path = \"..\\/paykit-lib\", version = \"$new_version\" }/" ../paykit-sdk/Cargo.toml
     "${SED_INPLACE[@]}" "s/let tag = \"v.*\"/let tag = \"v$new_version\"/" ../Package.swift
     "${SED_INPLACE[@]}" "s/^version=.*/version=$new_version/" bindings/android/gradle.properties
+
+    # React Native package: the root "version" in package.json, and the two
+    # root entries in package-lock.json. Fails if a pattern does not match.
+    NEW_VERSION="$new_version" perl -0pi -e \
+        's/^(  "version": )"[^"]*"/$1"$ENV{NEW_VERSION}"/m or die "package.json: root version not found\n"' \
+        ../paykit-react-native/package.json
+    NEW_VERSION="$new_version" perl -0pi -e \
+        's/\A(\{\n  "name": [^\n]*\n  "version": )"[^"]*"/$1"$ENV{NEW_VERSION}"/ or die "package-lock.json: root version not found\n";
+         s/^(    "": \{\n      "name": [^\n]*\n      "version": )"[^"]*"/$1"$ENV{NEW_VERSION}"/m or die "package-lock.json: root package version not found\n"' \
+        ../paykit-react-native/package-lock.json
 }
 
 bump_version() {

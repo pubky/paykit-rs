@@ -19,7 +19,7 @@ Write "None" if this PR has no protocol impact.
 
 <!--
 Does this change any exposed struct, enum, or capability string that the
-Swift / Kotlin bindings consume? If so, note what needs to be
+Swift / Kotlin / React Native bindings consume? If so, note what needs to be
 regenerated or updated in sync. Write "None" if not applicable.
 -->
 
@@ -32,4 +32,5 @@ regenerated or updated in sync. Write "None" if not applicable.
 - [ ] Added tests for new behaviour (at least one positive and one failure-path test for new protocol features)
 - [ ] Public API changes include `///` docs and use THESAURUS.md vocabulary
 - [ ] Platform bindings rebuilt for **all** targets if FFI changed (`cd paykit-ffi && ./build.sh all`)
+- [ ] React Native package regenerates and type-checks if FFI changed (`npm run ubrn:generate && npm run typecheck` in `paykit-react-native`; the React Native CI workflow checks this)
 - [ ] I reviewed this PR myself and asked an LLM to review it and check whether it can be simplified

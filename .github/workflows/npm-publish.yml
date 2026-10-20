@@ -1,0 +1,213 @@
+name: npm Package
+
+# Publishes @synonymdev/react-native-paykit with the prebuilt iOS XCFramework
+# and Android libraries. A manual run builds the same tag but only runs
+# `npm publish --dry-run`.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to dry-run (e.g., v0.1.0-rc19 or 0.1.0-rc19); nothing is published"
+        required: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.release.tag_name || github.event.inputs.version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Resolve release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Normalize release version
+        id: version
+        shell: bash
+        env:
+          VERSION: ${{ github.event.inputs.version || github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          TAG="$VERSION"
+          if [[ "$TAG" != v* ]]; then
+            TAG="v$TAG"
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]]; then
+            echo "::error::Tag must look like v<x.y.z> or v<x.y.z>-rc<N>, got '$TAG'"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+  # No caches in this workflow: its artifacts are published, so it does not
+  # restore caches written by pull request jobs.
+  ios:
+    name: Build iOS XCFramework
+    needs: version
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: paykit-react-native
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: paykit-react-native/.nvmrc
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build Rust libraries, XCFramework and bindings
+        run: npm run build:ios
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: react-native-ios
+          path: paykit-react-native/SynonymdevReactNativePaykitFramework.xcframework
+          if-no-files-found: error
+
+  android:
+    name: Build Android libraries
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: paykit-react-native
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev cmake protobuf-compiler
+
+      - name: Set up Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
+        with:
+          ndk-version: r28c
+          add-to-path: true
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: paykit-react-native/.nvmrc
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # Same cargo-ndk version as paykit-ffi/build_android.sh.
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version 3.5.4 --locked
+
+      # Also generates the TypeScript and C++ bindings that the package ships.
+      - name: Build Rust libraries and bindings
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: npm run build:android
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: react-native-android
+          # Common root is paykit-react-native/, so the layout is kept.
+          path: |
+            paykit-react-native/android/src/main/jniLibs
+            paykit-react-native/android/libs
+            paykit-react-native/src/generated
+            paykit-react-native/cpp/generated
+          if-no-files-found: error
+
+  publish:
+    name: Publish to npm
+    needs: [version, ios, android]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      # npm provenance attestation.
+      id-token: write
+    defaults:
+      run:
+        working-directory: paykit-react-native
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: paykit-react-native/.nvmrc
+          registry-url: https://registry.npmjs.org
+
+      - name: Check package version matches the tag
+        shell: bash
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          package_version=$(node -p "require('./package.json').version")
+          if [ "v$package_version" != "$TAG" ]; then
+            echo "::error::package.json version $package_version does not match tag $TAG"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: react-native-ios
+          path: paykit-react-native/SynonymdevReactNativePaykitFramework.xcframework
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: react-native-android
+          path: paykit-react-native
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # Builds lib/ and fails if a native library or binding is missing.
+      - name: Check package contents
+        run: npm run pack:check
+
+      # Release candidates go to the `next` dist-tag, so `latest` stays on a
+      # final release. Scripts are skipped: pack:check already built lib/, and
+      # no dependency code runs while the npm token is in the environment.
+      - name: Publish
+        shell: bash
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' }}
+          VERSION: ${{ needs.version.outputs.version }}
+          NODE_AUTH_TOKEN: ${{ github.event_name == 'release' && secrets.NPM_TOKEN || '' }}
+        run: |
+          set -euo pipefail
+          args=(--ignore-scripts)
+          if [[ "$VERSION" == *-* ]]; then
+            args+=(--tag next)
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            npm publish --dry-run "${args[@]}"
+          else
+            npm publish --provenance --access public "${args[@]}"
+          fi

@@ -7,6 +7,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+
+- React Native package `@synonymdev/react-native-paykit` in
+  `paykit-react-native/`, generated from the `paykit-ffi` UniFFI metadata with
+  uniffi-bindgen-react-native. It exposes the same SDK surface as Swift and
+  Kotlin, but TypeScript names keep the `Ffi` prefix (`FfiPaykitSdk`,
+  `FfiSdkStateBlobStore`, and so on). It requires the React Native New
+  Architecture and is published to npm by the `npm Package` workflow.
+
 ### Fixed
 
 - `FfiPaykitSdk.stateRevision` returns `SharedStateBusy` instead of blocking
