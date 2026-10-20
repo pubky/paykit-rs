@@ -30,12 +30,13 @@ const installedDir = path.join(
   'react-native-paykit'
 );
 const LOCK_KEY = 'node_modules/@synonymdev/react-native-paykit';
-// Files compared between the tarball and the installed copy: package.json and
-// the first native library the tarball contains (an iOS-only or Android-only
-// build packs only one of them).
-const CHECKED_NATIVE_FILES = [
-  'android/src/main/jniLibs/arm64-v8a/libpaykit.so',
-  'SynonymdevReactNativePaykitFramework.xcframework/ios-arm64/libpaykit.a',
+// Native libraries compared between the tarball and the installed copy, in
+// order of preference: any Android ABI first, then any iOS slice. A build packs
+// only the ABIs it was asked for (CI builds x86_64 only), so the file is picked
+// from the tarball listing rather than fixed.
+const NATIVE_FILE_PATTERNS = [
+  /^android\/src\/main\/jniLibs\/[^/]+\/libpaykit\.so$/,
+  /^[^/]+\.xcframework\/[^/]+\/libpaykit\.a$/,
 ];
 
 /**
@@ -59,7 +60,9 @@ function assertInstalledMatchesTarball() {
   const listing = run('tar', ['-tzf', tarballPath], { capture: true })
     .split('\n')
     .map((entry) => entry.replace(/^package\//, ''));
-  const native = CHECKED_NATIVE_FILES.find((file) => listing.includes(file));
+  const native = NATIVE_FILE_PATTERNS.map((pattern) =>
+    listing.find((entry) => pattern.test(entry))
+  ).find(Boolean);
   if (!native) {
     throw new Error(`${EXAMPLE_TARBALL} contains no native library`);
   }
