@@ -4,8 +4,11 @@ use paykit_lib::PaymentReference;
 use paykit_sdk::PaymentProofSubmission;
 
 use crate::{
-    errors::validation_error, json::FfiPrivateJsonObject,
-    private_lists::FfiOutboundPrivateMessageStatus, sdk::FfiPaykitSdk, PaykitFfiError,
+    errors::validation_error,
+    json::FfiPrivateJsonObject,
+    private_lists::FfiOutboundPrivateMessageStatus,
+    sdk::{FfiIdentityStatus, FfiPaykitSdk},
+    PaykitFfiError,
 };
 
 mod conversions;
@@ -13,6 +16,17 @@ mod conversions;
 mod tests;
 
 use conversions::{parse_payment_request_id, parse_public_key, payment_request_records_to_ffi};
+
+/// Live identity status and complete Payment Requests from one storage operation.
+///
+/// Does not authorize payment or make subsequent proof submission idempotent.
+#[derive(uniffi::Record, Clone)]
+pub struct FfiPaymentRequestRead {
+    /// Current identity and session capability, when initialized.
+    pub identity_status: Option<FfiIdentityStatus>,
+    /// Counterparty records, empty when the identity/capability check did not pass.
+    pub payment_requests: Vec<FfiPaymentRequestRecord>,
+}
 
 /// Payment Reference text with redacted debug output.
 #[derive(uniffi::Object)]
@@ -363,6 +377,33 @@ impl fmt::Debug for FfiPaymentProofSubmission {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
+    /// Read current identity and counterparty requests before a payment check.
+    ///
+    /// After successful storage/session access, an expected identity mismatch,
+    /// missing initialization, or insufficient capability returns no requests
+    /// without refreshing identity/key bindings. Existing access errors still
+    /// propagate, including missing keys or scopes for Pubky shared storage.
+    /// Do not cache the result or reuse it across a mutation. With Pubky shared
+    /// storage, only `SharedStateBusy` denotes a retryable pre-operation failure;
+    /// other errors may follow a committed refresh and must not be replayed.
+    /// Session creation, capability scope and key rotation remain caller-owned.
+    pub async fn read_payment_requests(
+        &self,
+        counterparty: String,
+        expected_identity: Option<String>,
+    ) -> Result<FfiPaymentRequestRead, PaykitFfiError> {
+        let counterparty = parse_public_key(counterparty)?;
+        let expected_identity = expected_identity.map(parse_public_key).transpose()?;
+        let read = self
+            .runtime
+            .read_payment_requests(&counterparty, expected_identity.as_ref())
+            .await?;
+        Ok(FfiPaymentRequestRead {
+            identity_status: read.identity_status.map(Into::into),
+            payment_requests: payment_request_records_to_ffi(read.payment_requests)?,
+        })
+    }
+
     /// Inspect inbound proposals from one counterparty.
     /// Quotes and actionable state require the full view, which includes outbound acceptance.
     pub async fn received_payment_requests_from(

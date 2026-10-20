@@ -111,7 +111,7 @@ pub use pubky_session::{
 };
 #[doc(inline)]
 pub use runtime::{
-    Clock, PaykitAppRemovalBlockers, PaykitSdk, PaykitStateObservation,
+    Clock, PaykitAppRemovalBlockers, PaykitSdk, PaykitStateObservation, PaymentRequestRead,
     PrivateMessageSchedulingSnapshot, SystemClock,
 };
 #[doc(inline)]

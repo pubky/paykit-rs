@@ -2244,6 +2244,20 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func quotePaymentRequest(counterparty: String, paymentRequestId: String, billingPeriod: BillingPeriod, rates: [ConversionRate], expiresAt: String) async throws  -> PaymentRequestRecord
 
     /**
+     * Read current identity and counterparty requests before a payment check.
+     *
+     * After successful storage/session access, an expected identity mismatch,
+     * missing initialization, or insufficient capability returns no requests
+     * without refreshing identity/key bindings. Existing access errors still
+     * propagate, including missing keys or scopes for Pubky shared storage.
+     * Do not cache the result or reuse it across a mutation. With Pubky shared
+     * storage, only `SharedStateBusy` denotes a retryable pre-operation failure;
+     * other errors may follow a committed refresh and must not be replayed.
+     * Session creation, capability scope and key rotation remain caller-owned.
+     */
+    func readPaymentRequests(counterparty: String, expectedIdentity: String?) async throws  -> PaymentRequestRead
+
+    /**
      * List Receipt Access across non-blocked counterparties, newest first.
      */
     func receiptAccess() async throws  -> [ReceiptAccessView]
@@ -4379,6 +4393,35 @@ open func quotePaymentRequest(counterparty: String, paymentRequestId: String, bi
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypePaymentRequestRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Read current identity and counterparty requests before a payment check.
+     *
+     * After successful storage/session access, an expected identity mismatch,
+     * missing initialization, or insufficient capability returns no requests
+     * without refreshing identity/key bindings. Existing access errors still
+     * propagate, including missing keys or scopes for Pubky shared storage.
+     * Do not cache the result or reuse it across a mutation. With Pubky shared
+     * storage, only `SharedStateBusy` denotes a retryable pre-operation failure;
+     * other errors may follow a committed refresh and must not be replayed.
+     * Session creation, capability scope and key rotation remain caller-owned.
+     */
+open func readPaymentRequests(counterparty: String, expectedIdentity: String?)async throws  -> PaymentRequestRead  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_read_payment_requests(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterOptionString.lower(expectedIdentity)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaymentRequestRead_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -14308,6 +14351,75 @@ public func FfiConverterTypePaymentRequestFilter_lift(_ buf: RustBuffer) throws 
 #endif
 public func FfiConverterTypePaymentRequestFilter_lower(_ value: PaymentRequestFilter) -> RustBuffer {
     return FfiConverterTypePaymentRequestFilter.lower(value)
+}
+
+
+/**
+ * Live identity status and complete Payment Requests from one storage operation.
+ *
+ * Does not authorize payment or make subsequent proof submission idempotent.
+ */
+public struct PaymentRequestRead {
+    /**
+     * Current identity and session capability, when initialized.
+     */
+    public var identityStatus: IdentityStatus?
+    /**
+     * Counterparty records, empty when the identity/capability check did not pass.
+     */
+    public var paymentRequests: [PaymentRequestRecord]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Current identity and session capability, when initialized.
+         */identityStatus: IdentityStatus?,
+        /**
+         * Counterparty records, empty when the identity/capability check did not pass.
+         */paymentRequests: [PaymentRequestRecord]) {
+        self.identityStatus = identityStatus
+        self.paymentRequests = paymentRequests
+    }
+}
+
+#if compiler(>=6)
+extension PaymentRequestRead: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaymentRequestRead: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaymentRequestRead {
+        return
+            try PaymentRequestRead(
+                identityStatus: FfiConverterOptionTypeIdentityStatus.read(from: &buf),
+                paymentRequests: FfiConverterSequenceTypePaymentRequestRecord.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PaymentRequestRead, into buf: inout [UInt8]) {
+        FfiConverterOptionTypeIdentityStatus.write(value.identityStatus, into: &buf)
+        FfiConverterSequenceTypePaymentRequestRecord.write(value.paymentRequests, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentRequestRead_lift(_ buf: RustBuffer) throws -> PaymentRequestRead {
+    return try FfiConverterTypePaymentRequestRead.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaymentRequestRead_lower(_ value: PaymentRequestRead) -> RustBuffer {
+    return FfiConverterTypePaymentRequestRead.lower(value)
 }
 
 
@@ -25969,6 +26081,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_quote_payment_request() != 54465) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_read_payment_requests() != 47234) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_receipt_access() != 27958) {

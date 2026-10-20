@@ -13,6 +13,11 @@ extension PrivateMessageSchedulingSnapshot: CustomStringConvertible, CustomDebug
     public var debugDescription: String { description }
 }
 
+extension PaymentRequestRead: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PaymentRequestRead(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
 extension ContactUpdate: CustomStringConvertible, CustomDebugStringConvertible {
     public var description: String { "ContactUpdate(<redacted>)" }
     public var debugDescription: String { description }

@@ -216,6 +216,13 @@ async fn test_signed_out_pubky_storage_does_not_require_remote_state() {
     );
 
     assert!(sdk.identity_status().await.unwrap().is_none());
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let read = sdk
+        .read_payment_requests(&counterparty, None)
+        .await
+        .unwrap();
+    assert!(read.identity_status.is_none());
+    assert!(read.payment_requests.is_empty());
     assert_eq!(
         sdk.initialize().await.unwrap().capability,
         PubkyIdentityCapability::SignedOut
@@ -229,6 +236,15 @@ async fn test_signed_out_pubky_storage_does_not_require_remote_state() {
         sdk.identity_status().await.unwrap().unwrap().capability,
         PubkyIdentityCapability::SignedOut
     );
+    let read = sdk
+        .read_payment_requests(&counterparty, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        read.identity_status.unwrap().capability,
+        PubkyIdentityCapability::SignedOut
+    );
+    assert!(read.payment_requests.is_empty());
 }
 
 #[tokio::test]
@@ -422,6 +438,13 @@ async fn test_storage_operation_reuses_caller_guard_while_writer_waits() {
             Box::pin(async {
                 sdk.with_storage_operation(Box::pin(async {
                     assert!(sdk.identity_status().await?.is_none());
+                    let counterparty =
+                        PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+                    assert!(sdk
+                        .read_payment_requests(&counterparty, None)
+                        .await?
+                        .identity_status
+                        .is_none());
                     Ok(())
                 }))
                 .await?;
@@ -478,8 +501,12 @@ async fn test_sign_out_waits_for_live_session_operations() {
 }
 
 #[tokio::test]
-async fn test_identity_status_holds_session_gate_until_provider_load_finishes() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+async fn test_identity_reads_hold_session_gate_until_completion_or_cancellation() {
+    use std::{
+        future::Future,
+        sync::atomic::{AtomicBool, Ordering},
+        task::{Context, Poll, Waker},
+    };
     use tokio::sync::Barrier;
 
     struct BlockingSessionProvider {
@@ -509,35 +536,54 @@ async fn test_identity_status_holds_session_gate_until_provider_load_finishes() 
         }
     }
 
-    let entered = Arc::new(Barrier::new(2));
-    let release = Arc::new(Barrier::new(2));
-    let block_next_load = Arc::new(AtomicBool::new(true));
-    let cleared = Arc::new(AtomicBool::new(false));
-    let sdk = Arc::new(PaykitSdk::with_clock(
-        InMemoryStorage::new(),
-        BlockingSessionProvider {
-            entered: Arc::clone(&entered),
-            release: Arc::clone(&release),
-            block_next_load,
-            cleared: Arc::clone(&cleared),
-        },
-        TestPaymentAdapter,
-        PaykitSdkConfig::new("test-app").unwrap(),
-        FixedClock,
-    ));
-    let status_sdk = Arc::clone(&sdk);
-    let status = tokio::spawn(async move { status_sdk.identity_status().await });
-    entered.wait().await;
-    let sign_out_sdk = Arc::clone(&sdk);
-    let sign_out = tokio::spawn(async move { sign_out_sdk.sign_out().await });
-    tokio::task::yield_now().await;
+    for (read_requests, cancel) in [(false, false), (true, false), (true, true)] {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let cleared = Arc::new(AtomicBool::new(false));
+        let sdk = Arc::new(PaykitSdk::with_clock(
+            InMemoryStorage::new(),
+            BlockingSessionProvider {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                block_next_load: Arc::new(AtomicBool::new(true)),
+                cleared: Arc::clone(&cleared),
+            },
+            TestPaymentAdapter,
+            PaykitSdkConfig::new("test-app").unwrap(),
+            FixedClock,
+        ));
+        let read_sdk = Arc::clone(&sdk);
+        let read = tokio::spawn(async move {
+            if read_requests {
+                let counterparty =
+                    PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+                read_sdk.read_payment_requests(&counterparty, None).await?;
+            } else {
+                read_sdk.identity_status().await?;
+            }
+            Ok::<(), PaykitSdkError>(())
+        });
+        entered.wait().await;
+        let mut sign_out = Box::pin(sdk.sign_out());
+        {
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(matches!(
+                sign_out.as_mut().poll(&mut context),
+                Poll::Pending
+            ));
+        }
+        assert!(!cleared.load(Ordering::SeqCst));
 
-    assert!(!cleared.load(Ordering::SeqCst));
-
-    release.wait().await;
-    status.await.unwrap().unwrap();
-    sign_out.await.unwrap().unwrap();
-    assert!(cleared.load(Ordering::SeqCst));
+        if cancel {
+            read.abort();
+            assert!(read.await.unwrap_err().is_cancelled());
+        } else {
+            release.wait().await;
+            read.await.unwrap().unwrap();
+        }
+        sign_out.await.unwrap();
+        assert!(cleared.load(Ordering::SeqCst));
+    }
 }
 
 #[tokio::test]
