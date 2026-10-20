@@ -259,6 +259,11 @@ impl FfiPaykitSdk {
     }
 
     /// Return the latest observed SDK state revision, when one exists.
+    ///
+    /// This call never blocks waiting for in-flight SDK work. With callback
+    /// storage, it returns `SharedStateBusy` with code
+    /// `state_transaction_in_progress` while a state transaction is running on
+    /// this handle; retry later, after that SDK call finishes.
     pub fn state_revision(&self) -> Result<Option<String>, PaykitFfiError> {
         self.storage.state_revision()
     }
