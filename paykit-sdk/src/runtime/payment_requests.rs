@@ -343,6 +343,9 @@ where
         require_unblocked_peer: bool,
     ) -> Result<PaymentRequestRecord> {
         self.with_storage_operation(Box::pin(async {
+            if require_unblocked_peer {
+                self.ensure_peer_not_blocked(&counterparty).await?;
+            }
             let record = self
                 .load_payment_request_record(&counterparty, payment_request_id)
                 .await?;

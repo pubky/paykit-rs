@@ -537,7 +537,7 @@ async fn test_payment_execution_shared_operations() {
         .await
         .unwrap();
     assert_eq!(operations.swap(0, Ordering::SeqCst), 1);
-    assert_eq!(transactions.swap(0, Ordering::SeqCst), 3);
+    assert_eq!(transactions.swap(0, Ordering::SeqCst), 4);
     assert_eq!(commits.swap(0, Ordering::SeqCst), 1);
     let after_claim = pair.bitkit.storage_state().await;
 
@@ -557,13 +557,10 @@ async fn test_payment_execution_shared_operations() {
         .unwrap();
         assert_eq!(repeated, claimed);
         assert_eq!(operations.swap(0, Ordering::SeqCst), 1);
-        assert_eq!(
-            transactions.swap(0, Ordering::SeqCst),
-            if combined { 3 } else { 4 }
-        );
+        assert_eq!(transactions.swap(0, Ordering::SeqCst), 4);
         assert_eq!(commits.swap(0, Ordering::SeqCst), 0);
         // The standalone linked_peers transaction acquires its own remote lease;
-        // all three claim transactions share the single explicit operation.
+        // the guarded claim's transactions share the single explicit operation.
         assert_eq!(pair.bitkit.storage_state().await, after_claim);
     }
     sdk.claim_and_accept_payment_request(pair.bob.public_key.clone(), &request_id, proposal_item)

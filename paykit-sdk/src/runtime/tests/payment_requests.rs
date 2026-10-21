@@ -95,6 +95,37 @@ async fn test_preparation_claim_adds_only_exact_blocked_peer_policy() {
 }
 
 #[tokio::test]
+async fn test_preparation_claim_rejects_blocked_peer_before_registry_access() {
+    for successful_loads in [0, 1] {
+        let (storage, peer, request_id) = preparation_claim_fixture(None).await;
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            FailingPublicStorageProvider {
+                successful_loads: successful_loads.into(),
+            },
+            TestPaymentAdapter,
+            PaykitSdkConfig::new("bitkit").unwrap(),
+            FixedClock,
+        );
+        sdk.block_peer(peer.clone()).await.unwrap();
+        let before = storage.snapshot().unwrap();
+
+        let result = sdk
+            .claim_payment_request_for_preparation(peer, &request_id)
+            .await;
+
+        assert!(
+            matches!(result, Err(PaykitSdkError::Policy { ref context, .. }) if context.contains("is blocked"))
+        );
+        assert_eq!(
+            sdk.pubky.successful_loads.load(Ordering::SeqCst),
+            successful_loads
+        );
+        assert_eq!(storage.snapshot().unwrap(), before);
+    }
+}
+
+#[tokio::test]
 async fn test_preparation_claim_preserves_execution_authority_checks() {
     for failure in [
         "request",
