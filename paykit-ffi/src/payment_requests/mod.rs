@@ -497,6 +497,28 @@ impl FfiPaykitSdk {
             .and_then(FfiPaymentRequestRecord::try_from)
     }
 
+    /// Claim for payment preparation, rejecting an exact blocked counterparty atomically.
+    ///
+    /// Retains execution-claim checks without requiring a ready Encrypted Link.
+    /// Compare the returned proposal and billing-period state with approved terms.
+    /// Does not accept, publish or consume an endpoint; execution checks remain required.
+    /// Session creation, capability scope and key rotation remain caller-owned.
+    pub async fn claim_payment_request_for_preparation(
+        &self,
+        counterparty: String,
+        payment_request_id: String,
+    ) -> Result<FfiPaymentRequestRecord, PaykitFfiError> {
+        let payment_request_id = parse_payment_request_id(payment_request_id)?;
+        self.runtime
+            .claim_payment_request_for_preparation(
+                parse_public_key(counterparty)?,
+                &payment_request_id,
+            )
+            .await
+            .map_err(Into::into)
+            .and_then(FfiPaymentRequestRecord::try_from)
+    }
+
     /// Release this App's unresolved execution claim without rejecting the request.
     pub async fn release_payment_request_execution_claim(
         &self,

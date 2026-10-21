@@ -530,10 +530,42 @@ async fn test_payment_execution_shared_operations() {
     let proposal_item =
         crate::harness::proposal_item(&sdk, &pair.bob.public_key, &request_id).await;
     operations.store(0, Ordering::SeqCst);
-    sdk.claim_payment_request_for_execution(pair.bob.public_key.clone(), &request_id)
+    transactions.store(0, Ordering::SeqCst);
+    commits.store(0, Ordering::SeqCst);
+    let claimed = sdk
+        .claim_payment_request_for_preparation(pair.bob.public_key.clone(), &request_id)
         .await
         .unwrap();
     assert_eq!(operations.swap(0, Ordering::SeqCst), 1);
+    assert_eq!(transactions.swap(0, Ordering::SeqCst), 3);
+    assert_eq!(commits.swap(0, Ordering::SeqCst), 1);
+    let after_claim = pair.bitkit.storage_state().await;
+
+    for combined in [false, true] {
+        if !combined {
+            assert!(sdk.linked_peers().await.unwrap().iter().any(|peer| {
+                peer.counterparty == pair.bob.public_key && peer.state == LinkedPeerState::Linked
+            }));
+        }
+        let repeated = if combined {
+            sdk.claim_payment_request_for_preparation(pair.bob.public_key.clone(), &request_id)
+                .await
+        } else {
+            sdk.claim_payment_request_for_execution(pair.bob.public_key.clone(), &request_id)
+                .await
+        }
+        .unwrap();
+        assert_eq!(repeated, claimed);
+        assert_eq!(operations.swap(0, Ordering::SeqCst), 1);
+        assert_eq!(
+            transactions.swap(0, Ordering::SeqCst),
+            if combined { 3 } else { 4 }
+        );
+        assert_eq!(commits.swap(0, Ordering::SeqCst), 0);
+        // The standalone linked_peers transaction acquires its own remote lease;
+        // all three claim transactions share the single explicit operation.
+        assert_eq!(pair.bitkit.storage_state().await, after_claim);
+    }
     sdk.claim_and_accept_payment_request(pair.bob.public_key.clone(), &request_id, proposal_item)
         .await
         .unwrap();
@@ -554,6 +586,12 @@ async fn test_payment_execution_shared_operations() {
         .unwrap();
     assert_eq!(operations.swap(0, Ordering::SeqCst), 1);
     assert_eq!(proven.payment_proofs.len(), 1);
+    let prepared = sdk
+        .claim_payment_request_for_preparation(pair.bob.public_key.clone(), &request_id)
+        .await
+        .unwrap();
+    assert_eq!(prepared, proven);
+    assert_eq!(operations.swap(0, Ordering::SeqCst), 1);
     let expected_identity = pair.bitkit.sdk.identity_status().await.unwrap();
     transactions.store(0, Ordering::SeqCst);
     commits.store(0, Ordering::SeqCst);
@@ -608,6 +646,64 @@ async fn test_payment_execution_shared_operations() {
     assert_eq!(read.identity_status, expected_identity);
     assert_eq!(read.payment_requests, vec![updated]);
     assert_eq!(pair.bitkit.storage_state().await, committed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_preparation_claim_observes_block_committed_before_acquisition() {
+    let (pair, request) = received_request_with_confirmation().await;
+    let request_id = request_id(&request);
+    assert!(pair
+        .bitkit
+        .sdk
+        .linked_peers()
+        .await
+        .unwrap()
+        .iter()
+        .any(|peer| {
+            peer.counterparty == pair.bob.public_key && peer.state == LinkedPeerState::Linked
+        }));
+    let (blocking_sdk, loaded, resume) = pair.server.paused_sdk();
+    let counterparty = pair.bob.public_key.clone();
+    let blocking = std::thread::spawn(move || {
+        // Keep the synchronous transaction pause off the shared HTTP driver's runtime.
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(blocking_sdk.block_peer(counterparty))
+    });
+    loaded.recv_timeout(TRANSACTION_PAUSE_TIMEOUT).unwrap();
+    let contending = tokio::time::timeout(
+        TRANSACTION_PAUSE_TIMEOUT / 2,
+        pair.bitkit
+            .sdk
+            .claim_payment_request_for_preparation(pair.bob.public_key.clone(), &request_id),
+    )
+    .await;
+    // Release the real remote lease even if the contender unexpectedly succeeds or times out.
+    let resumed = resume.try_send(());
+    let blocked = blocking.join().unwrap();
+    resumed.unwrap();
+    assert_eq!(blocked.unwrap().state, LinkedPeerState::Blocked);
+    assert!(matches!(
+        contending.unwrap(),
+        Err(PaykitSdkError::SharedStateBusy { .. })
+    ));
+    let before = pair.bitkit.storage_state().await;
+    assert!(before.payment_request_execution_claims.is_empty());
+
+    let error = pair
+        .bitkit
+        .sdk
+        .claim_payment_request_for_preparation(pair.bob.public_key.clone(), &request_id)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, PaykitSdkError::Policy { ref context, .. } if context.contains("is blocked"))
+    );
+    assert_eq!(pair.bitkit.storage_state().await, before);
+    assert_no_pending_shared_state_writes(&pair.bitkit.access.session).await;
 }
 
 #[tokio::test]
@@ -787,9 +883,14 @@ async fn test_request_preparation_preserves_confirmation_for_restart() {
 
 #[tokio::test]
 async fn test_rejected_request_actions_preserve_app_revocation() {
-    for (remove_app, claim_and_accept) in
-        [(false, false), (true, false), (false, true), (true, true)]
-    {
+    for (remove_app, action) in [
+        (false, "prepare"),
+        (true, "prepare"),
+        (false, "claim_and_accept"),
+        (true, "claim_and_accept"),
+        (false, "claim_for_preparation"),
+        (true, "claim_for_preparation"),
+    ] {
         let (pair, request) = received_request_with_confirmation().await;
         let request_id = PaymentRequestId::new(request.payment_request_id).unwrap();
         let before = pair.bitkit.storage_state().await;
@@ -818,7 +919,13 @@ async fn test_rejected_request_actions_preserve_app_revocation() {
             .await
             .unwrap();
 
-        let error = if claim_and_accept {
+        let error = if action == "claim_for_preparation" {
+            pair.bitkit
+                .sdk
+                .claim_payment_request_for_preparation(pair.bob.public_key.clone(), &request_id)
+                .await
+                .unwrap_err()
+        } else if action == "claim_and_accept" {
             pair.bitkit
                 .sdk
                 .claim_and_accept_payment_request(
@@ -1243,6 +1350,16 @@ async fn test_shared_storage_operation_keeps_committed_transactions_after_error(
                 pair.bitkit
                     .sdk
                     .read_payment_requests(&pair.bob.public_key, None)
+                    .await,
+                Err(PaykitSdkError::Policy { .. })
+            ));
+            assert!(matches!(
+                pair.bitkit
+                    .sdk
+                    .claim_payment_request_for_preparation(
+                        pair.bob.public_key.clone(),
+                        &PaymentRequestId::new("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+                    )
                     .await,
                 Err(PaykitSdkError::Policy { .. })
             ));
@@ -5108,7 +5225,7 @@ async fn test_independent_apps_claim_and_handoff_one_payment_request() {
     let (bitkit_result, server_result) = tokio::join!(
         pair.bitkit
             .sdk
-            .claim_payment_request_for_execution(pair.bob.public_key.clone(), &request_id),
+            .claim_payment_request_for_preparation(pair.bob.public_key.clone(), &request_id),
         pair.server
             .sdk
             .claim_payment_request_for_execution(pair.bob.public_key.clone(), &request_id),
@@ -5180,7 +5297,7 @@ async fn test_independent_apps_claim_and_handoff_one_payment_request() {
             .expect("Paykit Server should release recurring payment execution");
         pair.bitkit
             .sdk
-            .claim_payment_request_for_execution(pair.bob.public_key.clone(), &request_id)
+            .claim_payment_request_for_preparation(pair.bob.public_key.clone(), &request_id)
             .await
             .expect("Bitkit should claim the released subscription")
     };

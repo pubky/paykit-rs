@@ -314,6 +314,34 @@ where
         counterparty: PubkyPublicKey,
         payment_request_id: &PaymentRequestId,
     ) -> Result<PaymentRequestRecord> {
+        self.claim_payment_request(counterparty, payment_request_id, false)
+            .await
+    }
+
+    /// Claim a received Payment Request after checking the counterparty is not blocked.
+    ///
+    /// The peer check and execution claim use the same fresh transaction. Other
+    /// peer states do not add a link-readiness requirement. All execution-claim
+    /// rules and the returned record match [`Self::claim_payment_request_for_execution`].
+    /// Compare the returned proposal and billing-period state with the approved
+    /// terms before preparing payment. This does not accept, publish or consume
+    /// a private endpoint, and does not replace checks immediately before execution.
+    /// Session creation, capability scope and key rotation remain caller-owned.
+    pub async fn claim_payment_request_for_preparation(
+        &self,
+        counterparty: PubkyPublicKey,
+        payment_request_id: &PaymentRequestId,
+    ) -> Result<PaymentRequestRecord> {
+        self.claim_payment_request(counterparty, payment_request_id, true)
+            .await
+    }
+
+    async fn claim_payment_request(
+        &self,
+        counterparty: PubkyPublicKey,
+        payment_request_id: &PaymentRequestId,
+        require_unblocked_peer: bool,
+    ) -> Result<PaymentRequestRecord> {
         self.with_storage_operation(Box::pin(async {
             let record = self
                 .load_payment_request_record(&counterparty, payment_request_id)
@@ -329,13 +357,37 @@ where
                 "claim Payment Request for execution",
             )
             .await?;
-            claim_payment_request_execution(
-                &self.storage,
-                counterparty,
-                &self.config.app_id,
-                payment_request_id,
-                self.clock.now(),
-            )
+            let now = self.clock.now();
+            if !require_unblocked_peer {
+                return claim_payment_request_execution(
+                    &self.storage,
+                    counterparty,
+                    &self.config.app_id,
+                    payment_request_id,
+                    now,
+                )
+                .await;
+            }
+            self.retry_storage_transaction(|| {
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    if tx.linked_peer(&counterparty).map(|peer| peer.state)
+                        == Some(LinkedPeerState::Blocked)
+                    {
+                        return Err(PaykitSdkError::Policy {
+                            context: format!("counterparty {counterparty} is blocked"),
+                            source: None,
+                        });
+                    }
+                    claim_payment_request_execution_in_transaction(
+                        tx,
+                        &counterparty,
+                        &self.config.app_id,
+                        payment_request_id,
+                        now,
+                    )
+                }
+            })
             .await
         }))
         .await

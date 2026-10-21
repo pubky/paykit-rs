@@ -1851,6 +1851,16 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func claimPaymentRequestForExecution(counterparty: String, paymentRequestId: String) async throws  -> PaymentRequestRecord
 
     /**
+     * Claim for payment preparation, rejecting an exact blocked counterparty atomically.
+     *
+     * Retains execution-claim checks without requiring a ready Encrypted Link.
+     * Compare the returned proposal and billing-period state with approved terms.
+     * Does not accept, publish or consume an endpoint; execution checks remain required.
+     * Session creation, capability scope and key rotation remain caller-owned.
+     */
+    func claimPaymentRequestForPreparation(counterparty: String, paymentRequestId: String) async throws  -> PaymentRequestRecord
+
+    /**
      * Queue an empty Private Payment List for one counterparty.
      */
     func clearPrivatePaymentList(counterparty: String) async throws  -> QueuedPrivateMessage
@@ -3052,6 +3062,31 @@ open func claimPaymentRequestForExecution(counterparty: String, paymentRequestId
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_claim_payment_request_for_execution(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterString.lower(paymentRequestId)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePaymentRequestRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Claim for payment preparation, rejecting an exact blocked counterparty atomically.
+     *
+     * Retains execution-claim checks without requiring a ready Encrypted Link.
+     * Compare the returned proposal and billing-period state with approved terms.
+     * Does not accept, publish or consume an endpoint; execution checks remain required.
+     * Session creation, capability scope and key rotation remain caller-owned.
+     */
+open func claimPaymentRequestForPreparation(counterparty: String, paymentRequestId: String)async throws  -> PaymentRequestRecord  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_claim_payment_request_for_preparation(
                     self.uniffiClonePointer(),
                     FfiConverterString.lower(counterparty),FfiConverterString.lower(paymentRequestId)
                 )
@@ -25889,6 +25924,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_claim_payment_request_for_execution() != 22993) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_claim_payment_request_for_preparation() != 46118) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list() != 56925) {

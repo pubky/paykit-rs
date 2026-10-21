@@ -247,7 +247,13 @@ Common workflows:
   current proposal is a different stream item. Pass the id you displayed, not
   one read just before the call. `claim_payment_request_for_execution` returns
   the record it claimed; compare its `proposal_stream_item_id` with the one you
-  displayed before preparing a payment
+  displayed before preparing a payment. Use `claim_payment_request_for_preparation`
+  when preparation also requires an exact counterparty-not-blocked check: it
+  checks that policy inside the claim transaction, without requiring a ready
+  Encrypted Link or changing acceptance, endpoint consumption or execution
+  checks. Revalidate the returned proposal and recurring billing-period state
+  against the approved terms. The existing execution claim and release APIs
+  retain their behavior
 - list saved Payment Requests with `payment_requests` or `list_payment_requests`;
   all counterparties and filters use one shared-state read, without network intake
 - use `propose_allowance`, `accept_allowance`, `reject_allowance`, and
