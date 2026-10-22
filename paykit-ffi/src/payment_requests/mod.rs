@@ -480,7 +480,10 @@ impl FfiPaykitSdk {
             .and_then(FfiPaymentRequestRecord::try_from)
     }
 
-    /// Claim a received Payment Request before preparing payment execution.
+    /// Claim a received Payment Request with legacy compatibility behavior.
+    ///
+    /// This does not reject blocked peers before App Registry access. New payment
+    /// preparation must use `claimPaymentRequestForPreparation` instead.
     pub async fn claim_payment_request_for_execution(
         &self,
         counterparty: String,
