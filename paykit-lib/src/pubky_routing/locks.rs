@@ -202,7 +202,12 @@ where
         biased;
         error = renewal => {
             return Err(E::from(PaykitError::Transport {
-                context: "Pubky write lock lost; operation outcome is uncertain".into(),
+                context: match error.downcast_ref::<pubky::Error>() {
+                    Some(source) => lock_failure_context(
+                        "Pubky write lock lost; operation outcome is uncertain", source,
+                    ),
+                    None => "Pubky write lock lost; operation outcome is uncertain (renewal timeout)".into(),
+                },
                 source: LockRenewalError(error).into(),
             }));
         }
@@ -210,8 +215,14 @@ where
     };
     // Releasing the lock does not undo a committed operation. A failed unlock
     // leaves a bounded lease, not a reason to repeat a successful mutation.
-    if storage.unlock(&lock).await.is_err() {
-        tracing::warn!("Failed to release Pubky write lock; waiting for expiry");
+    if let Err(error) = storage.unlock(&lock).await {
+        tracing::warn!(
+            "{}",
+            lock_failure_context(
+                "Failed to release Pubky write lock; waiting for expiry",
+                &error
+            )
+        );
     }
     result
 }
@@ -228,14 +239,99 @@ fn retryable_lock_refresh(error: &pubky::Error) -> bool {
 
 fn lock_error(context: &str, source: pubky::Error) -> PaykitError {
     PaykitError::Transport {
-        context: context.into(),
+        context: lock_failure_context(context, &source),
         source: source.into(),
     }
+}
+
+// Only allow-listed categories cross the FFI boundary. Error displays may contain
+// private resource paths, session tokens, or untrusted server response bodies.
+fn lock_failure_context(context: &str, source: &pubky::Error) -> String {
+    use pubky::errors::RequestError;
+    let category = match source {
+        pubky::Error::Request(RequestError::Server { status, .. }) => {
+            return format!("{context} (HTTP {})", status.as_u16());
+        }
+        pubky::Error::Request(RequestError::Transport(error)) if error.is_timeout() => {
+            "request timeout"
+        }
+        pubky::Error::Request(RequestError::Transport(error)) if error.is_connect() => {
+            "connection failure"
+        }
+        pubky::Error::Request(RequestError::Transport(_)) => "transport failure",
+        pubky::Error::Request(RequestError::Validation { .. }) => "invalid request",
+        pubky::Error::Request(RequestError::DecodeJson { .. }) => "invalid response",
+        _ => "Pubky client failure",
+    };
+    format!("{context} ({category})")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_lock_timeout_redacts_request_url() {
+        // Keep the socket open without answering so the real transport reports a timeout.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://{}/private-path?token=secret",
+            listener.local_addr().unwrap()
+        );
+        let source = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(20))
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap_err();
+        let context = lock_failure_context(
+            "acquire Pubky write lock",
+            &pubky::Error::Request(pubky::errors::RequestError::Transport(source)),
+        );
+        assert_eq!(context, "acquire Pubky write lock (request timeout)");
+    }
+
+    #[test]
+    fn test_lock_failure_preserves_status_without_response_body() {
+        for status in [401, 403, 423, 429, 500, 503] {
+            let error = lock_error(
+                "acquire Pubky write lock",
+                pubky::Error::Request(pubky::errors::RequestError::Server {
+                    status: pubky::StatusCode::from_u16(status).unwrap(),
+                    message: "secret-session-token /pub/paykit/private/path".into(),
+                }),
+            );
+            let PaykitError::Transport { context, .. } = error else {
+                panic!("expected transport")
+            };
+            assert_eq!(context, format!("acquire Pubky write lock (HTTP {status})"));
+        }
+    }
+
+    #[test]
+    fn test_lock_failure_redacts_request_and_decode_details() {
+        for request_error in [
+            pubky::errors::RequestError::Validation {
+                message: "private path".into(),
+            },
+            pubky::errors::RequestError::DecodeJson {
+                message: "private payload".into(),
+            },
+        ] {
+            let context = lock_failure_context(
+                "read Pubky resource revision",
+                &pubky::Error::Request(request_error),
+            );
+            assert!(!context.contains("private"));
+            assert!(
+                context == "read Pubky resource revision (invalid request)"
+                    || context == "read Pubky resource revision (invalid response)"
+            );
+        }
+    }
 
     #[test]
     fn test_generation_conflict_requires_fresh_operation() {
