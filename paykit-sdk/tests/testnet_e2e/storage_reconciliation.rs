@@ -2,6 +2,7 @@
 //! response/cancellation boundaries, not GCS's generation-precondition contract.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -26,12 +27,14 @@ enum Fault {
     Reject(http::StatusCode),
     LoseResponse,
     HoldResponse(oneshot::Sender<()>, oneshot::Receiver<()>),
+    HoldLockResponse(oneshot::Sender<()>, oneshot::Receiver<()>),
 }
 
 #[derive(Default)]
 struct Observations {
     writes: Vec<(String, Vec<u8>)>,
     faults: VecDeque<Fault>,
+    lock_timeout_seconds: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -47,20 +50,27 @@ async fn forward(State(proxy): State<Proxy>, request: http::Request<Body>) -> Re
         .await
         .expect("bounded test request");
     let path = parts.uri.path();
-    let fault = {
+    let (fault, lock_timeout_seconds) = {
         let mut observations = proxy.observations.lock().unwrap();
         if parts.method == http::Method::PUT {
             observations.writes.push((path.into(), bytes.to_vec()));
         }
         let read_fault = matches!(observations.faults.front(), Some(Fault::TruncateRead));
-        if path.ends_with(STATE)
-            && ((parts.method == http::Method::PUT && !read_fault)
-                || (parts.method == http::Method::GET && read_fault))
+        let lock_fault = matches!(
+            observations.faults.front(),
+            Some(Fault::HoldLockResponse(..))
+        );
+        let fault = if path.ends_with(STATE)
+            && ((lock_fault && parts.method.as_str() == "LOCK")
+                || (!lock_fault
+                    && ((parts.method == http::Method::PUT && !read_fault)
+                        || (parts.method == http::Method::GET && read_fault))))
         {
             observations.faults.pop_front()
         } else {
             None
-        }
+        };
+        (fault, observations.lock_timeout_seconds)
     };
     if let Some(Fault::Reject(status)) = fault {
         return Response::builder()
@@ -71,6 +81,11 @@ async fn forward(State(proxy): State<Proxy>, request: http::Request<Body>) -> Re
     let mut headers = parts.headers;
     headers.remove(http::header::HOST);
     headers.remove(http::header::CONTENT_LENGTH);
+    if parts.method.as_str() == "LOCK" {
+        if let Some(seconds) = lock_timeout_seconds {
+            headers.insert("timeout", format!("Second-{seconds}").parse().unwrap());
+        }
+    }
     let response = proxy
         .client
         .request(parts.method, format!("{}{}", proxy.upstream, parts.uri))
@@ -99,7 +114,7 @@ async fn forward(State(proxy): State<Proxy>, request: http::Request<Body>) -> Re
                 .body(Body::empty())
                 .unwrap();
         }
-        Some(Fault::HoldResponse(entered, release)) => {
+        Some(Fault::HoldResponse(entered, release) | Fault::HoldLockResponse(entered, release)) => {
             assert!(status.is_success());
             let _ = entered.send(());
             let _ = release.await;
@@ -262,6 +277,102 @@ impl Fixture {
         .await
         .expect("reconciliation must complete within the test deadline")
     }
+}
+
+#[tokio::test]
+async fn test_expired_acquisition_response_never_enters_shared_state_operation() {
+    let fixture = Fixture::new(true).await;
+    fixture.observations.lock().unwrap().lock_timeout_seconds = Some(1);
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    fixture.fault(Fault::HoldLockResponse(entered_tx, release_rx));
+    let invoked = AtomicBool::new(false);
+    let operation = paykit_lib::with_write_lock::<(), paykit_lib::PaykitError, _, _>(
+        &fixture.access.session,
+        STATE,
+        |_| {
+            invoked.store(true, Ordering::SeqCst);
+            async { Ok(()) }
+        },
+    );
+    tokio::pin!(operation);
+    tokio::select! {
+        result = &mut operation => panic!("lock response should be held: {result:?}"),
+        _ = entered_rx => {}
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    release_tx.send(()).unwrap();
+    let error = operation.await.unwrap_err();
+    assert!(!paykit_lib::is_write_conflict(&error));
+    assert!(!invoked.load(Ordering::SeqCst));
+    fixture.observations.lock().unwrap().lock_timeout_seconds = None;
+    fixture.read().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_delayed_renewal_stops_operation_after_confirmed_write() {
+    let fixture = Fixture::new(true).await;
+    fixture.observations.lock().unwrap().lock_timeout_seconds = Some(3);
+    let original = fixture.bytes().await;
+    let writes_before = fixture.observations.lock().unwrap().writes.len();
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = oneshot::channel();
+    let operation_storage = fixture.access.session.storage();
+    let operation_fixture = &fixture;
+    let original_bytes = original.clone();
+    let operation = paykit_lib::with_write_lock::<(), paykit_lib::PaykitError, _, _>(
+        &fixture.access.session,
+        STATE,
+        |lock| async move {
+            operation_storage
+                .put_locked(&lock, original_bytes)
+                .await
+                .unwrap();
+            operation_fixture
+                .observations
+                .lock()
+                .unwrap()
+                .lock_timeout_seconds = Some(6);
+            operation_fixture.fault(Fault::HoldLockResponse(entered_tx, release_rx));
+            resume_rx.await.unwrap();
+            panic!("the operation must not resume after its confirmed lease expires");
+        },
+    );
+    tokio::pin!(operation);
+    tokio::select! {
+        result = &mut operation => panic!("renewal response should be held: {result:?}"),
+        _ = entered_rx => {}
+    }
+    // Resume after the original lease but before the longer renewal would expire.
+    // Accepting that stale response would let the ready continuation run.
+    release_tx.send(()).unwrap();
+    resume_tx.send(()).unwrap();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let error = tokio::time::timeout(Duration::from_secs(1), operation)
+        .await
+        .expect("expired confirmation must stop the operation promptly")
+        .unwrap_err();
+    assert!(!paykit_lib::is_write_conflict(&error));
+    assert_eq!(
+        fixture.observations.lock().unwrap().writes.len(),
+        writes_before + 1
+    );
+    fixture.observations.lock().unwrap().lock_timeout_seconds = None;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match fixture.read().await {
+                Ok(()) => break,
+                Err(paykit_sdk::PaykitSdkError::SharedStateBusy { .. }) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await
+                }
+                Err(error) => panic!("unexpected recovery failure: {error}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fixture.bytes().await, original);
 }
 
 #[tokio::test]
