@@ -31,6 +31,9 @@ tokio = { version = "1", features = ["macros", "time"] }
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
 
+[target.'cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 proptest = "1"
 pubky-noise = { version = "=0.1.0", features = ["test-utils"] }

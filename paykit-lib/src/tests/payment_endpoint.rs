@@ -14,6 +14,99 @@ fn app_capabilities() -> PaykitAppCapabilities {
 }
 
 #[tokio::test]
+async fn test_device_sleep_stops_ready_locked_continuation_without_unlocking() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::Duration;
+    let setup = TestSetup::new().await;
+    let path = format!("{PAYKIT_PATH_PREFIX}sleep-expiry.json");
+    let clock = AtomicU64::new(10);
+    let continued = AtomicBool::new(false);
+    let error = pubky_routing::with_write_lock_clock(
+        &setup.session,
+        &path,
+        Duration::from_secs(6),
+        |_| async {
+            clock.store(17, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            continued.store(true, Ordering::SeqCst);
+            Ok::<(), PaykitError>(())
+        },
+        || Ok(Duration::from_secs(clock.load(Ordering::SeqCst))),
+    )
+    .await
+    .unwrap_err();
+    assert!(!continued.load(Ordering::SeqCst));
+    assert!(
+        !is_write_conflict(&error),
+        "An interrupted operation must be reconciled, not replayed"
+    );
+    // The injected clock models sleep without waiting for the real server lease.
+    // A still-held server lock proves that expiry did not run the normal unlock path.
+    let error = setup
+        .session
+        .storage()
+        .lock(&path, Duration::from_secs(6))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, pubky::Error::Request(pubky::errors::RequestError::Server { status, .. })
+        if status == pubky::StatusCode::LOCKED)
+    );
+}
+
+#[tokio::test]
+async fn test_device_sleep_during_acquisition_never_invokes_operation() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+    let setup = TestSetup::new().await;
+    let invoked = AtomicBool::new(false);
+    let readings = AtomicUsize::new(0);
+    let error = pubky_routing::with_write_lock_clock(
+        &setup.session,
+        &format!("{PAYKIT_PATH_PREFIX}sleep-acquisition.json"),
+        Duration::from_secs(6),
+        |_| {
+            invoked.store(true, Ordering::SeqCst);
+            async { Ok::<(), PaykitError>(()) }
+        },
+        || {
+            Ok(Duration::from_secs(
+                if readings.fetch_add(1, Ordering::SeqCst) == 0 {
+                    10
+                } else {
+                    17
+                },
+            ))
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(!invoked.load(Ordering::SeqCst));
+    assert!(!is_write_conflict(&error));
+}
+
+#[tokio::test]
+async fn test_unavailable_lease_clock_never_invokes_operation() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let setup = TestSetup::new().await;
+    let invoked = AtomicBool::new(false);
+    let error = pubky_routing::with_write_lock_clock(
+        &setup.session,
+        &format!("{PAYKIT_PATH_PREFIX}clock-unavailable.json"),
+        std::time::Duration::from_secs(6),
+        |_| {
+            invoked.store(true, Ordering::SeqCst);
+            async { Ok::<(), PaykitError>(()) }
+        },
+        || Err(std::io::Error::other("fixture clock unavailable")),
+    )
+    .await
+    .unwrap_err();
+    assert!(!invoked.load(Ordering::SeqCst));
+    assert!(!is_write_conflict(&error));
+}
+
+#[tokio::test]
 async fn test_endpoint_repair_and_removal_use_raw_revisions() {
     let setup = TestSetup::new().await;
     let app = app_id();

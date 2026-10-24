@@ -1,4 +1,4 @@
-use std::{future::Future, time::Duration};
+use std::{future::Future, sync::Mutex, task::Poll, time::Duration};
 
 use pubky::{PubkySession, StorageLock};
 
@@ -146,12 +146,28 @@ where
     F: FnOnce(StorageLock) -> Fut,
     Fut: Future<Output = std::result::Result<T, E>>,
 {
+    with_write_lock_clock(session, path, timeout, operation, lease_time).await
+}
+
+pub(crate) async fn with_write_lock_clock<T, E, F, Fut>(
+    session: &PubkySession,
+    path: &str,
+    timeout: Duration,
+    operation: F,
+    now: impl Fn() -> std::io::Result<Duration> + Sync,
+) -> std::result::Result<T, E>
+where
+    E: From<PaykitError>,
+    F: FnOnce(StorageLock) -> Fut,
+    Fut: Future<Output = std::result::Result<T, E>>,
+{
     let storage = session.storage();
     let mut attempt = 1;
-    let (lock, acquired_at) = loop {
+    let (lock, acquired_at, lease_started_at) = loop {
         let requested_at = tokio::time::Instant::now();
+        let lease_started_at = now().map_err(|error| E::from(lost_lock(error.into())))?;
         match storage.lock(path, timeout).await {
-            Ok(lock) => break (lock, requested_at),
+            Ok(lock) => break (lock, requested_at, lease_started_at),
             Err(pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }))
                 if status == pubky::StatusCode::LOCKED
                     && attempt < LOCK_ACQUISITION_MAX_ATTEMPTS =>
@@ -163,6 +179,17 @@ where
         }
     };
     let valid_until = confirmed_lease_deadline(acquired_at, lock.timeout()).map_err(E::from)?;
+    let lease = Mutex::new(
+        LeaseDeadline::new(lease_started_at, lock.timeout())
+            .map_err(|error| E::from(lost_lock(error)))?,
+    );
+    let check_lease = || -> anyhow::Result<()> {
+        lease
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Pubky write lock clock state unavailable"))?
+            .check(now()?)
+    };
+    check_lease().map_err(|error| E::from(lost_lock(error)))?;
     let mut renewed = lock.clone();
     let renewal = async {
         let mut valid_until = valid_until;
@@ -170,6 +197,13 @@ where
             tokio::time::sleep_until(valid_until - renewed.timeout() * 2 / 3).await;
             loop {
                 let requested_at = tokio::time::Instant::now();
+                let lease_started_at = match now() {
+                    Ok(value) => value,
+                    Err(error) => return error.into(),
+                };
+                if let Err(error) = check_lease() {
+                    return error;
+                }
                 if requested_at >= valid_until {
                     return anyhow::anyhow!(
                         "Pubky write lock expired before renewal was confirmed"
@@ -182,6 +216,27 @@ where
                 .await
                 {
                     Ok(Ok(())) if tokio::time::Instant::now() < valid_until => {
+                        // A response cannot revive a lease that expired while the device slept.
+                        if let Err(error) = check_lease() {
+                            return error;
+                        }
+                        let next = match LeaseDeadline::new(lease_started_at, renewed.timeout()) {
+                            Ok(value) => value,
+                            Err(error) => return error,
+                        };
+                        let current_time = match now() {
+                            Ok(value) => value,
+                            Err(error) => return error.into(),
+                        };
+                        if let Err(error) = next.check(current_time) {
+                            return error;
+                        }
+                        match lease.lock() {
+                            Ok(mut deadline) => *deadline = next,
+                            Err(_) => {
+                                return anyhow::anyhow!("Pubky write lock clock state unavailable")
+                            }
+                        }
                         valid_until =
                             match confirmed_lease_deadline(requested_at, renewed.timeout()) {
                                 Ok(deadline) => deadline,
@@ -208,21 +263,18 @@ where
             }
         }
     };
-    let result = tokio::select! {
-        biased;
-        error = renewal => {
-            return Err(E::from(PaykitError::Transport {
-                context: match error.downcast_ref::<pubky::Error>() {
-                    Some(source) => lock_failure_context(
-                        "Pubky write lock lost; operation outcome is uncertain", source,
-                    ),
-                    None => "Pubky write lock lost; operation outcome is uncertain (renewal timeout)".into(),
-                },
-                source: LockRenewalError(error).into(),
-            }));
+    let work = async {
+        tokio::select! {
+            biased;
+            error = renewal => Err(error),
+            result = Box::pin(async { operation(lock.clone()).await }) => Ok(result),
         }
-        result = Box::pin(async { operation(lock.clone()).await }) => result,
     };
+    // Tokio's scheduling clock can stop during native device sleep. Check the
+    // suspend-inclusive lease before every resumed poll, even if renewal's sleep is pending.
+    let result = poll_with_lease(work, check_lease)
+        .await
+        .map_err(|error| E::from(lost_lock(error)))?;
     // Releasing the lock does not undo a committed operation. A failed unlock
     // leaves a bounded lease, not a reason to repeat a successful mutation.
     if let Err(error) = storage.unlock(&lock).await {
@@ -235,6 +287,86 @@ where
         );
     }
     result
+}
+
+fn poll_with_lease<T>(
+    work: impl Future<Output = anyhow::Result<T>>,
+    check: impl Fn() -> anyhow::Result<()>,
+) -> impl Future<Output = anyhow::Result<T>> {
+    // Allocate before returning the future so callers do not embed the lease state machine.
+    let mut work = Box::pin(work);
+    std::future::poll_fn(move |cx| {
+        if let Err(error) = check() {
+            return Poll::Ready(Err(error));
+        }
+        work.as_mut().poll(cx)
+    })
+}
+
+fn lost_lock(error: anyhow::Error) -> PaykitError {
+    PaykitError::Transport {
+        context: match error.downcast_ref::<pubky::Error>() {
+            Some(source) => lock_failure_context(
+                "Pubky write lock lost; operation outcome is uncertain",
+                source,
+            ),
+            None => "Pubky write lock lost; operation outcome is uncertain (lease expired or clock unavailable)".into(),
+        },
+        source: LockRenewalError(error).into(),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LeaseDeadline {
+    started_at: Duration,
+    expires_at: Duration,
+}
+
+impl LeaseDeadline {
+    fn new(started_at: Duration, timeout: Duration) -> anyhow::Result<Self> {
+        Ok(Self {
+            started_at,
+            expires_at: started_at
+                .checked_add(timeout)
+                .ok_or_else(|| anyhow::anyhow!("Pubky write lock deadline overflow"))?,
+        })
+    }
+
+    fn check(self, now: Duration) -> anyhow::Result<()> {
+        if now < self.started_at || now >= self.expires_at {
+            anyhow::bail!("Pubky write lock expired or its clock moved backwards");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn lease_time() -> std::io::Result<Duration> {
+    #[cfg(target_vendor = "apple")]
+    let clock = libc::CLOCK_MONOTONIC_RAW;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let clock = libc::CLOCK_BOOTTIME;
+    let mut value = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // Both clocks advance during system sleep and are independent of wall-clock adjustments.
+    // SAFETY: value points to a valid writable timespec; clock is a platform-defined clock ID.
+    if unsafe { libc::clock_gettime(clock, &mut value) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if value.tv_sec < 0 || !(0..1_000_000_000).contains(&value.tv_nsec) {
+        return Err(std::io::Error::other("invalid lease clock reading"));
+    }
+    Ok(Duration::new(value.tv_sec as u64, value.tv_nsec as u32))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn lease_time() -> std::io::Result<Duration> {
+    // Preserve the existing monotonic behavior on other targets. The explicit
+    // suspend-inclusive guarantee applies to the native platforms mapped above.
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    Ok(START.get_or_init(std::time::Instant::now).elapsed())
 }
 
 fn confirmed_lease_deadline(
@@ -293,6 +425,89 @@ fn lock_failure_context(context: &str, source: &pubky::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_sleep_expiry_stops_a_ready_continuation_before_polling_it() {
+        use std::{cell::Cell, task::Context};
+        let clock = Cell::new(Duration::from_secs(10));
+        let deadline = LeaseDeadline::new(clock.get(), Duration::from_secs(60)).unwrap();
+        let ready = Cell::new(false);
+        let continued = Cell::new(false);
+        let work = async {
+            std::future::poll_fn(|_| {
+                if ready.get() {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+            continued.set(true);
+            Ok(())
+        };
+        let mut guarded = Box::pin(poll_with_lease(work, || deadline.check(clock.get())));
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(guarded.as_mut().poll(&mut cx).is_pending());
+        // Only the lease clock advances: the scheduler's renewal timer is still pending.
+        clock.set(Duration::from_secs(71));
+        ready.set(true);
+        assert!(matches!(
+            guarded.as_mut().poll(&mut cx),
+            Poll::Ready(Err(_))
+        ));
+        assert!(!continued.get());
+    }
+
+    #[test]
+    fn test_lease_response_and_clock_failures_fail_closed() {
+        let deadline =
+            LeaseDeadline::new(Duration::from_secs(10), Duration::from_secs(60)).unwrap();
+        assert!(deadline.check(Duration::from_secs(69)).is_ok());
+        assert!(deadline.check(Duration::from_secs(70)).is_err());
+        assert!(deadline.check(Duration::from_secs(9)).is_err());
+        assert!(LeaseDeadline::new(Duration::MAX, Duration::from_secs(1)).is_err());
+        let continued = std::cell::Cell::new(false);
+        let mut guarded = Box::pin(poll_with_lease(
+            async {
+                continued.set(true);
+                Ok(())
+            },
+            || Err(std::io::Error::other("clock unavailable").into()),
+        ));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(
+            guarded.as_mut().poll(&mut cx),
+            Poll::Ready(Err(_))
+        ));
+        assert!(!continued.get());
+    }
+
+    #[test]
+    fn test_confirmed_renewal_extends_the_guard_before_a_ready_continuation() {
+        let clock = std::cell::Cell::new(Duration::from_secs(10));
+        let deadline =
+            Mutex::new(LeaseDeadline::new(clock.get(), Duration::from_secs(60)).unwrap());
+        clock.set(Duration::from_secs(30));
+        deadline.lock().unwrap().check(clock.get()).unwrap();
+        *deadline.lock().unwrap() =
+            LeaseDeadline::new(clock.get(), Duration::from_secs(60)).unwrap();
+        clock.set(Duration::from_secs(71));
+        let mut guarded = Box::pin(poll_with_lease(async { Ok(42) }, || {
+            deadline.lock().unwrap().check(clock.get())
+        }));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(
+            guarded.as_mut().poll(&mut cx),
+            Poll::Ready(Ok(42))
+        ));
+    }
+
+    #[test]
+    fn test_native_lease_clock_advances() {
+        let before = lease_time().unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        assert!(lease_time().unwrap() > before);
+    }
 
     #[test]
     fn test_delayed_lock_response_cannot_extend_lease_from_receipt_time() {
