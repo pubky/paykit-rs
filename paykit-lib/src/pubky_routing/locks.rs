@@ -162,21 +162,31 @@ where
             Err(source) => return Err(E::from(lock_error("acquire Pubky write lock", source))),
         }
     };
+    let valid_until = confirmed_lease_deadline(acquired_at, lock.timeout()).map_err(E::from)?;
     let mut renewed = lock.clone();
     let renewal = async {
-        let mut valid_until = acquired_at + renewed.timeout();
+        let mut valid_until = valid_until;
         loop {
             tokio::time::sleep_until(valid_until - renewed.timeout() * 2 / 3).await;
             loop {
                 let requested_at = tokio::time::Instant::now();
+                if requested_at >= valid_until {
+                    return anyhow::anyhow!(
+                        "Pubky write lock expired before renewal was confirmed"
+                    );
+                }
                 match tokio::time::timeout_at(
                     valid_until,
                     storage.refresh_lock(&mut renewed, timeout),
                 )
                 .await
                 {
-                    Ok(Ok(())) => {
-                        valid_until = requested_at + renewed.timeout();
+                    Ok(Ok(())) if tokio::time::Instant::now() < valid_until => {
+                        valid_until =
+                            match confirmed_lease_deadline(requested_at, renewed.timeout()) {
+                                Ok(deadline) => deadline,
+                                Err(error) => return anyhow::Error::from(error),
+                            };
                         break;
                     }
                     Ok(Err(error))
@@ -189,7 +199,7 @@ where
                         .await;
                     }
                     Ok(Err(error)) => return anyhow::Error::from(error),
-                    Err(_) => {
+                    Ok(Ok(())) | Err(_) => {
                         return anyhow::anyhow!(
                             "Pubky write lock expired before renewal was confirmed"
                         )
@@ -211,7 +221,7 @@ where
                 source: LockRenewalError(error).into(),
             }));
         }
-        result = operation(lock.clone()) => result,
+        result = Box::pin(async { operation(lock.clone()).await }) => result,
     };
     // Releasing the lock does not undo a committed operation. A failed unlock
     // leaves a bounded lease, not a reason to repeat a successful mutation.
@@ -225,6 +235,20 @@ where
         );
     }
     result
+}
+
+fn confirmed_lease_deadline(
+    requested_at: tokio::time::Instant,
+    timeout: Duration,
+) -> Result<tokio::time::Instant> {
+    let deadline = requested_at + timeout;
+    if tokio::time::Instant::now() >= deadline {
+        return Err(PaykitError::Transport {
+            context: "Pubky write lock response arrived after its safe lease expired".into(),
+            source: anyhow::anyhow!("expired Pubky write lock response"),
+        });
+    }
+    Ok(deadline)
 }
 
 fn retryable_lock_refresh(error: &pubky::Error) -> bool {
@@ -269,6 +293,21 @@ fn lock_failure_context(context: &str, source: &pubky::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_delayed_lock_response_cannot_extend_lease_from_receipt_time() {
+        let requested_at = tokio::time::Instant::now() - Duration::from_secs(30);
+        let timeout = Duration::from_secs(60);
+        assert_eq!(
+            confirmed_lease_deadline(requested_at, timeout).unwrap(),
+            requested_at + timeout
+        );
+        let requested_at = tokio::time::Instant::now() - Duration::from_secs(61);
+        let error = confirmed_lease_deadline(requested_at, timeout).unwrap_err();
+        assert!(!is_write_conflict(&error));
+        assert!(matches!(error, PaykitError::Transport { .. }));
+        assert!(confirmed_lease_deadline(tokio::time::Instant::now(), Duration::ZERO).is_err());
+    }
 
     #[tokio::test]
     async fn test_lock_timeout_redacts_request_url() {
