@@ -7,6 +7,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+
+- `accept_pending_allowance_proposals` in Rust and
+  `acceptPendingAllowanceProposals` in Swift and Kotlin accept up to a limit of
+  one counterparty's pending Allowance proposals in one transaction, with work
+  bounded by a per-link record cap instead of the link's whole history.
+
 ## [0.1.1-rc1] - 2026-10-20
 
 ### Added

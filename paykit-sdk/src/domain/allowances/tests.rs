@@ -1662,3 +1662,408 @@ async fn test_allowance_invalid_location_receipt_reuse_invalidates_history() {
 fn registered_storage() -> InMemoryStorage {
     InMemoryStorage::with_registered_apps([paykit_lib::PaykitAppId::new("bitkit").unwrap()])
 }
+
+fn received_allowee_proposal(role: AllowanceRole) -> AllowanceEvent {
+    AllowanceEvent::Proposal(AllowanceProposal::new(
+        EventId::new_v4(),
+        AllowanceId::new_v4(),
+        role,
+        terms(),
+    ))
+}
+
+/// Persist `count` proposals that make the local identity the Allowee, in
+/// one receive batch, and return their stream item ids oldest first.
+async fn persist_allowee_proposals(
+    storage: &InMemoryStorage,
+    peer: &PubkyPublicKey,
+    count: usize,
+) -> Vec<u64> {
+    persist_private_stream_batch(
+        storage,
+        peer.clone(),
+        (0..count)
+            .map(|_| message(&received_allowee_proposal(AllowanceRole::Allower)))
+            .collect(),
+        None,
+        timestamp(),
+    )
+    .await
+    .unwrap()
+    .stream_item_ids
+}
+
+/// Seed an identity and a ready link whose state passes the validation
+/// shared storage runs before every write.
+async fn seed_validating_link(storage: &InMemoryStorage, peer: &PubkyPublicKey) {
+    use pubky_noise::snow_crypto::{HandshakePattern, NoisePhase, NoiseStep};
+
+    let snapshot = pubky_noise::serializer::PubkyNoiseSessionState {
+        version: pubky_noise::serializer::SESSION_STATE_VERSION,
+        phase: NoisePhase::Transport,
+        pattern: HandshakePattern::PatternXX,
+        initiator: true,
+        ephemeral_secret: [1; 32],
+        static_secret: Some([2; 32]),
+        counter: 3,
+        noise_step: NoiseStep::Final,
+        sub_step_index: 0,
+        handshake_hash: Some([3; 32]),
+        link_id: Some([4; 32]),
+        sending_nonce: 0,
+        receiving_nonce: 0,
+        write_counter: 3,
+        read_counter: 3,
+        endpoint_pubkey: peer.to_public_key().unwrap().to_bytes(),
+        handshake_messages: vec![vec![5; 96]],
+    };
+    let mut link_snapshot = snapshot.serialize();
+    link_snapshot.extend_from_slice(&peer.to_public_key().unwrap().to_bytes());
+    // The Paykit snapshot appends the routing key and empty recovery context.
+    link_snapshot.extend_from_slice(&[0; 72]);
+    let peer = peer.clone();
+    storage
+        .transaction(move |tx| {
+            tx.save_identity_state(crate::IdentityState {
+                public_key: Some(counterparty()),
+                initialized_at: timestamp(),
+            });
+            tx.save_linked_peer(linked_peer(peer.clone(), LinkedPeerState::Linked));
+            tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                counterparty: peer,
+                link_snapshot: Some(link_snapshot),
+                handshake_snapshot: None,
+                handshake_role: None,
+                generation: 1,
+                checkpointed_at: timestamp(),
+            });
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// Proposals that, with their Delivery Confirmations and the message from
+/// [`choose_counterparty`], leave a link one record under the cap.
+const AT_CAP_PROPOSALS: usize = (MAX_PENDING_ALLOWANCE_LINK_RECORDS - 2) / 2;
+
+/// Lift the retained-item limit, as an earlier local Allowance message does.
+async fn choose_counterparty(storage: &InMemoryStorage, peer: &PubkyPublicKey) {
+    queue_outbound(
+        storage,
+        peer.clone(),
+        received_allowee_proposal(AllowanceRole::Allowee),
+        timestamp(),
+    )
+    .await;
+}
+
+fn link_records(storage: &InMemoryStorage, peer: &PubkyPublicKey) -> usize {
+    let state = storage.snapshot().unwrap();
+    state
+        .private_stream_items
+        .iter()
+        .filter(|item| &item.counterparty == peer)
+        .count()
+        + state
+            .outbound_private_messages
+            .iter()
+            .filter(|message| &message.counterparty == peer)
+            .count()
+}
+
+async fn accept_pending(
+    storage: &InMemoryStorage,
+    peer: &PubkyPublicKey,
+    limit: usize,
+) -> crate::Result<PendingAllowanceAcceptance> {
+    accept_pending_allowance_proposals(
+        storage,
+        peer.clone(),
+        paykit_lib::PaykitAppId::new("bitkit").unwrap(),
+        limit,
+        timestamp(),
+    )
+    .await
+}
+
+fn reset_history_counters() {
+    LINK_HISTORY_LOADS.with(|loads| loads.set(0));
+    LINK_HISTORY_RECORDS_READ.with(|read| read.set(0));
+}
+
+fn history_counters() -> (usize, usize) {
+    (
+        LINK_HISTORY_LOADS.with(std::cell::Cell::get),
+        LINK_HISTORY_RECORDS_READ.with(std::cell::Cell::get),
+    )
+}
+
+/// Comparable view of a link's derived Allowances and queued messages, free
+/// of the random Event IDs each Acceptance gets.
+async fn link_outcome(
+    storage: &InMemoryStorage,
+    peer: &PubkyPublicKey,
+) -> (Vec<impl PartialEq + std::fmt::Debug>, Vec<String>) {
+    let mut records = allowance_records(storage, peer)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|record| {
+            (
+                record.allowance_id,
+                record.state,
+                record.history_status,
+                record.local_role,
+                record.proposal_stream_item_id,
+                record.acceptance_outbound_status,
+                record.last_outbound_message_id,
+            )
+        })
+        .collect::<Vec<_>>();
+    records.sort_by(|left, right| left.0.cmp(&right.0));
+    let kinds = storage
+        .snapshot()
+        .unwrap()
+        .outbound_private_messages
+        .into_iter()
+        .filter(|message| &message.counterparty == peer)
+        .map(|message| message.kind)
+        .collect();
+    (records, kinds)
+}
+
+fn accepted(outcome: PendingAllowanceAcceptance) -> (Vec<AllowanceRecord>, bool) {
+    match outcome {
+        PendingAllowanceAcceptance::Accepted {
+            records,
+            more_pending,
+        } => (records, more_pending),
+        other => panic!("expected Acceptances, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_pending_allowance_acceptance_matches_accept_allowance_for_oldest_proposals() {
+    let storage = registered_storage();
+    let peer = counterparty();
+    seed_validating_link(&storage, &peer).await;
+    let proposal_items = persist_allowee_proposals(&storage, &peer, 6).await;
+    // Proposals the local identity may not accept as Allowee stay untouched.
+    persist_inbound(
+        &storage,
+        peer.clone(),
+        vec![received_allowee_proposal(AllowanceRole::Allowee)],
+        timestamp(),
+    )
+    .await;
+    queue_outbound(
+        &storage,
+        peer.clone(),
+        received_allowee_proposal(AllowanceRole::Allower),
+        timestamp(),
+    )
+    .await;
+    let expected = InMemoryStorage::from_state(storage.snapshot().unwrap());
+    let records = allowance_records(&expected, &peer).await.unwrap();
+    for stream_item_id in &proposal_items[..4] {
+        let record = records
+            .iter()
+            .find(|record| record.proposal_stream_item_id == Some(*stream_item_id))
+            .unwrap();
+        enqueue_allowance_response(
+            &expected,
+            peer.clone(),
+            paykit_lib::PaykitAppId::new("bitkit").unwrap(),
+            AllowanceId::new(&record.allowance_id).unwrap(),
+            AllowanceResponse::Acceptance {
+                expected_proposal_stream_item_id: *stream_item_id,
+            },
+            timestamp(),
+        )
+        .await
+        .unwrap();
+    }
+
+    let (first, more_pending) = accepted(accept_pending(&storage, &peer, 4).await.unwrap());
+
+    assert!(more_pending);
+    assert_eq!(
+        first
+            .iter()
+            .map(|record| record.proposal_stream_item_id.unwrap())
+            .collect::<Vec<_>>(),
+        proposal_items[..4]
+    );
+    assert!(first
+        .iter()
+        .all(|record| record.state == AllowanceLifecycleState::Accepted));
+    assert_eq!(
+        link_outcome(&storage, &peer).await,
+        link_outcome(&expected, &peer).await
+    );
+    // The state the call commits passes the validation shared storage runs
+    // before every write.
+    let state = storage.snapshot().unwrap();
+    assert_eq!(
+        crate::storage::decode_storage_state_blob(
+            &crate::storage::encode_storage_state_blob(&state).unwrap()
+        )
+        .unwrap()
+        .outbound_private_messages,
+        state.outbound_private_messages
+    );
+
+    let (rest, more_pending) = accepted(accept_pending(&storage, &peer, 4).await.unwrap());
+    assert!(!more_pending);
+    assert_eq!(
+        rest.iter()
+            .map(|record| record.proposal_stream_item_id.unwrap())
+            .collect::<Vec<_>>(),
+        proposal_items[4..]
+    );
+    assert_eq!(
+        accept_pending(&storage, &peer, 4).await.unwrap(),
+        PendingAllowanceAcceptance::Accepted {
+            records: Vec::new(),
+            more_pending: false,
+        }
+    );
+}
+
+#[tokio::test]
+async fn test_pending_allowance_acceptance_derives_at_cap_history_once_per_call() {
+    let storage = registered_storage();
+    let peer = counterparty();
+    seed_active_link(&storage, peer.clone()).await;
+    choose_counterparty(&storage, &peer).await;
+    let proposal_items = persist_allowee_proposals(&storage, &peer, AT_CAP_PROPOSALS).await;
+    let records_before = link_records(&storage, &peer);
+    assert_eq!(records_before, MAX_PENDING_ALLOWANCE_LINK_RECORDS - 1);
+
+    reset_history_counters();
+    let (records, more_pending) = accepted(accept_pending(&storage, &peer, 4).await.unwrap());
+
+    assert!(more_pending);
+    assert_eq!(records.len(), 4);
+    assert_eq!(records[0].proposal_stream_item_id, Some(proposal_items[0]));
+    // One derivation to select and one to report, whatever `limit` is; the
+    // per-proposal path would derive the link again for every Acceptance.
+    let (loads, records_read) = history_counters();
+    assert_eq!(loads, 2);
+    assert_eq!(records_read, 2 * records_before + 4);
+}
+
+#[tokio::test]
+async fn test_pending_allowance_acceptance_reads_no_history_over_the_link_cap() {
+    let storage = registered_storage();
+    let heavy = counterparty();
+    let other = counterparty();
+    seed_active_link(&storage, heavy.clone()).await;
+    seed_active_link(&storage, other.clone()).await;
+    choose_counterparty(&storage, &heavy).await;
+    persist_allowee_proposals(&storage, &heavy, MAX_PENDING_ALLOWANCE_LINK_RECORDS / 2 + 1).await;
+    let other_proposal = persist_allowee_proposals(&storage, &other, 1).await[0];
+    let heavy_records = link_records(&storage, &heavy);
+    assert!(heavy_records > MAX_PENDING_ALLOWANCE_LINK_RECORDS);
+    let before = storage.snapshot().unwrap().outbound_private_messages;
+
+    reset_history_counters();
+    let outcome = accept_pending(&storage, &heavy, 4).await.unwrap();
+
+    assert_eq!(
+        outcome,
+        PendingAllowanceAcceptance::LinkHistoryTooLarge {
+            link_records: heavy_records,
+        }
+    );
+    assert_eq!(history_counters(), (0, 0));
+    assert_eq!(
+        storage.snapshot().unwrap().outbound_private_messages,
+        before
+    );
+
+    // Another counterparty's intake on the same identity reads only its own link.
+    let other_records = link_records(&storage, &other);
+    let (records, more_pending) = accepted(accept_pending(&storage, &other, 4).await.unwrap());
+    assert!(!more_pending);
+    assert_eq!(records[0].proposal_stream_item_id, Some(other_proposal));
+    assert_eq!(history_counters(), (2, 2 * other_records + 1));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pending_allowance_acceptance_at_the_cap_leaves_identity_work_and_shutdown_bounded() {
+    let storage = std::sync::Arc::new(registered_storage());
+    let heavy = counterparty();
+    let other = counterparty();
+    seed_active_link(&storage, heavy.clone()).await;
+    seed_active_link(&storage, other.clone()).await;
+    choose_counterparty(&storage, &heavy).await;
+    persist_allowee_proposals(&storage, &heavy, AT_CAP_PROPOSALS).await;
+    persist_allowee_proposals(&storage, &other, 1).await;
+
+    // A caller's shutdown deadline: the largest history the call derives is
+    // synchronous work, so both calls must end within it while sharing the
+    // identity's storage.
+    let deadline = std::time::Duration::from_secs(30);
+    let heavy_call = tokio::spawn({
+        let storage = storage.clone();
+        async move { accept_pending(&storage, &heavy, 4).await }
+    });
+    let other_call = tokio::spawn({
+        let storage = storage.clone();
+        async move { accept_pending(&storage, &other, 4).await }
+    });
+    let (heavy_outcome, other_outcome) = tokio::time::timeout(deadline, async {
+        (heavy_call.await.unwrap(), other_call.await.unwrap())
+    })
+    .await
+    .expect("calls ended within the shutdown deadline");
+
+    let (heavy_records, more_pending) = accepted(heavy_outcome.unwrap());
+    assert_eq!(heavy_records.len(), 4);
+    assert!(more_pending);
+    assert_eq!(accepted(other_outcome.unwrap()).0.len(), 1);
+}
+
+#[tokio::test]
+async fn test_pending_allowance_acceptance_requires_ready_link_without_queue_mutation() {
+    for state in [LinkedPeerState::Blocked, LinkedPeerState::RecoveryRequired] {
+        let storage = registered_storage();
+        let peer = counterparty();
+        seed_active_link(&storage, peer.clone()).await;
+        persist_allowee_proposals(&storage, &peer, 2).await;
+        storage
+            .transaction({
+                let peer = peer.clone();
+                move |tx| {
+                    tx.save_linked_peer(linked_peer(peer, state));
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let before = storage.snapshot().unwrap().outbound_private_messages;
+        let single = enqueue_allowance_acceptance(
+            &storage,
+            peer.clone(),
+            paykit_lib::PaykitAppId::new("bitkit").unwrap(),
+            AllowanceId::new(&allowance_records(&storage, &peer).await.unwrap()[0].allowance_id)
+                .unwrap(),
+            timestamp(),
+        )
+        .await
+        .unwrap_err();
+
+        let pending = accept_pending(&storage, &peer, 4).await.unwrap_err();
+
+        assert_eq!(
+            std::mem::discriminant(&pending),
+            std::mem::discriminant(&single)
+        );
+        assert_eq!(
+            storage.snapshot().unwrap().outbound_private_messages,
+            before
+        );
+    }
+}

@@ -55,6 +55,7 @@ PaymentConversionQuoteRecord
 PaymentRequestAmount
 PaymentRequestRecurrence
 AllowanceRecord
+PendingAllowanceAcceptance
 LinkedPeerRecord
 PrivatePaymentListEndpoint
 PrivatePaymentListView

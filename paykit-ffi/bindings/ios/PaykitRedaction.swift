@@ -293,6 +293,11 @@ extension AllowanceRecord: CustomStringConvertible, CustomDebugStringConvertible
     public var debugDescription: String { description }
 }
 
+extension PendingAllowanceAcceptance: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PendingAllowanceAcceptance(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
 extension LinkedPeerRecord: CustomStringConvertible, CustomDebugStringConvertible {
     public var description: String { "LinkedPeerRecord(<redacted>)" }
     public var debugDescription: String { description }

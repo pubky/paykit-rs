@@ -38,6 +38,17 @@ internal suspend fun compileAllowanceBindingsSurface(
         terms,
     )
     val accepted: AllowanceRecord = sdk.acceptAllowance(counterparty, allowanceId, 1uL)
+    val pending: PendingAllowanceAcceptance = sdk.acceptPendingAllowanceProposals(counterparty, 4u)
+    when (pending) {
+        is PendingAllowanceAcceptance.Accepted -> {
+            val records: List<AllowanceRecord> = pending.records
+            val morePending: Boolean = pending.morePending
+        }
+        is PendingAllowanceAcceptance.LinkHistoryTooLarge -> {
+            val linkRecords: ULong = pending.linkRecords
+        }
+        PendingAllowanceAcceptance.Unknown -> Unit
+    }
     val rejected: AllowanceRecord = sdk.rejectAllowance(counterparty, allowanceId)
     val ended: AllowanceRecord = sdk.endAllowance(counterparty, allowanceId)
     val proof = PrivateJsonObject(text = "{}")

@@ -32,6 +32,6 @@ perl -0pi -e '
         s/(public data class \Q$type\E \(.*?\n\)[^{\n]*\{\n)(.*?)(    public companion object)/$1$2$override$3/gs;
         my $sealed_override = "    final override fun toString(): kotlin.String = \"${type}(<redacted>)\"\n\n";
         s/\Q$sealed_override\E//g;
-        s/(public sealed class \Q$type\E \{\n)/$1$sealed_override/g;
+        s/(public sealed class \Q$type\E(?:: [^{\n]*)? *\{\n)/$1$sealed_override/g;
     }
 ' "$@"

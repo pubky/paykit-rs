@@ -1784,6 +1784,18 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func acceptPaymentRequestAutomatically(scope: PaymentRequestScope, selection: AllowanceSelectionInput, checks: PaymentExecutionChecks) async throws  -> AllowanceAssociationRecord
 
     /**
+     * Accept up to `limit` pending proposals from one exact counterparty.
+     *
+     * Pending proposals are received proposals that make the local identity
+     * the Allowee, are `Proposed`, and have `Consistent` history. They are
+     * accepted oldest first, each with the same checks as `accept_allowance`,
+     * in one durable transaction, without deriving the link's history once
+     * per proposal. A link with too large a history returns
+     * `LinkHistoryTooLarge` without reading it.
+     */
+    func acceptPendingAllowanceProposals(counterparty: String, limit: UInt32) async throws  -> PendingAllowanceAcceptance
+
+    /**
      * Return received Payment Requests that still need a payer response.
      *
      * A request's required Paykit App constrains the payee endpoint, not the
@@ -2828,6 +2840,33 @@ open func acceptPaymentRequestAutomatically(scope: PaymentRequestScope, selectio
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeAllowanceAssociationRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Accept up to `limit` pending proposals from one exact counterparty.
+     *
+     * Pending proposals are received proposals that make the local identity
+     * the Allowee, are `Proposed`, and have `Consistent` history. They are
+     * accepted oldest first, each with the same checks as `accept_allowance`,
+     * in one durable transaction, without deriving the link's history once
+     * per proposal. A link with too large a history returns
+     * `LinkHistoryTooLarge` without reading it.
+     */
+open func acceptPendingAllowanceProposals(counterparty: String, limit: UInt32)async throws  -> PendingAllowanceAcceptance  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_accept_pending_allowance_proposals(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterUInt32.lower(limit)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePendingAllowanceAcceptance_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -21541,6 +21580,109 @@ extension PaymentRequestLocalRole: Codable {}
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * Outcome of accepting one link's pending Allowance proposals.
+ */
+
+public enum PendingAllowanceAcceptance {
+
+    /**
+     * Acceptances queued in this call, oldest proposal first.
+     */
+    case accepted(
+        /**
+         * Derived records after the Acceptances were queued.
+         */records: [AllowanceRecord],
+        /**
+         * Whether pending proposals beyond the requested limit remain.
+         */morePending: Bool
+    )
+    /**
+     * The link holds more records than the SDK reads for this operation. Its
+     * history was not read and nothing was accepted.
+     */
+    case linkHistoryTooLarge(
+        /**
+         * Inbound and outbound records the link holds.
+         */linkRecords: UInt64
+    )
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    case unknown
+}
+
+
+#if compiler(>=6)
+extension PendingAllowanceAcceptance: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePendingAllowanceAcceptance: FfiConverterRustBuffer {
+    typealias SwiftType = PendingAllowanceAcceptance
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PendingAllowanceAcceptance {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .accepted(records: try FfiConverterSequenceTypeAllowanceRecord.read(from: &buf), morePending: try FfiConverterBool.read(from: &buf)
+        )
+
+        case 2: return .linkHistoryTooLarge(linkRecords: try FfiConverterUInt64.read(from: &buf)
+        )
+
+        case 3: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PendingAllowanceAcceptance, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .accepted(records,morePending):
+            writeInt(&buf, Int32(1))
+            FfiConverterSequenceTypeAllowanceRecord.write(records, into: &buf)
+            FfiConverterBool.write(morePending, into: &buf)
+
+
+        case let .linkHistoryTooLarge(linkRecords):
+            writeInt(&buf, Int32(2))
+            FfiConverterUInt64.write(linkRecords, into: &buf)
+
+
+        case .unknown:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePendingAllowanceAcceptance_lift(_ buf: RustBuffer) throws -> PendingAllowanceAcceptance {
+    return try FfiConverterTypePendingAllowanceAcceptance.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePendingAllowanceAcceptance_lower(_ value: PendingAllowanceAcceptance) -> RustBuffer {
+    return FfiConverterTypePendingAllowanceAcceptance.lower(value)
+}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * Encrypted Link and Private Payment List state observed during resolution.
  */
 
@@ -25856,6 +25998,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request_automatically() != 49289) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_pending_allowance_proposals() != 63256) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_actionable_received_payment_requests() != 36729) {
