@@ -6,6 +6,8 @@ use chrono::{DateTime, Utc};
 mod compaction;
 pub(crate) use compaction::compact_received_private_payment_lists;
 mod in_memory;
+#[cfg(test)]
+pub(crate) use in_memory::LINK_RECORDS_LOADED;
 mod pubky_shared;
 mod queue;
 mod records;
@@ -579,6 +581,14 @@ pub trait StorageTransaction {
         counterparty: &PubkyPublicKey,
     ) -> Vec<OutboundPrivateMessageRecord>;
 
+    /// Count all outbound private messages for one counterparty.
+    ///
+    /// Adapters should count without loading the records, so a caller can
+    /// refuse a history before paying for its size.
+    fn outbound_private_message_count(&self, counterparty: &PubkyPublicKey) -> usize {
+        self.outbound_private_messages(counterparty).len()
+    }
+
     /// Claim the next retryable outbound private message for sending.
     ///
     /// Event Messages are claimed FIFO. Private Payment Lists are Latest-State
@@ -615,6 +625,14 @@ pub trait StorageTransaction {
 
     /// List private stream items for a counterparty.
     fn private_stream_items(&self, counterparty: &PubkyPublicKey) -> Vec<PrivateStreamItemRecord>;
+
+    /// Count private stream items for a counterparty.
+    ///
+    /// Adapters should count without loading the records, so a caller can
+    /// refuse a history before paying for its size.
+    fn private_stream_item_count(&self, counterparty: &PubkyPublicKey) -> usize {
+        self.private_stream_items(counterparty).len()
+    }
 
     /// Load an Event Message dedupe record.
     fn event_dedup_record(

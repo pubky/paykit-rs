@@ -87,6 +87,14 @@ impl StorageAdapter for InMemoryStorage {
     }
 }
 
+// Counts link records copied out of state, so tests can prove a call refused
+// a history without loading it.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LINK_RECORDS_LOADED: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// Run one logical SDK storage transaction against an owned storage state.
 pub fn run_storage_state_transaction(
     state: StorageState,
@@ -487,7 +495,17 @@ impl StorageTransaction for StorageStateTransaction {
             .cloned()
             .collect::<Vec<_>>();
         messages.sort_by_key(|message| message.outbound_message_id);
+        #[cfg(test)]
+        LINK_RECORDS_LOADED.with(|loaded| loaded.set(loaded.get() + messages.len()));
         messages
+    }
+
+    fn outbound_private_message_count(&self, counterparty: &PubkyPublicKey) -> usize {
+        self.state
+            .outbound_private_messages
+            .iter()
+            .filter(|message| &message.counterparty == counterparty)
+            .count()
     }
 
     fn outbound_private_messages(
@@ -579,12 +597,24 @@ impl StorageTransaction for StorageStateTransaction {
     }
 
     fn private_stream_items(&self, counterparty: &PubkyPublicKey) -> Vec<PrivateStreamItemRecord> {
-        self.state
+        let items = self
+            .state
             .private_stream_items
             .iter()
             .filter(|item| &item.counterparty == counterparty)
             .cloned()
-            .collect()
+            .collect::<Vec<_>>();
+        #[cfg(test)]
+        LINK_RECORDS_LOADED.with(|loaded| loaded.set(loaded.get() + items.len()));
+        items
+    }
+
+    fn private_stream_item_count(&self, counterparty: &PubkyPublicKey) -> usize {
+        self.state
+            .private_stream_items
+            .iter()
+            .filter(|item| &item.counterparty == counterparty)
+            .count()
     }
 
     fn event_dedup_record(

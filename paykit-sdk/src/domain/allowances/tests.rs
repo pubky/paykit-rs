@@ -1790,6 +1790,11 @@ async fn accept_pending(
 fn reset_history_counters() {
     LINK_HISTORY_LOADS.with(|loads| loads.set(0));
     LINK_HISTORY_RECORDS_READ.with(|read| read.set(0));
+    crate::storage::LINK_RECORDS_LOADED.with(|loaded| loaded.set(0));
+}
+
+fn link_records_loaded() -> usize {
+    crate::storage::LINK_RECORDS_LOADED.with(std::cell::Cell::get)
 }
 
 fn history_counters() -> (usize, usize) {
@@ -1978,6 +1983,8 @@ async fn test_pending_allowance_acceptance_reads_no_history_over_the_link_cap() 
         }
     );
     assert_eq!(history_counters(), (0, 0));
+    // The cap is checked on counts, so no record of the link was copied.
+    assert_eq!(link_records_loaded(), 0);
     assert_eq!(
         storage.snapshot().unwrap().outbound_private_messages,
         before

@@ -69,20 +69,19 @@ impl AllowanceLinkHistory {
     /// Load link history only when the link holds at most `max_records`
     /// inbound and outbound records, otherwise return how many it holds.
     ///
-    /// The count reads stored record lengths only, so a link over the cap costs
-    /// no payload parsing.
+    /// The cap is checked on record counts before any record is loaded, so a
+    /// link over the cap costs no copying or payload parsing.
     pub(super) fn load_at_most(
         tx: &dyn StorageTransaction,
         counterparty: &PubkyPublicKey,
         max_records: usize,
     ) -> std::result::Result<Self, usize> {
-        let items = tx.private_stream_items(counterparty);
-        let outbound = tx.outbound_private_messages(counterparty);
-        let records = items.len() + outbound.len();
+        let records = tx.private_stream_item_count(counterparty)
+            + tx.outbound_private_message_count(counterparty);
         if records > max_records {
             return Err(records);
         }
-        Ok(Self::from_records(tx, counterparty, items, outbound))
+        Ok(Self::load(tx, counterparty))
     }
 
     fn from_records(
