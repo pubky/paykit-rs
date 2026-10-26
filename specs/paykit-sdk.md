@@ -1382,9 +1382,15 @@ the `proposal_stream_item_id` of the record whose terms were approved, and the
 SDK MUST refuse, in the transaction that queues the Acceptance, when the
 current proposal for that id is a different stream item. A caller passes the id
 it displayed, not one it read just before the call.
-`claim_payment_request_for_execution` takes no such argument: it returns the
-record it claimed, and an app compares that record's `proposal_stream_item_id`
-with the one it displayed before it prepares a payment.
+For payment preparation, callers MUST use `claim_payment_request_for_preparation`
+(FFI `claimPaymentRequestForPreparation`). It rejects blocked counterparties
+before App Registry access and rechecks that policy atomically with the claim.
+It takes no expected proposal argument: it returns the record it claimed. Before
+preparing payment, compare that record's `proposal_stream_item_id` and applicable
+Billing Period state with the approved terms. This does not replace fresh
+acceptance, authorization or execution checks. The legacy
+`claim_payment_request_for_execution` remains for compatibility; it does not
+provide the blocked-peer guard and is not the preparation API.
 `accept_payment_request_automatically` needs accepted Allowance authority,
 which is payment history, so its counterparty cannot have been forgotten. A
 backup exported before the call still contains the forgotten history and
