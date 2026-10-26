@@ -245,9 +245,15 @@ Common workflows:
   `claim_and_accept_payment_request` take the `proposal_stream_item_id` of the
   record whose terms were approved and are refused with `Policy` when the
   current proposal is a different stream item. Pass the id you displayed, not
-  one read just before the call. `claim_payment_request_for_execution` returns
-  the record it claimed; compare its `proposal_stream_item_id` with the one you
-  displayed before preparing a payment
+  one read just before the call. Before preparing a payment, use
+  `claim_payment_request_for_preparation`. It rejects blocked counterparties
+  before App Registry access and rechecks that policy atomically with the claim,
+  without requiring a ready Encrypted Link or changing acceptance, endpoint
+  consumption or execution checks. Compare the returned `proposal_stream_item_id`
+  and applicable Billing Period state with the approved terms. The legacy
+  `claim_payment_request_for_execution` remains for compatibility without this
+  blocked-peer guard; use the guarded preparation API for new preparation. The
+  release API retains its behavior
 - list saved Payment Requests with `payment_requests` or `list_payment_requests`;
   all counterparties and filters use one shared-state read, without network intake
 - use `propose_allowance`, `accept_allowance`, `reject_allowance`, and
@@ -407,8 +413,9 @@ The SDK implements this durable coordination through the following workflow:
 2. Inspect `evaluate_allowance_candidates`, then persist a choice with
    `select_allowance` or atomically select and queue ordinary Acceptance through
    `accept_payment_request_automatically`. Claim the request for this app with
-   `claim_payment_request_for_execution` before accepting it. Acceptance reserves
-   no capacity.
+   `claim_payment_request_for_preparation` before preparing or accepting it;
+   revalidate the returned proposal and applicable Billing Period against the
+   selected terms. Acceptance reserves no capacity.
 3. Call `reserve_automatic_payment` for an occurrence and expected association
    revision, or `reserve_manual_payment` for an explicitly authorized manual
    payment. Both use the same scoped exclusion key.

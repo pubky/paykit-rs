@@ -114,9 +114,14 @@ identities run receive and outbound workers, including Delivery Confirmations.
    again; resume durable outbound work with original IDs/payloads.
 2. Payer: query `actionable_received_payment_requests()` or
    `list_payment_requests(filter)`. Claim with
-   `claim_payment_request_for_execution(counterparty, &payment_request_id)`
-   before payment preparation when reserving work early; shared claims coordinate
-   apps on the identity. Once terms and consent are checked, use
+   `claim_payment_request_for_preparation(counterparty, &payment_request_id)`
+   (FFI `claimPaymentRequestForPreparation`) before payment preparation; shared
+   claims coordinate apps on the identity. It rejects blocked counterparties before
+   App Registry access and rechecks that policy atomically with the claim. Compare
+   the returned proposal and applicable Billing Period with the approved terms
+   before preparing payment. The legacy `claim_payment_request_for_execution`
+   remains for compatibility and does not provide this blocked-peer guard.
+   Once terms and consent are checked, use
    `claim_and_accept_payment_request` (FFI `claimAndAcceptPaymentRequest`) when
    claim and Acceptance can happen together. It also accepts an existing claim
    by this App, never one owned by another App. Success durably queues Acceptance,

@@ -302,7 +302,10 @@ where
         .await
     }
 
-    /// Claim a received Payment Request before beginning payment preparation.
+    /// Claim a received Payment Request with legacy compatibility behavior.
+    ///
+    /// This does not reject blocked peers before App Registry access. New payment
+    /// preparation must use [`Self::claim_payment_request_for_preparation`].
     ///
     /// The shared claim hides the work from other local Paykit Apps. It remains
     /// through acceptance and may be explicitly released while payment remains
@@ -314,7 +317,38 @@ where
         counterparty: PubkyPublicKey,
         payment_request_id: &PaymentRequestId,
     ) -> Result<PaymentRequestRecord> {
+        self.claim_payment_request(counterparty, payment_request_id, false)
+            .await
+    }
+
+    /// Claim a received Payment Request before preparation, rejecting blocked peers.
+    ///
+    /// The peer check and execution claim use the same fresh transaction. Other
+    /// peer states do not add a link-readiness requirement. All execution-claim
+    /// rules and the returned record match [`Self::claim_payment_request_for_execution`].
+    /// Compare the returned proposal and billing-period state with the approved
+    /// terms before preparing payment. This does not accept, publish or consume
+    /// a private endpoint, and does not replace checks immediately before execution.
+    /// Session creation, capability scope and key rotation remain caller-owned.
+    pub async fn claim_payment_request_for_preparation(
+        &self,
+        counterparty: PubkyPublicKey,
+        payment_request_id: &PaymentRequestId,
+    ) -> Result<PaymentRequestRecord> {
+        self.claim_payment_request(counterparty, payment_request_id, true)
+            .await
+    }
+
+    async fn claim_payment_request(
+        &self,
+        counterparty: PubkyPublicKey,
+        payment_request_id: &PaymentRequestId,
+        require_unblocked_peer: bool,
+    ) -> Result<PaymentRequestRecord> {
         self.with_storage_operation(Box::pin(async {
+            if require_unblocked_peer {
+                self.ensure_peer_not_blocked(&counterparty).await?;
+            }
             let record = self
                 .load_payment_request_record(&counterparty, payment_request_id)
                 .await?;
@@ -329,13 +363,37 @@ where
                 "claim Payment Request for execution",
             )
             .await?;
-            claim_payment_request_execution(
-                &self.storage,
-                counterparty,
-                &self.config.app_id,
-                payment_request_id,
-                self.clock.now(),
-            )
+            let now = self.clock.now();
+            if !require_unblocked_peer {
+                return claim_payment_request_execution(
+                    &self.storage,
+                    counterparty,
+                    &self.config.app_id,
+                    payment_request_id,
+                    now,
+                )
+                .await;
+            }
+            self.retry_storage_transaction(|| {
+                let counterparty = counterparty.clone();
+                move |tx| {
+                    if tx.linked_peer(&counterparty).map(|peer| peer.state)
+                        == Some(LinkedPeerState::Blocked)
+                    {
+                        return Err(PaykitSdkError::Policy {
+                            context: format!("counterparty {counterparty} is blocked"),
+                            source: None,
+                        });
+                    }
+                    claim_payment_request_execution_in_transaction(
+                        tx,
+                        &counterparty,
+                        &self.config.app_id,
+                        payment_request_id,
+                        now,
+                    )
+                }
+            })
             .await
         }))
         .await
@@ -424,8 +482,9 @@ where
     /// queued.
     ///
     /// An existing claim must belong to this App. Callers that reserve work during
-    /// preparation should still use [`Self::claim_payment_request_for_execution`]
-    /// before preparing the payment. Success durably queues acceptance, not delivery;
+    /// preparation should use [`Self::claim_payment_request_for_preparation`] and
+    /// revalidate its returned proposal and applicable Billing Period against the
+    /// approved terms before preparing payment. Success durably queues acceptance, not delivery;
     /// accounting callers must still reserve payment and obtain a fresh handoff.
     pub async fn claim_and_accept_payment_request(
         &self,

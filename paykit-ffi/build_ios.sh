@@ -74,6 +74,7 @@ xcrun --sdk iphonesimulator swiftc \
     "$IOS_BINDINGS_DIR/PaykitRedaction.swift" \
     ./src/swift/AllowanceBindingsCompile.swift \
     ./src/swift/PaymentConversionBindingsCompile.swift \
+    ./src/swift/PaymentRequestPreparationBindingsCompile.swift \
     ./src/swift/PrivateMessageSchedulingBindingsCompile.swift \
     || { echo "Failed to type-check generated Swift bindings"; exit 1; }
 
