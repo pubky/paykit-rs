@@ -38,5 +38,5 @@ libc = "0.2"
 proptest = "1"
 pubky-noise = { version = "=0.1.0", features = ["test-utils"] }
 pubky-testnet = { version = "0.16.2", features = ["docker-postgres"] }
-tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-subscriber = "0.3"

@@ -14,6 +14,64 @@ fn app_capabilities() -> PaykitAppCapabilities {
 }
 
 #[tokio::test]
+async fn test_silent_device_resume_renews_pending_operation() {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let setup = TestSetup::new().await;
+    let path = format!("{PAYKIT_PATH_PREFIX}silent-resume-renewal.json");
+    let start = Instant::now();
+    let offset = Arc::new(AtomicU64::new(0));
+    let callbacks = Arc::new(AtomicUsize::new(0));
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (continue_tx, continue_rx) = tokio::sync::oneshot::channel();
+    let worker_session = setup.session.clone();
+    let worker_path = path.clone();
+    let worker_offset = offset.clone();
+    let worker_callbacks = callbacks.clone();
+    let worker = tokio::spawn(async move {
+        let storage = worker_session.storage();
+        pubky_routing::with_write_lock_clock(
+            &worker_session,
+            &worker_path,
+            Duration::from_secs(60),
+            |lock| async move {
+                worker_callbacks.fetch_add(1, Ordering::SeqCst);
+                ready_tx.send(()).unwrap();
+                // Nothing in this operation wakes the lock future during the clock jump.
+                continue_rx.await.unwrap();
+                storage
+                    .put_locked(&lock, "silent resume renewed")
+                    .await
+                    .unwrap();
+                Ok::<(), PaykitError>(())
+            },
+            || Ok(start.elapsed() + Duration::from_secs(worker_offset.load(Ordering::SeqCst))),
+        )
+        .await
+    });
+    ready_rx.await.unwrap();
+    offset.store(50, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    continue_tx.send(()).unwrap();
+    worker.await.unwrap().unwrap();
+    assert_eq!(callbacks.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        setup
+            .session
+            .storage()
+            .get(&path)
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+        "silent resume renewed"
+    );
+}
+
+#[tokio::test]
 async fn test_device_resume_renews_before_scheduler_timer() {
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};

@@ -401,22 +401,31 @@ async fn wait_for_renewal(
     let renew_at = valid_until
         .checked_sub(remaining_after_renewal)
         .ok_or_else(|| anyhow::anyhow!("Pubky write lock deadline overflow"))?;
+    // A suspended runtime cannot execute renewal. Once it runs again, silent
+    // operations still need a bounded native-clock check without an operation wake.
+    let interval = Duration::from_secs(1);
+    let first_check = tokio::time::Instant::now()
+        .checked_add(interval)
+        .ok_or_else(|| anyhow::anyhow!("Pubky write lock deadline overflow"))?;
+    let mut clock_checks = tokio::time::interval_at(first_check, interval);
+    clock_checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             // Either monotonic clock may make renewal due. A ready normal timer
             // is sufficient; it must not spin waiting for a later native reading.
             _ = tokio::time::sleep_until(renew_at) => return Ok(()),
-            _ = wakeup.notified() => {
-                let current_time = now()?;
-                let deadline = lease.lock()
-                    .map_err(|_| anyhow::anyhow!("Pubky write lock clock state unavailable"))?;
-                deadline.check(current_time)?;
-                if current_time >= deadline.renew_at {
-                    return Ok(());
-                }
-                // A prior generation's stored permit cannot trigger another refresh.
-            }
+            _ = clock_checks.tick() => {},
+            _ = wakeup.notified() => {},
         }
+        let current_time = now()?;
+        let deadline = lease
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Pubky write lock clock state unavailable"))?;
+        deadline.check(current_time)?;
+        if current_time >= deadline.renew_at {
+            return Ok(());
+        }
+        // A prior generation's stored permit cannot trigger another refresh.
     }
 }
 
@@ -530,6 +539,85 @@ fn lock_failure_context(context: &str, source: &pubky::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn test_silent_resume_rechecks_native_clock_without_operation_wakeup() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        let clock = Arc::new(AtomicU64::new(0));
+        let worker_clock = clock.clone();
+        let waiting = tokio::spawn(async move {
+            let lease =
+                Mutex::new(LeaseDeadline::new(Duration::ZERO, Duration::from_secs(60)).unwrap());
+            wait_for_renewal(
+                &lease,
+                tokio::time::Instant::now() + Duration::from_secs(54),
+                &|| Ok(Duration::from_secs(worker_clock.load(Ordering::SeqCst))),
+                &Notify::new(),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        clock.store(44, Ordering::SeqCst);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            waiting.is_finished(),
+            "silent work must not wait for the old scheduler renewal point"
+        );
+        waiting.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_silent_expired_resume_fails_before_refresh() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        let clock = Arc::new(AtomicU64::new(0));
+        let worker_clock = clock.clone();
+        let waiting = tokio::spawn(async move {
+            let lease =
+                Mutex::new(LeaseDeadline::new(Duration::ZERO, Duration::from_secs(60)).unwrap());
+            wait_for_renewal(
+                &lease,
+                tokio::time::Instant::now() + Duration::from_secs(54),
+                &|| Ok(Duration::from_secs(worker_clock.load(Ordering::SeqCst))),
+                &Notify::new(),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        clock.store(54, Ordering::SeqCst);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            waiting.is_finished(),
+            "expired silent work must be noticed on the bounded tick"
+        );
+        assert!(waiting.await.unwrap().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_silent_clock_ticks_do_not_renew_an_early_lease() {
+        let waiting = tokio::spawn(async move {
+            let lease =
+                Mutex::new(LeaseDeadline::new(Duration::ZERO, Duration::from_secs(60)).unwrap());
+            wait_for_renewal(
+                &lease,
+                tokio::time::Instant::now() + Duration::from_secs(54),
+                &|| Ok(Duration::ZERO),
+                &Notify::new(),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        waiting.abort();
+        assert!(waiting.await.unwrap_err().is_cancelled());
+    }
 
     #[test]
     fn test_resume_notification_is_once_per_confirmed_lease() {
