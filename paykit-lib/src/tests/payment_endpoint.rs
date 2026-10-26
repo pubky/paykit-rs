@@ -14,6 +14,70 @@ fn app_capabilities() -> PaykitAppCapabilities {
 }
 
 #[tokio::test]
+async fn test_acquisition_clock_rejection_releases_unstarted_operation() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    let setup = TestSetup::new().await;
+    for rejection in [
+        "overflow",
+        "unavailable",
+        "expired",
+        "poll-unavailable",
+        "poll-expired",
+        "renewal-unavailable",
+    ] {
+        let path = format!("{PAYKIT_PATH_PREFIX}acquisition-{rejection}.json");
+        let readings = AtomicUsize::new(0);
+        let invoked = AtomicBool::new(false);
+        let error = pubky_routing::with_write_lock_clock(
+            &setup.session,
+            &path,
+            Duration::from_secs(60),
+            |_| {
+                invoked.store(true, Ordering::SeqCst);
+                async { Ok::<(), PaykitError>(()) }
+            },
+            || {
+                let reading = readings.fetch_add(1, Ordering::SeqCst);
+                if reading == 0 {
+                    return Ok(if rejection == "overflow" {
+                        Duration::MAX
+                    } else {
+                        Duration::ZERO
+                    });
+                }
+                if rejection.starts_with("poll-") && reading == 1 {
+                    return Ok(Duration::ZERO);
+                }
+                if rejection == "renewal-unavailable" && reading < 3 {
+                    // Make the initial renewal notification ready before the callback is polled.
+                    return Ok(Duration::from_secs(40));
+                }
+                if rejection.ends_with("unavailable") {
+                    Err(std::io::Error::other(
+                        "controlled acquisition clock failure",
+                    ))
+                } else {
+                    Ok(Duration::from_secs(61))
+                }
+            },
+        )
+        .await
+        .expect_err(rejection);
+        assert!(!invoked.load(Ordering::SeqCst));
+        assert!(!is_write_conflict(&error));
+        let next = setup
+            .session
+            .storage()
+            .lock(&path, Duration::from_secs(60))
+            .await
+            .expect("failed pre-operation clock validation must release the acquired token");
+        setup.session.storage().unlock(&next).await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn test_silent_device_resume_renews_pending_operation() {
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;

@@ -29,11 +29,13 @@ enum Fault {
     HoldResponse(oneshot::Sender<()>, oneshot::Receiver<()>),
     HoldLockResponse(oneshot::Sender<()>, oneshot::Receiver<()>),
     InvalidLockGrant(u64),
+    RejectUnlock(http::StatusCode),
 }
 
 #[derive(Default)]
 struct Observations {
     writes: Vec<(String, Vec<u8>)>,
+    unlocks: usize,
     faults: VecDeque<Fault>,
     lock_timeout_seconds: Option<u64>,
 }
@@ -56,6 +58,10 @@ async fn forward(State(proxy): State<Proxy>, request: http::Request<Body>) -> Re
         if parts.method == http::Method::PUT {
             observations.writes.push((path.into(), bytes.to_vec()));
         }
+        if parts.method.as_str() == "UNLOCK" && path.ends_with(STATE) {
+            observations.unlocks += 1;
+        }
+        let unlock_fault = matches!(observations.faults.front(), Some(Fault::RejectUnlock(_)));
         let read_fault = matches!(observations.faults.front(), Some(Fault::TruncateRead));
         let lock_fault = matches!(
             observations.faults.front(),
@@ -63,7 +69,9 @@ async fn forward(State(proxy): State<Proxy>, request: http::Request<Body>) -> Re
         );
         let fault = if path.ends_with(STATE)
             && ((lock_fault && parts.method.as_str() == "LOCK")
+                || (unlock_fault && parts.method.as_str() == "UNLOCK")
                 || (!lock_fault
+                    && !unlock_fault
                     && ((parts.method == http::Method::PUT && !read_fault)
                         || (parts.method == http::Method::GET && read_fault))))
         {
@@ -73,7 +81,7 @@ async fn forward(State(proxy): State<Proxy>, request: http::Request<Body>) -> Re
         };
         (fault, observations.lock_timeout_seconds)
     };
-    if let Some(Fault::Reject(status)) = fault {
+    if let Some(Fault::Reject(status) | Fault::RejectUnlock(status)) = fault {
         return Response::builder()
             .status(status)
             .body(Body::empty())
@@ -306,6 +314,47 @@ async fn test_oversized_acquisition_grant_never_enters_operation() {
         fixture.observations.lock().unwrap().writes.len(),
         writes_before
     );
+    let next = fixture
+        .access
+        .session
+        .storage()
+        .lock(STATE, Duration::from_secs(60))
+        .await
+        .expect("a rejected acquisition grant must release its token before returning");
+    fixture
+        .access
+        .session
+        .storage()
+        .unlock(&next)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_rejected_acquisition_preserves_error_when_unlock_fails() {
+    let fixture = Fixture::new(true).await;
+    let unlocks_before = fixture.observations.lock().unwrap().unlocks;
+    fixture.fault(Fault::InvalidLockGrant(u64::MAX));
+    fixture.fault(Fault::RejectUnlock(http::StatusCode::SERVICE_UNAVAILABLE));
+    let invoked = AtomicBool::new(false);
+    let error = paykit_lib::with_write_lock::<(), paykit_lib::PaykitError, _, _>(
+        &fixture.access.session,
+        STATE,
+        |_| {
+            invoked.store(true, Ordering::SeqCst);
+            async { Ok(()) }
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(!invoked.load(Ordering::SeqCst));
+    assert!(!paykit_lib::is_write_conflict(&error));
+    assert!(format!("{error:?}").contains("grant exceeds the supported maximum"));
+    assert_eq!(
+        fixture.observations.lock().unwrap().unlocks,
+        unlocks_before + 1
+    );
+    assert!(fixture.observations.lock().unwrap().faults.is_empty());
 }
 
 #[tokio::test]

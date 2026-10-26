@@ -179,12 +179,27 @@ where
             Err(source) => return Err(E::from(lock_error("acquire Pubky write lock", source))),
         }
     };
-    let valid_until = confirmed_lease_deadline(acquired_at, lock.timeout()).map_err(E::from)?;
-    let lease = Mutex::new(
-        LeaseDeadline::new(lease_started_at, lock.timeout())
-            .map_err(|error| E::from(lost_lock(error)))?,
-    );
     let renewal_wakeup = Notify::new();
+    let prepared = (|| -> Result<_> {
+        let valid_until = confirmed_lease_deadline(acquired_at, lock.timeout())?;
+        let mut deadline =
+            LeaseDeadline::new(lease_started_at, lock.timeout()).map_err(lost_lock)?;
+        if deadline
+            .check_and_notify(now().map_err(|error| lost_lock(error.into()))?)
+            .map_err(lost_lock)?
+        {
+            renewal_wakeup.notify_one();
+        }
+        Ok((valid_until, Mutex::new(deadline)))
+    })();
+    let (valid_until, lease) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            // No operation started. Release only this acquired token without hiding the validation error.
+            release_rejected_lock(session, &lock).await;
+            return Err(E::from(error));
+        }
+    };
     let check_lease = || -> anyhow::Result<()> {
         let should_renew = {
             let mut deadline = lease
@@ -197,7 +212,6 @@ where
         }
         Ok(())
     };
-    check_lease().map_err(|error| E::from(lost_lock(error)))?;
     let mut renewed = lock.clone();
     let renewal = async {
         let mut valid_until = valid_until;
@@ -281,18 +295,28 @@ where
             }
         }
     };
+    let mut operation_started = false;
     let work = async {
         tokio::select! {
             biased;
             error = renewal => Err(error),
-            result = Box::pin(async { operation(lock.clone()).await }) => Ok(result),
+            result = Box::pin(async {
+                operation_started = true;
+                operation(lock.clone()).await
+            }) => Ok(result),
         }
     };
     // Tokio's scheduling clock can stop during native device sleep. Check the
     // suspend-inclusive lease before every resumed poll, even if renewal's sleep is pending.
-    let result = poll_with_lease(work, check_lease)
-        .await
-        .map_err(|error| E::from(lost_lock(error)))?;
+    let result = match poll_with_lease(work, check_lease).await {
+        Ok(result) => result,
+        Err(error) => {
+            if !operation_started {
+                release_rejected_lock(session, &lock).await;
+            }
+            return Err(E::from(lost_lock(error)));
+        }
+    };
     // Releasing the lock does not undo a committed operation. A failed unlock
     // leaves a bounded lease, not a reason to repeat a successful mutation.
     if let Err(error) = storage.unlock(&lock).await {
@@ -305,6 +329,18 @@ where
         );
     }
     result
+}
+
+async fn release_rejected_lock(session: &PubkySession, lock: &StorageLock) {
+    if let Err(error) = session.storage().unlock(lock).await {
+        tracing::warn!(
+            "{}",
+            lock_failure_context(
+                "Failed to release rejected Pubky write lock; waiting for expiry",
+                &error
+            )
+        );
+    }
 }
 
 fn poll_with_lease<T>(
