@@ -109,9 +109,11 @@ where
                 &counterparty,
                 MAX_PENDING_ALLOWANCE_LINK_RECORDS,
             ) {
-                Ok(history) => history,
-                Err(link_records) => {
-                    return Ok(PendingAllowanceAcceptance::LinkHistoryTooLarge { link_records })
+                Some(history) => history,
+                None => {
+                    return Ok(PendingAllowanceAcceptance::LinkHistoryTooLarge {
+                        record_cap: MAX_PENDING_ALLOWANCE_LINK_RECORDS,
+                    })
                 }
             };
             let mut pending = derive_records(&history, None)

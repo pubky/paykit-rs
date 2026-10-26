@@ -544,13 +544,11 @@ fn test_pending_allowance_acceptance_conversion_keeps_outcome() {
 
     let too_large =
         FfiPendingAllowanceAcceptance::try_from(PendingAllowanceAcceptance::LinkHistoryTooLarge {
-            link_records: 20_000,
+            record_cap: 16_384,
         })
         .unwrap();
     assert!(matches!(
         too_large,
-        FfiPendingAllowanceAcceptance::LinkHistoryTooLarge {
-            link_records: 20_000
-        }
+        FfiPendingAllowanceAcceptance::LinkHistoryTooLarge { record_cap: 16_384 }
     ));
 }

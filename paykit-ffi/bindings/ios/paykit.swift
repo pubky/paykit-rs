@@ -21643,8 +21643,8 @@ public enum PendingAllowanceAcceptance {
      */
     case linkHistoryTooLarge(
         /**
-         * Inbound and outbound records the link holds.
-         */linkRecords: UInt64
+         * The cap the link's inbound and outbound records exceed.
+         */recordCap: UInt64
     )
     /**
      * SDK returned a value this binding version does not understand.
@@ -21670,7 +21670,7 @@ public struct FfiConverterTypePendingAllowanceAcceptance: FfiConverterRustBuffer
         case 1: return .accepted(records: try FfiConverterSequenceTypeAllowanceRecord.read(from: &buf), morePending: try FfiConverterBool.read(from: &buf)
         )
 
-        case 2: return .linkHistoryTooLarge(linkRecords: try FfiConverterUInt64.read(from: &buf)
+        case 2: return .linkHistoryTooLarge(recordCap: try FfiConverterUInt64.read(from: &buf)
         )
 
         case 3: return .unknown
@@ -21689,9 +21689,9 @@ public struct FfiConverterTypePendingAllowanceAcceptance: FfiConverterRustBuffer
             FfiConverterBool.write(morePending, into: &buf)
 
 
-        case let .linkHistoryTooLarge(linkRecords):
+        case let .linkHistoryTooLarge(recordCap):
             writeInt(&buf, Int32(2))
-            FfiConverterUInt64.write(linkRecords, into: &buf)
+            FfiConverterUInt64.write(recordCap, into: &buf)
 
 
         case .unknown:

@@ -51,8 +51,9 @@ pub enum PendingAllowanceAcceptance {
     /// The link holds more than [`MAX_PENDING_ALLOWANCE_LINK_RECORDS`]
     /// records. Its history was not read and nothing was accepted.
     LinkHistoryTooLarge {
-        /// Inbound and outbound records the link holds.
-        link_records: usize,
+        /// The cap the link's inbound and outbound records exceed. The exact
+        /// count is not computed, so refusing stays bounded.
+        record_cap: usize,
     },
 }
 pub(crate) use derivation::{

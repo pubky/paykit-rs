@@ -54,8 +54,8 @@ private func compileAllowanceBindingsSurface(
     switch pending {
     case let .accepted(records, morePending):
         _ = (records as [AllowanceRecord], morePending as Bool)
-    case let .linkHistoryTooLarge(linkRecords):
-        _ = linkRecords as UInt64
+    case let .linkHistoryTooLarge(recordCap):
+        _ = recordCap as UInt64
     case .unknown:
         break
     }

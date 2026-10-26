@@ -45,7 +45,7 @@ internal suspend fun compileAllowanceBindingsSurface(
             val morePending: Boolean = pending.morePending
         }
         is PendingAllowanceAcceptance.LinkHistoryTooLarge -> {
-            val linkRecords: ULong = pending.linkRecords
+            val recordCap: ULong = pending.recordCap
         }
         PendingAllowanceAcceptance.Unknown -> Unit
     }

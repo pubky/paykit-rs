@@ -135,9 +135,9 @@ impl TryFrom<PendingAllowanceAcceptance> for FfiPendingAllowanceAcceptance {
                     .collect::<Result<_, _>>()?,
                 more_pending,
             },
-            PendingAllowanceAcceptance::LinkHistoryTooLarge { link_records } => {
+            PendingAllowanceAcceptance::LinkHistoryTooLarge { record_cap } => {
                 Self::LinkHistoryTooLarge {
-                    link_records: link_records as u64,
+                    record_cap: record_cap as u64,
                 }
             }
             _ => Self::Unknown,

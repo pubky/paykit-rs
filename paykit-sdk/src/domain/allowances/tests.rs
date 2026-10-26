@@ -1791,10 +1791,16 @@ fn reset_history_counters() {
     LINK_HISTORY_LOADS.with(|loads| loads.set(0));
     LINK_HISTORY_RECORDS_READ.with(|read| read.set(0));
     crate::storage::LINK_RECORDS_LOADED.with(|loaded| loaded.set(0));
+    crate::storage::LINK_RECORDS_VISITED.with(|visited| visited.set(0));
 }
 
 fn link_records_loaded() -> usize {
     crate::storage::LINK_RECORDS_LOADED.with(std::cell::Cell::get)
+}
+
+/// Records of any link examined while counting a link against its cap.
+fn link_records_visited() -> usize {
+    crate::storage::LINK_RECORDS_VISITED.with(std::cell::Cell::get)
 }
 
 fn history_counters() -> (usize, usize) {
@@ -1967,10 +1973,13 @@ async fn test_pending_allowance_acceptance_reads_no_history_over_the_link_cap() 
     seed_active_link(&storage, heavy.clone()).await;
     seed_active_link(&storage, other.clone()).await;
     choose_counterparty(&storage, &heavy).await;
-    persist_allowee_proposals(&storage, &heavy, MAX_PENDING_ALLOWANCE_LINK_RECORDS / 2 + 1).await;
+    // About twice the cap, so a count that ran to the end would visit about
+    // twice as many records as a count that stops at the cap.
+    persist_allowee_proposals(&storage, &heavy, MAX_PENDING_ALLOWANCE_LINK_RECORDS).await;
     let other_proposal = persist_allowee_proposals(&storage, &other, 1).await[0];
     let heavy_records = link_records(&storage, &heavy);
-    assert!(heavy_records > MAX_PENDING_ALLOWANCE_LINK_RECORDS);
+    let other_records = link_records(&storage, &other);
+    assert!(heavy_records > 2 * MAX_PENDING_ALLOWANCE_LINK_RECORDS);
     let before = storage.snapshot().unwrap().outbound_private_messages;
 
     reset_history_counters();
@@ -1979,19 +1988,21 @@ async fn test_pending_allowance_acceptance_reads_no_history_over_the_link_cap() 
     assert_eq!(
         outcome,
         PendingAllowanceAcceptance::LinkHistoryTooLarge {
-            link_records: heavy_records,
+            record_cap: MAX_PENDING_ALLOWANCE_LINK_RECORDS,
         }
     );
     assert_eq!(history_counters(), (0, 0));
-    // The cap is checked on counts, so no record of the link was copied.
+    // No record of the link was copied, and the count stopped after the cap:
+    // it examined at most `cap + 1` of the link's records plus the records of
+    // other links stored between them, not the link's whole history.
     assert_eq!(link_records_loaded(), 0);
+    assert!(link_records_visited() <= MAX_PENDING_ALLOWANCE_LINK_RECORDS + 1 + other_records);
     assert_eq!(
         storage.snapshot().unwrap().outbound_private_messages,
         before
     );
 
     // Another counterparty's intake on the same identity reads only its own link.
-    let other_records = link_records(&storage, &other);
     let (records, more_pending) = accepted(accept_pending(&storage, &other, 4).await.unwrap());
     assert!(!more_pending);
     assert_eq!(records[0].proposal_stream_item_id, Some(other_proposal));

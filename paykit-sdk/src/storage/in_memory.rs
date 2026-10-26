@@ -87,11 +87,14 @@ impl StorageAdapter for InMemoryStorage {
     }
 }
 
-// Counts link records copied out of state, so tests can prove a call refused
-// a history without loading it.
+// Count link records copied out of state, and records examined while
+// counting a link, so tests can prove a call refused a history without
+// loading it and with bounded work.
 #[cfg(test)]
 thread_local! {
     pub(crate) static LINK_RECORDS_LOADED: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    pub(crate) static LINK_RECORDS_VISITED: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
 }
 
@@ -500,14 +503,6 @@ impl StorageTransaction for StorageStateTransaction {
         messages
     }
 
-    fn outbound_private_message_count(&self, counterparty: &PubkyPublicKey) -> usize {
-        self.state
-            .outbound_private_messages
-            .iter()
-            .filter(|message| &message.counterparty == counterparty)
-            .count()
-    }
-
     fn outbound_private_messages(
         &self,
         counterparty: &PubkyPublicKey,
@@ -609,12 +604,29 @@ impl StorageTransaction for StorageStateTransaction {
         items
     }
 
-    fn private_stream_item_count(&self, counterparty: &PubkyPublicKey) -> usize {
-        self.state
+    fn link_record_count_up_to(&self, counterparty: &PubkyPublicKey, max: usize) -> usize {
+        let inbound = self
+            .state
             .private_stream_items
             .iter()
-            .filter(|item| &item.counterparty == counterparty)
-            .count()
+            .map(|item| &item.counterparty);
+        let outbound = self
+            .state
+            .outbound_private_messages
+            .iter()
+            .map(|message| &message.counterparty);
+        let mut count = 0;
+        for record_counterparty in inbound.chain(outbound) {
+            #[cfg(test)]
+            LINK_RECORDS_VISITED.with(|visited| visited.set(visited.get() + 1));
+            if record_counterparty == counterparty {
+                count += 1;
+                if count > max {
+                    break;
+                }
+            }
+        }
+        count
     }
 
     fn event_dedup_record(

@@ -394,8 +394,8 @@ pub enum FfiPendingAllowanceAcceptance {
     /// The link holds more records than the SDK reads for this operation. Its
     /// history was not read and nothing was accepted.
     LinkHistoryTooLarge {
-        /// Inbound and outbound records the link holds.
-        link_records: u64,
+        /// The cap the link's inbound and outbound records exceed.
+        record_cap: u64,
     },
     /// SDK returned a value this binding version does not understand.
     Unknown,
