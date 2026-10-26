@@ -14,6 +14,53 @@ fn app_capabilities() -> PaykitAppCapabilities {
 }
 
 #[tokio::test]
+async fn test_device_resume_renews_before_scheduler_timer() {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+    let setup = TestSetup::new().await;
+    let path = format!("{PAYKIT_PATH_PREFIX}resume-renewal.json");
+    let storage = setup.session.storage();
+    let start = Instant::now();
+    let offset = AtomicU64::new(0);
+    let callbacks = AtomicUsize::new(0);
+    pubky_routing::with_write_lock_clock(
+        &setup.session,
+        &path,
+        Duration::from_secs(60),
+        |lock| {
+            let (callbacks, offset, storage) = (&callbacks, &offset, &storage);
+            async move {
+                callbacks.fetch_add(1, Ordering::SeqCst);
+                offset.store(44, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+                // Cross the original native deadline before the normal scheduler's
+                // first renewal. Only a confirmed resume-triggered refresh can extend it.
+                tokio::time::sleep(Duration::from_secs(17)).await;
+                assert!(
+                    start.elapsed() < Duration::from_secs(18),
+                    "fixture exceeded the normal renewal point"
+                );
+                storage
+                    .put_locked(&lock, "renewed after resume")
+                    .await
+                    .unwrap();
+                Ok::<(), PaykitError>(())
+            }
+        },
+        || Ok(start.elapsed() + Duration::from_secs(offset.load(Ordering::SeqCst))),
+    )
+    .await
+    .unwrap();
+    assert_eq!(callbacks.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        storage.get(&path).await.unwrap().text().await.unwrap(),
+        "renewed after resume"
+    );
+    let lock = storage.lock(&path, Duration::from_secs(60)).await.unwrap();
+    storage.unlock(&lock).await.unwrap();
+}
+
+#[tokio::test]
 async fn test_device_sleep_stops_ready_locked_continuation_without_unlocking() {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;

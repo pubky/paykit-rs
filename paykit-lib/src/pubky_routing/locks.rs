@@ -1,6 +1,7 @@
 use std::{future::Future, sync::Mutex, task::Poll, time::Duration};
 
 use pubky::{PubkySession, StorageLock};
+use tokio::sync::Notify;
 
 use crate::{PaykitError, Result};
 
@@ -183,39 +184,45 @@ where
         LeaseDeadline::new(lease_started_at, lock.timeout())
             .map_err(|error| E::from(lost_lock(error)))?,
     );
+    let renewal_wakeup = Notify::new();
     let check_lease = || -> anyhow::Result<()> {
-        lease
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Pubky write lock clock state unavailable"))?
-            .check(now()?)
+        let should_renew = {
+            let mut deadline = lease
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Pubky write lock clock state unavailable"))?;
+            deadline.check_and_notify(now()?)?
+        };
+        if should_renew {
+            renewal_wakeup.notify_one();
+        }
+        Ok(())
     };
     check_lease().map_err(|error| E::from(lost_lock(error)))?;
     let mut renewed = lock.clone();
     let renewal = async {
         let mut valid_until = valid_until;
         loop {
-            tokio::time::sleep_until(valid_until - renewed.timeout() * 2 / 3).await;
+            if let Err(error) = wait_for_renewal(&lease, valid_until, &now, &renewal_wakeup).await {
+                return error;
+            }
             loop {
                 let requested_at = tokio::time::Instant::now();
                 let lease_started_at = match now() {
                     Ok(value) => value,
                     Err(error) => return error.into(),
                 };
-                if let Err(error) = check_lease() {
-                    return error;
-                }
-                if requested_at >= valid_until {
-                    return anyhow::anyhow!(
-                        "Pubky write lock expired before renewal was confirmed"
-                    );
-                }
+                let attempt_deadline = match refresh_deadline(&lease, valid_until, lease_started_at)
+                {
+                    Ok(value) => value,
+                    Err(error) => return error,
+                };
                 match tokio::time::timeout_at(
-                    valid_until,
+                    attempt_deadline,
                     storage.refresh_lock(&mut renewed, timeout),
                 )
                 .await
                 {
-                    Ok(Ok(())) if tokio::time::Instant::now() < valid_until => {
+                    Ok(Ok(())) if tokio::time::Instant::now() < attempt_deadline => {
                         // A response cannot revive a lease that expired while the device slept.
                         if let Err(error) = check_lease() {
                             return error;
@@ -231,27 +238,38 @@ where
                         if let Err(error) = next.check(current_time) {
                             return error;
                         }
+                        let next_valid_until =
+                            match confirmed_lease_deadline(requested_at, renewed.timeout()) {
+                                Ok(deadline) => deadline,
+                                Err(error) => return anyhow::Error::from(error),
+                            };
                         match lease.lock() {
                             Ok(mut deadline) => *deadline = next,
                             Err(_) => {
                                 return anyhow::anyhow!("Pubky write lock clock state unavailable")
                             }
                         }
-                        valid_until =
-                            match confirmed_lease_deadline(requested_at, renewed.timeout()) {
-                                Ok(deadline) => deadline,
-                                Err(error) => return anyhow::Error::from(error),
-                            };
+                        valid_until = next_valid_until;
                         break;
                     }
-                    Ok(Err(error))
-                        if retryable_lock_refresh(&error)
-                            && requested_at + Duration::from_secs(1) < valid_until =>
-                    {
-                        tokio::time::sleep_until(
-                            (tokio::time::Instant::now() + Duration::from_secs(1)).min(valid_until),
-                        )
-                        .await;
+                    Ok(Err(error)) if retryable_lock_refresh(&error) => {
+                        let current_time = match now() {
+                            Ok(value) => value,
+                            Err(error) => return error.into(),
+                        };
+                        let deadline = match refresh_deadline(&lease, valid_until, current_time) {
+                            Ok(value) => value,
+                            Err(error) => return error,
+                        };
+                        let Some(retry_at) =
+                            tokio::time::Instant::now().checked_add(Duration::from_secs(1))
+                        else {
+                            return anyhow::anyhow!("Pubky write lock deadline overflow");
+                        };
+                        if retry_at >= deadline {
+                            return error.into();
+                        }
+                        tokio::time::sleep_until(retry_at).await;
                     }
                     Ok(Err(error)) => return anyhow::Error::from(error),
                     Ok(Ok(())) | Err(_) => {
@@ -316,19 +334,38 @@ fn lost_lock(error: anyhow::Error) -> PaykitError {
     }
 }
 
+// The server rounds timestamps to whole seconds. Reserve that quantization
+// budget plus headroom; a local deadline never replaces server-token fencing.
+fn safe_lease_lifetime(timeout: Duration) -> anyhow::Result<Duration> {
+    if timeout > WRITE_LOCK_TIMEOUT {
+        anyhow::bail!("Pubky write lock grant exceeds the supported maximum");
+    }
+    timeout
+        .checked_sub(Duration::from_secs(2).max(timeout / 10))
+        .filter(|lifetime| !lifetime.is_zero())
+        .ok_or_else(|| anyhow::anyhow!("Pubky write lock grant has no safe lifetime"))
+}
+
 #[derive(Clone, Copy)]
 struct LeaseDeadline {
     started_at: Duration,
+    renew_at: Duration,
     expires_at: Duration,
+    renewal_notified: bool,
 }
 
 impl LeaseDeadline {
     fn new(started_at: Duration, timeout: Duration) -> anyhow::Result<Self> {
+        let lifetime = safe_lease_lifetime(timeout)?;
         Ok(Self {
             started_at,
-            expires_at: started_at
-                .checked_add(timeout)
+            renew_at: started_at
+                .checked_add(lifetime / 3)
                 .ok_or_else(|| anyhow::anyhow!("Pubky write lock deadline overflow"))?,
+            expires_at: started_at
+                .checked_add(lifetime)
+                .ok_or_else(|| anyhow::anyhow!("Pubky write lock deadline overflow"))?,
+            renewal_notified: false,
         })
     }
 
@@ -338,6 +375,71 @@ impl LeaseDeadline {
         }
         Ok(())
     }
+
+    fn check_and_notify(&mut self, now: Duration) -> anyhow::Result<bool> {
+        self.check(now)?;
+        if now < self.renew_at || self.renewal_notified {
+            return Ok(false);
+        }
+        self.renewal_notified = true;
+        Ok(true)
+    }
+}
+
+async fn wait_for_renewal(
+    lease: &Mutex<LeaseDeadline>,
+    valid_until: tokio::time::Instant,
+    now: &impl Fn() -> std::io::Result<Duration>,
+    wakeup: &Notify,
+) -> anyhow::Result<()> {
+    let remaining_after_renewal = {
+        let deadline = lease
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Pubky write lock clock state unavailable"))?;
+        deadline.expires_at - deadline.renew_at
+    };
+    let renew_at = valid_until
+        .checked_sub(remaining_after_renewal)
+        .ok_or_else(|| anyhow::anyhow!("Pubky write lock deadline overflow"))?;
+    loop {
+        tokio::select! {
+            // Either monotonic clock may make renewal due. A ready normal timer
+            // is sufficient; it must not spin waiting for a later native reading.
+            _ = tokio::time::sleep_until(renew_at) => return Ok(()),
+            _ = wakeup.notified() => {
+                let current_time = now()?;
+                let deadline = lease.lock()
+                    .map_err(|_| anyhow::anyhow!("Pubky write lock clock state unavailable"))?;
+                deadline.check(current_time)?;
+                if current_time >= deadline.renew_at {
+                    return Ok(());
+                }
+                // A prior generation's stored permit cannot trigger another refresh.
+            }
+        }
+    }
+}
+
+fn refresh_deadline(
+    lease: &Mutex<LeaseDeadline>,
+    valid_until: tokio::time::Instant,
+    now: Duration,
+) -> anyhow::Result<tokio::time::Instant> {
+    let remaining = {
+        let deadline = lease
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Pubky write lock clock state unavailable"))?;
+        deadline.check(now)?;
+        deadline.expires_at - now
+    };
+    let scheduler_now = tokio::time::Instant::now();
+    if scheduler_now >= valid_until {
+        anyhow::bail!("Pubky write lock expired before renewal was confirmed");
+    }
+    scheduler_now
+        .checked_add(remaining)
+        .map(|deadline| deadline.min(valid_until))
+        .ok_or_else(|| anyhow::anyhow!("Pubky write lock deadline overflow"))
 }
 
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
@@ -373,7 +475,10 @@ fn confirmed_lease_deadline(
     requested_at: tokio::time::Instant,
     timeout: Duration,
 ) -> Result<tokio::time::Instant> {
-    let deadline = requested_at + timeout;
+    let lifetime = safe_lease_lifetime(timeout).map_err(lost_lock)?;
+    let deadline = requested_at
+        .checked_add(lifetime)
+        .ok_or_else(|| lost_lock(anyhow::anyhow!("Pubky write lock deadline overflow")))?;
     if tokio::time::Instant::now() >= deadline {
         return Err(PaykitError::Transport {
             context: "Pubky write lock response arrived after its safe lease expired".into(),
@@ -427,6 +532,143 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_resume_notification_is_once_per_confirmed_lease() {
+        let mut deadline = LeaseDeadline::new(Duration::ZERO, Duration::from_secs(60)).unwrap();
+        assert!(!deadline.check_and_notify(Duration::from_secs(17)).unwrap());
+        assert!(deadline.check_and_notify(Duration::from_secs(18)).unwrap());
+        assert!(!deadline.check_and_notify(Duration::from_secs(30)).unwrap());
+        assert!(deadline.check_and_notify(Duration::from_secs(54)).is_err());
+        deadline = LeaseDeadline::new(Duration::from_secs(30), Duration::from_secs(60)).unwrap();
+        assert!(!deadline.check_and_notify(Duration::from_secs(47)).unwrap());
+        assert!(deadline.check_and_notify(Duration::from_secs(48)).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_stale_renewal_permit_waits_for_current_lease() {
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let lease = Mutex::new(LeaseDeadline::new(clock.get(), Duration::from_secs(60)).unwrap());
+        let wakeup = Notify::new();
+        wakeup.notify_one();
+        let now = || Ok(clock.get());
+        let mut waiting = Box::pin(wait_for_renewal(
+            &lease,
+            tokio::time::Instant::now() + Duration::from_secs(54),
+            &now,
+            &wakeup,
+        ));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(waiting.as_mut().poll(&mut cx).is_pending());
+        assert!(waiting.as_mut().poll(&mut cx).is_pending());
+        clock.set(Duration::from_secs(18));
+        assert!(lease.lock().unwrap().check_and_notify(clock.get()).unwrap());
+        wakeup.notify_one();
+        assert!(matches!(
+            waiting.as_mut().poll(&mut cx),
+            Poll::Ready(Ok(()))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_notification_before_waiter_registration_is_retained() {
+        let lease =
+            Mutex::new(LeaseDeadline::new(Duration::ZERO, Duration::from_secs(60)).unwrap());
+        let wakeup = Notify::new();
+        assert!(lease
+            .lock()
+            .unwrap()
+            .check_and_notify(Duration::from_secs(18))
+            .unwrap());
+        wakeup.notify_one();
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            wait_for_renewal(
+                &lease,
+                tokio::time::Instant::now() + Duration::from_secs(54),
+                &|| Ok(Duration::from_secs(18)),
+                &wakeup,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_ready_scheduler_timer_progresses_with_early_native_clock() {
+        let lease =
+            Mutex::new(LeaseDeadline::new(Duration::ZERO, Duration::from_secs(60)).unwrap());
+        let wakeup = Notify::new();
+        wakeup.notify_one();
+        // Its renewal point is already past, but its expiration is still future.
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            wait_for_renewal(
+                &lease,
+                tokio::time::Instant::now() + Duration::from_secs(35),
+                &|| Ok(Duration::ZERO),
+                &wakeup,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    #[test]
+    fn test_refresh_attempt_is_bounded_by_native_time_remaining() {
+        let lease =
+            Mutex::new(LeaseDeadline::new(Duration::ZERO, Duration::from_secs(60)).unwrap());
+        let start = tokio::time::Instant::now();
+        let scheduler_expiry = start + Duration::from_secs(54);
+        let bound = refresh_deadline(&lease, scheduler_expiry, Duration::from_secs(50)).unwrap();
+        assert!(bound >= start + Duration::from_secs(4));
+        assert!(bound <= tokio::time::Instant::now() + Duration::from_secs(4));
+        assert!(refresh_deadline(&lease, scheduler_expiry, Duration::from_secs(54)).is_err());
+        assert!(refresh_deadline(&lease, start - Duration::from_secs(1), Duration::ZERO).is_err());
+    }
+
+    #[test]
+    fn test_server_quantization_cannot_admit_a_ready_continuation() {
+        let start = Duration::from_millis(1000499);
+        let deadline = LeaseDeadline::new(start, Duration::from_secs(60)).unwrap();
+        // PostgreSQL rounds the acquire and validity timestamps to seconds.
+        // At 1059.5s it considers the server's stored expiry of 1060 expired.
+        let server_expiry = Duration::from_millis(1059500);
+        let continued = std::cell::Cell::new(false);
+        let mut guarded = Box::pin(poll_with_lease(
+            async {
+                continued.set(true);
+                Ok(())
+            },
+            || deadline.check(server_expiry),
+        ));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(
+            guarded.as_mut().poll(&mut cx),
+            Poll::Ready(Err(_))
+        ));
+        assert!(!continued.get());
+    }
+
+    #[test]
+    fn test_invalid_granted_lease_returns_error_without_panicking() {
+        for timeout in [
+            Duration::ZERO,
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(61),
+            Duration::from_secs(u64::MAX),
+        ] {
+            assert!(LeaseDeadline::new(Duration::ZERO, timeout).is_err());
+            let result = std::panic::catch_unwind(|| {
+                confirmed_lease_deadline(tokio::time::Instant::now(), timeout)
+            });
+            assert!(result.is_ok(), "an invalid server grant must not panic");
+            assert!(result.unwrap().is_err());
+        }
+    }
+
+    #[test]
     fn test_sleep_expiry_stops_a_ready_continuation_before_polling_it() {
         use std::{cell::Cell, task::Context};
         let clock = Cell::new(Duration::from_secs(10));
@@ -462,10 +704,10 @@ mod tests {
     fn test_lease_response_and_clock_failures_fail_closed() {
         let deadline =
             LeaseDeadline::new(Duration::from_secs(10), Duration::from_secs(60)).unwrap();
-        assert!(deadline.check(Duration::from_secs(69)).is_ok());
-        assert!(deadline.check(Duration::from_secs(70)).is_err());
+        assert!(deadline.check(Duration::from_secs(63)).is_ok());
+        assert!(deadline.check(Duration::from_secs(64)).is_err());
         assert!(deadline.check(Duration::from_secs(9)).is_err());
-        assert!(LeaseDeadline::new(Duration::MAX, Duration::from_secs(1)).is_err());
+        assert!(LeaseDeadline::new(Duration::MAX, Duration::from_secs(60)).is_err());
         let continued = std::cell::Cell::new(false);
         let mut guarded = Box::pin(poll_with_lease(
             async {
@@ -515,7 +757,7 @@ mod tests {
         let timeout = Duration::from_secs(60);
         assert_eq!(
             confirmed_lease_deadline(requested_at, timeout).unwrap(),
-            requested_at + timeout
+            requested_at + Duration::from_secs(54)
         );
         let requested_at = tokio::time::Instant::now() - Duration::from_secs(61);
         let error = confirmed_lease_deadline(requested_at, timeout).unwrap_err();
