@@ -1978,15 +1978,15 @@ async fn test_pending_allowance_acceptance_reads_no_history_over_the_link_cap() 
     // Thousands of unrelated records stored before and after the heavy link's.
     let unrelated = [counterparty(), counterparty(), counterparty()];
     for peer in &unrelated[..2] {
-        seed_active_link(&storage, peer.clone()).await;
+        seed_validating_link(&storage, peer).await;
         persist_allowee_proposals(&storage, peer, 2_000).await;
     }
-    seed_active_link(&storage, heavy.clone()).await;
-    seed_active_link(&storage, other.clone()).await;
+    seed_validating_link(&storage, &heavy).await;
+    seed_validating_link(&storage, &other).await;
     choose_counterparty(&storage, &heavy).await;
     persist_allowee_proposals(&storage, &heavy, MAX_PENDING_ALLOWANCE_LINK_RECORDS / 2 + 1).await;
     let other_proposal = persist_allowee_proposals(&storage, &other, 1).await[0];
-    seed_active_link(&storage, unrelated[2].clone()).await;
+    seed_validating_link(&storage, &unrelated[2]).await;
     persist_allowee_proposals(&storage, &unrelated[2], 2_000).await;
     assert!(link_records(&storage, &heavy) > MAX_PENDING_ALLOWANCE_LINK_RECORDS);
     assert!(unrelated
@@ -1994,8 +1994,15 @@ async fn test_pending_allowance_acceptance_reads_no_history_over_the_link_cap() 
         .all(|peer| link_records(&storage, peer) == 4_000));
     let other_records = link_records(&storage, &other);
     let before = storage.snapshot().unwrap().outbound_private_messages;
+    let blob = crate::storage::encode_storage_state_blob(&storage.snapshot().unwrap()).unwrap();
 
+    // Reload the persisted state just before intake, as Pubky shared and
+    // FFI storage do on every load. Decoding takes the index from the passes
+    // validation already makes, so neither decoding nor intake builds it
+    // in a pass of its own.
     reset_history_counters();
+    let storage =
+        InMemoryStorage::from_state(crate::storage::decode_storage_state_blob(&blob).unwrap());
     let outcome = accept_pending(&storage, &heavy, 4).await.unwrap();
 
     assert_eq!(
@@ -2005,8 +2012,9 @@ async fn test_pending_allowance_acceptance_reads_no_history_over_the_link_cap() 
         }
     );
     // The cap check read the per-link index: no history was derived or
-    // copied, no record of any link was visited, and the index was not
-    // rebuilt, so the work did not depend on this or any other link's length.
+    // copied, no record of any link was visited, and no pass built the
+    // index, so the allowance-specific work did not depend on this or any
+    // other link's length.
     assert_eq!(history_counters(), (0, 0));
     assert_eq!(link_records_loaded(), 0);
     assert_eq!(link_records_visited(), 0);

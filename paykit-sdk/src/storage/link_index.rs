@@ -100,6 +100,15 @@ impl StorageState {
         self.link_record_index.counts = Some(LinkRecordIndex::build(self));
     }
 
+    /// Install per-link counts that a caller took from the records in a pass
+    /// it already made, such as validation on decode.
+    pub(crate) fn install_link_record_counts(&mut self, per_link: HashMap<PubkyPublicKey, usize>) {
+        self.link_record_index.counts = Some(LinkRecordCounts {
+            per_link,
+            stamp: RecordStamp::of(self),
+        });
+    }
+
     /// Records one counterparty holds, when the index matches the records.
     pub(crate) fn indexed_link_records(&self, counterparty: &PubkyPublicKey) -> Option<usize> {
         let counts = self.link_record_index.counts.as_ref()?;

@@ -49,10 +49,22 @@ where
 }
 
 pub(in crate::backup) fn unique_outbound_messages(
+    records: Vec<OutboundPrivateMessageRecord>,
+) -> Result<Vec<OutboundPrivateMessageRecord>> {
+    unique_outbound_messages_counting_links(records, None)
+}
+
+/// [`unique_outbound_messages`], also counting records per counterparty in
+/// the same pass when `link_counts` is given.
+pub(in crate::backup) fn unique_outbound_messages_counting_links(
     mut records: Vec<OutboundPrivateMessageRecord>,
+    mut link_counts: Option<&mut HashMap<PubkyPublicKey, usize>>,
 ) -> Result<Vec<OutboundPrivateMessageRecord>> {
     let mut ids = HashSet::new();
     for record in &records {
+        if let Some(counts) = link_counts.as_deref_mut() {
+            *counts.entry(record.counterparty.clone()).or_insert(0) += 1;
+        }
         if !ids.insert(record.outbound_message_id) {
             return Err(PaykitSdkError::Protocol {
                 context: format!(
@@ -68,10 +80,22 @@ pub(in crate::backup) fn unique_outbound_messages(
 }
 
 pub(in crate::backup) fn unique_private_stream_items(
+    records: Vec<PrivateStreamItemRecord>,
+) -> Result<Vec<PrivateStreamItemRecord>> {
+    unique_private_stream_items_counting_links(records, None)
+}
+
+/// [`unique_private_stream_items`], also counting records per counterparty in
+/// the same pass when `link_counts` is given.
+pub(in crate::backup) fn unique_private_stream_items_counting_links(
     mut records: Vec<PrivateStreamItemRecord>,
+    mut link_counts: Option<&mut HashMap<PubkyPublicKey, usize>>,
 ) -> Result<Vec<PrivateStreamItemRecord>> {
     let mut ids = HashSet::new();
     for record in &records {
+        if let Some(counts) = link_counts.as_deref_mut() {
+            *counts.entry(record.counterparty.clone()).or_insert(0) += 1;
+        }
         if !ids.insert(record.stream_item_id) {
             return Err(PaykitSdkError::Protocol {
                 context: format!("duplicate private stream item id {}", record.stream_item_id),
