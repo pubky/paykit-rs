@@ -221,9 +221,14 @@ pixel and cache limits, and request timeouts remain app responsibilities.
 - `PaykitSdk.proposePaymentRequest`, `acceptPaymentRequest`,
   `rejectPaymentRequest`, `cancelPaymentRequest`, and `submitPaymentProof` —
   queue Payment Request lifecycle events through the SDK outbound stream.
+- `PaykitSdk.claimPaymentRequestForPreparation` - claim before preparing payment.
+  It rejects blocked counterparties before App Registry access and rechecks the
+  policy atomically with the claim. Compare the returned proposal and applicable
+  Billing Period with the approved terms. The legacy
+  `claimPaymentRequestForExecution` is compatibility-only and lacks this guard.
 - `PaykitSdk.claimAndAcceptPaymentRequest` — atomically claim execution and queue
-  acceptance. Keep the earlier preparation claim where needed; success confirms
-  durable acceptance, not delivery or permission to execute a payment.
+  acceptance. Use the guarded preparation claim above when preparing first;
+  success confirms durable acceptance, not delivery or permission to execute a payment.
 - `acceptPaymentRequest` and `claimAndAcceptPaymentRequest` take
   `expectedProposalStreamItemId`: pass `proposalStreamItemId` from the record
   whose terms the user approved, as displayed. They fail with a policy error
@@ -312,8 +317,12 @@ responsibility.
    static matching and active time; actual capacity is checked at admission.
 3. `acceptPaymentRequestAutomatically` atomically persists selection and queues
    ordinary Acceptance after SDK and wallet checks. As with manual Acceptance,
-   call `claimPaymentRequestForExecution` first to assign the request to this app.
-   Recurring Acceptance reserves
+   call `claimPaymentRequestForPreparation` first to assign the request to this
+   app and reject blocked counterparties before App Registry access, with an
+   atomic policy recheck when claiming. Revalidate the returned proposal and
+   applicable Billing Period against the approved terms before preparing payment.
+   `claimPaymentRequestForExecution` remains a compatibility API without this
+   blocked-peer guard. Recurring Acceptance reserves
    no amount or count. Each scheduled Billing Period needs its own later admission.
 4. Call `reserveAutomaticPayment` with the occurrence, expected association
    revision, and fresh `PaymentExecutionChecks`. The checks include the actual
