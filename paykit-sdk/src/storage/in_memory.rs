@@ -104,6 +104,9 @@ pub fn run_storage_state_transaction(
     f: StorageTransactionCallback<'_>,
 ) -> Result<(StorageState, Box<dyn std::any::Any + Send>)> {
     let mut transaction = StorageStateTransaction { state };
+    // O(1) when the index matches the records; rebuilt only after records
+    // changed outside the transaction methods, such as compaction.
+    transaction.state.refresh_link_record_index();
     let value = f(&mut transaction)?;
     Ok((transaction.state, value))
 }
@@ -133,6 +136,7 @@ impl StorageTransaction for StorageStateTransaction {
 
     fn replace_storage_state(&mut self, state: ValidatedStorageState) {
         self.state = state.into_storage_state();
+        self.state.refresh_link_record_index();
     }
 
     fn load_identity_state(&self) -> Option<IdentityState> {
@@ -482,7 +486,7 @@ impl StorageTransaction for StorageStateTransaction {
             .checked_add(1)
             .ok_or_else(storage_id_exhausted)?;
         let record = OutboundPrivateMessageRecord::from_new(outbound_message_id, message);
-        self.state.outbound_private_messages.push(record.clone());
+        self.state.push_outbound_private_message(record.clone());
         Ok(record)
     }
 
@@ -586,8 +590,7 @@ impl StorageTransaction for StorageStateTransaction {
             .checked_add(1)
             .ok_or_else(storage_id_exhausted)?;
         self.state
-            .private_stream_items
-            .push(PrivateStreamItemRecord::from_new(stream_item_id, item));
+            .push_private_stream_item(PrivateStreamItemRecord::from_new(stream_item_id, item));
         Ok(stream_item_id)
     }
 
@@ -605,6 +608,12 @@ impl StorageTransaction for StorageStateTransaction {
     }
 
     fn link_record_count_up_to(&self, counterparty: &PubkyPublicKey, max: usize) -> usize {
+        if let Some(count) = self.state.indexed_link_records(counterparty) {
+            return count;
+        }
+        // Records changed earlier in this transaction outside the methods
+        // that keep the index current. Count without the index, stopping
+        // past `max`; the next transaction rebuilds it.
         let inbound = self
             .state
             .private_stream_items

@@ -1792,6 +1792,7 @@ fn reset_history_counters() {
     LINK_HISTORY_RECORDS_READ.with(|read| read.set(0));
     crate::storage::LINK_RECORDS_LOADED.with(|loaded| loaded.set(0));
     crate::storage::LINK_RECORDS_VISITED.with(|visited| visited.set(0));
+    crate::storage::LINK_RECORD_INDEX_REBUILDS.with(|rebuilds| rebuilds.set(0));
 }
 
 fn link_records_loaded() -> usize {
@@ -1801,6 +1802,10 @@ fn link_records_loaded() -> usize {
 /// Records of any link examined while counting a link against its cap.
 fn link_records_visited() -> usize {
     crate::storage::LINK_RECORDS_VISITED.with(std::cell::Cell::get)
+}
+
+fn link_record_index_rebuilds() -> usize {
+    crate::storage::LINK_RECORD_INDEX_REBUILDS.with(std::cell::Cell::get)
 }
 
 fn history_counters() -> (usize, usize) {
@@ -1970,16 +1975,24 @@ async fn test_pending_allowance_acceptance_reads_no_history_over_the_link_cap() 
     let storage = registered_storage();
     let heavy = counterparty();
     let other = counterparty();
+    // Thousands of unrelated records stored before and after the heavy link's.
+    let unrelated = [counterparty(), counterparty(), counterparty()];
+    for peer in &unrelated[..2] {
+        seed_active_link(&storage, peer.clone()).await;
+        persist_allowee_proposals(&storage, peer, 2_000).await;
+    }
     seed_active_link(&storage, heavy.clone()).await;
     seed_active_link(&storage, other.clone()).await;
     choose_counterparty(&storage, &heavy).await;
-    // About twice the cap, so a count that ran to the end would visit about
-    // twice as many records as a count that stops at the cap.
-    persist_allowee_proposals(&storage, &heavy, MAX_PENDING_ALLOWANCE_LINK_RECORDS).await;
+    persist_allowee_proposals(&storage, &heavy, MAX_PENDING_ALLOWANCE_LINK_RECORDS / 2 + 1).await;
     let other_proposal = persist_allowee_proposals(&storage, &other, 1).await[0];
-    let heavy_records = link_records(&storage, &heavy);
+    seed_active_link(&storage, unrelated[2].clone()).await;
+    persist_allowee_proposals(&storage, &unrelated[2], 2_000).await;
+    assert!(link_records(&storage, &heavy) > MAX_PENDING_ALLOWANCE_LINK_RECORDS);
+    assert!(unrelated
+        .iter()
+        .all(|peer| link_records(&storage, peer) == 4_000));
     let other_records = link_records(&storage, &other);
-    assert!(heavy_records > 2 * MAX_PENDING_ALLOWANCE_LINK_RECORDS);
     let before = storage.snapshot().unwrap().outbound_private_messages;
 
     reset_history_counters();
@@ -1991,22 +2004,113 @@ async fn test_pending_allowance_acceptance_reads_no_history_over_the_link_cap() 
             record_cap: MAX_PENDING_ALLOWANCE_LINK_RECORDS,
         }
     );
+    // The cap check read the per-link index: no history was derived or
+    // copied, no record of any link was visited, and the index was not
+    // rebuilt, so the work did not depend on this or any other link's length.
     assert_eq!(history_counters(), (0, 0));
-    // No record of the link was copied, and the count stopped after the cap:
-    // it examined at most `cap + 1` of the link's records plus the records of
-    // other links stored between them, not the link's whole history.
     assert_eq!(link_records_loaded(), 0);
-    assert!(link_records_visited() <= MAX_PENDING_ALLOWANCE_LINK_RECORDS + 1 + other_records);
+    assert_eq!(link_records_visited(), 0);
+    assert_eq!(link_record_index_rebuilds(), 0);
     assert_eq!(
         storage.snapshot().unwrap().outbound_private_messages,
         before
     );
 
-    // Another counterparty's intake on the same identity reads only its own link.
+    // Another counterparty's intake on the same identity reads only its own
+    // link, and its cap check visits no record either.
     let (records, more_pending) = accepted(accept_pending(&storage, &other, 4).await.unwrap());
     assert!(!more_pending);
     assert_eq!(records[0].proposal_stream_item_id, Some(other_proposal));
     assert_eq!(history_counters(), (2, 2 * other_records + 1));
+    assert_eq!(link_records_visited(), 0);
+    assert_eq!(link_record_index_rebuilds(), 0);
+}
+
+/// Per-link counts computed from the records themselves.
+fn counted_link_records(
+    state: &crate::storage::StorageState,
+) -> std::collections::HashMap<PubkyPublicKey, usize> {
+    let mut counts = std::collections::HashMap::new();
+    for counterparty in state
+        .private_stream_items
+        .iter()
+        .map(|item| &item.counterparty)
+        .chain(
+            state
+                .outbound_private_messages
+                .iter()
+                .map(|message| &message.counterparty),
+        )
+    {
+        *counts.entry(counterparty.clone()).or_insert(0) += 1;
+    }
+    counts
+}
+
+#[tokio::test]
+async fn test_link_record_index_matches_records_across_insert_remove_and_decode() {
+    let storage = registered_storage();
+    let peers = [counterparty(), counterparty()];
+    for peer in &peers {
+        seed_validating_link(&storage, peer).await;
+        persist_allowee_proposals(&storage, peer, 3).await;
+    }
+    // Inserts through the transaction methods keep the index current.
+    let state = storage.snapshot().unwrap();
+    assert_eq!(
+        state.link_record_index_counts(),
+        Some(counted_link_records(&state))
+    );
+    queue_outbound(
+        &storage,
+        peers[0].clone(),
+        received_allowee_proposal(AllowanceRole::Allowee),
+        timestamp(),
+    )
+    .await;
+    let mut state = storage.snapshot().unwrap();
+    assert_eq!(
+        state.link_record_index_counts(),
+        Some(counted_link_records(&state))
+    );
+    let valid = state.clone();
+
+    // A removal outside the transaction methods leaves the index unread
+    // until it is rebuilt, and the next transaction rebuilds it.
+    let removed = state.private_stream_items.remove(0).counterparty;
+    assert_eq!(state.link_record_index_counts(), None);
+    assert_eq!(state.indexed_link_records(&removed), None);
+    let storage = InMemoryStorage::from_state(state);
+    reset_history_counters();
+    storage.transaction(|_| Ok(())).await.unwrap();
+    assert_eq!(link_record_index_rebuilds(), 1);
+    let state = storage.snapshot().unwrap();
+    assert_eq!(
+        state.link_record_index_counts(),
+        Some(counted_link_records(&state))
+    );
+    // A removal followed by an append keeps the length, but the last id
+    // changes, so the stale index is still not read.
+    let mut stale = state.clone();
+    let mut appended = stale.private_stream_items.remove(0);
+    appended.stream_item_id = stale.next_private_stream_item_id;
+    stale.private_stream_items.push(appended);
+    assert_eq!(stale.link_record_index_counts(), None);
+
+    // The index is never stored, and decoding rebuilds it.
+    let blob = crate::storage::encode_storage_state_blob(&valid).unwrap();
+    let mut bare = valid.clone();
+    bare.link_record_index = Default::default();
+    assert_eq!(
+        crate::storage::encode_storage_state_blob(&bare).unwrap(),
+        blob
+    );
+    let decoded = crate::storage::decode_storage_state_blob(&blob).unwrap();
+    assert_eq!(decoded, valid);
+    assert_eq!(
+        decoded.link_record_index_counts(),
+        Some(counted_link_records(&decoded))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

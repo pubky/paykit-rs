@@ -6,8 +6,12 @@ use chrono::{DateTime, Utc};
 mod compaction;
 pub(crate) use compaction::compact_received_private_payment_lists;
 mod in_memory;
+mod link_index;
 #[cfg(test)]
 pub(crate) use in_memory::{LINK_RECORDS_LOADED, LINK_RECORDS_VISITED};
+pub use link_index::LinkRecordIndex;
+#[cfg(test)]
+pub(crate) use link_index::LINK_RECORD_INDEX_REBUILDS;
 mod pubky_shared;
 mod queue;
 mod records;
@@ -619,19 +623,14 @@ pub trait StorageTransaction {
     fn private_stream_items(&self, counterparty: &PubkyPublicKey) -> Vec<PrivateStreamItemRecord>;
 
     /// Count one counterparty's private stream items and outbound private
-    /// messages together, stopping once the count exceeds `max`.
+    /// messages together, up to `max + 1`.
     ///
-    /// Returns the exact count when it is at most `max`, otherwise a value
-    /// above `max`. Adapters should stop examining records once the count
-    /// exceeds `max`, so a caller can refuse a long history without paying
-    /// for its length.
-    ///
-    /// The default loads both collections and counts them in full, so it
-    /// returns the exact count but does not stop early.
-    fn link_record_count_up_to(&self, counterparty: &PubkyPublicKey, _max: usize) -> usize {
-        self.private_stream_items(counterparty).len()
-            + self.outbound_private_messages(counterparty).len()
-    }
+    /// Returns the exact count when it is at most `max`, otherwise any value
+    /// above `max`. The SDK calls this to refuse a long history before
+    /// reading it, so an adapter's work must stay bounded by `max` and not
+    /// grow with the length of this or any other counterparty's history: use
+    /// a per-counterparty index or partition, never a scan of all records.
+    fn link_record_count_up_to(&self, counterparty: &PubkyPublicKey, max: usize) -> usize;
 
     /// Load an Event Message dedupe record.
     fn event_dedup_record(

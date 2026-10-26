@@ -698,6 +698,7 @@ impl SdkBackupState {
             receipt_access_records,
             receipt_records,
             receipt_issuance_records,
+            link_record_index: Default::default(),
         };
 
         validation::validate_storage_state(&state)?;

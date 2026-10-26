@@ -701,6 +701,11 @@ pub struct StorageState {
     pub receipt_records: HashMap<(PubkyPublicKey, String), ReceiptRecord>,
     /// Local receipt issuance records by counterparty and Receipt ID.
     pub receipt_issuance_records: HashMap<(PubkyPublicKey, String), ReceiptIssuanceRecord>,
+    /// Derived per-link record counts. Never stored, so the encoded state is
+    /// unchanged; the SDK rebuilds it whenever it no longer matches the
+    /// records.
+    #[serde(skip)]
+    pub link_record_index: super::LinkRecordIndex,
 }
 
 impl fmt::Debug for StorageState {

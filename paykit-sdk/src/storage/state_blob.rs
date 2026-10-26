@@ -56,6 +56,7 @@ pub fn decode_storage_state_blob(bytes: &[u8]) -> Result<StorageState> {
             source: None,
         }
     })?;
+    envelope.state.refresh_link_record_index();
     Ok(envelope.state)
 }
 
