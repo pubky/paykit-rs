@@ -1,6 +1,350 @@
 use super::*;
 use std::time::Duration;
 
+async fn preparation_claim_fixture(
+    expires_at: Option<&str>,
+) -> (InMemoryStorage, PubkyPublicKey, PaymentRequestId) {
+    let storage = registered_test_storage();
+    let peer = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let request_id = PaymentRequestId::new("550e8400-e29b-41d4-a716-446655440000").unwrap();
+    seed_private_capable_identity_and_handshake(&storage, peer.clone()).await;
+    persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        vec![payment_request_message(
+            "650e8400-e29b-41d4-a716-446655440000",
+            request_id.as_str(),
+            expires_at,
+        )],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    authorize_payment_request_app(&storage, peer.clone(), "bitkit").await;
+    (storage, peer, request_id)
+}
+
+#[tokio::test]
+async fn test_preparation_claim_adds_only_exact_blocked_peer_policy() {
+    let (storage, peer, request_id) = preparation_claim_fixture(None).await;
+    let unrelated = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    for state in [
+        None,
+        Some(LinkedPeerState::NotLinked),
+        Some(LinkedPeerState::Linking),
+        Some(LinkedPeerState::Linked),
+        Some(LinkedPeerState::RecoveryRequired),
+        Some(LinkedPeerState::Blocked),
+    ] {
+        let mut before = storage.snapshot().unwrap();
+        let mut record = before.linked_peers.remove(&peer).unwrap();
+        record.counterparty = unrelated.clone();
+        record.state = LinkedPeerState::Blocked;
+        before
+            .linked_peers
+            .insert(unrelated.clone(), record.clone());
+        if let Some(state) = state.clone() {
+            record.counterparty = peer.clone();
+            record.state = state;
+            before.linked_peers.insert(peer.clone(), record);
+        }
+        // Claim preparation does not require an active transport snapshot.
+        before.encrypted_link_states.clear();
+        let mut outcomes = Vec::new();
+        for preparation in [false, true] {
+            let storage = InMemoryStorage::from_state(before.clone());
+            let sdk = PaykitSdk::with_clock(
+                storage.clone(),
+                TestPubkySessionProvider { session: None },
+                TestPaymentAdapter,
+                PaykitSdkConfig::new("bitkit").unwrap(),
+                FixedClock,
+            );
+            let result = if preparation {
+                sdk.claim_payment_request_for_preparation(peer.clone(), &request_id)
+                    .await
+            } else {
+                sdk.claim_payment_request_for_execution(peer.clone(), &request_id)
+                    .await
+            };
+            let after = storage.snapshot().unwrap();
+            assert_eq!(
+                after.outbound_private_messages,
+                before.outbound_private_messages
+            );
+            if preparation && state == Some(LinkedPeerState::Blocked) {
+                assert!(
+                    matches!(result, Err(PaykitSdkError::Policy { ref context, .. }) if context.contains("is blocked"))
+                );
+                assert!(after.payment_request_execution_claims.is_empty());
+            } else {
+                outcomes.push((result.map_err(|error| error.to_string()), after));
+            }
+        }
+        if state != Some(LinkedPeerState::Blocked) {
+            assert_eq!(outcomes[0], outcomes[1]);
+            assert!(outcomes[1].0.is_ok());
+        } else {
+            assert!(
+                outcomes[0].0.is_ok(),
+                "existing execution claim remains unchanged"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_preparation_claim_rejects_blocked_peer_before_registry_access() {
+    for successful_loads in [0, 1] {
+        let (storage, peer, request_id) = preparation_claim_fixture(None).await;
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            FailingPublicStorageProvider {
+                successful_loads: successful_loads.into(),
+            },
+            TestPaymentAdapter,
+            PaykitSdkConfig::new("bitkit").unwrap(),
+            FixedClock,
+        );
+        sdk.block_peer(peer.clone()).await.unwrap();
+        let before = storage.snapshot().unwrap();
+
+        let result = sdk
+            .claim_payment_request_for_preparation(peer, &request_id)
+            .await;
+
+        assert!(
+            matches!(result, Err(PaykitSdkError::Policy { ref context, .. }) if context.contains("is blocked"))
+        );
+        assert_eq!(
+            sdk.pubky.successful_loads.load(Ordering::SeqCst),
+            successful_loads
+        );
+        assert_eq!(storage.snapshot().unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn test_preparation_claim_preserves_execution_authority_checks() {
+    for failure in [
+        "request",
+        "counterparty",
+        "outgoing",
+        "capability",
+        "owner",
+        "origin",
+        "expiry",
+    ] {
+        let expires_at = (failure == "expiry").then_some("2026-06-03T11:59:59Z");
+        let (storage, peer, request_id) = preparation_claim_fixture(expires_at).await;
+        storage
+            .transaction(|tx| {
+                match failure {
+                    "outgoing" | "capability" => {
+                        let mut capabilities = tx.paykit_app_capabilities(&app_id()).unwrap();
+                        if failure == "outgoing" {
+                            capabilities.outgoing_payments = false;
+                        } else {
+                            capabilities.payment_requests = false;
+                        }
+                        tx.save_paykit_app_capabilities(&app_id(), capabilities);
+                    }
+                    "owner" => tx.save_payment_request_execution_claim(
+                        crate::storage::PaymentRequestExecutionClaim {
+                            counterparty: peer.clone(),
+                            payment_request_id: request_id.as_str().to_owned(),
+                            app_id: paykit_lib::PaykitAppId::new("server").unwrap(),
+                            claimed_at: FixedClock.now(),
+                        },
+                    ),
+                    "origin" => tx.save_authorized_paykit_apps(peer.clone(), HashMap::new()),
+                    _ => {}
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let before = storage.snapshot().unwrap();
+        let sdk = PaykitSdk::with_clock(
+            storage.clone(),
+            TestPubkySessionProvider { session: None },
+            TestPaymentAdapter,
+            PaykitSdkConfig::new("bitkit").unwrap(),
+            FixedClock,
+        );
+        let request = if failure == "request" {
+            PaymentRequestId::new("550e8400-e29b-41d4-a716-446655440001").unwrap()
+        } else {
+            request_id.clone()
+        };
+        let counterparty = if failure == "counterparty" {
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key())
+        } else {
+            peer.clone()
+        };
+        assert!(sdk
+            .claim_payment_request_for_preparation(counterparty, &request)
+            .await
+            .is_err());
+        assert_eq!(storage.snapshot().unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn test_preparation_claim_preserves_uncertain_commit_for_restart() {
+    struct LostClaimAcknowledgement {
+        inner: InMemoryStorage,
+        claim_writes: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl StorageAdapter for LostClaimAcknowledgement {
+        async fn transaction_erased<'a>(
+            &self,
+            callback: crate::storage::StorageTransactionCallback<'a>,
+        ) -> Result<Box<dyn std::any::Any + Send>> {
+            let mut changed = false;
+            let result = self
+                .inner
+                .transaction_erased(Box::new(|tx| {
+                    let before = tx.export_storage_state().payment_request_execution_claims;
+                    let result = callback(tx);
+                    changed = result.is_ok()
+                        && tx.export_storage_state().payment_request_execution_claims != before;
+                    result
+                }))
+                .await?;
+            if changed {
+                self.claim_writes.fetch_add(1, Ordering::SeqCst);
+                return Err(PaykitSdkError::Storage {
+                    context: "commit acknowledgement unavailable".into(),
+                    source: None,
+                });
+            }
+            Ok(result)
+        }
+    }
+    let (storage, peer, request_id) = preparation_claim_fixture(None).await;
+    let before = storage.snapshot().unwrap();
+    let sdk = PaykitSdk::with_clock(
+        LostClaimAcknowledgement {
+            inner: storage.clone(),
+            claim_writes: 0.into(),
+        },
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("bitkit").unwrap(),
+        FixedClock,
+    );
+    assert!(matches!(
+        sdk.claim_payment_request_for_preparation(peer.clone(), &request_id)
+            .await,
+        Err(PaykitSdkError::Storage { .. })
+    ));
+    assert_eq!(sdk.storage.claim_writes.load(Ordering::SeqCst), 1);
+    let committed = storage.snapshot().unwrap();
+    assert_eq!(committed.payment_request_execution_claims.len(), 1);
+    assert_eq!(
+        committed.outbound_private_messages,
+        before.outbound_private_messages
+    );
+    let restarted = InMemoryStorage::from_state(committed.clone());
+    let sdk = PaykitSdk::with_clock(
+        restarted.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("bitkit").unwrap(),
+        FixedClock,
+    );
+    let claim = sdk
+        .claim_payment_request_for_preparation(peer, &request_id)
+        .await
+        .unwrap();
+    assert_eq!(claim.execution_claim_app_id, Some(app_id()));
+    assert_eq!(restarted.snapshot().unwrap(), committed);
+}
+
+#[tokio::test]
+async fn test_preparation_claim_holds_session_until_completion_or_cancellation() {
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+    use tokio::sync::Barrier;
+    struct PausedAuthorization {
+        entered: Arc<Barrier>,
+        release: Arc<Barrier>,
+    }
+    #[async_trait::async_trait]
+    impl PubkySessionProvider for PausedAuthorization {
+        async fn load_session_access(&self) -> Result<Option<PubkySessionAccess>> {
+            Ok(None)
+        }
+        async fn load_public_storage(&self) -> Result<Option<pubky::PublicStorage>> {
+            self.entered.wait().await;
+            self.release.wait().await;
+            Ok(None)
+        }
+        async fn clear_session_access(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for cancel in [false, true] {
+            let (storage, peer, request_id) = preparation_claim_fixture(None).await;
+            let entered = Arc::new(Barrier::new(2));
+            let release = Arc::new(Barrier::new(2));
+            let sdk = Arc::new(PaykitSdk::with_clock(
+                storage.clone(),
+                PausedAuthorization {
+                    entered: entered.clone(),
+                    release: release.clone(),
+                },
+                TestPaymentAdapter,
+                PaykitSdkConfig::new("bitkit").unwrap(),
+                FixedClock,
+            ));
+            let claiming = tokio::spawn({
+                let sdk = sdk.clone();
+                async move {
+                    sdk.claim_payment_request_for_preparation(peer, &request_id)
+                        .await
+                }
+            });
+            entered.wait().await;
+            let mut forget_session = Box::pin(sdk.forget_session_access());
+            {
+                let mut context = Context::from_waker(Waker::noop());
+                assert!(matches!(
+                    forget_session.as_mut().poll(&mut context),
+                    Poll::Pending
+                ));
+            }
+            if cancel {
+                claiming.abort();
+                assert!(claiming.await.unwrap_err().is_cancelled());
+            } else {
+                release.wait().await;
+                assert_eq!(
+                    claiming.await.unwrap().unwrap().execution_claim_app_id,
+                    Some(app_id())
+                );
+            }
+            assert_eq!(
+                storage
+                    .snapshot()
+                    .unwrap()
+                    .payment_request_execution_claims
+                    .len(),
+                usize::from(!cancel)
+            );
+            forget_session.await.unwrap();
+        }
+    })
+    .await
+    .expect("preparation claim session coordination should finish");
+}
+
 #[tokio::test]
 async fn test_idempotent_proposal_retry_requires_live_session() {
     let storage = registered_test_storage();

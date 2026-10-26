@@ -9,10 +9,27 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Added
 
+- `claim_payment_request_for_preparation` in Rust and
+  `claimPaymentRequestForPreparation` in Swift and Kotlin reject blocked
+  counterparties before App Registry access and atomically recheck that policy
+  when claiming a Payment Request for preparation.
 - `accept_pending_allowance_proposals` in Rust and
   `acceptPendingAllowanceProposals` in Swift and Kotlin accept up to a limit of
   one counterparty's pending Allowance proposals in one transaction, with work
   bounded by a per-link record cap instead of the link's whole history.
+
+### Integration
+
+- Use the guarded preparation API before preparing payment, and compare its
+  returned proposal and applicable Billing Period with the approved terms.
+  Existing acceptance, authorization and execution checks remain required. The
+  legacy execution-claim API retains compatibility behavior without this guard.
+- Use bindings and native libraries generated from the same SDK release. The
+  corrected FFI method documentation changes a UniFFI compatibility checksum;
+  mixing earlier bindings or native libraries fails SDK initialization. Payment
+  behavior and callable signatures are unchanged by the documentation update.
+  Mocks and conformers of the generated SDK interfaces must implement the new
+  preparation-claim method.
 
 ## [0.1.1-rc1] - 2026-10-20
 
