@@ -19,7 +19,7 @@ where
     /// Restore SDK-managed backup state.
     ///
     /// Restores only into an empty or matching identity-only state backing: it
-    /// may hold identity metadata, cached Paykit App authorizations, and
+    /// may hold identity metadata, authorized Paykit App records, and
     /// operation leases, and nothing else. Otherwise the refusal names the
     /// blocking record kinds. Restore is also refused while a peer-link or
     /// Paykit App operation lease is unexpired. A backup with identity-scoped
@@ -29,11 +29,11 @@ where
     /// restore. Retained Allowance and Payment Request evidence cannot be
     /// discarded; rejection changes no state.
     ///
-    /// Restore before [`Self::publish_paykit_app`]: publishing (and the public
-    /// endpoint sync it enables) writes SDK-managed state that blocks restore.
-    /// After [`Self::initialize`] on a fresh backing, ask the user about a backup
-    /// and restore it before publishing. With Pubky shared storage, restore over
-    /// an identity where any app has published is refused by design;
+    /// After [`Self::initialize`] on a fresh backing, restore before
+    /// [`Self::publish_paykit_app`]: publishing (and the public endpoint sync it
+    /// enables) writes SDK-managed state that blocks restore. With Pubky shared
+    /// storage, restore over an identity where any app has published is refused
+    /// by design;
     /// [`Self::recover_shared_state_from_backup`] covers only missing or corrupt
     /// state. With app-owned local storage (such as a callback state blob), the
     /// app may discard that state and initialize again only when the refusal

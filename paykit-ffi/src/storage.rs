@@ -31,12 +31,8 @@ pub struct FfiSdkStateBlobSnapshot {
 /// Platform-owned durable blob store for SDK state.
 ///
 /// Callback storage only: the SDK writes the whole state on every change as
-/// unencrypted `FfiSdkStateBlob` bytes, the same kind of sensitive plaintext as
-/// `FfiSdkBackupBlob`, including the Paykit Noise static secret key. Store
-/// blobs only in platform-protected storage (Keychain- or Keystore-backed
-/// encryption or equivalent); never log them or upload them unencrypted.
-/// Pubky shared-state runtimes do not call this store; they encrypt their
-/// shared state.
+/// unencrypted `FfiSdkStateBlob` bytes, including the Paykit Noise static
+/// secret key. See `FfiSdkStateBlob` for the required protection.
 ///
 /// The SDK invokes these callbacks while holding its per-handle storage lock.
 /// Implementations must not call back into the same SDK handle from either

@@ -373,10 +373,13 @@ impl FfiPaykitSdk {
     /// identity, private-link-capable when the backup holds private state.
     ///
     /// Restore before `publish_paykit_app`: publishing (and the public endpoint
-    /// sync it enables) writes SDK-managed state that blocks restore. After
-    /// restore, payment accounting requires `reconcile_allowance_accounting`
-    /// with complete wallet history; an empty history attests that there were
-    /// no previous payments.
+    /// sync it enables) writes SDK-managed state that blocks restore. With
+    /// callback storage, discard the state blob and initialize again only when
+    /// the refusal names nothing but registered Paykit Apps and public Payment
+    /// Endpoint records, then restore with `RequireRecovery`. After restore,
+    /// payment accounting requires `reconcile_allowance_accounting` with
+    /// complete wallet history; an empty history attests that there were no
+    /// previous payments.
     ///
     /// `link_policy` decides whether saved Encrypted Links resume or require a
     /// fresh Encrypted Link Handshake. Resuming a backup that is not current
@@ -420,22 +423,10 @@ impl FfiPaykitSdk {
 
     /// Restore SDK-managed backup state from a hex string.
     ///
-    /// Restores only into a state backing that holds nothing but identity
-    /// metadata, authorized Paykit App records, and operation leases; otherwise
-    /// the refusal names the blocking record kinds. Restore is also refused
-    /// while a peer-link or Paykit App operation lease is unexpired. A backup
-    /// with identity-scoped state needs an active Pubky session for the same
-    /// identity, private-link-capable when the backup holds private state.
-    ///
-    /// Restore before `publish_paykit_app`: publishing (and the public endpoint
-    /// sync it enables) writes SDK-managed state that blocks restore. After
-    /// restore, payment accounting requires `reconcile_allowance_accounting`
-    /// with complete wallet history; an empty history attests that there were
-    /// no previous payments.
-    ///
-    /// `link_policy` decides whether saved Encrypted Links resume or require a
-    /// fresh Encrypted Link Handshake. Resuming a backup that is not current
-    /// reuses a transport key and nonce.
+    /// Hex-string form of `restore_backup_state`, with the same preconditions,
+    /// onboarding order (restore before `publish_paykit_app`), post-restore
+    /// reconciliation, and `link_policy` semantics. Resuming a backup that is
+    /// not current reuses a transport key and nonce.
     pub async fn restore_backup_string(
         &self,
         backup: String,

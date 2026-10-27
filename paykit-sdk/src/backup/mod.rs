@@ -323,10 +323,7 @@ where
             let blockers = restore_blockers(&current_state);
             if !blockers.is_empty() {
                 return Err(PaykitSdkError::Policy {
-                    context: format!(
-                        "cannot restore a backup over existing SDK-managed state: {}",
-                        blockers.join(", ")
-                    ),
+                    context: format!("{RESTORE_TARGET_NOT_EMPTY}: {}", blockers.join(", ")),
                     source: None,
                 });
             }
@@ -376,6 +373,9 @@ where
         .await
 }
 
+/// Refusal prefix for a restore over SDK-managed state; [`restore_blockers`] names follow it.
+const RESTORE_TARGET_NOT_EMPTY: &str = "cannot restore a backup over existing SDK-managed state";
+
 /// Name the SDK-managed record kinds that block a normal restore, in a stable order.
 ///
 /// An empty list means the backing holds only identity metadata, the authorized
@@ -385,7 +385,11 @@ where
 /// The destructure is exhaustive on purpose (no `..`): a new `StorageState`
 /// field fails to compile here until someone decides whether it blocks restore.
 /// The names are static because the refusal crosses the FFI verbatim; never add
-/// ids, public keys, payloads, Paykit App IDs, or counts.
+/// ids, public keys, payloads, Paykit App IDs, or counts. The restore docs tell
+/// callback-storage apps they may discard state only when the refusal names
+/// nothing but "registered Paykit Apps" and "public Payment Endpoint records",
+/// so renaming or regrouping those two labels changes that rule; update the
+/// `restore_backup_state` docs and READMEs with them.
 fn restore_blockers(state: &StorageState) -> Vec<&'static str> {
     let StorageState {
         paykit_noise_public_key: _,

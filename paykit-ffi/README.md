@@ -373,8 +373,8 @@ The current state and backup blob formats remain version 1; see
 Decode failure never falls back to empty state. The platform
 `saveStateBlobAtomically` callback must durably save the whole blob and enforce
 its expected revision before acknowledging success.
-State and backup blobs are unencrypted, sensitive plaintext. Protect them with
-caller-managed encryption in storage and backups.
+State and backup blobs are unencrypted, sensitive plaintext; see
+[State and Secret Blobs](#state-and-secret-blobs).
 
 Restore rejects backups that would discard retained Allowance or Payment Request
 lifecycle evidence, including Cancellation and Event ID conflicts. Rejection
@@ -529,11 +529,11 @@ identity profile fields without exposing an FFI JSON value model.
 ### State and Secret Blobs
 
 - `SdkStateBlob` — internal identity-wide SDK runtime state. Store it in the
-  shared durable backing used by every runtime for that Pubky identity. It is
-  unencrypted with callback storage: keep it in platform-protected storage
-  (Keychain- or Keystore-backed encryption or equivalent).
-- `SdkBackupBlob` — unencrypted, sensitive SDK backup/export payload for
-  app-controlled backup flows. Encrypt it before storage or transport.
+  shared durable backing used by every runtime for that Pubky identity. With
+  callback storage it is unencrypted; keep it in platform-protected storage
+  (Keychain- or Keystore-backed encryption or equivalent). See below.
+- `SdkBackupBlob` — unencrypted SDK backup/export payload for app-controlled
+  backup flows. Encrypt it before storage or transport. See below.
 - `PubkyLocalSecretKey` — local Pubky secret key bytes.
 - `PaykitIdentitySecretKey` — rotatable identity-wide Paykit secret plus key
   generation.

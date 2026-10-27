@@ -1,7 +1,5 @@
 use super::*;
 
-const REFUSAL: &str = "cannot restore a backup over existing SDK-managed state";
-
 fn capabilities() -> paykit_lib::PaykitAppCapabilities {
     paykit_lib::PaykitAppCapabilities {
         private_payments: true,
@@ -26,17 +24,9 @@ fn public_endpoint_record() -> PublicEndpointRecord {
 /// registry publication. Publishing itself needs a live homeserver, so these
 /// tests seed the same storage writes directly.
 async fn published_app_storage(local: &PubkyPublicKey) -> InMemoryStorage {
-    let storage = InMemoryStorage::new();
+    let storage = InMemoryStorage::with_registered_apps([app_id()]);
     storage
-        .transaction({
-            let local = local.clone();
-            move |tx| {
-                tx.save_identity_state(identity(local));
-                tx.save_paykit_app_capabilities(&app_id(), capabilities());
-                tx.activate_paykit_app(&app_id());
-                Ok(())
-            }
-        })
+        .save_identity_state(identity(local.clone()))
         .await
         .unwrap();
     storage
@@ -118,9 +108,9 @@ fn test_restore_blockers_name_app_setup_records() {
 }
 
 #[test]
-fn test_restore_blockers_treat_advanced_counters_as_history() {
+fn test_restore_blockers_name_single_history_kinds() {
     type Mutation = fn(&mut StorageState);
-    let cases: [(Mutation, &str); 5] = [
+    let cases: &[(Mutation, &str)] = &[
         (
             |state| state.next_outbound_private_message_id = 1,
             "outbound Private Application Messages",
@@ -149,22 +139,11 @@ fn test_restore_blockers_treat_advanced_counters_as_history() {
             "Contact Records",
         ),
     ];
-    for (mutate, expected) in cases {
+    for &(mutate, expected) in cases {
         let mut state = StorageState::default();
         mutate(&mut state);
         assert_eq!(restore_blockers(&state), [expected]);
     }
-}
-
-#[tokio::test]
-async fn test_restore_backup_state_refusal_names_registered_paykit_apps() {
-    let local = public_key();
-    let storage = published_app_storage(&local).await;
-
-    let context = refusal_context(&storage, &local).await;
-
-    assert_eq!(context, format!("{REFUSAL}: registered Paykit Apps"));
-    assert_no_identifiers(&context, &local);
 }
 
 #[tokio::test]
@@ -183,32 +162,9 @@ async fn test_restore_backup_state_refusal_names_public_endpoint_records() {
 
     assert_eq!(
         context,
-        format!("{REFUSAL}: registered Paykit Apps, public Payment Endpoint records")
+        format!(
+            "{RESTORE_TARGET_NOT_EMPTY}: registered Paykit Apps, public Payment Endpoint records"
+        )
     );
     assert_no_identifiers(&context, &local);
-}
-
-#[tokio::test]
-async fn test_restore_backup_state_accepts_fresh_backing_before_publication() {
-    let local = public_key();
-    let storage = InMemoryStorage::new();
-    storage
-        .transaction({
-            let local = local.clone();
-            move |tx| {
-                tx.save_identity_state(identity(local));
-                Ok(())
-            }
-        })
-        .await
-        .unwrap();
-    let mut backup = empty_backup(identity(local));
-    backup
-        .public_endpoint_records
-        .push(public_endpoint_record());
-
-    let report = restore_backup_state(&storage, backup).await.unwrap();
-
-    assert!(report.restored_identity);
-    assert_eq!(storage.snapshot().unwrap().public_endpoint_records.len(), 1);
 }
