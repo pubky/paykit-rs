@@ -384,6 +384,11 @@ pub struct FfiAllowanceRecord {
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
     /// Return Allowances matching a local SDK filter, newest first by local record time (presentation order only).
+    ///
+    /// A counterparty filter naming a Blocked peer fails with a policy error
+    /// when that peer has Allowance messages and returns an empty list
+    /// otherwise. Without a counterparty filter, blocked peers are skipped.
+    /// See `blockPeer`.
     pub async fn list_allowances(
         &self,
         filter: FfiAllowanceFilter,
@@ -398,6 +403,7 @@ impl FfiPaykitSdk {
     }
 
     /// Return one Allowance from one exact authenticated Encrypted Link.
+    /// Fails with a policy error while the counterparty is Blocked.
     pub async fn get_allowance(
         &self,
         counterparty: String,
@@ -467,6 +473,10 @@ impl FfiPaykitSdk {
     }
 
     /// Queue a proposal withdrawal or unilateral End for accepted authority.
+    ///
+    /// Fails with a policy error while the counterparty is Blocked and with a
+    /// `RecoveryRequired` error while its Encrypted Link is not ready, so end
+    /// Allowances before blocking a peer; see `blockPeer`.
     pub async fn end_allowance(
         &self,
         counterparty: String,

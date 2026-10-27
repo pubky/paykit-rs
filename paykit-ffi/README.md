@@ -105,6 +105,19 @@ Paykit-side workflow.
   `advanceLinkHandshake` — establish Encrypted Links with counterparties.
 - `PaykitSdk.linkedPeers`, `blockPeer`, and `unblockPeer` — inspect and
   manage local peer state.
+- Blocking a peer: `blockPeer` is local and does not notify the peer. It parks
+  queued private messages instead of deleting them, and after `unblockPeer`
+  and a fresh Encrypted Link Handshake they are sent again in order. Accepted
+  Allowances and Payment Requests are paused, not revoked, and authorize again
+  after relink without new consent. While the peer is blocked, nothing new can
+  be queued for it, `endAllowance` is refused, and reads that name it fail
+  with a policy error. Before blocking, while the peer is still Linked, deliver
+  pending events such as a Payment Proof with `processOutboundPrivateMessages`,
+  retrieve any Receipt you need, and call `endAllowance` for each `Accepted`
+  Allowance, and each `Proposed` one this identity proposed, that the user
+  wants gone. If the peer was already blocked, after unblock and relink call
+  `endAllowance`, or confirm with the user before calling
+  `acceptPaymentRequestAutomatically` for that peer again.
 - `PaykitSdk.forgetPeer`: irreversibly delete what a blocked counterparty
   sent, for every Paykit App on the identity, when the local identity never
   acted on it. It releases a counterparty whose `receivePrivateMessages` fails
@@ -502,7 +515,27 @@ bootstrap.approveAuthWithCompanionClaim(
   blobs and read public Pubky resources with caller-provided size limits.
 - `PaykitSdk.saveContact`, `contactRecord`, `contactRecords`, and
   `removeContact` — manage Contact Records. Each contact is one Pubky
-  identity.
+  identity. `removeContact` deletes only the record: the Encrypted Link,
+  intake, queued sends, accepted Allowances and the peer's copy of your last
+  Private Payment List stay, and a re-add reuses the link.
+- `PaykitSdk.removeContactsAndBlockPeers(publicKeys)`: remove contacts and
+  block their peers in one transaction, as `blockPeer` does. To end a
+  contact's Encrypted Link without keeping the peer blocked:
+  1. Call `endAllowance` and `cancelPaymentRequest` for the Allowances and
+     Payment Requests the user wants gone. Otherwise they authorize again
+     after a later relink.
+  2. While the peer is still Linked, call
+     `clearPrivatePaymentListAndProcessOutbound`. It queues an empty Private
+     Payment List and sends the peer's queue in order, including step 1's
+     messages. Check that `failedToQueue` and `failedToDeliver` are empty;
+     they cover only the list. Queueing the list alone is not enough, because
+     the block parks it unsent. This is best effort for this Paykit App only
+     and cannot take back details the peer already read.
+  3. Call `removeContactsAndBlockPeers`, then `unblockPeer`.
+
+  A crash between the two calls in step 3 leaves the peer Blocked, which hides
+  its Payment Requests and Receipts. On startup, unblock any Blocked peer that
+  has no Contact Record and that the user did not block.
 - `PaykitSdk.saveContacts(updates)` — save a batch in one atomic storage
   transaction after validating every update and the initialized identity. Results
   follow input order; duplicate keys are applied in order, with the last update
@@ -512,7 +545,9 @@ bootstrap.approveAuthWithCompanionClaim(
 - `PaykitSdk.saveContactsAndUnblockPeers(updates)` — explicitly add or restore
   contacts and unblock their blocked peers in the same atomic transaction. Other
   peers and existing links are unchanged. A busy blocked peer rejects the batch;
-  unblocked peers need a fresh Encrypted Link. Use `saveContact` for label edits.
+  unblocked peers need a fresh Encrypted Link Handshake, after which parked
+  work is sent and accepted Allowances and Payment Requests authorize again
+  (see Blocking a peer). Use `saveContact` for label edits.
 - `PaykitSdk.fetchPubkyProfile` and bounded `fetchPubkyFollows` — read Pubky
   app profile and follow data.
 - `PaykitSdk.resolveProfile` and `currentProfile` — resolve profile display

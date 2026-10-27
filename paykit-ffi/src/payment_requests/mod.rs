@@ -406,6 +406,7 @@ impl FfiPaykitSdk {
 
     /// Inspect inbound proposals from one counterparty.
     /// Quotes and actionable state require the full view, which includes outbound acceptance.
+    /// Fails with a policy error while the counterparty is Blocked.
     pub async fn received_payment_requests_from(
         &self,
         counterparty: String,
@@ -418,6 +419,7 @@ impl FfiPaykitSdk {
     }
 
     /// Return Payment Requests involving one counterparty.
+    /// Fails with a policy error while the counterparty is Blocked; see `blockPeer`.
     pub async fn payment_requests_with(
         &self,
         counterparty: String,
@@ -430,6 +432,8 @@ impl FfiPaykitSdk {
     }
 
     /// Return Payment Requests matching a local SDK filter.
+    /// A filter naming a Blocked counterparty fails with a policy error; without
+    /// a counterparty, blocked peers are skipped.
     pub async fn list_payment_requests(
         &self,
         filter: FfiPaymentRequestFilter,

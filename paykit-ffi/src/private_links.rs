@@ -295,6 +295,24 @@ impl FfiPaykitSdk {
     }
 
     /// Block a counterparty for local Paykit private workflows.
+    ///
+    /// Local policy; the counterparty is not notified. Clears Encrypted Link
+    /// state, and fails with a `ConcurrentUpdate` error while another peer
+    /// link operation, such as a send, is running.
+    ///
+    /// Queued outbound messages are parked as `RecoveryRequired`, not deleted.
+    /// After `unblockPeer` and a fresh Encrypted Link Handshake they are queued
+    /// again unchanged and in order, except messages whose Paykit App is then
+    /// unregistered or retired. No call withdraws them. While blocked, no new
+    /// private message, including a Payment Proof, can be queued for the peer.
+    ///
+    /// Accepted Allowances and accepted Payment Requests are paused, not
+    /// revoked, and authorize again after relink without new consent. While
+    /// blocked, `endAllowance` is refused, reads that name this counterparty
+    /// fail with a policy error, and reads across counterparties skip it. So
+    /// first deliver pending Event Messages with
+    /// `processOutboundPrivateMessages` and call `endAllowance` for authority
+    /// the user wants gone. See "Blocking a peer" in the README.
     pub async fn block_peer(
         &self,
         counterparty: String,
@@ -307,6 +325,16 @@ impl FfiPaykitSdk {
     }
 
     /// Remove a local peer block and return the peer to NotLinked.
+    ///
+    /// The counterparty is not notified, and old Encrypted Link state is not
+    /// restored. When a fresh Encrypted Link Handshake completes, work parked
+    /// by `blockPeer` is queued again, and accepted Allowances and accepted
+    /// Payment Requests authorize again without new consent. If the user
+    /// wanted them gone, call `endAllowance` after relink, or confirm with the
+    /// user before calling `acceptPaymentRequestAutomatically` for this
+    /// counterparty again. Until that handshake,
+    /// `pendingOutboundPrivateCounterparties` can list the peer and sending to
+    /// it fails with a `RecoveryRequired` error.
     pub async fn unblock_peer(
         &self,
         counterparty: String,
