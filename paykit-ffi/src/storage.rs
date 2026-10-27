@@ -14,10 +14,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{ffi_error_to_sdk, storage_error, PaykitFfiError};
 use crate::secrets::FfiSdkStateBlob;
-use crate::{SDK_BACKUP_BLOB_VERSION, SDK_STATE_BLOB_VERSION};
+use crate::SDK_BACKUP_BLOB_VERSION;
 
 const INVALID_STATE_BLOB_CODE: &str = "invalid_state_blob";
 const INVALID_STATE_BLOB_CONTEXT: &str = "SDK state blob failed validation";
+const STATE_BLOB_SNAPSHOT_VERSION_V1: u32 = 1;
+const STATE_BLOB_SNAPSHOT_VERSION: u32 = 2;
 
 /// Current SDK state blob with its platform storage revision.
 #[derive(uniffi::Record, Clone, Debug)]
@@ -355,7 +357,7 @@ pub fn encode_sdk_state_blob_snapshot(
         return Err(invalid_state_blob_error());
     }
     postcard::to_allocvec(&StateBlobSnapshotEnvelope {
-        version: SDK_STATE_BLOB_VERSION,
+        version: STATE_BLOB_SNAPSHOT_VERSION,
         revision: snapshot.revision,
         blob: snapshot.blob.export_bytes(),
     })
@@ -385,12 +387,15 @@ pub fn decode_sdk_state_blob_snapshot(
             "SDK state snapshot contains trailing bytes",
         ));
     }
-    if envelope.version != SDK_STATE_BLOB_VERSION {
+    if !matches!(
+        envelope.version,
+        STATE_BLOB_SNAPSHOT_VERSION_V1 | STATE_BLOB_SNAPSHOT_VERSION
+    ) {
         return Err(storage_error(
             "unsupported_state_snapshot_blob_version",
             format!(
-                "unsupported SDK state snapshot blob version {}, expected {}",
-                envelope.version, SDK_STATE_BLOB_VERSION
+                "unsupported SDK state snapshot blob version {}, expected {} or {}",
+                envelope.version, STATE_BLOB_SNAPSHOT_VERSION_V1, STATE_BLOB_SNAPSHOT_VERSION
             ),
         ));
     }

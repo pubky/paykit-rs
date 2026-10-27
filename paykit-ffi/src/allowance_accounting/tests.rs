@@ -287,7 +287,7 @@ fn test_accounting_state_blob_round_trip_and_version_truncation_rejection() {
     };
     let bytes = encode_storage_state(&state).unwrap();
     assert_eq!(decode_storage_state(&bytes).unwrap(), state);
-    assert_eq!(bytes[0], crate::SDK_STATE_BLOB_VERSION as u8);
+    assert_eq!(bytes[0], paykit_sdk::storage::SDK_STATE_BLOB_VERSION as u8);
     let mut unsupported = bytes.clone();
     unsupported[0] = 3;
     assert!(decode_storage_state(&unsupported).is_err());

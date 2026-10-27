@@ -1059,12 +1059,58 @@ fn test_state_blob_snapshot_encoding_round_trips() {
     };
 
     let mut encoded = encode_sdk_state_blob_snapshot(snapshot.clone()).unwrap();
+    let (version, _): (u32, _) = postcard::take_from_bytes(&encoded).unwrap();
+    assert_eq!(version, 2);
     let decoded = decode_sdk_state_blob_snapshot(encoded.clone()).unwrap();
 
     assert_eq!(decoded.revision, snapshot.revision);
     assert_eq!(decoded.blob.export_bytes(), snapshot.blob.export_bytes());
+
+    let mut unsupported = encoded.clone();
+    unsupported[0] = 3;
+    assert!(matches!(
+        decode_sdk_state_blob_snapshot(unsupported),
+        Err(PaykitFfiError::Storage { code, .. })
+            if code == "unsupported_state_snapshot_blob_version"
+    ));
+
     encoded.push(0);
     assert!(decode_sdk_state_blob_snapshot(encoded).is_err());
+}
+
+#[test]
+fn test_state_blob_snapshot_decodes_real_v1_envelope_and_state() {
+    #[derive(serde::Serialize)]
+    struct StateBlobSnapshotEnvelopeV1<'a> {
+        version: u32,
+        revision: &'a str,
+        blob: &'a [u8],
+    }
+
+    let inner_v1 = include_bytes!("fixtures/sdk-state-v1.postcard");
+    let encoded = postcard::to_allocvec(&StateBlobSnapshotEnvelopeV1 {
+        version: 1,
+        revision: "revision-from-v1",
+        blob: inner_v1,
+    })
+    .unwrap();
+
+    let decoded = decode_sdk_state_blob_snapshot(encoded).unwrap();
+    assert_eq!(decoded.revision, "revision-from-v1");
+    assert_eq!(decoded.blob.export_bytes(), inner_v1);
+
+    let migrated = decode_storage_state(&decoded.blob.export_bytes()).unwrap();
+    assert_eq!(
+        migrated
+            .identity_state
+            .unwrap()
+            .public_key
+            .unwrap()
+            .as_str(),
+        "7jfgaa9nutjyixzikb7tgmsf9gkwq7iqz498zr1nd5ig1fng4esy"
+    );
+    assert!(migrated.private_intake_cursors.is_empty());
+    assert!(migrated.private_intake_peers.is_empty());
 }
 
 #[test]
