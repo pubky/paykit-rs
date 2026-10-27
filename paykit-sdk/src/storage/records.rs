@@ -727,7 +727,7 @@ impl fmt::Debug for PrivateIntakePeerRecord {
 pub enum PrivateIntakeBufferOutcome {
     /// Packet and relevant cursor were committed.
     Inserted,
-    /// Exact packet was already buffered; cursor was advanced idempotently.
+    /// Exact packet was already buffered; no cursor or packet state changed.
     AlreadyBuffered,
     /// Persisted hard queue capacity was reached; nothing changed.
     CapacityReached,

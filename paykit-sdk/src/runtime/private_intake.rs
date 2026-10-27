@@ -1,11 +1,12 @@
 use super::*;
 use crate::storage::{
-    BufferedPrivatePacketRecord, PrivateIntakeBufferOutcome, PrivateIntakeCursorRecord,
+    BufferedPrivatePacketRecord, PaykitAppOperationLease, PrivateIntakeBufferOutcome,
+    PrivateIntakeCursorRecord,
 };
 use futures_util::StreamExt;
 use std::{
     collections::HashMap,
-    sync::{atomic::Ordering, Arc, Mutex as StdMutex},
+    sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
 use tokio::sync::{watch, Notify, RwLock as AsyncRwLock};
@@ -19,6 +20,9 @@ const MIN_HEALTHY_AUDIT_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_HEALTHY_AUDIT_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const MAX_AUDIT_JITTER: Duration = Duration::from_secs(5);
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const SUPERVISOR_LEASE_TIMEOUT: chrono::Duration = chrono::Duration::minutes(2);
+const SUPERVISOR_LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(30);
+const SUPERVISOR_LEASE_APP_ID: &str = "paykit-private-intake-supervisor";
 
 /// Validated limits for SSE-assisted private intake.
 #[derive(Clone, Debug)]
@@ -96,7 +100,6 @@ pub struct PrivateIntakeSupervisor {
     tasks: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
     health: Arc<AsyncRwLock<PrivateIntakeHealth>>,
     work: Arc<Notify>,
-    running: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PrivateIntakeSupervisor {
@@ -129,26 +132,22 @@ impl PrivateIntakeSupervisor {
         for state in health.peers.values_mut() {
             *state = PrivateIntakeTransportState::Stopped;
         }
-        self.running.store(false, Ordering::Release);
     }
 }
 
 impl Drop for PrivateIntakeSupervisor {
     fn drop(&mut self) {
         let _ = self.stop.send(true);
-        for task in self
-            .tasks
+        // Dropping JoinHandles detaches tasks. They observe stop, exit their
+        // cancellation-safe loops, and release ownership after streams stop.
+        self.tasks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .drain(..)
-        {
-            task.abort();
-        }
-        self.running.store(false, Ordering::Release);
+            .clear();
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct SubscriptionGroup {
     homeserver: paykit_lib::PublicKey,
     homeserver_name: String,
@@ -160,6 +159,38 @@ enum PrivatePacketAcquisition {
     Inserted,
     AlreadyBuffered,
     CapacityReached,
+}
+
+fn next_private_intake_counter(
+    state: &crate::storage::StorageState,
+    counterparty: &PubkyPublicKey,
+    generation: u64,
+    snapshot_counter: u64,
+) -> Result<u64> {
+    let Some(buffered) = state.private_intake_peers.get(counterparty) else {
+        return Ok(snapshot_counter);
+    };
+    if buffered.link_generation != generation {
+        return Err(PaykitSdkError::RecoveryRequired {
+            context: "buffered private intake generation does not match Encrypted Link".into(),
+            source: None,
+        });
+    }
+    let Some(tail) = buffered.buffered_packets.last() else {
+        return Ok(snapshot_counter);
+    };
+    if buffered.buffered_packets[0].receive_counter != snapshot_counter {
+        return Err(PaykitSdkError::RecoveryRequired {
+            context: "buffered private intake does not begin at Noise read counter".into(),
+            source: None,
+        });
+    }
+    tail.receive_counter
+        .checked_add(1)
+        .ok_or_else(|| PaykitSdkError::RecoveryRequired {
+            context: "private intake receive counter is exhausted".into(),
+            source: None,
+        })
 }
 
 fn partition_public_subscriptions(users: Vec<PubkyPublicKey>) -> Vec<Vec<PubkyPublicKey>> {
@@ -186,6 +217,39 @@ fn reserve_stream_capacity(capacity: usize, required: usize) -> Result<usize> {
     Ok(required)
 }
 
+fn supervisor_lease_app_id() -> paykit_lib::PaykitAppId {
+    paykit_lib::PaykitAppId::new(SUPERVISOR_LEASE_APP_ID)
+        .expect("private intake supervisor lease app id is valid")
+}
+
+async fn claim_private_intake_lease<S: StorageAdapter>(
+    storage: &S,
+    now: DateTime<Utc>,
+) -> Result<PaykitAppOperationLease> {
+    storage
+        .transaction(move |tx| {
+            tx.claim_paykit_app_operation(
+                &supervisor_lease_app_id(),
+                now,
+                now + SUPERVISOR_LEASE_TIMEOUT,
+            )?
+            .ok_or_else(|| PaykitSdkError::Policy {
+                context: "private intake supervisor is already running for this identity".into(),
+                source: None,
+            })
+        })
+        .await
+}
+
+async fn release_private_intake_lease<S: StorageAdapter>(storage: &S, lease_id: u64) -> Result<()> {
+    storage
+        .transaction(move |tx| {
+            tx.release_paykit_app_operation(&supervisor_lease_app_id(), lease_id);
+            Ok(())
+        })
+        .await
+}
+
 fn audit_jitter(group: &SubscriptionGroup) -> Duration {
     let millis = group
         .peers
@@ -207,16 +271,7 @@ where
     P: PaymentAdapter + 'static,
     C: Clock,
 {
-    /// Start caller-owned SSE-assisted intake for every established Linked Peer.
-    ///
-    /// SSE events are hints only. Each hint and healthy audit fetches only next
-    /// expected immutable Noise slot, then commits ciphertext with per-user cursor.
-    /// No Noise receive checkpoint advances until explicit buffered processing.
-    pub async fn start_private_intake(
-        self: &Arc<Self>,
-        config: PrivateIntakeConfig,
-    ) -> Result<PrivateIntakeSupervisor> {
-        config.validate()?;
+    async fn resolve_private_intake_groups(&self) -> Result<Vec<SubscriptionGroup>> {
         let (access, peers) = self.private_receive_context(None).await?;
         let mut by_homeserver: HashMap<String, (paykit_lib::PublicKey, Vec<PubkyPublicKey>)> =
             HashMap::new();
@@ -260,17 +315,23 @@ where
                 .cmp(&right.homeserver_name)
                 .then_with(|| left.peers[0].as_str().cmp(right.peers[0].as_str()))
         });
+        Ok(groups)
+    }
+
+    /// Start caller-owned SSE-assisted intake for every established Linked Peer.
+    ///
+    /// SSE events are hints only. Each hint and healthy audit fetches only next
+    /// expected immutable Noise slot, then commits ciphertext with per-user cursor.
+    /// No Noise receive checkpoint advances until explicit buffered processing.
+    pub async fn start_private_intake(
+        self: &Arc<Self>,
+        config: PrivateIntakeConfig,
+    ) -> Result<PrivateIntakeSupervisor> {
+        config.validate()?;
+        let groups = self.resolve_private_intake_groups().await?;
         let reserved_streams = reserve_stream_capacity(config.stream_capacity, groups.len())?;
-        if self
-            .private_intake_running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(PaykitSdkError::Policy {
-                context: "private intake supervisor is already running for this SDK".into(),
-                source: None,
-            });
-        }
+        let lease = claim_private_intake_lease(&self.storage, self.clock.now()).await?;
+        let lease_id = lease.lease_id;
         let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth {
             peers: groups
                 .iter()
@@ -282,16 +343,48 @@ where
         }));
         let work = Arc::new(Notify::new());
         let (stop, _) = watch::channel(false);
-        let mut tasks = Vec::with_capacity(groups.len());
-        for group in groups {
+        let mut tasks = Vec::with_capacity(groups.len() + 1);
+        {
+            let sdk = Arc::clone(self);
+            let mut stop_rx = stop.subscribe();
+            let stop_tx = stop.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut renewal = tokio::time::interval(SUPERVISOR_LEASE_RENEW_INTERVAL);
+                renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                renewal.tick().await;
+                loop {
+                    tokio::select! {
+                        changed = stop_rx.changed() => {
+                            if changed.is_err() || *stop_rx.borrow() { break; }
+                        }
+                        _ = renewal.tick() => {
+                            let now = sdk.clock.now();
+                            let renewed = sdk.storage.transaction(move |tx| {
+                                Ok(tx.renew_paykit_app_operation(
+                                    &supervisor_lease_app_id(),
+                                    lease_id,
+                                    now + SUPERVISOR_LEASE_TIMEOUT,
+                                ))
+                            }).await.unwrap_or(false);
+                            if !renewed {
+                                let _ = stop_tx.send(true);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }));
+        }
+        {
             let sdk = Arc::clone(self);
             let stop_rx = stop.subscribe();
             let health = Arc::clone(&health);
             let work = Arc::clone(&work);
-            let config = config.clone();
             tasks.push(tokio::spawn(async move {
-                sdk.run_private_intake_group(group, config, stop_rx, health, work)
+                sdk.clone()
+                    .run_private_intake_topology(groups, config, stop_rx, health, work)
                     .await;
+                let _ = release_private_intake_lease(&sdk.storage, lease_id).await;
             }));
         }
         Ok(PrivateIntakeSupervisor {
@@ -299,8 +392,118 @@ where
             tasks: StdMutex::new(tasks),
             health,
             work,
-            running: Arc::clone(&self.private_intake_running),
         })
+    }
+
+    async fn run_private_intake_topology(
+        self: Arc<Self>,
+        mut groups: Vec<SubscriptionGroup>,
+        config: PrivateIntakeConfig,
+        mut stop: watch::Receiver<bool>,
+        health: Arc<AsyncRwLock<PrivateIntakeHealth>>,
+        work: Arc<Notify>,
+    ) {
+        loop {
+            if *stop.borrow() {
+                return;
+            }
+            let mappings = groups
+                .iter()
+                .flat_map(|group| {
+                    group
+                        .peers
+                        .iter()
+                        .cloned()
+                        .map(|peer| (peer, group.homeserver_name.clone()))
+                })
+                .collect::<Vec<_>>();
+            if self
+                .storage
+                .transaction(move |tx| {
+                    for (peer, homeserver) in mappings {
+                        tx.reconcile_private_intake_cursor_homeserver(&peer, &homeserver);
+                    }
+                    Ok(())
+                })
+                .await
+                .is_err()
+            {
+                for group in &groups {
+                    set_group_state(&health, group, PrivateIntakeTransportState::Stale).await;
+                }
+                if wait_reconnect_or_stop(&mut stop).await {
+                    return;
+                }
+                continue;
+            }
+
+            {
+                let mut current = health.write().await;
+                let active_peers = groups
+                    .iter()
+                    .flat_map(|group| group.peers.iter())
+                    .cloned()
+                    .collect::<std::collections::HashSet<_>>();
+                current.peers.retain(|peer, _| active_peers.contains(peer));
+                current
+                    .last_successful_audit_at
+                    .retain(|peer, _| active_peers.contains(peer));
+                current.reserved_streams = groups.len();
+                for peer in active_peers {
+                    current
+                        .peers
+                        .entry(peer)
+                        .or_insert(PrivateIntakeTransportState::Connecting);
+                }
+            }
+            let (epoch_stop, _) = watch::channel(false);
+            let mut handles = Vec::with_capacity(groups.len());
+            for group in groups.clone() {
+                let sdk = Arc::clone(&self);
+                let config = config.clone();
+                let health = Arc::clone(&health);
+                let work = Arc::clone(&work);
+                let stop_rx = epoch_stop.subscribe();
+                handles.push(tokio::spawn(async move {
+                    sdk.run_private_intake_group(group, config, stop_rx, health, work)
+                        .await;
+                }));
+            }
+
+            let next_groups = loop {
+                tokio::select! {
+                    changed = stop.changed() => {
+                        if changed.is_err() || *stop.borrow() { break None; }
+                    }
+                    _ = tokio::time::sleep(RECONNECT_DELAY) => {
+                        match self.resolve_private_intake_groups().await {
+                            Ok(resolved) if resolved != groups => {
+                                if reserve_stream_capacity(config.stream_capacity, resolved.len()).is_ok() {
+                                    break Some(resolved);
+                                }
+                                for group in &resolved {
+                                    set_group_state(&health, group, PrivateIntakeTransportState::Stale).await;
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(_) => {
+                                for group in &groups {
+                                    set_group_state(&health, group, PrivateIntakeTransportState::Stale).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            let _ = epoch_stop.send(true);
+            for handle in handles {
+                let _ = handle.await;
+            }
+            let Some(resolved) = next_groups else {
+                return;
+            };
+            groups = resolved;
+        }
     }
 
     async fn run_private_intake_group(
@@ -526,9 +729,27 @@ where
         let secret = access.paykit_noise_secret_key()?;
         let session_info = access.session.info();
         let local = session_info.public_key();
+        let snapshot_counter = snapshot
+            .link
+            .next_private_application_message_resource(local, &secret)?
+            .1;
+        let counterparty_for_tail = counterparty.clone();
+        let generation = snapshot.state.generation;
+        let receive_counter = self
+            .storage
+            .transaction(move |tx| {
+                let state = tx.export_storage_state();
+                next_private_intake_counter(
+                    &state,
+                    &counterparty_for_tail,
+                    generation,
+                    snapshot_counter,
+                )
+            })
+            .await?;
         let (resource, receive_counter) = snapshot
             .link
-            .next_private_application_message_resource(local, &secret)?;
+            .private_application_message_resource_at_counter(local, &secret, receive_counter)?;
         let response = match access.outbox_client.public_storage().get(resource).await {
             Ok(response) => response,
             Err(error) if is_pubky_not_found(&error) => {
@@ -698,5 +919,53 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_lease_is_identity_wide_across_sdk_handles() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let first = claim_private_intake_lease(&storage, Utc::now())
+            .await
+            .unwrap();
+        let second = claim_private_intake_lease(&storage.clone(), Utc::now()).await;
+        assert!(matches!(second, Err(PaykitSdkError::Policy { .. })));
+
+        release_private_intake_lease(&storage, first.lease_id)
+            .await
+            .unwrap();
+        assert!(claim_private_intake_lease(&storage, Utc::now())
+            .await
+            .is_ok());
+    }
+
+    #[test]
+    fn test_event_and_audit_acquisition_follow_contiguous_buffer_tail() {
+        let peer = users(1).remove(0);
+        let mut state = crate::storage::StorageState::default();
+        state.private_intake_peers.insert(
+            peer.clone(),
+            crate::storage::PrivateIntakePeerRecord {
+                counterparty: peer.clone(),
+                link_generation: 7,
+                buffered_packets: vec![3, 4]
+                    .into_iter()
+                    .map(|receive_counter| BufferedPrivatePacketRecord {
+                        counterparty: peer.clone(),
+                        link_generation: 7,
+                        receive_counter,
+                        ciphertext: vec![
+                            receive_counter as u8;
+                            crate::storage::PRIVATE_INTAKE_PACKET_BYTES
+                        ],
+                        source_cursor: None,
+                        buffered_at: Utc::now(),
+                    })
+                    .collect(),
+                cancelled_handshake_through_generation: None,
+            },
+        );
+
+        assert_eq!(next_private_intake_counter(&state, &peer, 7, 3).unwrap(), 5);
+        assert_eq!(next_private_intake_counter(&state, &peer, 7, 3).unwrap(), 5);
     }
 }

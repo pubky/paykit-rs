@@ -544,3 +544,87 @@ async fn test_storage_allocators_fail_without_mutating_at_exhaustion() {
     assert!(matches!(result, Err(PaykitSdkError::Storage { .. })));
     assert!(storage.snapshot().unwrap().private_stream_items.is_empty());
 }
+
+#[tokio::test]
+async fn test_duplicate_buffered_packet_does_not_advance_relevant_cursor() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    let user = counterparty();
+    storage
+        .transaction({
+            let peer = peer.clone();
+            let user = user.clone();
+            move |tx| {
+                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                    counterparty: peer.clone(),
+                    link_snapshot: None,
+                    handshake_snapshot: None,
+                    handshake_role: None,
+                    generation: 1,
+                    checkpointed_at: timestamp(),
+                });
+                let packet = BufferedPrivatePacketRecord {
+                    counterparty: peer,
+                    link_generation: 1,
+                    receive_counter: 3,
+                    ciphertext: vec![7; PRIVATE_INTAKE_PACKET_BYTES],
+                    source_cursor: Some(PrivateIntakeCursorRecord {
+                        subscribed_user: user.clone(),
+                        homeserver: "homeserver-a".into(),
+                        event_id: 10,
+                    }),
+                    buffered_at: timestamp(),
+                };
+                assert_eq!(
+                    tx.buffer_private_intake_packet(packet.clone())?,
+                    PrivateIntakeBufferOutcome::Inserted
+                );
+                let mut replay = packet;
+                replay.source_cursor.as_mut().unwrap().event_id = 11;
+                assert_eq!(
+                    tx.buffer_private_intake_packet(replay)?,
+                    PrivateIntakeBufferOutcome::AlreadyBuffered
+                );
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        storage.snapshot().unwrap().private_intake_cursors[&user].event_id,
+        10
+    );
+}
+
+#[tokio::test]
+async fn test_homeserver_move_resets_only_moved_users_cursor() {
+    let storage = InMemoryStorage::new();
+    let moved = counterparty();
+    let stable = counterparty();
+    storage
+        .transaction({
+            let moved = moved.clone();
+            let stable = stable.clone();
+            move |tx| {
+                tx.advance_private_intake_cursor(PrivateIntakeCursorRecord {
+                    subscribed_user: moved.clone(),
+                    homeserver: "homeserver-a".into(),
+                    event_id: 10,
+                })?;
+                tx.advance_private_intake_cursor(PrivateIntakeCursorRecord {
+                    subscribed_user: stable.clone(),
+                    homeserver: "homeserver-a".into(),
+                    event_id: 20,
+                })?;
+                tx.reconcile_private_intake_cursor_homeserver(&moved, "homeserver-b");
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let state = storage.snapshot().unwrap();
+    assert!(!state.private_intake_cursors.contains_key(&moved));
+    assert_eq!(state.private_intake_cursors[&stable].event_id, 20);
+}

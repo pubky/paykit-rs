@@ -503,6 +503,14 @@ pub trait StorageTransaction {
     /// Advance one subscribed user's durable homeserver cursor monotonically.
     fn advance_private_intake_cursor(&mut self, cursor: PrivateIntakeCursorRecord) -> Result<()>;
 
+    /// Drop one user's replay cursor when authoritative homeserver resolution moves it.
+    /// Other users' independent cursors remain unchanged.
+    fn reconcile_private_intake_cursor_homeserver(
+        &mut self,
+        subscribed_user: &PubkyPublicKey,
+        homeserver: &str,
+    );
+
     /// Remove only the expected queue head after its durable processing commits.
     fn remove_buffered_private_intake_packet(
         &mut self,

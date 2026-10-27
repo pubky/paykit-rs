@@ -383,9 +383,6 @@ impl StorageTransaction for StorageStateTransaction {
                         source: None,
                     });
                 }
-                if let Some(cursor) = packet.source_cursor {
-                    advance_private_intake_cursor(&mut self.state, cursor)?;
-                }
                 return Ok(PrivateIntakeBufferOutcome::AlreadyBuffered);
             }
             if let Some(tail) = existing.buffered_packets.last() {
@@ -465,6 +462,21 @@ impl StorageTransaction for StorageStateTransaction {
 
     fn advance_private_intake_cursor(&mut self, cursor: PrivateIntakeCursorRecord) -> Result<()> {
         advance_private_intake_cursor(&mut self.state, cursor)
+    }
+
+    fn reconcile_private_intake_cursor_homeserver(
+        &mut self,
+        subscribed_user: &PubkyPublicKey,
+        homeserver: &str,
+    ) {
+        if self
+            .state
+            .private_intake_cursors
+            .get(subscribed_user)
+            .is_some_and(|cursor| cursor.homeserver != homeserver)
+        {
+            self.state.private_intake_cursors.remove(subscribed_user);
+        }
     }
 
     fn remove_buffered_private_intake_packet(

@@ -1055,6 +1055,36 @@ fn test_private_message_resource_derivation_does_not_advance_snapshot() {
     assert_eq!(snapshot.serialize(), before);
 }
 
+#[test]
+fn test_private_message_resource_derives_contiguous_buffer_tail_without_advancing_snapshot() {
+    let mut state = transport_snapshot_state_with_nonces(0, 7);
+    state.read_counter = 3;
+    let mut bytes = state.serialize();
+    bytes.extend_from_slice(&Keypair::random().public_key().as_inner().to_bytes());
+    bytes.extend_from_slice(&[0; 72]);
+    let snapshot = EncryptedLinkSnapshot::deserialize(&bytes).unwrap();
+    let before = snapshot.serialize();
+
+    let (resource, counter) = snapshot
+        .private_application_message_resource_at_counter(
+            &Keypair::random().public_key(),
+            &[2; 32],
+            5,
+        )
+        .unwrap();
+
+    assert_eq!(counter, 5);
+    assert!(resource.ends_with("/5"));
+    assert_eq!(snapshot.serialize(), before);
+    assert!(snapshot
+        .private_application_message_resource_at_counter(
+            &Keypair::random().public_key(),
+            &[2; 32],
+            2,
+        )
+        .is_err());
+}
+
 #[tokio::test]
 async fn test_malformed_private_application_message_packet_is_rejected() {
     let mut setup = PrivateTestSetup::new().await;

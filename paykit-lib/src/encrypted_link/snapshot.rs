@@ -191,10 +191,33 @@ impl EncryptedLinkSnapshot {
         local_identity_public_key: &PublicKey,
         local_noise_secret_key: &[u8; 32],
     ) -> Result<(String, u64)> {
+        self.private_application_message_resource_at_counter(
+            local_identity_public_key,
+            local_noise_secret_key,
+            u64::from(self.state.read_counter),
+        )
+    }
+
+    /// Return remote resource for an expected immutable transport slot at or
+    /// after this snapshot's current read counter.
+    ///
+    /// This supports ordered prefetch into a durable contiguous buffer without
+    /// advancing Noise state. Callers must derive `receive_counter` from the
+    /// authoritative snapshot plus validated buffered tail; arbitrary skips are
+    /// not safe. Session capability, bounded reads, authentication, and durable
+    /// ordered processing remain caller responsibilities.
+    pub fn private_application_message_resource_at_counter(
+        &self,
+        local_identity_public_key: &PublicKey,
+        local_noise_secret_key: &[u8; 32],
+        receive_counter: u64,
+    ) -> Result<(String, u64)> {
         if self.state.phase != pubky_noise::snow_crypto::NoisePhase::Transport
             || self.state.static_secret.as_ref() != Some(local_noise_secret_key)
             || self.state.read_counter >= u32::MAX - 1
             || self.state.receiving_nonce >= u64::MAX - 1
+            || receive_counter < u64::from(self.state.read_counter)
+            || receive_counter >= u64::from(u32::MAX - 1)
         {
             return Err(PaykitError::Validation(
                 "snapshot cannot receive with the supplied Noise key".into(),
@@ -208,11 +231,8 @@ impl EncryptedLinkSnapshot {
             &self.recovery_context,
         );
         Ok((
-            format!(
-                "{}/{}/{}",
-                self.recipient, read_path, self.state.read_counter
-            ),
-            u64::from(self.state.read_counter),
+            format!("{}/{}/{}", self.recipient, read_path, receive_counter),
+            receive_counter,
         ))
     }
 
