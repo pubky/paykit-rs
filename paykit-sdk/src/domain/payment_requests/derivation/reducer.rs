@@ -121,6 +121,7 @@ fn apply_request(
         .parsed_app_id
         .as_ref()
         .and_then(|app_id| paykit_lib::PaykitAppId::new(app_id).ok());
+    record.proposal_recorded_at = Some(item.received_at);
     record.terms = Some(PaymentRequestTermsRecord::from(request.request()));
     record.touch(item);
 }
@@ -159,14 +160,10 @@ pub(super) fn apply_stored_event(
             ) {
                 return;
             }
-            if proposal_expired(record, stored.record_time()) {
-                mark_invalid_stored(
-                    record,
-                    stored,
-                    "Payment Request acceptance arrived after proposal expiry",
-                );
-                return;
-            }
+            // The payer checks proposal expiry at its acceptance decision. A
+            // payee can fetch an in-time Acceptance after its own local expiry,
+            // so it records the Acceptance and exposes `acceptance_recorded_at`
+            // for application policy instead of voiding the request here.
             // Only the first Acceptance may cross a payee Cancellation; any
             // later Acceptance falls through to the transition check below.
             let crosses_payee_cancellation = record.state == PaymentRequestLifecycleState::Canceled
@@ -185,6 +182,7 @@ pub(super) fn apply_stored_event(
             }
             record.accepted_event_id = Some(acceptance.event_id().as_str().to_owned());
             record.accepted_outbound_status = outbound_status(stored);
+            record.acceptance_recorded_at = Some(stored.record_time());
             record.payer_app_id = stored.app_id();
             if !crosses_payee_cancellation {
                 record.state = accepted_state(record);
@@ -438,6 +436,7 @@ fn apply_stored_request(
     }
     record.proposal_event_id = Some(request.event_id().as_str().to_owned());
     record.proposal_app_id = stored.app_id();
+    record.proposal_recorded_at = Some(stored.record_time());
     record.terms = Some(PaymentRequestTermsRecord::from(request.request()));
     touch_stored(record, stored);
 }

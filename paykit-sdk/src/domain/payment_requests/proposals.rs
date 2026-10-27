@@ -76,9 +76,10 @@ pub(crate) fn enqueue_idempotent_payment_request(
         proposal_ids = Some((
             original.event_id().as_str().to_owned(),
             message.outbound_message_id,
+            message.created_at,
         ));
     }
-    let (event_id, outbound_message_id) = if let Some(ids) = proposal_ids {
+    let (event_id, outbound_message_id, recorded_at) = if let Some(ids) = proposal_ids {
         ids
     } else {
         for item in state.private_stream_items {
@@ -115,6 +116,7 @@ pub(crate) fn enqueue_idempotent_payment_request(
         (
             request.event_id().as_str().to_owned(),
             message.outbound_message_id,
+            message.created_at,
         )
     };
     let mut record = payment_request_records_from_transaction(tx, counterparty, now)?
@@ -125,8 +127,10 @@ pub(crate) fn enqueue_idempotent_payment_request(
             source: None,
         })?;
     // Invalid lifecycle events can suppress proposal fields during derivation.
-    // Recover queue identities without changing lifecycle or payment authority.
+    // Recover queue identities and record time without changing lifecycle or
+    // payment authority.
     record.proposal_event_id = Some(event_id);
     record.proposal_outbound_message_id = Some(outbound_message_id);
+    record.proposal_recorded_at = Some(recorded_at);
     Ok(record)
 }
