@@ -343,7 +343,12 @@ responsibility.
        paymentEndpointIdentifier, actualAmount,
        endpointCurrent, localEnabled, recurrenceEligible
    )
-   selection = AllowanceSelectionInput(allowanceId, expectedRevision, checks.trustedTime)
+   selection = AllowanceSelectionInput(
+       allowanceId,
+       // latest association revision for this request; null only for the initial selection
+       expectedAssociationRevision,
+       checks.trustedTime
+   )
    sdk.acceptPaymentRequestAutomatically(scope, selection, checks)
    ```
 
@@ -388,10 +393,11 @@ with a replace-by-fee (RBF) spend back to the wallet or a self-transfer that
 consumes the same nonce, rather than inferring failure from absence. RBF needs
 the original transaction to be replaceable. Retry by replacement (same inputs or
 same nonce) so the original and the retry cannot both settle, and check the
-executor's idempotency records for the previous attempt ID first. After a
-post-handoff automatic `Failed` that is not fully certain, call
-`markPaymentManualOnly` on the occurrence. It is sticky, so any second payment
-then needs user authorization.
+executor's idempotency records for the previous attempt ID first. Keep any
+post-handoff result that is not definitive as `Unknown` until it is verified
+successful or made definitively failed. After a definitive automatic failure,
+call `markPaymentManualOnly` on the occurrence if product policy requires user
+authorization before any retry. It is sticky.
 
 `deferPaymentOccurrence` records a temporary private reason; reconsideration must
 repeat all checks. `markPaymentManualOnly` is sticky and background matching never
@@ -465,8 +471,9 @@ of every request under that Allowance. The same applies after
   again after `recordPaymentOutcome`. A restored `Prepared` attempt becomes
   `Unknown`; it still blocks the occurrence and, when automatic, counts as
   Allowance usage, so restoring that backup fails closed. Resolve it with an
-  explicit entry in the reconciliation `outcomes`. Backing up only after the
-  outcome leaves the handoff window unprotected.
+  explicit entry in the reconciliation `outcomes`; a terminal status copied
+  into `history` does not change it. Backing up only after the outcome leaves
+  the handoff window unprotected.
 - **Keep every attempt.** Keep each `PaymentAttemptRecord` that admission
   returns with the wallet's own payment records, and resubmit all of them when
   reconciling, not only a recent time window. Reconciliation deduplicates by
@@ -481,11 +488,16 @@ To rebuild the history for reconciliation:
 
 1. Start from `allowanceAccountingState().history`. It keeps the restored
    associations and watermarks that automatic attempts must reference.
-2. Add each externally verified payment the history lacks, as an attempt with
+2. For each attempt already in the retained history (for example a restored
+   `Unknown`) whose result the wallet has verified, add an entry to
+   `outcomes`. Reconciliation keeps a retained attempt's nonterminal status
+   even when `history` supplies `Succeeded` or `Failed`; a terminal status in
+   the supplied `history` applies only to a newly reconstructed attempt.
+   Add each externally verified payment the history lacks, as an attempt with
    its verified status on the matching occurrence (or a new occurrence record).
-   Reuse the kept `PaymentAttemptRecord` when there is one; otherwise use a new
-   lowercase UUID v4 `attemptId`, the state's `epoch`, and the original
-   admission or payment time as `admittedAt`.
+   For such an attempt, reuse the kept `PaymentAttemptRecord` when there is
+   one; otherwise use a new lowercase UUID v4 `attemptId`, the state's `epoch`,
+   and the original admission or payment time as `admittedAt`.
    - Manual: mode `Manual`, no `allowanceId` or `associationRevision`, and the
      verified actual amount.
    - Automatic: mode `Automatic`, the request terms amount, and `allowanceId`
@@ -497,9 +509,11 @@ To rebuild the history for reconciliation:
    admission".
 4. Use a reconciliation `trustedTime` at or after every `admittedAt` and
    `evaluatedAt`.
-5. An association created after the export is missing from the restored
-   history. Supply its revision yourself, or record the payment as `Manual`;
-   a manual record blocks the occurrence but under-counts Allowance usage.
+5. An association created or replaced after the export is missing from the
+   restored history. Reconstruct its complete, contiguous association history
+   and the payment's original automatic attribution from authoritative wallet
+   records. If that evidence is unavailable, do not reconcile: leave accounting
+   blocked (fail closed) rather than recording the payment as `Manual`.
 
 Never build attempts from Payment Proofs or Receipts.
 
