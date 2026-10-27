@@ -118,7 +118,10 @@ where
     ///
     /// Use this when the user explicitly adds or restores contacts, not for label
     /// edits. Only selected blocked peers are unblocked; existing links and
-    /// unselected peers are unchanged. Unblocked peers need a fresh Encrypted Link.
+    /// unselected peers are unchanged. Unblocked peers need a fresh Encrypted Link
+    /// Handshake. After it, parked private work is sent again, and accepted
+    /// Allowances and Payment Requests authorize again without new consent, as
+    /// described on [`Self::unblock_peer`].
     /// Contact ordering, duplicate keys, timestamps and metadata follow `save_contacts`.
     /// Invalid updates, the local identity, or an active lease on a selected blocked
     /// peer reject the entire batch without changing contacts or peer state.
@@ -206,6 +209,18 @@ where
     }
 
     /// Remove one Contact Record.
+    ///
+    /// Only the record is removed. The Encrypted Link, private stream intake,
+    /// queued outbound messages, accepted Allowances, and the counterparty's
+    /// copy of the last Private Payment List this identity sent are all kept,
+    /// and a later re-add reuses the same Encrypted Link. Removal restores the
+    /// retained private stream item limit only when this identity has never
+    /// queued or sent that counterparty a Payment Request, Payment Request
+    /// Acceptance, Payment Proof, Allowance proposal, or Allowance Acceptance;
+    /// otherwise the limit stays lifted.
+    ///
+    /// Returns `Policy` while the record has a Public Contact Marker. To also
+    /// end the Encrypted Link, see [`Self::remove_contacts_and_block_peers`].
     pub async fn remove_contact(
         &self,
         public_key: &PubkyPublicKey,
@@ -237,10 +252,34 @@ where
     /// records do not prevent other contacts from being removed. Storage failures
     /// roll back the entire batch; a local-identity key rejects it before mutation.
     ///
-    /// Blocking discards Encrypted Link state and retires pending private work, as
-    /// in `block_peer`. This does not withdraw published Payment Lists or cancel
-    /// subscriptions. Callers must apply their subscription policy and perform any
-    /// best-effort withdrawal before blocking.
+    /// Blocking discards Encrypted Link state and parks pending private work,
+    /// which is sent again after a fresh handshake, as described on
+    /// [`Self::block_peer`]. Accepted Allowances and Payment Requests are paused,
+    /// not ended. Keys without a Contact Record are skipped and not blocked.
+    /// This does not withdraw published Payment Lists or cancel subscriptions.
+    /// Callers must apply their subscription policy and perform any best-effort
+    /// withdrawal before blocking.
+    ///
+    /// To end a contact's Encrypted Link without keeping the peer blocked:
+    ///
+    /// 1. Call [`Self::end_allowance`] and [`Self::cancel_payment_request`] for
+    ///    the Allowances and Payment Requests the user wants gone. Otherwise
+    ///    they authorize again after a later relink.
+    /// 2. While the peer is `Linked`, call
+    ///    [`Self::clear_private_payment_list_and_process_outbound`]. It queues an
+    ///    empty Private Payment List and processes the peer's outbound queue in
+    ///    order, so it also sends step 1's messages. Check that
+    ///    `failed_to_queue` and `failed_to_deliver` are empty; they cover only the
+    ///    list. Queueing the list alone, with [`Self::clear_private_payment_list`]
+    ///    or [`Self::sync_contact_private_payment_lists`], is not enough, because
+    ///    the block parks it unsent. This is best effort and covers only this
+    ///    SDK's Paykit App; it cannot take back details the peer already read.
+    /// 3. Call this method, then [`Self::unblock_peer`].
+    ///
+    /// A crash between the two calls in step 3 leaves the peer `Blocked`, which
+    /// hides its Payment Requests and Receipts. On startup, unblock every
+    /// `Blocked` peer from [`Self::linked_peers`] that has no Contact Record and
+    /// is not on the wallet's own list of peers the user blocked.
     pub async fn remove_contacts_and_block_peers(
         &self,
         public_keys: Vec<PubkyPublicKey>,

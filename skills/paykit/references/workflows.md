@@ -51,6 +51,23 @@ use `save_contacts_and_unblock_peers(updates)`; do not use it for label edits or
 automatic refresh. Unblocked peers still need a fresh Encrypted Link. FFI names
 are `saveContacts` and `saveContactsAndUnblockPeers`.
 
+Remove a contact: `remove_contact` deletes only the Contact Record. The
+Encrypted Link, intake, queued sends, accepted Allowances and the peer's copy of
+your last Private Payment List stay, and a re-add reuses the link. To also end
+the link, follow the steps on `remove_contacts_and_block_peers`: end or cancel
+what the user wants gone, `clear_private_payment_list_and_process_outbound`
+while still Linked, then `remove_contacts_and_block_peers` and `unblock_peer`.
+On startup, unblock any `Blocked` peer that has no Contact Record and that the
+user did not block.
+
+Blocking a peer: `block_peer` parks queued private messages and sends them again
+after unblock and a fresh Encrypted Link Handshake; it does not delete them or
+notify the peer. Accepted Allowances and Payment Requests are paused, not
+revoked, and authorize again after relink without new consent. Deliver pending
+events (for example a Payment Proof) with `process_outbound_private_messages`
+and call `end_allowance` for authority the user wants gone before blocking;
+both are refused while blocked. See the `block_peer` docs.
+
 ## Pay a Contact
 
 1. Choose public or private deliberately. Private preparation is
