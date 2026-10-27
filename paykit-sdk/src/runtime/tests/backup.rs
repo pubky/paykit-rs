@@ -22,6 +22,8 @@ fn empty_backup_state() -> SdkBackupState {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     }
 }
 
@@ -62,6 +64,8 @@ async fn test_restore_backup_state_requires_active_identity() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
     let sdk = PaykitSdk::with_clock(
         storage.clone(),

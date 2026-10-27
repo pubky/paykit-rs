@@ -9,7 +9,7 @@ use paykit_sdk::storage::{
     PubkySharedStateStorage, StorageAdapter, StorageKeyRotationCallback, StorageOperation,
     StorageState, StorageTransactionCallback,
 };
-use paykit_sdk::{validate_storage_state, PaykitSdkError, SdkBackupState};
+use paykit_sdk::{validate_storage_state, PaykitSdkError, SdkBackupState, SdkBackupStateV1};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{ffi_error_to_sdk, storage_error, PaykitFfiError};
@@ -236,6 +236,12 @@ struct BackupStateEnvelope {
     backup: SdkBackupState,
 }
 
+#[derive(Deserialize)]
+struct BackupStateEnvelopeV1 {
+    version: u32,
+    backup: SdkBackupStateV1,
+}
+
 #[derive(Serialize, Deserialize)]
 struct StateBlobSnapshotEnvelope {
     version: u32,
@@ -276,29 +282,68 @@ pub(crate) fn encode_backup_state(backup: &SdkBackupState) -> Result<Vec<u8>, Pa
 }
 
 pub(crate) fn decode_backup_state(bytes: &[u8]) -> Result<SdkBackupState, PaykitFfiError> {
-    let (envelope, remainder): (BackupStateEnvelope, _) = postcard::take_from_bytes(bytes)
-        .map_err(|err| {
-            storage_error(
-                "decode_backup_blob",
-                format!("decode SDK backup blob: {err}"),
-            )
-        })?;
-    if !remainder.is_empty() {
-        return Err(storage_error(
+    let (version, _): (u32, _) = postcard::take_from_bytes(bytes).map_err(|err| {
+        storage_error(
             "decode_backup_blob",
-            "SDK backup blob contains trailing bytes",
-        ));
-    }
-    if envelope.version != SDK_BACKUP_BLOB_VERSION {
-        return Err(storage_error(
+            format!("decode SDK backup blob: {err}"),
+        )
+    })?;
+
+    match version {
+        1 => {
+            let (envelope, remainder): (BackupStateEnvelopeV1, _) =
+                postcard::take_from_bytes(bytes).map_err(|err| {
+                    storage_error(
+                        "decode_backup_blob",
+                        format!("decode SDK backup blob: {err}"),
+                    )
+                })?;
+            if !remainder.is_empty() {
+                return Err(storage_error(
+                    "decode_backup_blob",
+                    "SDK backup blob contains trailing bytes",
+                ));
+            }
+            if envelope.version != 1 || envelope.backup.version() != 1 {
+                return Err(storage_error(
+                    "unsupported_backup_blob_version",
+                    "version 1 SDK backup blob contains a mismatched payload version",
+                ));
+            }
+            Ok(envelope.backup.into())
+        }
+        SDK_BACKUP_BLOB_VERSION => {
+            let (envelope, remainder): (BackupStateEnvelope, _) = postcard::take_from_bytes(bytes)
+                .map_err(|err| {
+                    storage_error(
+                        "decode_backup_blob",
+                        format!("decode SDK backup blob: {err}"),
+                    )
+                })?;
+            if !remainder.is_empty() {
+                return Err(storage_error(
+                    "decode_backup_blob",
+                    "SDK backup blob contains trailing bytes",
+                ));
+            }
+            if envelope.version != SDK_BACKUP_BLOB_VERSION
+                || envelope.backup.version != paykit_sdk::SDK_BACKUP_VERSION
+            {
+                return Err(storage_error(
+                    "unsupported_backup_blob_version",
+                    "current SDK backup blob contains a mismatched payload version",
+                ));
+            }
+            Ok(envelope.backup)
+        }
+        _ => Err(storage_error(
             "unsupported_backup_blob_version",
             format!(
-                "unsupported SDK backup blob version {}, expected {}",
-                envelope.version, SDK_BACKUP_BLOB_VERSION
+                "unsupported SDK backup blob version {version}, expected 1 or {}",
+                SDK_BACKUP_BLOB_VERSION
             ),
-        ));
+        )),
     }
-    Ok(envelope.backup)
 }
 
 /// Encode an SDK state blob snapshot for apps that store blob and revision together.

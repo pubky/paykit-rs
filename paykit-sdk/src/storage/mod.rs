@@ -15,10 +15,14 @@ pub use in_memory::{run_storage_state_transaction, InMemoryStorage};
 pub(crate) use pubky_shared::shared_state_operation_active;
 pub use pubky_shared::{ObservedBackupStateRevision, PubkySharedStateStorage};
 pub use records::{
-    EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord, NewOutboundPrivateMessage,
-    NewPrivateStreamItem, OutboundPrivateMessageRecord, PaykitAppOperationLease,
-    PaymentEndpointReservationRecord, PaymentRequestExecutionClaim, PeerLinkOperationLease,
-    PreparedOutboundPrivateSend, PrivateStreamItemRecord, PublicEndpointRecord, StorageState,
+    BufferedPrivatePacketRecord, EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord,
+    NewOutboundPrivateMessage, NewPrivateStreamItem, OutboundPrivateMessageRecord,
+    PaykitAppOperationLease, PaymentEndpointReservationRecord, PaymentRequestExecutionClaim,
+    PeerLinkOperationLease, PreparedOutboundPrivateSend, PrivateIntakeBufferOutcome,
+    PrivateIntakeCursorRecord, PrivateIntakePeerRecord, PrivateStreamItemRecord,
+    PublicEndpointRecord, StorageState, PRIVATE_INTAKE_MAX_BYTES_GLOBAL,
+    PRIVATE_INTAKE_MAX_BYTES_PER_PEER, PRIVATE_INTAKE_MAX_PACKETS_GLOBAL,
+    PRIVATE_INTAKE_MAX_PACKETS_PER_PEER, PRIVATE_INTAKE_PACKET_BYTES,
 };
 pub use state_blob::{
     decode_storage_state_blob, encode_storage_state_blob, SDK_STATE_BLOB_VERSION,
@@ -489,6 +493,30 @@ pub trait StorageTransaction {
 
     /// Save one Encrypted Link state record.
     fn save_encrypted_link_state(&mut self, record: EncryptedLinkStateRecord);
+
+    /// Buffer one expected encrypted private packet and its relevant cursor atomically.
+    fn buffer_private_intake_packet(
+        &mut self,
+        packet: BufferedPrivatePacketRecord,
+    ) -> Result<PrivateIntakeBufferOutcome>;
+
+    /// Advance one subscribed user's durable homeserver cursor monotonically.
+    fn advance_private_intake_cursor(&mut self, cursor: PrivateIntakeCursorRecord) -> Result<()>;
+
+    /// Remove only the expected queue head after its durable processing commits.
+    fn remove_buffered_private_intake_packet(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        link_generation: u64,
+        receive_counter: u64,
+    ) -> Result<BufferedPrivatePacketRecord>;
+
+    /// Fence locally cancelled Encrypted Link Handshake work through one generation.
+    fn cancel_private_intake_handshake_generation(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        generation: u64,
+    ) -> Result<()>;
 
     /// Claim exclusive local work on one peer's Encrypted Link.
     fn claim_peer_link_operation(

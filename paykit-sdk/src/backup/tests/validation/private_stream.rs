@@ -39,6 +39,8 @@ async fn test_restore_backup_state_rejects_stale_private_stream_metadata() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
+            private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -85,6 +87,8 @@ async fn test_restore_backup_state_refreshes_stale_private_stream_parse_status()
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
+            private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     assert!(validate_private_stream_items(&backup.private_stream_items).is_err());
@@ -147,6 +151,8 @@ async fn test_restore_backup_state_rejects_stale_private_stream_parse_error() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -200,6 +206,8 @@ async fn test_restore_backup_state_rejects_stale_dedupe_event_header() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -253,6 +261,8 @@ async fn test_restore_backup_state_rejects_overlapping_event_dedupe_membership()
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -322,6 +332,8 @@ async fn test_restore_backup_state_rejects_tampered_invalid_receipt_dedupe_hash(
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let mut backup = backup;
@@ -404,6 +416,8 @@ async fn test_restore_backup_state_accepts_cross_kind_event_id_conflict() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 3,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     restore_backup_state(&storage, backup).await.unwrap();
@@ -447,6 +461,8 @@ async fn test_restore_backup_state_rejects_missing_event_dedupe_index() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -511,6 +527,8 @@ async fn test_restore_backup_state_rejects_missing_receipt_access_index() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -589,6 +607,8 @@ async fn test_restore_backup_state_refreshes_cached_parse_results() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
+            private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     restore_backup_state(&storage, backup).await.unwrap();
@@ -662,6 +682,8 @@ async fn test_restore_backup_state_accepts_invalid_location_receipt_access_dedup
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let mut backup = backup;

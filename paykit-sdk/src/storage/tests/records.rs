@@ -144,6 +144,130 @@ fn test_sensitive_storage_debug_is_redacted() {
 }
 
 #[tokio::test]
+async fn test_private_intake_buffers_packet_and_cursor_atomically() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    let subscribed_user = counterparty();
+    let packet = BufferedPrivatePacketRecord {
+        counterparty: peer.clone(),
+        link_generation: 7,
+        receive_counter: 11,
+        ciphertext: vec![42; PRIVATE_INTAKE_PACKET_BYTES],
+        source_cursor: Some(PrivateIntakeCursorRecord {
+            subscribed_user: subscribed_user.clone(),
+            homeserver: "https://private-homeserver.example".into(),
+            event_id: 19,
+        }),
+        buffered_at: timestamp(),
+    };
+
+    let outcome = storage
+        .transaction({
+            let peer = peer.clone();
+            let packet = packet.clone();
+            move |tx| {
+                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                    counterparty: peer,
+                    link_snapshot: None,
+                    handshake_snapshot: None,
+                    handshake_role: None,
+                    generation: 7,
+                    checkpointed_at: timestamp(),
+                });
+                tx.buffer_private_intake_packet(packet)
+            }
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, PrivateIntakeBufferOutcome::Inserted);
+    let state = storage.snapshot().unwrap();
+    assert_eq!(
+        state.private_intake_peers[&peer].buffered_packets,
+        vec![packet]
+    );
+    assert_eq!(state.private_intake_cursors[&subscribed_user].event_id, 19);
+    let debug = format!("{:?} {:?}", state.private_intake_peers[&peer], state);
+    assert!(!debug.contains("42"));
+    assert!(!debug.contains("private-homeserver"));
+}
+
+#[tokio::test]
+async fn test_private_intake_cursor_cancel_and_head_removal_are_fenced() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    let user = counterparty();
+    storage
+        .transaction({
+            let peer = peer.clone();
+            let user = user.clone();
+            move |tx| {
+                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                    counterparty: peer.clone(),
+                    link_snapshot: None,
+                    handshake_snapshot: Some(vec![1, 2, 3]),
+                    handshake_role: Some(crate::EncryptedLinkHandshakeRole::Initiator),
+                    generation: 4,
+                    checkpointed_at: timestamp(),
+                });
+                tx.advance_private_intake_cursor(PrivateIntakeCursorRecord {
+                    subscribed_user: user,
+                    homeserver: "https://homeserver.example".into(),
+                    event_id: 9,
+                })?;
+                tx.cancel_private_intake_handshake_generation(&peer, 4)?;
+                assert!(tx
+                    .buffer_private_intake_packet(BufferedPrivatePacketRecord {
+                        counterparty: peer.clone(),
+                        link_generation: 4,
+                        receive_counter: 19,
+                        ciphertext: vec![19; PRIVATE_INTAKE_PACKET_BYTES],
+                        source_cursor: None,
+                        buffered_at: timestamp(),
+                    })
+                    .is_err());
+                for counter in [20, 21] {
+                    assert_eq!(
+                        tx.buffer_private_intake_packet(BufferedPrivatePacketRecord {
+                            counterparty: peer.clone(),
+                            link_generation: 5,
+                            receive_counter: counter,
+                            ciphertext: vec![counter as u8; PRIVATE_INTAKE_PACKET_BYTES],
+                            source_cursor: None,
+                            buffered_at: timestamp(),
+                        })?,
+                        PrivateIntakeBufferOutcome::Inserted
+                    );
+                }
+                assert!(tx
+                    .remove_buffered_private_intake_packet(&peer, 5, 21)
+                    .is_err());
+                Ok(tx
+                    .remove_buffered_private_intake_packet(&peer, 5, 20)?
+                    .receive_counter)
+            }
+        })
+        .await
+        .unwrap();
+
+    let state = storage.snapshot().unwrap();
+    assert_eq!(state.private_intake_cursors[&user].event_id, 9);
+    assert_eq!(
+        state.private_intake_peers[&peer].cancelled_handshake_through_generation,
+        Some(4)
+    );
+    assert_eq!(state.private_intake_peers[&peer].link_generation, 5);
+    assert!(state.encrypted_link_states[&peer]
+        .handshake_snapshot
+        .is_none());
+    assert!(state.encrypted_link_states[&peer].handshake_role.is_none());
+    assert_eq!(
+        state.private_intake_peers[&peer].buffered_packets[0].receive_counter,
+        21
+    );
+}
+
+#[tokio::test]
 async fn test_transaction_commits_records() {
     let storage = InMemoryStorage::new();
     let counterparty = counterparty();

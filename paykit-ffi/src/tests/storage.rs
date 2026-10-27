@@ -947,6 +947,30 @@ async fn test_storage_and_backup_blobs_round_trip_private_sync_records() {
 }
 
 #[test]
+fn test_backup_blob_upgrades_real_v1_fixture() {
+    let backup = decode_backup_state(include_bytes!("fixtures/sdk-backup-v1.postcard")).unwrap();
+
+    assert_eq!(backup.version, paykit_sdk::SDK_BACKUP_VERSION);
+    assert_eq!(
+        backup
+            .identity_state
+            .as_ref()
+            .and_then(|state| state.public_key.as_ref())
+            .map(paykit_sdk::PubkyPublicKey::as_str),
+        Some("7jfgaa9nutjyixzikb7tgmsf9gkwq7iqz498zr1nd5ig1fng4esy")
+    );
+    assert_eq!(
+        backup
+            .paykit_noise_public_key
+            .as_ref()
+            .map(paykit_sdk::PubkyPublicKey::as_str),
+        Some("9wm1eqn4wddis385xdgsym7b5ge9549zpcjhmdszymicopxj6acy")
+    );
+    assert!(backup.private_intake_cursors.is_empty());
+    assert!(backup.private_intake_peers.is_empty());
+}
+
+#[test]
 fn test_pubky_public_key_helpers_accept_raw_or_app_key() {
     let raw = "8jsf5bm1ck3r7sn6pfx4q9mgqq5xn8fi6sizw6pxgjc8zs1bt4io";
     let app_key = format!("pubky{raw}");

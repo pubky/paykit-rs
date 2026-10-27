@@ -61,6 +61,8 @@ async fn test_restore_backup_state_rejects_receipt_key_hash_mismatch() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 1,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -164,6 +166,8 @@ async fn test_restore_backup_state_rejects_receipt_recipient_mismatch() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -218,6 +222,8 @@ async fn test_restore_backup_state_rejects_receipt_issuance_access_mismatch() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -273,6 +279,8 @@ async fn test_restore_backup_state_redacts_invalid_receipt_issuance() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let err = restore_backup_state(&storage, backup).await.unwrap_err();
@@ -350,6 +358,8 @@ async fn test_restore_backup_state_rejects_duplicate_receipt_issuance_ids() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
