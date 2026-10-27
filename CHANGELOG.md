@@ -13,6 +13,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `claimPaymentRequestForPreparation` in Swift and Kotlin reject blocked
   counterparties before App Registry access and atomically recheck that policy
   when claiming a Payment Request for preparation.
+- `paymentProofEventLen` in Swift and Kotlin (`payment_proof_event_len` in
+  `paykit-ffi`) returns the exact byte length of the Payment Proof Event
+  Message that `submitPaymentProof` would queue, so payers and payees can check
+  it against the 1000-byte limit before payment approval or before offering a
+  method. It is a measurement, not a validity check.
 
 ### Changed
 
@@ -37,6 +42,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   behavior and callable signatures are unchanged by the documentation update.
   Mocks and conformers of the generated SDK interfaces must implement the new
   preparation-claim method.
+- Regenerate bindings for `paymentProofEventLen` and the message size
+  documentation on `proposePaymentRequest`, `submitPaymentProof`,
+  `PaymentRequestTerms` and `PaymentProofSubmission`. Protocol errors have a new
+  code value, `message_too_large`; apps that branch on codes should handle it.
 
 ## [0.1.1-rc1] - 2026-10-20
 

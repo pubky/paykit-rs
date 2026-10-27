@@ -159,6 +159,9 @@ pub struct FfiPaymentConversionQuoteRecord {
 }
 
 /// Immutable terms for a Payment Request proposal.
+///
+/// The complete Event Message must fit 1000 bytes of canonical JSON: `metadata`
+/// is re-serialized and non-ASCII text is written raw. See `proposePaymentRequest`.
 #[derive(uniffi::Record, Clone)]
 pub struct FfiPaymentRequestTerms {
     /// Requested amount.
@@ -341,6 +344,10 @@ pub struct FfiPaymentRequestRecord {
 }
 
 /// Method-specific Payment Proof submission data.
+///
+/// The complete Event Message must fit 1000 bytes of canonical JSON: `proof` is
+/// re-serialized and non-ASCII text is written raw. Measure it with
+/// `paymentProofEventLen`.
 #[derive(uniffi::Record, Clone, PartialEq, Eq)]
 pub struct FfiPaymentProofSubmission {
     /// Billing Period for recurring Payment Requests.
@@ -468,6 +475,12 @@ impl FfiPaykitSdk {
 
     /// Queue a new Payment Request proposal and return local derived state.
     /// The caller must establish peer support before including conversion or payment deadlines.
+    ///
+    /// The complete Event Message must fit 1000 bytes of canonical JSON
+    /// (`metadata` is re-serialized, non-ASCII is written raw). An oversized
+    /// message fails with code `message_too_large` (category protocol), whose
+    /// context reports the byte counts, before link readiness checks and before
+    /// anything is queued.
     pub async fn propose_payment_request(
         &self,
         counterparty: String,
@@ -641,6 +654,12 @@ impl FfiPaykitSdk {
     }
 
     /// Queue a Payment Proof for an accepted Payment Request.
+    ///
+    /// The complete Event Message must fit 1000 bytes of canonical JSON
+    /// (`proof` is re-serialized, non-ASCII is written raw). An oversized
+    /// message fails with code `message_too_large` (category protocol), whose
+    /// context reports the byte counts, before link readiness checks and before
+    /// anything is queued. Measure with `paymentProofEventLen` before payment.
     pub async fn submit_payment_proof(
         &self,
         counterparty: String,
@@ -674,4 +693,53 @@ pub fn payment_deadline_at(
     deadline
         .at(period.as_ref())
         .map_err(|err| validation_error(err.to_string()))
+}
+
+/// Return the exact UTF-8 byte length of the Payment Proof Event Message that
+/// `submitPaymentProof` would queue for this App, Payment Reference and submission.
+///
+/// Compare it with the 1000-byte (`PUBKY_NOISE_MSG_LEN`) limit. This is a
+/// measurement, not a validity check: a proof that fits can still be refused by
+/// role, state or conversion checks, and lengths above the limit are returned.
+/// Payers must measure before payment approval and payees before offering a
+/// method. Pass maximum-length placeholders for variable fields (for example a
+/// 78-digit ERC-20 log index) and every optional ID you will send, or "fits" is
+/// false assurance. The proof JSON is re-serialized canonically, so do not
+/// measure the wallet's own string.
+#[uniffi::export]
+pub fn payment_proof_event_len(
+    app_id: String,
+    payment_reference: Arc<FfiPaymentReference>,
+    submission: FfiPaymentProofSubmission,
+) -> Result<u32, PaykitFfiError> {
+    let app_id =
+        paykit_lib::PaykitAppId::new(app_id).map_err(|err| validation_error(err.to_string()))?;
+    let payment_reference = PaymentReference::new(payment_reference.export_text())
+        .map_err(|err| validation_error(err.to_string()))?;
+    let submission = PaymentProofSubmission::try_from(submission)?;
+    // Mirrors `PaykitRuntime::submit_payment_proof_submission`. Canonical
+    // UUID-v4 IDs are always 36 characters, so fresh placeholders keep the
+    // length exact.
+    let mut event = paykit_lib::PaymentProof::new(
+        paykit_lib::EventId::new_v4(),
+        paykit_lib::PaymentRequestId::new_v4(),
+        payment_reference,
+        submission.billing_period,
+        submission.payment_app_id,
+        submission.payment_endpoint_identifier,
+        submission.proof,
+    );
+    if let Some(allowance_id) = submission.allowance_id {
+        event = event.with_allowance_id(allowance_id);
+    }
+    if let Some(conversion_quote_id) = submission.conversion_quote_id {
+        event = event.with_conversion_quote_id(conversion_quote_id);
+    }
+    let raw_json = paykit_lib::serialize_payment_request_event(
+        &app_id,
+        &paykit_lib::PaymentRequestEvent::Proof(event),
+    )
+    .map_err(|err| validation_error(err.to_string()))?;
+    u32::try_from(raw_json.len())
+        .map_err(|_| validation_error("Payment Proof Event Message length exceeds u32"))
 }
