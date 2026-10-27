@@ -375,8 +375,12 @@ impl FfiPaykitSdk {
     /// Restore before `publish_paykit_app`: publishing (and the public endpoint
     /// sync it enables) writes SDK-managed state that blocks restore. With
     /// callback storage, discard the state blob and initialize again only when
-    /// the refusal names nothing but registered Paykit Apps and public Payment
-    /// Endpoint records, then restore with `RequireRecovery`. After restore,
+    /// the app independently knows it is the only Paykit App and SDK handle
+    /// using that backing for this identity, and the refusal names nothing but
+    /// registered Paykit Apps and public Payment Endpoint records; then restore
+    /// with `RequireRecovery`. The SDK cannot check ownership: those labels
+    /// combine every app's records and omit Paykit App IDs, so another app's
+    /// setup produces the same refusal. Otherwise do not discard. After restore,
     /// payment accounting requires `reconcile_allowance_accounting` with
     /// complete wallet history; an empty history attests that there were no
     /// previous payments.

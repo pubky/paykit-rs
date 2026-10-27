@@ -36,9 +36,13 @@ where
     /// by design;
     /// [`Self::recover_shared_state_from_backup`] covers only missing or corrupt
     /// state. With app-owned local storage (such as a callback state blob), the
-    /// app may discard that state and initialize again only when the refusal
-    /// names nothing but this app's own setup records (registered Paykit Apps and
-    /// public Payment Endpoint records), and must then restore with
+    /// app may discard that state and initialize again only when it
+    /// independently knows it is the only Paykit App and SDK handle using that
+    /// backing for this identity, and the refusal names nothing but registered
+    /// Paykit Apps and public Payment Endpoint records. The SDK cannot check
+    /// ownership: those labels combine every app's records and omit Paykit App
+    /// IDs, so another app's setup produces the same refusal; otherwise do not
+    /// discard. After discarding, the app must restore with
     /// [`RestoredLinkPolicy::RequireRecovery`]: discarding newer history could let
     /// a re-delivered Payment Request be paid again, and `Resume` could reuse a
     /// transport key and nonce.

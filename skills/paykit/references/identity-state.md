@@ -158,9 +158,13 @@ state with a stale app backup.
 shared storage, restore after any app published is refused by design;
 `recover_shared_state_from_backup` covers only missing or corrupt state. With
 callback storage, discard the state blob and initialize again only when the
-refusal names nothing but this app's setup records (registered Paykit Apps and
-public Payment Endpoint records), then restore with `RequireRecovery`;
-discarding newer history risks paying a re-delivered Payment Request twice.
+app independently knows it is the only Paykit App and SDK handle using that
+backing for this identity, and the refusal names nothing but registered Paykit
+Apps and public Payment Endpoint records; then restore with `RequireRecovery`.
+The SDK cannot check ownership: those labels combine every app's records and
+omit Paykit App IDs, so another app's setup produces the same refusal; otherwise
+do not discard. Discarding newer history risks paying a re-delivered Payment
+Request twice.
 
 Republish participating App Registry entries after restore and reconcile
 complete wallet execution history before automation. Restore retains peer

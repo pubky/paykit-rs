@@ -781,11 +781,15 @@ sdk.syncPublicEndpointsWithReceivingDetails(publicDetails)
 With Pubky shared storage, restore over an identity where any app has
 published is refused by design; `recoverSharedStateFromBackup` covers only
 missing or corrupt state. With callback storage, the app may discard its state
-blob and initialize again only when the refusal names nothing but this app's
-own setup records (registered Paykit Apps, which include their capabilities,
-and public Payment Endpoint records), and must then restore with
-`RequireRecovery`. Discarding newer history could let a re-delivered Payment
-Request be paid again, and `Resume` could reuse a transport key and nonce.
+blob and initialize again only when it independently knows it is the only
+Paykit App and SDK handle using that backing for this identity, and the refusal
+names nothing but registered Paykit Apps (which include their capabilities) and
+public Payment Endpoint records. The SDK cannot check ownership: those labels
+combine every app's records and omit Paykit App IDs, so another app's setup
+produces the same refusal; otherwise do not discard. After discarding, the app
+must restore with `RequireRecovery`. Discarding newer history could let a
+re-delivered Payment Request be paid again, and `Resume` could reuse a
+transport key and nonce.
 
 After restore, participating apps publish their App Registry entries again
 before creating new app-attributed work, and payment admission stays blocked

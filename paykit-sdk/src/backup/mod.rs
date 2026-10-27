@@ -386,10 +386,13 @@ const RESTORE_TARGET_NOT_EMPTY: &str = "cannot restore a backup over existing SD
 /// field fails to compile here until someone decides whether it blocks restore.
 /// The names are static because the refusal crosses the FFI verbatim; never add
 /// ids, public keys, payloads, Paykit App IDs, or counts. The restore docs tell
-/// callback-storage apps they may discard state only when the refusal names
-/// nothing but "registered Paykit Apps" and "public Payment Endpoint records",
-/// so renaming or regrouping those two labels changes that rule; update the
-/// `restore_backup_state` docs and READMEs with them.
+/// callback-storage apps they may discard state only when they independently
+/// know they are the only Paykit App and SDK handle using the backing and the
+/// refusal names nothing but "registered Paykit Apps" and "public Payment
+/// Endpoint records". These labels aggregate every app sharing the backing, so
+/// they never prove which app owns the records. Renaming or regrouping those two
+/// labels changes that rule; update the `restore_backup_state` docs and READMEs
+/// with them.
 fn restore_blockers(state: &StorageState) -> Vec<&'static str> {
     let StorageState {
         paykit_noise_public_key: _,

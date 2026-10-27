@@ -592,8 +592,12 @@ the same identity. With `PubkySharedStateStorage`, restore over an identity wher
 any app has published is refused by design; `recover_shared_state_from_backup`
 covers only missing or corrupt state. With app-owned local storage (such as a
 callback state blob), an app may discard that state and initialize again only
-when the refusal names nothing but its own registered Paykit Apps and public
-Payment Endpoint records, and must then restore with `RequireRecovery`.
+when it independently knows it is the only Paykit App and SDK handle using that
+backing for this identity, and the refusal names nothing but registered Paykit
+Apps and public Payment Endpoint records. The SDK cannot check ownership: those
+labels combine every app's records and omit Paykit App IDs, so another app's
+setup produces the same refusal; otherwise do not discard. After discarding, the
+app must restore with `RequireRecovery`.
 Participating apps must publish their App Registry entries again after restore.
 Restore preserves terminal invalid and recovery-required outbound private
 records for audit, while pending, sending, failed, sent, and superseded outbound
