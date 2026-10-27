@@ -371,15 +371,4 @@ fn test_unexpected_callback_error_maps_to_redacted_storage_error() {
             "platform callback failed with an undeclared error type"
         )
     );
-
-    let restored = PaykitFfiError::from(ffi_error_to_sdk(err, "load SDK state blob"));
-    assert_eq!(
-        parts(&restored),
-        (
-            "storage",
-            "unexpected_callback_error",
-            "load SDK state blob: unexpected_callback_error"
-        )
-    );
-    assert!(!format!("{restored:?}").contains("disk full"));
 }

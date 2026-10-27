@@ -37,9 +37,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   Mocks and conformers of the generated SDK interfaces must implement the new
   preparation-claim method.
 - Throw `PaykitError` (Swift) or `PaykitException` (Kotlin) from platform
-  callbacks to keep a specific error variant and code. Any other thrown error
-  becomes `Storage` with code `unexpected_callback_error`, and its message is
-  discarded.
+  callbacks to keep a specific error variant and code.
 
 ## [0.1.1-rc1] - 2026-10-20
 
