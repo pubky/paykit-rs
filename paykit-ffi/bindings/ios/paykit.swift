@@ -1847,8 +1847,10 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * blocked, `endAllowance` is refused, reads that name this counterparty
      * fail with a policy error, and reads across counterparties skip it. So
      * first deliver pending Event Messages with
-     * `processOutboundPrivateMessages` and call `endAllowance` for authority
-     * the user wants gone. See "Blocking a peer" in the README.
+     * `processOutboundPrivateMessages`, which is confirmed only when each
+     * message's id appears in a returned report's `sent`, and call
+     * `endAllowance` for authority the user wants gone. See "Blocking a
+     * peer" in the README.
      */
     func blockPeer(counterparty: String) async throws  -> LinkedPeerRecord
 
@@ -2423,10 +2425,13 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      *
      * To end a contact's Encrypted Link without keeping the peer blocked, call
      * `endAllowance` and `cancelPaymentRequest` for what the user wants gone.
-     * While the peer is still Linked, call
-     * `clearPrivatePaymentListAndProcessOutbound`, which also sends those
-     * messages, and check that `failedToQueue` and `failedToDeliver` are
-     * empty; a list that is only queued is parked unsent by the block. Then
+     * While the peer is still Linked, queue an empty Private Payment List with
+     * `clearPrivatePaymentList` and keep its `outboundMessageId`. Call
+     * `processOutboundPrivateMessages` until a returned report's `sent`
+     * contains that id, waiting out any retry backoff between calls; the
+     * queue is processed in order, so this also sends those messages first.
+     * Empty failure lists do not prove delivery, and a list that is queued
+     * without a confirmed send is parked unsent by the block. Then
      * persist the app's own record of intent to end the link with that peer,
      * call this method and `unblockPeer`, and clear the record. On startup,
      * unblock only peers that carry that record and are still Blocked. Never
@@ -3089,8 +3094,10 @@ open func beginPaymentExecution(attemptId: String, checks: PaymentExecutionCheck
      * blocked, `endAllowance` is refused, reads that name this counterparty
      * fail with a policy error, and reads across counterparties skip it. So
      * first deliver pending Event Messages with
-     * `processOutboundPrivateMessages` and call `endAllowance` for authority
-     * the user wants gone. See "Blocking a peer" in the README.
+     * `processOutboundPrivateMessages`, which is confirmed only when each
+     * message's id appears in a returned report's `sent`, and call
+     * `endAllowance` for authority the user wants gone. See "Blocking a
+     * peer" in the README.
      */
 open func blockPeer(counterparty: String)async throws  -> LinkedPeerRecord  {
     return
@@ -4965,10 +4972,13 @@ open func removeContact(publicKey: String)async throws  -> ContactRecord?  {
      *
      * To end a contact's Encrypted Link without keeping the peer blocked, call
      * `endAllowance` and `cancelPaymentRequest` for what the user wants gone.
-     * While the peer is still Linked, call
-     * `clearPrivatePaymentListAndProcessOutbound`, which also sends those
-     * messages, and check that `failedToQueue` and `failedToDeliver` are
-     * empty; a list that is only queued is parked unsent by the block. Then
+     * While the peer is still Linked, queue an empty Private Payment List with
+     * `clearPrivatePaymentList` and keep its `outboundMessageId`. Call
+     * `processOutboundPrivateMessages` until a returned report's `sent`
+     * contains that id, waiting out any retry backoff between calls; the
+     * queue is processed in order, so this also sends those messages first.
+     * Empty failure lists do not prove delivery, and a list that is queued
+     * without a confirmed send is parked unsent by the block. Then
      * persist the app's own record of intent to end the link with that peer,
      * call this method and `unblockPeer`, and clear the record. On startup,
      * unblock only peers that carry that record and are still Blocked. Never
@@ -26070,7 +26080,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_begin_payment_execution() != 18142) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_block_peer() != 49880) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_block_peer() != 4626) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_cancel_payment_request() != 58269) {
@@ -26334,7 +26344,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 47245) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contacts_and_block_peers() != 19789) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contacts_and_block_peers() != 14890) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_encrypted_link_recovery_marker() != 34687) {
