@@ -6,8 +6,8 @@ use futures_util::{stream, StreamExt};
 const PRIVATE_INBOX_PROBE_CONCURRENCY: usize = 16;
 
 pub(super) struct PrivateReceiveSnapshot {
-    link: paykit_lib::EncryptedLinkSnapshot,
-    state: EncryptedLinkStateRecord,
+    pub(super) link: paykit_lib::EncryptedLinkSnapshot,
+    pub(super) state: EncryptedLinkStateRecord,
     authorization: paykit_lib::PaykitNoiseKeyAuthorization,
     has_peer_lease: bool,
 }
@@ -258,7 +258,7 @@ where
         Ok(reports)
     }
 
-    async fn private_receive_context(
+    pub(super) async fn private_receive_context(
         &self,
         counterparty: Option<&PubkyPublicKey>,
     ) -> Result<(

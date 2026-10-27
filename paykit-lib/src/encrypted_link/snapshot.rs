@@ -181,6 +181,41 @@ impl EncryptedLinkSnapshot {
         self.state.link_id
     }
 
+    /// Return remote resource and counter for next immutable transport slot.
+    ///
+    /// This derives routing data only. It does not fetch, authenticate, decrypt,
+    /// or advance Noise state. Caller remains responsible for session capability,
+    /// key authorization, bounded reads, and durable ordered processing.
+    pub fn next_private_application_message_resource(
+        &self,
+        local_identity_public_key: &PublicKey,
+        local_noise_secret_key: &[u8; 32],
+    ) -> Result<(String, u64)> {
+        if self.state.phase != pubky_noise::snow_crypto::NoisePhase::Transport
+            || self.state.static_secret.as_ref() != Some(local_noise_secret_key)
+            || self.state.read_counter >= u32::MAX - 1
+            || self.state.receiving_nonce >= u64::MAX - 1
+        {
+            return Err(PaykitError::Validation(
+                "snapshot cannot receive with the supplied Noise key".into(),
+            ));
+        }
+        let (_, read_path) = super::paths::compute_private_payment_paths(
+            local_noise_secret_key,
+            local_identity_public_key,
+            &self.recipient,
+            &self.remote_noise_public_key,
+            &self.recovery_context,
+        );
+        Ok((
+            format!(
+                "{}/{}/{}",
+                self.recipient, read_path, self.state.read_counter
+            ),
+            u64::from(self.state.read_counter),
+        ))
+    }
+
     /// Check whether the next private message slot exists without restoring Noise.
     ///
     /// This is an advisory HEAD request. It does not authenticate a message or
@@ -202,18 +237,12 @@ impl EncryptedLinkSnapshot {
                 "snapshot cannot receive with the supplied Noise key".into(),
             ));
         }
-        let (_, read_path) = super::paths::compute_private_payment_paths(
-            local_noise_secret_key,
+        let (resource, _) = self.next_private_application_message_resource(
             local_identity_public_key,
-            &self.recipient,
-            &self.remote_noise_public_key,
-            &self.recovery_context,
-        );
+            local_noise_secret_key,
+        )?;
         public_storage
-            .exists(format!(
-                "{}/{}/{}",
-                self.recipient, read_path, self.state.read_counter
-            ))
+            .exists(resource)
             .await
             .map_err(|err| PaykitError::Transport {
                 context: "failed to check private message availability".into(),

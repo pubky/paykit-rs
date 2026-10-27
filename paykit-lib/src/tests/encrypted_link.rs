@@ -1036,6 +1036,25 @@ async fn test_private_message_probe_rejects_exhausted_receive_cursors() {
     }
 }
 
+#[test]
+fn test_private_message_resource_derivation_does_not_advance_snapshot() {
+    let mut state = transport_snapshot_state_with_nonces(0, 7);
+    state.read_counter = 3;
+    let mut bytes = state.serialize();
+    bytes.extend_from_slice(&Keypair::random().public_key().as_inner().to_bytes());
+    bytes.extend_from_slice(&[0; 72]);
+    let snapshot = EncryptedLinkSnapshot::deserialize(&bytes).unwrap();
+    let before = snapshot.serialize();
+
+    let (resource, counter) = snapshot
+        .next_private_application_message_resource(&Keypair::random().public_key(), &[2; 32])
+        .unwrap();
+
+    assert_eq!(counter, 3);
+    assert!(resource.ends_with("/3"));
+    assert_eq!(snapshot.serialize(), before);
+}
+
 #[tokio::test]
 async fn test_malformed_private_application_message_packet_is_rejected() {
     let mut setup = PrivateTestSetup::new().await;
