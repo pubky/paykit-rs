@@ -104,3 +104,48 @@ fn test_retention_limit_is_detected_only_from_its_policy_cause() {
         assert!(!other.is_retention_limit_reached());
     }
 }
+
+#[test]
+fn test_signup_code_rejected_is_detected_only_from_its_identity_cause() {
+    // Sign-up wraps the homeserver's error in the cause, as context.
+    let homeserver_error = pubky::Error::Request(pubky::errors::RequestError::Server {
+        status: pubky::StatusCode::UNAUTHORIZED,
+        message: "Token already used".into(),
+    });
+    let rejected = PaykitSdkError::Identity {
+        context: "sign up Pubky identity".into(),
+        source: Some(anyhow::Error::from(homeserver_error).context(SignupCodeRejected)),
+    };
+    assert!(rejected.is_signup_code_rejected());
+    let PaykitSdkError::Identity {
+        source: Some(source),
+        ..
+    } = &rejected
+    else {
+        panic!("expected Identity error, got {rejected:?}");
+    };
+    assert!(matches!(
+        source.downcast_ref::<pubky::Error>(),
+        Some(pubky::Error::Request(
+            pubky::errors::RequestError::Server { status, .. }
+        )) if *status == pubky::StatusCode::UNAUTHORIZED
+    ));
+
+    // Neither another identity cause nor the same cause on another variant counts.
+    for other in [
+        PaykitSdkError::Identity {
+            context: "sign up Pubky identity".into(),
+            source: None,
+        },
+        PaykitSdkError::Identity {
+            context: "sign up Pubky identity".into(),
+            source: Some(anyhow::anyhow!("signup code was rejected")),
+        },
+        PaykitSdkError::Transport {
+            context: "sign up Pubky identity".into(),
+            source: Some(SignupCodeRejected.into()),
+        },
+    ] {
+        assert!(!other.is_signup_code_rejected());
+    }
+}

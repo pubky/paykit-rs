@@ -18,6 +18,7 @@ use url::Url;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
+    error::SignupCodeRejected,
     identity::{PubkyIdentityCapability, PubkyLocalSecretKey, PubkyPublicKey},
     PaykitSdkError, Result,
 };
@@ -252,13 +253,33 @@ impl PubkyAuthRequest {
         local_secret_key: Option<PubkyLocalSecretKey>,
         required_capabilities: &str,
     ) -> Result<PubkySessionBootstrapResult> {
+        self.complete_with(
+            local_secret_key,
+            required_capabilities,
+            map_pubky_identity_error,
+        )
+        .await
+    }
+
+    /// Complete the request, mapping a failed approval wait or grant exchange
+    /// with `map_exchange_error`.
+    ///
+    /// Only [`PubkySessionBootstrap::sign_in`] reports retryable failures as
+    /// [`PaykitSdkError::Transport`]. External signer flows keep reporting
+    /// every completion failure as [`PaykitSdkError::Identity`].
+    async fn complete_with(
+        self,
+        local_secret_key: Option<PubkyLocalSecretKey>,
+        required_capabilities: &str,
+        map_exchange_error: fn(&'static str, pubky::Error) -> PaykitSdkError,
+    ) -> Result<PubkySessionBootstrapResult> {
         validate_auth_url_capabilities(&self.authorization_url, required_capabilities)?;
         let client_id = parse_client_id(&parse_pubky_auth_url(&self.authorization_url)?.client_id)?;
         let session = self
             .flow
             .await_approval()
             .await
-            .map_err(|err| map_pubky_identity_error("complete Pubky auth flow", err))?;
+            .map_err(|err| map_exchange_error("complete Pubky auth flow", err))?;
         validate_session_exact_capabilities(&session, required_capabilities)?;
         session_result(
             session,
@@ -369,6 +390,27 @@ impl PubkySessionBootstrap {
     /// the identity's homeserver should pass it. The lookup adds up to two
     /// PKARR resolutions, which take longest for an identity that has no
     /// record, as on a first-time signup.
+    ///
+    /// # Failures and retries
+    ///
+    /// A signup code is spent only when the homeserver creates the account.
+    /// After any failure, retrying with the same identity, the same trusted
+    /// homeserver and the same signup code is safe: once the account exists,
+    /// the homeserver reports it and its homeserver record is published again.
+    /// The homeserver checks the code's format and the device clock before it
+    /// looks for the account, so a malformed code, or a device clock that is
+    /// too far off, fails every retry.
+    ///
+    /// - [`PaykitSdkError::Transport`]: the network failed, the homeserver
+    ///   answered with a 5xx or 429 status, or a PKARR publish or resolve
+    ///   failed, here or in the grant exchange of the sign-in that follows.
+    ///   Retry later.
+    /// - [`PaykitSdkError::is_signup_code_rejected`]: the homeserver refused
+    ///   the signup code as missing, malformed, unknown or already used. Ask
+    ///   the user for a code. A malformed code can be a typo that the user can
+    ///   fix, so do not tell them to discard it.
+    /// - Other [`PaykitSdkError::Identity`] errors, such as a device clock
+    ///   that is too far off, are not fixed by a new code.
     pub async fn sign_up(
         &self,
         secret_key: &PubkyLocalSecretKey,
@@ -389,6 +431,26 @@ impl PubkySessionBootstrap {
     /// This self-approves a standard Pubky grant-auth request so the returned
     /// session has exactly `required_capabilities`. The auth relay must be
     /// reachable.
+    ///
+    /// # Failures and retries
+    ///
+    /// When completing the grant exchange fails on the network, with a 5xx or
+    /// 429 answer, or on a PKARR resolve, the error is
+    /// [`PaykitSdkError::Transport`]: retry later. Other failures are
+    /// [`PaykitSdkError::Identity`] errors, including an identity whose
+    /// homeserver record is not found and a homeserver that has no account for
+    /// it.
+    ///
+    /// A sign-in failure does not show whether an account exists, so never
+    /// fall back to [`Self::sign_up`] automatically. To tell the cases apart,
+    /// call [`Self::republish_identity`] with the identity's public key:
+    ///
+    /// - `Ok(true)`: the identity has a record. Retry sign-in.
+    /// - `Ok(false)`: no record was found. Offer to restore the identity with
+    ///   [`Self::sign_up`] on a homeserver the caller already trusts.
+    /// - `Err`: the lookup failed. Retry later.
+    ///
+    /// The call also rebroadcasts the record it finds.
     pub async fn sign_in(
         &self,
         secret_key: &PubkyLocalSecretKey,
@@ -402,7 +464,11 @@ impl PubkySessionBootstrap {
         )
         .await?;
         request
-            .complete(Some(secret_key.clone()), required_capabilities)
+            .complete_with(
+                Some(secret_key.clone()),
+                required_capabilities,
+                map_pubky_retryable_error,
+            )
             .await
     }
 
@@ -799,15 +865,23 @@ async fn approve_checked_auth(
             // The requester chose this homeserver, so its claim that the
             // account exists is no reason to publish it as the identity's
             // homeserver. The context tells the caller how to recover.
-            let context = match &err {
+            // Retryable failures also stay identity errors on this path; only
+            // a refused signup code gets its own cause.
+            let conflict = matches!(
+                &err,
                 pubky::Error::Request(pubky::errors::RequestError::Server { status, .. })
-                    if status.as_u16() == 409 =>
-                {
-                    "requested Pubky homeserver reported an existing account; restore the homeserver record with sign_up"
-                }
-                _ => "sign up Pubky identity",
-            };
-            return Err(map_pubky_identity_error(context, err));
+                    if status.as_u16() == 409
+            );
+            return Err(if conflict {
+                map_pubky_identity_error(
+                    "requested Pubky homeserver reported an existing account; restore the homeserver record with sign_up",
+                    err,
+                )
+            } else if is_signup_code_rejection(&err) {
+                signup_code_rejected_error("sign up Pubky identity", err)
+            } else {
+                map_pubky_identity_error("sign up Pubky identity", err)
+            });
         }
     }
     signer
@@ -831,6 +905,12 @@ async fn published_homeserver(
         .map_err(|err| map_pubky_identity_error("resolve Pubky homeserver record", err))
 }
 
+/// Create the identity's account on `homeserver`, or republish its homeserver
+/// record when the homeserver already has the account.
+///
+/// Both steps report retryable failures as [`PaykitSdkError::Transport`],
+/// including a PKARR publish that fails after the homeserver created the
+/// account. A retry then takes the conflict path.
 async fn ensure_pubky_account(
     signer: &pubky::PubkySigner,
     homeserver: &paykit_lib::PublicKey,
@@ -845,9 +925,9 @@ async fn ensure_pubky_account(
                 .pkdns()
                 .publish_homeserver_force(Some(homeserver))
                 .await
-                .map_err(|err| map_pubky_identity_error("restore Pubky homeserver record", err))
+                .map_err(|err| map_pubky_signup_error("restore Pubky homeserver record", err))
         }
-        Err(err) => Err(map_pubky_identity_error("sign up Pubky identity", err)),
+        Err(err) => Err(map_pubky_signup_error("sign up Pubky identity", err)),
     }
 }
 
@@ -1197,6 +1277,86 @@ fn map_pubky_identity_error(context: &'static str, err: pubky::Error) -> PaykitS
     PaykitSdkError::Identity {
         context: context.into(),
         source: Some(err.into()),
+    }
+}
+
+/// Map `err` to [`PaykitSdkError::Transport`] when the same request may
+/// succeed later, and to [`PaykitSdkError::Identity`] otherwise.
+///
+/// Used only by sign-up and the sign-in completion step. Other Pubky
+/// operations keep [`map_pubky_identity_error`].
+fn map_pubky_retryable_error(context: &'static str, err: pubky::Error) -> PaykitSdkError {
+    if is_retryable_pubky_error(&err) {
+        PaykitSdkError::Transport {
+            context: context.into(),
+            source: Some(err.into()),
+        }
+    } else {
+        map_pubky_identity_error(context, err)
+    }
+}
+
+/// Map a sign-up failure like [`map_pubky_retryable_error`], giving a refused
+/// signup code its own cause.
+fn map_pubky_signup_error(context: &'static str, err: pubky::Error) -> PaykitSdkError {
+    if is_signup_code_rejection(&err) {
+        signup_code_rejected_error(context, err)
+    } else {
+        map_pubky_retryable_error(context, err)
+    }
+}
+
+/// Report a refused signup code as an identity error whose cause is
+/// [`SignupCodeRejected`], with the homeserver's error kept below it.
+///
+/// SECURITY: `context` is a fixed label. The homeserver's answer and request
+/// errors, whose URL carries the signup code in its `signup_token` query
+/// parameter, stay in the cause, which the bindings drop.
+fn signup_code_rejected_error(context: &'static str, err: pubky::Error) -> PaykitSdkError {
+    PaykitSdkError::Identity {
+        context: context.into(),
+        source: Some(anyhow::Error::from(err).context(SignupCodeRejected)),
+    }
+}
+
+/// Return whether retrying the same Pubky request later may succeed: a
+/// transport failure, a 5xx or 429 answer, or a PKARR publish or resolve
+/// failure.
+///
+/// The HTTP rules match paykit-lib's private lock-refresh classifier.
+fn is_retryable_pubky_error(err: &pubky::Error) -> bool {
+    match err {
+        pubky::Error::Request(pubky::errors::RequestError::Transport(_)) => true,
+        pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }) => {
+            status.is_server_error() || *status == pubky::StatusCode::TOO_MANY_REQUESTS
+        }
+        pubky::Error::Pkarr(err) => err.is_retryable(),
+        _ => false,
+    }
+}
+
+/// Return whether the homeserver refused the signup code as missing,
+/// malformed, unknown or already used.
+///
+/// The bodies are those of pubky-homeserver 0.16.2,
+/// `client_server/auth/grant/error_mapping.rs:29-35` and
+/// `client_server/auth/grant/routes.rs:49-54`; a unit test pins them.
+///
+/// SECURITY: status alone is not enough. The same 400 and 401 answers report
+/// a signup grant rejected for clock skew or a failed proof of possession,
+/// which a new code cannot fix, and reading those as a refused code could
+/// make a wallet discard a valid single-use code. A canonical reason, which
+/// replaces the body when the client keeps no error bodies, and a body cut
+/// short before the matched text are not read as a refused code either.
+fn is_signup_code_rejection(err: &pubky::Error) -> bool {
+    let pubky::Error::Request(pubky::errors::RequestError::Server { status, message }) = err else {
+        return false;
+    };
+    let message = message.trim();
+    match status.as_u16() {
+        400 => message == "Token required" || message.starts_with("Invalid signup token format"),
+        401 => matches!(message, "Invalid token" | "Token already used"),
+        _ => false,
     }
 }
 

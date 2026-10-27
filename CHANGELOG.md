@@ -7,6 +7,26 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Added
+
+- `SignupCodeRejected`, `PaykitSdkError::is_signup_code_rejected` in Rust and
+  the `identity/signup_code_rejected` error code in Swift and Kotlin report a
+  signup code that the homeserver refused as missing, malformed, unknown or
+  already used during `sign_up` or `approve_auth`.
+- `claim_payment_request_for_preparation` in Rust and
+  `claimPaymentRequestForPreparation` in Swift and Kotlin reject blocked
+  counterparties before App Registry access and atomically recheck that policy
+  when claiming a Payment Request for preparation.
+
+### Changed
+
+- `sign_up` in Rust and `signUp` in Swift and Kotlin report network failures,
+  5xx and 429 answers, and failed PKARR publishes or resolves as transport
+  errors instead of identity errors. This covers the signup request, the
+  record republish for an existing account, and the grant exchange of the
+  sign-in that follows. The grant exchange of `sign_in` and `signIn` does the
+  same. External auth flows and `approve_auth` keep their identity errors.
+
 ### Fixed
 
 - `sign_up` in Rust and `signUp` in Swift and Kotlin no longer move an identity
@@ -14,13 +34,6 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   to the homeserver or published, when the identity's homeserver record names a
   different homeserver. A record lookup error also fails the sign-up. The check
   adds PKARR lookups, which take longest for a first-time signup.
-
-### Added
-
-- `claim_payment_request_for_preparation` in Rust and
-  `claimPaymentRequestForPreparation` in Swift and Kotlin reject blocked
-  counterparties before App Registry access and atomically recheck that policy
-  when claiming a Payment Request for preparation.
 
 ### Integration
 
@@ -40,6 +53,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   as "this identity lives on another homeserver" and sign in instead. The
   updated `signUp` documentation changes a UniFFI checksum, so regenerate the
   bindings and native libraries together.
+- Branch on sign-up and sign-in errors by category and code. Retry a
+  `transport` error later; after any sign-up failure, retrying with the same
+  identity, homeserver and signup code is safe. On `signup_code_rejected`, ask
+  for a code without telling the user to discard theirs. Never fall back from
+  a failed sign-in to sign-up automatically; call `republishIdentity` to tell
+  a missing record from a transient failure. Wallets that catch identity
+  errors from these calls must also handle transport errors. The updated
+  `signUp` and `signIn` documentation changes UniFFI checksums.
 
 ## [0.1.1-rc1] - 2026-10-20
 

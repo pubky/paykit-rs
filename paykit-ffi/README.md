@@ -434,6 +434,22 @@ object.
     homeserver; there, `signUp` with a homeserver the app trusts restores it.
   - `false`: no record was found, so `signUp` is safe.
   - an error: do neither, and retry later.
+
+  A signup code is spent only when the homeserver creates the account. After
+  any `signUp` failure, retrying with the same identity, the same trusted
+  homeserver and the same code is safe; a malformed code, or a device clock
+  that is too far off, fails every retry. A `transport/transport_error` error
+  means retry later. `identity/signup_code_rejected` means the homeserver
+  refused the code as missing, malformed, unknown or already used: ask for a
+  code, but do not tell the user to discard it, because a malformed code can be
+  a fixable typo.
+- `PubkySessionBootstrap.signIn(...)` — a `transport/transport_error` from
+  completing the grant exchange means retry later. A failure does not show
+  whether an account exists, so never fall back to `signUp` automatically.
+  Call `republishIdentity(publicKey)` to tell the cases apart: `true` means
+  retry `signIn`; `false` means offer a restore through `signUp` with a
+  homeserver the app already trusts; an error means retry later. The call
+  also rebroadcasts the record it finds.
 - `PubkyClientConfig.authRelayUrl` — select a local or private grant-auth
   relay; leave unset for Pubky's production default.
 - `PubkyAuthRequest` — pending external auth-flow handle; call `saveState()` to
@@ -804,6 +820,12 @@ derivable from the Pubky public key alone.
 - `PrivateOperationError.category` and `code` are for app branching.
   `redactedContext` is safe for normal UI/logging. Use `exportDebugDetails`
   only for explicit diagnostics.
+- `PubkySessionBootstrap.signUp` and the grant-exchange step of `signIn`
+  report retryable failures as `transport/transport_error`: a network failure,
+  a 5xx or 429 answer, or a failed PKARR publish or resolve, including
+  republishing the homeserver record of an existing account. Other failures
+  stay `identity/identity_error`, except `identity/signup_code_rejected` from
+  `signUp` for a missing, malformed, unknown or already used signup code.
 - `EndpointSyncReport.failed` means public endpoint publication/removal was not
   fully applied. Keep local receiving details and retry sync later.
 - `PrivatePaymentListDeliveryReport.failedToQueue` is a local persistence or

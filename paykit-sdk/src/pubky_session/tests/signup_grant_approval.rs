@@ -174,6 +174,11 @@ impl Fixture {
     /// Start the relay and the requested homeserver, which answers every
     /// request with `homeserver_status`.
     fn start(homeserver_status: &'static str) -> Self {
+        Self::start_with_body(homeserver_status, "")
+    }
+
+    /// Like [`Self::start`], with `homeserver_body` as every response body.
+    fn start_with_body(homeserver_status: &'static str, homeserver_body: &'static str) -> Self {
         let relay = Arc::new(Relay::default());
         let relay_address = {
             let relay = relay.clone();
@@ -186,7 +191,13 @@ impl Fixture {
             let tls = Arc::new(homeserver.to_rpk_rustls_server_config());
             let requests = homeserver_requests.clone();
             serve(move |stream| {
-                serve_homeserver_request(stream, tls.clone(), homeserver_status, &requests);
+                serve_homeserver_request(
+                    stream,
+                    tls.clone(),
+                    homeserver_status,
+                    homeserver_body,
+                    &requests,
+                );
             })
         };
         // Pubky clients find the homeserver's TLS endpoint through its record.
@@ -347,11 +358,12 @@ fn serve(handle: impl Fn(TcpStream) + Send + Sync + 'static) -> SocketAddr {
 }
 
 /// Record one connection to the requested homeserver and answer it with
-/// `status`.
+/// `status` and `body`.
 fn serve_homeserver_request(
     stream: TcpStream,
     tls: Arc<rustls::ServerConfig>,
     status: &str,
+    body: &str,
     requests: &Mutex<Vec<String>>,
 ) {
     // Logged before any I/O, so even a connection that never completes a
@@ -367,7 +379,7 @@ fn serve_homeserver_request(
     let mut stream = rustls::StreamOwned::new(connection, stream);
     if let Some((request_line, _)) = read_request(&mut stream) {
         requests.lock().unwrap()[entry] = request_line;
-        respond(&mut stream, status, &[]);
+        respond(&mut stream, status, body.as_bytes());
         stream.conn.send_close_notify();
         let _ = stream.flush();
     }
@@ -519,6 +531,50 @@ async fn test_approve_auth_signup_grant_does_not_publish_after_signup_conflict()
         matches!(
             &result,
             Err(PaykitSdkError::Identity { context, .. }) if context.contains("sign_up")
+        ),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_approve_auth_signup_grant_reports_rejected_signup_code() {
+    let fixture = Fixture::start_with_body("401 Unauthorized", "Token already used");
+    let auth_url = format!("{}&st=invite", fixture.signup_auth_url());
+
+    let result = fixture
+        .bootstrap()
+        .approve_auth(&auth_url, CAPABILITIES, &identity())
+        .await;
+
+    assert_eq!(
+        fixture.effects().await,
+        Effects {
+            homeserver: None,
+            records_published: 0,
+            inbox_deliveries: 0,
+            homeserver_requests: vec![
+                "POST /auth/grant/signup?signup_token=invite HTTP/1.1".to_owned()
+            ],
+        }
+    );
+    let error = result.unwrap_err();
+    assert!(error.is_signup_code_rejected(), "{error:?}");
+    assert_eq!(error.to_string(), "identity error: sign up Pubky identity");
+}
+
+#[tokio::test]
+async fn test_approve_auth_signup_grant_keeps_retryable_signup_failure_an_identity_error() {
+    let fixture = Fixture::start("503 Service Unavailable");
+
+    let result = fixture
+        .bootstrap()
+        .approve_auth(&fixture.signup_auth_url(), CAPABILITIES, &identity())
+        .await;
+
+    assert!(
+        matches!(
+            &result,
+            Err(PaykitSdkError::Identity { context, .. }) if context == "sign up Pubky identity"
         ),
         "{result:?}"
     );
@@ -1077,7 +1133,8 @@ async fn test_sign_up_fails_closed_on_malformed_homeserver_record() {
 }
 
 /// Sign up where the guard lets the signup through. The homeserver answers
-/// it with an error, so the sign-up fails before signing in.
+/// it with a retryable error, so the sign-up fails before signing in and
+/// reports a transport error.
 async fn assert_sign_up_reaches_homeserver(fixture: &Fixture, homeserver: Option<String>) {
     let result = sign_up_on_requested_homeserver(&fixture.bootstrap()).await;
 
@@ -1090,7 +1147,10 @@ async fn assert_sign_up_reaches_homeserver(fixture: &Fixture, homeserver: Option
             homeserver_requests: vec![SIGNUP_REQUEST.to_owned()],
         }
     );
-    assert!(result.is_err(), "{result:?}");
+    assert!(
+        matches!(result, Err(PaykitSdkError::Transport { .. })),
+        "{result:?}"
+    );
 }
 
 #[tokio::test]
@@ -1114,4 +1174,24 @@ async fn test_sign_up_signs_up_identity_whose_record_names_no_homeserver() {
     fixture.publish_identity_record_without_homeserver();
 
     assert_sign_up_reaches_homeserver(&fixture, None).await;
+}
+
+#[tokio::test]
+async fn test_sign_up_reports_rejected_signup_code() {
+    let fixture = Fixture::start_with_body("400 Bad Request", "Token required");
+
+    let result = sign_up_on_requested_homeserver(&fixture.bootstrap()).await;
+
+    assert_eq!(
+        fixture.effects().await,
+        Effects {
+            homeserver: None,
+            records_published: 0,
+            inbox_deliveries: 0,
+            homeserver_requests: vec![SIGNUP_REQUEST.to_owned()],
+        }
+    );
+    let error = result.err().unwrap();
+    assert!(error.is_signup_code_rejected(), "{error:?}");
+    assert_eq!(error.to_string(), "identity error: sign up Pubky identity");
 }
