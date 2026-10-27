@@ -871,9 +871,14 @@ A manual Payment Request payment with payment accounting runs in this order:
 
 ```text
 record = sdk.claimPaymentRequestForPreparation(counterparty, paymentRequestId)
-// Wallet checks: show the terms and Billing Period, obtain user approval.
-sdk.claimAndAcceptPaymentRequest(
-    counterparty, paymentRequestId, record.proposalStreamItemId)
+if record.state == Proposed:
+    // Wallet checks: show the terms and Billing Period, obtain user approval.
+    sdk.claimAndAcceptPaymentRequest(
+        counterparty, paymentRequestId, record.proposalStreamItemId)
+else:
+    // Accepted (unpaid one-time) or ActiveRecurring: do not accept again.
+    // Check the accepted terms and this Billing Period against what the
+    // user approved, then continue under the execution claim just taken.
 
 state = sdk.allowanceAccountingState()
 if state == nil/null || state.requiresReconciliation:
