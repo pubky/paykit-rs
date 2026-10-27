@@ -6988,14 +6988,39 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
 
     /**
      * Sign in with a local Pubky secret key and return session access material.
+     *
+     * A `transport` error from completing the grant exchange means retry
+     * later. A sign-in failure does not show whether an account exists, so
+     * never fall back to `sign_up` automatically. To tell the cases apart,
+     * call `republish_identity` with the identity's public key: `true` means
+     * retry sign-in; `false` means offer a restore through `sign_up` with a
+     * homeserver the app already trusts; an error means retry later. That
+     * call also rebroadcasts the record it finds.
      */
     func signIn(localSecretKey: PubkyLocalSecretKey, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
     /**
      * Sign up on a homeserver and return session access material.
      *
-     * Signing up an identity that already has an account on that homeserver
-     * publishes its homeserver record again.
+     * The identity's homeserver record is looked up first. If it names a
+     * different homeserver, this fails with a policy error before anything
+     * is sent to the homeserver, so no signup code is spent; call `sign_in`
+     * instead. If it names this homeserver, an identity that already has an
+     * account here has its homeserver record published again. If no record
+     * is found, or the record names no homeserver, the identity is signed up
+     * here. A lookup error, or a record whose homeserver is not a valid
+     * public key, fails the sign-up. A record that no reachable cache holds
+     * counts as none.
+     *
+     * A signup code is spent only when the homeserver creates the account.
+     * After any failure, retrying with the same identity, the same trusted
+     * homeserver and the same signup code is safe, because a homeserver that
+     * already has the account takes the republish path. A malformed code,
+     * or a device clock that is too far off, fails every retry. A `transport`
+     * error means retry later. The `identity/signup_code_rejected` error
+     * means the homeserver refused the code as missing, malformed, unknown or
+     * already used: ask the user for a code, and do not tell them to discard
+     * it, because a malformed code can be a fixable typo.
      */
     func signUp(localSecretKey: PubkyLocalSecretKey, homeserverPublicKey: String, signupCode: String?, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
@@ -7232,6 +7257,14 @@ open func resumeAuth(state: PubkyAuthRequestState, expectedCapabilities: String)
 
     /**
      * Sign in with a local Pubky secret key and return session access material.
+     *
+     * A `transport` error from completing the grant exchange means retry
+     * later. A sign-in failure does not show whether an account exists, so
+     * never fall back to `sign_up` automatically. To tell the cases apart,
+     * call `republish_identity` with the identity's public key: `true` means
+     * retry sign-in; `false` means offer a restore through `sign_up` with a
+     * homeserver the app already trusts; an error means retry later. That
+     * call also rebroadcasts the record it finds.
      */
 open func signIn(localSecretKey: PubkyLocalSecretKey, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
     return
@@ -7253,8 +7286,25 @@ open func signIn(localSecretKey: PubkyLocalSecretKey, requiredCapabilities: Stri
     /**
      * Sign up on a homeserver and return session access material.
      *
-     * Signing up an identity that already has an account on that homeserver
-     * publishes its homeserver record again.
+     * The identity's homeserver record is looked up first. If it names a
+     * different homeserver, this fails with a policy error before anything
+     * is sent to the homeserver, so no signup code is spent; call `sign_in`
+     * instead. If it names this homeserver, an identity that already has an
+     * account here has its homeserver record published again. If no record
+     * is found, or the record names no homeserver, the identity is signed up
+     * here. A lookup error, or a record whose homeserver is not a valid
+     * public key, fails the sign-up. A record that no reachable cache holds
+     * counts as none.
+     *
+     * A signup code is spent only when the homeserver creates the account.
+     * After any failure, retrying with the same identity, the same trusted
+     * homeserver and the same signup code is safe, because a homeserver that
+     * already has the account takes the republish path. A malformed code,
+     * or a device clock that is too far off, fails every retry. A `transport`
+     * error means retry later. The `identity/signup_code_rejected` error
+     * means the homeserver refused the code as missing, malformed, unknown or
+     * already used: ask the user for a code, and do not tell them to discard
+     * it, because a malformed code can be a fixable typo.
      */
 open func signUp(localSecretKey: PubkyLocalSecretKey, homeserverPublicKey: String, signupCode: String?, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
     return
@@ -26349,10 +26399,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_resume_auth() != 52728) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_in() != 15662) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_in() != 61814) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_up() != 13465) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_up() != 28501) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_start_sign_in_auth() != 47023) {
