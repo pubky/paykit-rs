@@ -96,6 +96,28 @@ fn test_failure_report_debug_redacts_errors() {
     assert!(!debug.contains("counterparty-secret"));
 }
 
+#[test]
+fn test_outbound_private_message_size_limit_is_inclusive() {
+    let limit = paykit_lib::pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN;
+    // Three-byte characters show the limit counts UTF-8 bytes, not characters.
+    let fits = format!("{}{}", "€".repeat(limit / 3), "x".repeat(limit % 3));
+    assert_eq!(fits.len(), limit);
+    require_outbound_private_message_fits(&fits).unwrap();
+
+    let error = require_outbound_private_message_fits(&format!("{fits}x")).unwrap_err();
+    assert!(error.is_message_too_large(), "{error:?}");
+    let PaykitSdkError::Protocol { context, .. } = &error else {
+        panic!("expected Protocol error");
+    };
+    assert_eq!(
+        context,
+        &format!(
+            "Private Application Message ({} bytes) exceeds pubky-noise message size ({limit} bytes)",
+            limit + 1
+        )
+    );
+}
+
 #[tokio::test]
 async fn test_enqueue_private_message_stores_pending_record() {
     let storage = registered_storage();

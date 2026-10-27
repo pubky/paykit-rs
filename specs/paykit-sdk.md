@@ -1061,6 +1061,11 @@ for all Private Application Message kinds. Event Messages are processed as FIFO
 per counterparty Encrypted Link. Private Payment Lists use latest-state
 semantics per source App ID, so older lists never sent by the same app may be
 superseded by a newer complete list.
+The exact raw JSON payload must fit `PUBKY_NOISE_MSG_LEN` (1000) UTF-8 bytes;
+Noise framing and the AEAD tag are outside that budget. A larger message is
+refused with `Protocol` before it is queued. `is_message_too_large` identifies
+that error in Rust and bindings report it with the `message_too_large` code.
+Proposals and Payment Proofs are measured before link readiness checks.
 Send workers must claim the next sendable message through storage before
 sending it. A stale `Sending` queue head can be reclaimed after the lease
 timeout, but the SDK must retry that same message before later private messages
@@ -1802,7 +1807,10 @@ SDK errors should be structured:
 - `Identity`: Pubky session/key/capability failure
 - `Transport`: Pubky or Encrypted Link transport failure
 - `NotFound`: required local or Pubky resource is missing
-- `Protocol`: invalid Paykit message, conflict, or unsupported version
+- `Protocol`: invalid Paykit message, conflict, unsupported version, or an
+  outbound message larger than the pubky-noise message size. The size refusal
+  carries a typed cause (`is_message_too_large`) and the binding code
+  `message_too_large`
 - `Policy`: operation blocked by configuration, privacy policy, or a
   per-counterparty retention limit. The retention limit refusal carries a typed
   cause (`is_retention_limit_reached`) and the binding code

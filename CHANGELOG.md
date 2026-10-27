@@ -14,6 +14,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   counterparties before App Registry access and atomically recheck that policy
   when claiming a Payment Request for preparation.
 
+### Changed
+
+- Identify an outbound Private Application Message larger than the pubky-noise
+  message size (1000 bytes) with `PaykitSdkError::is_message_too_large` and the
+  `message_too_large` FFI protocol code. It is still a `Protocol` error, and
+  its context now carries the message and limit byte counts. Proposing a
+  Payment Request and submitting a Payment Proof check the size before link
+  readiness, so a not-ready link no longer hides the size error, and nothing is
+  queued. `propose_payment_request_with_id` refuses oversized terms before it
+  checks earlier use of the Payment Request ID.
+
 ### Integration
 
 - Use the guarded preparation API before preparing payment, and compare its

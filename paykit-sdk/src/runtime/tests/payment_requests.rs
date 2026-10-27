@@ -1762,3 +1762,182 @@ async fn test_quote_payment_request_rejects_identity_change_in_progress() {
         .await;
     assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
 }
+
+fn one_time_terms_with_note(note: String) -> PaymentRequestTerms {
+    PaymentRequestTerms::builder(
+        paykit_lib::PaymentAmount::new("0.001", "btc").unwrap(),
+        paykit_lib::PaymentReference::new("invoice-2026-0001").unwrap(),
+        vec![PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap()],
+    )
+    .metadata(JsonMap::from_iter([(
+        "note".into(),
+        JsonValue::String(note),
+    )]))
+    .build()
+    .unwrap()
+}
+
+fn sdk_without_session(
+    storage: InMemoryStorage,
+) -> PaykitSdk<InMemoryStorage, TestPubkySessionProvider, TestPaymentAdapter, FixedClock> {
+    PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("bitkit").unwrap(),
+        FixedClock,
+    )
+}
+
+#[tokio::test]
+async fn test_payment_request_proposal_size_is_checked_before_send_readiness() {
+    let storage = registered_test_storage();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let sdk = sdk_without_session(storage.clone());
+    let before = storage.snapshot().unwrap();
+    // 400 three-byte characters exceed the budget on their own.
+    let oversized = one_time_terms_with_note("€".repeat(400));
+
+    for with_id in [false, true] {
+        let error = if with_id {
+            sdk.propose_payment_request_with_id(
+                counterparty.clone(),
+                PaymentRequestId::new_v4(),
+                oversized.clone(),
+            )
+            .await
+        } else {
+            sdk.propose_payment_request(counterparty.clone(), oversized.clone())
+                .await
+        }
+        .unwrap_err();
+        assert!(error.is_message_too_large(), "{error:?}");
+    }
+    assert_eq!(storage.snapshot().unwrap(), before);
+
+    // The same runtime refuses terms that fit at the readiness check instead.
+    let error = sdk
+        .propose_payment_request(counterparty, one_time_terms_with_note("short".into()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, PaykitSdkError::Identity { .. }),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_payment_proof_size_is_checked_before_send_readiness() {
+    let storage = registered_test_storage();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let request_id = PaymentRequestId::new_v4();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        vec![payment_request_message(
+            EventId::new_v4().as_str(),
+            request_id.as_str(),
+            None,
+        )],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    authorize_payment_request_app(&storage, counterparty.clone(), "bitkit").await;
+    crate::domain::payment_requests::enqueue_payment_request_event(
+        &storage,
+        counterparty.clone(),
+        &app_id(),
+        &PaymentRequestEvent::Acceptance(PaymentRequestAcceptance::new(
+            EventId::new_v4(),
+            request_id.clone(),
+        )),
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let sdk = sdk_without_session(storage.clone());
+    let before = storage.snapshot().unwrap();
+    let submit = |evidence: &str| {
+        sdk.submit_payment_proof(
+            counterparty.clone(),
+            &request_id,
+            None,
+            paykit_lib::PaykitAppId::new("merchant").unwrap(),
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            JsonMap::from_iter([("preimage".into(), JsonValue::String(evidence.into()))]),
+        )
+    };
+
+    let error = submit(&"€".repeat(400)).await.unwrap_err();
+    assert!(error.is_message_too_large(), "{error:?}");
+    assert_eq!(storage.snapshot().unwrap(), before);
+
+    // The same request reaches the readiness check with a proof that fits.
+    let error = submit("preimage").await.unwrap_err();
+    assert!(
+        matches!(error, PaykitSdkError::Identity { .. }),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_payment_request_proposal_size_matches_issue_224_shape() {
+    // Issue #224: a recurring proposal with bound Payment Endpoints and a
+    // 100-character note of three-byte characters.
+    let lightning = PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap();
+    let onchain = PaymentEndpointIdentifier::new("btc-bitcoin-p2wpkh").unwrap();
+    let terms = PaymentRequestTerms::builder(
+        paykit_lib::PaymentAmount::new("0.001", "btc").unwrap(),
+        paykit_lib::PaymentReference::new("subscription-2026-0001").unwrap(),
+        vec![lightning.clone(), onchain.clone()],
+    )
+    .required_app_id(Some(app_id()))
+    .payment_endpoints(Some(HashMap::from([
+        (
+            lightning,
+            paykit_lib::PaymentEndpointPayload::new(format!("lnbc1{}", "q".repeat(200))),
+        ),
+        (
+            onchain,
+            paykit_lib::PaymentEndpointPayload::new(format!("bc1q{}", "q".repeat(38))),
+        ),
+    ])))
+    .recurrence(Some(
+        paykit_lib::Recurrence::try_from(paykit_lib::RecurrenceConfig {
+            every: 1,
+            unit: paykit_lib::RecurrenceUnit::Month,
+            starts_at: "2026-06-03T12:00:00Z".into(),
+            anchor: "2026-06-03T12:00:00Z".into(),
+            ends_at: None,
+        })
+        .unwrap(),
+    ))
+    .metadata(JsonMap::from_iter([(
+        "note".into(),
+        JsonValue::String("€".repeat(100)),
+    )]))
+    .build()
+    .unwrap();
+    let request = PaymentRequest::new(EventId::new_v4(), PaymentRequestId::new_v4(), terms);
+    let raw = paykit_lib::serialize_payment_request_event(
+        &app_id(),
+        &PaymentRequestEvent::Request(request.clone()),
+    )
+    .unwrap();
+    // Event and Payment Request IDs are fixed-length UUIDs, so the length is
+    // exact: the 300-byte note pushes this proposal past the limit.
+    assert_eq!(raw.len(), 1175);
+
+    let error = sdk_without_session(registered_test_storage())
+        .propose_payment_request_with_id(
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()),
+            request.payment_request_id().clone(),
+            request.request().clone(),
+        )
+        .await
+        .unwrap_err();
+    let limit = paykit_lib::pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN;
+    assert_eq!(error.is_message_too_large(), raw.len() > limit, "{error:?}");
+}
