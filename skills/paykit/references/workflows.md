@@ -191,11 +191,13 @@ reserve with `reserve_automatic_payment` or `reserve_manual_payment`, obtain a
 fresh handoff through `begin_payment_execution`, then `record_payment_outcome`.
 Only Ready with Submitted status grants one handoff; use its attempt ID for wallet
 idempotency. Unknown outcomes stay reserved. `Failed` is permanent, releases
-usage, and reopens the occurrence, so report it only for a
+usage, and reopens the occurrence, so after handoff report it only for a
 [definitive failure](https://github.com/pubky/paykit-rs/blob/master/paykit-ffi/README.md#definitive-failure)
 on the Rail; an RPC "dropped" or "not found" status is `Unknown`. Retry only by
-replacement (same inputs or nonce). Restore/relink requires complete
-reconciliation before automation; an empty history, timeout, or Payment Proof
+replacement (same inputs or nonce). A blocked `Prepared` attempt that was never
+handed off is instead retried through `begin_payment_execution` with corrected
+checks or, once no handoff occurred, aborted and reported `Failed`.
+Restore/relink requires complete reconciliation before automation; an empty history, timeout, or Payment Proof
 cannot establish unused capacity. Read the
 [Allowance contract](https://github.com/pubky/paykit-rs/blob/master/specs/allowances.md)
 and [SDK accounting workflow](https://github.com/pubky/paykit-rs/blob/master/paykit-sdk/README.md#allowance-integration)

@@ -430,8 +430,11 @@ The SDK implements this durable coordination through the following workflow:
    wallet checks. Only Ready with status Submitted grants one handoff. Use the
    returned attempt ID for external wallet idempotency, then report the verified
    outcome through `record_payment_outcome`. `Failed` is permanent for the
-   attempt: it releases Allowance usage and reopens the occurrence. Report
-   anything short of a definitive failure on the Rail as `Unknown`.
+   attempt: it releases Allowance usage and reopens the occurrence. After
+   handoff, report anything short of a definitive failure on the Rail as
+   `Unknown`. A blocked `Prepared` attempt that was never handed off is retried
+   through `begin_payment_execution` with corrected checks or, once no handoff
+   occurred, aborted and reported `Failed`.
 
 `defer_payment_occurrence` retains temporary failures for reconsideration;
 `mark_payment_manual_only` is sticky. A pending execution cannot be relabeled

@@ -376,8 +376,9 @@ responsibility.
 `Failed` is permanent for that attempt: `recordPaymentOutcome` cannot change
 it later. It releases Allowance usage, reopens the occurrence for a new
 reservation, and can let the execution claim be released before a Payment Proof
-is sent. Report anything short of a definitive failure as `Unknown`; an
-`Unknown` attempt can later become `Succeeded` or `Failed`. A failure is
+is sent. For an attempt that received a handoff (`Submitted` or `Unknown`),
+report anything short of a definitive failure as `Unknown`; an `Unknown`
+attempt can later become `Succeeded` or `Failed`. A failure on the Rail is
 definitive only when:
 
 - Bitcoin: a conflicting spend of the same inputs is confirmed to the wallet's
@@ -387,6 +388,14 @@ definitive only when:
   counts.
 - Lightning: the wallet's own node reports the payment failed with no HTLC
   still in flight.
+
+A `Prepared` attempt that never received a handoff, for example because
+`beginPaymentExecution` returned `Blocked`, has nothing on a Rail to wait for.
+Either call `beginPaymentExecution` again with corrected fresh checks, or abort
+it: verify that no handoff occurred (no executor call with that attempt ID),
+then report `Failed`, which releases the reservation and reopens the
+occurrence. Never report `Unknown` for it just to wait; that keeps the
+occurrence occupied and the execution claim held.
 
 To end an `Unknown` attempt, make the failure definitive yourself, for example
 with a replace-by-fee (RBF) spend back to the wallet or a self-transfer that
