@@ -1774,12 +1774,17 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * the current request for this Payment Request ID is a different stream
      * item, which happens when the counterparty was forgotten and sent the id
      * again.
+     *
+     * Success only queues acceptance; accounting callers must still reserve payment and
+     * obtain a fresh handoff.
      */
     func acceptPaymentRequest(counterparty: String, paymentRequestId: String, expectedProposalStreamItemId: UInt64) async throws  -> PaymentRequestRecord
 
     /**
      * Select and queue automatic Acceptance after SDK validation. This does not reserve or execute a payment.
      * The current app must first claim the Payment Request for execution.
+     * Read the clock once: `selection.trusted_time` and `checks.trusted_time` must be the
+     * same instant, or the call is refused.
      */
     func acceptPaymentRequestAutomatically(scope: PaymentRequestScope, selection: AllowanceSelectionInput, checks: PaymentExecutionChecks) async throws  -> AllowanceAssociationRecord
 
@@ -1802,7 +1807,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func advanceLinkHandshake(counterparty: String) async throws  -> LinkedPeerHandshakeReport
 
     /**
-     * Return durable accounting, or None before complete wallet reconciliation.
+     * Return durable accounting, or None only when no accounting state exists.
+     *
+     * State that requires reconciliation is still returned, for example after restore, key
+     * rotation, or a manual Payment Request Acceptance, Rejection, or Cancellation made
+     * before any accounting existed.
      */
     func allowanceAccountingState() async throws  -> AllowanceAccountingState?
 
@@ -1822,7 +1831,8 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Recheck a preparation and durably issue a handoff before wallet execution. Use the returned attempt ID for executor idempotency.
-     * A Blocked value is a successful durable decision, including its updated watermark.
+     * A Blocked value is a successful result, not an error, and may include an updated
+     * watermark. Nothing is persisted while accounting is absent or requires reconciliation.
      */
     func beginPaymentExecution(attemptId: String, checks: PaymentExecutionChecks) async throws  -> PaymentAttemptDecision
 
@@ -1842,6 +1852,8 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Pass the `proposal_stream_item_id` of the record whose terms were
      * approved, as it was displayed. On a mismatch nothing is claimed or
      * queued and the call fails with a policy error.
+     *
+     * Accounting callers must still reserve payment and obtain a fresh handoff.
      */
     func claimAndAcceptPaymentRequest(counterparty: String, paymentRequestId: String, expectedProposalStreamItemId: UInt64) async throws  -> PaymentRequestRecord
 
@@ -2323,11 +2335,23 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Merge complete wallet-attested history. An empty history cannot reset existing evidence.
+     *
+     * After restoring an older backup, an empty or incomplete history re-enables payment of
+     * anything paid after the export and frees the Allowance capacity it used. This is a
+     * ledger-wide recovery step, not a routine call: it starts a new epoch and turns every
+     * Prepared attempt, including other apps' preparations, into Unknown.
+     * See `paykit-ffi/README.md` for the recipe.
      */
     func reconcileAllowanceAccounting(reconciliation: AllowanceAccountingReconciliation) async throws  -> AllowanceAccountingState
 
     /**
      * Record wallet-verified settlement. A timeout is Unknown; only definitive failure releases capacity.
+     *
+     * Report Failed only when the payment can never settle; anything less is Unknown, which can
+     * later become Succeeded or Failed. This method cannot change Failed later. Failed
+     * releases Allowance usage, reopens the occurrence for a new reservation, and can let the
+     * execution claim be released before a Payment Proof is sent. See `paykit-ffi/README.md`
+     * for what counts as definitive on each Rail.
      */
     func recordPaymentOutcome(report: PaymentOutcomeReport) async throws  -> PaymentAttemptRecord
 
@@ -2339,6 +2363,9 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * recovery and payment execution requires complete wallet reconciliation.
      * State newer than the backup is not recovered. Unreadable generation
      * headers and corrupt replacement-generation state are rejected, not overwritten.
+     *
+     * Reconcile payment accounting with every payment made after the backup was exported,
+     * or those payments can be made again; see `reconcile_allowance_accounting`.
      */
     func recoverSharedStateFromBackup(backup: SdkBackupBlob, replacementKey: PaykitIdentitySecretKey) async throws  -> PaykitAppRegistry
 
@@ -2397,13 +2424,15 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Atomically reserve one occurrence. Ready with Prepared status is not an execution permit.
-     * A Blocked value is a successful durable decision, including its updated watermark.
+     * A Blocked value is a successful result, not an error, and may include an updated
+     * watermark. Nothing is persisted while accounting is absent or requires reconciliation.
      */
     func reserveAutomaticPayment(occurrence: PaymentOccurrence, expectedAssociationRevision: UInt64, checks: PaymentExecutionChecks) async throws  -> PaymentAttemptDecision
 
     /**
      * Reserve manual execution under the same semantic dedupe key without consuming Allowance capacity.
-     * A Blocked value is a successful durable decision, including its updated watermark.
+     * A Blocked value is a successful result, not an error, and may include an updated
+     * watermark. Nothing is persisted while accounting is absent or requires reconciliation.
      */
     func reserveManualPayment(occurrence: PaymentOccurrence, checks: PaymentExecutionChecks) async throws  -> PaymentAttemptDecision
 
@@ -2444,6 +2473,9 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * `link_policy` decides whether saved Encrypted Links resume or require a
      * fresh Encrypted Link Handshake. Resuming a backup that is not current
      * reuses a transport key and nonce.
+     *
+     * Reconcile payment accounting with every payment made after the backup was exported,
+     * or those payments can be made again; see `reconcile_allowance_accounting`.
      */
     func restoreBackupState(backup: SdkBackupBlob, linkPolicy: RestoredLinkPolicy) async throws  -> RestoreReport
 
@@ -2453,6 +2485,9 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * `link_policy` decides whether saved Encrypted Links resume or require a
      * fresh Encrypted Link Handshake. Resuming a backup that is not current
      * reuses a transport key and nonce.
+     *
+     * Reconcile payment accounting with every payment made after the backup was exported,
+     * or those payments can be made again; see `reconcile_allowance_accounting`.
      */
     func restoreBackupString(backup: String, linkPolicy: RestoredLinkPolicy) async throws  -> RestoreReport
 
@@ -2806,6 +2841,9 @@ open func acceptLinkWithPeer(counterparty: String)async throws  -> LinkedPeerHan
      * the current request for this Payment Request ID is a different stream
      * item, which happens when the counterparty was forgotten and sent the id
      * again.
+     *
+     * Success only queues acceptance; accounting callers must still reserve payment and
+     * obtain a fresh handoff.
      */
 open func acceptPaymentRequest(counterparty: String, paymentRequestId: String, expectedProposalStreamItemId: UInt64)async throws  -> PaymentRequestRecord  {
     return
@@ -2827,6 +2865,8 @@ open func acceptPaymentRequest(counterparty: String, paymentRequestId: String, e
     /**
      * Select and queue automatic Acceptance after SDK validation. This does not reserve or execute a payment.
      * The current app must first claim the Payment Request for execution.
+     * Read the clock once: `selection.trusted_time` and `checks.trusted_time` must be the
+     * same instant, or the call is refused.
      */
 open func acceptPaymentRequestAutomatically(scope: PaymentRequestScope, selection: AllowanceSelectionInput, checks: PaymentExecutionChecks)async throws  -> AllowanceAssociationRecord  {
     return
@@ -2909,7 +2949,11 @@ open func advanceLinkHandshake(counterparty: String)async throws  -> LinkedPeerH
 }
 
     /**
-     * Return durable accounting, or None before complete wallet reconciliation.
+     * Return durable accounting, or None only when no accounting state exists.
+     *
+     * State that requires reconciliation is still returned, for example after restore, key
+     * rotation, or a manual Payment Request Acceptance, Rejection, or Cancellation made
+     * before any accounting existed.
      */
 open func allowanceAccountingState()async throws  -> AllowanceAccountingState?  {
     return
@@ -2974,7 +3018,8 @@ open func backupStateRevision()async throws  -> String  {
 
     /**
      * Recheck a preparation and durably issue a handoff before wallet execution. Use the returned attempt ID for executor idempotency.
-     * A Blocked value is a successful durable decision, including its updated watermark.
+     * A Blocked value is a successful result, not an error, and may include an updated
+     * watermark. Nothing is persisted while accounting is absent or requires reconciliation.
      */
 open func beginPaymentExecution(attemptId: String, checks: PaymentExecutionChecks)async throws  -> PaymentAttemptDecision  {
     return
@@ -3039,6 +3084,8 @@ open func cancelPaymentRequest(counterparty: String, paymentRequestId: String, r
      * Pass the `proposal_stream_item_id` of the record whose terms were
      * approved, as it was displayed. On a mismatch nothing is claimed or
      * queued and the call fails with a policy error.
+     *
+     * Accounting callers must still reserve payment and obtain a fresh handoff.
      */
 open func claimAndAcceptPaymentRequest(counterparty: String, paymentRequestId: String, expectedProposalStreamItemId: UInt64)async throws  -> PaymentRequestRecord  {
     return
@@ -4670,6 +4717,12 @@ open func receivedPaymentRequestsFrom(counterparty: String)async throws  -> [Pay
 
     /**
      * Merge complete wallet-attested history. An empty history cannot reset existing evidence.
+     *
+     * After restoring an older backup, an empty or incomplete history re-enables payment of
+     * anything paid after the export and frees the Allowance capacity it used. This is a
+     * ledger-wide recovery step, not a routine call: it starts a new epoch and turns every
+     * Prepared attempt, including other apps' preparations, into Unknown.
+     * See `paykit-ffi/README.md` for the recipe.
      */
 open func reconcileAllowanceAccounting(reconciliation: AllowanceAccountingReconciliation)async throws  -> AllowanceAccountingState  {
     return
@@ -4690,6 +4743,12 @@ open func reconcileAllowanceAccounting(reconciliation: AllowanceAccountingReconc
 
     /**
      * Record wallet-verified settlement. A timeout is Unknown; only definitive failure releases capacity.
+     *
+     * Report Failed only when the payment can never settle; anything less is Unknown, which can
+     * later become Succeeded or Failed. This method cannot change Failed later. Failed
+     * releases Allowance usage, reopens the occurrence for a new reservation, and can let the
+     * execution claim be released before a Payment Proof is sent. See `paykit-ffi/README.md`
+     * for what counts as definitive on each Rail.
      */
 open func recordPaymentOutcome(report: PaymentOutcomeReport)async throws  -> PaymentAttemptRecord  {
     return
@@ -4716,6 +4775,9 @@ open func recordPaymentOutcome(report: PaymentOutcomeReport)async throws  -> Pay
      * recovery and payment execution requires complete wallet reconciliation.
      * State newer than the backup is not recovered. Unreadable generation
      * headers and corrupt replacement-generation state are rejected, not overwritten.
+     *
+     * Reconcile payment accounting with every payment made after the backup was exported,
+     * or those payments can be made again; see `reconcile_allowance_accounting`.
      */
 open func recoverSharedStateFromBackup(backup: SdkBackupBlob, replacementKey: PaykitIdentitySecretKey)async throws  -> PaykitAppRegistry  {
     return
@@ -4924,7 +4986,8 @@ open func removePublicContact(publicKey: String)async throws  -> ContactRecord? 
 
     /**
      * Atomically reserve one occurrence. Ready with Prepared status is not an execution permit.
-     * A Blocked value is a successful durable decision, including its updated watermark.
+     * A Blocked value is a successful result, not an error, and may include an updated
+     * watermark. Nothing is persisted while accounting is absent or requires reconciliation.
      */
 open func reserveAutomaticPayment(occurrence: PaymentOccurrence, expectedAssociationRevision: UInt64, checks: PaymentExecutionChecks)async throws  -> PaymentAttemptDecision  {
     return
@@ -4945,7 +5008,8 @@ open func reserveAutomaticPayment(occurrence: PaymentOccurrence, expectedAssocia
 
     /**
      * Reserve manual execution under the same semantic dedupe key without consuming Allowance capacity.
-     * A Blocked value is a successful durable decision, including its updated watermark.
+     * A Blocked value is a successful result, not an error, and may include an updated
+     * watermark. Nothing is persisted while accounting is absent or requires reconciliation.
      */
 open func reserveManualPayment(occurrence: PaymentOccurrence, checks: PaymentExecutionChecks)async throws  -> PaymentAttemptDecision  {
     return
@@ -5076,6 +5140,9 @@ open func resolvePublicPaymentRequest(counterparty: String, paymentRequestId: St
      * `link_policy` decides whether saved Encrypted Links resume or require a
      * fresh Encrypted Link Handshake. Resuming a backup that is not current
      * reuses a transport key and nonce.
+     *
+     * Reconcile payment accounting with every payment made after the backup was exported,
+     * or those payments can be made again; see `reconcile_allowance_accounting`.
      */
 open func restoreBackupState(backup: SdkBackupBlob, linkPolicy: RestoredLinkPolicy)async throws  -> RestoreReport  {
     return
@@ -5100,6 +5167,9 @@ open func restoreBackupState(backup: SdkBackupBlob, linkPolicy: RestoredLinkPoli
      * `link_policy` decides whether saved Encrypted Links resume or require a
      * fresh Encrypted Link Handshake. Resuming a backup that is not current
      * reuses a transport key and nonce.
+     *
+     * Reconcile payment accounting with every payment made after the backup was exported,
+     * or those payments can be made again; see `reconcile_allowance_accounting`.
      */
 open func restoreBackupString(backup: String, linkPolicy: RestoredLinkPolicy)async throws  -> RestoreReport  {
     return
@@ -8998,6 +9068,10 @@ public func FfiConverterTypeAllowanceAccountingHistory_lower(_ value: AllowanceA
  * An empty history attests that there were no previous payments; it never
  * clears evidence already retained by this SDK.
  *
+ * After restoring an older backup, start from the retained history and add every
+ * payment made after the export. An omitted payment can be paid again, and the
+ * Allowance capacity it used is freed. See `paykit-ffi/README.md`.
+ *
  * Treat these fields as private wallet data; do not log or describe the record.
  */
 public struct AllowanceAccountingReconciliation {
@@ -10020,7 +10094,8 @@ public struct AllowanceSelectionInput {
      */
     public var expectedRevision: UInt64?
     /**
-     * Wallet-supplied trusted UTC time.
+     * Wallet-supplied trusted UTC time. Automatic Acceptance requires the same
+     * instant as `checks.trusted_time`; read the clock once.
      */
     public var trustedTime: String
 
@@ -10034,7 +10109,8 @@ public struct AllowanceSelectionInput {
          * Absent only for an initial decision.
          */expectedRevision: UInt64?,
         /**
-         * Wallet-supplied trusted UTC time.
+         * Wallet-supplied trusted UTC time. Automatic Acceptance requires the same
+         * instant as `checks.trusted_time`; read the clock once.
          */trustedTime: String) {
         self.allowanceId = allowanceId
         self.expectedRevision = expectedRevision
@@ -13425,7 +13501,8 @@ public func FfiConverterTypePaymentConversionQuoteRecord_lower(_ value: PaymentC
  */
 public struct PaymentExecutionChecks {
     /**
-     * Trusted UTC time for this decision.
+     * Trusted UTC time for this decision. Automatic Acceptance requires the same
+     * instant as `selection.trusted_time`; read the clock once.
      */
     public var trustedTime: String
     /**
@@ -13457,7 +13534,8 @@ public struct PaymentExecutionChecks {
     // declare one manually.
     public init(
         /**
-         * Trusted UTC time for this decision.
+         * Trusted UTC time for this decision. Automatic Acceptance requires the same
+         * instant as `selection.trusted_time`; read the clock once.
          */trustedTime: String,
         /**
          * Method actually selected by the wallet.
@@ -19774,7 +19852,9 @@ public func FfiConverterTypeSdkStateBlobSnapshot_lower(_ value: SdkStateBlobSnap
 public enum AllowanceAccountingBlock {
 
     /**
-     * Accounting is absent or requires wallet reconciliation.
+     * Accounting is absent or requires wallet reconciliation: on first use, after
+     * restore, or after key rotation. Read `allowance_accounting_state` and reconcile
+     * with `expected_revision` set to its revision, or null only when no state exists.
      */
     case reconciliationRequired
     /**
@@ -19798,7 +19878,8 @@ public enum AllowanceAccountingBlock {
      */
     case paymentAlreadyRecorded
     /**
-     * Endpoint, amount, scheduling, or private wallet checks failed.
+     * Endpoint, amount, scheduling, or private wallet checks failed. Automatic
+     * Acceptance also reports different selection and checks trusted times this way.
      */
     case walletChecksFailed
     /**
@@ -21150,7 +21231,8 @@ public enum PaymentExecutionStatus {
      */
     case succeeded
     /**
-     * Wallet confirmed terminal failure before settlement.
+     * Wallet confirmed terminal failure before settlement. Permanent for this
+     * attempt: it releases Allowance usage and reopens the occurrence.
      */
     case failed
 }
@@ -21249,7 +21331,8 @@ public enum PaymentOutcome {
      */
     case succeeded
     /**
-     * Terminal failure before settlement was verified.
+     * Terminal failure before settlement was verified: the payment can never settle.
+     * Permanent for the attempt; report anything less certain as Unknown.
      */
     case failed
     /**
@@ -25893,10 +25976,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_link_with_peer() != 32868) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request() != 16435) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request() != 55386) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request_automatically() != 49289) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request_automatically() != 16194) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_actionable_received_payment_requests() != 36729) {
@@ -25908,7 +25991,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_advance_link_handshake() != 20770) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_allowance_accounting_state() != 43672) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_allowance_accounting_state() != 58415) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_authorize_allowance_reassociation() != 14050) {
@@ -25917,7 +26000,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_backup_state_revision() != 60914) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_begin_payment_execution() != 18142) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_begin_payment_execution() != 57909) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_block_peer() != 3462) {
@@ -25926,7 +26009,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_cancel_payment_request() != 58269) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_claim_and_accept_payment_request() != 49298) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_claim_and_accept_payment_request() != 38326) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_claim_payment_request_for_execution() != 44314) {
@@ -26160,13 +26243,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_received_payment_requests_from() != 4199) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_reconcile_allowance_accounting() != 25077) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_reconcile_allowance_accounting() != 55123) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_record_payment_outcome() != 2286) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_record_payment_outcome() != 56035) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_recover_shared_state_from_backup() != 19688) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_recover_shared_state_from_backup() != 4141) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_refresh_contact_paykit_profile() != 15127) {
@@ -26196,10 +26279,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_public_contact() != 46208) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_reserve_automatic_payment() != 11908) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_reserve_automatic_payment() != 12458) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_reserve_manual_payment() != 65334) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_reserve_manual_payment() != 46485) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_private_contact_payment() != 42116) {
@@ -26217,10 +26300,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_public_payment_request() != 44750) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_state() != 65524) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_state() != 42686) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_string() != 63951) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_string() != 49317) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_retrieve_receipt() != 26622) {
