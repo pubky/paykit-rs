@@ -7728,7 +7728,9 @@ public protocol SdkPaymentAdapter: AnyObject, Sendable {
      * The result is this Paykit App's complete desired public set: sync removes
      * every SDK-managed endpoint missing from it, and an empty list removes all
      * of them. While any receive backend the wallet publishes is not ready,
-     * throw `PaykitError::PaymentAdapter`, never an empty list or a subset.
+     * throw the `PaymentAdapter` case of the Paykit error type (Swift
+     * `PaykitError.PaymentAdapter(code:context:)`, Kotlin
+     * `PaykitException.PaymentAdapter`), never an empty list or a subset.
      * The sync then fails without changing publication records or endpoints.
      * Other foreign exceptions are not mapped to a clean Paykit error.
      */
@@ -7837,7 +7839,9 @@ open class SdkPaymentAdapterImpl: SdkPaymentAdapter, @unchecked Sendable {
      * The result is this Paykit App's complete desired public set: sync removes
      * every SDK-managed endpoint missing from it, and an empty list removes all
      * of them. While any receive backend the wallet publishes is not ready,
-     * throw `PaykitError::PaymentAdapter`, never an empty list or a subset.
+     * throw the `PaymentAdapter` case of the Paykit error type (Swift
+     * `PaykitError.PaymentAdapter(code:context:)`, Kotlin
+     * `PaykitException.PaymentAdapter`), never an empty list or a subset.
      * The sync then fails without changing publication records or endpoints.
      * Other foreign exceptions are not mapped to a clean Paykit error.
      */
@@ -26431,7 +26435,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffisdkbackupblob_export_bytes() != 43352) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_current_public_receiving_details() != 8246) {
+    if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_current_public_receiving_details() != 1235) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_current_private_receiving_details() != 22405) {

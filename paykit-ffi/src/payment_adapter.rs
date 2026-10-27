@@ -294,7 +294,9 @@ pub trait FfiSdkPaymentAdapter: Send + Sync {
     /// The result is this Paykit App's complete desired public set: sync removes
     /// every SDK-managed endpoint missing from it, and an empty list removes all
     /// of them. While any receive backend the wallet publishes is not ready,
-    /// throw `PaykitFfiError::PaymentAdapter`, never an empty list or a subset.
+    /// throw the `PaymentAdapter` case of the Paykit error type (Swift
+    /// `PaykitError.PaymentAdapter(code:context:)`, Kotlin
+    /// `PaykitException.PaymentAdapter`), never an empty list or a subset.
     /// The sync then fails without changing publication records or endpoints.
     /// Other foreign exceptions are not mapped to a clean Paykit error.
     fn current_public_receiving_details(
