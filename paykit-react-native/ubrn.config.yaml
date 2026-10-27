@@ -41,3 +41,7 @@ noOverwrite:
   - android/build.gradle
   # Initializes the Android TLS verifier (PaykitAndroid.kt).
   - android/src/main/java/com/synonymdev/reactnativepaykit/ReactNativePaykitModule.kt
+  # Carries the ubrn 0.30.0-1 CallInvokerHolder lookup: the 0.29.3-1 template
+  # reads mHybridData, which React Native 0.80 removed. Drop this entry once
+  # ubrn is 0.30.0-1 or later, which needs UniFFI 0.30 for all bindings.
+  - android/cpp-adapter.cpp

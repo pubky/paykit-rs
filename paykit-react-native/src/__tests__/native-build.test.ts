@@ -48,6 +48,20 @@ describe('Android TLS init', () => {
   });
 });
 
+describe('Android TurboModule install', () => {
+  test('test_cpp_adapter_does_not_read_removed_hybrid_data_field', () => {
+    // React Native 0.80 removed CallInvokerHolderImpl.mHybridData, so the
+    // ubrn 0.29.3-1 adapter aborts at launch. ubrn.config.yaml keeps the
+    // fixed adapter out of regeneration.
+    const adapter = read(packageDir, 'android/cpp-adapter.cpp');
+    expect(adapter).not.toContain('mHybridData');
+    expect(adapter).toContain('holderRef->cthis()');
+    expect(read(packageDir, 'ubrn.config.yaml')).toMatch(
+      /noOverwrite:[\s\S]*- android\/cpp-adapter\.cpp/
+    );
+  });
+});
+
 describe('iOS build', () => {
   test('test_ios_deployment_target_matches_build_ios_script', () => {
     const buildIos = read(repoRoot, 'paykit-ffi/build_ios.sh');
