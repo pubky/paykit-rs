@@ -141,16 +141,13 @@ pub(crate) fn reconcile(
 /// Sets every watermark to `time`, adding one for each scope that an
 /// association revision or automatic attempt references without a watermark.
 fn raise_watermarks(history: &mut AllowanceAccountingHistory, time: DateTime<Utc>) {
+    for watermark in &mut history.watermarks {
+        watermark.evaluated_at = time;
+    }
     let mut scopes: HashSet<_> = history
         .watermarks
         .iter()
-        .map(|w| {
-            (
-                &w.local_public_key,
-                &w.counterparty,
-                w.allowance_id.as_str(),
-            )
-        })
+        .map(validation::watermark_key)
         .collect();
     let selected = history.associations.iter().flat_map(|a| {
         a.revisions
@@ -165,7 +162,7 @@ fn raise_watermarks(history: &mut AllowanceAccountingHistory, time: DateTime<Utc
     });
     let missing: Vec<_> = selected
         .chain(admitted)
-        .filter(|(scope, id)| scopes.insert((&scope.local_public_key, &scope.counterparty, id)))
+        .filter(|(scope, id)| scopes.insert(validation::scope_key(scope, id)))
         .map(|(scope, id)| AllowanceWatermarkRecord {
             local_public_key: scope.local_public_key.clone(),
             counterparty: scope.counterparty.clone(),
@@ -174,9 +171,6 @@ fn raise_watermarks(history: &mut AllowanceAccountingHistory, time: DateTime<Utc
         })
         .collect();
     history.watermarks.extend(missing);
-    for watermark in &mut history.watermarks {
-        watermark.evaluated_at = time;
-    }
 }
 
 pub(crate) fn report_outcome(
@@ -300,25 +294,40 @@ fn merge(
 }
 
 /// Keeps the longer of two association histories for a request when one
-/// extends the other.
+/// extends the other. Reconciliation merges the whole retained ledger into the
+/// supplied rows, so requests are matched by key instead of by scanning.
 fn merge_associations(
     destination: &mut Vec<AllowanceAssociationRecord>,
     recovered: Vec<AllowanceAssociationRecord>,
 ) -> Result<()> {
+    let request_key = |r: &AllowanceAssociationRecord| {
+        (
+            r.request.local_public_key.clone(),
+            r.request.counterparty.clone(),
+            r.request.payment_request_id.clone(),
+        )
+    };
+    let mut positions: HashMap<_, _> = destination
+        .iter()
+        .enumerate()
+        .map(|(position, record)| (request_key(record), position))
+        .collect();
     for incoming in recovered {
-        if let Some(existing) = destination
-            .iter_mut()
-            .find(|r| r.request == incoming.request)
-        {
-            let common = existing.revisions.len().min(incoming.revisions.len());
-            if existing.revisions[..common] != incoming.revisions[..common] {
-                return Err(protocol("Conflicting association history"));
+        match positions.entry(request_key(&incoming)) {
+            Entry::Occupied(position) => {
+                let existing = &mut destination[*position.get()];
+                let common = existing.revisions.len().min(incoming.revisions.len());
+                if existing.revisions[..common] != incoming.revisions[..common] {
+                    return Err(protocol("Conflicting association history"));
+                }
+                if incoming.revisions.len() > existing.revisions.len() {
+                    existing.revisions = incoming.revisions;
+                }
             }
-            if incoming.revisions.len() > existing.revisions.len() {
-                existing.revisions = incoming.revisions;
+            Entry::Vacant(position) => {
+                position.insert(destination.len());
+                destination.push(incoming);
             }
-        } else {
-            destination.push(incoming);
         }
     }
     Ok(())

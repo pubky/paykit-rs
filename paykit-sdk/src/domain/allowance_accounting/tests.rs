@@ -159,6 +159,36 @@ impl Fixture {
             .await
             .unwrap()
     }
+    async fn settle(
+        &self,
+        attempt_id: String,
+        outcome: PaymentOutcome,
+    ) -> Result<PaymentAttemptRecord> {
+        self.storage
+            .transaction(|tx| {
+                report_outcome(
+                    tx,
+                    PaymentOutcomeReport {
+                        attempt_id,
+                        outcome,
+                    },
+                )
+            })
+            .await
+    }
+    /// Reserves, hands off, and settles one automatic payment, returning its attempt ID.
+    async fn pay(&self, outcome: PaymentOutcome) -> String {
+        let prepared = attempt(self.reserve().await);
+        self.storage
+            .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id.clone(), checks()))
+            .await
+            .map(attempt)
+            .unwrap();
+        self.settle(prepared.attempt_id.clone(), outcome)
+            .await
+            .unwrap();
+        prepared.attempt_id
+    }
     fn state(&self) -> AllowanceAccountingState {
         self.storage
             .snapshot()

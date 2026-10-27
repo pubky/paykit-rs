@@ -10,45 +10,11 @@ fn assert_error<T: std::fmt::Debug>(result: Result<T>, expected: &str) {
     }
 }
 
-async fn settle(
-    fixture: &Fixture,
-    attempt_id: String,
-    outcome: PaymentOutcome,
-) -> Result<PaymentAttemptRecord> {
-    fixture
-        .storage
-        .transaction(|tx| {
-            report_outcome(
-                tx,
-                PaymentOutcomeReport {
-                    attempt_id,
-                    outcome,
-                },
-            )
-        })
-        .await
-}
-
-/// Reserves, hands off, and settles one automatic payment, returning its attempt ID.
-async fn pay(fixture: &Fixture, outcome: PaymentOutcome) -> String {
-    let prepared = attempt(fixture.reserve().await);
-    fixture
-        .storage
-        .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id.clone(), checks()))
-        .await
-        .map(attempt)
-        .unwrap();
-    settle(fixture, prepared.attempt_id.clone(), outcome)
-        .await
-        .unwrap();
-    prepared.attempt_id
-}
-
 /// Pays once, then restores the ledger snapshot taken before the payment.
 async fn stale_restore() -> Fixture {
     let fixture = Fixture::new().await;
     let stale = fixture.state();
-    pay(&fixture, PaymentOutcome::Succeeded).await;
+    fixture.pay(PaymentOutcome::Succeeded).await;
     let restored = merge_restored_accounting(None, Some(stale))
         .unwrap()
         .unwrap();
@@ -244,7 +210,7 @@ async fn test_accounting_reconcile_rejects_duplicate_supplied_rows() {
 #[tokio::test]
 async fn test_accounting_reconcile_appends_success_after_reported_failure() {
     let fixture = Fixture::new().await;
-    let failed = pay(&fixture, PaymentOutcome::Failed).await;
+    let failed = fixture.pay(PaymentOutcome::Failed).await;
     assert_eq!(committed_usage(&fixture), 0);
     let history = rebuilt(&fixture, succeeded(&fixture, 1, time()));
     let state = reconcile_history(&fixture, history, time()).await.unwrap();
@@ -259,7 +225,7 @@ async fn test_accounting_reconcile_appends_success_after_reported_failure() {
 #[tokio::test]
 async fn test_accounting_reconcile_append_rejects_second_live_attempt() {
     let fixture = Fixture::new().await;
-    pay(&fixture, PaymentOutcome::Failed).await;
+    fixture.pay(PaymentOutcome::Failed).await;
     attempt(fixture.reserve().await);
     let before = fixture.state();
     let history = rebuilt(&fixture, succeeded(&fixture, 1, time()));
@@ -273,9 +239,9 @@ async fn test_accounting_reconcile_append_rejects_second_live_attempt() {
 #[tokio::test]
 async fn test_accounting_failed_outcome_cannot_become_succeeded() {
     let fixture = Fixture::new().await;
-    let failed = pay(&fixture, PaymentOutcome::Failed).await;
+    let failed = fixture.pay(PaymentOutcome::Failed).await;
     assert_error(
-        settle(&fixture, failed, PaymentOutcome::Succeeded).await,
+        fixture.settle(failed, PaymentOutcome::Succeeded).await,
         "Terminal payment outcome cannot be rewritten",
     );
     let failed_side = fixture.state();
