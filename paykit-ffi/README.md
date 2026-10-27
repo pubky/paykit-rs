@@ -224,11 +224,13 @@ pixel and cache limits, and request timeouts remain app responsibilities.
   Each Event Message must fit 1000 bytes of canonical JSON. `metadata` and
   `proof` objects are re-serialized and non-ASCII text is written raw, so a
   wallet's own byte count is not authoritative.
-- `paymentProofEventLen(appId, paymentReference, submission)` - return the exact
-  byte length of the Payment Proof Event Message that `submitPaymentProof`
-  would queue. It is a measurement, not a validity check. Payers measure before
-  payment approval and payees before offering a method, with maximum-length
-  placeholders for variable fields and every optional ID they will send.
+- `paymentProofEventLen(localAppId, paymentReference, submission)` - return the
+  exact byte length of the Payment Proof Event Message that `submitPaymentProof`
+  would queue. `localAppId` is the local (sending) App ID from
+  `PaykitSdkConfig`, not the payee App in `submission.paymentAppId`. It is a
+  measurement, not a validity check. Payers measure before payment approval and
+  payees before offering a method, with maximum-length placeholders for
+  variable fields and every optional ID they will send.
 - `PaykitSdk.claimPaymentRequestForPreparation` - claim before preparing payment.
   It rejects blocked counterparties before App Registry access and rechecks the
   policy atomically with the claim. Compare the returned proposal and applicable

@@ -1872,7 +1872,9 @@ async fn test_payment_proof_size_is_checked_before_send_readiness() {
     let oversized = "\u{20ac}".repeat(400);
     let error = submit(&oversized).await.unwrap_err();
     assert!(error.is_message_too_large(), "{error:?}");
-    // The measurement matches the bytes the runtime refused.
+    // The measurement matches the bytes the runtime refused. The local App ID
+    // ("bitkit") and the payment App ID ("merchant") differ in length, so this
+    // also pins that the helper takes the local (sending) App ID.
     let measured = crate::payment_proof_event_len(
         &app_id(),
         &paykit_lib::PaymentReference::new("invoice-2026-0001").unwrap(),

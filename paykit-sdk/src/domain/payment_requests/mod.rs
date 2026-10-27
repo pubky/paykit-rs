@@ -305,8 +305,13 @@ impl PaymentProofSubmission {
 }
 
 /// Return the exact UTF-8 byte length of the Payment Proof Event Message that
-/// submitting `submission` from `app_id` would queue for a request with
+/// submitting `submission` from `local_app_id` would queue for a request with
 /// `payment_reference`.
+///
+/// `local_app_id` is the App ID this SDK is configured with (the
+/// `PaykitSdkConfig` App ID that `submit_payment_proof` sends from, written as
+/// the outer `app_id`), not the payee App in `submission.payment_app_id`.
+/// Passing the wrong one measures the wrong length.
 ///
 /// Compare it with `PUBKY_NOISE_MSG_LEN` (1000 bytes). This is a measurement,
 /// not a validity check: a proof that fits can still be refused by role, state
@@ -316,7 +321,7 @@ impl PaymentProofSubmission {
 /// will be sent. Canonical UUID-v4 Event and Payment Request IDs always have 36
 /// characters, so fresh placeholders keep the length exact.
 pub fn payment_proof_event_len(
-    app_id: &paykit_lib::PaykitAppId,
+    local_app_id: &paykit_lib::PaykitAppId,
     payment_reference: &paykit_lib::PaymentReference,
     submission: PaymentProofSubmission,
 ) -> Result<usize> {
@@ -325,7 +330,7 @@ pub fn payment_proof_event_len(
         paykit_lib::PaymentRequestId::new_v4(),
         payment_reference.clone(),
     );
-    Ok(serialize_payment_request_event(app_id, &PaymentRequestEvent::Proof(event))?.len())
+    Ok(serialize_payment_request_event(local_app_id, &PaymentRequestEvent::Proof(event))?.len())
 }
 
 /// Payment Proof captured in a derived Payment Request record.

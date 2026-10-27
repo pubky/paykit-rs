@@ -25726,6 +25726,11 @@ public func paymentDeadlineAt(deadline: PaymentDeadline, billingPeriod: BillingP
  * Return the exact UTF-8 byte length of the Payment Proof Event Message that
  * `submitPaymentProof` would queue for this App, Payment Reference and submission.
  *
+ * `local_app_id` is the App ID this SDK is configured with (the
+ * `PaykitSdkConfig` App ID that `submitPaymentProof` sends from, written as the
+ * outer `app_id`), not the payee App in `submission.payment_app_id`. Passing
+ * the wrong one measures the wrong length.
+ *
  * Compare it with the 1000-byte (`PUBKY_NOISE_MSG_LEN`) limit. This is a
  * measurement, not a validity check: a proof that fits can still be refused by
  * role, state or conversion checks, and lengths above the limit are returned.
@@ -25735,10 +25740,10 @@ public func paymentDeadlineAt(deadline: PaymentDeadline, billingPeriod: BillingP
  * false assurance. The proof JSON is re-serialized canonically, so do not
  * measure the wallet's own string.
  */
-public func paymentProofEventLen(appId: String, paymentReference: PaymentReference, submission: PaymentProofSubmission)throws  -> UInt32  {
+public func paymentProofEventLen(localAppId: String, paymentReference: PaymentReference, submission: PaymentProofSubmission)throws  -> UInt32  {
     return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
     uniffi_paykit_fn_func_payment_proof_event_len(
-        FfiConverterString.lower(appId),
+        FfiConverterString.lower(localAppId),
         FfiConverterTypePaymentReference_lower(paymentReference),
         FfiConverterTypePaymentProofSubmission_lower(submission),$0
     )
@@ -25859,7 +25864,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_payment_deadline_at() != 2507) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_func_payment_proof_event_len() != 1366) {
+    if (uniffi_paykit_checksum_func_payment_proof_event_len() != 55765) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_pubky_public_key_from_secret() != 41462) {

@@ -498,6 +498,29 @@ fn test_payment_proof_event_len_measures_canonical_proof_json() {
 }
 
 #[test]
+fn test_payment_proof_event_len_uses_local_app_id() {
+    let measure = |local_app_id: &str, payment_app_id: &str| {
+        let reference = Arc::new(FfiPaymentReference::new("invoice-1".into()).unwrap());
+        let mut submission = proof_submission(None);
+        submission.payment_app_id = payment_app_id.into();
+        payment_proof_event_len(local_app_id.into(), reference, submission).unwrap() as usize
+    };
+    let base = measure("bitkit", "merchant");
+
+    // The local App ID is the outer Event Message `app_id`; changing it alone
+    // moves the length by its own length difference.
+    assert_eq!(
+        measure("bitkit-wallet", "merchant") - base,
+        "bitkit-wallet".len() - "bitkit".len()
+    );
+    // The submission's `payment_app_id` is a separate field.
+    assert_eq!(
+        measure("bitkit", "merchant-store") - base,
+        "merchant-store".len() - "merchant".len()
+    );
+}
+
+#[test]
 fn test_payment_proof_event_len_rejects_invalid_app_id() {
     for app_id in ["", "../bitkit"] {
         let reference = Arc::new(FfiPaymentReference::new("invoice-1".into()).unwrap());

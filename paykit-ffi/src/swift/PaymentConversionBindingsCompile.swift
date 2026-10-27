@@ -3,6 +3,7 @@
 private func compilePaymentConversionBindingsSurface(
     sdk: PaykitSdkProtocol,
     counterparty: String,
+    localAppId: String,
     paymentAppId: String,
     requestId: String
 ) async throws {
@@ -26,7 +27,7 @@ private func compilePaymentConversionBindingsSurface(
         proof: proofBody
     )
     let proofLen: UInt32 = try paymentProofEventLen(
-        appId: paymentAppId, paymentReference: try PaymentReference(text: "invoice-1"), submission: proof
+        localAppId: localAppId, paymentReference: try PaymentReference(text: "invoice-1"), submission: proof
     )
     _ = (fixed, recurring, proof, proofLen)
 }

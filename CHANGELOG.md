@@ -17,7 +17,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   Swift and Kotlin return the exact byte length of the Payment Proof Event
   Message that `submitPaymentProof` would queue, so payers and payees can check
   it against the 1000-byte limit before payment approval or before offering a
-  method. It is a measurement, not a validity check.
+  method. It takes the local (sending) App ID from `PaykitSdkConfig`, not the
+  submission's `payment_app_id`. It is a measurement, not a validity check.
 
 ### Changed
 

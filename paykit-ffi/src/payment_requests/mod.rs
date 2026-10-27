@@ -698,6 +698,11 @@ pub fn payment_deadline_at(
 /// Return the exact UTF-8 byte length of the Payment Proof Event Message that
 /// `submitPaymentProof` would queue for this App, Payment Reference and submission.
 ///
+/// `local_app_id` is the App ID this SDK is configured with (the
+/// `PaykitSdkConfig` App ID that `submitPaymentProof` sends from, written as the
+/// outer `app_id`), not the payee App in `submission.payment_app_id`. Passing
+/// the wrong one measures the wrong length.
+///
 /// Compare it with the 1000-byte (`PUBKY_NOISE_MSG_LEN`) limit. This is a
 /// measurement, not a validity check: a proof that fits can still be refused by
 /// role, state or conversion checks, and lengths above the limit are returned.
@@ -708,16 +713,16 @@ pub fn payment_deadline_at(
 /// measure the wallet's own string.
 #[uniffi::export]
 pub fn payment_proof_event_len(
-    app_id: String,
+    local_app_id: String,
     payment_reference: Arc<FfiPaymentReference>,
     submission: FfiPaymentProofSubmission,
 ) -> Result<u32, PaykitFfiError> {
-    let app_id =
-        paykit_lib::PaykitAppId::new(app_id).map_err(|err| validation_error(err.to_string()))?;
+    let local_app_id = paykit_lib::PaykitAppId::new(local_app_id)
+        .map_err(|err| validation_error(err.to_string()))?;
     let payment_reference = PaymentReference::new(payment_reference.export_text())
         .map_err(|err| validation_error(err.to_string()))?;
     let submission = PaymentProofSubmission::try_from(submission)?;
-    let len = paykit_sdk::payment_proof_event_len(&app_id, &payment_reference, submission)?;
+    let len = paykit_sdk::payment_proof_event_len(&local_app_id, &payment_reference, submission)?;
     u32::try_from(len)
         .map_err(|_| validation_error("Payment Proof Event Message length exceeds u32"))
 }

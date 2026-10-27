@@ -1811,7 +1811,7 @@ RustBuffer uniffi_paykit_fn_func_payment_deadline_at(RustBuffer deadline, RustBu
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYMENT_PROOF_EVENT_LEN
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYMENT_PROOF_EVENT_LEN
-uint32_t uniffi_paykit_fn_func_payment_proof_event_len(RustBuffer app_id, void*_Nonnull payment_reference, RustBuffer submission, RustCallStatus *_Nonnull out_status
+uint32_t uniffi_paykit_fn_func_payment_proof_event_len(RustBuffer local_app_id, void*_Nonnull payment_reference, RustBuffer submission, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PUBKY_PUBLIC_KEY_FROM_SECRET
