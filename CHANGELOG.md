@@ -52,9 +52,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - Before signing up an imported or unknown key, call `republishIdentity`. On
   `true`, sign in and never fall back to sign-up automatically; on `false`,
   sign-up is safe; on an error, retry later. Treat a policy error from sign-up
-  as "this identity lives on another homeserver" and sign in instead. The
-  updated `signUp` documentation changes a UniFFI checksum, so regenerate the
-  bindings and native libraries together.
+  as "this identity lives on another homeserver" and sign in instead.
 - Branch on sign-up and sign-in errors by category and code. Retry a
   `transport` error later; after any sign-up failure, retrying with the same
   identity, homeserver and signup code is safe. On `signup_code_rejected`, ask
@@ -62,7 +60,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   a failed sign-in to sign-up automatically; call `republishIdentity` to tell
   a missing record from a transient failure. Wallets that catch identity
   errors from these calls must also handle transport errors. The updated
-  `signUp` and `signIn` documentation changes UniFFI checksums.
+  `signUp` and `signIn` documentation changes UniFFI checksums, so regenerate
+  the bindings and native libraries together.
 
 ## [0.1.1-rc1] - 2026-10-20
 

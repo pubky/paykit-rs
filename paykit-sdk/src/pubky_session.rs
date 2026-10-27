@@ -878,22 +878,19 @@ async fn approve_checked_auth(
             // account exists is no reason to publish it as the identity's
             // homeserver. The context tells the caller how to recover.
             // Retryable failures also stay identity errors on this path; only
-            // a refused signup code gets its own cause.
-            let conflict = matches!(
-                &err,
+            // a refused signup code, never a 409, gets its own cause.
+            if is_signup_code_rejection(&err) {
+                return Err(signup_code_rejected_error("sign up Pubky identity", err));
+            }
+            let context = match &err {
                 pubky::Error::Request(pubky::errors::RequestError::Server { status, .. })
-                    if status.as_u16() == 409
-            );
-            return Err(if conflict {
-                map_pubky_identity_error(
-                    "requested Pubky homeserver reported an existing account; restore the homeserver record with sign_up",
-                    err,
-                )
-            } else if is_signup_code_rejection(&err) {
-                signup_code_rejected_error("sign up Pubky identity", err)
-            } else {
-                map_pubky_identity_error("sign up Pubky identity", err)
-            });
+                    if status.as_u16() == 409 =>
+                {
+                    "requested Pubky homeserver reported an existing account; restore the homeserver record with sign_up"
+                }
+                _ => "sign up Pubky identity",
+            };
+            return Err(map_pubky_identity_error(context, err));
         }
     }
     signer
