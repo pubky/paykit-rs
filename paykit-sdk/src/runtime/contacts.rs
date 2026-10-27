@@ -266,15 +266,17 @@ where
     /// 1. Call [`Self::end_allowance`] and [`Self::cancel_payment_request`] for
     ///    the Allowances and Payment Requests the user wants gone. Otherwise
     ///    they authorize again after a later relink.
-    /// 2. While the peer is `Linked`, call
-    ///    [`Self::clear_private_payment_list_and_process_outbound`]. It queues an
-    ///    empty Private Payment List and processes the peer's outbound queue in
-    ///    order, so it also sends step 1's messages. Check that
-    ///    `failed_to_queue` and `failed_to_deliver` are empty; they cover only the
-    ///    list. Queueing the list alone, with [`Self::clear_private_payment_list`]
-    ///    or [`Self::sync_contact_private_payment_lists`], is not enough, because
-    ///    the block parks it unsent. This is best effort and covers only this
-    ///    SDK's Paykit App; it cannot take back details the peer already read.
+    /// 2. While the peer is `Linked`, queue an empty Private Payment List with
+    ///    [`Self::clear_private_payment_list`] and keep its
+    ///    `outbound_message_id`. Call [`Self::process_outbound_private_messages`]
+    ///    until a returned report's `sent` contains that id, waiting out any
+    ///    retry backoff between calls. The queue is processed in order, so this
+    ///    also sends step 1's messages first. Empty failure lists do not prove
+    ///    delivery: an older failed message in retry backoff holds the queue
+    ///    head, and the run then sends nothing and reports no failure.
+    ///    Queueing without a confirmed send is not enough, because the block
+    ///    parks it unsent. This is best effort and covers only this SDK's
+    ///    Paykit App; it cannot take back details the peer already read.
     /// 3. Persist the wallet's own record of intent to end the link with this
     ///    peer. Call this method, then [`Self::unblock_peer`], then clear the
     ///    record.

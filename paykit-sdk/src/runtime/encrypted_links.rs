@@ -387,8 +387,9 @@ where
     ///
     /// 1. While the peer is still `Linked`, queue any pending Event Message,
     ///    such as [`Self::submit_payment_proof`], and deliver it with
-    ///    [`Self::process_outbound_private_messages`]. Retrieve any Receipt you
-    ///    need.
+    ///    [`Self::process_outbound_private_messages`]. Delivery is confirmed
+    ///    only when the message's `outbound_message_id` appears in a returned
+    ///    report's `sent`. Retrieve any Receipt you need.
     /// 2. To revoke Allowances, call [`Self::list_allowances`] filtered to this
     ///    counterparty and [`Self::end_allowance`] for each `Accepted` one and
     ///    each `Proposed` one this identity proposed. An End keeps the

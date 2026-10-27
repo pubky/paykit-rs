@@ -114,8 +114,9 @@ Paykit-side workflow.
   consent. While the peer is blocked, nothing new can
   be queued for it, `endAllowance` is refused, and reads that name it fail
   with a policy error. Before blocking, while the peer is still Linked, deliver
-  pending events such as a Payment Proof with `processOutboundPrivateMessages`,
-  retrieve any Receipt you need, and call `endAllowance` for each `Accepted`
+  pending events such as a Payment Proof with `processOutboundPrivateMessages`
+  (delivered only once its id appears in a report's `sent`), retrieve any
+  Receipt you need, and call `endAllowance` for each `Accepted`
   Allowance, and each `Proposed` one this identity proposed, that the user
   wants gone. If the peer was already blocked, after unblock and relink call
   `endAllowance`, or confirm with the user before calling
@@ -526,13 +527,16 @@ bootstrap.approveAuthWithCompanionClaim(
   1. Call `endAllowance` and `cancelPaymentRequest` for the Allowances and
      Payment Requests the user wants gone. Otherwise they authorize again
      after a later relink.
-  2. While the peer is still Linked, call
-     `clearPrivatePaymentListAndProcessOutbound`. It queues an empty Private
-     Payment List and sends the peer's queue in order, including step 1's
-     messages. Check that `failedToQueue` and `failedToDeliver` are empty;
-     they cover only the list. Queueing the list alone is not enough, because
-     the block parks it unsent. This is best effort for this Paykit App only
-     and cannot take back details the peer already read.
+  2. While the peer is still Linked, queue an empty Private Payment List with
+     `clearPrivatePaymentList` and keep its `outboundMessageId`. Call
+     `processOutboundPrivateMessages` until a returned report's `sent`
+     contains that id, waiting out any retry backoff between calls. The queue
+     is processed in order, so this also sends step 1's messages first. Empty
+     failure lists do not prove delivery: an older failed message in retry
+     backoff holds the queue head, and the run then sends nothing and reports
+     no failure. Queueing without a confirmed send is not enough, because the
+     block parks it unsent. This is best effort for this Paykit App only and
+     cannot take back details the peer already read.
   3. Persist the app's own record of intent to end the link with that peer.
      Call `removeContactsAndBlockPeers`, then `unblockPeer`, then clear the
      record.

@@ -570,10 +570,13 @@ impl FfiPaykitSdk {
     ///
     /// To end a contact's Encrypted Link without keeping the peer blocked, call
     /// `endAllowance` and `cancelPaymentRequest` for what the user wants gone.
-    /// While the peer is still Linked, call
-    /// `clearPrivatePaymentListAndProcessOutbound`, which also sends those
-    /// messages, and check that `failedToQueue` and `failedToDeliver` are
-    /// empty; a list that is only queued is parked unsent by the block. Then
+    /// While the peer is still Linked, queue an empty Private Payment List with
+    /// `clearPrivatePaymentList` and keep its `outboundMessageId`. Call
+    /// `processOutboundPrivateMessages` until a returned report's `sent`
+    /// contains that id, waiting out any retry backoff between calls; the
+    /// queue is processed in order, so this also sends those messages first.
+    /// Empty failure lists do not prove delivery, and a list that is queued
+    /// without a confirmed send is parked unsent by the block. Then
     /// persist the app's own record of intent to end the link with that peer,
     /// call this method and `unblockPeer`, and clear the record. On startup,
     /// unblock only peers that carry that record and are still Blocked. Never

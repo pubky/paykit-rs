@@ -314,8 +314,10 @@ impl FfiPaykitSdk {
     /// blocked, `endAllowance` is refused, reads that name this counterparty
     /// fail with a policy error, and reads across counterparties skip it. So
     /// first deliver pending Event Messages with
-    /// `processOutboundPrivateMessages` and call `endAllowance` for authority
-    /// the user wants gone. See "Blocking a peer" in the README.
+    /// `processOutboundPrivateMessages`, which is confirmed only when each
+    /// message's id appears in a returned report's `sent`, and call
+    /// `endAllowance` for authority the user wants gone. See "Blocking a
+    /// peer" in the README.
     pub async fn block_peer(
         &self,
         counterparty: String,
