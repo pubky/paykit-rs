@@ -306,7 +306,13 @@ export default function App(props: LaunchProps): React.JSX.Element {
 
 function makeStyles(colors: Palette) {
   return StyleSheet.create({
-    screen: { flex: 1, backgroundColor: colors.background },
+    screen: {
+      flex: 1,
+      backgroundColor: colors.background,
+      // Android draws edge to edge when targeting SDK 36, and SafeAreaView
+      // only insets on iOS.
+      paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0,
+    },
     content: { padding: 20, paddingBottom: 48, gap: 20 },
     title: { fontSize: 15, fontWeight: '600', color: colors.muted },
     verdict: {

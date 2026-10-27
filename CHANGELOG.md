@@ -14,7 +14,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   uniffi-bindgen-react-native. It exposes the same SDK surface as Swift and
   Kotlin, but TypeScript names keep the `Ffi` prefix (`FfiPaykitSdk`,
   `FfiSdkStateBlobStore`, and so on). It requires the React Native New
-  Architecture and is published to npm by the `npm Package` workflow.
+  Architecture, supports React Native 0.78 and later (including 0.80 and
+  later, Expo SDK 54 and later), and is published to npm by the `npm Package`
+  workflow.
 - `claim_payment_request_for_preparation` in Rust and
   `claimPaymentRequestForPreparation` in Swift and Kotlin reject blocked
   counterparties before App Registry access and atomically recheck that policy

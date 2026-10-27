@@ -1,6 +1,6 @@
 # Paykit React Native example
 
-A bare React Native 0.78.2 app (New Architecture, TypeScript) that runs a
+A bare React Native 0.83.10 app (New Architecture, TypeScript) that runs a
 smoke test of `@synonymdev/react-native-paykit` against a real Pubky
 homeserver. It is the package's test harness and a reference for
 integrators.

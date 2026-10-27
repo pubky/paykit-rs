@@ -79,7 +79,11 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
       ms
     );
   });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  });
 }
 
 /** Poll until `done` accepts a result, or fail with `what`. */
