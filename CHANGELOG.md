@@ -14,6 +14,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   counterparties before App Registry access and atomically recheck that policy
   when claiming a Payment Request for preparation.
 
+### Fixed
+
+- A platform callback (`SdkStateBlobStore`, `SdkPubkySessionProvider` or
+  `SdkPaymentAdapter`) that throws an error other than `PaykitError` (Swift) or
+  `PaykitException` (Kotlin) now returns a `Storage` error with code
+  `unexpected_callback_error` instead of panicking in Rust. Previously the panic
+  reached the app as an internal panic error that included the platform error
+  text, and a throw from `SdkStateBlobStore` left that SDK handle failing every
+  later call with `state_transaction_lock_poisoned`.
+
 ### Integration
 
 - Use the guarded preparation API before preparing payment, and compare its
@@ -26,6 +36,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   behavior and callable signatures are unchanged by the documentation update.
   Mocks and conformers of the generated SDK interfaces must implement the new
   preparation-claim method.
+- Throw `PaykitError` (Swift) or `PaykitException` (Kotlin) from platform
+  callbacks to keep a specific error variant and code. Any other thrown error
+  becomes `Storage` with code `unexpected_callback_error`, and its message is
+  discarded.
 
 ## [0.1.1-rc1] - 2026-10-20
 

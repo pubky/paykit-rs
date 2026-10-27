@@ -35,6 +35,10 @@ pub struct FfiSdkStateBlobSnapshot {
 /// callback because doing so would deadlock.
 /// Independent handles for one identity must use the same atomic backing store;
 /// a per-handle mutex does not coordinate separate applications or processes.
+///
+/// Report callback failures by throwing `PaykitFfiError`. Any other thrown
+/// error is mapped to `PaykitFfiError::Storage` with code
+/// `unexpected_callback_error`, and its message is discarded.
 #[uniffi::export(with_foreign)]
 pub trait FfiSdkStateBlobStore: Send + Sync {
     /// Load the current SDK state blob, when one exists.

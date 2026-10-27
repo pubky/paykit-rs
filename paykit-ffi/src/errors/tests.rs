@@ -351,3 +351,35 @@ fn test_retention_limit_cause_selects_policy_code() {
         "policy/retention_limit_reached: counterparty reached the limit"
     );
 }
+
+#[test]
+fn test_unexpected_callback_error_maps_to_redacted_storage_error() {
+    // Generated callback code reports a platform error of an undeclared type
+    // (Swift NSError, Kotlin non-PaykitException, JS Error) as UnexpectedError
+    // with the error description, then lifts it through this exact path.
+    let marker = r#"Error Domain=AppStore Code=7 "disk full at /private/app/state.bin""#;
+    let call_status = uniffi::RustCallStatus::error(marker);
+    let result = <Result<Option<String>, PaykitFfiError> as uniffi::LiftReturn<
+        crate::UniFfiTag,
+    >>::lift_foreign_return(uniffi::RustBuffer::default(), call_status);
+    let err = result.unwrap_err();
+    assert_eq!(
+        parts(&err),
+        (
+            "storage",
+            "unexpected_callback_error",
+            "platform callback failed with an undeclared error type"
+        )
+    );
+
+    let restored = PaykitFfiError::from(ffi_error_to_sdk(err, "load SDK state blob"));
+    assert_eq!(
+        parts(&restored),
+        (
+            "storage",
+            "unexpected_callback_error",
+            "load SDK state blob: unexpected_callback_error"
+        )
+    );
+    assert!(!format!("{restored:?}").contains("disk full"));
+}

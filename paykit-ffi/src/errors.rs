@@ -241,6 +241,24 @@ fn callback_ffi_error(source: Option<&anyhow::Error>, context: &str) -> Option<P
     })
 }
 
+// UNDECLARED CALLBACK ERRORS: UniFFI calls this when a platform callback throws
+// an error other than `PaykitFfiError` or returns a value it cannot lift.
+// Without this impl UniFFI panics inside the SDK, which poisons the storage
+// transaction lock and skips lease cleanup. `Storage` has no special SDK
+// handling, unlike `Protocol` (forces Encrypted Link handshake recovery) or
+// `Transport`, `ConcurrentUpdate` and `SharedStateBusy` (drive retries and
+// fallbacks). `reason` holds the platform error description, which can carry
+// file paths, keychain details or payment data, so it is dropped unread and
+// never logged.
+impl From<uniffi::UnexpectedUniFFICallbackError> for PaykitFfiError {
+    fn from(_err: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        storage_error(
+            "unexpected_callback_error",
+            "platform callback failed with an undeclared error type",
+        )
+    }
+}
+
 pub(crate) fn ffi_error_to_sdk(err: PaykitFfiError, context: &'static str) -> PaykitSdkError {
     let source = Some(anyhow::Error::new(err.clone()));
     match err {

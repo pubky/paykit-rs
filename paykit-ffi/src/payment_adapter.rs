@@ -287,6 +287,10 @@ pub struct FfiEndpointSyncReport {
 ///
 /// Callbacks must not synchronously call back into the same SDK handle while
 /// the originating SDK call is waiting for them.
+///
+/// Report callback failures by throwing `PaykitFfiError`. Any other thrown
+/// error is mapped to `PaykitFfiError::Storage` with code
+/// `unexpected_callback_error`, and its message is discarded.
 #[uniffi::export(with_foreign)]
 pub trait FfiSdkPaymentAdapter: Send + Sync {
     /// Return receiving details intended for public Payment Endpoints.
