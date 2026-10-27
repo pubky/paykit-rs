@@ -7,6 +7,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Fixed
+
+- `sign_up` in Rust and `signUp` in Swift and Kotlin no longer move an identity
+  to another homeserver. They fail with a policy error, before anything is sent
+  to the homeserver or published, when the identity's homeserver record names a
+  different homeserver. A record lookup error also fails the sign-up. The check
+  adds PKARR lookups, which take longest for a first-time signup.
+
 ### Added
 
 - `claim_payment_request_for_preparation` in Rust and
@@ -26,6 +34,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   behavior and callable signatures are unchanged by the documentation update.
   Mocks and conformers of the generated SDK interfaces must implement the new
   preparation-claim method.
+- Before signing up an imported or unknown key, call `republishIdentity`. On
+  `true`, sign in and never fall back to sign-up automatically; on `false`,
+  sign-up is safe; on an error, retry later. Treat a policy error from sign-up
+  as "this identity lives on another homeserver" and sign in instead. The
+  updated `signUp` documentation changes a UniFFI checksum, so regenerate the
+  bindings and native libraries together.
 
 ## [0.1.1-rc1] - 2026-10-20
 

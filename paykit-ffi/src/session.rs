@@ -547,8 +547,15 @@ impl FfiPubkySessionBootstrap {
 
     /// Sign up on a homeserver and return session access material.
     ///
-    /// Signing up an identity that already has an account on that homeserver
-    /// publishes its homeserver record again.
+    /// The identity's homeserver record is looked up first. If it names a
+    /// different homeserver, this fails with a policy error before anything
+    /// is sent to the homeserver, so no signup code is spent; call `sign_in`
+    /// instead. If it names this homeserver, an identity that already has an
+    /// account here has its homeserver record published again. If no record
+    /// is found, or the record names no homeserver, the identity is signed up
+    /// here. A lookup error, or a record whose homeserver is not a valid
+    /// public key, fails the sign-up. A record that no reachable cache holds
+    /// counts as none.
     pub async fn sign_up(
         &self,
         local_secret_key: Arc<FfiPubkyLocalSecretKey>,

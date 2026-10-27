@@ -423,6 +423,17 @@ object.
   owns timeouts.
 - `PubkySessionBootstrap(clientId)` — create/import grant sessions and grant
   auth flows for a stable app-owned Pubky client ID.
+- `PubkySessionBootstrap.signUp(...)` — fails with a policy error when the
+  identity's homeserver record names a different homeserver. Nothing is sent
+  to the homeserver, so the signup code is not spent. A lookup failure is an
+  error, never "no record". The check cannot see a record that no reachable
+  PKARR cache holds, so for an imported or unknown key, call
+  `republishIdentity(publicKey)` first:
+  - `true`: the identity already exists. Use `signIn`, and never fall back to
+    `signUp` automatically. `true` also covers a record that names no
+    homeserver; there, `signUp` with a homeserver the app trusts restores it.
+  - `false`: no record was found, so `signUp` is safe.
+  - an error: do neither, and retry later.
 - `PubkyClientConfig.authRelayUrl` — select a local or private grant-auth
   relay; leave unset for Pubky's production default.
 - `PubkyAuthRequest` — pending external auth-flow handle; call `saveState()` to

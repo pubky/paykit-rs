@@ -345,8 +345,30 @@ impl PubkySessionBootstrap {
     ///
     /// After creating the account, this uses Pubky grant auth to issue a
     /// session with exactly `required_capabilities`. The auth relay must be
-    /// reachable. Signing up an identity that already has an account on that
-    /// homeserver publishes its homeserver record again.
+    /// reachable.
+    ///
+    /// Signing up never moves an identity to another homeserver. The
+    /// identity's homeserver record is looked up first:
+    ///
+    /// - If it names a different homeserver, sign-up fails with
+    ///   [`PaykitSdkError::Policy`]. Nothing is sent to the homeserver, so no
+    ///   signup code is spent, and nothing is published. Call
+    ///   [`Self::sign_in`] instead.
+    /// - If it names `homeserver_public_key`, the identity is signed up there.
+    ///   When the homeserver already has the account, its homeserver record is
+    ///   published again.
+    /// - If no record is found, or the record names no homeserver, the
+    ///   identity is signed up on `homeserver_public_key`. This also restores
+    ///   a record that names no homeserver.
+    ///
+    /// A lookup error fails the sign-up, and so does a homeserver record whose
+    /// target is not a valid public key. "No record" is still what PKARR
+    /// reports, not proof: a record that no reachable cache holds, or that
+    /// only a relay cache still holds, counts as none, and so does a partly
+    /// failed lookup in which one backend finds nothing. A caller that knows
+    /// the identity's homeserver should pass it. The lookup adds up to two
+    /// PKARR resolutions, which take longest for an identity that has no
+    /// record, as on a first-time signup.
     pub async fn sign_up(
         &self,
         secret_key: &PubkyLocalSecretKey,
@@ -356,6 +378,8 @@ impl PubkySessionBootstrap {
     ) -> Result<PubkySessionBootstrapResult> {
         let homeserver = homeserver_public_key.to_public_key()?;
         let signer = self.pubky.signer(secret_key.keypair());
+        self.ensure_sign_up_keeps_homeserver(&signer, &homeserver)
+            .await?;
         ensure_pubky_account(&signer, &homeserver, signup_code).await?;
         self.sign_in(secret_key, required_capabilities).await
     }
@@ -584,14 +608,7 @@ impl PubkySessionBootstrap {
         let DeepLink::SignupGrant(signup) = deep_link else {
             return Ok(None);
         };
-        let lookup = || async {
-            signer
-                .pkdns()
-                .get_homeserver()
-                .await
-                .map_err(|err| map_pubky_identity_error("resolve Pubky homeserver record", err))
-        };
-        let mut published = lookup().await?;
+        let mut published = published_homeserver(signer).await?;
         if published.is_none() {
             // SECURITY: read the caches before the network is asked. Relay
             // caches are read only while this client caches no record for the
@@ -605,7 +622,7 @@ impl PubkySessionBootstrap {
             // the network was asked. A newer record from the network replaces
             // the cached one, so the second lookup reads it.
             if self.refresh_identity_record(&signer.public_key()).await? {
-                published = lookup().await?;
+                published = published_homeserver(signer).await?;
             }
         }
         let requested = &signup.params().homeserver;
@@ -636,6 +653,47 @@ impl PubkySessionBootstrap {
                 }
                 Ok(Some(signup))
             }
+        }
+    }
+
+    /// Fail unless signing up on `requested` keeps the identity's published
+    /// homeserver.
+    ///
+    /// SECURITY: signing up publishes the requested homeserver as the
+    /// identity's homeserver, and so does the republish after a 409 from a
+    /// homeserver that already has the account. This runs before both, so on
+    /// a mismatch nothing reaches the homeserver, no signup code is spent and
+    /// nothing is published to PKARR. A lookup error is returned, never read
+    /// as "no record". Unlike approval, a record that names no homeserver
+    /// counts as none here: the caller chose this homeserver, and signing up
+    /// is how such a record is restored. Residual cases: a record that no
+    /// reachable cache holds, one that only a relay cache still holds while
+    /// the network finds nothing, and a partly failed lookup in which one
+    /// backend's "not found" outvotes the failures of the others all count as
+    /// none. A `_pubky` target that is not a valid public key fails the lookup
+    /// with an invalid-record error, which blocks sign-up for that identity.
+    async fn ensure_sign_up_keeps_homeserver(
+        &self,
+        signer: &pubky::PubkySigner,
+        requested: &paykit_lib::PublicKey,
+    ) -> Result<()> {
+        let mut published = published_homeserver(signer).await?;
+        // SECURITY: the lookup answers from this client's cached identity
+        // record while that record is within its TTL, and a cached record can
+        // predate the homeserver record. Ask the network before trusting it.
+        if published.is_none() && self.refresh_identity_record(&signer.public_key()).await? {
+            published = published_homeserver(signer).await?;
+        }
+        match published {
+            Some(published) if published != *requested => Err(PaykitSdkError::Policy {
+                context: format!(
+                    "Pubky signup homeserver `{}` did not match published homeserver `{}`; call sign_in instead of sign_up",
+                    requested.z32(),
+                    published.z32(),
+                ),
+                source: None,
+            }),
+            _ => Ok(()),
         }
     }
 
@@ -756,6 +814,21 @@ async fn approve_checked_auth(
         .approve_auth(auth_url)
         .await
         .map_err(|err| map_pubky_identity_error("approve Pubky auth flow", err))
+}
+
+/// Look up the homeserver that the signer's identity record names.
+///
+/// The lookup reads this client's cache first. A record that names no
+/// homeserver and a missing record both return `None`; any other failure is
+/// an error.
+async fn published_homeserver(
+    signer: &pubky::PubkySigner,
+) -> Result<Option<paykit_lib::PublicKey>> {
+    signer
+        .pkdns()
+        .get_homeserver()
+        .await
+        .map_err(|err| map_pubky_identity_error("resolve Pubky homeserver record", err))
 }
 
 async fn ensure_pubky_account(
