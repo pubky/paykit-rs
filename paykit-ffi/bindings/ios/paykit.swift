@@ -7675,6 +7675,10 @@ public func FfiConverterTypeSdkBackupBlob_lower(_ value: SdkBackupBlob) -> Unsaf
  *
  * Callbacks must not synchronously call back into the same SDK handle while
  * the originating SDK call is waiting for them.
+ *
+ * Report callback failures by throwing `PaykitError`. Any other thrown
+ * error is mapped to `PaykitError::Storage` with code
+ * `unexpected_callback_error`, and its message is discarded.
  */
 public protocol SdkPaymentAdapter: AnyObject, Sendable {
 
@@ -7727,6 +7731,10 @@ public protocol SdkPaymentAdapter: AnyObject, Sendable {
  *
  * Callbacks must not synchronously call back into the same SDK handle while
  * the originating SDK call is waiting for them.
+ *
+ * Report callback failures by throwing `PaykitError`. Any other thrown
+ * error is mapped to `PaykitError::Storage` with code
+ * `unexpected_callback_error`, and its message is discarded.
  */
 open class SdkPaymentAdapterImpl: SdkPaymentAdapter, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -8154,6 +8162,10 @@ public func FfiConverterTypeSdkPaymentAdapter_lower(_ value: SdkPaymentAdapter) 
  *
  * Callbacks must not synchronously call back into the same SDK handle. Session
  * workflows may hold that handle's session-operation gate while invoking them.
+ *
+ * Report callback failures by throwing `PaykitError`. Any other thrown
+ * error is mapped to `PaykitError::Storage` with code
+ * `unexpected_callback_error`, and its message is discarded.
  */
 public protocol SdkPubkySessionProvider: AnyObject, Sendable {
 
@@ -8180,6 +8192,10 @@ public protocol SdkPubkySessionProvider: AnyObject, Sendable {
  *
  * Callbacks must not synchronously call back into the same SDK handle. Session
  * workflows may hold that handle's session-operation gate while invoking them.
+ *
+ * Report callback failures by throwing `PaykitError`. Any other thrown
+ * error is mapped to `PaykitError::Storage` with code
+ * `unexpected_callback_error`, and its message is discarded.
  */
 open class SdkPubkySessionProviderImpl: SdkPubkySessionProvider, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -8577,6 +8593,10 @@ public func FfiConverterTypeSdkStateBlob_lower(_ value: SdkStateBlob) -> UnsafeM
  * callback because doing so would deadlock.
  * Independent handles for one identity must use the same atomic backing store;
  * a per-handle mutex does not coordinate separate applications or processes.
+ *
+ * Report callback failures by throwing `PaykitError`. Any other thrown
+ * error is mapped to `PaykitError::Storage` with code
+ * `unexpected_callback_error`, and its message is discarded.
  */
 public protocol SdkStateBlobStore: AnyObject, Sendable {
 
@@ -8607,6 +8627,10 @@ public protocol SdkStateBlobStore: AnyObject, Sendable {
  * callback because doing so would deadlock.
  * Independent handles for one identity must use the same atomic backing store;
  * a per-handle mutex does not coordinate separate applications or processes.
+ *
+ * Report callback failures by throwing `PaykitError`. Any other thrown
+ * error is mapped to `PaykitError::Storage` with code
+ * `unexpected_callback_error`, and its message is discarded.
  */
 open class SdkStateBlobStoreImpl: SdkStateBlobStore, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
