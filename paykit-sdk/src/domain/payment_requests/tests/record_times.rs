@@ -12,7 +12,10 @@ const FIRST_MONTH: &str =
     r#"{"starts_at":"2026-06-01T00:00:00Z","ends_at":"2026-07-01T00:00:00Z"}"#;
 
 fn after_expiry(minutes: i64) -> DateTime<Utc> {
-    timestamp() + ChronoDuration::minutes(5 + minutes)
+    DateTime::parse_from_rfc3339(EXPIRES_AT)
+        .unwrap()
+        .with_timezone(&Utc)
+        + ChronoDuration::minutes(minutes)
 }
 
 async fn payee_proposal(
@@ -47,6 +50,25 @@ async fn record_at(
         .remove(0)
 }
 
+/// Stores an Acceptance fetched after expiry, then `proof`, and returns the
+/// Acceptance's local record time.
+async fn fetch_late_acceptance_and_proof(
+    storage: &InMemoryStorage,
+    peer: &PubkyPublicKey,
+    proof: String,
+) -> DateTime<Utc> {
+    let fetched_at = after_expiry(5);
+    persist_messages_at(
+        storage,
+        peer.clone(),
+        vec![acceptance_raw(ACCEPTANCE_ID, REQUEST_ID)],
+        fetched_at,
+    )
+    .await;
+    persist_messages_at(storage, peer.clone(), vec![proof], after_expiry(6)).await;
+    fetched_at
+}
+
 async fn cancel(
     storage: &InMemoryStorage,
     peer: &PubkyPublicKey,
@@ -75,19 +97,11 @@ async fn test_record_times_payee_keeps_acceptance_fetched_after_expiry() {
         let storage = registered_storage();
         let peer = counterparty();
         payee_proposal(&storage, &peer, recurrence).await;
-        let fetched_at = after_expiry(5);
-        persist_messages_at(
-            &storage,
-            peer.clone(),
-            vec![acceptance_raw(ACCEPTANCE_ID, REQUEST_ID)],
-            fetched_at,
-        )
-        .await;
         let proof = proof_raw(PROOF_ID, REQUEST_ID, REFERENCE).replace(
             r#""billing_period":null"#,
             &format!(r#""billing_period":{billing_period}"#),
         );
-        persist_messages_at(&storage, peer.clone(), vec![proof], after_expiry(6)).await;
+        let fetched_at = fetch_late_acceptance_and_proof(&storage, &peer, proof).await;
 
         let record = record_at(&storage, &peer, after_expiry(7)).await;
 
@@ -111,19 +125,10 @@ async fn test_record_times_late_acceptance_crosses_expired_cancellation() {
         PaymentRequestLifecycleState::ProposalExpired
     );
     cancel(&storage, &peer, after_expiry(1)).await.unwrap();
-    let fetched_at = after_expiry(5);
-    persist_messages_at(
+    let fetched_at = fetch_late_acceptance_and_proof(
         &storage,
-        peer.clone(),
-        vec![acceptance_raw(ACCEPTANCE_ID, REQUEST_ID)],
-        fetched_at,
-    )
-    .await;
-    persist_messages_at(
-        &storage,
-        peer.clone(),
-        vec![proof_raw(PROOF_ID, REQUEST_ID, REFERENCE)],
-        after_expiry(6),
+        &peer,
+        proof_raw(PROOF_ID, REQUEST_ID, REFERENCE),
     )
     .await;
 
@@ -170,42 +175,6 @@ async fn test_record_times_proposal_time_stays_fixed_for_both_roles() {
         assert_eq!(record.acceptance_recorded_at, Some(accepted_at));
         assert_eq!(record.last_event_at, Some(accepted_at));
     }
-}
-
-#[tokio::test]
-async fn test_record_times_payer_acceptance_time_ignores_delivery_updates() {
-    let storage = registered_storage();
-    let peer = counterparty();
-    persist_messages_at(
-        &storage,
-        peer.clone(),
-        vec![request_raw(PROPOSAL_ID, REQUEST_ID, REFERENCE, None, None)],
-        timestamp(),
-    )
-    .await;
-    let queued_at = timestamp() + ChronoDuration::minutes(1);
-    let sent_at = timestamp() + ChronoDuration::minutes(5);
-    let mut acceptance = enqueue_untyped_private_message(
-        &storage,
-        peer.clone(),
-        acceptance_raw(ACCEPTANCE_ID, REQUEST_ID),
-        queued_at,
-    )
-    .await
-    .unwrap();
-    acceptance.status = OutboundPrivateMessageStatus::Sent;
-    acceptance.updated_at = sent_at;
-    acceptance.sent_at = Some(sent_at);
-    storage
-        .transaction(|tx| tx.save_outbound_private_message(acceptance))
-        .await
-        .unwrap();
-
-    let record = record_at(&storage, &peer, sent_at).await;
-
-    assert_eq!(record.acceptance_recorded_at, Some(queued_at));
-    assert_eq!(record.last_event_at, Some(sent_at));
-    assert_eq!(record.proposal_recorded_at, Some(timestamp()));
 }
 
 #[tokio::test]

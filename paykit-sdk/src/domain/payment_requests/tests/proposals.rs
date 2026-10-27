@@ -171,7 +171,6 @@ async fn test_idempotent_proposal_preserves_ids_with_invalid_lifecycle() {
         );
         expected.proposal_event_id = first.proposal_event_id;
         expected.proposal_outbound_message_id = first.proposal_outbound_message_id;
-        expected.proposal_recorded_at = first.proposal_recorded_at;
 
         let record = propose(&storage, &peer, &retry(&request), &identity, timestamp())
             .await

@@ -160,10 +160,8 @@ pub(super) fn apply_stored_event(
             ) {
                 return;
             }
-            // The payer checks proposal expiry at its acceptance decision. A
-            // payee can fetch an in-time Acceptance after its own local expiry,
-            // so it records the Acceptance and exposes `acceptance_recorded_at`
-            // for application policy instead of voiding the request here.
+            // Proposal expiry is the payer's check at its acceptance decision;
+            // a payee may fetch an in-time Acceptance after its local expiry.
             // Only the first Acceptance may cross a payee Cancellation; any
             // later Acceptance falls through to the transition check below.
             let crosses_payee_cancellation = record.state == PaymentRequestLifecycleState::Canceled

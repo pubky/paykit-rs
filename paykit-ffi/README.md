@@ -240,9 +240,7 @@ pixel and cache limits, and request timeouts remain app responsibilities.
   times this device stored the proposal and the recorded Acceptance. Their
   meaning depends on the role: a payee queued the proposal and fetched the
   Acceptance; a payer received the proposal and queued the Acceptance. They are
-  not authenticated and do not prove cross-direction order, so a payee's
-  `acceptanceRecordedAt` after `proposalExpiresAt` does not show a late
-  acceptance decision.
+  unauthenticated local clock times and do not prove cross-direction order.
 - `PaykitSdk.readPaymentRequests(counterparty, expectedIdentity)` - read fresh
   identity/capability and complete counterparty records under one shared-storage
   operation. Existing storage/session access errors still propagate, including
@@ -280,8 +278,8 @@ payer response. A required Paykit App constrains the payee endpoint, not the
 payer app that responds.
 
 `ProposalExpired` is a local view state. On the payee side it can still move to
-`Accepted` or `ActiveRecurring` when an Acceptance the payer made in time is
-fetched after expiry. Payers should run `processOutboundPrivateMessages` in the
+`Accepted`, `ProofSubmitted` or `ActiveRecurring` when an Acceptance the payer
+made in time is fetched after expiry. Payers should run `processOutboundPrivateMessages` in the
 same foreground task as `claimAndAcceptPaymentRequest`, and avoid accepting
 right at `proposalExpiresAt`. Payees should:
 

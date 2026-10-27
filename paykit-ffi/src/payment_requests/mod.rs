@@ -306,15 +306,10 @@ pub struct FfiPaymentRequestRecord {
     pub proposal_event_id: Option<String>,
     /// Application that created the proposal.
     pub proposal_app_id: Option<String>,
-    /// Local record time of the proposal on this device as RFC3339 text.
-    ///
-    /// For a payee this is when it queued its proposal. For a payer this is
-    /// when this device received the proposal. It does not change when later
-    /// events arrive. This is local clock time: it is not authenticated and
-    /// does not prove the order of events between the two sides. A payee can
-    /// subtract a payment-method-specific tolerance from it to get the
-    /// earliest payment time it should accept as proof. A payer should use it
-    /// only as a search hint.
+    /// Local time this device stored the proposal, as RFC3339 text: queued by
+    /// a payee, received by a payer. Unauthenticated local clock time. A payee
+    /// subtracts a payment-method tolerance to get a payment not-before bound;
+    /// a payer uses it only as a search hint.
     pub proposal_recorded_at: Option<String>,
     /// Payer application associated with the request, independent of its current execution claim.
     pub payer_app_id: Option<String>,
@@ -326,15 +321,10 @@ pub struct FfiPaymentRequestRecord {
     pub accepted_event_id: Option<String>,
     /// Local outbound delivery status for an acceptance event.
     pub accepted_outbound_status: Option<FfiOutboundPrivateMessageStatus>,
-    /// Local record time of the recorded acceptance on this device as RFC3339
-    /// text.
-    ///
-    /// For a payer this is when it queued its acceptance. For a payee this is
-    /// when this device fetched the acceptance, which can be after the payer
-    /// accepted in time, so a value after `proposal_expires_at` does not show
-    /// that the payer accepted late. This is local clock time: it is not
-    /// authenticated and does not prove the order of events between the two
-    /// sides. It is not a lower bound on payment time.
+    /// Local time this device stored the recorded acceptance, as RFC3339 text:
+    /// queued by a payer, fetched by a payee. Unauthenticated local clock time.
+    /// A payee value after `proposal_expires_at` does not show a late
+    /// acceptance, and it is not a lower bound on payment time.
     pub acceptance_recorded_at: Option<String>,
     /// Rejection Event ID.
     pub rejected_event_id: Option<String>,
