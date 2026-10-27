@@ -646,6 +646,19 @@ async fn seed_private_capable_identity_and_link(
         .unwrap();
 }
 
+/// Complete an Encrypted Link Handshake, as the first link or a relink after
+/// `unblock_peer` does. Parked outbound messages are requeued.
+async fn complete_link_handshake(storage: &InMemoryStorage, counterparty: &PubkyPublicKey) {
+    crate::domain::linked_peers::save_linked_peer_link_state(
+        storage,
+        counterparty.clone(),
+        vec![4, 5, 6],
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+}
+
 pub(super) async fn seed_private_capable_identity_and_handshake(
     storage: &InMemoryStorage,
     counterparty: PubkyPublicKey,
