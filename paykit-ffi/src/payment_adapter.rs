@@ -561,6 +561,9 @@ impl FfiSdkPaymentAdapter for FfiNoopSdkPaymentAdapter {
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
     /// Publish current public receiving details and remove stale SDK-managed endpoints.
+    ///
+    /// This writes SDK-managed state, so `restore_backup_state` is refused on
+    /// this state backing afterwards; restore a backup first.
     pub async fn sync_public_endpoints(&self) -> Result<FfiEndpointSyncReport, PaykitFfiError> {
         self.runtime
             .sync_public_endpoints()
@@ -570,6 +573,9 @@ impl FfiPaykitSdk {
     }
 
     /// Publish explicit public receiving details and remove stale SDK-managed endpoints.
+    ///
+    /// This writes SDK-managed state, so `restore_backup_state` is refused on
+    /// this state backing afterwards; restore a backup first.
     pub async fn sync_public_endpoints_with_receiving_details(
         &self,
         receiving_details: Vec<FfiPublicReceivingDetail>,
