@@ -772,21 +772,11 @@ where
                 context: "Payment Request terms are unavailable".into(),
                 source: None,
             })?;
-            let mut event = PaymentProof::new(
+            let event = submission.into_payment_proof(
                 EventId::new_v4(),
                 payment_request_id.clone(),
                 request.request().payment_reference().clone(),
-                submission.billing_period,
-                submission.payment_app_id,
-                submission.payment_endpoint_identifier,
-                submission.proof,
             );
-            if let Some(allowance_id) = submission.allowance_id {
-                event = event.with_allowance_id(allowance_id);
-            }
-            if let Some(conversion_quote_id) = submission.conversion_quote_id {
-                event = event.with_conversion_quote_id(conversion_quote_id);
-            }
             validate_proof_conversion(&record, &event, &request)?;
             self.enqueue_raw_payment_proof(counterparty.clone(), &event)
                 .await?;

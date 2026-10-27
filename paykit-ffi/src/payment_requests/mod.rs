@@ -717,29 +717,7 @@ pub fn payment_proof_event_len(
     let payment_reference = PaymentReference::new(payment_reference.export_text())
         .map_err(|err| validation_error(err.to_string()))?;
     let submission = PaymentProofSubmission::try_from(submission)?;
-    // Mirrors `PaykitRuntime::submit_payment_proof_submission`. Canonical
-    // UUID-v4 IDs are always 36 characters, so fresh placeholders keep the
-    // length exact.
-    let mut event = paykit_lib::PaymentProof::new(
-        paykit_lib::EventId::new_v4(),
-        paykit_lib::PaymentRequestId::new_v4(),
-        payment_reference,
-        submission.billing_period,
-        submission.payment_app_id,
-        submission.payment_endpoint_identifier,
-        submission.proof,
-    );
-    if let Some(allowance_id) = submission.allowance_id {
-        event = event.with_allowance_id(allowance_id);
-    }
-    if let Some(conversion_quote_id) = submission.conversion_quote_id {
-        event = event.with_conversion_quote_id(conversion_quote_id);
-    }
-    let raw_json = paykit_lib::serialize_payment_request_event(
-        &app_id,
-        &paykit_lib::PaymentRequestEvent::Proof(event),
-    )
-    .map_err(|err| validation_error(err.to_string()))?;
-    u32::try_from(raw_json.len())
+    let len = paykit_sdk::payment_proof_event_len(&app_id, &payment_reference, submission)?;
+    u32::try_from(len)
         .map_err(|_| validation_error("Payment Proof Event Message length exceeds u32"))
 }

@@ -1796,23 +1796,22 @@ async fn test_payment_request_proposal_size_is_checked_before_send_readiness() {
     let sdk = sdk_without_session(storage.clone());
     let before = storage.snapshot().unwrap();
     // 400 three-byte characters exceed the budget on their own.
-    let oversized = one_time_terms_with_note("€".repeat(400));
+    let oversized = one_time_terms_with_note("\u{20ac}".repeat(400));
 
-    for with_id in [false, true] {
-        let error = if with_id {
-            sdk.propose_payment_request_with_id(
-                counterparty.clone(),
-                PaymentRequestId::new_v4(),
-                oversized.clone(),
-            )
-            .await
-        } else {
-            sdk.propose_payment_request(counterparty.clone(), oversized.clone())
-                .await
-        }
+    let error = sdk
+        .propose_payment_request(counterparty.clone(), oversized.clone())
+        .await
         .unwrap_err();
-        assert!(error.is_message_too_large(), "{error:?}");
-    }
+    assert!(error.is_message_too_large(), "{error:?}");
+    let error = sdk
+        .propose_payment_request_with_id(
+            counterparty.clone(),
+            PaymentRequestId::new_v4(),
+            oversized,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.is_message_too_large(), "{error:?}");
     assert_eq!(storage.snapshot().unwrap(), before);
 
     // The same runtime refuses terms that fit at the readiness check instead.
@@ -1870,8 +1869,31 @@ async fn test_payment_proof_size_is_checked_before_send_readiness() {
         )
     };
 
-    let error = submit(&"€".repeat(400)).await.unwrap_err();
+    let oversized = "\u{20ac}".repeat(400);
+    let error = submit(&oversized).await.unwrap_err();
     assert!(error.is_message_too_large(), "{error:?}");
+    // The measurement matches the bytes the runtime refused.
+    let measured = crate::payment_proof_event_len(
+        &app_id(),
+        &paykit_lib::PaymentReference::new("invoice-2026-0001").unwrap(),
+        PaymentProofSubmission {
+            billing_period: None,
+            payment_app_id: paykit_lib::PaykitAppId::new("merchant").unwrap(),
+            payment_endpoint_identifier: PaymentEndpointIdentifier::new("btc-lightning-bolt11")
+                .unwrap(),
+            conversion_quote_id: None,
+            proof: JsonMap::from_iter([("preimage".into(), JsonValue::String(oversized))]),
+            allowance_id: None,
+        },
+    )
+    .unwrap();
+    let PaykitSdkError::Protocol { context, .. } = &error else {
+        panic!("expected Protocol error");
+    };
+    assert!(
+        context.contains(&format!("({measured} bytes)")),
+        "{context}"
+    );
     assert_eq!(storage.snapshot().unwrap(), before);
 
     // The same request reaches the readiness check with a proof that fits.
@@ -1916,7 +1938,7 @@ async fn test_payment_request_proposal_size_matches_issue_224_shape() {
     ))
     .metadata(JsonMap::from_iter([(
         "note".into(),
-        JsonValue::String("€".repeat(100)),
+        JsonValue::String("\u{20ac}".repeat(100)),
     )]))
     .build()
     .unwrap();
@@ -1938,6 +1960,5 @@ async fn test_payment_request_proposal_size_matches_issue_224_shape() {
         )
         .await
         .unwrap_err();
-    let limit = paykit_lib::pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN;
-    assert_eq!(error.is_message_too_large(), raw.len() > limit, "{error:?}");
+    assert!(error.is_message_too_large(), "{error:?}");
 }

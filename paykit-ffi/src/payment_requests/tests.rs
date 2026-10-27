@@ -438,32 +438,6 @@ fn test_erc20_receipt_log_index_max_survives_ffi_submission_boundary() {
     );
 }
 
-// Serialize a proof the way `PaykitRuntime::submit_payment_proof_submission`
-// builds it, with its own fresh Event ID and Payment Request ID.
-fn sdk_payment_proof_event_json(reference: &str, submission: FfiPaymentProofSubmission) -> String {
-    let submission = PaymentProofSubmission::try_from(submission).unwrap();
-    let mut event = paykit_lib::PaymentProof::new(
-        paykit_lib::EventId::new_v4(),
-        paykit_lib::PaymentRequestId::new_v4(),
-        PaymentReference::new(reference).unwrap(),
-        submission.billing_period,
-        submission.payment_app_id,
-        submission.payment_endpoint_identifier,
-        submission.proof,
-    );
-    if let Some(allowance_id) = submission.allowance_id {
-        event = event.with_allowance_id(allowance_id);
-    }
-    if let Some(conversion_quote_id) = submission.conversion_quote_id {
-        event = event.with_conversion_quote_id(conversion_quote_id);
-    }
-    paykit_lib::serialize_payment_request_event(
-        &paykit_lib::PaykitAppId::new("bitkit").unwrap(),
-        &paykit_lib::PaymentRequestEvent::Proof(event),
-    )
-    .unwrap()
-}
-
 fn measured_proof_len(reference: &str, submission: FfiPaymentProofSubmission) -> usize {
     let reference = Arc::new(FfiPaymentReference::new(reference.into()).unwrap());
     payment_proof_event_len("bitkit".into(), reference, submission).unwrap() as usize
@@ -474,37 +448,22 @@ fn proof_object(text: &str) -> Arc<FfiPrivateJsonObject> {
 }
 
 #[test]
-fn test_payment_proof_event_len_matches_sdk_serialization() {
+fn test_payment_proof_event_len_counts_optional_ids() {
     let reference = "invoice-\u{20ac}-1";
-    for (allowance_id, conversion_quote_id) in [
-        (None, None),
-        (Some(ALLOWANCE_ID), None),
-        (None, Some("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103")),
-        (
-            Some(ALLOWANCE_ID),
-            Some("8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103"),
-        ),
-    ] {
-        let mut submission = proof_submission(allowance_id.map(Into::into));
-        submission.conversion_quote_id = conversion_quote_id.map(Into::into);
-        submission.billing_period = Some(FfiBillingPeriod {
-            starts_at: "2026-10-01T00:00:00Z".into(),
-            ends_at: "2026-11-01T00:00:00Z".into(),
-        });
-        submission.proof =
-            proof_object("{\"preimage\":\"ab12\",\"memo\":\"\u{65e5}\u{672c}\u{8a9e}\"}");
-
-        assert_eq!(
-            measured_proof_len(reference, submission.clone()),
-            sdk_payment_proof_event_json(reference, submission).len()
-        );
-    }
-
+    let quote_id = "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103";
     let without_ids = measured_proof_len(reference, proof_submission(None));
+
     let with_allowance = measured_proof_len(reference, proof_submission(Some(ALLOWANCE_ID.into())));
     assert_eq!(
         with_allowance - without_ids,
         format!(r#","allowance_id":"{ALLOWANCE_ID}""#).len()
+    );
+
+    let mut with_quote = proof_submission(None);
+    with_quote.conversion_quote_id = Some(quote_id.into());
+    assert_eq!(
+        measured_proof_len(reference, with_quote) - without_ids,
+        format!(r#","conversion_quote_id":"{quote_id}""#).len()
     );
 }
 
@@ -531,11 +490,9 @@ fn test_payment_proof_event_len_measures_canonical_proof_json() {
         let mut submission = proof_submission(None);
         submission.proof = proof_object(wallet_text);
 
-        let measured = measured_proof_len("invoice-1", submission.clone());
-        assert_eq!(measured, empty_proof_len - "{}".len() + canonical.len());
         assert_eq!(
-            measured,
-            sdk_payment_proof_event_json("invoice-1", submission).len()
+            measured_proof_len("invoice-1", submission),
+            empty_proof_len - "{}".len() + canonical.len()
         );
     }
 }
@@ -556,11 +513,7 @@ fn test_payment_proof_event_len_returns_lengths_above_limit() {
     let mut submission = proof_submission(None);
     submission.proof = proof_object(&format!(r#"{{"memo":"{}"}}"#, "\u{20ac}".repeat(400)));
 
-    let measured = measured_proof_len("invoice-1", submission.clone());
+    let measured = measured_proof_len("invoice-1", submission);
 
     assert!(measured > paykit_lib::pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN);
-    assert_eq!(
-        measured,
-        sdk_payment_proof_event_json("invoice-1", submission).len()
-    );
 }

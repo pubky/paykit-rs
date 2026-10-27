@@ -55,8 +55,8 @@ An extension must participate in SDK durability and recovery, not fork its state
 Serialized private messages, including their JSON envelope, must fit
 `PUBKY_NOISE_MSG_LEN` (currently 1000 bytes). Do not truncate or invent attachment
 chunking. An oversized message fails with the protocol code `message_too_large`
-before anything is queued. Bindings measure a Payment Proof with
-`paymentProofEventLen`; call it before payment approval, with maximum-length
+before anything is queued. Measure a Payment Proof with
+`payment_proof_event_len` (bindings: `paymentProofEventLen`); call it before payment approval, with maximum-length
 placeholder values. A `private` segment under `/pub/` is not an access-control
 boundary; use encrypted protocol helpers, never plaintext secret-bearing state
 there.

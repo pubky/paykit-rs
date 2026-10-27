@@ -100,7 +100,7 @@ fn test_failure_report_debug_redacts_errors() {
 fn test_outbound_private_message_size_limit_is_inclusive() {
     let limit = paykit_lib::pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN;
     // Three-byte characters show the limit counts UTF-8 bytes, not characters.
-    let fits = format!("{}{}", "€".repeat(limit / 3), "x".repeat(limit % 3));
+    let fits = format!("{}{}", "\u{20ac}".repeat(limit / 3), "x".repeat(limit % 3));
     assert_eq!(fits.len(), limit);
     require_outbound_private_message_fits(&fits).unwrap();
 

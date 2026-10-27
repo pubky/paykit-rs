@@ -13,8 +13,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `claimPaymentRequestForPreparation` in Swift and Kotlin reject blocked
   counterparties before App Registry access and atomically recheck that policy
   when claiming a Payment Request for preparation.
-- `paymentProofEventLen` in Swift and Kotlin (`payment_proof_event_len` in
-  `paykit-ffi`) returns the exact byte length of the Payment Proof Event
+- `paykit_sdk::payment_proof_event_len` in Rust and `paymentProofEventLen` in
+  Swift and Kotlin return the exact byte length of the Payment Proof Event
   Message that `submitPaymentProof` would queue, so payers and payees can check
   it against the 1000-byte limit before payment approval or before offering a
   method. It is a measurement, not a validity check.

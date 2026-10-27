@@ -57,9 +57,10 @@ pub use domain::outbound_private::{
 };
 #[doc(inline)]
 pub use domain::payment_requests::{
-    PaymentConversionQuoteRecord, PaymentProofRecord, PaymentProofSubmission, PaymentRequestFilter,
-    PaymentRequestLifecycleState, PaymentRequestLocalRole, PaymentRequestRecord,
-    PaymentRequestRecurrenceRecord, PaymentRequestTermsRecord,
+    payment_proof_event_len, PaymentConversionQuoteRecord, PaymentProofRecord,
+    PaymentProofSubmission, PaymentRequestFilter, PaymentRequestLifecycleState,
+    PaymentRequestLocalRole, PaymentRequestRecord, PaymentRequestRecurrenceRecord,
+    PaymentRequestTermsRecord,
 };
 #[doc(inline)]
 pub use domain::payment_resolution::{
