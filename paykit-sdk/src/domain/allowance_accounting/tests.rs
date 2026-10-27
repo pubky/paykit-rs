@@ -4,6 +4,7 @@ use chrono::{Duration, TimeZone};
 
 mod history_validation;
 mod manual_conversion;
+mod reconcile_rebuild;
 mod recovery_merge;
 mod shared_identity;
 

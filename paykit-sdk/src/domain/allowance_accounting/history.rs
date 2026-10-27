@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 
 /// Private-state loss invalidates every unissued handoff without releasing usage.
 pub(crate) fn invalidate_accounting(state: &mut AllowanceAccountingState) {
@@ -51,29 +51,20 @@ pub(crate) fn reconcile(
     if current.as_ref().map(|state| state.revision) != input.expected_revision {
         return Err(policy("Accounting reconciliation revision is stale"));
     }
-    let supplied = AllowanceAccountingState {
-        revision: 0,
-        epoch: new_id(),
-        requires_reconciliation: true,
-        history: input.history,
-    };
-    validate_accounting(&supplied)?;
+    let supplied = input.history;
     let identity = tx
         .load_identity_state()
         .and_then(|i| i.public_key)
         .ok_or_else(|| policy("Reconciliation requires an initialized identity"))?;
     if supplied
-        .history
         .associations
         .iter()
         .any(|a| a.request.local_public_key != identity)
         || supplied
-            .history
             .occurrences
             .iter()
             .any(|o| o.key.request.local_public_key != identity)
         || supplied
-            .history
             .watermarks
             .iter()
             .any(|w| w.local_public_key != identity)
@@ -90,13 +81,37 @@ pub(crate) fn reconcile(
     });
     validate_accounting(&state)?;
     validation::payer_scope(&state, &identity)?;
-    merge(&mut state.history, supplied.history)?;
+    // Supplied rows are validated on their own, so duplicates within them still
+    // fail, but against the retained association histories and with a watermark
+    // at `trusted_time` for every referenced scope. A wallet rebuilding a lost
+    // payment therefore need not copy retained rows or invent watermark times.
+    // The derived watermarks are safe because the check below rejects any
+    // retained or supplied evidence later than `trusted_time`, and every
+    // watermark ends at `trusted_time` anyway.
+    let mut context = AllowanceAccountingState {
+        revision: 0,
+        epoch: new_id(),
+        requires_reconciliation: true,
+        history: supplied.clone(),
+    };
+    merge_associations(
+        &mut context.history.associations,
+        state.history.associations.clone(),
+    )?;
+    raise_watermarks(&mut context.history, input.trusted_time);
+    merge(&mut state.history, supplied)?;
     validation::payer_scope(&state, &identity)?;
     if state
         .history
         .watermarks
         .iter()
         .any(|w| w.evaluated_at > input.trusted_time)
+        || state
+            .history
+            .associations
+            .iter()
+            .flat_map(|a| &a.revisions)
+            .any(|r| r.authorized_at > input.trusted_time)
         || state
             .history
             .occurrences
@@ -106,15 +121,14 @@ pub(crate) fn reconcile(
     {
         return Err(policy("Reconciliation time precedes retained evidence"));
     }
+    validate_accounting(&context)?;
     // New epochs deliberately cannot resume an old Prepared token. The wallet
     // must explicitly attest a terminal outcome or retain its reservation.
     invalidate_accounting(&mut state);
     for outcome in input.outcomes {
         apply_outcome(&mut state, outcome)?;
     }
-    for watermark in &mut state.history.watermarks {
-        watermark.evaluated_at = input.trusted_time;
-    }
+    raise_watermarks(&mut state.history, input.trusted_time);
     state.requires_reconciliation = false;
     save(tx, state)?;
     crate::domain::payment_requests::release_resolved_payment_execution_claims(
@@ -122,6 +136,47 @@ pub(crate) fn reconcile(
         input.trusted_time,
     )?;
     load(tx)
+}
+
+/// Sets every watermark to `time`, adding one for each scope that an
+/// association revision or automatic attempt references without a watermark.
+fn raise_watermarks(history: &mut AllowanceAccountingHistory, time: DateTime<Utc>) {
+    let mut scopes: HashSet<_> = history
+        .watermarks
+        .iter()
+        .map(|w| {
+            (
+                &w.local_public_key,
+                &w.counterparty,
+                w.allowance_id.as_str(),
+            )
+        })
+        .collect();
+    let selected = history.associations.iter().flat_map(|a| {
+        a.revisions
+            .iter()
+            .map(move |r| (&a.request, r.allowance_id.as_str()))
+    });
+    let admitted = history.occurrences.iter().flat_map(|o| {
+        o.attempts
+            .iter()
+            .filter(|a| a.mode == PaymentExecutionMode::Automatic)
+            .filter_map(move |a| Some((&o.key.request, a.allowance_id.as_deref()?)))
+    });
+    let missing: Vec<_> = selected
+        .chain(admitted)
+        .filter(|(scope, id)| scopes.insert((&scope.local_public_key, &scope.counterparty, id)))
+        .map(|(scope, id)| AllowanceWatermarkRecord {
+            local_public_key: scope.local_public_key.clone(),
+            counterparty: scope.counterparty.clone(),
+            allowance_id: id.to_owned(),
+            evaluated_at: time,
+        })
+        .collect();
+    history.watermarks.extend(missing);
+    for watermark in &mut history.watermarks {
+        watermark.evaluated_at = time;
+    }
 }
 
 pub(crate) fn report_outcome(
@@ -175,23 +230,7 @@ fn merge(
     destination: &mut AllowanceAccountingHistory,
     recovered: AllowanceAccountingHistory,
 ) -> Result<()> {
-    for incoming in recovered.associations {
-        if let Some(existing) = destination
-            .associations
-            .iter_mut()
-            .find(|r| r.request == incoming.request)
-        {
-            let common = existing.revisions.len().min(incoming.revisions.len());
-            if existing.revisions[..common] != incoming.revisions[..common] {
-                return Err(protocol("Conflicting association history"));
-            }
-            if incoming.revisions.len() > existing.revisions.len() {
-                existing.revisions = incoming.revisions;
-            }
-        } else {
-            destination.associations.push(incoming);
-        }
-    }
+    merge_associations(&mut destination.associations, recovered.associations)?;
     for incoming in recovered.occurrences {
         if let Some(existing) = destination
             .occurrences
@@ -255,6 +294,31 @@ fn merge(
                 position.insert(destination.watermarks.len());
                 destination.watermarks.push(incoming);
             }
+        }
+    }
+    Ok(())
+}
+
+/// Keeps the longer of two association histories for a request when one
+/// extends the other.
+fn merge_associations(
+    destination: &mut Vec<AllowanceAssociationRecord>,
+    recovered: Vec<AllowanceAssociationRecord>,
+) -> Result<()> {
+    for incoming in recovered {
+        if let Some(existing) = destination
+            .iter_mut()
+            .find(|r| r.request == incoming.request)
+        {
+            let common = existing.revisions.len().min(incoming.revisions.len());
+            if existing.revisions[..common] != incoming.revisions[..common] {
+                return Err(protocol("Conflicting association history"));
+            }
+            if incoming.revisions.len() > existing.revisions.len() {
+                existing.revisions = incoming.revisions;
+            }
+        } else {
+            destination.push(incoming);
         }
     }
     Ok(())
