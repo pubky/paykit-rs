@@ -218,7 +218,8 @@ pub struct FfiAllowanceSelectionInput {
     pub allowance_id: String,
     /// Absent only for an initial decision.
     pub expected_revision: Option<u64>,
-    /// Wallet-supplied trusted UTC time.
+    /// Wallet-supplied trusted UTC time. Automatic Acceptance requires the same
+    /// instant as `checks.trusted_time`; read the clock once.
     pub trusted_time: String,
 }
 
@@ -244,7 +245,8 @@ pub struct FfiAllowanceReassociationInput {
 /// Treat these fields as private wallet data; do not log or describe the record.
 #[derive(uniffi::Record, Clone)]
 pub struct FfiPaymentExecutionChecks {
-    /// Trusted UTC time for this decision.
+    /// Trusted UTC time for this decision. Automatic Acceptance requires the same
+    /// instant as `selection.trusted_time`; read the clock once.
     pub trusted_time: String,
     /// Method actually selected by the wallet.
     pub payment_endpoint_identifier: String,
@@ -291,6 +293,10 @@ pub struct FfiPaymentOutcomeReport {
 /// The caller must reconcile external idempotency records and all payment paths.
 /// An empty history attests that there were no previous payments; it never
 /// clears evidence already retained by this SDK.
+///
+/// After restoring an older backup, start from the retained history and add every
+/// payment made after the export. An omitted payment can be paid again, and the
+/// Allowance capacity it used is freed. See `paykit-ffi/README.md`.
 ///
 /// Treat these fields as private wallet data; do not log or describe the record.
 #[derive(uniffi::Record, Clone)]
@@ -339,14 +345,17 @@ pub enum FfiPaymentExecutionStatus {
     Unknown,
     /// Wallet verified success; committed usage never decreases.
     Succeeded,
-    /// Wallet confirmed terminal failure before settlement.
+    /// Wallet confirmed terminal failure before settlement. Permanent for this
+    /// attempt: it releases Allowance usage and reopens the occurrence.
     Failed,
 }
 
 /// Fixed, redaction-safe reasons why an operation did not proceed.
 #[derive(uniffi::Enum, Clone)]
 pub enum FfiAllowanceAccountingBlock {
-    /// Accounting is absent or requires wallet reconciliation.
+    /// Accounting is absent or requires wallet reconciliation: on first use, after
+    /// restore, or after key rotation. Read `allowance_accounting_state` and reconcile
+    /// with `expected_revision` set to its revision, or null only when no state exists.
     ReconciliationRequired,
     /// Request or Allowance lifecycle, authenticated role, or history is unsuitable.
     InvalidLifecycle,
@@ -358,7 +367,8 @@ pub enum FfiAllowanceAccountingBlock {
     ManualOnly,
     /// A successful or unresolved attempt already owns this occurrence.
     PaymentAlreadyRecorded,
-    /// Endpoint, amount, scheduling, or private wallet checks failed.
+    /// Endpoint, amount, scheduling, or private wallet checks failed. Automatic
+    /// Acceptance also reports different selection and checks trusted times this way.
     WalletChecksFailed,
     /// Shared exact amount, time, or capacity rules failed.
     SharedRule {
@@ -387,7 +397,8 @@ pub enum FfiPaymentAttemptDecision {
 pub enum FfiPaymentOutcome {
     /// Settlement was verified.
     Succeeded,
-    /// Terminal failure before settlement was verified.
+    /// Terminal failure before settlement was verified: the payment can never settle.
+    /// Permanent for the attempt; report anything less certain as Unknown.
     Failed,
     /// Settlement remains uncertain.
     Unknown,

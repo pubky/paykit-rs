@@ -409,20 +409,29 @@ The SDK implements this durable coordination through the following workflow:
 
 1. Call `reconcile_allowance_accounting` with complete authoritative wallet
    history before first admission or after recovery. Missing history never means
-   zero usage; an empty reconciliation cannot erase retained evidence.
+   zero usage; an empty reconciliation cannot erase retained evidence. Pass
+   `expected_revision` equal to the state's revision, or `None` only when no
+   state exists. A manual Acceptance, Rejection, or Cancellation creates state
+   that requires reconciliation when none exists, so read the state first.
 2. Inspect `evaluate_allowance_candidates`, then persist a choice with
    `select_allowance` or atomically select and queue ordinary Acceptance through
    `accept_payment_request_automatically`. Claim the request for this app with
    `claim_payment_request_for_preparation` before preparing or accepting it;
    revalidate the returned proposal and applicable Billing Period against the
-   selected terms. Acceptance reserves no capacity.
+   selected terms. Acceptance reserves no capacity. Read the trusted clock once
+   for automatic Acceptance: `AllowanceSelectionInput::trusted_time` and
+   `PaymentExecutionChecks::trusted_time` must be the same instant, otherwise
+   the call is refused (currently as `Allowance selection blocked:
+   WalletChecksFailed`).
 3. Call `reserve_automatic_payment` for an occurrence and expected association
    revision, or `reserve_manual_payment` for an explicitly authorized manual
    payment. Both use the same scoped exclusion key.
 4. Immediately before execution, call `begin_payment_execution` with fresh
    wallet checks. Only Ready with status Submitted grants one handoff. Use the
    returned attempt ID for external wallet idempotency, then report the verified
-   outcome through `record_payment_outcome`.
+   outcome through `record_payment_outcome`. `Failed` is permanent for the
+   attempt: it releases Allowance usage and reopens the occurrence. Report
+   anything short of a definitive failure on the Rail as `Unknown`.
 
 `defer_payment_occurrence` retains temporary failures for reconsideration;
 `mark_payment_manual_only` is sticky. A pending execution cannot be relabeled
@@ -443,6 +452,25 @@ prove accounting freshness; reconcile it with authoritative wallet execution
 records before resuming automatic handling. Optional Payment Proofs cannot
 reconstruct complete spending history. See [Allowances](../specs/allowances.md)
 for the normative rules.
+
+The same accounting coordinates manual Payment Request payments. It is required
+when the identity may also run automatic payments, and recommended otherwise.
+Use `reserve_manual_payment`, `begin_payment_execution`, and
+`record_payment_outcome` around every manual payment.
+
+`reconcile_allowance_accounting` is a ledger-wide recovery step, not a routine
+call: it starts a new epoch and turns every Prepared attempt, including other
+apps' preparations, into Unknown. Reconciling an empty or incomplete history
+after restoring an older backup re-enables payment of anything paid after the
+export and frees the Allowance capacity it used. Back up off-device after
+reservation and before the irreversible handoff (compare
+`SdkBackupState::content_fingerprint` to detect changes), and again after the
+outcome. Keep every `PaymentAttemptRecord` that admission returns and resubmit
+all of them when reconciling. The FFI README has the full
+[manual payment sequence](../paykit-ffi/README.md#pay-a-payment-request), the
+per-Rail rules for a
+[definitive failure](../paykit-ffi/README.md#definitive-failure), and the
+[history rebuild recipe](../paykit-ffi/README.md#stale-backups-and-reconciliation).
 
 ## Profile And Contacts
 
@@ -601,6 +629,10 @@ current, so every `restore_backup_state` call passes a `RestoredLinkPolicy`:
   read from the old link; only unconfirmed Event Messages are replayed.
 
 Missing or unsafe checkpoints pause private automation until relink.
+
+A restored backup has no record of payments made after its export. Reconcile
+payment accounting with those payments before paying again; see
+[Allowance Integration](#allowance-integration).
 
 For missing or corrupt Pubky shared state, use
 `recover_shared_state_from_backup(backup, replacement_key)` with a matching

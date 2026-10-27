@@ -89,7 +89,8 @@ pub enum PaymentExecutionStatus {
     Unknown,
     /// Wallet verified success; committed usage never decreases.
     Succeeded,
-    /// Wallet confirmed terminal failure before settlement.
+    /// Wallet confirmed terminal failure before settlement. Permanent for this
+    /// attempt: it releases Allowance usage and reopens the occurrence.
     Failed,
 }
 
@@ -198,7 +199,8 @@ pub struct AllowanceSelectionInput {
     pub allowance_id: AllowanceId,
     /// Absent only for an initial decision.
     pub expected_revision: Option<u64>,
-    /// Wallet-supplied trusted UTC time.
+    /// Wallet-supplied trusted UTC time. Automatic Acceptance requires the same
+    /// instant as [`PaymentExecutionChecks::trusted_time`]; read the clock once.
     pub trusted_time: DateTime<Utc>,
 }
 
@@ -220,7 +222,8 @@ pub struct AllowanceReassociationInput {
 /// Fresh wallet checks the SDK cannot establish from protocol evidence.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PaymentExecutionChecks {
-    /// Trusted UTC time for this decision.
+    /// Trusted UTC time for this decision. Automatic Acceptance requires the same
+    /// instant as [`AllowanceSelectionInput::trusted_time`]; read the clock once.
     pub trusted_time: DateTime<Utc>,
     /// Method actually selected by the wallet.
     pub payment_endpoint_identifier: PaymentEndpointIdentifier,
@@ -241,7 +244,9 @@ pub struct PaymentExecutionChecks {
 /// Fixed, redaction-safe reasons why an operation did not proceed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AllowanceAccountingBlock {
-    /// Accounting is absent or requires wallet reconciliation.
+    /// Accounting is absent or requires wallet reconciliation: on first use, after
+    /// restore, or after key rotation. Read the accounting state and reconcile with
+    /// `expected_revision` set to its revision, or `None` only when no state exists.
     ReconciliationRequired,
     /// Request or Allowance lifecycle, authenticated role, or history is unsuitable.
     InvalidLifecycle,
@@ -253,7 +258,8 @@ pub enum AllowanceAccountingBlock {
     ManualOnly,
     /// A successful or unresolved attempt already owns this occurrence.
     PaymentAlreadyRecorded,
-    /// Endpoint, amount, scheduling, or private wallet checks failed.
+    /// Endpoint, amount, scheduling, or private wallet checks failed. Automatic
+    /// Acceptance also reports different selection and checks trusted times this way.
     WalletChecksFailed,
     /// Shared exact amount, time, or capacity rules failed.
     SharedRule {
@@ -293,7 +299,8 @@ pub enum PaymentAttemptDecision {
 pub enum PaymentOutcome {
     /// Settlement was verified.
     Succeeded,
-    /// Terminal failure before settlement was verified.
+    /// Terminal failure before settlement was verified: the payment can never settle.
+    /// Permanent for the attempt; report anything less certain as Unknown.
     Failed,
     /// Settlement remains uncertain.
     Unknown,
@@ -313,6 +320,10 @@ pub struct PaymentOutcomeReport {
 /// The caller must reconcile external idempotency records and all payment paths.
 /// An empty history attests that there were no previous payments; it never
 /// clears evidence already retained by this SDK.
+///
+/// After restoring an older backup, start from the retained history and add every
+/// payment made after the export. An omitted payment can be paid again, and the
+/// Allowance capacity it used is freed.
 #[derive(Clone)]
 pub struct AllowanceAccountingReconciliation {
     /// Expected ledger revision, or None only when no ledger exists.
