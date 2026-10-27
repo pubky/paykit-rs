@@ -37,6 +37,9 @@ pub struct FfiPaykitSdkConfig {
 }
 
 /// Pubky client configuration owned by the binding layer.
+///
+/// Identity records use HTTP PKARR relays, including on local testnets. Clients do
+/// not connect directly to the DHT; successful publication still awaits the relay.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct FfiPubkyClientConfig {
     /// Request timeout for Pubky HTTP operations in seconds.

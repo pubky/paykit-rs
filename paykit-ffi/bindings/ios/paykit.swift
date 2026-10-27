@@ -17201,6 +17201,9 @@ public func FfiConverterTypePubkyAuthDetails_lower(_ value: PubkyAuthDetails) ->
 
 /**
  * Pubky client configuration owned by the binding layer.
+ *
+ * Identity records use HTTP PKARR relays, including on local testnets. Clients do
+ * not connect directly to the DHT; successful publication still awaits the relay.
  */
 public struct PubkyClientConfig {
     /**
