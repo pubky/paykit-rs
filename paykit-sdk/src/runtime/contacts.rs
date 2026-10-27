@@ -119,9 +119,10 @@ where
     /// Use this when the user explicitly adds or restores contacts, not for label
     /// edits. Only selected blocked peers are unblocked; existing links and
     /// unselected peers are unchanged. Unblocked peers need a fresh Encrypted Link
-    /// Handshake. After it, parked private work is sent again, and accepted
-    /// Allowances and Payment Requests authorize again without new consent, as
-    /// described on [`Self::unblock_peer`].
+    /// Handshake. It requeues eligible parked private work, which the next
+    /// outbound processing sends, and accepted Allowances and Payment Requests
+    /// authorize again without new consent, as described on
+    /// [`Self::unblock_peer`].
     /// Contact ordering, duplicate keys, timestamps and metadata follow `save_contacts`.
     /// Invalid updates, the local identity, or an active lease on a selected blocked
     /// peer reject the entire batch without changing contacts or peer state.
@@ -253,7 +254,7 @@ where
     /// roll back the entire batch; a local-identity key rejects it before mutation.
     ///
     /// Blocking discards Encrypted Link state and parks pending private work,
-    /// which is sent again after a fresh handshake, as described on
+    /// which a fresh handshake requeues, as described on
     /// [`Self::block_peer`]. Accepted Allowances and Payment Requests are paused,
     /// not ended. Keys without a Contact Record are skipped and not blocked.
     /// This does not withdraw published Payment Lists or cancel subscriptions.
@@ -274,12 +275,16 @@ where
     ///    or [`Self::sync_contact_private_payment_lists`], is not enough, because
     ///    the block parks it unsent. This is best effort and covers only this
     ///    SDK's Paykit App; it cannot take back details the peer already read.
-    /// 3. Call this method, then [`Self::unblock_peer`].
+    /// 3. Persist the wallet's own record of intent to end the link with this
+    ///    peer. Call this method, then [`Self::unblock_peer`], then clear the
+    ///    record.
     ///
     /// A crash between the two calls in step 3 leaves the peer `Blocked`, which
-    /// hides its Payment Requests and Receipts. On startup, unblock every
-    /// `Blocked` peer from [`Self::linked_peers`] that has no Contact Record and
-    /// is not on the wallet's own list of peers the user blocked.
+    /// hides its Payment Requests and Receipts. On startup, unblock only peers
+    /// that carry that record and are still `Blocked`, then clear it. Never
+    /// infer intent from a `Blocked` peer without a Contact Record: the block
+    /// records no reason and is shared by every app and device on the identity,
+    /// so it may be another app's deliberate block.
     pub async fn remove_contacts_and_block_peers(
         &self,
         public_keys: Vec<PubkyPublicKey>,

@@ -362,14 +362,18 @@ where
     /// Queued work is parked, not deleted. Outbound messages that are
     /// `Pending`, `Sending`, `Failed`, or `RecoveryRequired` become
     /// `RecoveryRequired`. After [`Self::unblock_peer`], the next completed
-    /// Encrypted Link Handshake queues them again unchanged, except messages
-    /// whose Paykit App is then unregistered or retired.
-    /// If the peer is never linked again, they are never delivered. `Sent`
-    /// Event Messages still waiting for a Delivery Confirmation stay queued.
-    /// No API withdraws parked work, and Event Messages keep their order per
-    /// counterparty, so after relink a parked Acceptance is delivered before a
-    /// cancellation queued later. While the peer is blocked, no new private
-    /// message, including a Payment Proof, can be queued for it.
+    /// Encrypted Link Handshake requeues them unchanged as `Pending`; it does
+    /// not send them, and the next [`Self::process_outbound_private_messages`]
+    /// does. Messages the peer already confirmed become `Sent`, and messages
+    /// whose Paykit App is then unregistered or retired stay
+    /// `RecoveryRequired`. If the peer is never linked again, they are never
+    /// delivered. `Sent` Event Messages still waiting for a Delivery
+    /// Confirmation stay queued. No API withdraws parked work. Event Messages
+    /// keep their order per counterparty, so a parked Acceptance is sent before
+    /// a cancellation queued later. A requeued Private Payment List is a
+    /// Latest-State Message, so a newer list can supersede it before it is
+    /// sent. While the peer is blocked, no new private message, including a
+    /// Payment Proof, can be queued for it.
     ///
     /// Accepted Allowances and accepted Payment Requests are paused, not
     /// revoked. Payment accounting refuses them while the peer is not `Linked`,
@@ -388,7 +392,8 @@ where
     /// 2. To revoke Allowances, call [`Self::list_allowances`] filtered to this
     ///    counterparty and [`Self::end_allowance`] for each `Accepted` one and
     ///    each `Proposed` one this identity proposed. An End keeps the
-    ///    Allowance `Ended` while parked and is sent after a relink.
+    ///    Allowance `Ended` while parked; a relink requeues it, and the next
+    ///    outbound processing sends it.
     /// 3. Call `block_peer`.
     ///
     /// If the peer is already blocked, or its link was not ready so End was
@@ -424,7 +429,8 @@ where
     ///
     /// Existing Encrypted Link snapshots are not restored. Callers should start
     /// a fresh Encrypted Link Handshake before private workflows resume. When
-    /// it completes, work parked by [`Self::block_peer`] is queued again, and
+    /// it completes, it requeues eligible work parked by [`Self::block_peer`],
+    /// which the next [`Self::process_outbound_private_messages`] sends, and
     /// accepted Allowances and accepted Payment Requests authorize again
     /// without new consent; `block_peer` describes how to end them. The
     /// counterparty is not notified. Until that handshake,

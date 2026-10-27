@@ -301,9 +301,12 @@ impl FfiPaykitSdk {
     /// link operation, such as a send, is running.
     ///
     /// Queued outbound messages are parked as `RecoveryRequired`, not deleted.
-    /// After `unblockPeer` and a fresh Encrypted Link Handshake they are queued
-    /// again unchanged and in order, except messages whose Paykit App is then
-    /// unregistered or retired. No call withdraws them. While blocked, no new
+    /// After `unblockPeer`, a fresh Encrypted Link Handshake requeues them
+    /// unchanged as `Pending`, except messages whose Paykit App is then
+    /// unregistered or retired, but does not send them: call
+    /// `processOutboundPrivateMessages`. Event Messages keep their order; a
+    /// newer Private Payment List can supersede a requeued one. No call
+    /// withdraws parked work. While blocked, no new
     /// private message, including a Payment Proof, can be queued for the peer.
     ///
     /// Accepted Allowances and accepted Payment Requests are paused, not
@@ -327,9 +330,10 @@ impl FfiPaykitSdk {
     /// Remove a local peer block and return the peer to NotLinked.
     ///
     /// The counterparty is not notified, and old Encrypted Link state is not
-    /// restored. When a fresh Encrypted Link Handshake completes, work parked
-    /// by `blockPeer` is queued again, and accepted Allowances and accepted
-    /// Payment Requests authorize again without new consent. If the user
+    /// restored. When a fresh Encrypted Link Handshake completes, it requeues
+    /// eligible work parked by `blockPeer`, which the next
+    /// `processOutboundPrivateMessages` sends, and accepted Allowances and
+    /// accepted Payment Requests authorize again without new consent. If the user
     /// wanted them gone, call `endAllowance` after relink, or confirm with the
     /// user before calling `acceptPaymentRequestAutomatically` for this
     /// counterparty again. Until that handshake,

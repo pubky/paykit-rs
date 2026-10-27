@@ -56,14 +56,18 @@ Encrypted Link, intake, queued sends, accepted Allowances and the peer's copy of
 your last Private Payment List stay, and a re-add reuses the link. To also end
 the link, follow the steps on `remove_contacts_and_block_peers`: end or cancel
 what the user wants gone, `clear_private_payment_list_and_process_outbound`
-while still Linked, then `remove_contacts_and_block_peers` and `unblock_peer`.
-On startup, unblock any `Blocked` peer that has no Contact Record and that the
-user did not block.
+while still Linked, persist the app's own record of intent to end the link,
+then `remove_contacts_and_block_peers`, `unblock_peer`, and clear the record.
+On startup, unblock only peers that carry that record and are still `Blocked`.
+Never infer intent from a `Blocked` peer without a Contact Record: the block
+records no reason and is shared by every app and device on the identity.
 
-Blocking a peer: `block_peer` parks queued private messages and sends them again
-after unblock and a fresh Encrypted Link Handshake; it does not delete them or
-notify the peer. Accepted Allowances and Payment Requests are paused, not
-revoked, and authorize again after relink without new consent. Deliver pending
+Blocking a peer: `block_peer` parks queued private messages; it does not delete
+them or notify the peer. After unblock, a fresh Encrypted Link Handshake requeues
+eligible parked messages, and the next `process_outbound_private_messages` sends
+them; a newer Private Payment List can supersede a requeued one. Accepted
+Allowances and Payment Requests are paused, not revoked, and authorize again
+after relink without new consent. Deliver pending
 events (for example a Payment Proof) with `process_outbound_private_messages`
 and call `end_allowance` for authority the user wants gone before blocking;
 both are refused while blocked. See the `block_peer` docs.

@@ -495,9 +495,10 @@ impl FfiPaykitSdk {
     /// Save contacts and unblock selected blocked peers in one atomic transaction.
     ///
     /// For explicit contact additions or restoration, not label edits. Unblocked
-    /// peers need a fresh Encrypted Link Handshake. After it, parked private work
-    /// is sent again, and accepted Allowances and Payment Requests authorize again
-    /// without new consent, as described on `unblockPeer`. Other links remain
+    /// peers need a fresh Encrypted Link Handshake. It requeues eligible parked
+    /// private work, which the next `processOutboundPrivateMessages` sends, and
+    /// accepted Allowances and Payment Requests authorize again without new
+    /// consent, as described on `unblockPeer`. Other links remain
     /// unchanged. Ordering, duplicates and metadata follow `save_contacts`.
     /// Invalid input or an active lease on a selected blocked peer rejects the
     /// entire batch.
@@ -573,9 +574,12 @@ impl FfiPaykitSdk {
     /// `clearPrivatePaymentListAndProcessOutbound`, which also sends those
     /// messages, and check that `failedToQueue` and `failedToDeliver` are
     /// empty; a list that is only queued is parked unsent by the block. Then
-    /// call this method and `unblockPeer`. On startup, unblock every Blocked
-    /// peer that has no Contact Record and that the user did not block. See
-    /// "Profiles and Contacts" in the README.
+    /// persist the app's own record of intent to end the link with that peer,
+    /// call this method and `unblockPeer`, and clear the record. On startup,
+    /// unblock only peers that carry that record and are still Blocked. Never
+    /// infer intent from a Blocked peer without a Contact Record: the block
+    /// records no reason and is shared by every app and device on the
+    /// identity. See "Profiles and Contacts" in the README.
     pub async fn remove_contacts_and_block_peers(
         &self,
         public_keys: Vec<String>,

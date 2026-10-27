@@ -106,10 +106,12 @@ Paykit-side workflow.
 - `PaykitSdk.linkedPeers`, `blockPeer`, and `unblockPeer` — inspect and
   manage local peer state.
 - Blocking a peer: `blockPeer` is local and does not notify the peer. It parks
-  queued private messages instead of deleting them, and after `unblockPeer`
-  and a fresh Encrypted Link Handshake they are sent again in order. Accepted
-  Allowances and Payment Requests are paused, not revoked, and authorize again
-  after relink without new consent. While the peer is blocked, nothing new can
+  queued private messages instead of deleting them. After `unblockPeer`, a
+  fresh Encrypted Link Handshake requeues eligible parked messages, and the
+  next `processOutboundPrivateMessages` sends them; a newer Private Payment
+  List can supersede a requeued one. Accepted Allowances and Payment Requests
+  are paused, not revoked, and authorize again after relink without new
+  consent. While the peer is blocked, nothing new can
   be queued for it, `endAllowance` is refused, and reads that name it fail
   with a policy error. Before blocking, while the peer is still Linked, deliver
   pending events such as a Payment Proof with `processOutboundPrivateMessages`,
@@ -531,11 +533,15 @@ bootstrap.approveAuthWithCompanionClaim(
      they cover only the list. Queueing the list alone is not enough, because
      the block parks it unsent. This is best effort for this Paykit App only
      and cannot take back details the peer already read.
-  3. Call `removeContactsAndBlockPeers`, then `unblockPeer`.
+  3. Persist the app's own record of intent to end the link with that peer.
+     Call `removeContactsAndBlockPeers`, then `unblockPeer`, then clear the
+     record.
 
   A crash between the two calls in step 3 leaves the peer Blocked, which hides
-  its Payment Requests and Receipts. On startup, unblock any Blocked peer that
-  has no Contact Record and that the user did not block.
+  its Payment Requests and Receipts. On startup, unblock only peers that carry
+  that record and are still Blocked, then clear it. Never infer intent from a
+  Blocked peer without a Contact Record: the block records no reason and is
+  shared by every app and device on the identity.
 - `PaykitSdk.saveContacts(updates)` — save a batch in one atomic storage
   transaction after validating every update and the initialized identity. Results
   follow input order; duplicate keys are applied in order, with the last update
@@ -545,9 +551,10 @@ bootstrap.approveAuthWithCompanionClaim(
 - `PaykitSdk.saveContactsAndUnblockPeers(updates)` — explicitly add or restore
   contacts and unblock their blocked peers in the same atomic transaction. Other
   peers and existing links are unchanged. A busy blocked peer rejects the batch;
-  unblocked peers need a fresh Encrypted Link Handshake, after which parked
-  work is sent and accepted Allowances and Payment Requests authorize again
-  (see Blocking a peer). Use `saveContact` for label edits.
+  unblocked peers need a fresh Encrypted Link Handshake, which requeues parked
+  work for the next `processOutboundPrivateMessages`, and accepted Allowances
+  and Payment Requests authorize again (see Blocking a peer). Use
+  `saveContact` for label edits.
 - `PaykitSdk.fetchPubkyProfile` and bounded `fetchPubkyFollows` — read Pubky
   app profile and follow data.
 - `PaykitSdk.resolveProfile` and `currentProfile` — resolve profile display

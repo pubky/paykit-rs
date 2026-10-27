@@ -1331,11 +1331,16 @@ the same for saved contacts and removes their Contact Records.
 Blocking parks queued work instead of deleting it. Outbound messages that are
 pending, sending, failed, or recovery required become recovery required.
 `unblock_peer` returns the peer to `NotLinked`, and the next completed
-Encrypted Link Handshake queues parked messages again unchanged, except
-messages whose Paykit App is then unregistered or retired. Sent
+Encrypted Link Handshake requeues parked messages unchanged as pending, except
+messages whose Paykit App is then unregistered or retired, which stay recovery
+required, and messages the counterparty already confirmed, which become sent.
+The handshake does not send them; the app's next outbound processing
+(`process_outbound_private_messages`) does. Sent
 Event Messages still waiting for a Delivery Confirmation stay queued. Parked
-work is never delivered if the peer is not linked again, no operation withdraws
-it, and Event Messages keep their order. An app that wants pending Event
+work is never delivered if the peer is not linked again, and no operation
+withdraws it. Event Messages keep their per-counterparty order. A requeued
+Private Payment List is a Latest-State Message, so a newer list can supersede
+it before it is sent. An app that wants pending Event
 Messages delivered before the block sends them while the peer is still
 `Linked`.
 
