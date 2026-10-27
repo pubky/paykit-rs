@@ -4,11 +4,17 @@ use crate::errors::{validation_error, PaykitFfiError};
 use crate::DEFAULT_PUBKY_REQUEST_TIMEOUT_SECS;
 
 /// SDK policy for public Payment Endpoint cleanup.
+///
+/// Public endpoint sync removes every managed endpoint missing from the
+/// receiving details it is given.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FfiEndpointManagementScope {
     /// Manage only endpoints previously published by the SDK.
     ManagedOnly,
     /// Manage the configured application's full public endpoint namespace.
+    ///
+    /// Sync also removes endpoint files in the App's endpoint directory that
+    /// the SDK never created.
     FullAppEndpointNamespace,
     /// SDK returned a value this binding version does not understand.
     Unknown,

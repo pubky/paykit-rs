@@ -290,6 +290,13 @@ pub struct FfiEndpointSyncReport {
 #[uniffi::export(with_foreign)]
 pub trait FfiSdkPaymentAdapter: Send + Sync {
     /// Return receiving details intended for public Payment Endpoints.
+    ///
+    /// The result is this Paykit App's complete desired public set: sync removes
+    /// every SDK-managed endpoint missing from it, and an empty list removes all
+    /// of them. While any receive backend the wallet publishes is not ready,
+    /// throw `PaykitFfiError::PaymentAdapter`, never an empty list or a subset.
+    /// The sync then fails without changing publication records or endpoints.
+    /// Other foreign exceptions are not mapped to a clean Paykit error.
     fn current_public_receiving_details(
         &self,
     ) -> Result<Vec<FfiPublicReceivingDetail>, PaykitFfiError>;
@@ -561,6 +568,11 @@ impl FfiSdkPaymentAdapter for FfiNoopSdkPaymentAdapter {
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
     /// Publish current public receiving details and remove stale SDK-managed endpoints.
+    ///
+    /// The adapter's answer is the complete desired set, removed as in
+    /// `sync_public_endpoints_with_receiving_details`. Call this only after
+    /// every receive backend the wallet publishes has loaded. If the adapter
+    /// throws, the sync fails before any publication record or endpoint changes.
     pub async fn sync_public_endpoints(&self) -> Result<FfiEndpointSyncReport, PaykitFfiError> {
         self.runtime
             .sync_public_endpoints()
@@ -570,6 +582,11 @@ impl FfiPaykitSdk {
     }
 
     /// Publish explicit public receiving details and remove stale SDK-managed endpoints.
+    ///
+    /// `receiving_details` is this Paykit App ID's complete desired public set,
+    /// shared by every runtime on the identity. Every managed endpoint missing
+    /// from it is removed; check `removed` and `failed` in the report. An empty
+    /// list removes them all and keeps the App registered.
     pub async fn sync_public_endpoints_with_receiving_details(
         &self,
         receiving_details: Vec<FfiPublicReceivingDetail>,

@@ -1218,9 +1218,16 @@ storage extends the durable leases across devices and processes.
 3. Convert receiving details into Payment Endpoint payloads.
 4. Validate identifiers and payloads through `paykit-lib`.
 5. Persist all pending publication and removal records in one transaction.
-6. Publish pending endpoints and remove stale managed endpoints.
+6. Remove stale managed endpoints, then publish pending endpoints. Removing
+   first keeps a replacement at the endpoint limit discoverable.
 7. Persist each confirmed or failed result while verifying the lease.
 8. Release the lease and return an `EndpointSyncReport`.
+
+The receiving details are the App's complete desired public set across every
+runtime sharing the identity. A managed endpoint is stale when its identifier
+is missing from that set, so an empty set removes every managed endpoint while
+the App stays registered. An adapter error at step 2 ends the sync before step 5
+changes any record or endpoint.
 
 The SDK should not remove endpoints it did not create for the configured App ID
 unless explicitly configured to manage that app's complete endpoint namespace.

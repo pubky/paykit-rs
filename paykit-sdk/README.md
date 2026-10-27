@@ -143,7 +143,11 @@ Common workflows:
   provider
 - call `publish_paykit_app` before publishing this app's public Payment
   Endpoints or creating app-attributed private work
-- call `sync_public_endpoints` after local receiving details change
+- call `sync_public_endpoints` after local receiving details change and every
+  receive backend the wallet publishes has loaded. The adapter's details are
+  this Paykit App's complete public set: SDK-managed endpoints missing from it
+  are removed, and an empty set removes all of them. An adapter that is not
+  ready, or only partly ready, returns `Err`, never an empty or partial list
 - request and validate `PAYKIT_SESSION_CAPABILITIES` for full SDK
   auth/session handoff
 - use `publish_paykit_profile` / `fetch_paykit_profile` for identity-wide
