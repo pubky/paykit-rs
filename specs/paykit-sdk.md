@@ -825,6 +825,30 @@ validate payment-method-specific settlement, or decide service entitlements.
 Those responsibilities belong to the integrating application/runtime. See
 [Recurring Payment Requests And Subscriptions](payment-requests.md#recurring-payment-requests-and-subscriptions).
 
+`active_recurring` has no time bound. When `terms.recurrence.ends_at` passes,
+the record keeps that state and stays in `active_recurring_payment_requests`
+(for both payer and payee) and in the payer's
+`actionable_received_payment_requests`. Wallets handle an ended Recurrence:
+
+1. Treat the Recurrence as ended once trusted local time is at or after
+   `terms.recurrence.ends_at`, and hide or label the record. Compare parsed
+   RFC 3339 instants, not strings.
+2. Decide whether it is fully paid by comparing the wallet's own expected
+   Billing Periods with `payment_proofs[].billing_period`. The SDK does not
+   expand Billing Periods.
+3. Once every outstanding Billing Period is settled, the payer calls
+   `release_payment_request_execution_claim`. It refuses while a payment is
+   unresolved or a successful payment is unreported. The payee holds no claim.
+4. Do not send a Cancellation for a Recurrence that completed normally. The
+   payee would then see `canceled`, and `reserve_manual_payment` and
+   `reserve_automatic_payment` block a `canceled` request, so an unpaid final
+   Billing Period can no longer be paid through the SDK.
+
+Releasing the claim does not remove the record from
+`active_recurring_payment_requests` or `actionable_received_payment_requests`:
+an unclaimed record is listed for every local App. A late Payment Proof for an
+earlier Billing Period is still accepted after `ends_at`.
+
 ### Logger And Clock
 
 The SDK should accept:
@@ -1548,8 +1572,9 @@ settlement confirmation.
 4. Persist proof event before sending.
 5. Send Payment Proof.
 6. Derive local state from the retained lifecycle events: preserve `canceled`
-   after Cancellation, retain `active_recurring` for an ongoing Recurring Payment
-   Request, and use `proof_submitted` for a non-canceled one-time request.
+   after Cancellation, retain `active_recurring` for a Recurring Payment Request
+   (also after its Recurrence has ended), and use `proof_submitted` for a
+   non-canceled one-time request.
 
 A proof after Cancellation may report only an execution the payer durably
 recorded as past its irreversible boundary before observing Cancellation. It
