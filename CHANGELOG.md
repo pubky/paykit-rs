@@ -22,10 +22,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 - `sign_up` in Rust and `signUp` in Swift and Kotlin report network failures,
   5xx and 429 answers, and failed PKARR publishes or resolves as transport
-  errors instead of identity errors. This covers the signup request, the
-  record republish for an existing account, and the grant exchange of the
-  sign-in that follows. The grant exchange of `sign_in` and `signIn` does the
-  same. External auth flows and `approve_auth` keep their identity errors.
+  errors instead of identity errors. This covers the homeserver record lookup
+  before signup, the signup request, the record republish for an existing
+  account, and the grant exchange of the sign-in that follows. A malformed
+  homeserver record stays an identity error. The grant exchange of `sign_in`
+  and `signIn` does the same. External auth flows and `approve_auth` keep their
+  identity errors.
 
 ### Fixed
 

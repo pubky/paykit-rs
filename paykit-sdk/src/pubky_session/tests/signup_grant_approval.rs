@@ -1061,6 +1061,9 @@ async fn test_sign_up_rejects_different_homeserver_behind_outdated_cached_record
 
 /// Sign up while the relay does not simply return the identity's record,
 /// which points at another homeserver.
+///
+/// The relay's 503 answer reaches the guard as a PKARR resolve error, which
+/// may succeed later, so the sign-up fails with a transport error.
 async fn assert_sign_up_fails_closed_on_lookup_fault(fault: LookupFault) {
     let fixture = Fixture::start("204 No Content");
     fixture.publish_identity_record(&published_homeserver());
@@ -1079,7 +1082,14 @@ async fn assert_sign_up_fails_closed_on_lookup_fault(fault: LookupFault) {
         }
     );
     assert!(
-        matches!(result, Err(PaykitSdkError::Identity { .. })),
+        matches!(
+            &result,
+            Err(PaykitSdkError::Transport { source: Some(source), .. })
+                if matches!(
+                    source.downcast_ref::<pubky::Error>(),
+                    Some(pubky::Error::Pkarr(pubky::errors::PkarrError::Resolve(_)))
+                )
+        ),
         "{result:?}"
     );
 }
@@ -1122,11 +1132,17 @@ async fn test_sign_up_fails_closed_on_malformed_homeserver_record() {
         *fixture.homeserver_requests.lock().unwrap(),
         Vec::<String>::new()
     );
+    // A malformed record does not become valid on a retry, so it stays an
+    // identity error.
     assert!(
         matches!(
             &result,
-            Err(PaykitSdkError::Identity { context, .. })
+            Err(PaykitSdkError::Identity { context, source: Some(source) })
                 if context == "resolve Pubky homeserver record"
+                    && matches!(
+                        source.downcast_ref::<pubky::Error>(),
+                        Some(pubky::Error::Pkarr(pubky::errors::PkarrError::InvalidRecord(_)))
+                    )
         ),
         "{result:?}"
     );
