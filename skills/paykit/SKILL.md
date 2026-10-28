@@ -78,5 +78,7 @@ unconfirmed events; neither local `Sent` nor a Delivery Confirmation means
 payment acceptance, execution, or settlement.
 
 Keep SDK backups encrypted by the app: exported blobs/strings contain sensitive
-plaintext private state even though the live Pubky shared resource is encrypted.
+plaintext private state, including the Paykit Noise static secret key, even
+though the live Pubky shared resource is encrypted. Restore a backup before
+`publish_paykit_app`; see [Identity and State](references/identity-state.md#backups-and-restore).
 Do not log keys, backup/state exports, endpoint payloads, or private messages.

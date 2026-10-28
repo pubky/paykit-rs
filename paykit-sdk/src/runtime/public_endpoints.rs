@@ -14,6 +14,10 @@ where
     C: Clock,
 {
     /// Publish current public receiving details and remove stale SDK-managed endpoints.
+    ///
+    /// Requires a published Paykit App. Like publication, it writes SDK-managed
+    /// public Payment Endpoint records, so [`Self::restore_backup_state`] is
+    /// refused on this state backing afterwards; restore a backup first.
     pub async fn sync_public_endpoints(&self) -> Result<EndpointSyncReport> {
         let _identity_guard = self.claim_identity_operation("sync public endpoints")?;
         let (session_access, _, publication) = self
@@ -38,6 +42,10 @@ where
     }
 
     /// Publish explicit public receiving details and remove stale SDK-managed endpoints.
+    ///
+    /// Like [`Self::sync_public_endpoints`], this requires a published Paykit App
+    /// and writes public Payment Endpoint records that block
+    /// [`Self::restore_backup_state`] on this state backing; restore a backup first.
     pub async fn sync_public_endpoints_with_receiving_details(
         &self,
         details: Vec<PublicReceivingDetail>,

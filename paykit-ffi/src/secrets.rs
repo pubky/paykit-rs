@@ -8,6 +8,17 @@ use crate::errors::{validation_error, PaykitFfiError};
 
 /// Identity-wide SDK state blob owned by the configured storage boundary.
 ///
+/// With callback storage, the SDK passes this blob to `FfiSdkStateBlobStore`
+/// unencrypted on every state change. It holds the same kind of sensitive
+/// plaintext as `FfiSdkBackupBlob`, including the Paykit Noise static secret
+/// key. Store it only in platform-protected storage (Keychain- or
+/// Keystore-backed encryption or equivalent); never log it or upload it
+/// unencrypted. Pubky shared-state runtimes do not use this blob; they encrypt
+/// their shared state.
+///
+/// `Debug` output is redacted and the bytes are zeroized on drop. Copies taken
+/// with `export_bytes` are the app's responsibility.
+///
 /// Android storage callbacks should export callback-supplied blob bytes and
 /// close the generated native wrapper before returning.
 #[derive(uniffi::Object)]
@@ -35,13 +46,26 @@ impl FfiSdkStateBlob {
         Self { bytes }
     }
 
-    /// Export the raw bytes for platform storage.
+    /// Export the unencrypted state bytes for platform-protected storage.
+    ///
+    /// The returned copy is not redacted or zeroized; never log it.
     pub fn export_bytes(&self) -> Vec<u8> {
         self.bytes.clone()
     }
 }
 
-/// SDK backup blob owned by the app.
+/// Unencrypted SDK backup bytes owned by the app.
+///
+/// The SDK does not seal or encrypt this blob. It contains Encrypted Link
+/// snapshots (including the current Paykit Noise static secret key and session
+/// ephemeral secrets), raw Private Application Messages, outbound payloads, and
+/// Receipt Decryption Keys. It does not contain the Pubky identity secret or the
+/// Paykit Identity Secret. Encrypt it before storage or transport and never log
+/// it. If a backup is exposed, call `rotate_paykit_identity_key` and relink
+/// with the affected peers.
+///
+/// `Debug` output is redacted and the bytes are zeroized on drop. Copies taken
+/// with `export_bytes` or `export_backup_string` are the app's responsibility.
 #[derive(uniffi::Object)]
 pub struct FfiSdkBackupBlob {
     bytes: Vec<u8>,
@@ -61,13 +85,16 @@ impl fmt::Debug for FfiSdkBackupBlob {
 
 #[uniffi::export]
 impl FfiSdkBackupBlob {
-    /// Create an SDK backup blob from app-owned bytes.
+    /// Create an SDK backup blob from app-owned bytes the app has decrypted.
     #[uniffi::constructor]
     pub fn new(bytes: Vec<u8>) -> Self {
         Self { bytes }
     }
 
-    /// Export the raw bytes for app-controlled backup storage.
+    /// Export the unencrypted backup bytes for app-controlled backup storage.
+    ///
+    /// The returned copy is not redacted or zeroized. Encrypt it before storage
+    /// or transport and never log it; see `FfiSdkBackupBlob`.
     pub fn export_bytes(&self) -> Vec<u8> {
         self.bytes.clone()
     }
