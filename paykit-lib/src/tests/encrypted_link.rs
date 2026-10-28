@@ -959,13 +959,31 @@ async fn test_prepared_private_message_advances_only_after_persistence_acknowled
 async fn test_prepare_private_message_from_ciphertext_matches_fetch_and_rejects_replay() {
     let mut setup = PrivateTestSetup::new().await;
     let raw_json = r#"{"version":1,"kind":"paykit.test_packet","app_id":"bitkit"}"#;
-    let receiver_snapshot = setup.receiver_link.snapshot().unwrap();
+    let receiver_snapshot = setup.receiver_link.snapshot().unwrap().serialize();
     let receiver_config = setup.receiver_link.config().clone();
     let remote = setup.sender_session.info().public_key().clone();
-    let mut buffered_receiver =
-        restore_encrypted_link_from_config(receiver_config, &remote, receiver_snapshot)
-            .await
-            .unwrap();
+    // Compare both receive paths from identical restored state. A live transport
+    // context retains its final handshake sub-step, while pubky-noise restore
+    // rebuilds that transport-only-irrelevant field from its default value.
+    let mut buffered_receiver = restore_encrypted_link_from_config(
+        receiver_config.clone(),
+        &remote,
+        EncryptedLinkSnapshot::deserialize(&receiver_snapshot).unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut fetched_receiver = restore_encrypted_link_from_config(
+        receiver_config,
+        &remote,
+        EncryptedLinkSnapshot::deserialize(&receiver_snapshot).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        buffered_receiver.snapshot().unwrap().serialize(),
+        fetched_receiver.snapshot().unwrap().serialize(),
+        "ciphertext and fetch paths must start from identical restored Noise state"
+    );
 
     let prepared_send = setup
         .sender_link
@@ -986,8 +1004,7 @@ async fn test_prepare_private_message_from_ciphertext_matches_fetch_and_rejects_
     let from_ciphertext = buffered_receiver
         .prepare_private_application_message_ciphertext(&ciphertext)
         .unwrap();
-    let fetched = setup
-        .receiver_link
+    let fetched = fetched_receiver
         .prepare_next_private_application_message()
         .await
         .unwrap()
