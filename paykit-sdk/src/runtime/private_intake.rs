@@ -311,6 +311,73 @@ where
 
 #[allow(
     clippy::too_many_arguments,
+    reason = "expected-slot acquisition keeps routing, generation, cursor, and injected transport explicit"
+)]
+async fn acquire_expected_private_packet_with_fetch<S, F, Fut>(
+    storage: &S,
+    counterparty: PubkyPublicKey,
+    snapshot: &paykit_lib::EncryptedLinkSnapshot,
+    local: &paykit_lib::PublicKey,
+    secret: &[u8; 32],
+    generation: u64,
+    cursor: Option<PrivateIntakeCursorRecord>,
+    buffered_at: DateTime<Utc>,
+    fetch: F,
+) -> Result<PrivatePacketAcquisition>
+where
+    S: StorageAdapter,
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = Result<Option<Vec<u8>>>>,
+{
+    let snapshot_counter = snapshot
+        .next_private_application_message_resource(local, secret)?
+        .1;
+    let counterparty_for_tail = counterparty.clone();
+    let receive_counter = storage
+        .transaction(move |tx| {
+            let state = tx.export_storage_state();
+            next_private_intake_counter(
+                &state,
+                &counterparty_for_tail,
+                generation,
+                snapshot_counter,
+            )
+        })
+        .await?;
+    let (resource, receive_counter) =
+        snapshot.private_application_message_resource_at_counter(local, secret, receive_counter)?;
+    let Some(ciphertext) = fetch(resource).await? else {
+        if let Some(cursor) = cursor {
+            storage
+                .transaction(move |tx| tx.advance_private_intake_cursor(cursor))
+                .await?;
+        }
+        return Ok(PrivatePacketAcquisition::Absent);
+    };
+    let packet = BufferedPrivatePacketRecord {
+        counterparty,
+        link_generation: generation,
+        receive_counter,
+        ciphertext,
+        source_cursor: cursor,
+        buffered_at,
+    };
+    storage
+        .transaction(move |tx| tx.buffer_private_intake_packet(packet))
+        .await
+        .map(|outcome| match outcome {
+            PrivateIntakeBufferOutcome::Inserted => PrivatePacketAcquisition::Inserted,
+            PrivateIntakeBufferOutcome::AlreadyBuffered => {
+                PrivatePacketAcquisition::AlreadyBuffered
+            }
+            PrivateIntakeBufferOutcome::CapacityReached => {
+                PrivatePacketAcquisition::CapacityReached
+            }
+        })
+}
+
+#[allow(
+    clippy::too_many_arguments,
     reason = "connected loop receives explicit lifecycle, health, and injected I/O boundaries"
 )]
 async fn run_connected_private_intake_stream(
@@ -957,80 +1024,37 @@ where
         let secret = access.paykit_noise_secret_key()?;
         let session_info = access.session.info();
         let local = session_info.public_key();
-        let snapshot_counter = snapshot
-            .link
-            .next_private_application_message_resource(local, &secret)?
-            .1;
-        let counterparty_for_tail = counterparty.clone();
         let generation = snapshot.state.generation;
-        let receive_counter = self
-            .storage
-            .transaction(move |tx| {
-                let state = tx.export_storage_state();
-                next_private_intake_counter(
-                    &state,
-                    &counterparty_for_tail,
-                    generation,
-                    snapshot_counter,
-                )
-            })
-            .await?;
-        let (resource, receive_counter) = snapshot
-            .link
-            .private_application_message_resource_at_counter(local, &secret, receive_counter)?;
-        let response = match access.outbox_client.public_storage().get(resource).await {
-            Ok(response) => response,
-            Err(error) if is_pubky_not_found(&error) => {
-                return self.commit_absent_private_intake_cursor(cursor).await;
-            }
-            Err(error) => {
-                return Err(map_pubky_transport_error(
-                    "fetch expected private intake slot",
-                    error,
-                ))
-            }
-        };
-        let ciphertext = read_public_response(
-            response,
-            crate::storage::PRIVATE_INTAKE_PACKET_BYTES,
-            "read expected private intake slot",
-        )
-        .await?;
-        let Some(ciphertext) = ciphertext else {
-            return self.commit_absent_private_intake_cursor(cursor).await;
-        };
-        let packet = BufferedPrivatePacketRecord {
+        let public_storage = access.outbox_client.public_storage();
+        acquire_expected_private_packet_with_fetch(
+            &self.storage,
             counterparty,
-            link_generation: snapshot.state.generation,
-            receive_counter,
-            ciphertext,
-            source_cursor: cursor,
-            buffered_at: self.clock.now(),
-        };
-        self.storage
-            .transaction(move |tx| tx.buffer_private_intake_packet(packet))
-            .await
-            .map(|outcome| match outcome {
-                PrivateIntakeBufferOutcome::Inserted => PrivatePacketAcquisition::Inserted,
-                PrivateIntakeBufferOutcome::AlreadyBuffered => {
-                    PrivatePacketAcquisition::AlreadyBuffered
-                }
-                PrivateIntakeBufferOutcome::CapacityReached => {
-                    PrivatePacketAcquisition::CapacityReached
-                }
-            })
-    }
-
-    async fn commit_absent_private_intake_cursor(
-        &self,
-        cursor: Option<PrivateIntakeCursorRecord>,
-    ) -> Result<PrivatePacketAcquisition> {
-        if let Some(cursor) = cursor {
-            self.storage
-                .transaction(move |tx| tx.advance_private_intake_cursor(cursor))
-                .await?;
-        }
-        Ok(PrivatePacketAcquisition::Absent)
+            &snapshot.link,
+            local,
+            &secret,
+            generation,
+            cursor,
+            self.clock.now(),
+            move |resource| async move {
+                let response = match public_storage.get(resource).await {
+                    Ok(response) => response,
+                    Err(error) if is_pubky_not_found(&error) => return Ok(None),
+                    Err(error) => {
+                        return Err(map_pubky_transport_error(
+                            "fetch expected private intake slot",
+                            error,
+                        ))
+                    }
+                };
+                read_public_response(
+                    response,
+                    crate::storage::PRIVATE_INTAKE_PACKET_BYTES,
+                    "read expected private intake slot",
+                )
+                .await
+            },
+        )
+        .await
     }
 }
 
@@ -1084,6 +1108,91 @@ fn is_unsupported_event_stream(error: &pubky::Error) -> bool {
 mod tests {
     use super::*;
     use futures_util::stream;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    async fn local_http_response(response: &'static [u8]) -> reqwest::Response {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await;
+            socket.write_all(response).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    fn intake_snapshot(
+        local: &pubky::PublicKey,
+        counterparty: &pubky::PublicKey,
+        read_counter: u32,
+    ) -> (paykit_lib::EncryptedLinkSnapshot, [u8; 32]) {
+        use pubky_noise::snow_crypto::{HandshakePattern, NoisePhase, NoiseStep};
+
+        let secret = [2; 32];
+        let state = pubky_noise::serializer::PubkyNoiseSessionState {
+            version: pubky_noise::serializer::SESSION_STATE_VERSION,
+            phase: NoisePhase::Transport,
+            pattern: HandshakePattern::PatternXX,
+            initiator: true,
+            ephemeral_secret: [1; 32],
+            static_secret: Some(secret),
+            counter: 3,
+            noise_step: NoiseStep::Final,
+            sub_step_index: 0,
+            handshake_hash: Some([3; 32]),
+            link_id: Some([4; 32]),
+            sending_nonce: 0,
+            receiving_nonce: 0,
+            write_counter: 3,
+            read_counter,
+            endpoint_pubkey: counterparty.to_bytes(),
+            handshake_messages: vec![vec![5; 96]],
+        };
+        let remote_noise = pubky::Keypair::random().public_key();
+        let mut bytes = state.serialize();
+        bytes.extend_from_slice(&remote_noise.to_bytes());
+        bytes.extend_from_slice(&[0; 72]);
+        let snapshot = paykit_lib::EncryptedLinkSnapshot::deserialize(&bytes).unwrap();
+        // Exercise path derivation now so malformed fixture state fails locally.
+        snapshot
+            .next_private_application_message_resource(local, &secret)
+            .unwrap();
+        (snapshot, secret)
+    }
+
+    async fn seed_intake_link(
+        storage: &crate::storage::InMemoryStorage,
+        counterparty: PubkyPublicKey,
+        snapshot: &paykit_lib::EncryptedLinkSnapshot,
+        generation: u64,
+    ) {
+        storage
+            .transaction(move |tx| {
+                tx.save_encrypted_link_state(crate::storage::EncryptedLinkStateRecord {
+                    counterparty,
+                    link_snapshot: Some(snapshot.serialize()),
+                    handshake_snapshot: None,
+                    handshake_role: None,
+                    generation,
+                    checkpointed_at: Utc::now(),
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
 
     fn users(count: usize) -> Vec<PubkyPublicKey> {
         (0..count)
@@ -1404,6 +1513,639 @@ mod tests {
         assert_eq!(
             health.read().await.peers[&observed_peer],
             PrivateIntakeTransportState::Backpressured
+        );
+    }
+
+    #[tokio::test]
+    async fn test_expected_slot_fetch_derives_exact_resource_and_atomically_buffers_cursor() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let local = pubky::Keypair::random().public_key();
+        let remote = pubky::Keypair::random().public_key();
+        let peer = PubkyPublicKey::from_public_key(&remote);
+        let (snapshot, secret) = intake_snapshot(&local, &remote, 3);
+        seed_intake_link(&storage, peer.clone(), &snapshot, 7).await;
+        let expected = snapshot
+            .private_application_message_resource_at_counter(&local, &secret, 3)
+            .unwrap()
+            .0;
+        let observed = Arc::new(StdMutex::new(Vec::new()));
+        let cursor = PrivateIntakeCursorRecord {
+            subscribed_user: peer.clone(),
+            homeserver: "homeserver-a".into(),
+            event_id: 42,
+        };
+
+        let outcome = acquire_expected_private_packet_with_fetch(
+            &storage,
+            peer.clone(),
+            &snapshot,
+            &local,
+            &secret,
+            7,
+            Some(cursor.clone()),
+            Utc::now(),
+            {
+                let observed = Arc::clone(&observed);
+                move |resource| {
+                    observed.lock().unwrap().push(resource);
+                    async { Ok(Some(vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES])) }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, PrivatePacketAcquisition::Inserted));
+        assert_eq!(*observed.lock().unwrap(), vec![expected]);
+        let state = storage.snapshot().unwrap();
+        assert_eq!(state.private_intake_cursors[&peer], cursor);
+        let packet = &state.private_intake_peers[&peer].buffered_packets[0];
+        assert_eq!(packet.receive_counter, 3);
+        assert_eq!(
+            packet.ciphertext,
+            vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_expected_slot_fetch_grows_contiguous_tail_without_noise_advance() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let local = pubky::Keypair::random().public_key();
+        let remote = pubky::Keypair::random().public_key();
+        let peer = PubkyPublicKey::from_public_key(&remote);
+        let (snapshot, secret) = intake_snapshot(&local, &remote, 3);
+        seed_intake_link(&storage, peer.clone(), &snapshot, 7).await;
+        let expected = [3_u64, 4].map(|counter| {
+            snapshot
+                .private_application_message_resource_at_counter(&local, &secret, counter)
+                .unwrap()
+                .0
+        });
+        let observed = Arc::new(StdMutex::new(Vec::new()));
+
+        for byte in [3_u8, 4] {
+            acquire_expected_private_packet_with_fetch(
+                &storage,
+                peer.clone(),
+                &snapshot,
+                &local,
+                &secret,
+                7,
+                None,
+                Utc::now(),
+                {
+                    let observed = Arc::clone(&observed);
+                    move |resource| {
+                        observed.lock().unwrap().push(resource);
+                        async move {
+                            Ok(Some(vec![
+                                byte;
+                                crate::storage::PRIVATE_INTAKE_PACKET_BYTES
+                            ]))
+                        }
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(*observed.lock().unwrap(), expected);
+        let state = storage.snapshot().unwrap();
+        assert_eq!(
+            state.private_intake_peers[&peer]
+                .buffered_packets
+                .iter()
+                .map(|packet| packet.receive_counter)
+                .collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+        assert_eq!(
+            paykit_lib::EncryptedLinkSnapshot::deserialize(
+                state.encrypted_link_states[&peer]
+                    .link_snapshot
+                    .as_ref()
+                    .unwrap()
+            )
+            .unwrap()
+            .next_private_application_message_resource(&local, &secret)
+            .unwrap()
+            .1,
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn test_expected_slot_fetch_failure_leaves_cursor_for_replay() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let local = pubky::Keypair::random().public_key();
+        let remote = pubky::Keypair::random().public_key();
+        let peer = PubkyPublicKey::from_public_key(&remote);
+        let (snapshot, secret) = intake_snapshot(&local, &remote, 3);
+        seed_intake_link(&storage, peer.clone(), &snapshot, 7).await;
+        let cursor = PrivateIntakeCursorRecord {
+            subscribed_user: peer.clone(),
+            homeserver: "homeserver-a".into(),
+            event_id: 42,
+        };
+
+        let result = acquire_expected_private_packet_with_fetch(
+            &storage,
+            peer.clone(),
+            &snapshot,
+            &local,
+            &secret,
+            7,
+            Some(cursor),
+            Utc::now(),
+            |_| async {
+                Err(PaykitSdkError::Transport {
+                    context: "offline expected-slot GET".into(),
+                    source: None,
+                })
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        let state = storage.snapshot().unwrap();
+        assert!(!state.private_intake_cursors.contains_key(&peer));
+        assert!(!state.private_intake_peers.contains_key(&peer));
+    }
+
+    #[tokio::test]
+    async fn test_expected_slot_oversize_response_leaves_cursor_for_replay() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let local = pubky::Keypair::random().public_key();
+        let remote = pubky::Keypair::random().public_key();
+        let peer = PubkyPublicKey::from_public_key(&remote);
+        let (snapshot, secret) = intake_snapshot(&local, &remote, 3);
+        seed_intake_link(&storage, peer.clone(), &snapshot, 7).await;
+        let cursor = PrivateIntakeCursorRecord {
+            subscribed_user: peer.clone(),
+            homeserver: "homeserver-a".into(),
+            event_id: 42,
+        };
+        let response = local_http_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+
+        let result = acquire_expected_private_packet_with_fetch(
+            &storage,
+            peer.clone(),
+            &snapshot,
+            &local,
+            &secret,
+            7,
+            Some(cursor),
+            Utc::now(),
+            |_| async move {
+                read_public_response(
+                    response,
+                    crate::storage::PRIVATE_INTAKE_PACKET_BYTES,
+                    "read expected private intake slot",
+                )
+                .await
+            },
+        )
+        .await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Protocol { .. })));
+        let state = storage.snapshot().unwrap();
+        assert!(!state.private_intake_cursors.contains_key(&peer));
+        assert!(!state.private_intake_peers.contains_key(&peer));
+    }
+
+    #[tokio::test]
+    async fn test_expected_slot_cursor_commit_failure_rolls_back_packet_for_replay() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let local = pubky::Keypair::random().public_key();
+        let remote = pubky::Keypair::random().public_key();
+        let peer = PubkyPublicKey::from_public_key(&remote);
+        let (snapshot, secret) = intake_snapshot(&local, &remote, 3);
+        seed_intake_link(&storage, peer.clone(), &snapshot, 7).await;
+        let old_cursor = PrivateIntakeCursorRecord {
+            subscribed_user: peer.clone(),
+            homeserver: "homeserver-a".into(),
+            event_id: 41,
+        };
+        storage
+            .transaction({
+                let old_cursor = old_cursor.clone();
+                move |tx| tx.advance_private_intake_cursor(old_cursor)
+            })
+            .await
+            .unwrap();
+        let moved_cursor = PrivateIntakeCursorRecord {
+            subscribed_user: peer.clone(),
+            homeserver: "homeserver-b".into(),
+            event_id: 42,
+        };
+
+        let result = acquire_expected_private_packet_with_fetch(
+            &storage,
+            peer.clone(),
+            &snapshot,
+            &local,
+            &secret,
+            7,
+            Some(moved_cursor),
+            Utc::now(),
+            |_| async { Ok(Some(vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES])) },
+        )
+        .await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Storage { .. })));
+        let state = storage.snapshot().unwrap();
+        assert_eq!(state.private_intake_cursors[&peer], old_cursor);
+        assert!(!state.private_intake_peers.contains_key(&peer));
+    }
+
+    #[tokio::test]
+    async fn test_absent_expected_slot_commits_replay_cursor_without_buffer() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let local = pubky::Keypair::random().public_key();
+        let remote = pubky::Keypair::random().public_key();
+        let peer = PubkyPublicKey::from_public_key(&remote);
+        let (snapshot, secret) = intake_snapshot(&local, &remote, 3);
+        seed_intake_link(&storage, peer.clone(), &snapshot, 7).await;
+        let cursor = PrivateIntakeCursorRecord {
+            subscribed_user: peer.clone(),
+            homeserver: "homeserver-a".into(),
+            event_id: 42,
+        };
+
+        let outcome = acquire_expected_private_packet_with_fetch(
+            &storage,
+            peer.clone(),
+            &snapshot,
+            &local,
+            &secret,
+            7,
+            Some(cursor.clone()),
+            Utc::now(),
+            |_| async { Ok(None) },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, PrivatePacketAcquisition::Absent));
+        let state = storage.snapshot().unwrap();
+        assert_eq!(state.private_intake_cursors[&peer], cursor);
+        assert!(!state.private_intake_peers.contains_key(&peer));
+    }
+
+    #[tokio::test]
+    async fn test_connected_stream_event_runs_exact_fetch_and_atomic_storage_path() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let local = pubky::Keypair::random().public_key();
+        let remote = pubky::Keypair::random().public_key();
+        let peer = PubkyPublicKey::from_public_key(&remote);
+        let (snapshot, secret) = intake_snapshot(&local, &remote, 3);
+        seed_intake_link(&storage, peer.clone(), &snapshot, 7).await;
+        let expected_resource = snapshot
+            .private_application_message_resource_at_counter(&local, &secret, 3)
+            .unwrap()
+            .0;
+        let snapshot_bytes = snapshot.serialize();
+        let observed_resources = Arc::new(StdMutex::new(Vec::new()));
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: vec![peer.clone()],
+        };
+        let event = pubky::Event {
+            event_type: pubky::EventType::Put {
+                content_hash: blake3::Hash::from_bytes([7; 32]),
+            },
+            resource: format!(
+                "pubky://{}/pub/paykit/v0/private/untrusted-hint",
+                remote.z32()
+            )
+            .parse()
+            .unwrap(),
+            cursor: pubky::EventCursor::new(42),
+        };
+        let acquire: PrivateIntakeAcquire = Arc::new({
+            let storage = storage.clone();
+            let local = local.clone();
+            let snapshot_bytes = snapshot_bytes.clone();
+            let observed_resources = Arc::clone(&observed_resources);
+            move |requested_peer, cursor| {
+                let storage = storage.clone();
+                let local = local.clone();
+                let snapshot_bytes = snapshot_bytes.clone();
+                let observed_resources = Arc::clone(&observed_resources);
+                Box::pin(async move {
+                    let snapshot = paykit_lib::EncryptedLinkSnapshot::deserialize(&snapshot_bytes)?;
+                    acquire_expected_private_packet_with_fetch(
+                        &storage,
+                        requested_peer,
+                        &snapshot,
+                        &local,
+                        &secret,
+                        7,
+                        cursor,
+                        Utc::now(),
+                        move |resource| {
+                            observed_resources.lock().unwrap().push(resource);
+                            async { Ok(Some(vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES])) }
+                        },
+                    )
+                    .await
+                })
+            }
+        });
+        let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth::default()));
+        let work = Arc::new(Notify::new());
+        let (_stop, stop_rx) = watch::channel(false);
+
+        let exit = run_connected_private_intake_stream(
+            &group,
+            Box::pin(stream::iter([Ok(event)])),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            stop_rx,
+            &health,
+            &work,
+            acquire,
+            Arc::new(|| Box::pin(async {})),
+        )
+        .await;
+
+        assert!(matches!(exit, PrivateIntakeEventLoopExit::Ended));
+        assert_eq!(*observed_resources.lock().unwrap(), vec![expected_resource]);
+        let state = storage.snapshot().unwrap();
+        assert_eq!(state.private_intake_cursors[&peer].event_id, 42);
+        assert_eq!(
+            state.private_intake_peers[&peer].buffered_packets[0].receive_counter,
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn test_startup_audit_runs_storage_tail_and_exact_fetch_until_absent() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let local = pubky::Keypair::random().public_key();
+        let remote = pubky::Keypair::random().public_key();
+        let peer = PubkyPublicKey::from_public_key(&remote);
+        let (snapshot, secret) = intake_snapshot(&local, &remote, 3);
+        seed_intake_link(&storage, peer.clone(), &snapshot, 7).await;
+        let fetched = Arc::new(StdMutex::new(0_usize));
+        let snapshot_bytes = snapshot.serialize();
+
+        let outcome = audit_private_intake_peer(peer.clone(), {
+            let storage = storage.clone();
+            let fetched = Arc::clone(&fetched);
+            let local = local.clone();
+            move |requested_peer, cursor| {
+                let storage = storage.clone();
+                let fetched = Arc::clone(&fetched);
+                let local = local.clone();
+                let snapshot_bytes = snapshot_bytes.clone();
+                async move {
+                    let snapshot = paykit_lib::EncryptedLinkSnapshot::deserialize(&snapshot_bytes)?;
+                    acquire_expected_private_packet_with_fetch(
+                        &storage,
+                        requested_peer,
+                        &snapshot,
+                        &local,
+                        &secret,
+                        7,
+                        cursor,
+                        Utc::now(),
+                        move |_| {
+                            let attempt = {
+                                let mut fetched = fetched.lock().unwrap();
+                                let attempt = *fetched;
+                                *fetched += 1;
+                                attempt
+                            };
+                            async move {
+                                Ok((attempt < 2).then(|| {
+                                    vec![attempt as u8; crate::storage::PRIVATE_INTAKE_PACKET_BYTES]
+                                }))
+                            }
+                        },
+                    )
+                    .await
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, PrivatePacketAcquisition::Absent));
+        assert_eq!(*fetched.lock().unwrap(), 3);
+        assert_eq!(
+            storage.snapshot().unwrap().private_intake_peers[&peer]
+                .buffered_packets
+                .iter()
+                .map(|packet| packet.receive_counter)
+                .collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_grouped_stream_detaches_full_peer_keeps_sibling_and_resumes_after_drain() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let local = pubky::Keypair::random().public_key();
+        let remotes = [
+            pubky::Keypair::random().public_key(),
+            pubky::Keypair::random().public_key(),
+        ];
+        let peers = remotes
+            .iter()
+            .map(PubkyPublicKey::from_public_key)
+            .collect::<Vec<_>>();
+        let (full_snapshot, secret) = intake_snapshot(&local, &remotes[0], 3);
+        let (sibling_snapshot, _) = intake_snapshot(&local, &remotes[1], 3);
+        seed_intake_link(&storage, peers[0].clone(), &full_snapshot, 7).await;
+        seed_intake_link(&storage, peers[1].clone(), &sibling_snapshot, 7).await;
+        storage
+            .transaction({
+                let full_peer = peers[0].clone();
+                move |tx| {
+                    for receive_counter in
+                        3..3 + u64::try_from(crate::storage::PRIVATE_INTAKE_MAX_PACKETS_PER_PEER)
+                            .unwrap()
+                    {
+                        assert!(matches!(
+                            tx.buffer_private_intake_packet(BufferedPrivatePacketRecord {
+                                counterparty: full_peer.clone(),
+                                link_generation: 7,
+                                receive_counter,
+                                ciphertext: vec![
+                                    receive_counter as u8;
+                                    crate::storage::PRIVATE_INTAKE_PACKET_BYTES
+                                ],
+                                source_cursor: None,
+                                buffered_at: Utc::now(),
+                            })?,
+                            PrivateIntakeBufferOutcome::Inserted
+                        ));
+                    }
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: peers.clone(),
+        };
+        let fetches = Arc::new(StdMutex::new(HashMap::<PubkyPublicKey, usize>::new()));
+        let acquire: PrivateIntakeAcquire = Arc::new({
+            let storage = storage.clone();
+            let local = local.clone();
+            let fetches = Arc::clone(&fetches);
+            move |peer, cursor| {
+                let storage = storage.clone();
+                let local = local.clone();
+                let fetches = Arc::clone(&fetches);
+                Box::pin(async move {
+                    let snapshot_bytes = storage.snapshot().unwrap().encrypted_link_states[&peer]
+                        .link_snapshot
+                        .clone()
+                        .unwrap();
+                    let snapshot = paykit_lib::EncryptedLinkSnapshot::deserialize(&snapshot_bytes)?;
+                    let fetched_peer = peer.clone();
+                    acquire_expected_private_packet_with_fetch(
+                        &storage,
+                        peer,
+                        &snapshot,
+                        &local,
+                        &secret,
+                        7,
+                        cursor,
+                        Utc::now(),
+                        move |_| {
+                            *fetches.lock().unwrap().entry(fetched_peer).or_default() += 1;
+                            async { Ok(Some(vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES])) }
+                        },
+                    )
+                    .await
+                })
+            }
+        });
+        let event = |owner: &pubky::PublicKey, event_id| pubky::Event {
+            event_type: pubky::EventType::Put {
+                content_hash: blake3::Hash::from_bytes([7; 32]),
+            },
+            resource: format!(
+                "pubky://{}/pub/paykit/v0/private/untrusted-hint",
+                owner.z32()
+            )
+            .parse()
+            .unwrap(),
+            cursor: pubky::EventCursor::new(event_id),
+        };
+        let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth::default()));
+        let work = Arc::new(Notify::new());
+        let (_stop, stop_rx) = watch::channel(false);
+
+        let first_exit = run_connected_private_intake_stream(
+            &group,
+            Box::pin(stream::iter([
+                Ok(event(&remotes[0], 42)),
+                Ok(event(&remotes[1], 43)),
+            ])),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            stop_rx,
+            &health,
+            &work,
+            Arc::clone(&acquire),
+            Arc::new(|| Box::pin(async {})),
+        )
+        .await;
+        assert!(matches!(
+            first_exit,
+            PrivateIntakeEventLoopExit::Backpressured
+        ));
+        assert_eq!(fetches.lock().unwrap().get(&peers[0]), Some(&1));
+        assert!(!fetches.lock().unwrap().contains_key(&peers[1]));
+        assert!(!storage
+            .snapshot()
+            .unwrap()
+            .private_intake_cursors
+            .contains_key(&peers[0]));
+
+        let active = subscribable_private_intake_peers(&storage.snapshot().unwrap(), &peers);
+        assert_eq!(active, vec![peers[1].clone()]);
+        let sibling_group = SubscriptionGroup {
+            peers: active,
+            ..group.clone()
+        };
+        let (_stop, stop_rx) = watch::channel(false);
+        let sibling_exit = run_connected_private_intake_stream(
+            &sibling_group,
+            Box::pin(stream::iter([Ok(event(&remotes[1], 43))])),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            stop_rx,
+            &health,
+            &work,
+            Arc::clone(&acquire),
+            Arc::new(|| Box::pin(async {})),
+        )
+        .await;
+        assert!(matches!(sibling_exit, PrivateIntakeEventLoopExit::Ended));
+        assert_eq!(fetches.lock().unwrap().get(&peers[1]), Some(&1));
+        assert_eq!(
+            storage.snapshot().unwrap().private_intake_cursors[&peers[1]].event_id,
+            43
+        );
+
+        let (advanced_snapshot, _) = intake_snapshot(&local, &remotes[0], 4);
+        storage
+            .transaction({
+                let full_peer = peers[0].clone();
+                move |tx| {
+                    tx.remove_buffered_private_intake_packet(&full_peer, 7, 3)?;
+                    tx.save_encrypted_link_state(crate::storage::EncryptedLinkStateRecord {
+                        counterparty: full_peer,
+                        link_snapshot: Some(advanced_snapshot.serialize()),
+                        handshake_snapshot: None,
+                        handshake_role: None,
+                        generation: 7,
+                        checkpointed_at: Utc::now(),
+                    });
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            subscribable_private_intake_peers(&storage.snapshot().unwrap(), &peers),
+            peers
+        );
+        let (_stop, stop_rx) = watch::channel(false);
+        let resumed_exit = run_connected_private_intake_stream(
+            &group,
+            Box::pin(stream::iter([Ok(event(&remotes[0], 44))])),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            stop_rx,
+            &health,
+            &work,
+            acquire,
+            Arc::new(|| Box::pin(async {})),
+        )
+        .await;
+        assert!(matches!(resumed_exit, PrivateIntakeEventLoopExit::Ended));
+        assert_eq!(fetches.lock().unwrap().get(&peers[0]), Some(&2));
+        let state = storage.snapshot().unwrap();
+        assert_eq!(state.private_intake_cursors[&peers[0]].event_id, 44);
+        assert_eq!(
+            state.private_intake_peers[&peers[0]]
+                .buffered_packets
+                .last()
+                .unwrap()
+                .receive_counter,
+            3 + u64::try_from(crate::storage::PRIVATE_INTAKE_MAX_PACKETS_PER_PEER).unwrap()
         );
     }
 }
