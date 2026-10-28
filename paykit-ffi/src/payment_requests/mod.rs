@@ -306,6 +306,11 @@ pub struct FfiPaymentRequestRecord {
     pub proposal_event_id: Option<String>,
     /// Application that created the proposal.
     pub proposal_app_id: Option<String>,
+    /// Local time this device stored the proposal, as RFC3339 text: queued by
+    /// a payee, received by a payer. Unauthenticated local clock time. A payee
+    /// subtracts a payment-method tolerance to get a payment not-before bound;
+    /// a payer uses it only as a search hint.
+    pub proposal_recorded_at: Option<String>,
     /// Payer application associated with the request, independent of its current execution claim.
     pub payer_app_id: Option<String>,
     /// Paykit App currently preparing to execute this payment.
@@ -316,6 +321,11 @@ pub struct FfiPaymentRequestRecord {
     pub accepted_event_id: Option<String>,
     /// Local outbound delivery status for an acceptance event.
     pub accepted_outbound_status: Option<FfiOutboundPrivateMessageStatus>,
+    /// Local time this device stored the recorded acceptance, as RFC3339 text:
+    /// queued by a payer, fetched by a payee. Unauthenticated local clock time.
+    /// A payee value after `proposal_expires_at` does not show a late
+    /// acceptance, and it is not a lower bound on payment time.
+    pub acceptance_recorded_at: Option<String>,
     /// Rejection Event ID.
     pub rejected_event_id: Option<String>,
     /// Local outbound delivery status for a rejection event.

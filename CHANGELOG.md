@@ -13,6 +13,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `claimPaymentRequestForPreparation` in Swift and Kotlin reject blocked
   counterparties before App Registry access and atomically recheck that policy
   when claiming a Payment Request for preparation.
+- `PaymentRequestRecord` exposes `proposal_recorded_at` and
+  `acceptance_recorded_at` in Rust, and `proposalRecordedAt` and
+  `acceptanceRecordedAt` in Swift and Kotlin. They are the local times this
+  device stored the proposal and the recorded Acceptance; their meaning depends
+  on the local role.
+
+### Changed
+
+- A payee no longer marks a Payment Request invalid when it stores an
+  otherwise-valid Acceptance after its local proposal expiry, such as an
+  in-time Acceptance fetched late. Later Payment Proofs are recorded and the
+  payee can cancel. Records are re-derived from the event log, so after
+  upgrading, requests a wallet showed as invalid may now appear as `Accepted`,
+  `ProofSubmitted` or `ActiveRecurring`.
 
 ### Integration
 
@@ -35,6 +49,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   payment sequence, one trusted time for automatic Acceptance, what counts as a
   definitive `Failed` outcome on each Rail, and how to reconcile after restoring
   an older backup without paying twice.
+- Regenerate bindings and native libraries together: the new Payment Request
+  record fields change the generated record layout, so do not mix them with
+  earlier builds. Payees should not count payment evidence earlier than the
+  proposal record time minus a payment-method tolerance as paying a request;
+  see the Payment time and attribution rule in `specs/payment-requests.md`.
 
 ## [0.1.1-rc1] - 2026-10-20
 

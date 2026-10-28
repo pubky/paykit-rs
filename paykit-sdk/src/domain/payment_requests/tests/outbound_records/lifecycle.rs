@@ -152,6 +152,7 @@ async fn test_payment_request_records_use_outbound_update_time_for_freshness() {
         .unwrap();
 
     assert_eq!(records[0].last_event_at, Some(updated_at));
+    assert_eq!(records[0].acceptance_recorded_at, Some(timestamp()));
     assert_eq!(
         records[0].last_outbound_status,
         Some(OutboundPrivateMessageStatus::Sent)

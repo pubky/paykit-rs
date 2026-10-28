@@ -92,6 +92,13 @@ where
         input: AllowanceSelectionInput,
         checks: PaymentExecutionChecks,
     ) -> Result<AllowanceAssociationRecord> {
+        // Input validation: a caller bug does no network work and commits no watermark.
+        if checks.trusted_time != input.trusted_time {
+            return Err(PaykitSdkError::Protocol {
+                context: "Automatic Acceptance requires one trusted time for selection and execution checks".into(),
+                source: None,
+            });
+        }
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         let record = self
             .load_payment_request_record(&scope.counterparty, &scope.payment_request_id)

@@ -971,10 +971,19 @@ Derived record per Payment Request:
 - immutable terms
 - proposal event id
 - proposal expiry state
+- proposal record time: when this device stored the proposal (payee: queued
+  it; payer: received it)
+- acceptance record time: when this device stored the recorded Acceptance
+  (payer: queued it; payee: fetched it)
 - lifecycle state
 - accepted/rejected/canceled event ids
 - latest Payment Proof records
 - recurrence schedule metadata
+
+Record times use the local clock. They are not authenticated and are not
+cross-direction causal-order evidence. The SDK records an otherwise-valid
+Acceptance received after local proposal expiry instead of marking the request
+invalid.
 
 SDK lifecycle states should be explicit and local:
 

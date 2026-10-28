@@ -185,6 +185,14 @@ for fixed terms versus per-period quotes, manual approval and payment-time check
 Explicitly priced endpoints require manual approval, including same-asset fixed
 rail prices; an Allowance does not authorize repricing.
 
+A payee can fetch an in-time Acceptance after its own `proposal_expires_at`,
+so `ProposalExpired` can still become accepted. Use `acceptance_recorded_at`
+only to flag a late fetch. Hold or flag payment evidence earlier than
+`proposal_recorded_at` minus a payment-method tolerance, per the
+[payment time rule](https://github.com/pubky/paykit-rs/blob/master/specs/payment-requests.md#payment-time-and-attribution).
+See the [FFI README](https://github.com/pubky/paykit-rs/blob/master/paykit-ffi/README.md#payment-requests)
+for payer and payee timing patterns.
+
 For Allowance-based automation, use SDK accounting rather than a parallel local
 counter: reconcile complete wallet history, persist selection/association,
 reserve with `reserve_automatic_payment` or `reserve_manual_payment`, obtain a
