@@ -18,6 +18,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `acceptanceRecordedAt` in Swift and Kotlin. They are the local times this
   device stored the proposal and the recorded Acceptance; their meaning depends
   on the local role.
+- `paykit_sdk::payment_proof_event_len` in Rust and `paymentProofEventLen` in
+  Swift and Kotlin return the exact byte length of the Payment Proof Event
+  Message that `submitPaymentProof` would queue, so payers and payees can check
+  it against the 1000-byte limit before payment approval or before offering a
+  method. It takes the local (sending) App ID from `PaykitSdkConfig`, not the
+  submission's `payment_app_id`. It is a measurement, not a validity check.
 - `accept_pending_allowance_proposals` in Rust and
   `acceptPendingAllowanceProposals` in Swift and Kotlin accept up to a limit of
   one counterparty's pending Allowance proposals in one transaction, with work
@@ -31,6 +37,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   payee can cancel. Records are re-derived from the event log, so after
   upgrading, requests a wallet showed as invalid may now appear as `Accepted`,
   `ProofSubmitted` or `ActiveRecurring`.
+- Identify an outbound Private Application Message larger than the pubky-noise
+  message size (1000 bytes) with `PaykitSdkError::is_message_too_large` and the
+  `message_too_large` FFI protocol code. It is still a `Protocol` error, and
+  its context now carries the message and limit byte counts. Proposing a
+  Payment Request and submitting a Payment Proof check the size before link
+  readiness, so a not-ready link no longer hides the size error, and nothing is
+  queued. `propose_payment_request_with_id` refuses oversized terms before it
+  checks earlier use of the Payment Request ID.
 
 ### Integration
 
@@ -58,6 +72,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   earlier builds. Payees should not count payment evidence earlier than the
   proposal record time minus a payment-method tolerance as paying a request;
   see the Payment time and attribution rule in `specs/payment-requests.md`.
+- Regenerate bindings for `paymentProofEventLen` and the message size
+  documentation on `proposePaymentRequest`, `submitPaymentProof`,
+  `PaymentRequestTerms` and `PaymentProofSubmission`. Protocol errors have a new
+  code value, `message_too_large`; apps that branch on codes should handle it.
 
 ## [0.1.1-rc1] - 2026-10-20
 

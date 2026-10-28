@@ -57,9 +57,10 @@ pub use domain::outbound_private::{
 };
 #[doc(inline)]
 pub use domain::payment_requests::{
-    PaymentConversionQuoteRecord, PaymentProofRecord, PaymentProofSubmission, PaymentRequestFilter,
-    PaymentRequestLifecycleState, PaymentRequestLocalRole, PaymentRequestRecord,
-    PaymentRequestRecurrenceRecord, PaymentRequestTermsRecord,
+    payment_proof_event_len, PaymentConversionQuoteRecord, PaymentProofRecord,
+    PaymentProofSubmission, PaymentRequestFilter, PaymentRequestLifecycleState,
+    PaymentRequestLocalRole, PaymentRequestRecord, PaymentRequestRecurrenceRecord,
+    PaymentRequestTermsRecord,
 };
 #[doc(inline)]
 pub use domain::payment_resolution::{
@@ -91,7 +92,7 @@ pub use domain::records::{AmountRecord, BillingPeriodRecord};
 #[doc(inline)]
 pub use domain::recovery::EncryptedLinkRecoveryMarkerReport;
 #[doc(inline)]
-pub use error::{PaykitSdkError, RetentionLimitReached};
+pub use error::{MessageTooLarge, PaykitSdkError, RetentionLimitReached};
 #[doc(inline)]
 pub use identity::{
     IdentityState, IdentityStatus, PaykitIdentitySecretKey, PubkyIdentityCapability,

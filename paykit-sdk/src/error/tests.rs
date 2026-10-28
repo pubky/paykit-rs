@@ -104,3 +104,32 @@ fn test_retention_limit_is_detected_only_from_its_policy_cause() {
         assert!(!other.is_retention_limit_reached());
     }
 }
+
+#[test]
+fn test_message_too_large_is_detected_only_from_its_protocol_cause() {
+    let too_large = PaykitSdkError::Protocol {
+        context:
+            "Private Application Message (1001 bytes) exceeds pubky-noise message size (1000 bytes)"
+                .into(),
+        source: Some(MessageTooLarge.into()),
+    };
+    assert!(too_large.is_message_too_large());
+
+    // Neither another protocol cause nor the same cause on another variant counts.
+    for other in [
+        PaykitSdkError::Protocol {
+            context: "Private Application Message exceeds pubky-noise message size".into(),
+            source: None,
+        },
+        PaykitSdkError::Protocol {
+            context: "invalid private message JSON".into(),
+            source: Some(anyhow::anyhow!("exceeds pubky-noise message size")),
+        },
+        PaykitSdkError::Policy {
+            context: "message refused".into(),
+            source: Some(MessageTooLarge.into()),
+        },
+    ] {
+        assert!(!other.is_message_too_large());
+    }
+}

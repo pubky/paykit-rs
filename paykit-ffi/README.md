@@ -137,7 +137,10 @@ fallback. See [Establish Encrypted Link](../specs/paykit-sdk.md#establish-encryp
 for setup, restore, and send/receive checks.
 
 Private operation errors expose stable category/code fields and redacted
-context. Raw diagnostic details require an explicit debug export method.
+context. Raw diagnostic details require an explicit debug export method. A
+private message whose serialized JSON exceeds 1000 bytes (`PUBKY_NOISE_MSG_LEN`)
+fails with the protocol code `message_too_large`, and its context reports the
+message and limit byte counts. Nothing is queued.
 
 ### Private Payment Lists and Payment Resolution
 
@@ -222,6 +225,16 @@ pixel and cache limits, and request timeouts remain app responsibilities.
 - `PaykitSdk.proposePaymentRequest`, `acceptPaymentRequest`,
   `rejectPaymentRequest`, `cancelPaymentRequest`, and `submitPaymentProof` —
   queue Payment Request lifecycle events through the SDK outbound stream.
+  Each Event Message must fit 1000 bytes of canonical JSON. `metadata` and
+  `proof` objects are re-serialized and non-ASCII text is written raw, so a
+  wallet's own byte count is not authoritative.
+- `paymentProofEventLen(localAppId, paymentReference, submission)` - return the
+  exact byte length of the Payment Proof Event Message that `submitPaymentProof`
+  would queue. `localAppId` is the local (sending) App ID from
+  `PaykitSdkConfig`, not the payee App in `submission.paymentAppId`. It is a
+  measurement, not a validity check. Payers measure before payment approval and
+  payees before offering a method, with maximum-length placeholders for
+  variable fields and every optional ID they will send.
 - `PaykitSdk.claimPaymentRequestForPreparation` - claim before preparing payment.
   It rejects blocked counterparties before App Registry access and rechecks the
   policy atomically with the claim. Compare the returned proposal and applicable
