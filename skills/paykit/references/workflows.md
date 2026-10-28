@@ -63,6 +63,32 @@ use `save_contacts_and_unblock_peers(updates)`; do not use it for label edits or
 automatic refresh. Unblocked peers still need a fresh Encrypted Link. FFI names
 are `saveContacts` and `saveContactsAndUnblockPeers`.
 
+Remove a contact: `remove_contact` deletes only the Contact Record. The
+Encrypted Link, intake, queued sends, accepted Allowances and the peer's copy of
+your last Private Payment List stay, and a re-add reuses the link. To also end
+the link, follow the steps on `remove_contacts_and_block_peers`: end or cancel
+what the user wants gone; while still Linked, call
+`clear_private_payment_list_and_process_outbound` until its `failed_to_queue`
+and `failed_to_deliver` are both empty, and do not block before then (pause
+other runtimes or devices of the same Paykit App that queue lists for that peer,
+since they can supersede the clear); persist the app's own record of intent to
+end the link, then `remove_contacts_and_block_peers`, `unblock_peer`, and clear
+the record.
+On startup, unblock only peers that carry that record and are still `Blocked`.
+Never infer intent from a `Blocked` peer without a Contact Record: the block
+records no reason and is shared by every app and device on the identity.
+
+Blocking a peer: `block_peer` parks queued private messages; it does not delete
+them or notify the peer. After unblock, a fresh Encrypted Link Handshake requeues
+eligible parked messages, and the next `process_outbound_private_messages` sends
+them; a newer Private Payment List can supersede a requeued one. Accepted
+Allowances and Payment Requests are paused, not revoked, and authorize again
+after relink without new consent. Deliver pending
+events (for example a Payment Proof) with `process_outbound_private_messages`,
+confirmed only once its id appears in a report's `sent`, and call
+`end_allowance` for authority the user wants gone before blocking; both are
+refused while blocked. See the `block_peer` docs.
+
 ## Pay a Contact
 
 1. Choose public or private deliberately. Private preparation is

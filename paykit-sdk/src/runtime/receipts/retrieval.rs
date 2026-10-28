@@ -12,7 +12,8 @@ where
     /// The decrypted Receipt is private SDK state. This returns an already
     /// stored Receipt record when available, and otherwise validates the
     /// decrypted recipient against the current local Pubky identity before
-    /// saving it.
+    /// saving it. Returns `Policy` while the counterparty is `Blocked`, so
+    /// retrieve a Receipt you need before blocking.
     pub async fn retrieve_receipt(
         &self,
         counterparty: PubkyPublicKey,
@@ -247,6 +248,7 @@ where
 
     /// List indexed Receipt Access records for one counterparty.
     /// Previously authorized records remain available when its registry is unavailable.
+    /// Returns `Policy` while the counterparty is `Blocked`.
     pub async fn receipt_access_records(
         &self,
         counterparty: &PubkyPublicKey,
@@ -353,6 +355,7 @@ where
     }
 
     /// List decrypted Receipt records for one issuer, newest first.
+    /// Returns `Policy` while the issuer is `Blocked`.
     pub async fn receipt_records(&self, issuer: &PubkyPublicKey) -> Result<Vec<ReceiptRecord>> {
         let (_, identity) = self.load_session_access_and_refresh_identity().await?;
         let Some(local_public_key) = identity.public_key else {

@@ -109,6 +109,22 @@ Paykit-side workflow.
   `advanceLinkHandshake` — establish Encrypted Links with counterparties.
 - `PaykitSdk.linkedPeers`, `blockPeer`, and `unblockPeer` — inspect and
   manage local peer state.
+- Blocking a peer: `blockPeer` is local and does not notify the peer. It parks
+  queued private messages instead of deleting them. After `unblockPeer`, a
+  fresh Encrypted Link Handshake requeues eligible parked messages, and the
+  next `processOutboundPrivateMessages` sends them; a newer Private Payment
+  List can supersede a requeued one. Accepted Allowances and Payment Requests
+  are paused, not revoked, and authorize again after relink without new
+  consent. While the peer is blocked, nothing new can
+  be queued for it, `endAllowance` is refused, and reads that name it fail
+  with a policy error. Before blocking, while the peer is still Linked, deliver
+  pending events such as a Payment Proof with `processOutboundPrivateMessages`
+  (delivered only once its id appears in a report's `sent`), retrieve any
+  Receipt you need, and call `endAllowance` for each `Accepted`
+  Allowance, and each `Proposed` one this identity proposed, that the user
+  wants gone. If the peer was already blocked, after unblock and relink call
+  `endAllowance`, or confirm with the user before calling
+  `acceptPaymentRequestAutomatically` for that peer again.
 - `PaykitSdk.forgetPeer`: irreversibly delete what a blocked counterparty
   sent, for every Paykit App on the identity, when the local identity never
   acted on it. It releases a counterparty whose `receivePrivateMessages` fails
@@ -677,7 +693,35 @@ bootstrap.approveAuthWithCompanionClaim(
   blobs and read public Pubky resources with caller-provided size limits.
 - `PaykitSdk.saveContact`, `contactRecord`, `contactRecords`, and
   `removeContact` — manage Contact Records. Each contact is one Pubky
-  identity.
+  identity. `removeContact` deletes only the record: the Encrypted Link,
+  intake, queued sends, accepted Allowances and the peer's copy of your last
+  Private Payment List stay, and a re-add reuses the link.
+- `PaykitSdk.removeContactsAndBlockPeers(publicKeys)`: remove contacts and
+  block their peers in one transaction, as `blockPeer` does. To end a
+  contact's Encrypted Link without keeping the peer blocked:
+  1. Call `endAllowance` and `cancelPaymentRequest` for the Allowances and
+     Payment Requests the user wants gone. Otherwise they authorize again
+     after a later relink.
+  2. While the peer is still Linked, call
+     `clearPrivatePaymentListAndProcessOutbound` and continue only when its
+     report's `failedToQueue` and `failedToDeliver` are both empty. Otherwise
+     call it again later; each call queues a fresh empty list, which
+     supersedes older pending ones. Do not block until it reports success,
+     because the block parks an unsent list. The queue is processed in order,
+     so this also sends step 1's messages first. Another runtime or device of
+     the same Paykit App that queues a list for this peer can supersede the
+     clear, which the report shows, so pause such writers during cleanup.
+     This is best effort for this Paykit App only and cannot take back
+     details the peer already read.
+  3. Persist the app's own record of intent to end the link with that peer.
+     Call `removeContactsAndBlockPeers`, then `unblockPeer`, then clear the
+     record.
+
+  A crash between the two calls in step 3 leaves the peer Blocked, which hides
+  its Payment Requests and Receipts. On startup, unblock only peers that carry
+  that record and are still Blocked, then clear it. Never infer intent from a
+  Blocked peer without a Contact Record: the block records no reason and is
+  shared by every app and device on the identity.
 - `PaykitSdk.saveContacts(updates)` — save a batch in one atomic storage
   transaction after validating every update and the initialized identity. Results
   follow input order; duplicate keys are applied in order, with the last update
@@ -687,7 +731,10 @@ bootstrap.approveAuthWithCompanionClaim(
 - `PaykitSdk.saveContactsAndUnblockPeers(updates)` — explicitly add or restore
   contacts and unblock their blocked peers in the same atomic transaction. Other
   peers and existing links are unchanged. A busy blocked peer rejects the batch;
-  unblocked peers need a fresh Encrypted Link. Use `saveContact` for label edits.
+  unblocked peers need a fresh Encrypted Link Handshake, which requeues parked
+  work for the next `processOutboundPrivateMessages`, and accepted Allowances
+  and Payment Requests authorize again (see Blocking a peer). Use
+  `saveContact` for label edits.
 - `PaykitSdk.fetchPubkyProfile` and bounded `fetchPubkyFollows` — read Pubky
   app profile and follow data.
 - `PaykitSdk.resolveProfile` and `currentProfile` — resolve profile display
@@ -912,8 +959,16 @@ An empty `reservations` list publishes an empty Private Payment List for that
 counterparty. `failedToQueue` reports a queueing failure, not a rollback guarantee;
 inspect durable state before replacing reservations or retrying the workflow.
 `failedToDeliver` means the SDK
-queued the message, then delivery or reservation cleanup failed; keep the state
-and retry with `processPendingPrivateMessages`.
+queued the message, then delivery or reservation cleanup failed, the list is
+still queued, a newer list superseded it before it was sent, it is invalid, or
+its outbound record is gone. To recover any entry, call the same high-level
+operation again with the current complete intent: for a clear, call
+`clearPrivatePaymentListAndProcessOutbound` again; for reservation sync, pass
+the current complete reservations, keeping reservation IDs while they remain
+valid. Never replay an older update over newer intent. Each call queues a fresh
+list that supersedes older pending ones. `processPendingPrivateMessages` only
+advances lists that are still queued, so it alone cannot recover a superseded,
+invalid, or missing list.
 
 ### Pay A Contact
 
@@ -1106,9 +1161,12 @@ paying again, read
 - `PrivatePaymentListDeliveryReport.failedToQueue` is a local persistence or
   validation problem for that counterparty; show or log it as a
   blocked update.
-- `PrivatePaymentListDeliveryReport.failedToDeliver` is retryable workflow
-  state unless the nested error says recovery is required. Keep the queued
-  state and let the retry worker continue.
+- `PrivatePaymentListDeliveryReport.failedToDeliver` is not a rollback
+  guarantee and is recoverable unless the nested error says recovery is
+  required. Call the same high-level operation again with the current complete
+  intent and still-valid reservation IDs; do not replay an older update. The
+  retry worker only advances lists that are still queued, so it alone cannot
+  recover a superseded, invalid, or missing list.
 - Private resolution reports private availability and recovery state. Public
   resolution has a separate result and does not carry private-link state.
 

@@ -12,6 +12,7 @@ where
     /// This does not store the Encrypted Receipt or queue Receipt Access. Use
     /// [`Self::process_receipt_issuance`] to continue the network steps, or
     /// [`Self::issue_receipt`] when the draft already has a Receipt ID.
+    /// Returns `Policy` while the counterparty is `Blocked`.
     pub async fn prepare_receipt_issuance(
         &self,
         counterparty: PubkyPublicKey,
@@ -212,6 +213,7 @@ where
     }
 
     /// List local receipt issuance records for one counterparty.
+    /// Returns `Policy` while the counterparty is `Blocked`.
     pub async fn receipt_issuance_records(
         &self,
         counterparty: &PubkyPublicKey,

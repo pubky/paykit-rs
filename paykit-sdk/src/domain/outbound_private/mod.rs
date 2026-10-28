@@ -201,6 +201,7 @@ where
 }
 
 /// Load private messages that should be attempted for one counterparty.
+#[cfg(test)]
 pub(crate) async fn queued_outbound_private_messages<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
