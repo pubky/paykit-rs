@@ -253,6 +253,14 @@ where
     /// The returned record reflects the local outbound queue, not delivery or
     /// counterparty processing. It is derived in the queue transaction, without
     /// a fallible post-commit read.
+    ///
+    /// The complete outer Event Message must fit `PUBKY_NOISE_MSG_LEN` (1000)
+    /// bytes of `serde_json` UTF-8. Non-ASCII text counts as raw UTF-8, not as
+    /// escapes, and JSON objects such as `metadata` are re-serialized by the
+    /// SDK. Noise framing and the AEAD tag are outside this budget. An oversized
+    /// message is refused with a [`PaykitSdkError::Protocol`] error that
+    /// [`PaykitSdkError::is_message_too_large`] identifies, before link
+    /// readiness checks and before anything is queued.
     pub async fn propose_payment_request(
         &self,
         counterparty: PubkyPublicKey,
@@ -285,16 +293,24 @@ where
     /// caller's responsibility. The caller must establish counterparty support
     /// for conversion and payment deadlines. Success describes the local queue,
     /// not delivery, payment authorization, or counterparty processing.
+    ///
+    /// The message size limit of [`Self::propose_payment_request`] applies. An
+    /// oversized proposal is refused before the ID is looked up, so it binds
+    /// nothing and returns the size error even when the ID was already used.
     pub async fn propose_payment_request_with_id(
         &self,
         counterparty: PubkyPublicKey,
         payment_request_id: PaymentRequestId,
         terms: PaymentRequestTerms,
     ) -> Result<PaymentRequestRecord> {
+        let request = PaymentRequest::new(EventId::new_v4(), payment_request_id, terms);
+        require_payment_request_event_fits(
+            &self.config.app_id,
+            &PaymentRequestEvent::Request(request.clone()),
+        )?;
         self.with_storage_operation(Box::pin(async {
             let session = self.ensure_private_outbound_ready(&counterparty).await?;
             let identity = session.public_key()?;
-            let request = PaymentRequest::new(EventId::new_v4(), payment_request_id, terms);
             self.storage
                 .transaction(|tx| {
                     crate::domain::payment_requests::enqueue_idempotent_payment_request(
@@ -686,7 +702,8 @@ where
     /// Use [`Self::submit_payment_proof_submission`] to report Allowance attribution.
     ///
     /// The returned record reflects the local outbound queue, not delivery or
-    /// counterparty processing.
+    /// counterparty processing. The message size limit of
+    /// [`Self::submit_payment_proof_submission`] applies.
     pub async fn submit_payment_proof(
         &self,
         counterparty: PubkyPublicKey,
@@ -729,6 +746,17 @@ where
     /// reopens the request. Session creation, capability scope, key rotation, and
     /// settlement validation remain caller responsibilities. The returned record
     /// describes the local outbound queue.
+    ///
+    /// The complete outer Event Message must fit `PUBKY_NOISE_MSG_LEN` (1000)
+    /// bytes of `serde_json` UTF-8. Non-ASCII text counts as raw UTF-8, not as
+    /// escapes, and the `proof` object is re-serialized by the SDK. Noise
+    /// framing and the AEAD tag are outside this budget. An oversized message
+    /// is refused with a [`PaykitSdkError::Protocol`] error that
+    /// [`PaykitSdkError::is_message_too_large`] identifies, before link
+    /// readiness checks and before anything is queued. Payers should measure
+    /// the proof before paying, because a proof refused after payment cannot be
+    /// delivered (see `specs/erc20-payment-proofs.md` and
+    /// `specs/payment-conversion.md`).
     pub async fn submit_payment_proof_submission(
         &self,
         counterparty: PubkyPublicKey,
@@ -753,21 +781,11 @@ where
                 context: "Payment Request terms are unavailable".into(),
                 source: None,
             })?;
-            let mut event = PaymentProof::new(
+            let event = submission.into_payment_proof(
                 EventId::new_v4(),
                 payment_request_id.clone(),
                 request.request().payment_reference().clone(),
-                submission.billing_period,
-                submission.payment_app_id,
-                submission.payment_endpoint_identifier,
-                submission.proof,
             );
-            if let Some(allowance_id) = submission.allowance_id {
-                event = event.with_allowance_id(allowance_id);
-            }
-            if let Some(conversion_quote_id) = submission.conversion_quote_id {
-                event = event.with_conversion_quote_id(conversion_quote_id);
-            }
             validate_proof_conversion(&record, &event, &request)?;
             self.enqueue_raw_payment_proof(counterparty.clone(), &event)
                 .await?;
@@ -945,6 +963,10 @@ where
         counterparty: PubkyPublicKey,
         event: &PaymentRequest,
     ) -> Result<PaymentRequestRecord> {
+        require_payment_request_event_fits(
+            &self.config.app_id,
+            &PaymentRequestEvent::Request(event.clone()),
+        )?;
         self.with_storage_operation(Box::pin(async {
             self.ensure_private_outbound_ready(&counterparty).await?;
             enqueue_payment_request_message(
@@ -1001,16 +1023,31 @@ where
         counterparty: PubkyPublicKey,
         event: &PaymentProof,
     ) -> Result<OutboundPrivateMessageRecord> {
+        let event = PaymentRequestEvent::Proof(event.clone());
+        require_payment_request_event_fits(&self.config.app_id, &event)?;
         self.ensure_private_outbound_ready(&counterparty).await?;
         enqueue_checked_payment_request_action(
             &self.storage,
             counterparty,
             &self.config.app_id,
-            &PaymentRequestEvent::Proof(event.clone()),
+            &event,
             self.clock.now(),
         )
         .await
     }
+}
+
+/// Refuse an Event Message that one pubky-noise message cannot carry.
+///
+/// Serialization is pure, so callers run this before link readiness and
+/// storage work. That keeps a readiness error from hiding the size error. The
+/// queue transaction repeats the check on the bytes it stores.
+fn require_payment_request_event_fits(
+    app_id: &paykit_lib::PaykitAppId,
+    event: &PaymentRequestEvent,
+) -> Result<()> {
+    let raw_json = paykit_lib::serialize_payment_request_event(app_id, event)?;
+    crate::domain::outbound_private::require_outbound_private_message_fits(&raw_json)
 }
 
 fn remote_payment_request_app(record: &PaymentRequestRecord) -> Option<&paykit_lib::PaykitAppId> {

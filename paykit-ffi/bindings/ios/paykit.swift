@@ -2245,6 +2245,12 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Queue a new Payment Request proposal and return local derived state.
      * The caller must establish peer support before including conversion or payment deadlines.
+     *
+     * The complete Event Message must fit 1000 bytes of canonical JSON
+     * (`metadata` is re-serialized, non-ASCII is written raw). An oversized
+     * message fails with code `message_too_large` (category protocol), whose
+     * context reports the byte counts, before link readiness checks and before
+     * anything is queued.
      */
     func proposePaymentRequest(counterparty: String, terms: PaymentRequestTerms) async throws  -> PaymentRequestRecord
 
@@ -2616,6 +2622,12 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Queue a Payment Proof for an accepted Payment Request.
+     *
+     * The complete Event Message must fit 1000 bytes of canonical JSON
+     * (`proof` is re-serialized, non-ASCII is written raw). An oversized
+     * message fails with code `message_too_large` (category protocol), whose
+     * context reports the byte counts, before link readiness checks and before
+     * anything is queued. Measure with `paymentProofEventLen` before payment.
      */
     func submitPaymentProof(counterparty: String, paymentRequestId: String, proof: PaymentProofSubmission) async throws  -> PaymentRequestRecord
 
@@ -4413,6 +4425,12 @@ open func proposeAllowance(counterparty: String, localRole: AllowanceLocalRole, 
     /**
      * Queue a new Payment Request proposal and return local derived state.
      * The caller must establish peer support before including conversion or payment deadlines.
+     *
+     * The complete Event Message must fit 1000 bytes of canonical JSON
+     * (`metadata` is re-serialized, non-ASCII is written raw). An oversized
+     * message fails with code `message_too_large` (category protocol), whose
+     * context reports the byte counts, before link readiness checks and before
+     * anything is queued.
      */
 open func proposePaymentRequest(counterparty: String, terms: PaymentRequestTerms)async throws  -> PaymentRequestRecord  {
     return
@@ -5524,6 +5542,12 @@ open func stateRevision()throws  -> String?  {
 
     /**
      * Queue a Payment Proof for an accepted Payment Request.
+     *
+     * The complete Event Message must fit 1000 bytes of canonical JSON
+     * (`proof` is re-serialized, non-ASCII is written raw). An oversized
+     * message fails with code `message_too_large` (category protocol), whose
+     * context reports the byte counts, before link readiness checks and before
+     * anything is queued. Measure with `paymentProofEventLen` before payment.
      */
 open func submitPaymentProof(counterparty: String, paymentRequestId: String, proof: PaymentProofSubmission)async throws  -> PaymentRequestRecord  {
     return
@@ -14372,6 +14396,10 @@ public func FfiConverterTypePaymentProofRecord_lower(_ value: PaymentProofRecord
 
 /**
  * Method-specific Payment Proof submission data.
+ *
+ * The complete Event Message must fit 1000 bytes of canonical JSON: `proof` is
+ * re-serialized and non-ASCII text is written raw. Measure it with
+ * `paymentProofEventLen`.
  */
 public struct PaymentProofSubmission {
     /**
@@ -15315,6 +15343,9 @@ public func FfiConverterTypePaymentRequestScope_lower(_ value: PaymentRequestSco
 
 /**
  * Immutable terms for a Payment Request proposal.
+ *
+ * The complete Event Message must fit 1000 bytes of canonical JSON: `metadata`
+ * is re-serialized and non-ASCII text is written raw. See `proposePaymentRequest`.
  */
 public struct PaymentRequestTerms {
     /**
@@ -26041,6 +26072,33 @@ public func paymentDeadlineAt(deadline: PaymentDeadline, billingPeriod: BillingP
 })
 }
 /**
+ * Return the exact UTF-8 byte length of the Payment Proof Event Message that
+ * `submitPaymentProof` would queue for this App, Payment Reference and submission.
+ *
+ * `local_app_id` is the App ID this SDK is configured with (the
+ * `PaykitSdkConfig` App ID that `submitPaymentProof` sends from, written as the
+ * outer `app_id`), not the payee App in `submission.payment_app_id`. Passing
+ * the wrong one measures the wrong length.
+ *
+ * Compare it with the 1000-byte (`PUBKY_NOISE_MSG_LEN`) limit. This is a
+ * measurement, not a validity check: a proof that fits can still be refused by
+ * role, state or conversion checks, and lengths above the limit are returned.
+ * Payers must measure before payment approval and payees before offering a
+ * method. Pass maximum-length placeholders for variable fields (for example a
+ * 78-digit ERC-20 log index) and every optional ID you will send, or "fits" is
+ * false assurance. The proof JSON is re-serialized canonically, so do not
+ * measure the wallet's own string.
+ */
+public func paymentProofEventLen(localAppId: String, paymentReference: PaymentReference, submission: PaymentProofSubmission)throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_func_payment_proof_event_len(
+        FfiConverterString.lower(localAppId),
+        FfiConverterTypePaymentReference_lower(paymentReference),
+        FfiConverterTypePaymentProofSubmission_lower(submission),$0
+    )
+})
+}
+/**
  * Return the Pubky public key for a local secret key.
  */
 public func pubkyPublicKeyFromSecret(localSecretKey: PubkyLocalSecretKey)throws  -> String  {
@@ -26153,6 +26211,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_payment_deadline_at() != 2507) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_func_payment_proof_event_len() != 55765) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_pubky_public_key_from_secret() != 41462) {
@@ -26452,7 +26513,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_allowance() != 43457) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_payment_request() != 10421) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_payment_request() != 45442) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_encrypted_link_recovery_marker() != 29039) {
@@ -26602,7 +26663,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_state_revision() != 17936) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_submit_payment_proof() != 59922) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_submit_payment_proof() != 58760) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_contact_private_payment_lists() != 4039) {

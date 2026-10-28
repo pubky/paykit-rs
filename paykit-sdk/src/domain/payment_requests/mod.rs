@@ -277,6 +277,62 @@ impl fmt::Debug for PaymentProofSubmission {
     }
 }
 
+impl PaymentProofSubmission {
+    /// Build the Payment Proof Event Message that reports this submission.
+    pub(crate) fn into_payment_proof(
+        self,
+        event_id: EventId,
+        payment_request_id: paykit_lib::PaymentRequestId,
+        payment_reference: paykit_lib::PaymentReference,
+    ) -> PaymentProof {
+        let mut event = PaymentProof::new(
+            event_id,
+            payment_request_id,
+            payment_reference,
+            self.billing_period,
+            self.payment_app_id,
+            self.payment_endpoint_identifier,
+            self.proof,
+        );
+        if let Some(allowance_id) = self.allowance_id {
+            event = event.with_allowance_id(allowance_id);
+        }
+        if let Some(conversion_quote_id) = self.conversion_quote_id {
+            event = event.with_conversion_quote_id(conversion_quote_id);
+        }
+        event
+    }
+}
+
+/// Return the exact UTF-8 byte length of the Payment Proof Event Message that
+/// submitting `submission` from `local_app_id` would queue for a request with
+/// `payment_reference`.
+///
+/// `local_app_id` is the App ID this SDK is configured with (the
+/// `PaykitSdkConfig` App ID that `submit_payment_proof` sends from, written as
+/// the outer `app_id`), not the payee App in `submission.payment_app_id`.
+/// Passing the wrong one measures the wrong length.
+///
+/// Compare it with `PUBKY_NOISE_MSG_LEN` (1000 bytes). This is a measurement,
+/// not a validity check: a proof that fits can still be refused by role, state
+/// or conversion checks, and lengths above the limit are returned. Payers must
+/// measure before payment approval and payees before offering a method, passing
+/// maximum-length placeholders for variable fields and every optional ID that
+/// will be sent. Canonical UUID-v4 Event and Payment Request IDs always have 36
+/// characters, so fresh placeholders keep the length exact.
+pub fn payment_proof_event_len(
+    local_app_id: &paykit_lib::PaykitAppId,
+    payment_reference: &paykit_lib::PaymentReference,
+    submission: PaymentProofSubmission,
+) -> Result<usize> {
+    let event = submission.into_payment_proof(
+        EventId::new_v4(),
+        paykit_lib::PaymentRequestId::new_v4(),
+        payment_reference.clone(),
+    );
+    Ok(serialize_payment_request_event(local_app_id, &PaymentRequestEvent::Proof(event))?.len())
+}
+
 /// Payment Proof captured in a derived Payment Request record.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaymentProofRecord {

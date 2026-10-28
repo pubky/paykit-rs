@@ -351,3 +351,26 @@ fn test_retention_limit_cause_selects_policy_code() {
         "policy/retention_limit_reached: counterparty reached the limit"
     );
 }
+
+#[test]
+fn test_message_too_large_cause_selects_protocol_code() {
+    // The typed cause only picks the code. Like every cause it never reaches
+    // `context`, and any other protocol cause keeps the generic code (see above).
+    let ffi = PaykitFfiError::from(PaykitSdkError::Protocol {
+        context: "message is 1200 bytes, limit is 1000 bytes".into(),
+        source: Some(paykit_sdk::MessageTooLarge.into()),
+    });
+
+    assert_eq!(
+        parts(&ffi),
+        (
+            "protocol",
+            "message_too_large",
+            "message is 1200 bytes, limit is 1000 bytes"
+        )
+    );
+    assert_eq!(
+        ffi.to_string(),
+        "protocol/message_too_large: message is 1200 bytes, limit is 1000 bytes"
+    );
+}
