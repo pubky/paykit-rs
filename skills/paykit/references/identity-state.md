@@ -133,17 +133,40 @@ derive every generation. Treat root compromise separately from app enrollment.
 ## Backups and Restore
 
 `export_backup_state()` and FFI `exportBackupString()` export sensitive plaintext
-state, including private messages, Noise snapshots, and Receipt Decryption Keys.
+state, including private messages, Noise snapshots (with the current Paykit
+Noise static secret key and session ephemeral secrets), and Receipt Decryption
+Keys. They exclude the Pubky identity secret and Paykit Identity Secret.
 Hex/serialization is not encryption. Encrypt backups before storage/upload;
-never log them. Preserve session credentials and current key/generation securely
-outside the backup. The live encrypted shared resource and backups are different:
-with current access, apps reopen live state after sign-out/reinstall; keys alone
-cannot reconstruct deleted private history.
+never log them. If a backup is exposed, call `rotate_paykit_identity_key` and
+relink with the affected peers. Callback-storage state blobs hold the same
+plaintext; keep them in platform-protected storage. Preserve session
+credentials and current key/generation securely outside the backup. The live
+encrypted shared resource and backups are different: with current access, apps
+reopen live state after sign-out/reinstall; keys alone cannot reconstruct
+deleted private history.
 
 Normal `restore_backup_state(backup, link_policy)` /
 `restoreBackupString(backup, linkPolicy)` requires empty or matching
-identity-only storage. Never overwrite healthy shared state with a stale app
-backup. Republish participating App Registry entries after restore and reconcile
+identity-only storage (identity metadata, authorized Paykit App records, and
+operation leases); the refusal names the blocking record kinds. It is also
+refused while an operation lease is unexpired and needs an active same-identity
+session, private-link-capable for private state. Never overwrite healthy shared
+state with a stale app backup.
+
+`publish_paykit_app` (and endpoint sync after it) blocks restore, so after
+`initialize()` on a fresh backing, offer restore before publishing. With Pubky
+shared storage, restore after any app published is refused by design;
+`recover_shared_state_from_backup` covers only missing or corrupt state. With
+callback storage, discard the state blob and initialize again only when the
+app independently knows it is the only Paykit App and SDK handle using that
+backing for this identity, and the refusal names nothing but registered Paykit
+Apps and public Payment Endpoint records; then restore with `RequireRecovery`.
+The SDK cannot check ownership: those labels combine every app's records and
+omit Paykit App IDs, so another app's setup produces the same refusal; otherwise
+do not discard. Discarding newer history risks paying a re-delivered Payment
+Request twice.
+
+Republish participating App Registry entries after restore and reconcile
 complete wallet execution history before automation. Restore retains peer
 authorization pins; a saved snapshot does not bypass checks against current
 signed keys.

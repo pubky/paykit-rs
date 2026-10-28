@@ -291,6 +291,9 @@ where
     /// Publishing also reactivates an application whose earlier removal did
     /// not complete. After a failed publication, staged capability restrictions
     /// remain in effect until a successful publication reconciles them.
+    ///
+    /// Publishing writes SDK-managed state, so [`Self::restore_backup_state`]
+    /// is refused on this state backing afterwards; restore a backup first.
     pub async fn publish_paykit_app(
         &self,
         app: paykit_lib::PaykitApp,
