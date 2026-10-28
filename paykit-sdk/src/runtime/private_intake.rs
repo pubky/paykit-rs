@@ -6,6 +6,8 @@ use crate::storage::{
 use futures_util::StreamExt;
 use std::{
     collections::HashMap,
+    future::Future,
+    pin::Pin,
     sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
@@ -22,6 +24,8 @@ const MAX_AUDIT_JITTER: Duration = Duration::from_secs(5);
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const SUPERVISOR_LEASE_TIMEOUT: chrono::Duration = chrono::Duration::minutes(2);
 const SUPERVISOR_LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(30);
+const MAX_AUDIT_ACQUISITIONS_PER_PEER: usize =
+    crate::storage::PRIVATE_INTAKE_MAX_PACKETS_PER_PEER + 1;
 
 /// Validated limits for SSE-assisted private intake.
 #[derive(Clone, Debug)]
@@ -252,6 +256,118 @@ fn route_private_intake_event(
         };
         (peer, cursor)
     })
+}
+
+async fn audit_private_intake_peer<F, Fut>(
+    peer: PubkyPublicKey,
+    mut acquire: F,
+) -> Result<PrivatePacketAcquisition>
+where
+    F: FnMut(PubkyPublicKey, Option<PrivateIntakeCursorRecord>) -> Fut,
+    Fut: Future<Output = Result<PrivatePacketAcquisition>>,
+{
+    for _ in 0..MAX_AUDIT_ACQUISITIONS_PER_PEER {
+        let outcome = acquire(peer.clone(), None).await?;
+        match outcome {
+            PrivatePacketAcquisition::Inserted => continue,
+            PrivatePacketAcquisition::Absent
+            | PrivatePacketAcquisition::AlreadyBuffered
+            | PrivatePacketAcquisition::CapacityReached => return Ok(outcome),
+        }
+    }
+    Ok(PrivatePacketAcquisition::Inserted)
+}
+
+enum PrivateIntakeEventLoopExit {
+    Stopped,
+    Ended,
+    Backpressured,
+    Failed,
+}
+
+type PrivateIntakeAcquisitionFuture =
+    Pin<Box<dyn Future<Output = Result<PrivatePacketAcquisition>> + Send>>;
+type PrivateIntakeAcquire = Arc<
+    dyn Fn(PubkyPublicKey, Option<PrivateIntakeCursorRecord>) -> PrivateIntakeAcquisitionFuture
+        + Send
+        + Sync,
+>;
+type PrivateIntakeAuditFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+type PrivateIntakeAudit = Arc<dyn Fn() -> PrivateIntakeAuditFuture + Send + Sync>;
+
+async fn process_private_intake_event<F, Fut>(
+    group: &SubscriptionGroup,
+    event: pubky::Event,
+    acquire: &mut F,
+) -> Option<(PubkyPublicKey, Result<PrivatePacketAcquisition>)>
+where
+    F: FnMut(PubkyPublicKey, Option<PrivateIntakeCursorRecord>) -> Fut,
+    Fut: Future<Output = Result<PrivatePacketAcquisition>>,
+{
+    let (peer, cursor) = route_private_intake_event(group, event)?;
+    let outcome = acquire(peer.clone(), Some(cursor)).await;
+    Some((peer, outcome))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "connected loop receives explicit lifecycle, health, and injected I/O boundaries"
+)]
+async fn run_connected_private_intake_stream(
+    group: &SubscriptionGroup,
+    mut stream: Pin<
+        Box<
+            dyn futures_util::Stream<Item = std::result::Result<pubky::Event, pubky::Error>> + Send,
+        >,
+    >,
+    audit_interval: Duration,
+    audit_delay: Duration,
+    mut stop: watch::Receiver<bool>,
+    health: &Arc<AsyncRwLock<PrivateIntakeHealth>>,
+    work: &Arc<Notify>,
+    acquire: PrivateIntakeAcquire,
+    audit_group: PrivateIntakeAudit,
+) -> PrivateIntakeEventLoopExit {
+    let mut audit =
+        tokio::time::interval_at(tokio::time::Instant::now() + audit_delay, audit_interval);
+    audit.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            changed = stop.changed() => {
+                if changed.is_err() || *stop.borrow() {
+                    return PrivateIntakeEventLoopExit::Stopped;
+                }
+            }
+            _ = audit.tick() => audit_group().await,
+            event = stream.next() => match event {
+                Some(Ok(event)) => {
+                    let mut acquire_one = |peer, cursor| acquire(peer, cursor);
+                    match process_private_intake_event(group, event, &mut acquire_one).await {
+                        Some((peer, Ok(PrivatePacketAcquisition::Inserted))) => {
+                            work.notify_waiters();
+                            set_peer_state(health, peer, PrivateIntakeTransportState::Replaying).await;
+                        }
+                        Some((peer, Ok(PrivatePacketAcquisition::AlreadyBuffered))) => {
+                            set_peer_state(health, peer, PrivateIntakeTransportState::Replaying).await;
+                        }
+                        Some((peer, Ok(PrivatePacketAcquisition::Absent))) => {
+                            set_peer_state(health, peer, PrivateIntakeTransportState::CaughtUp).await;
+                        }
+                        Some((peer, Ok(PrivatePacketAcquisition::CapacityReached))) => {
+                            set_peer_state(health, peer.clone(), PrivateIntakeTransportState::Backpressured).await;
+                            return PrivateIntakeEventLoopExit::Backpressured;
+                        }
+                        Some((peer, Err(_))) => {
+                            set_peer_state(health, peer, PrivateIntakeTransportState::Stale).await;
+                        }
+                        None => {}
+                    }
+                }
+                Some(Err(_)) => return PrivateIntakeEventLoopExit::Failed,
+                None => return PrivateIntakeEventLoopExit::Ended,
+            }
+        }
+    }
 }
 
 async fn claim_private_intake_lease<S: StorageAdapter>(
@@ -659,7 +775,7 @@ where
                     break;
                 }
             };
-            let mut stream = match builder
+            let stream = match builder
                 .path(paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX)
                 .max_event_bytes(config.max_event_bytes)
                 .live()
@@ -691,47 +807,48 @@ where
                 PrivateIntakeTransportState::Replaying,
             )
             .await;
-            let mut audit = tokio::time::interval_at(
-                tokio::time::Instant::now() + audit_jitter(&active_group),
+            let acquire: PrivateIntakeAcquire = {
+                let sdk = Arc::clone(&self);
+                Arc::new(move |peer, cursor| {
+                    let sdk = Arc::clone(&sdk);
+                    Box::pin(async move { sdk.acquire_expected_private_packet(peer, cursor).await })
+                })
+            };
+            let audit_group: PrivateIntakeAudit = {
+                let sdk = Arc::clone(&self);
+                let group = group.clone();
+                let health = Arc::clone(&health);
+                let work = Arc::clone(&work);
+                Arc::new(move || {
+                    let sdk = Arc::clone(&sdk);
+                    let group = group.clone();
+                    let health = Arc::clone(&health);
+                    let work = Arc::clone(&work);
+                    Box::pin(async move {
+                        sdk.audit_private_intake_group(&group, &health, &work).await;
+                    })
+                })
+            };
+            let exit = run_connected_private_intake_stream(
+                &active_group,
+                stream,
                 config.healthy_audit_interval,
-            );
-            audit.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tokio::select! {
-                    changed = stop.changed() => {
-                        if changed.is_err() || *stop.borrow() { return; }
-                    }
-                    _ = audit.tick() => {
-                        self.audit_private_intake_group(&group, &health, &work).await;
-                    }
-                    event = stream.next() => match event {
-                        Some(Ok(event)) => {
-                            if let Some((peer, cursor)) = route_private_intake_event(&active_group, event) {
-                                match self.acquire_expected_private_packet(peer.clone(), Some(cursor)).await {
-                                    Ok(PrivatePacketAcquisition::Inserted) => {
-                                        work.notify_waiters();
-                                        set_peer_state(&health, peer, PrivateIntakeTransportState::Replaying).await;
-                                    }
-                                    Ok(PrivatePacketAcquisition::AlreadyBuffered) => {
-                                        set_peer_state(&health, peer, PrivateIntakeTransportState::Replaying).await;
-                                    }
-                                    Ok(PrivatePacketAcquisition::Absent) => {
-                                        set_peer_state(&health, peer, PrivateIntakeTransportState::CaughtUp).await;
-                                    }
-                                    Ok(PrivatePacketAcquisition::CapacityReached) => {
-                                        set_peer_state(&health, peer, PrivateIntakeTransportState::Backpressured).await;
-                                        break;
-                                    }
-                                    Err(_) => set_peer_state(&health, peer, PrivateIntakeTransportState::Stale).await,
-                                }
-                            }
-                        }
-                        Some(Err(_)) | None => {
-                            set_group_state(&health, &active_group, PrivateIntakeTransportState::Stale).await;
-                            break;
-                        }
-                    }
-                }
+                audit_jitter(&active_group),
+                stop.clone(),
+                &health,
+                &work,
+                acquire,
+                audit_group,
+            )
+            .await;
+            if matches!(exit, PrivateIntakeEventLoopExit::Stopped) {
+                return;
+            }
+            if matches!(
+                exit,
+                PrivateIntakeEventLoopExit::Ended | PrivateIntakeEventLoopExit::Failed
+            ) {
+                set_group_state(&health, &active_group, PrivateIntakeTransportState::Stale).await;
             }
             if wait_reconnect_or_stop(&mut stop).await {
                 break;
@@ -774,9 +891,10 @@ where
                 .await;
                 continue;
             }
-            match self
-                .acquire_expected_private_packet(peer.clone(), None)
-                .await
+            match audit_private_intake_peer(peer.clone(), |peer, cursor| {
+                self.acquire_expected_private_packet(peer, cursor)
+            })
+            .await
             {
                 Ok(PrivatePacketAcquisition::Inserted) => {
                     work.notify_waiters();
@@ -965,6 +1083,7 @@ fn is_unsupported_event_stream(error: &pubky::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::stream;
 
     fn users(count: usize) -> Vec<PubkyPublicKey> {
         (0..count)
@@ -1188,5 +1307,103 @@ mod tests {
 
         assert_eq!(next_private_intake_counter(&state, &peer, 7, 3).unwrap(), 5);
         assert_eq!(next_private_intake_counter(&state, &peer, 7, 3).unwrap(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_startup_audit_catches_up_contiguous_backlog_to_absent() {
+        let peer = users(1).remove(0);
+        let outcomes = Arc::new(StdMutex::new(vec![
+            PrivatePacketAcquisition::Absent,
+            PrivatePacketAcquisition::Inserted,
+            PrivatePacketAcquisition::Inserted,
+        ]));
+        let observed = Arc::new(StdMutex::new(Vec::new()));
+
+        let result = audit_private_intake_peer(peer.clone(), {
+            let outcomes = Arc::clone(&outcomes);
+            let observed = Arc::clone(&observed);
+            move |requested, cursor| {
+                let outcome = outcomes.lock().unwrap().pop().unwrap();
+                observed.lock().unwrap().push((requested, cursor));
+                async move { Ok(outcome) }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(matches!(result, PrivatePacketAcquisition::Absent));
+        assert_eq!(observed.lock().unwrap().len(), 3);
+        assert!(observed
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(requested, cursor)| requested == &peer && cursor.is_none()));
+    }
+
+    #[tokio::test]
+    async fn test_production_stream_loop_routes_event_then_stops_on_backpressure() {
+        let peer = users(1).remove(0);
+        let owner = peer.to_public_key().unwrap();
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: vec![peer.clone()],
+        };
+        let events = stream::iter([
+            Ok(pubky::Event {
+                event_type: pubky::EventType::Put {
+                    content_hash: blake3::Hash::from_bytes([7; 32]),
+                },
+                resource: format!("pubky://{}/pub/paykit/v0/private/slot", owner.z32())
+                    .parse()
+                    .unwrap(),
+                cursor: pubky::EventCursor::new(42),
+            }),
+            Ok(pubky::Event {
+                event_type: pubky::EventType::Delete,
+                resource: format!("pubky://{}/pub/paykit/v0/private/slot", owner.z32())
+                    .parse()
+                    .unwrap(),
+                cursor: pubky::EventCursor::new(43),
+            }),
+        ]);
+        let observed = Arc::new(StdMutex::new(Vec::new()));
+        let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth::default()));
+        let work = Arc::new(Notify::new());
+        let (_stop, stop_rx) = watch::channel(false);
+        let acquire: PrivateIntakeAcquire = Arc::new({
+            let observed = Arc::clone(&observed);
+            move |requested, cursor| {
+                observed.lock().unwrap().push((requested, cursor));
+                Box::pin(async { Ok(PrivatePacketAcquisition::CapacityReached) })
+            }
+        });
+        let audit: PrivateIntakeAudit = Arc::new(|| Box::pin(async {}));
+
+        let result = run_connected_private_intake_stream(
+            &group,
+            Box::pin(events),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            stop_rx,
+            &health,
+            &work,
+            acquire,
+            audit,
+        )
+        .await;
+
+        assert!(matches!(result, PrivateIntakeEventLoopExit::Backpressured));
+        let (observed_peer, observed_cursor) = {
+            let observed = observed.lock().unwrap();
+            assert_eq!(observed.len(), 1);
+            (observed[0].0.clone(), observed[0].1.clone())
+        };
+        assert_eq!(observed_peer, peer);
+        assert_eq!(observed_cursor.as_ref().unwrap().event_id, 42);
+        assert_eq!(
+            health.read().await.peers[&observed_peer],
+            PrivateIntakeTransportState::Backpressured
+        );
     }
 }
