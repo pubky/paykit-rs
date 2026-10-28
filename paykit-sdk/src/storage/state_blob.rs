@@ -4,9 +4,10 @@ use super::StorageState;
 use crate::{PaykitSdkError, Result};
 
 /// Current encoded SDK state-blob version.
-pub const SDK_STATE_BLOB_VERSION: u32 = 3;
+pub const SDK_STATE_BLOB_VERSION: u32 = 4;
 const SDK_STATE_BLOB_VERSION_V1: u32 = 1;
 const SDK_STATE_BLOB_VERSION_V2: u32 = 2;
+const SDK_STATE_BLOB_VERSION_V3: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct StorageStateEnvelope<T> {
@@ -93,6 +94,8 @@ impl From<StorageStateV1> for StorageState {
             next_paykit_app_operation_lease_id: state.next_paykit_app_operation_lease_id,
             private_intake_supervisor_lease: None,
             next_private_intake_supervisor_lease_id: 0,
+            private_intake_stream_capacity: None,
+            private_intake_admitted_homeservers: std::collections::HashMap::new(),
             payment_request_execution_claims: state.payment_request_execution_claims,
             outbound_private_messages: state.outbound_private_messages,
             next_outbound_private_message_id: state.next_outbound_private_message_id,
@@ -142,11 +145,11 @@ pub fn decode_storage_state_blob(bytes: &[u8]) -> Result<StorageState> {
             (state.into(), remainder)
         }
         SDK_STATE_BLOB_VERSION_V2 => {
-            // Version 3 only appends two defaultable supervisor-lease fields.
+            // Later versions append four defaultable supervisor fields.
             // Postcard does not synthesize missing sequence fields, so append
-            // their canonical `None`/zero encoding before decoding frozen v2.
+            // their canonical empty encoding before decoding frozen v2.
             let mut upgraded = state_bytes.to_vec();
-            upgraded.extend_from_slice(&[0, 0]);
+            upgraded.extend_from_slice(&[0, 0, 0, 0]);
             let (state, remainder) =
                 postcard::take_from_bytes(&upgraded).map_err(|err| PaykitSdkError::Storage {
                     context: "decode SDK state blob version 2".into(),
@@ -160,9 +163,28 @@ pub fn decode_storage_state_blob(bytes: &[u8]) -> Result<StorageState> {
             }
             (state, &[][..])
         }
+        SDK_STATE_BLOB_VERSION_V3 => {
+            // Version 4 appends optional capacity and an empty admission map.
+            let mut upgraded = state_bytes.to_vec();
+            upgraded.extend_from_slice(&[0, 0]);
+            let (mut state, remainder): (StorageState, _) = postcard::take_from_bytes(&upgraded)
+                .map_err(|err| PaykitSdkError::Storage {
+                    context: "decode SDK state blob version 3".into(),
+                    source: Some(err.into()),
+                })?;
+            if !remainder.is_empty() {
+                return Err(PaykitSdkError::Storage {
+                    context: "SDK state blob version 3 contains trailing bytes".into(),
+                    source: None,
+                });
+            }
+            // Process-local supervisor cannot survive an SDK upgrade/restart.
+            state.private_intake_supervisor_lease = None;
+            (state, &[][..])
+        }
         SDK_STATE_BLOB_VERSION => {
             postcard::take_from_bytes(state_bytes).map_err(|err| PaykitSdkError::Storage {
-                context: "decode SDK state blob version 3".into(),
+                context: "decode SDK state blob version 4".into(),
                 source: Some(err.into()),
             })?
         }
@@ -297,8 +319,9 @@ mod tests {
     fn test_storage_state_blob_decodes_v2_before_supervisor_lease_fields() {
         let mut encoded = encode_storage_state_blob(&StorageState::default()).unwrap();
         encoded[0] = SDK_STATE_BLOB_VERSION_V2 as u8;
-        assert_eq!(encoded.pop(), Some(0));
-        assert_eq!(encoded.pop(), Some(0));
+        for _ in 0..4 {
+            assert_eq!(encoded.pop(), Some(0));
+        }
 
         let decoded = decode_storage_state_blob(&encoded).unwrap();
         assert!(decoded.private_intake_supervisor_lease.is_none());
@@ -306,11 +329,35 @@ mod tests {
     }
 
     #[test]
+    fn test_storage_state_blob_decodes_v3_before_capacity_admission_fields() {
+        let now = chrono::Utc::now();
+        let state = StorageState {
+            private_intake_supervisor_lease: Some(crate::storage::PrivateIntakeSupervisorLease {
+                lease_id: 7,
+                claimed_at: now,
+                expires_at: now + chrono::Duration::minutes(1),
+            }),
+            next_private_intake_supervisor_lease_id: 8,
+            ..StorageState::default()
+        };
+        let mut encoded = encode_storage_state_blob(&state).unwrap();
+        encoded[0] = SDK_STATE_BLOB_VERSION_V3 as u8;
+        assert_eq!(encoded.pop(), Some(0));
+        assert_eq!(encoded.pop(), Some(0));
+
+        let decoded = decode_storage_state_blob(&encoded).unwrap();
+        assert!(decoded.private_intake_supervisor_lease.is_none());
+        assert_eq!(decoded.next_private_intake_supervisor_lease_id, 8);
+        assert!(decoded.private_intake_stream_capacity.is_none());
+        assert!(decoded.private_intake_admitted_homeservers.is_empty());
+    }
+
+    #[test]
     fn test_storage_state_blob_upgrades_real_v1_fixture() {
         let encoded = include_bytes!("tests/fixtures/sdk-state-v1.postcard");
         let state = decode_storage_state_blob(encoded).unwrap();
 
-        assert_eq!(SDK_STATE_BLOB_VERSION, 3);
+        assert_eq!(SDK_STATE_BLOB_VERSION, 4);
         assert_eq!(
             state.identity_state.unwrap().public_key.unwrap().as_str(),
             "7jfgaa9nutjyixzikb7tgmsf9gkwq7iqz498zr1nd5ig1fng4esy"
@@ -322,7 +369,7 @@ mod tests {
 
         let current = encode_storage_state_blob(&StorageState::default()).unwrap();
         let (version, _): (u32, _) = postcard::take_from_bytes(&current).unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[test]
@@ -479,6 +526,18 @@ mod tests {
         assert!(
             decode_storage_state_blob(&encode_storage_state_blob(&over_capacity).unwrap()).is_err()
         );
+
+        let mut missing_supervisor_capacity = original.clone();
+        missing_supervisor_capacity.private_intake_supervisor_lease =
+            Some(crate::storage::PrivateIntakeSupervisorLease {
+                lease_id: 1,
+                claimed_at: chrono::Utc::now(),
+                expires_at: chrono::Utc::now() + chrono::Duration::minutes(1),
+            });
+        assert!(decode_storage_state_blob(
+            &encode_storage_state_blob(&missing_supervisor_capacity).unwrap()
+        )
+        .is_err());
 
         let mut mismatched_cursor_key = original;
         let cursor = mismatched_cursor_key

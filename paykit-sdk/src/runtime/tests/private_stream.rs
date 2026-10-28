@@ -73,6 +73,8 @@ async fn test_legacy_receive_conflicts_with_active_private_intake_ownership() {
                 tx.claim_private_intake_supervisor(
                     FixedClock.now(),
                     FixedClock.now() + chrono::Duration::minutes(1),
+                    1,
+                    HashMap::new(),
                 )?
                 .unwrap();
                 Ok(())

@@ -28,6 +28,21 @@ pub use state_blob::{
     decode_storage_state_blob, encode_storage_state_blob, SDK_STATE_BLOB_VERSION,
 };
 
+pub(crate) const PRIVATE_INTAKE_MAX_EVENT_STREAM_USERS: usize = 50;
+
+pub(crate) fn private_intake_stream_count(
+    admitted_homeservers: &HashMap<PubkyPublicKey, String>,
+) -> usize {
+    let mut users_per_homeserver = HashMap::<&str, usize>::new();
+    for homeserver in admitted_homeservers.values() {
+        *users_per_homeserver.entry(homeserver.as_str()).or_default() += 1;
+    }
+    users_per_homeserver
+        .values()
+        .map(|users| users.div_ceil(PRIVATE_INTAKE_MAX_EVENT_STREAM_USERS))
+        .sum()
+}
+
 pub(crate) use queue::outbound_private_queue_head_is_claimable;
 pub(crate) use records::NewPrivateStreamItemDetails;
 
@@ -582,7 +597,25 @@ pub trait StorageTransaction {
         &mut self,
         now: DateTime<Utc>,
         expires_at: DateTime<Utc>,
+        stream_capacity: usize,
+        admitted_homeservers: HashMap<PubkyPublicKey, String>,
     ) -> Result<Option<PrivateIntakeSupervisorLease>>;
+
+    /// Reserve one peer's resolved homeserver under active supervisor capacity.
+    /// Returns false when no unexpired supervisor owns intake.
+    fn reserve_private_intake_admission(
+        &mut self,
+        counterparty: PubkyPublicKey,
+        homeserver: String,
+        now: DateTime<Utc>,
+    ) -> Result<bool>;
+
+    /// Replace resolved topology while lease ownership still matches.
+    fn replace_private_intake_admissions(
+        &mut self,
+        lease_id: u64,
+        admitted_homeservers: HashMap<PubkyPublicKey, String>,
+    ) -> Result<bool>;
 
     /// Extend private-intake ownership only while lease id still matches.
     fn renew_private_intake_supervisor(&mut self, lease_id: u64, expires_at: DateTime<Utc>)

@@ -417,6 +417,31 @@ fn validate_live_link_state(state: &StorageState) -> Result<()> {
 }
 
 fn validate_private_intake_state(state: &StorageState) -> Result<()> {
+    match (
+        state.private_intake_supervisor_lease.as_ref(),
+        state.private_intake_stream_capacity,
+    ) {
+        (Some(_), Some(capacity))
+            if capacity > 0
+                && crate::storage::private_intake_stream_count(
+                    &state.private_intake_admitted_homeservers,
+                ) <= capacity => {}
+        (None, None) if state.private_intake_admitted_homeservers.is_empty() => {}
+        _ => {
+            return Err(invalid_live_state(
+                "private intake supervisor capacity ownership is inconsistent",
+            ));
+        }
+    }
+    if state
+        .private_intake_admitted_homeservers
+        .values()
+        .any(String::is_empty)
+    {
+        return Err(invalid_live_state(
+            "private intake admission has an empty homeserver",
+        ));
+    }
     for cursor in state.private_intake_cursors.values() {
         if cursor.homeserver.is_empty() {
             return Err(invalid_live_state(

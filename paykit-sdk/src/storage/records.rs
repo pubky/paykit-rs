@@ -840,6 +840,12 @@ pub struct StorageState {
     /// Appended with a default to preserve decoding of state-blob version 2.
     #[serde(default)]
     pub next_private_intake_supervisor_lease_id: u64,
+    /// Stream capacity reserved by active private-intake supervisor.
+    #[serde(default)]
+    pub private_intake_stream_capacity: Option<usize>,
+    /// Homeserver admission owned by active supervisor for each covered peer.
+    #[serde(default)]
+    pub private_intake_admitted_homeservers: HashMap<PubkyPublicKey, String>,
 }
 
 impl fmt::Debug for StorageState {

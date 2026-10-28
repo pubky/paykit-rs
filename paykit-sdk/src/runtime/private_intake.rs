@@ -13,7 +13,7 @@ use std::{
 };
 use tokio::sync::{watch, Notify, RwLock as AsyncRwLock};
 
-const MAX_EVENT_STREAM_USERS: usize = 50;
+const MAX_EVENT_STREAM_USERS: usize = crate::storage::PRIVATE_INTAKE_MAX_EVENT_STREAM_USERS;
 const DEFAULT_MAX_EVENT_BYTES: usize = 4096;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_STREAM_CAPACITY: usize = 1024;
@@ -323,6 +323,36 @@ fn reserve_stream_capacity(capacity: usize, required: usize) -> Result<usize> {
     Ok(required)
 }
 
+#[cfg(test)]
+fn reserve_private_intake_admission(
+    admitted_homeservers: &mut HashMap<PubkyPublicKey, String>,
+    counterparty: PubkyPublicKey,
+    homeserver: String,
+    capacity: usize,
+) -> Result<()> {
+    let mut proposed = admitted_homeservers.clone();
+    proposed.insert(counterparty, homeserver);
+    reserve_stream_capacity(
+        capacity,
+        crate::storage::private_intake_stream_count(&proposed),
+    )?;
+    *admitted_homeservers = proposed;
+    Ok(())
+}
+
+fn admitted_homeservers(groups: &[SubscriptionGroup]) -> HashMap<PubkyPublicKey, String> {
+    groups
+        .iter()
+        .flat_map(|group| {
+            group
+                .peers
+                .iter()
+                .cloned()
+                .map(|peer| (peer, group.homeserver_name.clone()))
+        })
+        .collect()
+}
+
 fn subscribable_private_intake_peers(
     state: &crate::storage::StorageState,
     peers: &[PubkyPublicKey],
@@ -550,15 +580,21 @@ async fn run_connected_private_intake_stream(
 async fn claim_private_intake_lease<S: StorageAdapter>(
     storage: &S,
     now: DateTime<Utc>,
+    stream_capacity: usize,
+    admitted_homeservers: HashMap<PubkyPublicKey, String>,
 ) -> Result<PrivateIntakeSupervisorLease> {
     storage
         .transaction(move |tx| {
-            tx.claim_private_intake_supervisor(now, now + SUPERVISOR_LEASE_TIMEOUT)?
-                .ok_or_else(|| PaykitSdkError::Policy {
-                    context: "private intake supervisor is already running for this identity"
-                        .into(),
-                    source: None,
-                })
+            tx.claim_private_intake_supervisor(
+                now,
+                now + SUPERVISOR_LEASE_TIMEOUT,
+                stream_capacity,
+                admitted_homeservers,
+            )?
+            .ok_or_else(|| PaykitSdkError::Policy {
+                context: "private intake supervisor is already running for this identity".into(),
+                source: None,
+            })
         })
         .await
 }
@@ -645,7 +681,13 @@ where
         config.validate()?;
         let groups = self.resolve_private_intake_groups().await?;
         let reserved_streams = reserve_stream_capacity(config.stream_capacity, groups.len())?;
-        let lease = claim_private_intake_lease(&self.storage, self.clock.now()).await?;
+        let lease = claim_private_intake_lease(
+            &self.storage,
+            self.clock.now(),
+            config.stream_capacity,
+            admitted_homeservers(&groups),
+        )
+        .await?;
         let lease_id = lease.lease_id;
         let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth {
             peers: groups
@@ -696,7 +738,7 @@ where
             let work = Arc::clone(&work);
             tasks.push(tokio::spawn(async move {
                 sdk.clone()
-                    .run_private_intake_topology(groups, config, stop_rx, health, work)
+                    .run_private_intake_topology(groups, config, lease_id, stop_rx, health, work)
                     .await;
                 let _ = release_private_intake_lease(&sdk.storage, lease_id).await;
             }));
@@ -714,6 +756,7 @@ where
         self: Arc<Self>,
         mut groups: Vec<SubscriptionGroup>,
         config: PrivateIntakeConfig,
+        lease_id: u64,
         mut stop: watch::Receiver<bool>,
         health: Arc<AsyncRwLock<PrivateIntakeHealth>>,
         work: Arc<Notify>,
@@ -793,11 +836,18 @@ where
                     _ = tokio::time::sleep(RECONNECT_DELAY) => {
                         match self.resolve_private_intake_groups().await {
                             Ok(resolved) if resolved != groups => {
-                                if reserve_stream_capacity(config.stream_capacity, resolved.len()).is_ok() {
-                                    break Some(resolved);
-                                }
-                                for group in &resolved {
-                                    set_group_state(&health, group, PrivateIntakeTransportState::Stale).await;
+                                let admissions = admitted_homeservers(&resolved);
+                                let replaced = self.storage.transaction(move |tx| {
+                                    tx.replace_private_intake_admissions(lease_id, admissions)
+                                }).await;
+                                match replaced {
+                                    Ok(true) => break Some(resolved),
+                                    Ok(false) | Err(_) => {
+                                        for group in &resolved {
+                                            set_group_state(&health, group, PrivateIntakeTransportState::Stale).await;
+                                        }
+                                        break None;
+                                    }
                                 }
                             }
                             Ok(_) => {}
@@ -1398,6 +1448,64 @@ mod tests {
     }
 
     #[test]
+    fn test_private_intake_admission_rejects_same_homeserver_fifty_first_peer() {
+        let peers = users(51);
+        let mut admissions = peers[..50]
+            .iter()
+            .cloned()
+            .map(|peer| (peer, "homeserver-a".to_owned()))
+            .collect::<HashMap<_, _>>();
+
+        let error = reserve_private_intake_admission(
+            &mut admissions,
+            peers[50].clone(),
+            "homeserver-a".into(),
+            1,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, PaykitSdkError::Policy { .. }));
+        assert_eq!(admissions.len(), 50);
+    }
+
+    #[test]
+    fn test_private_intake_admission_rejects_cross_homeserver_stream() {
+        let peers = users(2);
+        let mut admissions = HashMap::from([(peers[0].clone(), "homeserver-a".to_owned())]);
+
+        let error = reserve_private_intake_admission(
+            &mut admissions,
+            peers[1].clone(),
+            "homeserver-b".into(),
+            1,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, PaykitSdkError::Policy { .. }));
+        assert_eq!(admissions.len(), 1);
+    }
+
+    #[test]
+    fn test_private_intake_admission_rejects_topology_move_without_losing_old_coverage() {
+        let peers = users(2);
+        let mut admissions = HashMap::from([
+            (peers[0].clone(), "homeserver-a".to_owned()),
+            (peers[1].clone(), "homeserver-a".to_owned()),
+        ]);
+
+        let error = reserve_private_intake_admission(
+            &mut admissions,
+            peers[1].clone(),
+            "homeserver-b".into(),
+            1,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, PaykitSdkError::Policy { .. }));
+        assert_eq!(admissions[&peers[1]], "homeserver-a");
+    }
+
+    #[test]
     fn test_private_intake_audit_jitter_is_bounded() {
         let group = SubscriptionGroup {
             homeserver: pubky::Keypair::random().public_key(),
@@ -1446,18 +1554,21 @@ mod tests {
     #[tokio::test]
     async fn test_private_intake_lease_is_identity_wide_across_sdk_handles() {
         let storage = crate::storage::InMemoryStorage::new();
-        let first = claim_private_intake_lease(&storage, Utc::now())
+        let first = claim_private_intake_lease(&storage, Utc::now(), 1, HashMap::new())
             .await
             .unwrap();
-        let second = claim_private_intake_lease(&storage.clone(), Utc::now()).await;
+        let second =
+            claim_private_intake_lease(&storage.clone(), Utc::now(), 1, HashMap::new()).await;
         assert!(matches!(second, Err(PaykitSdkError::Policy { .. })));
 
         release_private_intake_lease(&storage, first.lease_id)
             .await
             .unwrap();
-        assert!(claim_private_intake_lease(&storage, Utc::now())
-            .await
-            .is_ok());
+        assert!(
+            claim_private_intake_lease(&storage, Utc::now(), 1, HashMap::new())
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -1473,7 +1584,9 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let supervisor = claim_private_intake_lease(&storage, now).await.unwrap();
+        let supervisor = claim_private_intake_lease(&storage, now, 1, HashMap::new())
+            .await
+            .unwrap();
         assert_eq!(app_lease.lease_id, 0);
         assert_eq!(supervisor.lease_id, 0);
         assert!(storage
@@ -1488,6 +1601,68 @@ mod tests {
             .unwrap()
             .private_intake_supervisor_lease
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_capacity_admission_is_identity_wide_across_sdk_handles() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let peers = users(51);
+        let admissions = peers[..50]
+            .iter()
+            .cloned()
+            .map(|peer| (peer, "homeserver-a".to_owned()))
+            .collect();
+        claim_private_intake_lease(&storage, Utc::now(), 1, admissions)
+            .await
+            .unwrap();
+
+        let alternate_handle = storage.clone();
+        let peer = peers[50].clone();
+        let result = alternate_handle
+            .transaction(move |tx| {
+                tx.reserve_private_intake_admission(peer, "homeserver-a".into(), Utc::now())
+            })
+            .await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
+        assert_eq!(
+            storage
+                .snapshot()
+                .unwrap()
+                .private_intake_admitted_homeservers
+                .len(),
+            50
+        );
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_topology_overflow_preserves_covered_topology() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let peers = users(2);
+        let current = HashMap::from([
+            (peers[0].clone(), "homeserver-a".to_owned()),
+            (peers[1].clone(), "homeserver-a".to_owned()),
+        ]);
+        let lease = claim_private_intake_lease(&storage, Utc::now(), 1, current.clone())
+            .await
+            .unwrap();
+        let moved = HashMap::from([
+            (peers[0].clone(), "homeserver-a".to_owned()),
+            (peers[1].clone(), "homeserver-b".to_owned()),
+        ]);
+
+        let result = storage
+            .transaction(move |tx| tx.replace_private_intake_admissions(lease.lease_id, moved))
+            .await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
+        assert_eq!(
+            storage
+                .snapshot()
+                .unwrap()
+                .private_intake_admitted_homeservers,
+            current
+        );
     }
 
     #[tokio::test]

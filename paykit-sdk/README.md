@@ -193,7 +193,11 @@ supervisor.stop().await;
 subscriptions group at most 50 users from one homeserver per connection, so 51
 users on one homeserver require two reserved streams; peers on different
 homeservers require separate streams. Startup fails instead of silently leaving
-peers uncovered when capacity is insufficient. Queue limits are 64 ciphertext
+peers uncovered when capacity is insufficient. Active supervisor capacity is
+identity-wide: new handshakes are rejected before becoming pending when their
+resolved homeserver would need another stream. A later topology move that no
+longer fits marks affected health stale and stops supervision instead of keeping
+old streams plus healthy-audit polling for an uncovered peer. Queue limits are 64 ciphertext
 packets per Linked Peer and 1,024 per identity. A full peer is detached without
 advancing its cursor; draining durable work releases capacity and lets it
 resume.

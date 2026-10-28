@@ -1322,8 +1322,12 @@ The supervisor groups public subscriptions by current homeserver and partitions
 each homeserver into at most 50 users per SSE request. Every partition consumes
 one caller-reserved stream; 51 users therefore consume two. Peers on different
 homeservers consume separate streams. Capacity is checked before startup and
-again when topology changes. Homeserver movement discards only the moved user's
-old homeserver cursor and reconnects against the newly resolved origin.
+again atomically when a new handshake becomes pending, including from another
+SDK handle over the same identity state. Homeserver movement discards only the
+moved user's old homeserver cursor and reconnects against the newly resolved
+origin when capacity permits. An over-capacity move marks the resolved topology
+stale and stops supervision; it does not retain old streams and use healthy
+audits as polling coverage for the moved peer.
 
 Durable intake is bounded to 64 packets per Linked Peer and 1,024 packets per
 identity, with equivalent exact ciphertext-byte bounds. A full peer is removed

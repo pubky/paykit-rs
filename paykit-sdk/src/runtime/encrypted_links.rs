@@ -1539,6 +1539,73 @@ where
         .await
     }
 
+    async fn private_intake_link_admission_homeserver(
+        &self,
+        access: &GuardedSessionAccess,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<Option<String>> {
+        let now = self.clock.now();
+        let active = self
+            .storage
+            .transaction(move |tx| {
+                Ok(tx
+                    .export_storage_state()
+                    .private_intake_supervisor_lease
+                    .is_some_and(|lease| lease.expires_at > now))
+            })
+            .await?;
+        if !active {
+            return Ok(None);
+        }
+        let remote = counterparty.to_public_key()?;
+        let homeserver = access
+            .outbox_client
+            .get_homeserver_of(&remote)
+            .await
+            .map_err(|error| PaykitSdkError::Transport {
+                context: "resolve private intake admission homeserver".into(),
+                source: Some(error.into()),
+            })?
+            .ok_or_else(|| PaykitSdkError::NotFound {
+                context: "Linked Peer has no Pubky homeserver".into(),
+                source: None,
+            })?;
+        let homeserver = homeserver.to_string();
+        let proposed_peer = counterparty.clone();
+        let proposed_homeserver = homeserver.clone();
+        self.storage
+            .transaction(move |tx| {
+                let state = tx.export_storage_state();
+                if state
+                    .private_intake_supervisor_lease
+                    .as_ref()
+                    .is_none_or(|lease| lease.expires_at <= now)
+                {
+                    return Ok(());
+                }
+                let capacity = state.private_intake_stream_capacity.ok_or_else(|| {
+                    PaykitSdkError::RecoveryRequired {
+                        context: "active private intake supervisor has no stream capacity".into(),
+                        source: None,
+                    }
+                })?;
+                let mut proposed = state.private_intake_admitted_homeservers;
+                proposed.insert(proposed_peer, proposed_homeserver);
+                let required = crate::storage::private_intake_stream_count(&proposed);
+                if required > capacity {
+                    return Err(PaykitSdkError::Policy {
+                        context: format!(
+                            "private intake requires {required} streams but caller reserved {capacity}"
+                        ),
+                        source: None,
+                    });
+                }
+                Ok(())
+            })
+            .await?;
+        Ok(Some(homeserver))
+    }
+
     pub(super) async fn start_link_handshake_with_claim(
         &self,
         counterparty: PubkyPublicKey,
@@ -1547,6 +1614,9 @@ where
         remote_noise_public_key: &paykit_lib::PublicKey,
     ) -> Result<LinkedPeerHandshakeReport> {
         let (session_access, secret_key) = self.private_link_session_access().await?;
+        let private_intake_homeserver = self
+            .private_intake_link_admission_homeserver(&session_access, &counterparty)
+            .await?;
         self.observe_remote_recovery_marker_with_lease(
             &counterparty,
             &session_access,
@@ -1676,6 +1746,7 @@ where
             handshake.serialize()?,
             lease,
             self.clock.now(),
+            private_intake_homeserver,
         )
         .await
     }

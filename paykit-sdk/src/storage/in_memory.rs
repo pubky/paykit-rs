@@ -709,7 +709,18 @@ impl StorageTransaction for StorageStateTransaction {
         &mut self,
         now: DateTime<Utc>,
         expires_at: DateTime<Utc>,
+        stream_capacity: usize,
+        admitted_homeservers: HashMap<PubkyPublicKey, String>,
     ) -> Result<Option<PrivateIntakeSupervisorLease>> {
+        let required = crate::storage::private_intake_stream_count(&admitted_homeservers);
+        if stream_capacity == 0 || required > stream_capacity {
+            return Err(PaykitSdkError::Policy {
+                context: format!(
+                    "private intake requires {required} streams but caller reserved {stream_capacity}"
+                ),
+                source: None,
+            });
+        }
         if self
             .state
             .private_intake_supervisor_lease
@@ -727,7 +738,76 @@ impl StorageTransaction for StorageStateTransaction {
             expires_at,
         };
         self.state.private_intake_supervisor_lease = Some(lease.clone());
+        self.state.private_intake_stream_capacity = Some(stream_capacity);
+        self.state.private_intake_admitted_homeservers = admitted_homeservers;
         Ok(Some(lease))
+    }
+
+    fn reserve_private_intake_admission(
+        &mut self,
+        counterparty: PubkyPublicKey,
+        homeserver: String,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        if self
+            .state
+            .private_intake_supervisor_lease
+            .as_ref()
+            .is_none_or(|lease| lease.expires_at <= now)
+        {
+            return Ok(false);
+        }
+        let capacity = self.state.private_intake_stream_capacity.ok_or_else(|| {
+            PaykitSdkError::RecoveryRequired {
+                context: "active private intake supervisor has no stream capacity".into(),
+                source: None,
+            }
+        })?;
+        let mut proposed = self.state.private_intake_admitted_homeservers.clone();
+        proposed.insert(counterparty, homeserver);
+        let required = crate::storage::private_intake_stream_count(&proposed);
+        if required > capacity {
+            return Err(PaykitSdkError::Policy {
+                context: format!(
+                    "private intake requires {required} streams but caller reserved {capacity}"
+                ),
+                source: None,
+            });
+        }
+        self.state.private_intake_admitted_homeservers = proposed;
+        Ok(true)
+    }
+
+    fn replace_private_intake_admissions(
+        &mut self,
+        lease_id: u64,
+        admitted_homeservers: HashMap<PubkyPublicKey, String>,
+    ) -> Result<bool> {
+        if self
+            .state
+            .private_intake_supervisor_lease
+            .as_ref()
+            .is_none_or(|lease| lease.lease_id != lease_id)
+        {
+            return Ok(false);
+        }
+        let capacity = self.state.private_intake_stream_capacity.ok_or_else(|| {
+            PaykitSdkError::RecoveryRequired {
+                context: "active private intake supervisor has no stream capacity".into(),
+                source: None,
+            }
+        })?;
+        let required = crate::storage::private_intake_stream_count(&admitted_homeservers);
+        if required > capacity {
+            return Err(PaykitSdkError::Policy {
+                context: format!(
+                    "private intake requires {required} streams but caller reserved {capacity}"
+                ),
+                source: None,
+            });
+        }
+        self.state.private_intake_admitted_homeservers = admitted_homeservers;
+        Ok(true)
     }
 
     fn renew_private_intake_supervisor(
@@ -753,6 +833,8 @@ impl StorageTransaction for StorageStateTransaction {
             .is_some_and(|lease| lease.lease_id == lease_id)
         {
             self.state.private_intake_supervisor_lease = None;
+            self.state.private_intake_stream_capacity = None;
+            self.state.private_intake_admitted_homeservers.clear();
         }
     }
 

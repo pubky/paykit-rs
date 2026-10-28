@@ -375,6 +375,7 @@ where
         handshake_snapshot,
         None,
         now,
+        None,
     )
     .await
 }
@@ -387,6 +388,7 @@ pub(crate) async fn save_link_handshake_state_with_lease<S>(
     handshake_snapshot: Vec<u8>,
     lease: PeerLinkOperationLease,
     now: DateTime<Utc>,
+    private_intake_homeserver: Option<String>,
 ) -> Result<LinkedPeerHandshakeReport>
 where
     S: StorageAdapter,
@@ -398,6 +400,7 @@ where
         handshake_snapshot,
         Some(lease),
         now,
+        private_intake_homeserver,
     )
     .await
 }
@@ -409,6 +412,7 @@ async fn save_link_handshake_state_inner<S>(
     handshake_snapshot: Vec<u8>,
     lease: Option<PeerLinkOperationLease>,
     now: DateTime<Utc>,
+    private_intake_homeserver: Option<String>,
 ) -> Result<LinkedPeerHandshakeReport>
 where
     S: StorageAdapter,
@@ -417,6 +421,7 @@ where
         let counterparty = counterparty.clone();
         let handshake_snapshot = handshake_snapshot.clone();
         let lease = lease.clone();
+        let private_intake_homeserver = private_intake_homeserver.clone();
         move |tx| {
             if let Some(lease) = lease.as_ref() {
                 require_peer_link_operation_lease(tx, lease)?;
@@ -429,6 +434,9 @@ where
                 let snapshot =
                     paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(&handshake_snapshot)?;
                 require_recovery_context(&peer, snapshot.recovery_context())?;
+            }
+            if let Some(homeserver) = private_intake_homeserver {
+                tx.reserve_private_intake_admission(counterparty.clone(), homeserver, now)?;
             }
             peer.state = LinkedPeerState::Linking;
             peer.last_sync_at = Some(now);

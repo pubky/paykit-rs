@@ -791,6 +791,8 @@ impl SdkBackupState {
             next_paykit_app_operation_lease_id,
             private_intake_supervisor_lease: None,
             next_private_intake_supervisor_lease_id: 0,
+            private_intake_stream_capacity: None,
+            private_intake_admitted_homeservers: HashMap::new(),
             payment_request_execution_claims,
             outbound_private_messages,
             next_outbound_private_message_id,
