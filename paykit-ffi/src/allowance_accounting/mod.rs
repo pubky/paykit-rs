@@ -12,7 +12,11 @@ pub use types::*;
 
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
-    /// Return durable accounting, or None before complete wallet reconciliation.
+    /// Return durable accounting, or None only when no accounting state exists.
+    ///
+    /// State that requires reconciliation is still returned, for example after restore, key
+    /// rotation, or a manual Payment Request Acceptance, Rejection, or Cancellation made
+    /// before any accounting existed.
     pub async fn allowance_accounting_state(
         &self,
     ) -> Result<Option<FfiAllowanceAccountingState>, PaykitFfiError> {
@@ -30,6 +34,12 @@ impl FfiPaykitSdk {
     /// every manual and automatic payment path and its external idempotency
     /// records. No Payment Proof, timeout, or missing local file establishes
     /// nonpayment.
+    ///
+    /// After restoring an older backup, an empty or incomplete history re-enables payment of
+    /// anything paid after the export and frees the Allowance capacity it used. This is a
+    /// ledger-wide recovery step, not a routine call: it starts a new epoch and turns every
+    /// Prepared attempt, including other apps' preparations, into Unknown.
+    /// See `paykit-ffi/README.md` for the recipe.
     pub async fn reconcile_allowance_accounting(
         &self,
         reconciliation: FfiAllowanceAccountingReconciliation,
@@ -71,6 +81,8 @@ impl FfiPaykitSdk {
 
     /// Select and queue automatic Acceptance after SDK validation. This does not reserve or execute a payment.
     /// The current app must first claim the Payment Request for execution.
+    /// Read the clock once: `selection.trusted_time` and `checks.trusted_time` must be the
+    /// same instant, or the call is refused.
     pub async fn accept_payment_request_automatically(
         &self,
         scope: FfiPaymentRequestScope,
@@ -123,7 +135,8 @@ impl FfiPaykitSdk {
     }
 
     /// Atomically reserve one occurrence. Ready with Prepared status is not an execution permit.
-    /// A Blocked value is a successful durable decision, including its updated watermark.
+    /// A Blocked value is a successful result, not an error, and may include an updated
+    /// watermark. Nothing is persisted while accounting is absent or requires reconciliation.
     pub async fn reserve_automatic_payment(
         &self,
         occurrence: FfiPaymentOccurrence,
@@ -141,7 +154,8 @@ impl FfiPaykitSdk {
     }
 
     /// Reserve manual execution under the same semantic dedupe key without consuming Allowance capacity.
-    /// A Blocked value is a successful durable decision, including its updated watermark.
+    /// A Blocked value is a successful result, not an error, and may include an updated
+    /// watermark. Nothing is persisted while accounting is absent or requires reconciliation.
     pub async fn reserve_manual_payment(
         &self,
         occurrence: FfiPaymentOccurrence,
@@ -154,7 +168,8 @@ impl FfiPaykitSdk {
     }
 
     /// Recheck a preparation and durably issue a handoff before wallet execution. Use the returned attempt ID for executor idempotency.
-    /// A Blocked value is a successful durable decision, including its updated watermark.
+    /// A Blocked value is a successful result, not an error, and may include an updated
+    /// watermark. Nothing is persisted while accounting is absent or requires reconciliation.
     pub async fn begin_payment_execution(
         &self,
         attempt_id: String,
@@ -167,6 +182,12 @@ impl FfiPaykitSdk {
     }
 
     /// Record wallet-verified settlement. A timeout is Unknown; only definitive failure releases capacity.
+    ///
+    /// Report Failed only when the payment can never settle; anything less is Unknown, which can
+    /// later become Succeeded or Failed. This method cannot change Failed later. Failed
+    /// releases Allowance usage, reopens the occurrence for a new reservation, and can let the
+    /// execution claim be released before a Payment Proof is sent. See `paykit-ffi/README.md`
+    /// for what counts as definitive on each Rail.
     pub async fn record_payment_outcome(
         &self,
         report: FfiPaymentOutcomeReport,

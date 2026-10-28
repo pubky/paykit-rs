@@ -44,6 +44,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   behavior and callable signatures are unchanged by the documentation update.
   Mocks and conformers of the generated SDK interfaces must implement the new
   preparation-claim method.
+- The corrected payment accounting, Payment Request Acceptance, and backup
+  restore FFI documentation also changes UniFFI compatibility checksums.
+  `allowanceAccountingState` returns null only when no accounting state exists;
+  state that requires reconciliation is returned. Payment behavior and callable
+  signatures are unchanged.
+- The payment accounting guidance now documents the manual Payment Request
+  payment sequence, one trusted time for automatic Acceptance, what counts as a
+  definitive `Failed` outcome on each Rail, and how to reconcile after restoring
+  an older backup without paying twice.
 - Regenerate bindings and native libraries together: the new Payment Request
   record fields change the generated record layout, so do not mix them with
   earlier builds. Payees should not count payment evidence earlier than the

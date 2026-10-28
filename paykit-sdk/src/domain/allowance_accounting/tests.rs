@@ -62,26 +62,9 @@ impl Fixture {
             new_id(),
             allowance.as_str()
         );
-        let raw_request = format!(
-            r#"{{"version":1,"app_id":"bitkit","kind":"paykit.payment_request","event_id":"{}","payment_request_id":"{}","request":{{"amount":{{"value":"1","asset":"btc"}},"payment_reference":"test","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"required_app_id":null,"metadata":{{}}}}}}"#,
-            new_id(),
-            request_id.as_str()
-        );
         storage
             .transaction(|tx| {
-                tx.save_identity_state(crate::IdentityState {
-                    public_key: Some(public_key()),
-                    initialized_at: time(),
-                });
-                let mut linked = crate::domain::linked_peers::default_linked_peer(peer.clone());
-                linked.state = crate::LinkedPeerState::Linked;
-                tx.save_linked_peer(linked);
-                tx.save_authorized_paykit_apps(
-                    peer.clone(),
-                    [(app_id(), tx.paykit_app_capabilities(&app_id()).unwrap())]
-                        .into_iter()
-                        .collect(),
-                );
+                seed_linked_payer(tx, &peer);
                 reconcile(
                     tx,
                     AllowanceAccountingReconciliation {
@@ -106,7 +89,7 @@ impl Fixture {
         crate::domain::private_stream::persist_private_stream_batch(
             &storage,
             peer.clone(),
-            vec![message(raw_acceptance), message(raw_request)],
+            vec![message(raw_acceptance), request_message(&request_id)],
             None,
             time(),
         )
@@ -196,6 +179,34 @@ impl Fixture {
             .allowance_accounting
             .unwrap()
     }
+}
+
+/// Save an initialized payer identity and a Linked Peer authorized for `bitkit`.
+fn seed_linked_payer(tx: &mut dyn StorageTransaction, peer: &crate::PubkyPublicKey) {
+    tx.save_identity_state(crate::IdentityState {
+        public_key: Some(public_key()),
+        initialized_at: time(),
+    });
+    let mut linked = crate::domain::linked_peers::default_linked_peer(peer.clone());
+    linked.state = crate::LinkedPeerState::Linked;
+    tx.save_linked_peer(linked);
+    tx.save_authorized_paykit_apps(
+        peer.clone(),
+        [(app_id(), tx.paykit_app_capabilities(&app_id()).unwrap())]
+            .into_iter()
+            .collect(),
+    );
+}
+
+/// One-time 1 btc Payment Request payable over `btc-lightning-bolt11`.
+fn request_message(
+    request_id: &paykit_lib::PaymentRequestId,
+) -> paykit_lib::PrivateApplicationMessage {
+    message(format!(
+        r#"{{"version":1,"app_id":"bitkit","kind":"paykit.payment_request","event_id":"{}","payment_request_id":"{}","request":{{"amount":{{"value":"1","asset":"btc"}},"payment_reference":"test","proposal_expires_at":null,"recurrence":null,"accepted_payment_endpoint_identifiers":["btc-lightning-bolt11"],"required_app_id":null,"metadata":{{}}}}}}"#,
+        new_id(),
+        request_id.as_str()
+    ))
 }
 
 async fn claim(storage: &InMemoryStorage, occurrence: &PaymentOccurrence) {
@@ -1076,6 +1087,165 @@ async fn test_accounting_successful_reconsideration_replaces_deferred_dispositio
             .unwrap();
         assert_eq!(fixture.state().history.occurrences[0].disposition, expected);
     }
+}
+
+/// A linked payer that received and claimed a Payment Request, with no accounting yet.
+async fn claimed_manual_request() -> (InMemoryStorage, PaymentOccurrence) {
+    let storage = InMemoryStorage::with_registered_apps([app_id()]);
+    let peer = public_key();
+    let request_id = paykit_lib::PaymentRequestId::new_v4();
+    storage
+        .transaction(|tx| {
+            seed_linked_payer(tx, &peer);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    crate::domain::private_stream::persist_private_stream_batch(
+        &storage,
+        peer.clone(),
+        vec![request_message(&request_id)],
+        None,
+        time(),
+    )
+    .await
+    .unwrap();
+    let occurrence = PaymentOccurrence {
+        request: PaymentRequestScope {
+            counterparty: peer,
+            payment_request_id: request_id,
+        },
+        billing_period: None,
+    };
+    claim(&storage, &occurrence).await;
+    assert!(storage.snapshot().unwrap().allowance_accounting.is_none());
+    (storage, occurrence)
+}
+
+async fn accept_manually(storage: &InMemoryStorage, occurrence: &PaymentOccurrence) {
+    crate::domain::payment_requests::enqueue_checked_payment_request_action(
+        storage,
+        occurrence.request.counterparty.clone(),
+        &app_id(),
+        &paykit_lib::PaymentRequestEvent::Acceptance(paykit_lib::PaymentRequestAcceptance::new(
+            paykit_lib::EventId::new_v4(),
+            occurrence.request.payment_request_id.clone(),
+        )),
+        time(),
+    )
+    .await
+    .unwrap();
+}
+
+async fn reconcile_empty(
+    storage: &InMemoryStorage,
+    expected_revision: Option<u64>,
+) -> Result<AllowanceAccountingState> {
+    storage
+        .transaction(|tx| {
+            reconcile(
+                tx,
+                AllowanceAccountingReconciliation {
+                    expected_revision,
+                    history: Default::default(),
+                    outcomes: vec![],
+                    trusted_time: time(),
+                },
+            )
+        })
+        .await
+}
+
+async fn reserve_manual_payment(
+    storage: &InMemoryStorage,
+    occurrence: &PaymentOccurrence,
+) -> PaymentAttemptDecision {
+    storage
+        .transaction(|tx| {
+            reserve(
+                tx,
+                &app_id(),
+                occurrence.clone(),
+                None,
+                checks(),
+                PaymentExecutionMode::Manual,
+            )
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_accounting_manual_payment_onboarding_reconcile_before_acceptance() {
+    let (storage, occurrence) = claimed_manual_request().await;
+    let onboarded = reconcile_empty(&storage, None).await.unwrap();
+    assert!(!onboarded.requires_reconciliation);
+
+    accept_manually(&storage, &occurrence).await;
+    let accepted = storage.snapshot().unwrap().allowance_accounting.unwrap();
+    assert!(!accepted.requires_reconciliation);
+    assert!(accepted.revision > onboarded.revision);
+    attempt(reserve_manual_payment(&storage, &occurrence).await);
+}
+
+#[tokio::test]
+async fn test_accounting_manual_acceptance_requires_reconciliation_at_current_revision() {
+    let (storage, occurrence) = claimed_manual_request().await;
+    accept_manually(&storage, &occurrence).await;
+    let accepted = storage.snapshot().unwrap();
+    let state = accepted.allowance_accounting.clone().unwrap();
+    assert!(state.requires_reconciliation);
+    assert_eq!(state.revision, 1);
+
+    // Blocked admission before reconciliation persists nothing.
+    assert!(matches!(
+        reserve_manual_payment(&storage, &occurrence).await,
+        PaymentAttemptDecision::Blocked {
+            reason: AllowanceAccountingBlock::ReconciliationRequired
+        }
+    ));
+    assert_eq!(storage.snapshot().unwrap(), accepted);
+
+    // Acceptance created the state, so `None` no longer names the current revision.
+    assert!(matches!(
+        reconcile_empty(&storage, None).await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
+    assert_eq!(storage.snapshot().unwrap(), accepted);
+    assert!(
+        !reconcile_empty(&storage, Some(state.revision))
+            .await
+            .unwrap()
+            .requires_reconciliation
+    );
+
+    let prepared = attempt(reserve_manual_payment(&storage, &occurrence).await);
+    assert_eq!(prepared.status, PaymentExecutionStatus::Prepared);
+    let submitted = attempt(
+        storage
+            .transaction(|tx| begin(tx, &app_id(), prepared.attempt_id.clone(), checks()))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(submitted.status, PaymentExecutionStatus::Submitted);
+    storage
+        .transaction(|tx| {
+            report_outcome(
+                tx,
+                PaymentOutcomeReport {
+                    attempt_id: submitted.attempt_id,
+                    outcome: PaymentOutcome::Succeeded,
+                },
+            )
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        reserve_manual_payment(&storage, &occurrence).await,
+        PaymentAttemptDecision::Blocked {
+            reason: AllowanceAccountingBlock::PaymentAlreadyRecorded
+        }
+    ));
 }
 
 mod reassociation;

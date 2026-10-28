@@ -104,6 +104,11 @@ where
 
     /// Return accepted recurring Payment Requests from currently authorized remote apps.
     /// Counterparties whose registry cannot be fetched or validated are omitted.
+    ///
+    /// Covers both payer and payee roles with no time filter: an ended Recurrence
+    /// stays listed after `terms.recurrence.ends_at`, and releasing the execution
+    /// claim does not remove it. Wallets compare `ends_at` with trusted local time
+    /// to hide or label it.
     pub async fn active_recurring_payment_requests(&self) -> Result<Vec<PaymentRequestRecord>> {
         let records = self
             .list_payment_requests(PaymentRequestFilter {
@@ -122,6 +127,10 @@ where
 
     /// Return received Payment Requests from currently authorized apps that need a response.
     /// Counterparties whose registry cannot be fetched or validated are omitted.
+    ///
+    /// Includes `ActiveRecurring` records with no time filter: an ended Recurrence
+    /// stays listed after `terms.recurrence.ends_at`, and releasing the execution
+    /// claim does not remove it. Wallets compare `ends_at` with trusted local time.
     pub async fn actionable_received_payment_requests(&self) -> Result<Vec<PaymentRequestRecord>> {
         let records = self
             .list_payment_requests(PaymentRequestFilter {
