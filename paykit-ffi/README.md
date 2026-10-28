@@ -354,8 +354,9 @@ responsibility.
    blocked-peer guard. Recurring Acceptance reserves
    no amount or count. Each scheduled Billing Period needs its own later admission.
    Read the trusted clock once: `selection.trustedTime` and `checks.trustedTime`
-   must be the same instant, otherwise the call is refused (currently as a
-   policy error, `Allowance selection blocked: WalletChecksFailed`).
+   must be the same instant, otherwise the call is refused before any network
+   or storage work with a `Protocol` error (code `protocol_error`), "Automatic
+   Acceptance requires one trusted time for selection and execution checks".
 
    ```text
    checks = PaymentExecutionChecks(
@@ -515,11 +516,12 @@ of every request under that Allowance. The same applies after
   while reconciliation is required. It comes from wallet-supplied trusted time,
   so treat it as a hint only.
 
-To rebuild the history for reconciliation:
+Reconciliation merges the supplied `history` into the retained ledger,
+validates it against the retained associations, and sets every watermark to
+`trustedTime`. So `history` needs only the missing occurrences and attempts,
+not copies of retained associations or watermarks. To rebuild it:
 
-1. Start from `allowanceAccountingState().history`. It keeps the restored
-   associations and watermarks that automatic attempts must reference.
-2. For each attempt already in the retained history (for example a restored
+1. For each attempt already in the retained history (for example a restored
    `Unknown`) whose result the wallet has verified, add an entry to
    `outcomes`. Reconciliation keeps a retained attempt's nonterminal status
    even when `history` supplies `Succeeded` or `Failed`; a terminal status in
@@ -533,18 +535,16 @@ To rebuild the history for reconciliation:
      verified actual amount.
    - Automatic: mode `Automatic`, the request terms amount, and `allowanceId`
      and `associationRevision` set from the effective association revision on
-     both the attempt and its occurrence.
-3. Raise the watermark for each touched counterparty and Allowance so its
-   `evaluatedAt` is at least the attempt's `admittedAt`. Otherwise
-   reconciliation fails with "Accounting watermark precedes retained
-   admission".
-4. Use a reconciliation `trustedTime` at or after every `admittedAt` and
-   `evaluatedAt`.
-5. An association created or replaced after the export is missing from the
+     both the attempt and its occurrence. That revision must be in the
+     retained history or in the supplied `associations`.
+2. Use a reconciliation `trustedTime` at or after every `admittedAt`,
+   `evaluatedAt`, and association `authorizedAt`.
+3. An association created or replaced after the export is missing from the
    restored history. Reconstruct its complete, contiguous association history
-   and the payment's original automatic attribution from authoritative wallet
-   records. If that evidence is unavailable, do not reconcile: leave accounting
-   blocked (fail closed) rather than recording the payment as `Manual`.
+   in `associations`, and the payment's original automatic attribution, from
+   authoritative wallet records. If that evidence is unavailable, do not
+   reconcile: leave accounting blocked (fail closed) rather than recording the
+   payment as `Manual`.
 
 Never build attempts from Payment Proofs or Receipts.
 

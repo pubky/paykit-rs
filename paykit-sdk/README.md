@@ -421,8 +421,9 @@ The SDK implements this durable coordination through the following workflow:
    selected terms. Acceptance reserves no capacity. Read the trusted clock once
    for automatic Acceptance: `AllowanceSelectionInput::trusted_time` and
    `PaymentExecutionChecks::trusted_time` must be the same instant, otherwise
-   the call is refused (currently as `Allowance selection blocked:
-   WalletChecksFailed`).
+   the call is refused before any network or storage work with
+   `PaykitSdkError::Protocol`, "Automatic Acceptance requires one trusted time
+   for selection and execution checks".
 3. Call `reserve_automatic_payment` for an occurrence and expected association
    revision, or `reserve_manual_payment` for an explicitly authorized manual
    payment. Both use the same scoped exclusion key.

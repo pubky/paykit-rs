@@ -258,8 +258,7 @@ pub enum AllowanceAccountingBlock {
     ManualOnly,
     /// A successful or unresolved attempt already owns this occurrence.
     PaymentAlreadyRecorded,
-    /// Endpoint, amount, scheduling, or private wallet checks failed. Automatic
-    /// Acceptance also reports different selection and checks trusted times this way.
+    /// Endpoint, amount, scheduling, or private wallet checks failed.
     WalletChecksFailed,
     /// Shared exact amount, time, or capacity rules failed.
     SharedRule {
@@ -321,9 +320,9 @@ pub struct PaymentOutcomeReport {
 /// An empty history attests that there were no previous payments; it never
 /// clears evidence already retained by this SDK.
 ///
-/// After restoring an older backup, start from the retained history and add every
-/// payment made after the export. An omitted payment can be paid again, and the
-/// Allowance capacity it used is freed.
+/// After restoring an older backup, add every payment made after the export;
+/// retained rows need not be resubmitted. An omitted payment can be paid again,
+/// and the Allowance capacity it used is freed.
 #[derive(Clone)]
 pub struct AllowanceAccountingReconciliation {
     /// Expected ledger revision, or None only when no ledger exists.
