@@ -598,6 +598,49 @@ async fn claim_private_intake_lease<S: StorageAdapter>(
         .await
 }
 
+async fn renew_private_intake_lease<S: StorageAdapter, C: Clock>(
+    storage: &S,
+    clock: &C,
+    lease_id: u64,
+) -> Result<bool> {
+    let clock = clock.clone();
+    storage
+        .transaction(move |tx| {
+            let now = clock.now();
+            Ok(tx.renew_private_intake_supervisor(lease_id, now, now + SUPERVISOR_LEASE_TIMEOUT))
+        })
+        .await
+}
+
+async fn renew_private_intake_lease_or_stop<S: StorageAdapter, C: Clock>(
+    storage: &S,
+    clock: &C,
+    lease_id: u64,
+    stop: &watch::Sender<bool>,
+) -> bool {
+    let renewed = renew_private_intake_lease(storage, clock, lease_id)
+        .await
+        .unwrap_or(false);
+    if !renewed {
+        let _ = stop.send(true);
+    }
+    renewed
+}
+
+async fn replace_private_intake_admissions<S: StorageAdapter, C: Clock>(
+    storage: &S,
+    clock: &C,
+    lease_id: u64,
+    admitted_homeservers: HashMap<PubkyPublicKey, String>,
+) -> Result<bool> {
+    let clock = clock.clone();
+    storage
+        .transaction(move |tx| {
+            tx.replace_private_intake_admissions(lease_id, clock.now(), admitted_homeservers)
+        })
+        .await
+}
+
 async fn release_private_intake_lease<S: StorageAdapter>(storage: &S, lease_id: u64) -> Result<()> {
     storage
         .transaction(move |tx| {
@@ -714,16 +757,13 @@ where
                             if changed.is_err() || *stop_rx.borrow() { break; }
                         }
                         _ = renewal.tick() => {
-                            let now = sdk.clock.now();
-                            let renewed = sdk.storage.transaction(move |tx| {
-                                Ok(tx.renew_private_intake_supervisor(
-                                    lease_id,
-                                    now,
-                                    now + SUPERVISOR_LEASE_TIMEOUT,
-                                ))
-                            }).await.unwrap_or(false);
+                            let renewed = renew_private_intake_lease_or_stop(
+                                &sdk.storage,
+                                &sdk.clock,
+                                lease_id,
+                                &stop_tx,
+                            ).await;
                             if !renewed {
-                                let _ = stop_tx.send(true);
                                 return;
                             }
                         }
@@ -842,10 +882,12 @@ where
                         match self.resolve_private_intake_groups().await {
                             Ok(resolved) if resolved != groups => {
                                 let admissions = admitted_homeservers(&resolved);
-                                let now = self.clock.now();
-                                let replaced = self.storage.transaction(move |tx| {
-                                    tx.replace_private_intake_admissions(lease_id, now, admissions)
-                                }).await;
+                                let replaced = replace_private_intake_admissions(
+                                    &self.storage,
+                                    &self.clock,
+                                    lease_id,
+                                    admissions,
+                                ).await;
                                 match replaced {
                                     Ok(true) => break Some(resolved),
                                     Ok(false) | Err(_) => {
@@ -1284,6 +1326,76 @@ mod tests {
         net::TcpListener,
     };
 
+    #[derive(Clone)]
+    struct TransactionGateStorage {
+        inner: crate::storage::InMemoryStorage,
+        entered: Arc<StdMutex<Option<std::sync::mpsc::Sender<()>>>>,
+        release: Arc<(StdMutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl TransactionGateStorage {
+        fn new(inner: crate::storage::InMemoryStorage) -> (Self, std::sync::mpsc::Receiver<()>) {
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            (
+                Self {
+                    inner,
+                    entered: Arc::new(StdMutex::new(Some(entered_tx))),
+                    release: Arc::new((StdMutex::new(false), std::sync::Condvar::new())),
+                },
+                entered_rx,
+            )
+        }
+
+        fn release(&self) {
+            let (released, condition) = &*self.release;
+            *released.lock().unwrap() = true;
+            condition.notify_one();
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::storage::StorageAdapter for TransactionGateStorage {
+        async fn transaction_erased<'a>(
+            &self,
+            callback: crate::storage::StorageTransactionCallback<'a>,
+        ) -> Result<Box<dyn std::any::Any + Send>> {
+            self.entered
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .send(())
+                .unwrap();
+            let (released, condition) = &*self.release;
+            {
+                let mut released = released.lock().unwrap();
+                while !*released {
+                    released = condition.wait(released).unwrap();
+                }
+            }
+            self.inner.transaction_erased(callback).await
+        }
+    }
+
+    #[derive(Clone)]
+    struct MutableClock(Arc<StdMutex<DateTime<Utc>>>);
+
+    impl MutableClock {
+        fn new(now: DateTime<Utc>) -> Self {
+            Self(Arc::new(StdMutex::new(now)))
+        }
+
+        fn set(&self, now: DateTime<Utc>) {
+            *self.0.lock().unwrap() = now;
+        }
+    }
+
+    impl Clock for MutableClock {
+        fn now(&self) -> DateTime<Utc> {
+            *self.0.lock().unwrap()
+        }
+    }
+
     async fn local_http_response(response: &'static [u8]) -> reqwest::Response {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1662,6 +1774,92 @@ mod tests {
             contender.lease_id
         );
         assert_eq!(snapshot.private_intake_admitted_homeservers, replacement);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_private_intake_renewal_samples_clock_after_storage_fence() {
+        let inner = crate::storage::InMemoryStorage::new();
+        let claimed_at = Utc::now();
+        let expires_at = claimed_at + SUPERVISOR_LEASE_TIMEOUT;
+        let lease = inner
+            .transaction(move |tx| {
+                tx.claim_private_intake_supervisor(claimed_at, expires_at, 1, HashMap::new())
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let (storage, entered) = TransactionGateStorage::new(inner.clone());
+        let clock = MutableClock::new(claimed_at + chrono::Duration::seconds(1));
+        let (stop, mut stopped) = watch::channel(false);
+        let task = tokio::spawn({
+            let storage = storage.clone();
+            let clock = clock.clone();
+            async move {
+                renew_private_intake_lease_or_stop(&storage, &clock, lease.lease_id, &stop).await
+            }
+        });
+
+        entered
+            .recv_timeout(Duration::from_secs(2))
+            .expect("renewal must wait at storage fence");
+        clock.set(expires_at);
+        storage.release();
+
+        assert!(!task.await.unwrap());
+        stopped.changed().await.unwrap();
+        assert!(*stopped.borrow());
+        let contender = claim_private_intake_lease(&inner, expires_at, 1, HashMap::new())
+            .await
+            .unwrap();
+        assert_ne!(contender.lease_id, lease.lease_id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_private_intake_replacement_samples_clock_after_storage_fence() {
+        let inner = crate::storage::InMemoryStorage::new();
+        let peers = users(2);
+        let claimed_at = Utc::now();
+        let expires_at = claimed_at + SUPERVISOR_LEASE_TIMEOUT;
+        let original = HashMap::from([(peers[0].clone(), "homeserver-a".to_owned())]);
+        let lease = inner
+            .transaction({
+                let original = original.clone();
+                move |tx| tx.claim_private_intake_supervisor(claimed_at, expires_at, 1, original)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let replacement = HashMap::from([(peers[1].clone(), "homeserver-b".to_owned())]);
+        let (storage, entered) = TransactionGateStorage::new(inner.clone());
+        let clock = MutableClock::new(claimed_at + chrono::Duration::seconds(1));
+        let task = tokio::spawn({
+            let storage = storage.clone();
+            let clock = clock.clone();
+            let replacement = replacement.clone();
+            async move {
+                replace_private_intake_admissions(&storage, &clock, lease.lease_id, replacement)
+                    .await
+            }
+        });
+
+        entered
+            .recv_timeout(Duration::from_secs(2))
+            .expect("replacement must wait at storage fence");
+        clock.set(expires_at + chrono::Duration::seconds(1));
+        storage.release();
+
+        assert!(!task.await.unwrap().unwrap());
+        assert_eq!(
+            inner
+                .snapshot()
+                .unwrap()
+                .private_intake_admitted_homeservers,
+            original
+        );
+        let contender = claim_private_intake_lease(&inner, expires_at, 1, replacement)
+            .await
+            .unwrap();
+        assert_ne!(contender.lease_id, lease.lease_id);
     }
 
     #[tokio::test]
