@@ -867,10 +867,10 @@ where
                 let health = Arc::clone(&health);
                 let work = Arc::clone(&work);
                 let stop_rx = epoch_stop.subscribe();
-                handles.push(tokio::spawn(async move {
-                    sdk.run_private_intake_group(group, config, stop_rx, health, work)
-                        .await;
-                }));
+                // Avoid another async layer: its nested future layout exceeds rustc's query depth.
+                handles.push(tokio::spawn(
+                    sdk.run_private_intake_group(group, config, stop_rx, health, work),
+                ));
             }
 
             let next_groups = loop {
