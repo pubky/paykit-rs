@@ -143,7 +143,10 @@ where
             )
             .await;
         let result = self.finish_peer_link_operation(lease, result).await;
-        if result.is_ok() {
+        if result
+            .as_ref()
+            .is_ok_and(|report| report.report.receive_batch_id.is_some())
+        {
             supervisor.notify_capacity_released();
         }
         result

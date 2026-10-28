@@ -542,6 +542,14 @@ pub trait StorageTransaction {
         resulting_generation: u64,
     ) -> Result<()>;
 
+    /// Discard packets from an invalidated link and advance its intake generation.
+    fn invalidate_buffered_private_intake_generation(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        expected_generation: u64,
+        resulting_generation: u64,
+    ) -> Result<()>;
+
     /// Fence locally cancelled Encrypted Link Handshake work through one generation.
     fn cancel_private_intake_handshake_generation(
         &mut self,

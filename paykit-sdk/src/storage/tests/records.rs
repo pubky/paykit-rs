@@ -193,6 +193,42 @@ async fn test_private_intake_buffers_packet_and_cursor_atomically() {
 }
 
 #[tokio::test]
+async fn test_private_intake_rejects_packet_from_invalidated_link_generation() {
+    let storage = InMemoryStorage::new();
+    let peer = counterparty();
+    let result = storage
+        .transaction({
+            let peer = peer.clone();
+            move |tx| {
+                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                    counterparty: peer.clone(),
+                    link_snapshot: None,
+                    handshake_snapshot: None,
+                    handshake_role: None,
+                    generation: 8,
+                    checkpointed_at: timestamp(),
+                });
+                tx.buffer_private_intake_packet(BufferedPrivatePacketRecord {
+                    counterparty: peer,
+                    link_generation: 7,
+                    receive_counter: 0,
+                    ciphertext: vec![0; PRIVATE_INTAKE_PACKET_BYTES],
+                    source_cursor: None,
+                    buffered_at: timestamp(),
+                })
+            }
+        })
+        .await;
+
+    assert!(matches!(result, Err(PaykitSdkError::Storage { .. })));
+    assert!(!storage
+        .snapshot()
+        .unwrap()
+        .private_intake_peers
+        .contains_key(&peer));
+}
+
+#[tokio::test]
 async fn test_private_intake_cursor_cancel_and_head_removal_are_fenced() {
     let storage = InMemoryStorage::new();
     let peer = counterparty();

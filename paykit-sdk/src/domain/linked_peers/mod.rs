@@ -298,12 +298,18 @@ where
     }
     tx.save_linked_peer(record);
     if let Some(link_state) = tx.encrypted_link_state(counterparty) {
+        let resulting_generation = link_state.generation.saturating_add(1);
+        tx.invalidate_buffered_private_intake_generation(
+            counterparty,
+            link_state.generation,
+            resulting_generation,
+        )?;
         tx.save_encrypted_link_state(EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
             link_snapshot: None,
             handshake_snapshot: None,
             handshake_role: None,
-            generation: link_state.generation.saturating_add(1),
+            generation: resulting_generation,
             checkpointed_at: now,
         });
     }

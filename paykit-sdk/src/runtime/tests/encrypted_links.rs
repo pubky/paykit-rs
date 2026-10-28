@@ -382,6 +382,27 @@ async fn test_block_and_relink_preserve_attempted_private_list_reservations() {
     let storage = registered_test_storage();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     seed_private_capable_identity_and_link(&storage, counterparty.clone()).await;
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                let generation = tx
+                    .encrypted_link_state(&counterparty)
+                    .expect("seeded link")
+                    .generation;
+                tx.buffer_private_intake_packet(crate::storage::BufferedPrivatePacketRecord {
+                    counterparty,
+                    link_generation: generation,
+                    receive_counter: 0,
+                    ciphertext: vec![0; crate::storage::PRIVATE_INTAKE_PACKET_BYTES],
+                    source_cursor: None,
+                    buffered_at: FixedClock.now(),
+                })?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
     let reservation = |id: &str| PrivatePaymentEndpointReservation {
         reservation_id: id.into(),
         receiving_detail: PrivateReceivingDetail {
@@ -433,6 +454,13 @@ async fn test_block_and_relink_preserve_attempted_private_list_reservations() {
         OutboundPrivateMessageStatus::RecoveryRequired
     );
     assert!(blocked.outbound_private_messages[0].prepared_send.is_none());
+    assert!(blocked.private_intake_peers[&counterparty]
+        .buffered_packets
+        .is_empty());
+    assert_eq!(
+        blocked.private_intake_peers[&counterparty].link_generation,
+        blocked.encrypted_link_states[&counterparty].generation
+    );
     sdk.unblock_peer(counterparty.clone()).await.unwrap();
     assert_eq!(
         storage.snapshot().unwrap().outbound_private_messages[0].status,

@@ -135,6 +135,57 @@ async fn test_legacy_receive_conflicts_while_buffered_packet_remains() {
 }
 
 #[tokio::test]
+async fn test_legacy_receive_can_take_over_after_recovery_discards_sse_buffer() {
+    let storage = InMemoryStorage::new();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                let mut peer =
+                    crate::domain::linked_peers::default_linked_peer(counterparty.clone());
+                peer.state = crate::LinkedPeerState::Linked;
+                tx.save_linked_peer(peer);
+                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                    counterparty: counterparty.clone(),
+                    link_snapshot: Some(vec![1, 2, 3]),
+                    handshake_snapshot: None,
+                    handshake_role: None,
+                    generation: 1,
+                    checkpointed_at: FixedClock.now(),
+                });
+                tx.buffer_private_intake_packet(crate::storage::BufferedPrivatePacketRecord {
+                    counterparty: counterparty.clone(),
+                    link_generation: 1,
+                    receive_counter: 0,
+                    ciphertext: vec![0; crate::storage::PRIVATE_INTAKE_PACKET_BYTES],
+                    source_cursor: None,
+                    buffered_at: FixedClock.now(),
+                })?;
+                crate::domain::linked_peers::mark_recovery_required_in_transaction(
+                    tx,
+                    &counterparty,
+                    FixedClock.now(),
+                )
+            }
+        })
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        sdk.receive_private_messages(counterparty).await,
+        Err(PaykitSdkError::Identity { .. })
+    ));
+}
+
+#[tokio::test]
 async fn test_bulk_legacy_receive_reports_conflict_without_hiding_other_peer() {
     let storage = InMemoryStorage::new();
     let sdk = PaykitSdk::with_clock(

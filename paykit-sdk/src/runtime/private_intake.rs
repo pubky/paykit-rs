@@ -16,6 +16,7 @@ const MIN_HEALTHY_AUDIT_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_HEALTHY_AUDIT_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const MAX_AUDIT_JITTER: Duration = Duration::from_secs(5);
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const TOPOLOGY_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const SUPERVISOR_LEASE_TIMEOUT: chrono::Duration = chrono::Duration::minutes(2);
 const SUPERVISOR_LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_AUDIT_ACQUISITIONS_PER_PEER: usize =
@@ -119,6 +120,13 @@ pub struct PrivateIntakeSupervisor {
     task_handles: Vec<tokio::task::AbortHandle>,
     health: Arc<AsyncRwLock<PrivateIntakeHealth>>,
     work: Arc<Notify>,
+    capacity_released: Arc<Notify>,
+}
+
+#[derive(Clone)]
+struct PrivateIntakeNotifications {
+    work: Arc<Notify>,
+    capacity_released: Arc<Notify>,
 }
 
 impl PrivateIntakeSupervisor {
@@ -158,7 +166,7 @@ impl PrivateIntakeSupervisor {
     }
 
     pub(super) fn notify_capacity_released(&self) {
-        self.work.notify_waiters();
+        self.capacity_released.notify_one();
     }
 
     /// Stop all streams and wait for their cancellation-safe exits.
@@ -418,6 +426,31 @@ enum PrivateIntakeEventLoopExit {
     Ended,
     Backpressured,
     Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrivateIntakeTopologyTrigger {
+    Stopped,
+    Refresh,
+    CapacityReleased,
+}
+
+async fn wait_private_intake_topology_trigger(
+    refresh: &mut tokio::time::Interval,
+    capacity_released: &Notify,
+    stop: &mut watch::Receiver<bool>,
+) -> PrivateIntakeTopologyTrigger {
+    tokio::select! {
+        changed = stop.changed() => {
+            if changed.is_err() || *stop.borrow() {
+                PrivateIntakeTopologyTrigger::Stopped
+            } else {
+                PrivateIntakeTopologyTrigger::Refresh
+            }
+        }
+        _ = refresh.tick() => PrivateIntakeTopologyTrigger::Refresh,
+        _ = capacity_released.notified() => PrivateIntakeTopologyTrigger::CapacityReleased,
+    }
 }
 
 type PrivateIntakeAcquisitionFuture =
@@ -741,6 +774,11 @@ where
             last_successful_audit_at: HashMap::new(),
         }));
         let work = Arc::new(Notify::new());
+        let capacity_released = Arc::new(Notify::new());
+        let notifications = PrivateIntakeNotifications {
+            work: Arc::clone(&work),
+            capacity_released: Arc::clone(&capacity_released),
+        };
         let (stop, _) = watch::channel(false);
         let mut tasks = Vec::with_capacity(groups.len() + 1);
         {
@@ -775,10 +813,16 @@ where
             let sdk = Arc::clone(self);
             let stop_rx = stop.subscribe();
             let health = Arc::clone(&health);
-            let work = Arc::clone(&work);
             tasks.push(tokio::spawn(async move {
                 sdk.clone()
-                    .run_private_intake_topology(groups, config, lease_id, stop_rx, health, work)
+                    .run_private_intake_topology(
+                        groups,
+                        config,
+                        lease_id,
+                        stop_rx,
+                        health,
+                        notifications,
+                    )
                     .await;
                 let _ = release_private_intake_lease(&sdk.storage, lease_id).await;
             }));
@@ -794,6 +838,7 @@ where
             task_handles,
             health,
             work,
+            capacity_released,
         })
     }
 
@@ -804,8 +849,11 @@ where
         lease_id: u64,
         mut stop: watch::Receiver<bool>,
         health: Arc<AsyncRwLock<PrivateIntakeHealth>>,
-        work: Arc<Notify>,
+        notifications: PrivateIntakeNotifications,
     ) {
+        let mut topology_refresh = tokio::time::interval(TOPOLOGY_REFRESH_INTERVAL);
+        topology_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        topology_refresh.tick().await;
         loop {
             if *stop.borrow() {
                 return;
@@ -865,7 +913,7 @@ where
                 let sdk = Arc::clone(&self);
                 let config = config.clone();
                 let health = Arc::clone(&health);
-                let work = Arc::clone(&work);
+                let work = Arc::clone(&notifications.work);
                 let stop_rx = epoch_stop.subscribe();
                 // Avoid another async layer: its nested future layout exceeds rustc's query depth.
                 handles.push(tokio::spawn(
@@ -874,11 +922,18 @@ where
             }
 
             let next_groups = loop {
-                tokio::select! {
-                    changed = stop.changed() => {
-                        if changed.is_err() || *stop.borrow() { break None; }
+                match wait_private_intake_topology_trigger(
+                    &mut topology_refresh,
+                    &notifications.capacity_released,
+                    &mut stop,
+                )
+                .await
+                {
+                    PrivateIntakeTopologyTrigger::Stopped => break None,
+                    PrivateIntakeTopologyTrigger::CapacityReleased => {
+                        break Some(groups.clone());
                     }
-                    _ = tokio::time::sleep(RECONNECT_DELAY) => {
+                    PrivateIntakeTopologyTrigger::Refresh => {
                         match self.resolve_private_intake_groups().await {
                             Ok(resolved) if resolved != groups => {
                                 let admissions = admitted_homeservers(&resolved);
@@ -887,12 +942,18 @@ where
                                     &self.clock,
                                     lease_id,
                                     admissions,
-                                ).await;
+                                )
+                                .await;
                                 match replaced {
                                     Ok(true) => break Some(resolved),
                                     Ok(false) | Err(_) => {
                                         for group in &resolved {
-                                            set_group_state(&health, group, PrivateIntakeTransportState::Stale).await;
+                                            set_group_state(
+                                                &health,
+                                                group,
+                                                PrivateIntakeTransportState::Stale,
+                                            )
+                                            .await;
                                         }
                                         break None;
                                     }
@@ -901,7 +962,12 @@ where
                             Ok(_) => {}
                             Err(_) => {
                                 for group in &groups {
-                                    set_group_state(&health, group, PrivateIntakeTransportState::Stale).await;
+                                    set_group_state(
+                                        &health,
+                                        group,
+                                        PrivateIntakeTransportState::Stale,
+                                    )
+                                    .await;
                                 }
                             }
                         }
@@ -1483,6 +1549,53 @@ mod tests {
             .collect()
     }
 
+    #[tokio::test]
+    async fn test_topology_refresh_is_bounded_and_capacity_release_is_immediate() {
+        let (_stop_tx, mut stop_rx) = watch::channel(false);
+        let capacity_released = Notify::new();
+        let mut refresh = tokio::time::interval(TOPOLOGY_REFRESH_INTERVAL);
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        refresh.tick().await;
+
+        let mut waiting = Box::pin(wait_private_intake_topology_trigger(
+            &mut refresh,
+            &capacity_released,
+            &mut stop_rx,
+        ));
+        tokio::select! {
+            trigger = &mut waiting => panic!("topology refreshed at reconnect cadence: {trigger:?}"),
+            _ = tokio::time::sleep(RECONNECT_DELAY + RECONNECT_DELAY) => {}
+        }
+        capacity_released.notify_one();
+        assert_eq!(
+            waiting.await,
+            PrivateIntakeTopologyTrigger::CapacityReleased
+        );
+    }
+
+    #[tokio::test]
+    async fn test_topology_refresh_fires_on_its_own_cadence() {
+        let (_stop_tx, mut stop_rx) = watch::channel(false);
+        let capacity_released = Notify::new();
+        let mut refresh = tokio::time::interval(Duration::from_millis(20));
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        refresh.tick().await;
+
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                wait_private_intake_topology_trigger(
+                    &mut refresh,
+                    &capacity_released,
+                    &mut stop_rx,
+                ),
+            )
+            .await
+            .unwrap(),
+            PrivateIntakeTopologyTrigger::Refresh
+        );
+    }
+
     #[test]
     fn test_private_intake_partitions_public_users_at_fifty() {
         assert_eq!(partition_public_subscriptions(users(50)).len(), 1);
@@ -1981,6 +2094,7 @@ mod tests {
                 last_successful_audit_at: HashMap::new(),
             })),
             work: Arc::new(Notify::new()),
+            capacity_released: Arc::new(Notify::new()),
         };
 
         assert!(!supervisor.is_finished());
@@ -2014,6 +2128,7 @@ mod tests {
             task_handles,
             health: Arc::new(AsyncRwLock::new(PrivateIntakeHealth::default())),
             work: Arc::new(Notify::new()),
+            capacity_released: Arc::new(Notify::new()),
         };
 
         let mut first_stop = Box::pin(supervisor.stop());
@@ -2061,6 +2176,7 @@ mod tests {
                 last_successful_audit_at: HashMap::new(),
             })),
             work: Arc::new(Notify::new()),
+            capacity_released: Arc::new(Notify::new()),
         };
 
         assert!(!supervisor.is_finished());

@@ -534,6 +534,26 @@ impl StorageTransaction for StorageStateTransaction {
         Ok(())
     }
 
+    fn invalidate_buffered_private_intake_generation(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        expected_generation: u64,
+        resulting_generation: u64,
+    ) -> Result<()> {
+        let Some(peer) = self.state.private_intake_peers.get_mut(counterparty) else {
+            return Ok(());
+        };
+        if peer.link_generation != expected_generation {
+            return Err(PaykitSdkError::Storage {
+                context: "private intake generation changed before link invalidation".into(),
+                source: None,
+            });
+        }
+        peer.link_generation = resulting_generation;
+        peer.buffered_packets.clear();
+        Ok(())
+    }
+
     fn cancel_private_intake_handshake_generation(
         &mut self,
         counterparty: &PubkyPublicKey,
