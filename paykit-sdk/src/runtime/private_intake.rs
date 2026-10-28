@@ -274,6 +274,38 @@ fn partition_public_subscriptions(users: Vec<PubkyPublicKey>) -> Vec<Vec<PubkyPu
         .collect()
 }
 
+fn group_private_intake_peers_by_homeserver(
+    resolved: Vec<(String, paykit_lib::PublicKey, PubkyPublicKey)>,
+) -> Vec<SubscriptionGroup> {
+    let mut by_homeserver: HashMap<String, (paykit_lib::PublicKey, Vec<PubkyPublicKey>)> =
+        HashMap::new();
+    for (homeserver_name, homeserver, peer) in resolved {
+        by_homeserver
+            .entry(homeserver_name)
+            .or_insert_with(|| (homeserver, Vec::new()))
+            .1
+            .push(peer);
+    }
+
+    let mut groups = Vec::new();
+    for (homeserver_name, (homeserver, mut peers)) in by_homeserver {
+        peers.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        for peers in partition_public_subscriptions(peers) {
+            groups.push(SubscriptionGroup {
+                homeserver: homeserver.clone(),
+                homeserver_name: homeserver_name.clone(),
+                peers,
+            });
+        }
+    }
+    groups.sort_by(|left, right| {
+        left.homeserver_name
+            .cmp(&right.homeserver_name)
+            .then_with(|| left.peers[0].as_str().cmp(right.peers[0].as_str()))
+    });
+    groups
+}
+
 #[cfg(test)]
 fn partition_private_subscriptions(users: Vec<PubkyPublicKey>) -> Vec<Vec<PubkyPublicKey>> {
     users.into_iter().map(|user| vec![user]).collect()
@@ -581,8 +613,7 @@ where
         })?;
         access.paykit_noise_secret_key()?;
         self.validate_local_noise_key_authorization(&access).await?;
-        let mut by_homeserver: HashMap<String, (paykit_lib::PublicKey, Vec<PubkyPublicKey>)> =
-            HashMap::new();
+        let mut resolved = Vec::new();
         for peer in peers.expect("active session reads private intake peers") {
             let remote = peer.to_public_key()?;
             let homeserver = access
@@ -597,30 +628,9 @@ where
                     context: "Linked Peer has no Pubky homeserver".into(),
                     source: None,
                 })?;
-            by_homeserver
-                .entry(homeserver.to_string())
-                .or_insert_with(|| (homeserver, Vec::new()))
-                .1
-                .push(peer);
+            resolved.push((homeserver.to_string(), homeserver, peer));
         }
-
-        let mut groups = Vec::new();
-        for (homeserver_name, (homeserver, mut peers)) in by_homeserver {
-            peers.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-            for peers in partition_public_subscriptions(peers) {
-                groups.push(SubscriptionGroup {
-                    homeserver: homeserver.clone(),
-                    homeserver_name: homeserver_name.clone(),
-                    peers,
-                });
-            }
-        }
-        groups.sort_by(|left, right| {
-            left.homeserver_name
-                .cmp(&right.homeserver_name)
-                .then_with(|| left.peers[0].as_str().cmp(right.peers[0].as_str()))
-        });
-        Ok(groups)
+        Ok(group_private_intake_peers_by_homeserver(resolved))
     }
 
     /// Start caller-owned SSE-assisted intake for every established Linked Peer.
@@ -1226,6 +1236,7 @@ fn is_unsupported_event_stream(error: &pubky::Error) -> bool {
         pubky::Error::Request(pubky::errors::RequestError::Server { status, .. })
             if *status == pubky::StatusCode::NOT_FOUND
                 || *status == pubky::StatusCode::METHOD_NOT_ALLOWED
+                || *status == pubky::StatusCode::NOT_IMPLEMENTED
     )
 }
 
@@ -1335,6 +1346,44 @@ mod tests {
     }
 
     #[test]
+    fn test_private_intake_groups_same_and_cross_homeserver_peers() {
+        let homeserver_a = pubky::Keypair::random().public_key();
+        let homeserver_b = pubky::Keypair::random().public_key();
+        let peers = users(3);
+
+        let groups = group_private_intake_peers_by_homeserver(vec![
+            (
+                "homeserver-a".into(),
+                homeserver_a.clone(),
+                peers[0].clone(),
+            ),
+            ("homeserver-b".into(), homeserver_b, peers[2].clone()),
+            ("homeserver-a".into(), homeserver_a, peers[1].clone()),
+        ]);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].homeserver_name, "homeserver-a");
+        assert_eq!(groups[0].peers.len(), 2);
+        assert_eq!(groups[1].homeserver_name, "homeserver-b");
+        assert_eq!(groups[1].peers, vec![peers[2].clone()]);
+    }
+
+    #[test]
+    fn test_private_intake_same_homeserver_fifty_first_peer_uses_second_stream() {
+        let homeserver = pubky::Keypair::random().public_key();
+        let resolved = users(51)
+            .into_iter()
+            .map(|peer| ("homeserver-a".into(), homeserver.clone(), peer))
+            .collect();
+
+        let groups = group_private_intake_peers_by_homeserver(resolved);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].peers.len(), 50);
+        assert_eq!(groups[1].peers.len(), 1);
+    }
+
+    #[test]
     fn test_private_intake_private_subscription_is_single_user() {
         let users = users(2);
         let groups = partition_private_subscriptions(users.clone());
@@ -1384,6 +1433,16 @@ mod tests {
         .is_err());
     }
 
+    #[test]
+    fn test_private_intake_treats_not_implemented_event_stream_as_unsupported() {
+        let error = pubky::Error::Request(pubky::errors::RequestError::Server {
+            status: pubky::StatusCode::NOT_IMPLEMENTED,
+            message: "event stream is not implemented".into(),
+        });
+
+        assert!(is_unsupported_event_stream(&error));
+    }
+
     #[tokio::test]
     async fn test_private_intake_lease_is_identity_wide_across_sdk_handles() {
         let storage = crate::storage::InMemoryStorage::new();
@@ -1429,6 +1488,35 @@ mod tests {
             .unwrap()
             .private_intake_supervisor_lease
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_stop_marks_every_peer_stopped() {
+        let peers = users(2);
+        let (stop, _) = watch::channel(false);
+        let supervisor = PrivateIntakeSupervisor {
+            lease_id: 1,
+            stop,
+            tasks: StdMutex::new(Vec::new()),
+            health: Arc::new(AsyncRwLock::new(PrivateIntakeHealth {
+                peers: HashMap::from([
+                    (peers[0].clone(), PrivateIntakeTransportState::CaughtUp),
+                    (peers[1].clone(), PrivateIntakeTransportState::Stale),
+                ]),
+                reserved_streams: 2,
+                last_successful_audit_at: HashMap::new(),
+            })),
+            work: Arc::new(Notify::new()),
+        };
+
+        supervisor.stop().await;
+
+        assert!(supervisor
+            .health()
+            .await
+            .peers
+            .values()
+            .all(|state| *state == PrivateIntakeTransportState::Stopped));
     }
 
     #[test]

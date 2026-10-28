@@ -131,8 +131,8 @@ The current Rust SDK implementation covers:
 
 The workspace also exposes Swift and Kotlin SDK bindings through `paykit-ffi`.
 First-party durable mobile storage helpers, payment execution, settlement
-confirmation, product UI, app backup transport, background synchronization,
-and recurring payment scheduling
+confirmation, product UI, app backup transport, autonomous platform background
+orchestration, and recurring payment scheduling
 remain separate implementation areas unless they are explicitly listed above.
 
 ## Crate Layout
@@ -175,6 +175,7 @@ paykit-sdk/
       payment_requests.rs
       payment_resolution.rs
       payment_resolution/
+      private_intake.rs
       private_lists.rs
       private_stream.rs
       profiles.rs
@@ -286,6 +287,8 @@ The Rust SDK storage model supports records for:
 - Event Message dedupe indexes
 - receipt records
 - recovery/fail-closed markers
+- private-intake supervisor lease, per-user homeserver replay cursors, bounded
+  encrypted packet queues, link generations, and handshake cancellation fences
 
 Allowance V1 requires the SDK storage model to retain:
 
@@ -1300,6 +1303,65 @@ Payment Requests, Payment Proofs, and Receipts.
 
 ### Receive Private Stream
 
+The Rust SDK has two explicit receive modes per Linked Peer:
+
+- legacy polling through `receive_private_messages*`; and
+- caller-owned SSE-assisted intake through `start_private_intake`, followed by
+  explicit `receive_buffered_private_messages` calls.
+
+SSE-assisted intake treats each event as an untrusted hint. It validates the
+subscribed owner, derives the expected immutable Noise resource independently
+of the event path, fetches only that resource, and atomically stores ciphertext
+with the relevant per-user cursor. It does not decrypt application data or
+advance the Noise receive checkpoint in the background. Explicit buffered
+drain commits plaintext stream records, Event Message dedupe, the advanced
+Noise snapshot, queue removal, and retained packet generations together.
+Failure leaves the packet and checkpoint unchanged.
+
+The supervisor groups public subscriptions by current homeserver and partitions
+each homeserver into at most 50 users per SSE request. Every partition consumes
+one caller-reserved stream; 51 users therefore consume two. Peers on different
+homeservers consume separate streams. Capacity is checked before startup and
+again when topology changes. Homeserver movement discards only the moved user's
+old homeserver cursor and reconnects against the newly resolved origin.
+
+Durable intake is bounded to 64 packets per Linked Peer and 1,024 packets per
+identity, with equivalent exact ciphertext-byte bounds. A full peer is removed
+from its shared homeserver subscription while siblings continue. Its cursor is
+not advanced. After explicit drain releases capacity, it is subscribed again
+and catches up from durable state. No unbounded in-memory event queue is used.
+
+Startup, reconnect, replay, and healthy operation reconcile the next expected
+slot. Healthy streams audit at a validated 1-second to 1-hour cadence, with a
+60-second default plus bounded jitter. This repairs missing or parser-skipped
+events without turning an unavailable SSE endpoint into an always-on polling
+fallback. HTTP 404, 405, and 501 subscription failures are reported as
+`Unsupported`; other stream/fetch failures are `Stale` and retry. Neither state
+proves remote absence. Buffered work remains drainable during transport
+failure.
+
+`PrivateIntakeSupervisor::health` reports per-peer transport state and last
+successful absent-slot audit. `subscribe_work` is a coalesced local hint, not a
+durable queue: consumers register first, inspect/drain durable state, wait, then
+inspect again. Buffered receive returns the canonical intake report, remaining
+packet count, and freshness. Explicit `stop` waits for stream tasks and marks
+peer state `Stopped`; dropping the handle requests cancellation but callers that
+need an observed shutdown use `stop`.
+
+One storage-backed supervisor lease exists per identity-wide state backing.
+Legacy polling returns `PrivateIntakeModeConflict` for supervised or still
+buffered peers while unrelated peers retain legacy polling. Pending Encrypted
+Link Handshakes participate in the same topology and advance under existing
+authorization and peer-operation leases. They have no automatic expiry.
+`cancel_pending_handshake` is local-only: it clears the pending attempt and its
+buffer, persists a generation tombstone, and prevents late old-attempt packets
+from reviving or completing a fresh attempt.
+
+Supervisor lifecycle APIs are not currently exposed through `paykit-ffi`.
+Bindings preserve/migrate durable intake state and backups, but Swift/Kotlin
+remain on legacy polling until they gain explicit long-lived task,
+notification, stop, and health semantics.
+
 1. Claim the peer link operation lease.
 2. Restore or establish Encrypted Link.
 3. Receive ordered Private Application Messages through `paykit-lib`.
@@ -1609,6 +1671,9 @@ Backup should include SDK-managed state:
 - raw private stream log or checkpointed subset
 - outbound queue
 - recovery markers
+- private-intake cursors, buffered ciphertext, generation/cancellation fences,
+  and transport-independent queue accounting; live supervisor ownership is not
+  restored
 
 For Allowance V1, backups must also retain lifecycle evidence together with
 association/decision history and selection revisions, semantic payment keys,
