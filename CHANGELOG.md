@@ -31,9 +31,6 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   payee can cancel. Records are re-derived from the event log, so after
   upgrading, requests a wallet showed as invalid may now appear as `Accepted`,
   `ProofSubmitted` or `ActiveRecurring`.
-
-### Changed
-
 - `sign_up` in Rust and `signUp` in Swift and Kotlin report network failures,
   5xx and 429 answers, and failed PKARR publishes or resolves as transport
   errors instead of identity errors. This covers the homeserver record lookup
