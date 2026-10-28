@@ -20,6 +20,10 @@ where
     /// after every receive backend the wallet publishes has loaded. If the
     /// adapter returns an error, the sync fails before any publication record
     /// or remote endpoint changes.
+    ///
+    /// Requires a published Paykit App. Like publication, it writes SDK-managed
+    /// public Payment Endpoint records, so [`Self::restore_backup_state`] is
+    /// refused on this state backing afterwards; restore a backup first.
     pub async fn sync_public_endpoints(&self) -> Result<EndpointSyncReport> {
         let _identity_guard = self.claim_identity_operation("sync public endpoints")?;
         let (session_access, _, publication) = self
@@ -51,6 +55,10 @@ where
     /// stale and removed; check [`crate::EndpointSyncReport::removed`] and
     /// [`crate::EndpointSyncReport::failed`].
     /// An empty list removes them all and keeps the App registered.
+    ///
+    /// Like [`Self::sync_public_endpoints`], this requires a published Paykit App
+    /// and writes public Payment Endpoint records that block
+    /// [`Self::restore_backup_state`] on this state backing; restore a backup first.
     pub async fn sync_public_endpoints_with_receiving_details(
         &self,
         details: Vec<PublicReceivingDetail>,

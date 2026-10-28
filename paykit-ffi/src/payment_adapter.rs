@@ -575,6 +575,9 @@ impl FfiPaykitSdk {
     /// `sync_public_endpoints_with_receiving_details`. Call this only after
     /// every receive backend the wallet publishes has loaded. If the adapter
     /// throws, the sync fails before any publication record or endpoint changes.
+    ///
+    /// This writes SDK-managed state, so `restore_backup_state` is refused on
+    /// this state backing afterwards; restore a backup first.
     pub async fn sync_public_endpoints(&self) -> Result<FfiEndpointSyncReport, PaykitFfiError> {
         self.runtime
             .sync_public_endpoints()
@@ -589,6 +592,9 @@ impl FfiPaykitSdk {
     /// shared by every runtime on the identity. Every managed endpoint missing
     /// from it is removed; check `removed` and `failed` in the report. An empty
     /// list removes them all and keeps the App registered.
+    ///
+    /// This writes SDK-managed state, so `restore_backup_state` is refused on
+    /// this state backing afterwards; restore a backup first.
     pub async fn sync_public_endpoints_with_receiving_details(
         &self,
         receiving_details: Vec<FfiPublicReceivingDetail>,
