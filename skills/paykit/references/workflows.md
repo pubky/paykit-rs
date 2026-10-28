@@ -130,10 +130,18 @@ identities run receive and outbound workers, including Delivery Confirmations.
    calls take the `proposal_stream_item_id` of the record whose terms were
    approved, as displayed, and fail with a policy error when the request was
    replaced; read the record again and ask again.
-3. Resolve through the request-specific API and execute only through the wallet.
-   Retain one execution identity per occurrence across manual/automatic paths.
-   Do not release claims or unresolved reservations to let another app retry an
-   uncertain financial execution.
+3. Read `allowance_accounting_state()`. If it is `None` or
+   `requires_reconciliation`, reconcile complete wallet history with
+   `expected_revision` set to the state's revision (`None` only when no state
+   exists; after Acceptance the state exists, so `None` fails as stale). Resolve
+   through the request-specific API, then `reserve_manual_payment` and
+   `begin_payment_execution`. Execute only through the wallet, only on Ready
+   with Submitted status, with the attempt ID as the executor idempotency key,
+   then `record_payment_outcome`. This payment accounting is required when the
+   identity may also run automatic Allowance payments, and recommended
+   otherwise. Retain one execution identity per occurrence across
+   manual/automatic paths. Do not release claims or unresolved reservations to
+   let another app retry an uncertain financial execution.
 4. Submit method-specific Payment Proof through SDK lifecycle APIs. Preserve the
    Payment Reference, chosen payee App/endpoint, and applicable Billing Period
    and conversion quote correlation. `ProofSubmitted` is not settlement.
@@ -153,6 +161,15 @@ Do not add an unconditional outbound drain just to show that target. Drive the
 durable queue in background maintenance; delivery can lag if the app stops.
 Likewise, queued Acceptance is distinct from its delivery. Neither permits
 skipping wallet validation, payment accounting, or uncertain-outcome recovery.
+
+For a freshly generated key (not imported or restored), reconcile once at
+sign-up with an empty history while the state is still `None`. An empty history
+is truthful only when the wallet has established that no previous manual or
+automatic payment exists for this identity. Never reconcile an empty history
+just to clear `ReconciliationRequired`: reconciliation never erases retained
+evidence, but it cannot know about payments made after an older backup was
+exported or outside payment accounting, and those can then be paid twice. See
+the [manual payment sequence](https://github.com/pubky/paykit-rs/blob/master/paykit-ffi/README.md#pay-a-payment-request).
 
 Recurring requests still need app scheduling, user/local authorization, payment
 execution, and one-payment-per-Billing-Period policy. Cancellation is not a refund.
@@ -181,8 +198,14 @@ counter: reconcile complete wallet history, persist selection/association,
 reserve with `reserve_automatic_payment` or `reserve_manual_payment`, obtain a
 fresh handoff through `begin_payment_execution`, then `record_payment_outcome`.
 Only Ready with Submitted status grants one handoff; use its attempt ID for wallet
-idempotency. Unknown outcomes stay reserved. Restore/relink requires complete
-reconciliation before automation; an empty history, timeout, or Payment Proof
+idempotency. Unknown outcomes stay reserved. `Failed` is permanent, releases
+usage, and reopens the occurrence, so after handoff report it only for a
+[definitive failure](https://github.com/pubky/paykit-rs/blob/master/paykit-ffi/README.md#definitive-failure)
+on the Rail; an RPC "dropped" or "not found" status is `Unknown`. Retry only by
+replacement (same inputs or nonce). A blocked `Prepared` attempt that was never
+handed off is instead retried through `begin_payment_execution` with corrected
+checks or, once no handoff occurred, aborted and reported `Failed`.
+Restore/relink requires complete reconciliation before automation; an empty history, timeout, or Payment Proof
 cannot establish unused capacity. Read the
 [Allowance contract](https://github.com/pubky/paykit-rs/blob/master/specs/allowances.md)
 and [SDK accounting workflow](https://github.com/pubky/paykit-rs/blob/master/paykit-sdk/README.md#allowance-integration)

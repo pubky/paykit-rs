@@ -1952,6 +1952,8 @@ external execution/idempotency records and every payment path. Empty recovered
 history attests no prior payments when initializing; it never clears existing
 evidence. Only explicit outcome reports resolve already retained uncertainty.
 Payment Proofs and Receipts never construct, commit, or release this accounting.
+This accounting also coordinates manual Payment Request payments through
+`reserve_manual_payment`, `begin_payment_execution`, and `record_payment_outcome`.
 
 `evaluate_allowance_candidates` returns advisory static/time/lifecycle results.
 `select_allowance` persists exactly one choice. The atomic
@@ -1964,7 +1966,8 @@ consumes no capacity, and reservation always rechecks it atomically. Existing
 manual Acceptance, Rejection, and Cancellation operations
 serialize with the same ledger and recheck current request state before queuing.
 Automatic Acceptance requires the current app's execution claim, as manual
-Acceptance does.
+Acceptance does. Its selection input and execution checks carry one trusted
+time; differing instants are refused.
 A manual response excludes conflicting automatic handling; it can revoke an
 unissued preparation but never releases a Submitted or Unknown attempt.
 

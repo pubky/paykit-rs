@@ -291,6 +291,14 @@ right at `proposalExpiresAt`. Payees should:
   payment-method tolerance as paying the request. See
   [Payment time and attribution](../specs/payment-requests.md#payment-time-and-attribution).
 
+Payment accounting also covers manual Payment Request payments. It is required
+when this identity may also run automatic Allowance payments, and recommended
+otherwise: it gives each occurrence crash-safe idempotency and coordinates
+manual work with automatic work. Acceptance does not reserve or permit a
+payment: accounting callers still reserve with `reserveManualPayment` and
+obtain a fresh handoff from `beginPaymentExecution`. See
+[Pay A Payment Request](#pay-a-payment-request) for the full sequence.
+
 ### Allowances
 
 - `PaykitSdk.proposeAllowance`, `acceptAllowance`, `rejectAllowance`, and
@@ -327,6 +335,10 @@ responsibility.
    wallet journal through `reconcileAllowanceAccounting`. Supply an empty history
    only when the wallet has established that no previous manual or automatic
    payment exists. Initialization is an explicit completeness attestation.
+   Pass `expectedRevision` equal to the state's `revision`, or null only when
+   the state is null. Read
+   [Stale backups and reconciliation](#stale-backups-and-reconciliation) before
+   reconciling after a restore.
 2. Call `evaluateAllowanceCandidates` with a scoped Payment Request and trusted
    UTC time. Apply wallet priority or obtain user choice among eligible candidates.
    `selectAllowance` persists one choice with its expected revision; candidate
@@ -341,6 +353,26 @@ responsibility.
    `claimPaymentRequestForExecution` remains a compatibility API without this
    blocked-peer guard. Recurring Acceptance reserves
    no amount or count. Each scheduled Billing Period needs its own later admission.
+   Read the trusted clock once: `selection.trustedTime` and `checks.trustedTime`
+   must be the same instant, otherwise the call is refused before any network
+   or storage work with a `Protocol` error (code `protocol_error`), "Automatic
+   Acceptance requires one trusted time for selection and execution checks".
+
+   ```text
+   checks = PaymentExecutionChecks(
+       trustedTime: trustedNow(), // the only clock read
+       paymentEndpointIdentifier, actualAmount,
+       endpointCurrent, localEnabled, recurrenceEligible
+   )
+   selection = AllowanceSelectionInput(
+       allowanceId,
+       // latest association revision for this request; null only for the initial selection
+       expectedAssociationRevision,
+       checks.trustedTime
+   )
+   sdk.acceptPaymentRequestAutomatically(scope, selection, checks)
+   ```
+
 4. Call `reserveAutomaticPayment` with the occurrence, expected association
    revision, and fresh `PaymentExecutionChecks`. The checks include the actual
    validated `AccountingAmount`, selected Payment Endpoint, trusted UTC time, and
@@ -351,12 +383,51 @@ responsibility.
    status permits handoff. Use its stable attempt ID as the external wallet's
    idempotency key. An admission or handoff `Blocked` result is a successful
    durable decision: its updated trusted-time watermark must remain saved.
+   `ReconciliationRequired` is the exception: it returns before any change.
    Reservation and handoff require this app's execution claim and outgoing
    payment capability; unresolved attempts keep the claim held.
 6. Report wallet-verified settlement through `recordPaymentOutcome`. `Succeeded`
    commits usage; verified terminal `Failed` releases it. Timeouts, missing
    callbacks, or uncertain settlement are `Unknown` and keep capacity reserved.
    A crash between handoff and settlement requires external reconciliation.
+   Report `Failed` only for a [definitive failure](#definitive-failure).
+
+#### Definitive failure
+
+`Failed` is permanent for that attempt: `recordPaymentOutcome` cannot change
+it later. It releases Allowance usage, reopens the occurrence for a new
+reservation, and can let the execution claim be released before a Payment Proof
+is sent. For an attempt that received a handoff (`Submitted` or `Unknown`),
+report anything short of a definitive failure as `Unknown`; an `Unknown`
+attempt can later become `Succeeded` or `Failed`. A failure on the Rail is
+definitive only when:
+
+- Bitcoin: a conflicting spend of the same inputs is confirmed to the wallet's
+  reorg-safety depth.
+- EVM: the account nonce was consumed by a different transaction at the
+  wallet's finality depth. One RPC reporting "dropped" or "not found" never
+  counts.
+- Lightning: the wallet's own node reports the payment failed with no HTLC
+  still in flight.
+
+A `Prepared` attempt that never received a handoff, for example because
+`beginPaymentExecution` returned `Blocked`, has nothing on a Rail to wait for.
+Either call `beginPaymentExecution` again with corrected fresh checks, or abort
+it: verify that no handoff occurred (no executor call with that attempt ID),
+then report `Failed`, which releases the reservation and reopens the
+occurrence. Never report `Unknown` for it just to wait; that keeps the
+occurrence occupied and the execution claim held.
+
+To end an `Unknown` attempt, make the failure definitive yourself, for example
+with a replace-by-fee (RBF) spend back to the wallet or a self-transfer that
+consumes the same nonce, rather than inferring failure from absence. RBF needs
+the original transaction to be replaceable. Retry by replacement (same inputs or
+same nonce) so the original and the retry cannot both settle, and check the
+executor's idempotency records for the previous attempt ID first. Keep any
+post-handoff result that is not definitive as `Unknown` until it is verified
+successful or made definitively failed. After a definitive automatic failure,
+call `markPaymentManualOnly` on the occurrence if product policy requires user
+authorization before any retry. It is sticky.
 
 `deferPaymentOccurrence` records a temporary private reason; reconsideration must
 repeat all checks. `markPaymentManualOnly` is sticky and background matching never
@@ -410,6 +481,72 @@ revision. Reconciliation merges retained evidence; it never resets usage from
 Allowance lifecycle events, Payment Proofs, timeouts, or missing files. Unresolved
 attempts remain reserved, and prepared tokens from an earlier recovery epoch
 cannot be used as fresh handoff permits.
+
+#### Stale backups and reconciliation
+
+`reconcileAllowanceAccounting` is a ledger-wide recovery step, not a routine
+call. It starts a new recovery epoch, turns every `Prepared` attempt into
+`Unknown` (including other apps' in-flight preparations), and fails unless
+`expectedRevision` matches the current state. Call it for recovery, normally
+when `allowanceAccountingState` is null or has `requiresReconciliation` set.
+
+Reconciling an empty or incomplete history after restoring an older backup
+re-enables payment of anything paid after the export. Lost automatic attempts
+also free the Allowance capacity they used, for the period and lifetime limits
+of every request under that Allowance. The same applies after
+`recoverSharedStateFromBackup`.
+
+- **Write-ahead backup.** After `reserveAutomaticPayment`,
+  `reserveManualPayment`, or `beginPaymentExecution`, and before the
+  irreversible wallet handoff, schedule an off-device backup and wait for it to
+  finish. Use a change in `backupStateRevision` as the trigger, and back up
+  again after `recordPaymentOutcome`. A restored `Prepared` attempt becomes
+  `Unknown`; it still blocks the occurrence and, when automatic, counts as
+  Allowance usage, so restoring that backup fails closed. Resolve it with an
+  explicit entry in the reconciliation `outcomes`; a terminal status copied
+  into `history` does not change it. Backing up only after the outcome leaves
+  the handoff window unprotected.
+- **Keep every attempt.** Keep each `PaymentAttemptRecord` that admission
+  returns with the wallet's own payment records, and resubmit all of them when
+  reconciling, not only a recent time window. Reconciliation deduplicates by
+  `attemptId`, so resubmitting retained attempts is safe.
+- **Search start.** Right after restore, the latest `admittedAt` or
+  `evaluatedAt` value in `allowanceAccountingState` is a hint for where to start
+  searching wallet records for missing payments; watermarks do not advance
+  while reconciliation is required. It comes from wallet-supplied trusted time,
+  so treat it as a hint only.
+
+Reconciliation merges the supplied `history` into the retained ledger,
+validates it against the retained associations, and sets every watermark to
+`trustedTime`. So `history` needs only the missing occurrences and attempts,
+not copies of retained associations or watermarks. To rebuild it:
+
+1. For each attempt already in the retained history (for example a restored
+   `Unknown`) whose result the wallet has verified, add an entry to
+   `outcomes`. Reconciliation keeps a retained attempt's nonterminal status
+   even when `history` supplies `Succeeded` or `Failed`; a terminal status in
+   the supplied `history` applies only to a newly reconstructed attempt.
+   Add each externally verified payment the history lacks, as an attempt with
+   its verified status on the matching occurrence (or a new occurrence record).
+   For such an attempt, reuse the kept `PaymentAttemptRecord` when there is
+   one; otherwise use a new lowercase UUID v4 `attemptId`, the state's `epoch`,
+   and the original admission or payment time as `admittedAt`.
+   - Manual: mode `Manual`, no `allowanceId` or `associationRevision`, and the
+     verified actual amount.
+   - Automatic: mode `Automatic`, the request terms amount, and `allowanceId`
+     and `associationRevision` set from the effective association revision on
+     both the attempt and its occurrence. That revision must be in the
+     retained history or in the supplied `associations`.
+2. Use a reconciliation `trustedTime` at or after every `admittedAt`,
+   `evaluatedAt`, and association `authorizedAt`.
+3. An association created or replaced after the export is missing from the
+   restored history. Reconstruct its complete, contiguous association history
+   in `associations`, and the payment's original automatic attribution, from
+   authoritative wallet records. If that evidence is unavailable, do not
+   reconcile: leave accounting blocked (fail closed) rather than recording the
+   payment as `Manual`.
+
+Never build attempts from Payment Proofs or Receipts.
 
 The Swift and Kotlin `AllowanceBindingsCompile` fixtures exercise all accounting
 methods and typed records. They are compile-only surface checks, not a payment
@@ -795,6 +932,70 @@ resolution = sdk.resolvePublicContactPayment(
 No API combines these results or falls back from one mode to the other. The
 application chooses which payment mode to present and invoke.
 
+### Pay A Payment Request
+
+A manual Payment Request payment with payment accounting runs in this order:
+
+```text
+record = sdk.claimPaymentRequestForPreparation(counterparty, paymentRequestId)
+if record.state == Proposed:
+    // Wallet checks: show the terms and Billing Period, obtain user approval.
+    sdk.claimAndAcceptPaymentRequest(
+        counterparty, paymentRequestId, record.proposalStreamItemId)
+else:
+    // Accepted (unpaid one-time) or ActiveRecurring: do not accept again.
+    // Check the accepted terms and this Billing Period against what the
+    // user approved, then continue under the execution claim just taken.
+
+state = sdk.allowanceAccountingState()
+if state == nil/null || state.requiresReconciliation:
+    // On a stale-revision policy error, read the state again and retry.
+    sdk.reconcileAllowanceAccounting(AllowanceAccountingReconciliation(
+        expectedRevision: state?.revision ?? nil/null,
+        history: completeWalletHistory,
+        outcomes: verifiedOutcomes,
+        trustedTime: trustedNow()
+    ))
+
+// Resolve the target with the request-specific API, then build fresh checks.
+reserved = sdk.reserveManualPayment(occurrence, checks)
+// Continue only on Ready; Blocked authorizes nothing.
+handoff = sdk.beginPaymentExecution(reserved.attempt.attemptId, freshChecks)
+// Execute only on Ready with status Submitted.
+attemptId = handoff.attempt.attemptId
+outcome = wallet.execute(target, idempotencyKey: attemptId)
+sdk.recordPaymentOutcome(PaymentOutcomeReport(attemptId, outcome))
+// After Succeeded, submit the Payment Proof.
+sdk.submitPaymentProof(counterparty, paymentRequestId, proof)
+```
+
+- A manual Acceptance, Rejection, or Cancellation creates accounting state
+  when none exists, with `requiresReconciliation` set, at revision 1. After
+  Acceptance, `expectedRevision: nil/null` therefore fails with a
+  stale-revision policy error. Read the state first and pass its `revision`.
+  Restore and Paykit identity key rotation also set `requiresReconciliation`.
+- Onboarding: for a freshly generated key (not imported and not restored),
+  reconcile once at sign-up with an empty history and `expectedRevision:
+  nil/null` while the state is still null. Later Acceptances keep the state
+  reconciled, so the reconcile step above is skipped. Otherwise follow the
+  empty-history rule in [Allowance payment accounting](#allowance-payment-accounting)
+  step 1; never reconcile an empty history just to clear
+  `ReconciliationRequired`. Reconciliation never erases retained evidence, so
+  the risk is payments the accounting never saw: payments made after an older
+  backup was exported (see
+  [Stale backups and reconciliation](#stale-backups-and-reconciliation)) or
+  outside payment accounting, such as on another device. Leaving them out lets
+  the same occurrence be paid twice.
+- `occurrence` names the Payment Request and, for a Recurring Payment Request,
+  the Billing Period. Reservation and handoff each need fresh
+  `PaymentExecutionChecks` with the selected Payment Endpoint Identifier, the
+  verified actual amount, and trusted time. `Blocked` with
+  `PaymentAlreadyRecorded` means a successful or unresolved attempt already
+  owns this occurrence; do not pay again.
+- Report uncertain settlement as `Unknown` and resolve it later; see
+  [Definitive failure](#definitive-failure). Do not submit a Payment Proof
+  for an `Unknown` or `Failed` attempt.
+
 ### Backup And Restore
 
 The SDK backup is separate from the live shared-state blob. Store the backup
@@ -876,6 +1077,10 @@ Without an SDK backup or live state blob, public Paykit data can be
 rediscovered from Pubky, but private link checkpoints, private stream indexes,
 receipt keys, queued outbound messages, and Contact Records are not
 derivable from the Pubky public key alone.
+
+A restored backup has no record of payments made after its export. Before
+paying again, read
+[Stale backups and reconciliation](#stale-backups-and-reconciliation).
 
 ### Error And Report Handling
 
