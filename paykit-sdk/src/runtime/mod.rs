@@ -194,6 +194,7 @@ pub struct PaykitSdk<S, K, P, C = SystemClock> {
     // and for the same App. Restarting conservatively republishes each list.
     private_payment_list_publications:
         Mutex<HashMap<(PubkyPublicKey, paykit_lib::PaykitAppId), PrivatePaymentListPublication>>,
+    private_intake_topology_changed: Arc<tokio::sync::Notify>,
 }
 
 struct PrivatePaymentListPublication {
@@ -272,6 +273,7 @@ where
             session_operation_gate: Arc::new(RwLock::new(())),
             last_identity_state: Mutex::new(None),
             private_payment_list_publications: Mutex::new(HashMap::new()),
+            private_intake_topology_changed: Arc::new(tokio::sync::Notify::new()),
         }
     }
 

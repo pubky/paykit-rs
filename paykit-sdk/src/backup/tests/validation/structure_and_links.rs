@@ -131,8 +131,10 @@ fn test_recovery_required_restore_state_drops_link_snapshots() {
         },
     )]);
 
+    let mut private_intake_peers = HashMap::new();
     clear_recovery_required_link_snapshots(
         &mut states,
+        &mut private_intake_peers,
         std::slice::from_ref(&counterparty.clone()),
     );
 
@@ -358,7 +360,7 @@ async fn test_restore_backup_state_require_recovery_discards_authorized_checkpoi
 }
 
 #[tokio::test]
-async fn test_require_recovery_preserves_buffered_ciphertext_from_fenced_generation() {
+async fn test_require_recovery_discards_buffered_ciphertext_and_allows_relink() {
     let counterparty = public_key();
     let noise_keypair = pubky::Keypair::random();
     let checkpoint = link_checkpoint(
@@ -394,7 +396,7 @@ async fn test_require_recovery_preserves_buffered_ciphertext_from_fenced_generat
         .push(crate::storage::PrivateIntakePeerRecord {
             counterparty: counterparty.clone(),
             link_generation: checkpoint.generation,
-            buffered_packets: vec![packet.clone()],
+            buffered_packets: vec![packet],
             cancelled_handshake_through_generation: None,
         });
     let storage = InMemoryStorage::new();
@@ -415,14 +417,40 @@ async fn test_require_recovery_preserves_buffered_ciphertext_from_fenced_generat
         restored.linked_peers[&counterparty].state,
         LinkedPeerState::RecoveryRequired
     );
+    let recovery_generation = checkpoint.generation + 1;
     assert_eq!(
         restored.encrypted_link_states[&counterparty].generation,
-        checkpoint.generation + 1
+        recovery_generation
     );
+    let intake = &restored.private_intake_peers[&counterparty];
+    assert_eq!(intake.link_generation, recovery_generation);
+    assert!(intake.buffered_packets.is_empty());
+
+    let replacement = link_checkpoint(
+        &counterparty,
+        &noise_keypair.public_key(),
+        &LinkedPeerState::Linking,
+    );
+    let report = crate::domain::linked_peers::save_link_handshake_state(
+        &storage,
+        counterparty.clone(),
+        EncryptedLinkHandshakeRole::Initiator,
+        replacement.handshake_snapshot.unwrap(),
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.state, LinkedPeerState::Linking);
+    assert_eq!(report.generation, recovery_generation + 1);
+    let relinking = storage.snapshot().unwrap();
     assert_eq!(
-        restored.private_intake_peers[&counterparty].buffered_packets,
-        vec![packet]
+        relinking.private_intake_peers[&counterparty].link_generation,
+        report.generation
     );
+    assert!(relinking.private_intake_peers[&counterparty]
+        .buffered_packets
+        .is_empty());
 }
 
 fn link_checkpoint(

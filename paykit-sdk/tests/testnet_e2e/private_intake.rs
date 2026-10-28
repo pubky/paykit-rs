@@ -1,7 +1,7 @@
 use std::{
     any::Any,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -14,7 +14,10 @@ use paykit_sdk::{
     PubkyPublicKey, Result, StorageAdapter,
 };
 
-use crate::harness::{linked_two_party, two_party, TestUser, TestnetSessionProvider, TwoParty};
+use crate::harness::{
+    app_id, drive_recovery_to_linked, linked_two_party, two_party, TestUser,
+    TestnetSessionProvider, TwoParty,
+};
 
 const RETAINED_PRIVATE_STREAM_ITEM_LIMIT: usize = 4096;
 
@@ -49,6 +52,37 @@ impl StorageAdapter for RejectBufferedDrainCommit {
     }
 }
 
+#[derive(Clone)]
+struct RejectSecondBufferedDrainCommit {
+    inner: InMemoryStorage,
+    attempted_drains: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl StorageAdapter for RejectSecondBufferedDrainCommit {
+    async fn transaction_erased<'a>(
+        &self,
+        callback: StorageTransactionCallback<'a>,
+    ) -> Result<Box<dyn Any + Send>> {
+        let attempted_drains = Arc::clone(&self.attempted_drains);
+        self.inner
+            .transaction_erased(Box::new(move |tx| {
+                let before = tx.export_storage_state().private_stream_items.len();
+                let result = callback(tx)?;
+                if tx.export_storage_state().private_stream_items.len() > before
+                    && attempted_drains.fetch_add(1, Ordering::SeqCst) == 1
+                {
+                    return Err(paykit_sdk::PaykitSdkError::Storage {
+                        context: "injected post-dequeue buffered receive failure".into(),
+                        source: None,
+                    });
+                }
+                Ok(result)
+            }))
+            .await
+    }
+}
+
 async fn publish_private_lists(sender: &TestUser, receiver: &TestUser, count: usize) {
     for _ in 0..count {
         sender
@@ -70,7 +104,7 @@ async fn wait_for_buffered(
     peer: &paykit_sdk::PubkyPublicKey,
     count: usize,
 ) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let buffered = storage
                 .snapshot()
@@ -84,8 +118,16 @@ async fn wait_for_buffered(
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
-    .await
-    .expect("private intake should durably buffer expected packets");
+    .await;
+    if result.is_err() {
+        let buffered = storage
+            .snapshot()
+            .unwrap()
+            .private_intake_peers
+            .get(peer)
+            .map_or(0, |state| state.buffered_packets.len());
+        panic!("private intake should durably buffer expected packets: expected {count}, got {buffered}");
+    }
 }
 
 async fn advance_handshake_from_intake_after_restart(
@@ -550,6 +592,180 @@ async fn test_buffered_receive_is_bounded_and_drains_while_transport_stale() {
         assert_eq!(second.remaining_buffered_packets, 0);
     }
     supervisor.stop().await;
+}
+
+#[tokio::test]
+async fn test_new_link_re_resolves_running_private_intake_topology_immediately() {
+    let pair = linked_two_party().await;
+    let sdk = Arc::new(PaykitSdk::new(
+        pair.alice.storage.clone(),
+        TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    ));
+    let supervisor = sdk
+        .start_private_intake(PrivateIntakeConfig::new(1).unwrap())
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if supervisor.health().await.peers.get(&pair.bob.public_key)
+                == Some(&PrivateIntakeTransportState::CaughtUp)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("initial private intake group should be running");
+    let charlie = TestUser::sign_up_with_app(&pair._testnet, app_id("wallet")).await;
+    sdk.initiate_link_with_peer(charlie.public_key.clone())
+        .await
+        .unwrap();
+
+    charlie
+        .sdk
+        .accept_link_with_peer(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let health = supervisor.health().await;
+            if health.peers.contains_key(&charlie.public_key) {
+                assert_eq!(health.reserved_streams, 1);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("new link should restart production topology and group loops before healthy refresh");
+    supervisor.stop().await;
+}
+
+#[tokio::test]
+async fn test_post_dequeue_failure_resubscribes_omitted_peer() {
+    let pair = linked_two_party().await;
+    let attempted_drains = Arc::new(AtomicUsize::new(0));
+    let storage = RejectSecondBufferedDrainCommit {
+        inner: pair.alice.storage.clone(),
+        attempted_drains: Arc::clone(&attempted_drains),
+    };
+    let sdk = Arc::new(PaykitSdk::new(
+        storage,
+        TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    ));
+    let capacity = paykit_sdk::storage::PRIVATE_INTAKE_MAX_PACKETS_PER_PEER;
+    publish_private_lists(&pair.bob, &pair.alice, capacity + 1).await;
+    let supervisor = sdk
+        .start_private_intake(PrivateIntakeConfig::new(1).unwrap())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let health = supervisor.health().await;
+            if health.peers.get(&pair.bob.public_key)
+                == Some(&PrivateIntakeTransportState::Backpressured)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("full peer should be omitted before capacity is released");
+
+    let error = sdk
+        .receive_buffered_private_messages(pair.bob.public_key.clone(), &supervisor)
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("injected post-dequeue buffered receive failure"));
+    assert_eq!(attempted_drains.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        pair.alice
+            .storage
+            .snapshot()
+            .unwrap()
+            .private_stream_items
+            .len(),
+        1
+    );
+    wait_for_buffered(&pair.alice.storage, &pair.bob.public_key, capacity).await;
+    supervisor.stop().await;
+}
+
+#[tokio::test]
+async fn test_drained_sse_then_legacy_receive_preserves_generation_for_sse_resume() {
+    let pair = linked_two_party().await;
+    let sdk = Arc::new(PaykitSdk::new(
+        pair.alice.storage.clone(),
+        TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    ));
+    let supervisor = sdk
+        .start_private_intake(PrivateIntakeConfig::new(1).unwrap())
+        .await
+        .unwrap();
+    publish_private_lists(&pair.bob, &pair.alice, 1).await;
+    wait_for_buffered(&pair.alice.storage, &pair.bob.public_key, 1).await;
+    let drained = sdk
+        .receive_buffered_private_messages(pair.bob.public_key.clone(), &supervisor)
+        .await
+        .unwrap();
+    assert_eq!(drained.report.stream_item_ids.len(), 1);
+    assert_eq!(drained.remaining_buffered_packets, 0);
+    supervisor.stop().await;
+
+    publish_private_lists(&pair.bob, &pair.alice, 1).await;
+    let legacy = sdk
+        .receive_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(legacy.stream_item_ids.len(), 1);
+    let after_legacy = pair.alice.storage.snapshot().unwrap();
+    assert_eq!(
+        after_legacy.private_intake_peers[&pair.bob.public_key].link_generation,
+        after_legacy.encrypted_link_states[&pair.bob.public_key].generation
+    );
+
+    let resumed = sdk
+        .start_private_intake(PrivateIntakeConfig::new(1).unwrap())
+        .await
+        .unwrap();
+    publish_private_lists(&pair.bob, &pair.alice, 1).await;
+    wait_for_buffered(&pair.alice.storage, &pair.bob.public_key, 1).await;
+    let continued = sdk
+        .receive_buffered_private_messages(pair.bob.public_key.clone(), &resumed)
+        .await
+        .unwrap();
+    assert_eq!(continued.report.stream_item_ids.len(), 1);
+    assert_eq!(continued.remaining_buffered_packets, 0);
+    resumed.stop().await;
+
+    pair.bob
+        .sdk
+        .publish_encrypted_link_recovery_marker(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    pair.alice
+        .sdk
+        .observe_encrypted_link_recovery_marker(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    drive_recovery_to_linked(&pair.alice, &pair.bob).await;
+    let recovered = pair.alice.storage.snapshot().unwrap();
+    assert_eq!(
+        recovered.private_intake_peers[&pair.bob.public_key].link_generation,
+        recovered.encrypted_link_states[&pair.bob.public_key].generation
+    );
 }
 
 #[tokio::test]

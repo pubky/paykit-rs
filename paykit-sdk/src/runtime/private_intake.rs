@@ -127,6 +127,7 @@ pub struct PrivateIntakeSupervisor {
 struct PrivateIntakeNotifications {
     work: Arc<Notify>,
     capacity_released: Arc<Notify>,
+    topology_changed: Arc<Notify>,
 }
 
 impl PrivateIntakeSupervisor {
@@ -203,6 +204,7 @@ struct SubscriptionGroup {
 enum PrivatePacketAcquisition {
     Absent,
     Inserted,
+    InsertedAtCapacity,
     AlreadyBuffered,
     CapacityReached,
     PendingHandshake,
@@ -413,6 +415,7 @@ where
         match outcome {
             PrivatePacketAcquisition::Inserted => continue,
             PrivatePacketAcquisition::Absent
+            | PrivatePacketAcquisition::InsertedAtCapacity
             | PrivatePacketAcquisition::AlreadyBuffered
             | PrivatePacketAcquisition::CapacityReached
             | PrivatePacketAcquisition::PendingHandshake => return Ok(outcome),
@@ -421,6 +424,7 @@ where
     Ok(PrivatePacketAcquisition::Inserted)
 }
 
+#[derive(Debug)]
 enum PrivateIntakeEventLoopExit {
     Stopped,
     Ended,
@@ -433,11 +437,13 @@ enum PrivateIntakeTopologyTrigger {
     Stopped,
     Refresh,
     CapacityReleased,
+    TopologyChanged,
 }
 
 async fn wait_private_intake_topology_trigger(
     refresh: &mut tokio::time::Interval,
     capacity_released: &Notify,
+    topology_changed: &Notify,
     stop: &mut watch::Receiver<bool>,
 ) -> PrivateIntakeTopologyTrigger {
     tokio::select! {
@@ -450,6 +456,7 @@ async fn wait_private_intake_topology_trigger(
         }
         _ = refresh.tick() => PrivateIntakeTopologyTrigger::Refresh,
         _ = capacity_released.notified() => PrivateIntakeTopologyTrigger::CapacityReleased,
+        _ = topology_changed.notified() => PrivateIntakeTopologyTrigger::TopologyChanged,
     }
 }
 
@@ -460,7 +467,13 @@ type PrivateIntakeAcquire = Arc<
         + Send
         + Sync,
 >;
-type PrivateIntakeAuditFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PrivateIntakeAuditOutcome {
+    handshake_pending: bool,
+    backpressured: bool,
+}
+
+type PrivateIntakeAuditFuture = Pin<Box<dyn Future<Output = PrivateIntakeAuditOutcome> + Send>>;
 type PrivateIntakeAudit = Arc<dyn Fn() -> PrivateIntakeAuditFuture + Send + Sync>;
 
 async fn process_private_intake_event<F, Fut>(
@@ -531,17 +544,29 @@ where
         buffered_at,
     };
     storage
-        .transaction(move |tx| tx.buffer_private_intake_packet(packet))
-        .await
-        .map(|outcome| match outcome {
-            PrivateIntakeBufferOutcome::Inserted => PrivatePacketAcquisition::Inserted,
-            PrivateIntakeBufferOutcome::AlreadyBuffered => {
-                PrivatePacketAcquisition::AlreadyBuffered
-            }
-            PrivateIntakeBufferOutcome::CapacityReached => {
-                PrivatePacketAcquisition::CapacityReached
-            }
+        .transaction(move |tx| {
+            let counterparty = packet.counterparty.clone();
+            let outcome = tx.buffer_private_intake_packet(packet)?;
+            let at_capacity = matches!(outcome, PrivateIntakeBufferOutcome::Inserted)
+                && subscribable_private_intake_peers(
+                    &tx.export_storage_state(),
+                    std::slice::from_ref(&counterparty),
+                )
+                .is_empty();
+            Ok(match outcome {
+                PrivateIntakeBufferOutcome::Inserted if at_capacity => {
+                    PrivatePacketAcquisition::InsertedAtCapacity
+                }
+                PrivateIntakeBufferOutcome::Inserted => PrivatePacketAcquisition::Inserted,
+                PrivateIntakeBufferOutcome::AlreadyBuffered => {
+                    PrivatePacketAcquisition::AlreadyBuffered
+                }
+                PrivateIntakeBufferOutcome::CapacityReached => {
+                    PrivatePacketAcquisition::CapacityReached
+                }
+            })
         })
+        .await
 }
 
 #[allow(
@@ -562,10 +587,16 @@ async fn run_connected_private_intake_stream(
     work: &Arc<Notify>,
     acquire: PrivateIntakeAcquire,
     audit_group: PrivateIntakeAudit,
+    mut handshake_pending: bool,
 ) -> PrivateIntakeEventLoopExit {
     let mut audit =
         tokio::time::interval_at(tokio::time::Instant::now() + audit_delay, audit_interval);
     audit.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut handshake_retry = tokio::time::interval_at(
+        tokio::time::Instant::now() + RECONNECT_DELAY,
+        RECONNECT_DELAY,
+    );
+    handshake_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             changed = stop.changed() => {
@@ -573,7 +604,20 @@ async fn run_connected_private_intake_stream(
                     return PrivateIntakeEventLoopExit::Stopped;
                 }
             }
-            _ = audit.tick() => audit_group().await,
+            _ = audit.tick() => {
+                let outcome = audit_group().await;
+                if outcome.backpressured {
+                    return PrivateIntakeEventLoopExit::Backpressured;
+                }
+                handshake_pending = outcome.handshake_pending;
+            }
+            _ = handshake_retry.tick(), if handshake_pending => {
+                let outcome = audit_group().await;
+                if outcome.backpressured {
+                    return PrivateIntakeEventLoopExit::Backpressured;
+                }
+                handshake_pending = outcome.handshake_pending;
+            }
             event = stream.next() => match event {
                 Some(Ok(event)) => {
                     let mut acquire_one = |peer, cursor| acquire(peer, cursor);
@@ -581,6 +625,11 @@ async fn run_connected_private_intake_stream(
                         Some((peer, Ok(PrivatePacketAcquisition::Inserted))) => {
                             work.notify_waiters();
                             set_peer_state(health, peer, PrivateIntakeTransportState::Replaying).await;
+                        }
+                        Some((peer, Ok(PrivatePacketAcquisition::InsertedAtCapacity))) => {
+                            work.notify_waiters();
+                            set_peer_state(health, peer, PrivateIntakeTransportState::Backpressured).await;
+                            return PrivateIntakeEventLoopExit::Backpressured;
                         }
                         Some((peer, Ok(PrivatePacketAcquisition::AlreadyBuffered))) => {
                             set_peer_state(health, peer, PrivateIntakeTransportState::Replaying).await;
@@ -594,6 +643,7 @@ async fn run_connected_private_intake_stream(
                         }
                         Some((peer, Ok(PrivatePacketAcquisition::PendingHandshake))) => {
                             work.notify_waiters();
+                            handshake_pending = true;
                             set_peer_state(health, peer, PrivateIntakeTransportState::Replaying).await;
                         }
                         Some((peer, Err(_))) => {
@@ -778,6 +828,7 @@ where
         let notifications = PrivateIntakeNotifications {
             work: Arc::clone(&work),
             capacity_released: Arc::clone(&capacity_released),
+            topology_changed: Arc::clone(&self.private_intake_topology_changed),
         };
         let (stop, _) = watch::channel(false);
         let mut tasks = Vec::with_capacity(groups.len() + 1);
@@ -914,26 +965,34 @@ where
                 let config = config.clone();
                 let health = Arc::clone(&health);
                 let work = Arc::clone(&notifications.work);
+                let topology_changed = Arc::clone(&notifications.topology_changed);
                 let stop_rx = epoch_stop.subscribe();
                 // Avoid another async layer: its nested future layout exceeds rustc's query depth.
-                handles.push(tokio::spawn(
-                    sdk.run_private_intake_group(group, config, stop_rx, health, work),
-                ));
+                handles.push(tokio::spawn(sdk.run_private_intake_group(
+                    group,
+                    config,
+                    stop_rx,
+                    health,
+                    work,
+                    topology_changed,
+                )));
             }
 
             let next_groups = loop {
-                match wait_private_intake_topology_trigger(
+                let trigger = wait_private_intake_topology_trigger(
                     &mut topology_refresh,
                     &notifications.capacity_released,
+                    &notifications.topology_changed,
                     &mut stop,
                 )
-                .await
-                {
+                .await;
+                match trigger {
                     PrivateIntakeTopologyTrigger::Stopped => break None,
                     PrivateIntakeTopologyTrigger::CapacityReleased => {
                         break Some(groups.clone());
                     }
-                    PrivateIntakeTopologyTrigger::Refresh => {
+                    PrivateIntakeTopologyTrigger::Refresh
+                    | PrivateIntakeTopologyTrigger::TopologyChanged => {
                         match self.resolve_private_intake_groups().await {
                             Ok(resolved) if resolved != groups => {
                                 let admissions = admitted_homeservers(&resolved);
@@ -992,13 +1051,12 @@ where
         mut stop: watch::Receiver<bool>,
         health: Arc<AsyncRwLock<PrivateIntakeHealth>>,
         work: Arc<Notify>,
+        topology_changed: Arc<Notify>,
     ) {
         loop {
             if *stop.borrow() {
                 break;
             }
-            self.audit_private_intake_group(&group, &health, &work)
-                .await;
             let active_peers = match self
                 .storage
                 .transaction({
@@ -1130,18 +1188,26 @@ where
                     }
                     set_group_state(&health, &active_group, PrivateIntakeTransportState::Stale)
                         .await;
+                    topology_changed.notify_one();
                     if wait_reconnect_or_stop(&mut stop).await {
                         break;
                     }
                     continue;
                 }
             };
-            set_group_state(
-                &health,
-                &active_group,
-                PrivateIntakeTransportState::Replaying,
-            )
-            .await;
+            // Establish live delivery before startup audit. Pending handshakes can
+            // publish their next packet during audit; subscribing first prevents
+            // that packet from falling into the live-stream setup gap.
+            let audit_outcome = self
+                .audit_private_intake_group(&group, &health, &work)
+                .await;
+            if audit_outcome.backpressured {
+                topology_changed.notify_one();
+                if wait_reconnect_or_stop(&mut stop).await {
+                    break;
+                }
+                continue;
+            }
             let acquire: PrivateIntakeAcquire = {
                 let sdk = Arc::clone(&self);
                 Arc::new(move |peer, cursor| {
@@ -1159,9 +1225,9 @@ where
                     let group = group.clone();
                     let health = Arc::clone(&health);
                     let work = Arc::clone(&work);
-                    Box::pin(async move {
-                        sdk.audit_private_intake_group(&group, &health, &work).await;
-                    })
+                    Box::pin(
+                        async move { sdk.audit_private_intake_group(&group, &health, &work).await },
+                    )
                 })
             };
             let exit = run_connected_private_intake_stream(
@@ -1174,6 +1240,7 @@ where
                 &work,
                 acquire,
                 audit_group,
+                audit_outcome.handshake_pending,
             )
             .await;
             if matches!(exit, PrivateIntakeEventLoopExit::Stopped) {
@@ -1184,6 +1251,7 @@ where
                 PrivateIntakeEventLoopExit::Ended | PrivateIntakeEventLoopExit::Failed
             ) {
                 set_group_state(&health, &active_group, PrivateIntakeTransportState::Stale).await;
+                topology_changed.notify_one();
             }
             if wait_reconnect_or_stop(&mut stop).await {
                 break;
@@ -1196,7 +1264,7 @@ where
         group: &SubscriptionGroup,
         health: &Arc<AsyncRwLock<PrivateIntakeHealth>>,
         work: &Arc<Notify>,
-    ) {
+    ) -> PrivateIntakeAuditOutcome {
         let active_peers = match self
             .storage
             .transaction({
@@ -1213,11 +1281,13 @@ where
             Ok(peers) => peers,
             Err(_) => {
                 set_group_state(health, group, PrivateIntakeTransportState::Stale).await;
-                return;
+                return PrivateIntakeAuditOutcome::default();
             }
         };
+        let mut audit = PrivateIntakeAuditOutcome::default();
         for peer in &group.peers {
             if !active_peers.contains(peer) {
+                audit.backpressured = true;
                 set_peer_state(
                     health,
                     peer.clone(),
@@ -1232,9 +1302,17 @@ where
             .await
             {
                 Ok(outcome) => {
+                    audit.handshake_pending |=
+                        matches!(&outcome, PrivatePacketAcquisition::PendingHandshake);
+                    audit.backpressured |= matches!(
+                        &outcome,
+                        PrivatePacketAcquisition::InsertedAtCapacity
+                            | PrivatePacketAcquisition::CapacityReached
+                    );
                     if matches!(
                         &outcome,
                         PrivatePacketAcquisition::Inserted
+                            | PrivatePacketAcquisition::InsertedAtCapacity
                             | PrivatePacketAcquisition::PendingHandshake
                     ) {
                         work.notify_waiters();
@@ -1246,6 +1324,7 @@ where
                 }
             }
         }
+        audit
     }
 
     async fn acquire_expected_private_packet(
@@ -1264,7 +1343,25 @@ where
             })
             .await?;
         if matches!(phase, Some(PrivateIntakePeerPhase::PendingHandshake { .. })) {
-            let report = self.advance_link_handshake(counterparty.clone()).await?;
+            let report =
+                match self.advance_link_handshake(counterparty.clone()).await {
+                    Ok(report) => report,
+                    Err(error) => {
+                        let counterparty_for_recovery = counterparty.clone();
+                        let recovery_required =
+                            self.storage
+                                .transaction(move |tx| {
+                                    Ok(tx.linked_peer(&counterparty_for_recovery).is_some_and(
+                                        |peer| peer.state == LinkedPeerState::RecoveryRequired,
+                                    ))
+                                })
+                                .await?;
+                        if !recovery_required {
+                            return Err(error);
+                        }
+                        self.ensure_link_with_peer(counterparty.clone(), 1).await?
+                    }
+                };
             if report.state == LinkedPeerState::Linking {
                 if let Some(cursor) = cursor {
                     self.storage
@@ -1343,10 +1440,12 @@ async fn set_peer_audit_outcome(
     let proves_absence = matches!(&outcome, PrivatePacketAcquisition::Absent);
     let state = match outcome {
         PrivatePacketAcquisition::Absent => PrivateIntakeTransportState::CaughtUp,
-        PrivatePacketAcquisition::Inserted
-        | PrivatePacketAcquisition::AlreadyBuffered
-        | PrivatePacketAcquisition::PendingHandshake => PrivateIntakeTransportState::Replaying,
-        PrivatePacketAcquisition::CapacityReached => PrivateIntakeTransportState::Backpressured,
+        PrivatePacketAcquisition::Inserted => PrivateIntakeTransportState::Replaying,
+        PrivatePacketAcquisition::InsertedAtCapacity
+        | PrivatePacketAcquisition::CapacityReached => PrivateIntakeTransportState::Backpressured,
+        PrivatePacketAcquisition::AlreadyBuffered | PrivatePacketAcquisition::PendingHandshake => {
+            PrivateIntakeTransportState::Replaying
+        }
     };
     health.peers.insert(peer.clone(), state);
     if proves_absence {
@@ -1553,6 +1652,7 @@ mod tests {
     async fn test_topology_refresh_is_bounded_and_capacity_release_is_immediate() {
         let (_stop_tx, mut stop_rx) = watch::channel(false);
         let capacity_released = Notify::new();
+        let topology_changed = Notify::new();
         let mut refresh = tokio::time::interval(TOPOLOGY_REFRESH_INTERVAL);
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         refresh.tick().await;
@@ -1560,6 +1660,7 @@ mod tests {
         let mut waiting = Box::pin(wait_private_intake_topology_trigger(
             &mut refresh,
             &capacity_released,
+            &topology_changed,
             &mut stop_rx,
         ));
         tokio::select! {
@@ -1577,6 +1678,7 @@ mod tests {
     async fn test_topology_refresh_fires_on_its_own_cadence() {
         let (_stop_tx, mut stop_rx) = watch::channel(false);
         let capacity_released = Notify::new();
+        let topology_changed = Notify::new();
         let mut refresh = tokio::time::interval(Duration::from_millis(20));
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         refresh.tick().await;
@@ -1587,12 +1689,39 @@ mod tests {
                 wait_private_intake_topology_trigger(
                     &mut refresh,
                     &capacity_released,
+                    &topology_changed,
                     &mut stop_rx,
                 ),
             )
             .await
             .unwrap(),
             PrivateIntakeTopologyTrigger::Refresh
+        );
+    }
+
+    #[tokio::test]
+    async fn test_topology_change_trigger_is_immediate_without_advancing_healthy_cadence() {
+        let (_stop_tx, mut stop_rx) = watch::channel(false);
+        let capacity_released = Notify::new();
+        let topology_changed = Notify::new();
+        let mut refresh = tokio::time::interval(TOPOLOGY_REFRESH_INTERVAL);
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        refresh.tick().await;
+
+        topology_changed.notify_one();
+        assert_eq!(
+            tokio::time::timeout(
+                RECONNECT_DELAY,
+                wait_private_intake_topology_trigger(
+                    &mut refresh,
+                    &capacity_released,
+                    &topology_changed,
+                    &mut stop_rx,
+                ),
+            )
+            .await
+            .unwrap(),
+            PrivateIntakeTopologyTrigger::TopologyChanged
         );
     }
 
@@ -2375,7 +2504,8 @@ mod tests {
                 Box::pin(async { Ok(PrivatePacketAcquisition::CapacityReached) })
             }
         });
-        let audit: PrivateIntakeAudit = Arc::new(|| Box::pin(async {}));
+        let audit: PrivateIntakeAudit =
+            Arc::new(|| Box::pin(async { PrivateIntakeAuditOutcome::default() }));
 
         let result = run_connected_private_intake_stream(
             &group,
@@ -2387,6 +2517,7 @@ mod tests {
             &work,
             acquire,
             audit,
+            false,
         )
         .await;
 
@@ -2402,6 +2533,64 @@ mod tests {
             health.read().await.peers[&observed_peer],
             PrivateIntakeTransportState::Backpressured
         );
+    }
+
+    #[tokio::test]
+    async fn test_pending_handshake_event_retries_before_healthy_audit() {
+        let peer = users(1).remove(0);
+        let owner = peer.to_public_key().unwrap();
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: vec![peer.clone()],
+        };
+        let event = pubky::Event {
+            event_type: pubky::EventType::Put {
+                content_hash: blake3::Hash::from_bytes([7; 32]),
+            },
+            resource: format!("pubky://{}/pub/paykit/v0/private/slot", owner.z32())
+                .parse()
+                .unwrap(),
+            cursor: pubky::EventCursor::new(42),
+        };
+        let events = stream::once(async { Ok(event) }).chain(stream::pending());
+        let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth::default()));
+        let work = Arc::new(Notify::new());
+        let retried = Arc::new(Notify::new());
+        let (_stop, stop_rx) = watch::channel(false);
+        let acquire: PrivateIntakeAcquire =
+            Arc::new(|_, _| Box::pin(async { Ok(PrivatePacketAcquisition::PendingHandshake) }));
+        let audit: PrivateIntakeAudit = Arc::new({
+            let retried = Arc::clone(&retried);
+            move || {
+                let retried = Arc::clone(&retried);
+                Box::pin(async move {
+                    retried.notify_one();
+                    PrivateIntakeAuditOutcome::default()
+                })
+            }
+        });
+        let mut running = Box::pin(run_connected_private_intake_stream(
+            &group,
+            Box::pin(events),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            stop_rx,
+            &health,
+            &work,
+            acquire,
+            audit,
+            false,
+        ));
+
+        tokio::time::timeout(RECONNECT_DELAY + RECONNECT_DELAY, async {
+            tokio::select! {
+                _ = retried.notified() => {}
+                exit = &mut running => panic!("connected stream exited before retry: {exit:?}"),
+            }
+        })
+        .await
+        .expect("pending handshake should retry before healthy audit cadence");
     }
 
     #[tokio::test]
@@ -2452,6 +2641,70 @@ mod tests {
         assert_eq!(
             packet.ciphertext,
             vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_expected_slot_final_capacity_insert_reports_backpressure() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let local = pubky::Keypair::random().public_key();
+        let remote = pubky::Keypair::random().public_key();
+        let peer = PubkyPublicKey::from_public_key(&remote);
+        let (snapshot, secret) = intake_snapshot(&local, &remote, 3);
+        seed_intake_link(&storage, peer.clone(), &snapshot, 7).await;
+        storage
+            .transaction({
+                let peer = peer.clone();
+                move |tx| {
+                    for receive_counter in 3..3 + u64::try_from(
+                        crate::storage::PRIVATE_INTAKE_MAX_PACKETS_PER_PEER - 1,
+                    )
+                    .unwrap()
+                    {
+                        assert!(matches!(
+                            tx.buffer_private_intake_packet(BufferedPrivatePacketRecord {
+                                counterparty: peer.clone(),
+                                link_generation: 7,
+                                receive_counter,
+                                ciphertext: vec![
+                                    receive_counter as u8;
+                                    crate::storage::PRIVATE_INTAKE_PACKET_BYTES
+                                ],
+                                source_cursor: None,
+                                buffered_at: Utc::now(),
+                            })?,
+                            PrivateIntakeBufferOutcome::Inserted
+                        ));
+                    }
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
+
+        let outcome = acquire_expected_private_packet_with_fetch(
+            &storage,
+            peer.clone(),
+            &snapshot,
+            &local,
+            &secret,
+            7,
+            None,
+            Utc::now(),
+            |_| async { Ok(Some(vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES])) },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            PrivatePacketAcquisition::InsertedAtCapacity
+        ));
+        assert_eq!(
+            storage.snapshot().unwrap().private_intake_peers[&peer]
+                .buffered_packets
+                .len(),
+            crate::storage::PRIVATE_INTAKE_MAX_PACKETS_PER_PEER
         );
     }
 
@@ -2757,7 +3010,8 @@ mod tests {
             &health,
             &work,
             acquire,
-            Arc::new(|| Box::pin(async {})),
+            Arc::new(|| Box::pin(async { PrivateIntakeAuditOutcome::default() })),
+            false,
         )
         .await;
 
@@ -2946,7 +3200,8 @@ mod tests {
             &health,
             &work,
             Arc::clone(&acquire),
-            Arc::new(|| Box::pin(async {})),
+            Arc::new(|| Box::pin(async { PrivateIntakeAuditOutcome::default() })),
+            false,
         )
         .await;
         assert!(matches!(
@@ -2977,7 +3232,8 @@ mod tests {
             &health,
             &work,
             Arc::clone(&acquire),
-            Arc::new(|| Box::pin(async {})),
+            Arc::new(|| Box::pin(async { PrivateIntakeAuditOutcome::default() })),
+            false,
         )
         .await;
         assert!(matches!(sibling_exit, PrivateIntakeEventLoopExit::Ended));
@@ -3020,10 +3276,14 @@ mod tests {
             &health,
             &work,
             acquire,
-            Arc::new(|| Box::pin(async {})),
+            Arc::new(|| Box::pin(async { PrivateIntakeAuditOutcome::default() })),
+            false,
         )
         .await;
-        assert!(matches!(resumed_exit, PrivateIntakeEventLoopExit::Ended));
+        assert!(matches!(
+            resumed_exit,
+            PrivateIntakeEventLoopExit::Backpressured
+        ));
         assert_eq!(fetches.lock().unwrap().get(&peers[0]), Some(&2));
         let state = storage.snapshot().unwrap();
         assert_eq!(state.private_intake_cursors[&peers[0]].event_id, 44);

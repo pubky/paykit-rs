@@ -808,7 +808,7 @@ impl SdkBackupState {
             |record| record.subscribed_user.clone(),
             "private intake cursor",
         )?;
-        let private_intake_peers = keyed_by_tuple(
+        let mut private_intake_peers = keyed_by_tuple(
             self.private_intake_peers,
             |record| record.counterparty.clone(),
             "private intake peer",
@@ -840,6 +840,7 @@ impl SdkBackupState {
         )?;
         clear_recovery_required_link_snapshots(
             &mut encrypted_link_states,
+            &mut private_intake_peers,
             &recovery_required_peers,
         );
         mark_restored_outbound_recovery_required(

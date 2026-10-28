@@ -140,16 +140,10 @@ where
                 supervisor.lease_id,
                 lease.clone(),
                 freshness,
+                supervisor,
             )
             .await;
-        let result = self.finish_peer_link_operation(lease, result).await;
-        if result
-            .as_ref()
-            .is_ok_and(|report| report.report.receive_batch_id.is_some())
-        {
-            supervisor.notify_capacity_released();
-        }
-        result
+        self.finish_peer_link_operation(lease, result).await
     }
 
     async fn require_private_intake_supervisor_lease(&self, lease_id: u64) -> Result<()> {
@@ -165,6 +159,7 @@ where
         supervisor_lease_id: u64,
         lease: PeerLinkOperationLease,
         freshness: PrivateIntakePeerFreshness,
+        supervisor: &PrivateIntakeSupervisor,
     ) -> Result<BufferedPrivateStreamIntakeReport> {
         let session_access = self
             .load_session_access_for_initialized_identity("receive buffered private messages")
@@ -333,6 +328,7 @@ where
                     }
                 })
                 .await?;
+            supervisor.notify_capacity_released();
             authorized_apps = None;
             link.acknowledge_persisted_private_receive(prepared)?;
             stored_link_state = next_link_state;
@@ -986,6 +982,8 @@ where
                     .and_then(|report| report.receive_batch_id),
                 received_at: now,
             };
+            let previous_generation = stored_link_state.generation;
+            let resulting_generation = next_link_state.generation;
             let report = self
                 .retry_storage_transaction(|| {
                     let mut write = write.clone();
@@ -1019,7 +1017,14 @@ where
                             &write.counterparty,
                             authorized_apps.as_ref(),
                         );
-                        persist_private_stream_batch_in_transaction(tx, write).map(Ok)
+                        let counterparty = write.counterparty.clone();
+                        let report = persist_private_stream_batch_in_transaction(tx, write)?;
+                        tx.rebase_buffered_private_intake_generation(
+                            &counterparty,
+                            previous_generation,
+                            resulting_generation,
+                        )?;
+                        Ok(Ok(report))
                     }
                 })
                 .await??;

@@ -1739,7 +1739,7 @@ where
             )?,
         };
 
-        save_link_handshake_state_with_lease(
+        let report = save_link_handshake_state_with_lease(
             &self.storage,
             counterparty,
             role,
@@ -1748,7 +1748,9 @@ where
             self.clock.now(),
             private_intake_homeserver,
         )
-        .await
+        .await?;
+        self.private_intake_topology_changed.notify_one();
+        Ok(report)
     }
 
     pub(super) async fn claim_peer_link_operation(
