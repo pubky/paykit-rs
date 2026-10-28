@@ -97,8 +97,29 @@ pub struct PrivateIntakeHealth {
     pub last_successful_audit_at: HashMap<PubkyPublicKey, DateTime<Utc>>,
 }
 
+/// Freshness evidence for one supervised Linked Peer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrivateIntakePeerFreshness {
+    /// Current SSE transport and reconciliation state.
+    pub transport_state: PrivateIntakeTransportState,
+    /// Last audit that proved the next expected slot absent.
+    pub last_successful_audit_at: Option<DateTime<Utc>>,
+}
+
+/// Result of explicitly processing a bounded durable ciphertext batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BufferedPrivateStreamIntakeReport {
+    /// Canonical private-stream persistence result.
+    pub report: crate::PrivateStreamIntakeReport,
+    /// Durable packets still waiting for this peer.
+    pub remaining_buffered_packets: usize,
+    /// Supervisor freshness; queue emptiness alone never proves remote absence.
+    pub freshness: PrivateIntakePeerFreshness,
+}
+
 /// Explicit lifecycle handle for SSE-assisted private intake.
 pub struct PrivateIntakeSupervisor {
+    pub(super) lease_id: u64,
     stop: watch::Sender<bool>,
     tasks: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
     health: Arc<AsyncRwLock<PrivateIntakeHealth>>,
@@ -117,6 +138,21 @@ impl PrivateIntakeSupervisor {
     /// notifications are coalesced and are not durable work items.
     pub fn subscribe_work(&self) -> Arc<Notify> {
         Arc::clone(&self.work)
+    }
+
+    pub(super) async fn peer_freshness(
+        &self,
+        counterparty: &PubkyPublicKey,
+    ) -> Option<PrivateIntakePeerFreshness> {
+        let health = self.health.read().await;
+        Some(PrivateIntakePeerFreshness {
+            transport_state: *health.peers.get(counterparty)?,
+            last_successful_audit_at: health.last_successful_audit_at.get(counterparty).copied(),
+        })
+    }
+
+    pub(super) fn notify_capacity_released(&self) {
+        self.work.notify_waiters();
     }
 
     /// Stop all streams and wait for their cancellation-safe exits.
@@ -599,6 +635,7 @@ where
             }));
         }
         Ok(PrivateIntakeSupervisor {
+            lease_id,
             stop,
             tasks: StdMutex::new(tasks),
             health,

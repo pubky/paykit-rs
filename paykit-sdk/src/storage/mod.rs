@@ -519,6 +519,14 @@ pub trait StorageTransaction {
         receive_counter: u64,
     ) -> Result<BufferedPrivatePacketRecord>;
 
+    /// Move any remaining buffered packets to a newly persisted link generation.
+    fn rebase_buffered_private_intake_generation(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        expected_generation: u64,
+        resulting_generation: u64,
+    ) -> Result<()>;
+
     /// Fence locally cancelled Encrypted Link Handshake work through one generation.
     fn cancel_private_intake_handshake_generation(
         &mut self,

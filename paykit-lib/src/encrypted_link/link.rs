@@ -464,9 +464,24 @@ impl EncryptedLink {
             "read next Private Application Message ciphertext",
         )
         .await?;
+        self.prepare_private_application_message_ciphertext(&ciphertext)
+            .map(Some)
+    }
+
+    /// Prepare one supplied encrypted Private Application Message packet.
+    ///
+    /// This performs the same authenticated Noise receive and message decoding
+    /// as [`prepare_next_private_application_message`](Self::prepare_next_private_application_message),
+    /// without fetching the ciphertext. Persist the application result and
+    /// returned snapshot atomically before acknowledging this value. A failure
+    /// does not advance the link's receive checkpoint.
+    pub fn prepare_private_application_message_ciphertext(
+        &mut self,
+        ciphertext: &[u8],
+    ) -> Result<PreparedPrivateApplicationMessageReceive> {
         let prepared =
             self.encryptor
-                .prepare_receive(&ciphertext)
+                .prepare_receive(ciphertext)
                 .map_err(|err| PaykitError::Transport {
                     context: format!("prepare Private Application Message receive: {err:?}"),
                     source: anyhow::Error::new(crate::error::NonRetryablePrivateReceiveError(err)),
@@ -479,11 +494,11 @@ impl EncryptedLink {
             self.remote_noise_public_key.clone(),
             self.recovery_context.clone(),
         );
-        Ok(Some(PreparedPrivateApplicationMessageReceive {
+        Ok(PreparedPrivateApplicationMessageReceive {
             prepared,
             message,
             resulting_snapshot,
-        }))
+        })
     }
 
     /// Acknowledge that a prepared receive and its application result are durable.

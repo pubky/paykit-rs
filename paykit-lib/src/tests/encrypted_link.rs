@@ -956,6 +956,76 @@ async fn test_prepared_private_message_advances_only_after_persistence_acknowled
 }
 
 #[tokio::test]
+async fn test_prepare_private_message_from_ciphertext_matches_fetch_and_rejects_replay() {
+    let mut setup = PrivateTestSetup::new().await;
+    let raw_json = r#"{"version":1,"kind":"paykit.test_packet","app_id":"bitkit"}"#;
+    let receiver_snapshot = setup.receiver_link.snapshot().unwrap();
+    let receiver_config = setup.receiver_link.config().clone();
+    let remote = setup.sender_session.info().public_key().clone();
+    let mut buffered_receiver =
+        restore_encrypted_link_from_config(receiver_config, &remote, receiver_snapshot)
+            .await
+            .unwrap();
+
+    let prepared_send = setup
+        .sender_link
+        .prepare_private_application_message_json(raw_json)
+        .unwrap();
+    let destination_path = prepared_send.destination_path().to_owned();
+    let ciphertext = prepared_send.ciphertext().to_vec();
+    setup
+        .sender_link
+        .acknowledge_persisted_private_send(prepared_send)
+        .unwrap();
+    setup
+        .sender_link
+        .publish_prepared_private_application_message(&destination_path, &ciphertext)
+        .await
+        .unwrap();
+
+    let from_ciphertext = buffered_receiver
+        .prepare_private_application_message_ciphertext(&ciphertext)
+        .unwrap();
+    let fetched = setup
+        .receiver_link
+        .prepare_next_private_application_message()
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(from_ciphertext.message(), fetched.message());
+    assert_eq!(
+        from_ciphertext.resulting_snapshot().serialize(),
+        fetched.resulting_snapshot().serialize()
+    );
+
+    buffered_receiver
+        .acknowledge_persisted_private_receive(from_ciphertext)
+        .unwrap();
+    let after_first = buffered_receiver.snapshot().unwrap().serialize();
+    assert!(buffered_receiver
+        .prepare_private_application_message_ciphertext(&ciphertext)
+        .is_err());
+    assert_eq!(
+        buffered_receiver.snapshot().unwrap().serialize(),
+        after_first,
+        "replaying ciphertext for the prior counter must not advance the checkpoint"
+    );
+}
+
+#[tokio::test]
+async fn test_prepare_private_message_from_ciphertext_failure_does_not_advance() {
+    let mut setup = PrivateTestSetup::new().await;
+    let before = setup.receiver_link.snapshot().unwrap().serialize();
+
+    assert!(setup
+        .receiver_link
+        .prepare_private_application_message_ciphertext(&[0; 10])
+        .is_err());
+    assert_eq!(setup.receiver_link.snapshot().unwrap().serialize(), before);
+}
+
+#[tokio::test]
 async fn test_encrypted_link_snapshot_deserialize_rejects_garbage() {
     let result = EncryptedLinkSnapshot::deserialize(&[0u8; 10]);
     assert!(result.is_err(), "deserializing garbage should fail");

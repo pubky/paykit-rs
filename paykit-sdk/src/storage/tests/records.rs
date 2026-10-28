@@ -242,9 +242,12 @@ async fn test_private_intake_cursor_cancel_and_head_removal_are_fenced() {
                 assert!(tx
                     .remove_buffered_private_intake_packet(&peer, 5, 21)
                     .is_err());
-                Ok(tx
-                    .remove_buffered_private_intake_packet(&peer, 5, 20)?
-                    .receive_counter)
+                let removed = tx.remove_buffered_private_intake_packet(&peer, 5, 20)?;
+                tx.rebase_buffered_private_intake_generation(&peer, 5, 6)?;
+                assert!(tx
+                    .rebase_buffered_private_intake_generation(&peer, 5, 7)
+                    .is_err());
+                Ok(removed.receive_counter)
             }
         })
         .await
@@ -256,7 +259,7 @@ async fn test_private_intake_cursor_cancel_and_head_removal_are_fenced() {
         state.private_intake_peers[&peer].cancelled_handshake_through_generation,
         Some(4)
     );
-    assert_eq!(state.private_intake_peers[&peer].link_generation, 5);
+    assert_eq!(state.private_intake_peers[&peer].link_generation, 6);
     assert!(state.encrypted_link_states[&peer]
         .handshake_snapshot
         .is_none());
@@ -264,6 +267,10 @@ async fn test_private_intake_cursor_cancel_and_head_removal_are_fenced() {
     assert_eq!(
         state.private_intake_peers[&peer].buffered_packets[0].receive_counter,
         21
+    );
+    assert_eq!(
+        state.private_intake_peers[&peer].buffered_packets[0].link_generation,
+        6
     );
 }
 

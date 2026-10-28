@@ -570,13 +570,20 @@ where
             destination_path: prepared.destination_path().to_owned(),
             ciphertext: prepared.ciphertext().to_vec(),
         });
+        let previous_generation = link_state.generation;
+        let resulting_generation = previous_generation.saturating_add(1);
         link_state.link_snapshot = Some(prepared.resulting_snapshot().serialize());
         link_state.handshake_snapshot = None;
         link_state.handshake_role = None;
-        link_state.generation = link_state.generation.saturating_add(1);
+        link_state.generation = resulting_generation;
         link_state.checkpointed_at = self.clock.now();
         tx.save_outbound_private_message(sending.clone())?;
         tx.save_encrypted_link_state(link_state.clone());
+        tx.rebase_buffered_private_intake_generation(
+            &link_state.counterparty,
+            previous_generation,
+            resulting_generation,
+        )?;
         Ok(PrivateSendPreparation::Ready(
             Box::new(sending),
             Some(Box::new(prepared)),

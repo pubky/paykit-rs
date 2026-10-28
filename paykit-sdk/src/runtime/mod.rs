@@ -156,7 +156,8 @@ pub use observation::PaykitStateObservation;
 pub use outbound_private::PrivateMessageSchedulingSnapshot;
 pub use payment_request_read::PaymentRequestRead;
 pub use private_intake::{
-    PrivateIntakeConfig, PrivateIntakeHealth, PrivateIntakeSupervisor, PrivateIntakeTransportState,
+    BufferedPrivateStreamIntakeReport, PrivateIntakeConfig, PrivateIntakeHealth,
+    PrivateIntakePeerFreshness, PrivateIntakeSupervisor, PrivateIntakeTransportState,
 };
 
 /// Clock abstraction used by SDK workflows and tests.
