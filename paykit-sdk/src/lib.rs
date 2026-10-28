@@ -1,4 +1,5 @@
 #![doc = "Stateful runtime layer for Paykit integrations."]
+#![recursion_limit = "256"]
 #![deny(rustdoc::broken_intra_doc_links)]
 
 mod backup;
