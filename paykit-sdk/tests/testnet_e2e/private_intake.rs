@@ -266,17 +266,18 @@ async fn test_cancel_then_fresh_handshake_ignores_late_old_packet_from_intake() 
     let old_packet_path =
         publish_pending_handshake_packet_from_restarted_intake(&pair.alice, &pair.bob.public_key)
             .await;
-    assert!(pair
+    let old_packet = pair
         .alice
         .access
-        .outbox_client
-        .public_storage()
-        .exists(format!(
-            "pubky://{}{}",
-            pair.alice.public_key, old_packet_path
-        ))
+        .session
+        .storage()
+        .get(&old_packet_path)
         .await
-        .unwrap());
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap()
+        .to_vec();
     let old_generation = pair.alice.storage.snapshot().unwrap().encrypted_link_states
         [&pair.bob.public_key]
         .generation;
@@ -317,23 +318,53 @@ async fn test_cancel_then_fresh_handshake_ignores_late_old_packet_from_intake() 
     // therefore reuses the stream path and the fresh `/0` publication replaces
     // the cancelled attempt's packet at that path.
     assert_eq!(fresh_packet_path, old_packet_path);
-
-    drive_handshake_from_restarted_intake(&pair.alice, &pair.bob).await;
-    assert_eq!(
-        pair.alice.storage.snapshot().unwrap().linked_peers[&pair.bob.public_key].state,
-        LinkedPeerState::Linked
-    );
-    assert!(pair
+    let fresh_packet = pair
         .alice
         .access
-        .outbox_client
-        .public_storage()
-        .exists(format!(
-            "pubky://{}{}",
-            pair.alice.public_key, old_packet_path
-        ))
+        .session
+        .storage()
+        .get(&fresh_packet_path)
         .await
-        .unwrap());
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap()
+        .to_vec();
+    assert_ne!(fresh_packet, old_packet);
+
+    // Let Bob consume the fresh generation's required `/0` before replacing
+    // that reused path with the exact packet from the cancelled generation.
+    advance_handshake_from_intake_after_restart(&pair.bob, &pair.alice.public_key).await;
+    pair.alice
+        .access
+        .session
+        .storage()
+        .put(&old_packet_path, old_packet.clone())
+        .await
+        .unwrap();
+
+    drive_handshake_from_restarted_intake(&pair.alice, &pair.bob).await;
+    for (local, remote) in [(&pair.alice, &pair.bob), (&pair.bob, &pair.alice)] {
+        assert_eq!(
+            local.storage.snapshot().unwrap().linked_peers[&remote.public_key].state,
+            LinkedPeerState::Linked
+        );
+    }
+    assert_eq!(
+        pair.alice
+            .access
+            .session
+            .storage()
+            .get(&old_packet_path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .as_ref(),
+        old_packet.as_slice(),
+        "late cancelled-generation packet must remain published on the reused path"
+    );
 }
 
 #[tokio::test]
