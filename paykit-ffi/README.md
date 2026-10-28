@@ -895,9 +895,10 @@ loading: trigger it from a backends-ready event, not from app start. While any
 backend is not ready, `currentPublicReceivingDetails` must throw
 `PaykitError.PaymentAdapter` (Kotlin: `PaykitException.PaymentAdapter`), never
 return an empty list or a subset. The sync then fails before any publication
-record or endpoint changes. Throw this error type specifically: the bindings do
-not map other foreign exceptions to a clean Paykit error. Handles created
-without a payment adapter already throw this error.
+record or endpoint changes. Throw this case specifically: any other thrown error
+also fails the sync, but arrives as `PaykitError.Storage` (Kotlin:
+`PaykitException.Storage`) with code `unexpected_callback_error`. Handles
+created without a payment adapter already throw this error.
 
 `removePaykitApp` is not a substitute for an empty sync. It requires the App's
 Payment Requests and private financial work to be complete, and it deactivates

@@ -318,9 +318,10 @@ pub struct FfiPubkyResourceRef {
 /// Callbacks must not synchronously call back into the same SDK handle. Session
 /// workflows may hold that handle's session-operation gate while invoking them.
 ///
-/// Report callback failures by throwing `PaykitFfiError`. Any other thrown
-/// error is mapped to `PaykitFfiError::Storage` with code
-/// `unexpected_callback_error`, and its message is discarded.
+/// Report callback failures by throwing the Paykit error type (Swift
+/// `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+/// its `Storage` case with code `unexpected_callback_error`, and its message
+/// is discarded.
 #[uniffi::export(with_foreign)]
 pub trait FfiSdkPubkySessionProvider: Send + Sync {
     /// Load current live Pubky session access, when available.
