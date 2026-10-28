@@ -208,6 +208,10 @@ must not be interpreted as remote queue emptiness. A homeserver that rejects or
 does not implement SSE is `Unsupported`; SSE mode does not fall back to
 continuous slot polling. Already buffered packets remain drainable during an
 outage. Reconnects reuse durable per-user cursors and reconcile expected slots.
+Use synchronous `PrivateIntakeSupervisor::is_finished` to detect authoritative
+supervisor task termination, including autonomous lease or topology failure.
+It remains false while any owned task is live and is true after `stop`; do not
+infer supervisor liveness from transport health.
 
 Only one supervisor may own an identity-wide state backing. While it owns a
 Linked Peer, legacy `receive_private_messages*` calls return

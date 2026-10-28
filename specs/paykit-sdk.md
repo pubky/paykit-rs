@@ -1350,7 +1350,10 @@ durable queue: consumers register first, inspect/drain durable state, wait, then
 inspect again. Buffered receive returns the canonical intake report, remaining
 packet count, and freshness. Explicit `stop` waits for stream tasks and marks
 peer state `Stopped`; dropping the handle requests cancellation but callers that
-need an observed shutdown use `stop`.
+need an observed shutdown use `stop`. Synchronous `is_finished` is true only
+when every task owned by the supervisor has terminated, including after
+autonomous lease, topology, or admission failure and after explicit `stop` has
+emptied the task set. Transport health does not determine this liveness signal.
 
 One storage-backed supervisor lease exists per identity-wide state backing.
 Legacy polling returns `PrivateIntakeModeConflict` for supervised or still

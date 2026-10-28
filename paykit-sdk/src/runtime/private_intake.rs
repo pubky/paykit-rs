@@ -4,14 +4,8 @@ use crate::storage::{
     PrivateIntakeSupervisorLease,
 };
 use futures_util::StreamExt;
-use std::{
-    collections::HashMap,
-    future::Future,
-    pin::Pin,
-    sync::{Arc, Mutex as StdMutex},
-    time::Duration,
-};
-use tokio::sync::{watch, Notify, RwLock as AsyncRwLock};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Duration};
+use tokio::sync::{watch, Mutex as AsyncMutex, Notify, RwLock as AsyncRwLock};
 
 const MAX_EVENT_STREAM_USERS: usize = crate::storage::PRIVATE_INTAKE_MAX_EVENT_STREAM_USERS;
 const DEFAULT_MAX_EVENT_BYTES: usize = 4096;
@@ -121,12 +115,24 @@ pub struct BufferedPrivateStreamIntakeReport {
 pub struct PrivateIntakeSupervisor {
     pub(super) lease_id: u64,
     stop: watch::Sender<bool>,
-    tasks: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
+    tasks: AsyncMutex<Vec<tokio::task::JoinHandle<()>>>,
+    task_handles: Vec<tokio::task::AbortHandle>,
     health: Arc<AsyncRwLock<PrivateIntakeHealth>>,
     work: Arc<Notify>,
 }
 
 impl PrivateIntakeSupervisor {
+    /// Return whether every task owned by this supervisor has terminated.
+    ///
+    /// This reports task termination, including autonomous lease or topology
+    /// failure, rather than transport health. It remains false while an
+    /// explicit [`Self::stop`] waits for any live task.
+    pub fn is_finished(&self) -> bool {
+        self.task_handles
+            .iter()
+            .all(tokio::task::AbortHandle::is_finished)
+    }
+
     /// Return current redacted transport health.
     pub async fn health(&self) -> PrivateIntakeHealth {
         self.health.read().await.clone()
@@ -158,15 +164,11 @@ impl PrivateIntakeSupervisor {
     /// Stop all streams and wait for their cancellation-safe exits.
     pub async fn stop(&self) {
         let _ = self.stop.send(true);
-        let tasks = std::mem::take(
-            &mut *self
-                .tasks
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
-        for task in tasks {
+        let mut tasks = self.tasks.lock().await;
+        for task in tasks.iter_mut() {
             let _ = task.await;
         }
+        tasks.clear();
         let mut health = self.health.write().await;
         for state in health.peers.values_mut() {
             *state = PrivateIntakeTransportState::Stopped;
@@ -179,10 +181,7 @@ impl Drop for PrivateIntakeSupervisor {
         let _ = self.stop.send(true);
         // Dropping JoinHandles detaches tasks. They observe stop, exit their
         // cancellation-safe loops, and release ownership after streams stop.
-        self.tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
+        self.tasks.get_mut().clear();
     }
 }
 
@@ -743,10 +742,15 @@ where
                 let _ = release_private_intake_lease(&sdk.storage, lease_id).await;
             }));
         }
+        let task_handles = tasks
+            .iter()
+            .map(tokio::task::JoinHandle::abort_handle)
+            .collect();
         Ok(PrivateIntakeSupervisor {
             lease_id,
             stop,
-            tasks: StdMutex::new(tasks),
+            tasks: AsyncMutex::new(tasks),
+            task_handles,
             health,
             work,
         })
@@ -1294,6 +1298,7 @@ fn is_unsupported_event_stream(error: &pubky::Error) -> bool {
 mod tests {
     use super::*;
     use futures_util::stream;
+    use std::sync::Mutex as StdMutex;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -1669,10 +1674,16 @@ mod tests {
     async fn test_private_intake_stop_marks_every_peer_stopped() {
         let peers = users(2);
         let (stop, _) = watch::channel(false);
+        let mut stop_rx = stop.subscribe();
+        let task = tokio::spawn(async move {
+            let _ = stop_rx.changed().await;
+        });
+        let task_handles = vec![task.abort_handle()];
         let supervisor = PrivateIntakeSupervisor {
             lease_id: 1,
             stop,
-            tasks: StdMutex::new(Vec::new()),
+            tasks: AsyncMutex::new(vec![task]),
+            task_handles,
             health: Arc::new(AsyncRwLock::new(PrivateIntakeHealth {
                 peers: HashMap::from([
                     (peers[0].clone(), PrivateIntakeTransportState::CaughtUp),
@@ -1684,14 +1695,99 @@ mod tests {
             work: Arc::new(Notify::new()),
         };
 
+        assert!(!supervisor.is_finished());
         supervisor.stop().await;
 
+        assert!(supervisor.is_finished());
         assert!(supervisor
             .health()
             .await
             .peers
             .values()
             .all(|state| *state == PrivateIntakeTransportState::Stopped));
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_is_not_finished_while_stop_waits_for_live_task() {
+        let (stop, _) = watch::channel(false);
+        let mut stop_rx = stop.subscribe();
+        let (stopping_tx, stopping_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _ = stop_rx.changed().await;
+            stopping_tx.send(()).unwrap();
+            let _ = release_rx.await;
+        });
+        let task_handles = vec![task.abort_handle()];
+        let supervisor = PrivateIntakeSupervisor {
+            lease_id: 1,
+            stop,
+            tasks: AsyncMutex::new(vec![task]),
+            task_handles,
+            health: Arc::new(AsyncRwLock::new(PrivateIntakeHealth::default())),
+            work: Arc::new(Notify::new()),
+        };
+
+        let mut first_stop = Box::pin(supervisor.stop());
+        tokio::select! {
+            _ = &mut first_stop => panic!("stop returned while its task was live"),
+            result = stopping_rx => result.unwrap(),
+        }
+        assert!(!supervisor.is_finished());
+
+        let mut second_stop = Box::pin(supervisor.stop());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut second_stop)
+                .await
+                .is_err(),
+            "concurrent stop returned while a task was live"
+        );
+
+        release_tx.send(()).unwrap();
+        first_stop.await;
+        second_stop.await;
+        assert!(supervisor.is_finished());
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_is_finished_after_autonomous_task_termination() {
+        let peer = users(1).remove(0);
+        let (stop, _) = watch::channel(false);
+        let (finish_first, finished_first) = tokio::sync::oneshot::channel::<()>();
+        let (finish_second, finished_second) = tokio::sync::oneshot::channel::<()>();
+        let first_task = tokio::spawn(async move {
+            let _ = finished_first.await;
+        });
+        let second_task = tokio::spawn(async move {
+            let _ = finished_second.await;
+        });
+        let task_handles = vec![first_task.abort_handle(), second_task.abort_handle()];
+        let supervisor = PrivateIntakeSupervisor {
+            lease_id: 1,
+            stop,
+            tasks: AsyncMutex::new(vec![first_task, second_task]),
+            task_handles,
+            health: Arc::new(AsyncRwLock::new(PrivateIntakeHealth {
+                peers: HashMap::from([(peer, PrivateIntakeTransportState::Stale)]),
+                reserved_streams: 1,
+                last_successful_audit_at: HashMap::new(),
+            })),
+            work: Arc::new(Notify::new()),
+        };
+
+        assert!(!supervisor.is_finished());
+        finish_first.send(()).unwrap();
+        tokio::task::yield_now().await;
+        assert!(!supervisor.is_finished());
+        finish_second.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !supervisor.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(supervisor.is_finished());
     }
 
     #[test]
