@@ -556,6 +556,9 @@ impl FfiPaykitSdk {
     /// the current request for this Payment Request ID is a different stream
     /// item, which happens when the counterparty was forgotten and sent the id
     /// again.
+    ///
+    /// Success only queues acceptance; accounting callers must still reserve payment and
+    /// obtain a fresh handoff.
     pub async fn accept_payment_request(
         &self,
         counterparty: String,
@@ -579,6 +582,8 @@ impl FfiPaykitSdk {
     /// Pass the `proposal_stream_item_id` of the record whose terms were
     /// approved, as it was displayed. On a mismatch nothing is claimed or
     /// queued and the call fails with a policy error.
+    ///
+    /// Accounting callers must still reserve payment and obtain a fresh handoff.
     pub async fn claim_and_accept_payment_request(
         &self,
         counterparty: String,

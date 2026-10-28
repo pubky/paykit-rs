@@ -51,6 +51,9 @@ where
     /// fresh Encrypted Link Handshake. The SDK cannot tell whether a backup is
     /// current, and resuming a stale one reuses a transport key and nonce, so the
     /// caller must choose; see [`RestoredLinkPolicy`].
+    ///
+    /// Reconcile accounting with every payment made after the export, or those
+    /// payments can be made again; see [`Self::reconcile_allowance_accounting`].
     pub async fn restore_backup_state(
         &self,
         backup: SdkBackupState,

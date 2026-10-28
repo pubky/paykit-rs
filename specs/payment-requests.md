@@ -299,7 +299,10 @@ accepted Allowance as prior permission to send the ordinary Acceptance and pay
 automatically. This is optional wallet behavior, not a Payment Request
 requirement or a guarantee of payment. Allowance matching, accepted-but-unpaid
 recovery, and per-Billing-Period metering are specified in
-[allowances.md](allowances.md) and are not repeated here.
+[allowances.md](allowances.md) and are not repeated here. The protocol flow for a
+manual payment is unchanged; a wallet that wants SDK duplicate-payment
+protection for it uses the SDK's
+[payment accounting](paykit-sdk.md#durable-allowance-payment-accounting).
 
 ## paykit.payment_request
 
