@@ -299,6 +299,55 @@ async fn test_private_list_delivery_skips_sent_and_pending_handshake_lists() {
 }
 
 #[tokio::test]
+async fn test_private_list_delivery_reports_terminal_lists_while_handshake_pending() {
+    // The handshake cannot make these lists sendable, so a pending handshake
+    // must not hide them.
+    for (status, record_missing, expected_error) in [
+        (
+            OutboundPrivateMessageStatus::Superseded,
+            false,
+            "superseded before it was sent",
+        ),
+        (
+            OutboundPrivateMessageStatus::Invalid,
+            false,
+            "is invalid and will not be sent",
+        ),
+        (
+            OutboundPrivateMessageStatus::Pending,
+            true,
+            "was not sent and is no longer queued",
+        ),
+    ] {
+        let (sdk, counterparty, mut report) = seed_tracked_private_list(false, false, status).await;
+        if record_missing {
+            // Track an id with no outbound record, as after compaction.
+            let tracked = report.cleared[0].outbound_message_id.as_mut().unwrap();
+            *tracked += 1000;
+        }
+        let list_id = report.cleared[0].outbound_message_id.unwrap();
+
+        sdk.report_unsent_private_payment_lists(
+            &mut report,
+            &counterparty,
+            &OutboundListRun::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.failed_to_deliver.len(), 1);
+        let failure = &report.failed_to_deliver[0];
+        assert_eq!(failure.counterparty, counterparty);
+        assert_eq!(failure.outbound_message_id, Some(list_id));
+        assert!(
+            failure.error.contains(expected_error),
+            "expected {expected_error:?}, got {:?}",
+            failure.error
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_private_list_delivery_does_not_duplicate_reported_list() {
     let (sdk, counterparty, mut report) =
         seed_tracked_private_list(true, false, OutboundPrivateMessageStatus::Failed).await;

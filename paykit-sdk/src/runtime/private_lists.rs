@@ -578,9 +578,11 @@ where
     /// or device, or when its outbound record is gone, for example after
     /// compaction removed a superseded list that was never attempted. Lists
     /// already `Sent`, including unchanged lists reused from an earlier send,
-    /// are not reported. Neither are lists for a counterparty whose Encrypted
-    /// Link Handshake is still pending: they stay eligible for a later run
-    /// after the link reaches `Linked`.
+    /// are not reported. Neither are lists still queued for a counterparty
+    /// whose Encrypted Link Handshake is pending: they stay eligible for a
+    /// later run after the link reaches `Linked`. Superseded, invalid, and
+    /// missing lists are reported even then, because the handshake cannot
+    /// make them sendable.
     pub(super) async fn report_unsent_private_payment_lists(
         &self,
         report: &mut PrivatePaymentListDeliveryReport,
@@ -601,31 +603,40 @@ where
             return Ok(());
         }
         unsent.sort_unstable();
-        let statuses = self
+        let (handshake_pending, statuses) = self
             .storage
             .transaction(|tx| {
-                if matches!(
+                let handshake_pending = matches!(
                     Self::private_queue_readiness_in_transaction(tx, counterparty),
                     Ok(PrivateQueueReadiness::PendingHandshake)
-                ) {
-                    return Ok(None);
-                }
-                Ok(Some(
-                    tx.outbound_private_messages(counterparty)
-                        .into_iter()
-                        .map(|message| (message.outbound_message_id, message.status))
-                        .collect::<HashMap<_, _>>(),
-                ))
+                );
+                let statuses = tx
+                    .outbound_private_messages(counterparty)
+                    .into_iter()
+                    .map(|message| (message.outbound_message_id, message.status))
+                    .collect::<HashMap<_, _>>();
+                Ok((handshake_pending, statuses))
             })
             .await?;
-        let Some(statuses) = statuses else {
-            return Ok(());
-        };
         for message_id in unsent {
+            let status = statuses.get(&message_id);
+            // A list still queued behind a pending handshake is sent once the
+            // link reaches `Linked`, so it is not a delivery failure yet.
+            let awaits_handshake = handshake_pending
+                && matches!(
+                    status,
+                    Some(
+                        OutboundPrivateMessageStatus::Pending
+                            | OutboundPrivateMessageStatus::Sending
+                            | OutboundPrivateMessageStatus::Failed
+                            | OutboundPrivateMessageStatus::RecoveryRequired
+                    )
+                );
+            if awaits_handshake {
+                continue;
+            }
             // Fail closed: a tracked list without a record was not sent.
-            if let Some(error) =
-                unsent_private_list_error(message_id, statuses.get(&message_id), run)
-            {
+            if let Some(error) = unsent_private_list_error(message_id, status, run) {
                 report
                     .failed_to_deliver
                     .push(PrivatePaymentListDeliveryFailure {
