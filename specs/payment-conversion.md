@@ -136,6 +136,15 @@ a claimed broadcast timestamp is not independently verifiable. This extension
 does not impose a new mining-confirmation requirement on Bitcoin. Lightning
 applications use their verified settlement evidence.
 
+The same time evidence sets the lower bound in
+[Payment time and attribution](payment-requests.md#payment-time-and-attribution).
+Its not-before tolerance must cover payee clock skew plus the method's
+timestamp rules. A Bitcoin block timestamp only has to exceed the
+median-time-past, so it can be well before real mining time, and it can be up
+to about 2 hours ahead. Some L2 sequencers allow timestamps that lag real time;
+use the chain's documented bounds. Where available, record a chain-tip height
+or first-seen time at proposal; it is a sturdier bound than a block timestamp.
+
 Expired evidence is not malformed merely because it arrives late. Wallets still
 credit received funds, and may label them underpaid, after expiry, or both. Paykit
 does not add refunds, disputes, top-up aggregation or resolution workflows.

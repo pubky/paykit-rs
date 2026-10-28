@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use paykit_lib::{PaymentRequestTerms, RecurrenceUnit};
 use paykit_sdk::{
     AmountRecord, BillingPeriodRecord, OutboundPrivateMessageStatus, PaymentProofRecord,
@@ -141,14 +141,13 @@ fn test_payment_request_filter_rejects_unknown_state() {
     ));
 }
 
-#[test]
-fn test_payment_request_record_conversion_redacts_references() {
+fn payment_request_record() -> PaymentRequestRecord {
     let mut metadata = JsonMap::new();
     metadata.insert("source".into(), JsonValue::String("test".into()));
     let mut proof = JsonMap::new();
     proof.insert("preimage".into(), JsonValue::String("secret".into()));
 
-    let record = PaymentRequestRecord {
+    PaymentRequestRecord {
         conversion_quotes: Vec::new(),
         counterparty: public_key(),
         payment_request_id: "550e8400-e29b-41d4-a716-446655440000".into(),
@@ -159,6 +158,7 @@ fn test_payment_request_record_conversion_redacts_references() {
         proposal_outbound_status: None,
         proposal_event_id: Some("650e8400-e29b-41d4-a716-446655440000".into()),
         proposal_app_id: Some(paykit_sdk::PaykitAppId::new("bitkit").unwrap()),
+        proposal_recorded_at: None,
         payer_app_id: Some(paykit_sdk::PaykitAppId::new("wallet").unwrap()),
         execution_claim_app_id: Some(paykit_sdk::PaykitAppId::new("wallet").unwrap()),
         terms: Some(PaymentRequestTermsRecord {
@@ -178,6 +178,7 @@ fn test_payment_request_record_conversion_redacts_references() {
         }),
         accepted_event_id: None,
         accepted_outbound_status: Some(OutboundPrivateMessageStatus::Pending),
+        acceptance_recorded_at: None,
         rejected_event_id: None,
         rejected_outbound_status: None,
         canceled_event_id: None,
@@ -204,9 +205,12 @@ fn test_payment_request_record_conversion_redacts_references() {
         last_outbound_status: Some(OutboundPrivateMessageStatus::Sent),
         last_event_at: Some(Utc::now()),
         invalid_reason: None,
-    };
+    }
+}
 
-    let ffi = FfiPaymentRequestRecord::try_from(record).unwrap();
+#[test]
+fn test_payment_request_record_conversion_redacts_references() {
+    let ffi = FfiPaymentRequestRecord::try_from(payment_request_record()).unwrap();
 
     assert_eq!(ffi.state, FfiPaymentRequestLifecycleState::Accepted);
     assert_eq!(ffi.payer_app_id.as_deref(), Some("wallet"));
@@ -226,6 +230,31 @@ fn test_payment_request_record_conversion_redacts_references() {
         .export_text()
         .contains("\"preimage\":\"secret\""));
     assert!(!format!("{:?}", ffi.payment_proofs[0].proof).contains("secret"));
+}
+
+#[test]
+fn test_payment_request_record_conversion_formats_record_times() {
+    let proposed_at = Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap();
+    let accepted_at = Utc.with_ymd_and_hms(2026, 6, 3, 12, 5, 30).unwrap();
+    let mut record = payment_request_record();
+    record.proposal_recorded_at = Some(proposed_at);
+    record.acceptance_recorded_at = Some(accepted_at);
+
+    let ffi = FfiPaymentRequestRecord::try_from(record).unwrap();
+
+    assert_eq!(
+        ffi.proposal_recorded_at.as_deref(),
+        Some("2026-06-03T12:00:00+00:00")
+    );
+    assert_eq!(
+        ffi.acceptance_recorded_at.as_deref(),
+        Some("2026-06-03T12:05:30+00:00")
+    );
+
+    let ffi = FfiPaymentRequestRecord::try_from(payment_request_record()).unwrap();
+
+    assert!(ffi.proposal_recorded_at.is_none());
+    assert!(ffi.acceptance_recorded_at.is_none());
 }
 
 #[test]

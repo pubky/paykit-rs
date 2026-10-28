@@ -8,15 +8,44 @@ where
     C: Clock,
 {
     /// Export SDK-managed backup state.
+    ///
+    /// The result is sensitive, unencrypted plaintext that includes Noise key
+    /// material. See [`SdkBackupState`] for its contents, required storage
+    /// protection, and what to do if a backup is exposed.
     pub async fn export_backup_state(&self) -> Result<SdkBackupState> {
         export_sdk_backup_state(&self.storage).await
     }
 
     /// Restore SDK-managed backup state.
     ///
-    /// Restores only into an empty or matching identity-only state backing.
-    /// Accounting always requires reconciliation after restore. Retained Allowance
-    /// and Payment Request evidence cannot be discarded; rejection changes no state.
+    /// Restores only into an empty or matching identity-only state backing: it
+    /// may hold identity metadata, authorized Paykit App records, and
+    /// operation leases, and nothing else. Otherwise the refusal names the
+    /// blocking record kinds. Restore is also refused while a peer-link or
+    /// Paykit App operation lease is unexpired. A backup with identity-scoped
+    /// state needs an active Pubky session for the same identity with
+    /// [`crate::PAYKIT_SESSION_CAPABILITIES`], and private-link capability when
+    /// it holds private state. Accounting always requires reconciliation after
+    /// restore. Retained Allowance and Payment Request evidence cannot be
+    /// discarded; rejection changes no state.
+    ///
+    /// After [`Self::initialize`] on a fresh backing, restore before
+    /// [`Self::publish_paykit_app`]: publishing (and the public endpoint sync it
+    /// enables) writes SDK-managed state that blocks restore. With Pubky shared
+    /// storage, restore over an identity where any app has published is refused
+    /// by design;
+    /// [`Self::recover_shared_state_from_backup`] covers only missing or corrupt
+    /// state. With app-owned local storage (such as a callback state blob), the
+    /// app may discard that state and initialize again only when it
+    /// independently knows it is the only Paykit App and SDK handle using that
+    /// backing for this identity, and the refusal names nothing but registered
+    /// Paykit Apps and public Payment Endpoint records. The SDK cannot check
+    /// ownership: those labels combine every app's records and omit Paykit App
+    /// IDs, so another app's setup produces the same refusal; otherwise do not
+    /// discard. After discarding, the app must restore with
+    /// [`RestoredLinkPolicy::RequireRecovery`]: discarding newer history could let
+    /// a re-delivered Payment Request be paid again, and `Resume` could reuse a
+    /// transport key and nonce.
     ///
     /// `link_policy` decides whether saved Encrypted Links resume or require a
     /// fresh Encrypted Link Handshake. The SDK cannot tell whether a backup is

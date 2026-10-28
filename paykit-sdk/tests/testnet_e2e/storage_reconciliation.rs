@@ -2,6 +2,7 @@
 //! response/cancellation boundaries, not GCS's generation-precondition contract.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -26,12 +27,17 @@ enum Fault {
     Reject(http::StatusCode),
     LoseResponse,
     HoldResponse(oneshot::Sender<()>, oneshot::Receiver<()>),
+    HoldLockResponse(oneshot::Sender<()>, oneshot::Receiver<()>),
+    InvalidLockGrant(u64),
+    RejectUnlock(http::StatusCode),
 }
 
 #[derive(Default)]
 struct Observations {
     writes: Vec<(String, Vec<u8>)>,
+    unlocks: usize,
     faults: VecDeque<Fault>,
+    lock_timeout_seconds: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -47,22 +53,35 @@ async fn forward(State(proxy): State<Proxy>, request: http::Request<Body>) -> Re
         .await
         .expect("bounded test request");
     let path = parts.uri.path();
-    let fault = {
+    let (fault, lock_timeout_seconds) = {
         let mut observations = proxy.observations.lock().unwrap();
         if parts.method == http::Method::PUT {
             observations.writes.push((path.into(), bytes.to_vec()));
         }
+        if parts.method.as_str() == "UNLOCK" && path.ends_with(STATE) {
+            observations.unlocks += 1;
+        }
+        let unlock_fault = matches!(observations.faults.front(), Some(Fault::RejectUnlock(_)));
         let read_fault = matches!(observations.faults.front(), Some(Fault::TruncateRead));
-        if path.ends_with(STATE)
-            && ((parts.method == http::Method::PUT && !read_fault)
-                || (parts.method == http::Method::GET && read_fault))
+        let lock_fault = matches!(
+            observations.faults.front(),
+            Some(Fault::HoldLockResponse(..) | Fault::InvalidLockGrant(_))
+        );
+        let fault = if path.ends_with(STATE)
+            && ((lock_fault && parts.method.as_str() == "LOCK")
+                || (unlock_fault && parts.method.as_str() == "UNLOCK")
+                || (!lock_fault
+                    && !unlock_fault
+                    && ((parts.method == http::Method::PUT && !read_fault)
+                        || (parts.method == http::Method::GET && read_fault))))
         {
             observations.faults.pop_front()
         } else {
             None
-        }
+        };
+        (fault, observations.lock_timeout_seconds)
     };
-    if let Some(Fault::Reject(status)) = fault {
+    if let Some(Fault::Reject(status) | Fault::RejectUnlock(status)) = fault {
         return Response::builder()
             .status(status)
             .body(Body::empty())
@@ -71,6 +90,11 @@ async fn forward(State(proxy): State<Proxy>, request: http::Request<Body>) -> Re
     let mut headers = parts.headers;
     headers.remove(http::header::HOST);
     headers.remove(http::header::CONTENT_LENGTH);
+    if parts.method.as_str() == "LOCK" {
+        if let Some(seconds) = lock_timeout_seconds {
+            headers.insert("timeout", format!("Second-{seconds}").parse().unwrap());
+        }
+    }
     let response = proxy
         .client
         .request(parts.method, format!("{}{}", proxy.upstream, parts.uri))
@@ -80,7 +104,7 @@ async fn forward(State(proxy): State<Proxy>, request: http::Request<Body>) -> Re
         .await
         .expect("test homeserver response");
     let status = response.status();
-    let headers = response.headers().clone();
+    let mut headers = response.headers().clone();
     let bytes = response.bytes().await.unwrap();
     match fault {
         Some(Fault::TruncateRead) => {
@@ -99,7 +123,11 @@ async fn forward(State(proxy): State<Proxy>, request: http::Request<Body>) -> Re
                 .body(Body::empty())
                 .unwrap();
         }
-        Some(Fault::HoldResponse(entered, release)) => {
+        Some(Fault::InvalidLockGrant(seconds)) => {
+            assert!(status.is_success());
+            headers.insert("timeout", format!("Second-{seconds}").parse().unwrap());
+        }
+        Some(Fault::HoldResponse(entered, release) | Fault::HoldLockResponse(entered, release)) => {
             assert!(status.is_success());
             let _ = entered.send(());
             let _ = release.await;
@@ -262,6 +290,214 @@ impl Fixture {
         .await
         .expect("reconciliation must complete within the test deadline")
     }
+}
+
+#[tokio::test]
+async fn test_oversized_acquisition_grant_never_enters_operation() {
+    let fixture = Fixture::new(true).await;
+    let writes_before = fixture.observations.lock().unwrap().writes.len();
+    fixture.fault(Fault::InvalidLockGrant(u64::MAX));
+    let invoked = AtomicBool::new(false);
+    let error = paykit_lib::with_write_lock::<(), paykit_lib::PaykitError, _, _>(
+        &fixture.access.session,
+        STATE,
+        |_| {
+            invoked.store(true, Ordering::SeqCst);
+            async { Ok(()) }
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(!invoked.load(Ordering::SeqCst));
+    assert!(!paykit_lib::is_write_conflict(&error));
+    assert_eq!(
+        fixture.observations.lock().unwrap().writes.len(),
+        writes_before
+    );
+    let next = fixture
+        .access
+        .session
+        .storage()
+        .lock(STATE, Duration::from_secs(60))
+        .await
+        .expect("a rejected acquisition grant must release its token before returning");
+    fixture
+        .access
+        .session
+        .storage()
+        .unlock(&next)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_rejected_acquisition_preserves_error_when_unlock_fails() {
+    let fixture = Fixture::new(true).await;
+    let unlocks_before = fixture.observations.lock().unwrap().unlocks;
+    fixture.fault(Fault::InvalidLockGrant(u64::MAX));
+    fixture.fault(Fault::RejectUnlock(http::StatusCode::SERVICE_UNAVAILABLE));
+    let invoked = AtomicBool::new(false);
+    let error = paykit_lib::with_write_lock::<(), paykit_lib::PaykitError, _, _>(
+        &fixture.access.session,
+        STATE,
+        |_| {
+            invoked.store(true, Ordering::SeqCst);
+            async { Ok(()) }
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(!invoked.load(Ordering::SeqCst));
+    assert!(!paykit_lib::is_write_conflict(&error));
+    assert!(format!("{error:?}").contains("grant exceeds the supported maximum"));
+    assert_eq!(
+        fixture.observations.lock().unwrap().unlocks,
+        unlocks_before + 1
+    );
+    assert!(fixture.observations.lock().unwrap().faults.is_empty());
+}
+
+#[tokio::test]
+async fn test_oversized_renewal_grant_preserves_uncertain_single_write() {
+    let fixture = Fixture::new(true).await;
+    fixture.observations.lock().unwrap().lock_timeout_seconds = Some(6);
+    let original = fixture.bytes().await;
+    let writes_before = fixture.observations.lock().unwrap().writes.len();
+    let invoked = AtomicBool::new(false);
+    let error = tokio::time::timeout(
+        Duration::from_secs(8),
+        paykit_lib::with_write_lock::<(), paykit_lib::PaykitError, _, _>(
+            &fixture.access.session,
+            STATE,
+            |lock| {
+                invoked.store(true, Ordering::SeqCst);
+                let fixture = &fixture;
+                let original = &original;
+                async move {
+                    fixture
+                        .access
+                        .session
+                        .storage()
+                        .put_locked(&lock, original.clone())
+                        .await
+                        .unwrap();
+                    fixture.fault(Fault::InvalidLockGrant(u64::MAX));
+                    std::future::pending::<()>().await;
+                    unreachable!("invalid renewal cannot resume an interrupted operation");
+                }
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(invoked.load(Ordering::SeqCst));
+    assert!(!paykit_lib::is_write_conflict(&error));
+    assert_eq!(
+        fixture.observations.lock().unwrap().writes.len(),
+        writes_before + 1
+    );
+    assert_eq!(fixture.bytes().await, original);
+}
+
+#[tokio::test]
+async fn test_expired_acquisition_response_never_enters_shared_state_operation() {
+    let fixture = Fixture::new(true).await;
+    fixture.observations.lock().unwrap().lock_timeout_seconds = Some(3);
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    fixture.fault(Fault::HoldLockResponse(entered_tx, release_rx));
+    let invoked = AtomicBool::new(false);
+    let operation = paykit_lib::with_write_lock::<(), paykit_lib::PaykitError, _, _>(
+        &fixture.access.session,
+        STATE,
+        |_| {
+            invoked.store(true, Ordering::SeqCst);
+            async { Ok(()) }
+        },
+    );
+    tokio::pin!(operation);
+    tokio::select! {
+        result = &mut operation => panic!("lock response should be held: {result:?}"),
+        _ = entered_rx => {}
+    }
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    release_tx.send(()).unwrap();
+    let error = operation.await.unwrap_err();
+    assert!(
+        matches!(&error, paykit_lib::PaykitError::Transport { context, .. }
+        if context == "Pubky write lock response arrived after its safe lease expired")
+    );
+    assert!(!paykit_lib::is_write_conflict(&error));
+    assert!(!invoked.load(Ordering::SeqCst));
+    fixture.observations.lock().unwrap().lock_timeout_seconds = None;
+    fixture.read().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_delayed_renewal_stops_operation_after_confirmed_write() {
+    let fixture = Fixture::new(true).await;
+    fixture.observations.lock().unwrap().lock_timeout_seconds = Some(3);
+    let original = fixture.bytes().await;
+    let writes_before = fixture.observations.lock().unwrap().writes.len();
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let (resume_tx, resume_rx) = oneshot::channel();
+    let operation_storage = fixture.access.session.storage();
+    let operation_fixture = &fixture;
+    let original_bytes = original.clone();
+    let operation = paykit_lib::with_write_lock::<(), paykit_lib::PaykitError, _, _>(
+        &fixture.access.session,
+        STATE,
+        |lock| async move {
+            operation_storage
+                .put_locked(&lock, original_bytes)
+                .await
+                .unwrap();
+            operation_fixture
+                .observations
+                .lock()
+                .unwrap()
+                .lock_timeout_seconds = Some(6);
+            operation_fixture.fault(Fault::HoldLockResponse(entered_tx, release_rx));
+            resume_rx.await.unwrap();
+            panic!("the operation must not resume after its confirmed lease expires");
+        },
+    );
+    tokio::pin!(operation);
+    tokio::select! {
+        result = &mut operation => panic!("renewal response should be held: {result:?}"),
+        _ = entered_rx => {}
+    }
+    // Resume after the original lease but before the longer renewal would expire.
+    // Accepting that stale response would let the ready continuation run.
+    release_tx.send(()).unwrap();
+    resume_tx.send(()).unwrap();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let error = tokio::time::timeout(Duration::from_secs(1), operation)
+        .await
+        .expect("expired confirmation must stop the operation promptly")
+        .unwrap_err();
+    assert!(!paykit_lib::is_write_conflict(&error));
+    assert_eq!(
+        fixture.observations.lock().unwrap().writes.len(),
+        writes_before + 1
+    );
+    fixture.observations.lock().unwrap().lock_timeout_seconds = None;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match fixture.read().await {
+                Ok(()) => break,
+                Err(paykit_sdk::PaykitSdkError::SharedStateBusy { .. }) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await
+                }
+                Err(error) => panic!("unexpected recovery failure: {error}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fixture.bytes().await, original);
 }
 
 #[tokio::test]
