@@ -527,16 +527,17 @@ bootstrap.approveAuthWithCompanionClaim(
   1. Call `endAllowance` and `cancelPaymentRequest` for the Allowances and
      Payment Requests the user wants gone. Otherwise they authorize again
      after a later relink.
-  2. While the peer is still Linked, queue an empty Private Payment List with
-     `clearPrivatePaymentList` and keep its `outboundMessageId`. Call
-     `processOutboundPrivateMessages` until a returned report's `sent`
-     contains that id, waiting out any retry backoff between calls. The queue
-     is processed in order, so this also sends step 1's messages first. Empty
-     failure lists do not prove delivery: an older failed message in retry
-     backoff holds the queue head, and the run then sends nothing and reports
-     no failure. Queueing without a confirmed send is not enough, because the
-     block parks it unsent. This is best effort for this Paykit App only and
-     cannot take back details the peer already read.
+  2. While the peer is still Linked, call
+     `clearPrivatePaymentListAndProcessOutbound` and continue only when its
+     report's `failedToQueue` and `failedToDeliver` are both empty. Otherwise
+     call it again later; each call queues a fresh empty list, which
+     supersedes older pending ones. Do not block until it reports success,
+     because the block parks an unsent list. The queue is processed in order,
+     so this also sends step 1's messages first. Another runtime or device of
+     the same Paykit App that queues a list for this peer can supersede the
+     clear, which the report shows, so pause such writers during cleanup.
+     This is best effort for this Paykit App only and cannot take back
+     details the peer already read.
   3. Persist the app's own record of intent to end the link with that peer.
      Call `removeContactsAndBlockPeers`, then `unblockPeer`, then clear the
      record.
@@ -749,7 +750,9 @@ An empty `reservations` list publishes an empty Private Payment List for that
 counterparty. `failedToQueue` reports a queueing failure, not a rollback guarantee;
 inspect durable state before replacing reservations or retrying the workflow.
 `failedToDeliver` means the SDK
-queued the message, then delivery or reservation cleanup failed; keep the state
+queued the message, then delivery or reservation cleanup failed, the list is
+still queued, a newer list superseded it before it was sent, or its outbound
+record is gone; keep the state
 and retry with `processPendingPrivateMessages`.
 
 ### Pay A Contact

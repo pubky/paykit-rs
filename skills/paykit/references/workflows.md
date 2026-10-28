@@ -55,11 +55,13 @@ Remove a contact: `remove_contact` deletes only the Contact Record. The
 Encrypted Link, intake, queued sends, accepted Allowances and the peer's copy of
 your last Private Payment List stay, and a re-add reuses the link. To also end
 the link, follow the steps on `remove_contacts_and_block_peers`: end or cancel
-what the user wants gone; while still Linked, queue an empty list with
-`clear_private_payment_list` and call `process_outbound_private_messages` until
-a report's `sent` contains its `outbound_message_id` (empty failure lists do
-not prove delivery); persist the app's own record of intent to end the link,
-then `remove_contacts_and_block_peers`, `unblock_peer`, and clear the record.
+what the user wants gone; while still Linked, call
+`clear_private_payment_list_and_process_outbound` until its `failed_to_queue`
+and `failed_to_deliver` are both empty, and do not block before then (pause
+other runtimes or devices of the same Paykit App that queue lists for that peer,
+since they can supersede the clear); persist the app's own record of intent to
+end the link, then `remove_contacts_and_block_peers`, `unblock_peer`, and clear
+the record.
 On startup, unblock only peers that carry that record and are still `Blocked`.
 Never infer intent from a `Blocked` peer without a Contact Record: the block
 records no reason and is shared by every app and device on the identity.
