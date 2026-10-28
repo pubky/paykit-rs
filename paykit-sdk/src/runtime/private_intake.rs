@@ -198,6 +198,41 @@ enum PrivatePacketAcquisition {
     Inserted,
     AlreadyBuffered,
     CapacityReached,
+    PendingHandshake,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrivateIntakePeerPhase {
+    PendingHandshake { generation: u64 },
+    Established,
+}
+
+fn private_intake_peer_phase(
+    state: &crate::storage::StorageState,
+    counterparty: &PubkyPublicKey,
+) -> Option<PrivateIntakePeerPhase> {
+    let peer = state.linked_peers.get(counterparty)?;
+    let link = state.encrypted_link_states.get(counterparty)?;
+    match peer.state {
+        LinkedPeerState::Linking
+            if link.link_snapshot.is_none()
+                && link.handshake_snapshot.is_some()
+                && link.handshake_role.is_some()
+                && state
+                    .private_intake_peers
+                    .get(counterparty)
+                    .and_then(|intake| intake.cancelled_handshake_through_generation)
+                    .is_none_or(|cancelled| link.generation > cancelled) =>
+        {
+            Some(PrivateIntakePeerPhase::PendingHandshake {
+                generation: link.generation,
+            })
+        }
+        LinkedPeerState::Linked if link.link_snapshot.is_some() => {
+            Some(PrivateIntakePeerPhase::Established)
+        }
+        _ => None,
+    }
 }
 
 fn next_private_intake_counter(
@@ -265,15 +300,17 @@ fn subscribable_private_intake_peers(
         .values()
         .map(|peer| peer.buffered_packets.len())
         .sum::<usize>();
-    if global_count >= crate::storage::PRIVATE_INTAKE_MAX_PACKETS_GLOBAL {
-        return Vec::new();
-    }
     peers
         .iter()
         .filter(|peer| {
-            state.private_intake_peers.get(*peer).is_none_or(|record| {
-                record.buffered_packets.len() < crate::storage::PRIVATE_INTAKE_MAX_PACKETS_PER_PEER
-            })
+            matches!(
+                private_intake_peer_phase(state, peer),
+                Some(PrivateIntakePeerPhase::PendingHandshake { .. })
+            ) || (global_count < crate::storage::PRIVATE_INTAKE_MAX_PACKETS_GLOBAL
+                && state.private_intake_peers.get(*peer).is_none_or(|record| {
+                    record.buffered_packets.len()
+                        < crate::storage::PRIVATE_INTAKE_MAX_PACKETS_PER_PEER
+                }))
         })
         .cloned()
         .collect()
@@ -308,7 +345,8 @@ where
             PrivatePacketAcquisition::Inserted => continue,
             PrivatePacketAcquisition::Absent
             | PrivatePacketAcquisition::AlreadyBuffered
-            | PrivatePacketAcquisition::CapacityReached => return Ok(outcome),
+            | PrivatePacketAcquisition::CapacityReached
+            | PrivatePacketAcquisition::PendingHandshake => return Ok(outcome),
         }
     }
     Ok(PrivatePacketAcquisition::Inserted)
@@ -460,6 +498,10 @@ async fn run_connected_private_intake_stream(
                             set_peer_state(health, peer.clone(), PrivateIntakeTransportState::Backpressured).await;
                             return PrivateIntakeEventLoopExit::Backpressured;
                         }
+                        Some((peer, Ok(PrivatePacketAcquisition::PendingHandshake))) => {
+                            work.notify_waiters();
+                            set_peer_state(health, peer, PrivateIntakeTransportState::Replaying).await;
+                        }
                         Some((peer, Err(_))) => {
                             set_peer_state(health, peer, PrivateIntakeTransportState::Stale).await;
                         }
@@ -520,13 +562,28 @@ where
     C: Clock,
 {
     async fn resolve_private_intake_groups(&self) -> Result<Vec<SubscriptionGroup>> {
-        let (access, peers) = self.private_receive_context(None).await?;
+        let (access, _, peers) = self
+            .load_session_access_and_refresh_identity_with(|tx| {
+                let state = tx.export_storage_state();
+                let mut peers = state
+                    .linked_peers
+                    .keys()
+                    .filter(|peer| private_intake_peer_phase(&state, peer).is_some())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                peers.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+                Ok(peers)
+            })
+            .await?;
+        let access = access.ok_or_else(|| PaykitSdkError::Identity {
+            context: "no Pubky session available".into(),
+            source: None,
+        })?;
+        access.paykit_noise_secret_key()?;
+        self.validate_local_noise_key_authorization(&access).await?;
         let mut by_homeserver: HashMap<String, (paykit_lib::PublicKey, Vec<PubkyPublicKey>)> =
             HashMap::new();
-        for (peer, snapshot) in peers {
-            if snapshot.is_none() {
-                continue;
-            }
+        for peer in peers.expect("active session reads private intake peers") {
             let remote = peer.to_public_key()?;
             let homeserver = access
                 .outbox_client
@@ -1037,6 +1094,11 @@ where
                     )
                     .await;
                 }
+                Ok(PrivatePacketAcquisition::PendingHandshake) => {
+                    work.notify_waiters();
+                    set_peer_state(health, peer.clone(), PrivateIntakeTransportState::Replaying)
+                        .await;
+                }
                 Err(_) => {
                     set_peer_state(health, peer.clone(), PrivateIntakeTransportState::Stale).await
                 }
@@ -1049,6 +1111,32 @@ where
         counterparty: PubkyPublicKey,
         cursor: Option<PrivateIntakeCursorRecord>,
     ) -> Result<PrivatePacketAcquisition> {
+        let counterparty_for_phase = counterparty.clone();
+        let phase = self
+            .storage
+            .transaction(move |tx| {
+                Ok(private_intake_peer_phase(
+                    &tx.export_storage_state(),
+                    &counterparty_for_phase,
+                ))
+            })
+            .await?;
+        if matches!(phase, Some(PrivateIntakePeerPhase::PendingHandshake { .. })) {
+            let report = self.advance_link_handshake(counterparty.clone()).await?;
+            if report.state == LinkedPeerState::Linking {
+                if let Some(cursor) = cursor {
+                    self.storage
+                        .transaction(move |tx| tx.advance_private_intake_cursor(cursor))
+                        .await?;
+                }
+                return Ok(PrivatePacketAcquisition::PendingHandshake);
+            }
+        } else if phase.is_none() {
+            return Err(PaykitSdkError::RecoveryRequired {
+                context: "Linked Peer has no current private intake checkpoint".into(),
+                source: None,
+            });
+        }
         let (access, snapshots) = self.private_receive_context(Some(&counterparty)).await?;
         let snapshot = snapshots
             .into_iter()
@@ -2184,5 +2272,58 @@ mod tests {
                 .receive_counter,
             3 + u64::try_from(crate::storage::PRIVATE_INTAKE_MAX_PACKETS_PER_PEER).unwrap()
         );
+    }
+
+    #[test]
+    fn test_pending_handshake_is_supervised_without_expiry() {
+        for role in [
+            EncryptedLinkHandshakeRole::Initiator,
+            EncryptedLinkHandshakeRole::Responder,
+        ] {
+            let peer = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+            let mut state = crate::storage::StorageState::default();
+            state.linked_peers.insert(
+                peer.clone(),
+                LinkedPeerRecord {
+                    counterparty: peer.clone(),
+                    state: LinkedPeerState::Linking,
+                    last_sync_at: Some(Utc::now() - chrono::Duration::days(365)),
+                    last_private_receive_at: None,
+                    failure_count: 0,
+                    local_recovery_attempt_id: None,
+                    local_recovery_marker_created_at: None,
+                    local_recovery_marker_last_error: None,
+                    remote_recovery_attempt_id: None,
+                    remote_recovery_marker_observed_at: None,
+                    noise_key_authorization: None,
+                },
+            );
+            state.encrypted_link_states.insert(
+                peer.clone(),
+                crate::storage::EncryptedLinkStateRecord {
+                    counterparty: peer.clone(),
+                    link_snapshot: None,
+                    handshake_snapshot: Some(vec![1, 2, 3]),
+                    handshake_role: Some(role),
+                    generation: 7,
+                    checkpointed_at: Utc::now() - chrono::Duration::days(365),
+                },
+            );
+
+            assert_eq!(
+                private_intake_peer_phase(&state, &peer),
+                Some(PrivateIntakePeerPhase::PendingHandshake { generation: 7 })
+            );
+            state.private_intake_peers.insert(
+                peer.clone(),
+                crate::storage::PrivateIntakePeerRecord {
+                    counterparty: peer.clone(),
+                    link_generation: 8,
+                    buffered_packets: Vec::new(),
+                    cancelled_handshake_through_generation: Some(7),
+                },
+            );
+            assert_eq!(private_intake_peer_phase(&state, &peer), None);
+        }
     }
 }

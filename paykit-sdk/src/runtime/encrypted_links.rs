@@ -522,6 +522,92 @@ where
         .await
     }
 
+    /// Cancel one local pending Encrypted Link Handshake.
+    ///
+    /// Cancellation is local-only: no remote notification is sent. It persists
+    /// a generation fence, clears buffered work from the cancelled attempt, and
+    /// leaves late packets unable to revive that attempt after restart. Pending
+    /// handshakes do not expire automatically; callers cancel them explicitly.
+    pub async fn cancel_pending_handshake(
+        &self,
+        counterparty: PubkyPublicKey,
+    ) -> Result<LinkedPeerHandshakeReport> {
+        self.retry_storage_transaction(|| {
+            let counterparty = counterparty.clone();
+            move |tx| {
+                let local = initialized_identity_in_transaction(tx, "cancel pending handshake")?;
+                require_distinct_link_identity(&local, &counterparty)?;
+                let now = self.clock.now();
+                let lease = tx
+                    .claim_peer_link_operation(
+                        &counterparty,
+                        now,
+                        now + ChronoDuration::from_std(PEER_LINK_OPERATION_LEASE_TIMEOUT)
+                            .expect("fixed peer link lease timeout must fit chrono duration"),
+                    )?
+                    .ok_or_else(|| PaykitSdkError::ConcurrentUpdate {
+                        context: format!(
+                            "peer link operation already in progress for counterparty {counterparty}"
+                        ),
+                        source: None,
+                    })?;
+                let result = (|| {
+                    let mut peer = tx.linked_peer(&counterparty).ok_or_else(|| {
+                        PaykitSdkError::Policy {
+                            context: format!(
+                                "no pending Encrypted Link Handshake for counterparty {counterparty}"
+                            ),
+                            source: None,
+                        }
+                    })?;
+                    let state = tx.encrypted_link_state(&counterparty).ok_or_else(|| {
+                        PaykitSdkError::Policy {
+                            context: format!(
+                                "no pending Encrypted Link Handshake for counterparty {counterparty}"
+                            ),
+                            source: None,
+                        }
+                    })?;
+                    if peer.state != LinkedPeerState::Linking
+                        || state.link_snapshot.is_some()
+                        || state.handshake_snapshot.is_none()
+                        || state.handshake_role.is_none()
+                    {
+                        return Err(PaykitSdkError::Policy {
+                            context: format!(
+                                "no pending Encrypted Link Handshake for counterparty {counterparty}"
+                            ),
+                            source: None,
+                        });
+                    }
+                    tx.cancel_private_intake_handshake_generation(
+                        &counterparty,
+                        state.generation,
+                    )?;
+                    let mut cancelled_state = tx
+                        .encrypted_link_state(&counterparty)
+                        .expect("cancellation preserves fenced Encrypted Link state");
+                    cancelled_state.checkpointed_at = now;
+                    let generation = cancelled_state.generation;
+                    tx.save_encrypted_link_state(cancelled_state);
+                    peer.state = LinkedPeerState::NotLinked;
+                    peer.last_sync_at = Some(now);
+                    peer.failure_count = 0;
+                    tx.save_linked_peer(peer.clone());
+                    Ok(LinkedPeerHandshakeReport {
+                        counterparty: counterparty.clone(),
+                        state: peer.state,
+                        generation,
+                        handshake_role: None,
+                    })
+                })();
+                tx.release_peer_link_operation(&counterparty, lease.lease_id);
+                result
+            }
+        })
+        .await
+    }
+
     /// Ensure an Encrypted Link is started or advanced for one counterparty.
     ///
     /// The SDK deterministically chooses the local handshake role from the two

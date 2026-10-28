@@ -9,11 +9,12 @@ use std::{
 
 use async_trait::async_trait;
 use paykit_sdk::{
-    storage::StorageTransactionCallback, InMemoryStorage, PaykitSdk, PaykitSdkConfig,
-    PrivateIntakeConfig, PrivateIntakeTransportState, Result, StorageAdapter,
+    load_encrypted_link_state, storage::StorageTransactionCallback, InMemoryStorage,
+    LinkedPeerState, PaykitSdk, PaykitSdkConfig, PrivateIntakeConfig, PrivateIntakeTransportState,
+    PubkyPublicKey, Result, StorageAdapter,
 };
 
-use crate::harness::{linked_two_party, TestUser, TestnetSessionProvider, TwoParty};
+use crate::harness::{linked_two_party, two_party, TestUser, TestnetSessionProvider, TwoParty};
 
 const RETAINED_PRIVATE_STREAM_ITEM_LIMIT: usize = 4096;
 
@@ -85,6 +86,270 @@ async fn wait_for_buffered(
     })
     .await
     .expect("private intake should durably buffer expected packets");
+}
+
+async fn advance_handshake_from_intake_after_restart(
+    user: &TestUser,
+    counterparty: &PubkyPublicKey,
+) {
+    let before = user.storage.snapshot().unwrap();
+    let before_link = before.encrypted_link_states[counterparty].clone();
+    let restarted = user.restart_with_storage(user.storage.clone()).await;
+    let sdk = Arc::new(restarted.sdk);
+    let supervisor = sdk
+        .start_private_intake(PrivateIntakeConfig::new(1).unwrap())
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let state = user.storage.snapshot().unwrap();
+            let peer = &state.linked_peers[counterparty];
+            let link = &state.encrypted_link_states[counterparty];
+            let attempted = supervisor
+                .health()
+                .await
+                .peers
+                .get(counterparty)
+                .is_some_and(|health| {
+                    matches!(
+                        health,
+                        PrivateIntakeTransportState::Replaying | PrivateIntakeTransportState::Stale
+                    )
+                });
+            if peer.state != LinkedPeerState::Linking
+                || link.generation != before_link.generation
+                || attempted
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("private intake should attempt pending handshake advancement");
+    supervisor.stop().await;
+}
+
+async fn drive_handshake_from_restarted_intake(alice: &TestUser, bob: &TestUser) {
+    for _ in 0..8 {
+        for (local, remote) in [(alice, bob), (bob, alice)] {
+            if local.storage.snapshot().unwrap().linked_peers[&remote.public_key].state
+                == LinkedPeerState::Linking
+            {
+                advance_handshake_from_intake_after_restart(local, &remote.public_key).await;
+            }
+        }
+        let alice_linked = alice.storage.snapshot().unwrap().linked_peers[&bob.public_key].state
+            == LinkedPeerState::Linked;
+        let bob_linked = bob.storage.snapshot().unwrap().linked_peers[&alice.public_key].state
+            == LinkedPeerState::Linked;
+        if alice_linked && bob_linked {
+            return;
+        }
+    }
+    panic!("restarted private intake did not complete Encrypted Link Handshake");
+}
+
+#[tokio::test]
+async fn test_pending_handshake_both_roles_advance_from_intake_across_restarts() {
+    let pair = two_party().await;
+    pair.alice
+        .sdk
+        .initiate_link_with_peer(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    pair.bob
+        .sdk
+        .accept_link_with_peer(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+
+    drive_handshake_from_restarted_intake(&pair.alice, &pair.bob).await;
+
+    for (local, remote) in [(&pair.alice, &pair.bob), (&pair.bob, &pair.alice)] {
+        let state = local.storage.snapshot().unwrap();
+        assert_eq!(
+            state.linked_peers[&remote.public_key].state,
+            LinkedPeerState::Linked
+        );
+        assert!(state.encrypted_link_states[&remote.public_key]
+            .link_snapshot
+            .is_some());
+        assert!(state.encrypted_link_states[&remote.public_key]
+            .handshake_snapshot
+            .is_none());
+    }
+}
+
+#[tokio::test]
+async fn test_cancel_then_fresh_handshake_ignores_late_old_packet_from_intake() {
+    let pair = two_party().await;
+    pair.alice
+        .sdk
+        .initiate_link_with_peer(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    pair.bob
+        .sdk
+        .accept_link_with_peer(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    let bob_old_state = load_encrypted_link_state(&pair.bob.storage, &pair.alice.public_key)
+        .await
+        .unwrap()
+        .unwrap();
+    let bob_key = pair
+        .bob
+        .access
+        .local_secret_key
+        .as_ref()
+        .unwrap()
+        .derive_paykit_identity_secret_key(paykit_sdk::INITIAL_PAYKIT_KEY_GENERATION)
+        .unwrap();
+    let bob_old_handshake = paykit_lib::restore_encrypted_link_handshake(
+        pair.bob.access.session.clone(),
+        paykit_lib::derive_paykit_noise_secret_key(bob_key.as_bytes()),
+        &pair.alice.public_key.to_public_key().unwrap(),
+        pair.bob.access.outbox_client.clone(),
+        paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(
+            &bob_old_state.handshake_snapshot.unwrap(),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let old_packet_path = format!("{}/0", bob_old_handshake.config().read_path);
+    advance_handshake_from_intake_after_restart(&pair.alice, &pair.bob.public_key).await;
+    assert!(pair
+        .alice
+        .access
+        .outbox_client
+        .public_storage()
+        .exists(format!(
+            "pubky://{}{}",
+            pair.alice.public_key, old_packet_path
+        ))
+        .await
+        .unwrap());
+    let old_generation = pair.alice.storage.snapshot().unwrap().encrypted_link_states
+        [&pair.bob.public_key]
+        .generation;
+
+    pair.alice
+        .sdk
+        .cancel_pending_handshake(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    pair.bob
+        .sdk
+        .cancel_pending_handshake(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    let cancelled = pair.alice.storage.snapshot().unwrap();
+    assert_eq!(
+        cancelled.private_intake_peers[&pair.bob.public_key].cancelled_handshake_through_generation,
+        Some(old_generation)
+    );
+
+    let fresh = pair
+        .alice
+        .sdk
+        .initiate_link_with_peer(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    pair.bob
+        .sdk
+        .accept_link_with_peer(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    assert!(fresh.generation > old_generation);
+    let bob_fresh_state = load_encrypted_link_state(&pair.bob.storage, &pair.alice.public_key)
+        .await
+        .unwrap()
+        .unwrap();
+    let bob_fresh_handshake = paykit_lib::restore_encrypted_link_handshake(
+        pair.bob.access.session.clone(),
+        paykit_lib::derive_paykit_noise_secret_key(bob_key.as_bytes()),
+        &pair.alice.public_key.to_public_key().unwrap(),
+        pair.bob.access.outbox_client.clone(),
+        paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(
+            &bob_fresh_state.handshake_snapshot.unwrap(),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_ne!(
+        format!("{}/0", bob_fresh_handshake.config().read_path),
+        old_packet_path
+    );
+
+    drive_handshake_from_restarted_intake(&pair.alice, &pair.bob).await;
+    assert_eq!(
+        pair.alice.storage.snapshot().unwrap().linked_peers[&pair.bob.public_key].state,
+        LinkedPeerState::Linked
+    );
+    assert!(pair
+        .alice
+        .access
+        .outbox_client
+        .public_storage()
+        .exists(format!(
+            "pubky://{}{}",
+            pair.alice.public_key, old_packet_path
+        ))
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn test_pending_handshake_intake_failure_persists_recovery_diagnostics() {
+    let pair = two_party().await;
+    pair.bob
+        .sdk
+        .accept_link_with_peer(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    let state = load_encrypted_link_state(&pair.bob.storage, &pair.alice.public_key)
+        .await
+        .unwrap()
+        .unwrap();
+    let key = pair
+        .bob
+        .access
+        .local_secret_key
+        .as_ref()
+        .unwrap()
+        .derive_paykit_identity_secret_key(paykit_sdk::INITIAL_PAYKIT_KEY_GENERATION)
+        .unwrap();
+    let handshake = paykit_lib::restore_encrypted_link_handshake(
+        pair.bob.access.session.clone(),
+        paykit_lib::derive_paykit_noise_secret_key(key.as_bytes()),
+        &pair.alice.public_key.to_public_key().unwrap(),
+        pair.bob.access.outbox_client.clone(),
+        paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(&state.handshake_snapshot.unwrap())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    pair.alice
+        .access
+        .session
+        .storage()
+        .put(format!("{}/0", handshake.config().read_path), vec![0_u8])
+        .await
+        .unwrap();
+
+    advance_handshake_from_intake_after_restart(&pair.bob, &pair.alice.public_key).await;
+
+    let failed = pair.bob.storage.snapshot().unwrap();
+    let peer = &failed.linked_peers[&pair.alice.public_key];
+    assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
+    assert!(peer.local_recovery_attempt_id.is_some());
+    assert!(failed.encrypted_link_states[&pair.alice.public_key]
+        .handshake_snapshot
+        .is_none());
 }
 
 #[tokio::test]

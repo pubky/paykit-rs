@@ -448,6 +448,13 @@ where
                 checkpointed_at: now,
             };
 
+            if let Some(existing) = existing {
+                tx.rebase_buffered_private_intake_generation(
+                    &counterparty,
+                    existing.generation,
+                    generation,
+                )?;
+            }
             tx.save_linked_peer(peer.clone());
             tx.save_encrypted_link_state(link_state.clone());
             Ok(LinkedPeerHandshakeReport {
@@ -602,6 +609,11 @@ pub(crate) fn save_handshake_checkpoint_in_transaction(
         generation: state.generation,
         handshake_role: state.handshake_role,
     };
+    tx.rebase_buffered_private_intake_generation(
+        counterparty,
+        expected_state.generation,
+        state.generation,
+    )?;
     tx.save_encrypted_link_state(state);
     tx.save_linked_peer(peer);
     Ok(HandshakeCheckpointSave::Applied(report))

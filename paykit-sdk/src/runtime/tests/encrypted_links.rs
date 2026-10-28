@@ -947,3 +947,138 @@ async fn test_advance_link_handshake_preserves_unusable_handshake_metadata_witho
         .unwrap()
         .is_some());
 }
+
+#[tokio::test]
+async fn test_cancel_pending_handshake_persists_restart_fence_and_allows_fresh_attempt() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    seed_private_capable_identity_and_handshake(&storage, counterparty.clone()).await;
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+
+    let cancelled = sdk
+        .cancel_pending_handshake(counterparty.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(cancelled.state, LinkedPeerState::NotLinked);
+    assert_eq!(cancelled.generation, 1);
+    let restarted = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    assert!(matches!(
+        restarted.advance_link_handshake(counterparty.clone()).await,
+        Err(PaykitSdkError::Identity { .. })
+    ));
+    let snapshot = storage.snapshot().unwrap();
+    assert_eq!(
+        snapshot.linked_peers[&counterparty].state,
+        LinkedPeerState::NotLinked
+    );
+    assert_eq!(
+        snapshot.private_intake_peers[&counterparty].cancelled_handshake_through_generation,
+        Some(0)
+    );
+    assert!(snapshot.private_intake_peers[&counterparty]
+        .buffered_packets
+        .is_empty());
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                assert!(tx
+                    .buffer_private_intake_packet(crate::storage::BufferedPrivatePacketRecord {
+                        counterparty,
+                        link_generation: 0,
+                        receive_counter: 0,
+                        ciphertext: vec![0; crate::storage::PRIVATE_INTAKE_PACKET_BYTES],
+                        source_cursor: None,
+                        buffered_at: FixedClock.now(),
+                    })
+                    .is_err());
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    crate::domain::linked_peers::save_link_handshake_state(
+        &storage,
+        counterparty.clone(),
+        EncryptedLinkHandshakeRole::Responder,
+        vec![4, 5, 6],
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let snapshot = storage.snapshot().unwrap();
+    assert_eq!(snapshot.encrypted_link_states[&counterparty].generation, 2);
+    assert_eq!(
+        snapshot.private_intake_peers[&counterparty].link_generation,
+        2
+    );
+    assert_eq!(
+        snapshot.private_intake_peers[&counterparty].cancelled_handshake_through_generation,
+        Some(0)
+    );
+}
+
+#[tokio::test]
+async fn test_cancel_pending_handshake_respects_peer_lease_without_expiring_checkpoint() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    seed_private_capable_identity_and_handshake(&storage, counterparty.clone()).await;
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                tx.claim_peer_link_operation(
+                    &counterparty,
+                    FixedClock.now(),
+                    FixedClock.now() + chrono::Duration::minutes(1),
+                )?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+
+    assert!(matches!(
+        sdk.cancel_pending_handshake(counterparty.clone()).await,
+        Err(PaykitSdkError::ConcurrentUpdate { .. })
+    ));
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                let lease = tx.peer_link_operation_lease(&counterparty).unwrap();
+                tx.release_peer_link_operation(&counterparty, lease.lease_id);
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    sdk.cancel_pending_handshake(counterparty.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.snapshot().unwrap().linked_peers[&counterparty].state,
+        LinkedPeerState::NotLinked
+    );
+}
