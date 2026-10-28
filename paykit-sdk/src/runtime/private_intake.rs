@@ -718,6 +718,7 @@ where
                             let renewed = sdk.storage.transaction(move |tx| {
                                 Ok(tx.renew_private_intake_supervisor(
                                     lease_id,
+                                    now,
                                     now + SUPERVISOR_LEASE_TIMEOUT,
                                 ))
                             }).await.unwrap_or(false);
@@ -841,8 +842,9 @@ where
                         match self.resolve_private_intake_groups().await {
                             Ok(resolved) if resolved != groups => {
                                 let admissions = admitted_homeservers(&resolved);
+                                let now = self.clock.now();
                                 let replaced = self.storage.transaction(move |tx| {
-                                    tx.replace_private_intake_admissions(lease_id, admissions)
+                                    tx.replace_private_intake_admissions(lease_id, now, admissions)
                                 }).await;
                                 match replaced {
                                     Ok(true) => break Some(resolved),
@@ -1121,47 +1123,15 @@ where
             })
             .await
             {
-                Ok(PrivatePacketAcquisition::Inserted) => {
-                    work.notify_waiters();
-                    set_peer_audit_state(
-                        health,
-                        peer.clone(),
-                        PrivateIntakeTransportState::Replaying,
-                        self.clock.now(),
-                    )
-                    .await;
-                }
-                Ok(PrivatePacketAcquisition::AlreadyBuffered) => {
-                    set_peer_audit_state(
-                        health,
-                        peer.clone(),
-                        PrivateIntakeTransportState::Replaying,
-                        self.clock.now(),
-                    )
-                    .await;
-                }
-                Ok(PrivatePacketAcquisition::Absent) => {
-                    set_peer_audit_state(
-                        health,
-                        peer.clone(),
-                        PrivateIntakeTransportState::CaughtUp,
-                        self.clock.now(),
-                    )
-                    .await;
-                }
-                Ok(PrivatePacketAcquisition::CapacityReached) => {
-                    set_peer_audit_state(
-                        health,
-                        peer.clone(),
-                        PrivateIntakeTransportState::Backpressured,
-                        self.clock.now(),
-                    )
-                    .await;
-                }
-                Ok(PrivatePacketAcquisition::PendingHandshake) => {
-                    work.notify_waiters();
-                    set_peer_state(health, peer.clone(), PrivateIntakeTransportState::Replaying)
-                        .await;
+                Ok(outcome) => {
+                    if matches!(
+                        &outcome,
+                        PrivatePacketAcquisition::Inserted
+                            | PrivatePacketAcquisition::PendingHandshake
+                    ) {
+                        work.notify_waiters();
+                    }
+                    set_peer_audit_outcome(health, peer.clone(), outcome, self.clock.now()).await;
                 }
                 Err(_) => {
                     set_peer_state(health, peer.clone(), PrivateIntakeTransportState::Stale).await
@@ -1255,15 +1225,25 @@ async fn set_peer_state(
     health.write().await.peers.insert(peer, state);
 }
 
-async fn set_peer_audit_state(
+async fn set_peer_audit_outcome(
     health: &Arc<AsyncRwLock<PrivateIntakeHealth>>,
     peer: PubkyPublicKey,
-    state: PrivateIntakeTransportState,
+    outcome: PrivatePacketAcquisition,
     audited_at: DateTime<Utc>,
 ) {
     let mut health = health.write().await;
+    let proves_absence = matches!(&outcome, PrivatePacketAcquisition::Absent);
+    let state = match outcome {
+        PrivatePacketAcquisition::Absent => PrivateIntakeTransportState::CaughtUp,
+        PrivatePacketAcquisition::Inserted
+        | PrivatePacketAcquisition::AlreadyBuffered
+        | PrivatePacketAcquisition::PendingHandshake => PrivateIntakeTransportState::Replaying,
+        PrivatePacketAcquisition::CapacityReached => PrivateIntakeTransportState::Backpressured,
+    };
     health.peers.insert(peer.clone(), state);
-    health.last_successful_audit_at.insert(peer, audited_at);
+    if proves_absence {
+        health.last_successful_audit_at.insert(peer, audited_at);
+    }
 }
 
 async fn set_group_state(
@@ -1546,6 +1526,53 @@ mod tests {
         .is_err());
     }
 
+    #[tokio::test]
+    async fn test_private_intake_audit_freshness_requires_absent_slot() {
+        let peer = users(1).remove(0);
+        let previous = Utc::now() - chrono::Duration::minutes(1);
+        let audited_at = Utc::now();
+        let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth {
+            peers: HashMap::new(),
+            reserved_streams: 1,
+            last_successful_audit_at: HashMap::from([(peer.clone(), previous)]),
+        }));
+
+        for (outcome, expected_state) in [
+            (
+                PrivatePacketAcquisition::Inserted,
+                PrivateIntakeTransportState::Replaying,
+            ),
+            (
+                PrivatePacketAcquisition::AlreadyBuffered,
+                PrivateIntakeTransportState::Replaying,
+            ),
+            (
+                PrivatePacketAcquisition::CapacityReached,
+                PrivateIntakeTransportState::Backpressured,
+            ),
+            (
+                PrivatePacketAcquisition::PendingHandshake,
+                PrivateIntakeTransportState::Replaying,
+            ),
+        ] {
+            set_peer_audit_outcome(&health, peer.clone(), outcome, audited_at).await;
+            let current = health.read().await;
+            assert_eq!(current.peers[&peer], expected_state);
+            assert_eq!(current.last_successful_audit_at[&peer], previous);
+        }
+
+        set_peer_audit_outcome(
+            &health,
+            peer.clone(),
+            PrivatePacketAcquisition::Absent,
+            audited_at,
+        )
+        .await;
+        let current = health.read().await;
+        assert_eq!(current.peers[&peer], PrivateIntakeTransportState::CaughtUp);
+        assert_eq!(current.last_successful_audit_at[&peer], audited_at);
+    }
+
     #[test]
     fn test_private_intake_treats_not_implemented_event_stream_as_unsupported() {
         let error = pubky::Error::Request(pubky::errors::RequestError::Server {
@@ -1574,6 +1601,67 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn test_expired_private_intake_owner_cannot_renew_or_replace_before_reclaim() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let peers = users(2);
+        let claimed_at = Utc::now();
+        let expires_at = claimed_at + SUPERVISOR_LEASE_TIMEOUT;
+        let original = HashMap::from([(peers[0].clone(), "homeserver-a".to_owned())]);
+        let lease = storage
+            .transaction({
+                let original = original.clone();
+                move |tx| tx.claim_private_intake_supervisor(claimed_at, expires_at, 1, original)
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let replacement = HashMap::from([(peers[1].clone(), "homeserver-b".to_owned())]);
+
+        assert!(!storage
+            .transaction({
+                let replacement = replacement.clone();
+                move |tx| {
+                    tx.replace_private_intake_admissions(lease.lease_id, expires_at, replacement)
+                }
+            })
+            .await
+            .unwrap());
+        assert!(!storage
+            .transaction(move |tx| {
+                Ok(tx.renew_private_intake_supervisor(
+                    lease.lease_id,
+                    expires_at,
+                    expires_at + SUPERVISOR_LEASE_TIMEOUT,
+                ))
+            })
+            .await
+            .unwrap());
+
+        let contender = storage
+            .transaction({
+                let replacement = replacement.clone();
+                move |tx| {
+                    tx.claim_private_intake_supervisor(
+                        expires_at,
+                        expires_at + SUPERVISOR_LEASE_TIMEOUT,
+                        1,
+                        replacement,
+                    )
+                }
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(contender.lease_id, lease.lease_id);
+        let snapshot = storage.snapshot().unwrap();
+        assert_eq!(
+            snapshot.private_intake_supervisor_lease.unwrap().lease_id,
+            contender.lease_id
+        );
+        assert_eq!(snapshot.private_intake_admitted_homeservers, replacement);
     }
 
     #[tokio::test]
@@ -1657,7 +1745,9 @@ mod tests {
         ]);
 
         let result = storage
-            .transaction(move |tx| tx.replace_private_intake_admissions(lease.lease_id, moved))
+            .transaction(move |tx| {
+                tx.replace_private_intake_admissions(lease.lease_id, Utc::now(), moved)
+            })
             .await;
 
         assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));

@@ -610,16 +610,21 @@ pub trait StorageTransaction {
         now: DateTime<Utc>,
     ) -> Result<bool>;
 
-    /// Replace resolved topology while lease ownership still matches.
+    /// Replace resolved topology while lease ownership is unexpired and still matches.
     fn replace_private_intake_admissions(
         &mut self,
         lease_id: u64,
+        now: DateTime<Utc>,
         admitted_homeservers: HashMap<PubkyPublicKey, String>,
     ) -> Result<bool>;
 
-    /// Extend private-intake ownership only while lease id still matches.
-    fn renew_private_intake_supervisor(&mut self, lease_id: u64, expires_at: DateTime<Utc>)
-        -> bool;
+    /// Extend private-intake ownership only while its lease is unexpired and still matches.
+    fn renew_private_intake_supervisor(
+        &mut self,
+        lease_id: u64,
+        now: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> bool;
 
     /// Release private-intake ownership only while lease id still matches.
     fn release_private_intake_supervisor(&mut self, lease_id: u64);

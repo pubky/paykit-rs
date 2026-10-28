@@ -781,13 +781,14 @@ impl StorageTransaction for StorageStateTransaction {
     fn replace_private_intake_admissions(
         &mut self,
         lease_id: u64,
+        now: DateTime<Utc>,
         admitted_homeservers: HashMap<PubkyPublicKey, String>,
     ) -> Result<bool> {
         if self
             .state
             .private_intake_supervisor_lease
             .as_ref()
-            .is_none_or(|lease| lease.lease_id != lease_id)
+            .is_none_or(|lease| lease.lease_id != lease_id || lease.expires_at <= now)
         {
             return Ok(false);
         }
@@ -813,12 +814,13 @@ impl StorageTransaction for StorageStateTransaction {
     fn renew_private_intake_supervisor(
         &mut self,
         lease_id: u64,
+        now: DateTime<Utc>,
         expires_at: DateTime<Utc>,
     ) -> bool {
         let Some(lease) = self.state.private_intake_supervisor_lease.as_mut() else {
             return false;
         };
-        if lease.lease_id != lease_id {
+        if lease.lease_id != lease_id || lease.expires_at <= now {
             return false;
         }
         lease.expires_at = lease.expires_at.max(expires_at);
