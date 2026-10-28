@@ -14665,6 +14665,13 @@ public struct PaymentRequestRecord {
      */
     public var proposalAppId: String?
     /**
+     * Local time this device stored the proposal, as RFC3339 text: queued by
+     * a payee, received by a payer. Unauthenticated local clock time. A payee
+     * subtracts a payment-method tolerance to get a payment not-before bound;
+     * a payer uses it only as a search hint.
+     */
+    public var proposalRecordedAt: String?
+    /**
      * Payer application associated with the request, independent of its current execution claim.
      */
     public var payerAppId: String?
@@ -14684,6 +14691,13 @@ public struct PaymentRequestRecord {
      * Local outbound delivery status for an acceptance event.
      */
     public var acceptedOutboundStatus: OutboundPrivateMessageStatus?
+    /**
+     * Local time this device stored the recorded acceptance, as RFC3339 text:
+     * queued by a payer, fetched by a payee. Unauthenticated local clock time.
+     * A payee value after `proposal_expires_at` does not show a late
+     * acceptance, and it is not a lower bound on payment time.
+     */
+    public var acceptanceRecordedAt: String?
     /**
      * Rejection Event ID.
      */
@@ -14760,6 +14774,12 @@ public struct PaymentRequestRecord {
          * Application that created the proposal.
          */proposalAppId: String?,
         /**
+         * Local time this device stored the proposal, as RFC3339 text: queued by
+         * a payee, received by a payer. Unauthenticated local clock time. A payee
+         * subtracts a payment-method tolerance to get a payment not-before bound;
+         * a payer uses it only as a search hint.
+         */proposalRecordedAt: String?,
+        /**
          * Payer application associated with the request, independent of its current execution claim.
          */payerAppId: String?,
         /**
@@ -14774,6 +14794,12 @@ public struct PaymentRequestRecord {
         /**
          * Local outbound delivery status for an acceptance event.
          */acceptedOutboundStatus: OutboundPrivateMessageStatus?,
+        /**
+         * Local time this device stored the recorded acceptance, as RFC3339 text:
+         * queued by a payer, fetched by a payee. Unauthenticated local clock time.
+         * A payee value after `proposal_expires_at` does not show a late
+         * acceptance, and it is not a lower bound on payment time.
+         */acceptanceRecordedAt: String?,
         /**
          * Rejection Event ID.
          */rejectedEventId: String?,
@@ -14816,11 +14842,13 @@ public struct PaymentRequestRecord {
         self.proposalOutboundStatus = proposalOutboundStatus
         self.proposalEventId = proposalEventId
         self.proposalAppId = proposalAppId
+        self.proposalRecordedAt = proposalRecordedAt
         self.payerAppId = payerAppId
         self.executionClaimAppId = executionClaimAppId
         self.terms = terms
         self.acceptedEventId = acceptedEventId
         self.acceptedOutboundStatus = acceptedOutboundStatus
+        self.acceptanceRecordedAt = acceptanceRecordedAt
         self.rejectedEventId = rejectedEventId
         self.rejectedOutboundStatus = rejectedOutboundStatus
         self.canceledEventId = canceledEventId
@@ -14857,11 +14885,13 @@ public struct FfiConverterTypePaymentRequestRecord: FfiConverterRustBuffer {
                 proposalOutboundStatus: FfiConverterOptionTypeOutboundPrivateMessageStatus.read(from: &buf),
                 proposalEventId: FfiConverterOptionString.read(from: &buf),
                 proposalAppId: FfiConverterOptionString.read(from: &buf),
+                proposalRecordedAt: FfiConverterOptionString.read(from: &buf),
                 payerAppId: FfiConverterOptionString.read(from: &buf),
                 executionClaimAppId: FfiConverterOptionString.read(from: &buf),
                 terms: FfiConverterOptionTypePaymentRequestTerms.read(from: &buf),
                 acceptedEventId: FfiConverterOptionString.read(from: &buf),
                 acceptedOutboundStatus: FfiConverterOptionTypeOutboundPrivateMessageStatus.read(from: &buf),
+                acceptanceRecordedAt: FfiConverterOptionString.read(from: &buf),
                 rejectedEventId: FfiConverterOptionString.read(from: &buf),
                 rejectedOutboundStatus: FfiConverterOptionTypeOutboundPrivateMessageStatus.read(from: &buf),
                 canceledEventId: FfiConverterOptionString.read(from: &buf),
@@ -14886,11 +14916,13 @@ public struct FfiConverterTypePaymentRequestRecord: FfiConverterRustBuffer {
         FfiConverterOptionTypeOutboundPrivateMessageStatus.write(value.proposalOutboundStatus, into: &buf)
         FfiConverterOptionString.write(value.proposalEventId, into: &buf)
         FfiConverterOptionString.write(value.proposalAppId, into: &buf)
+        FfiConverterOptionString.write(value.proposalRecordedAt, into: &buf)
         FfiConverterOptionString.write(value.payerAppId, into: &buf)
         FfiConverterOptionString.write(value.executionClaimAppId, into: &buf)
         FfiConverterOptionTypePaymentRequestTerms.write(value.terms, into: &buf)
         FfiConverterOptionString.write(value.acceptedEventId, into: &buf)
         FfiConverterOptionTypeOutboundPrivateMessageStatus.write(value.acceptedOutboundStatus, into: &buf)
+        FfiConverterOptionString.write(value.acceptanceRecordedAt, into: &buf)
         FfiConverterOptionString.write(value.rejectedEventId, into: &buf)
         FfiConverterOptionTypeOutboundPrivateMessageStatus.write(value.rejectedOutboundStatus, into: &buf)
         FfiConverterOptionString.write(value.canceledEventId, into: &buf)

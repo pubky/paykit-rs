@@ -236,6 +236,12 @@ pixel and cache limits, and request timeouts remain app responsibilities.
   `receivedPaymentRequestsFrom`, `listPaymentRequests`,
   `activeRecurringPaymentRequests`, and `actionableReceivedPaymentRequests` —
   inspect SDK-derived Payment Request records.
+- `PaymentRequestRecord.proposalRecordedAt` and `acceptanceRecordedAt`
+  (`proposal_recorded_at` and `acceptance_recorded_at` in Rust) are the local
+  times this device stored the proposal and the recorded Acceptance. Their
+  meaning depends on the role: a payee queued the proposal and fetched the
+  Acceptance; a payer received the proposal and queued the Acceptance. They are
+  unauthenticated local clock times and do not prove cross-direction order.
 - `PaykitSdk.readPaymentRequests(counterparty, expectedIdentity)` - read fresh
   identity/capability and complete counterparty records under one shared-storage
   operation. Existing storage/session access errors still propagate, including
@@ -271,6 +277,19 @@ to exchange confirmations; apps do not create these messages themselves.
 `actionableReceivedPaymentRequests` includes every request that still needs a
 payer response. A required Paykit App constrains the payee endpoint, not the
 payer app that responds.
+
+`ProposalExpired` is a local view state. On the payee side it can still move to
+`Accepted`, `ProofSubmitted` or `ActiveRecurring` when an Acceptance the payer
+made in time is fetched after expiry. Payers should run `processOutboundPrivateMessages` in the
+same foreground task as `claimAndAcceptPaymentRequest`, and avoid accepting
+right at `proposalExpiresAt`. Payees should:
+
+- choose a `proposalExpiresAt` well beyond their polling interval, or `null`;
+- bound price freshness with `paymentDeadline`, not `proposalExpiresAt`;
+- use `acceptanceRecordedAt` only to flag a late fetch, not to void the request;
+- not count payment evidence earlier than `proposalRecordedAt` minus a
+  payment-method tolerance as paying the request. See
+  [Payment time and attribution](../specs/payment-requests.md#payment-time-and-attribution).
 
 ### Allowances
 

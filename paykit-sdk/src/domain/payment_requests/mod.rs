@@ -373,6 +373,19 @@ pub struct PaymentRequestRecord {
     pub proposal_event_id: Option<String>,
     /// Application that created the proposal.
     pub proposal_app_id: Option<paykit_lib::PaykitAppId>,
+    /// Local record time of the proposal on this device.
+    ///
+    /// For a payee this is when it queued its own proposal. For a payer this
+    /// is when this device received the proposal, which can be later than
+    /// when the payee made it. It stays fixed while later events advance
+    /// `last_event_at`.
+    ///
+    /// This is local clock time. It is not authenticated, not portable between
+    /// devices, and not proof of causal order between the two directions. A
+    /// payee can subtract a payment-method-specific tolerance from it to get a
+    /// not-before bound for payment evidence. A payer should use it only as a
+    /// search hint, never as a hard filter.
+    pub proposal_recorded_at: Option<DateTime<Utc>>,
     /// Payer application associated with the request, independent of its current execution claim.
     pub payer_app_id: Option<paykit_lib::PaykitAppId>,
     /// Paykit App that currently owns payment execution for this identity.
@@ -383,6 +396,18 @@ pub struct PaymentRequestRecord {
     pub accepted_event_id: Option<String>,
     /// Local outbound delivery status for an acceptance event.
     pub accepted_outbound_status: Option<OutboundPrivateMessageStatus>,
+    /// Local record time of the recorded Acceptance on this device.
+    ///
+    /// For a payer this is when it queued its Acceptance, which is its
+    /// acceptance decision time. For a payee this is when this device fetched
+    /// the Acceptance. That is an upper bound on when the payer published it,
+    /// not the payer's decision time, so a value after `proposal_expires_at`
+    /// does not show the payer accepted late.
+    ///
+    /// This is local clock time. It is not authenticated and not proof of
+    /// causal order between the two directions. It is not a lower bound on
+    /// payment time: a payer can pay before its Acceptance reaches the payee.
+    pub acceptance_recorded_at: Option<DateTime<Utc>>,
     /// Rejection Event ID.
     pub rejected_event_id: Option<String>,
     /// Local outbound delivery status for a rejection event.
@@ -422,10 +447,12 @@ impl fmt::Debug for PaymentRequestRecord {
             .field("proposal_outbound_status", &self.proposal_outbound_status)
             .field("proposal_event_id", &self.proposal_event_id)
             .field("proposal_app_id", &self.proposal_app_id)
+            .field("proposal_recorded_at", &self.proposal_recorded_at)
             .field("payer_app_id", &self.payer_app_id)
             .field("execution_claim_app_id", &self.execution_claim_app_id)
             .field("accepted_event_id", &self.accepted_event_id)
             .field("accepted_outbound_status", &self.accepted_outbound_status)
+            .field("acceptance_recorded_at", &self.acceptance_recorded_at)
             .field("rejected_event_id", &self.rejected_event_id)
             .field("rejected_outbound_status", &self.rejected_outbound_status)
             .field("canceled_event_id", &self.canceled_event_id)
@@ -453,11 +480,13 @@ impl PaymentRequestRecord {
             proposal_outbound_status: None,
             proposal_event_id: None,
             proposal_app_id: None,
+            proposal_recorded_at: None,
             payer_app_id: None,
             execution_claim_app_id: None,
             terms: None,
             accepted_event_id: None,
             accepted_outbound_status: None,
+            acceptance_recorded_at: None,
             rejected_event_id: None,
             rejected_outbound_status: None,
             canceled_event_id: None,
