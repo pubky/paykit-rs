@@ -24,6 +24,12 @@ impl FfiPaykitSdk {
     }
 
     /// Merge complete wallet-attested history. An empty history cannot reset existing evidence.
+    ///
+    /// Manual and automatic payment admission require it after initialization,
+    /// while no ledger exists, and again after restore. The wallet must inspect
+    /// every manual and automatic payment path and its external idempotency
+    /// records. No Payment Proof, timeout, or missing local file establishes
+    /// nonpayment.
     pub async fn reconcile_allowance_accounting(
         &self,
         reconciliation: FfiAllowanceAccountingReconciliation,

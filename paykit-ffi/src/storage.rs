@@ -32,6 +32,10 @@ pub struct FfiSdkStateBlobSnapshot {
 
 /// Platform-owned durable blob store for SDK state.
 ///
+/// Callback storage only: the SDK writes the whole state on every change as
+/// unencrypted `FfiSdkStateBlob` bytes, including the Paykit Noise static
+/// secret key. See `FfiSdkStateBlob` for the required protection.
+///
 /// The SDK invokes these callbacks while holding its per-handle storage lock.
 /// Implementations must not call back into the same SDK handle from either
 /// callback because doing so would deadlock.
@@ -349,6 +353,10 @@ pub(crate) fn decode_backup_state(bytes: &[u8]) -> Result<SdkBackupState, Paykit
 }
 
 /// Encode an SDK state blob snapshot for apps that store blob and revision together.
+///
+/// The result is unencrypted state bytes with the same sensitivity as
+/// `FfiSdkStateBlob`; store it only in platform-protected storage and never
+/// log it.
 #[uniffi::export]
 pub fn encode_sdk_state_blob_snapshot(
     snapshot: FfiSdkStateBlobSnapshot,
@@ -370,6 +378,9 @@ pub fn encode_sdk_state_blob_snapshot(
 }
 
 /// Decode an SDK state blob snapshot previously encoded by Paykit FFI.
+///
+/// The input is unencrypted state bytes with the same sensitivity as
+/// `FfiSdkStateBlob`; see `encode_sdk_state_blob_snapshot`.
 #[uniffi::export]
 pub fn decode_sdk_state_blob_snapshot(
     bytes: Vec<u8>,

@@ -117,9 +117,13 @@ A receiver must:
    sender: a bundler or relayer can be the latter.
 5. Verify actual amount using the agreed rate and rounding, and payment time using
    the canonical block timestamp and the applicable request deadline and quote
-   validity interval, including its start. A quote issued after payment cannot
-   retroactively establish sufficient payment. A
-   valid signature alone proves neither settlement nor sufficient payment.
+   validity interval, including its start, and not earlier than the payee's
+   proposal record time, allowing for the chain's timestamp tolerance. Hold or
+   flag an earlier transfer as
+   [Payment time and attribution](payment-requests.md#payment-time-and-attribution)
+   describes. A quote issued after payment cannot retroactively establish
+   sufficient payment. A valid signature alone proves neither settlement nor
+   sufficient payment.
 6. Prevent the transfer identity from satisfying another request or Billing Period.
    Repeated proof delivery for the same association is idempotent. Handle chain
    reorganizations consistently with the wallet's existing history policy.

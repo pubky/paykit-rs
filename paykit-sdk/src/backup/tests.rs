@@ -166,4 +166,5 @@ mod allowances;
 mod basic;
 mod counters;
 mod recovery;
+mod restore_blockers;
 mod validation;

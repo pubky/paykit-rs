@@ -853,7 +853,11 @@ async fn test_restore_backup_state_rejects_registered_app_state() {
 
     let result = restore_backup_state(&storage, empty_backup(identity(local_public_key))).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
+    assert!(matches!(
+        result,
+        Err(PaykitSdkError::Policy { context, .. })
+            if context == format!("{RESTORE_TARGET_NOT_EMPTY}: registered Paykit Apps")
+    ));
     assert_eq!(storage.snapshot().unwrap(), before);
 }
 
@@ -876,6 +880,10 @@ async fn test_restore_backup_state_rejects_advanced_counter_state() {
 
     let result = restore_backup_state(&storage, empty_backup(identity(local_public_key))).await;
 
-    assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
+    assert!(matches!(
+        result,
+        Err(PaykitSdkError::Policy { context, .. })
+            if context == format!("{RESTORE_TARGET_NOT_EMPTY}: received Private Application Messages")
+    ));
     assert_eq!(storage.snapshot().unwrap(), before);
 }
