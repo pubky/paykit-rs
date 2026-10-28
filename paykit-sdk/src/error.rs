@@ -176,6 +176,14 @@ pub struct RetentionLimitReached;
 #[error("signup code was rejected")]
 pub struct SignupCodeRejected;
 
+/// Cause carried by the [`PaykitSdkError::Protocol`] that refuses an outbound
+/// Private Application Message larger than `PUBKY_NOISE_MSG_LEN`.
+///
+/// Check for it with [`PaykitSdkError::is_message_too_large`].
+#[derive(Debug, Error)]
+#[error("Private Application Message exceeds pubky-noise message size")]
+pub struct MessageTooLarge;
+
 impl PaykitSdkError {
     /// Return whether retrying from current shared state after contention is appropriate.
     pub fn is_concurrent_update(&self) -> bool {
@@ -212,6 +220,18 @@ impl PaykitSdkError {
                 source: Some(source),
                 ..
             } if source.is::<SignupCodeRejected>()
+        )
+    }
+
+    /// Return whether an outbound Private Application Message was refused
+    /// because its serialized JSON exceeds `PUBKY_NOISE_MSG_LEN` bytes.
+    pub fn is_message_too_large(&self) -> bool {
+        matches!(
+            self,
+            Self::Protocol {
+                source: Some(source),
+                ..
+            } if source.is::<MessageTooLarge>()
         )
     }
 }

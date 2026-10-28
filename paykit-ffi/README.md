@@ -94,6 +94,9 @@ load the native UniFFI library just to format keys.
   and remove stale SDK-managed public Payment Endpoints.
 - `PaykitSdk.syncPublicEndpointsWithReceivingDetails` — publish explicit
   public receiving details without relying on adapter-side mutable state.
+- Both sync calls treat the details as this App's complete public set and
+  remove every managed endpoint missing from it, all of them for an empty
+  list. See [Publish Receive Details](#publish-receive-details).
 - `EndpointSyncReport` — published, removed, and failed endpoint changes.
 
 The payment adapter returns receiving details and candidate ids. Apps execute
@@ -134,7 +137,10 @@ fallback. See [Establish Encrypted Link](../specs/paykit-sdk.md#establish-encryp
 for setup, restore, and send/receive checks.
 
 Private operation errors expose stable category/code fields and redacted
-context. Raw diagnostic details require an explicit debug export method.
+context. Raw diagnostic details require an explicit debug export method. A
+private message whose serialized JSON exceeds 1000 bytes (`PUBKY_NOISE_MSG_LEN`)
+fails with the protocol code `message_too_large`, and its context reports the
+message and limit byte counts. Nothing is queued.
 
 ### Private Payment Lists and Payment Resolution
 
@@ -219,6 +225,16 @@ pixel and cache limits, and request timeouts remain app responsibilities.
 - `PaykitSdk.proposePaymentRequest`, `acceptPaymentRequest`,
   `rejectPaymentRequest`, `cancelPaymentRequest`, and `submitPaymentProof` —
   queue Payment Request lifecycle events through the SDK outbound stream.
+  Each Event Message must fit 1000 bytes of canonical JSON. `metadata` and
+  `proof` objects are re-serialized and non-ASCII text is written raw, so a
+  wallet's own byte count is not authoritative.
+- `paymentProofEventLen(localAppId, paymentReference, submission)` - return the
+  exact byte length of the Payment Proof Event Message that `submitPaymentProof`
+  would queue. `localAppId` is the local (sending) App ID from
+  `PaykitSdkConfig`, not the payee App in `submission.paymentAppId`. It is a
+  measurement, not a validity check. Payers measure before payment approval and
+  payees before offering a method, with maximum-length placeholders for
+  variable fields and every optional ID they will send.
 - `PaykitSdk.claimPaymentRequestForPreparation` - claim before preparing payment.
   It rejects blocked counterparties before App Registry access and rechecks the
   policy atomically with the claim. Compare the returned proposal and applicable
@@ -866,6 +882,7 @@ contacts, queue private lists:
 
 ```text
 sdk.publishPaykitApp(displayName, capabilities)
+// After every published receive backend is ready. publicDetails is complete.
 sdk.syncPublicEndpointsWithReceivingDetails(publicDetails)
 
 updates = [
@@ -888,6 +905,30 @@ report = sdk.syncPrivatePaymentListsWithReservationsAndProcessOutbound(
     clearUnlistedLinkedPeers
 )
 ```
+
+Public receiving details are the complete desired set for this Paykit App ID
+across every device and runtime on the identity, because publication records
+live in shared state. Sync removes every SDK-managed endpoint of the App whose
+identifier is missing from the set and reports it in `EndpointSyncReport.removed`,
+or in `failed` if the removal fails.
+With `FullAppEndpointNamespace`, it also removes endpoint files in the App's
+endpoint directory that the SDK never created. Partial details, for example
+on-chain loaded but Lightning not yet, remove the missing methods. An empty
+list removes every managed endpoint. This is the supported way to stop public
+receiving while the App stays registered.
+
+Sync only after every receive backend the wallet publishes has finished
+loading: trigger it from a backends-ready event, not from app start. While any
+backend is not ready, `currentPublicReceivingDetails` must throw
+`PaykitError.PaymentAdapter` (Kotlin: `PaykitException.PaymentAdapter`), never
+return an empty list or a subset. The sync then fails before any publication
+record or endpoint changes. Throw this error type specifically: the bindings do
+not map other foreign exceptions to a clean Paykit error. Handles created
+without a payment adapter already throw this error.
+
+`removePaykitApp` is not a substitute for an empty sync. It requires the App's
+Payment Requests and private financial work to be complete, and it deactivates
+the App.
 
 Publishing the app is required before it can create app-attributed private
 work. Call `paykitAppRemovalBlockers` before de-registration to inspect active

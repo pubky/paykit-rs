@@ -159,6 +159,9 @@ pub struct FfiPaymentConversionQuoteRecord {
 }
 
 /// Immutable terms for a Payment Request proposal.
+///
+/// The complete Event Message must fit 1000 bytes of canonical JSON: `metadata`
+/// is re-serialized and non-ASCII text is written raw. See `proposePaymentRequest`.
 #[derive(uniffi::Record, Clone)]
 pub struct FfiPaymentRequestTerms {
     /// Requested amount.
@@ -351,6 +354,10 @@ pub struct FfiPaymentRequestRecord {
 }
 
 /// Method-specific Payment Proof submission data.
+///
+/// The complete Event Message must fit 1000 bytes of canonical JSON: `proof` is
+/// re-serialized and non-ASCII text is written raw. Measure it with
+/// `paymentProofEventLen`.
 #[derive(uniffi::Record, Clone, PartialEq, Eq)]
 pub struct FfiPaymentProofSubmission {
     /// Billing Period for recurring Payment Requests.
@@ -458,6 +465,11 @@ impl FfiPaykitSdk {
     }
 
     /// Return accepted recurring Payment Requests across non-blocked counterparties.
+    ///
+    /// Covers both payer and payee roles with no time filter: an ended Recurrence
+    /// stays listed after `terms.recurrence.ends_at`, and releasing the execution
+    /// claim does not remove it. Compare `ends_at` with trusted local time to hide
+    /// or label it.
     pub async fn active_recurring_payment_requests(
         &self,
     ) -> Result<Vec<FfiPaymentRequestRecord>, PaykitFfiError> {
@@ -469,6 +481,10 @@ impl FfiPaykitSdk {
     ///
     /// A request's required Paykit App constrains the payee endpoint, not the
     /// payer app that responds.
+    ///
+    /// Includes active recurring requests with no time filter: an ended Recurrence
+    /// stays listed after `terms.recurrence.ends_at`, and releasing the execution
+    /// claim does not remove it. Compare `ends_at` with trusted local time.
     pub async fn actionable_received_payment_requests(
         &self,
     ) -> Result<Vec<FfiPaymentRequestRecord>, PaykitFfiError> {
@@ -478,6 +494,12 @@ impl FfiPaykitSdk {
 
     /// Queue a new Payment Request proposal and return local derived state.
     /// The caller must establish peer support before including conversion or payment deadlines.
+    ///
+    /// The complete Event Message must fit 1000 bytes of canonical JSON
+    /// (`metadata` is re-serialized, non-ASCII is written raw). An oversized
+    /// message fails with code `message_too_large` (category protocol), whose
+    /// context reports the byte counts, before link readiness checks and before
+    /// anything is queued.
     pub async fn propose_payment_request(
         &self,
         counterparty: String,
@@ -533,6 +555,9 @@ impl FfiPaykitSdk {
     }
 
     /// Release this App's unresolved execution claim without rejecting the request.
+    ///
+    /// Releasing does not hide the record: it stays in the active recurring and
+    /// actionable lists, available to every local App.
     pub async fn release_payment_request_execution_claim(
         &self,
         counterparty: String,
@@ -656,6 +681,12 @@ impl FfiPaykitSdk {
     }
 
     /// Queue a Payment Proof for an accepted Payment Request.
+    ///
+    /// The complete Event Message must fit 1000 bytes of canonical JSON
+    /// (`proof` is re-serialized, non-ASCII is written raw). An oversized
+    /// message fails with code `message_too_large` (category protocol), whose
+    /// context reports the byte counts, before link readiness checks and before
+    /// anything is queued. Measure with `paymentProofEventLen` before payment.
     pub async fn submit_payment_proof(
         &self,
         counterparty: String,
@@ -689,4 +720,36 @@ pub fn payment_deadline_at(
     deadline
         .at(period.as_ref())
         .map_err(|err| validation_error(err.to_string()))
+}
+
+/// Return the exact UTF-8 byte length of the Payment Proof Event Message that
+/// `submitPaymentProof` would queue for this App, Payment Reference and submission.
+///
+/// `local_app_id` is the App ID this SDK is configured with (the
+/// `PaykitSdkConfig` App ID that `submitPaymentProof` sends from, written as the
+/// outer `app_id`), not the payee App in `submission.payment_app_id`. Passing
+/// the wrong one measures the wrong length.
+///
+/// Compare it with the 1000-byte (`PUBKY_NOISE_MSG_LEN`) limit. This is a
+/// measurement, not a validity check: a proof that fits can still be refused by
+/// role, state or conversion checks, and lengths above the limit are returned.
+/// Payers must measure before payment approval and payees before offering a
+/// method. Pass maximum-length placeholders for variable fields (for example a
+/// 78-digit ERC-20 log index) and every optional ID you will send, or "fits" is
+/// false assurance. The proof JSON is re-serialized canonically, so do not
+/// measure the wallet's own string.
+#[uniffi::export]
+pub fn payment_proof_event_len(
+    local_app_id: String,
+    payment_reference: Arc<FfiPaymentReference>,
+    submission: FfiPaymentProofSubmission,
+) -> Result<u32, PaykitFfiError> {
+    let local_app_id = paykit_lib::PaykitAppId::new(local_app_id)
+        .map_err(|err| validation_error(err.to_string()))?;
+    let payment_reference = PaymentReference::new(payment_reference.export_text())
+        .map_err(|err| validation_error(err.to_string()))?;
+    let submission = PaymentProofSubmission::try_from(submission)?;
+    let len = paykit_sdk::payment_proof_event_len(&local_app_id, &payment_reference, submission)?;
+    u32::try_from(len)
+        .map_err(|_| validation_error("Payment Proof Event Message length exceeds u32"))
 }

@@ -15,8 +15,20 @@ Endpoints are app-scoped; the private link is identity-wide. Preserve candidate
 or a Payment Request's required payee App.
 
 - Public: call `sync_public_endpoints()` or
-  `sync_public_endpoints_with_receiving_details(details)`. Keep `ManagedOnly`
-  unless the app intentionally owns its entire app endpoint namespace.
+  `sync_public_endpoints_with_receiving_details(details)` only after every
+  receive backend the app publishes has loaded (a backends-ready event, not app
+  start). The details are this app's complete public set across every runtime
+  on the identity: SDK-managed endpoints missing from it are removed, so partial
+  details remove the missing methods. A not-ready or partly ready adapter returns
+  `Err` (FFI: throw `PaykitError.PaymentAdapter`, Kotlin
+  `PaykitException.PaymentAdapter`), never `[]` or a subset; the sync then
+  changes nothing. Check `EndpointSyncReport.removed`.
+- An empty public set removes every managed endpoint and keeps the app
+  registered; `remove_paykit_app` is not a substitute, since it needs the app's
+  Payment Requests and private financial work complete and deactivates the app.
+  Keep `ManagedOnly` unless the app intentionally owns its entire app endpoint
+  namespace; `FullAppEndpointNamespace` also removes endpoint files the SDK never
+  created.
 - Private: first call `ensure_link_with_peer(counterparty, max_advance_steps)`.
   List queueing needs an active link or persisted handshake; sync does not
   initiate one. Use

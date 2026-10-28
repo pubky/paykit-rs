@@ -324,6 +324,8 @@ At minimum, platform errors should expose:
 Apps should be able to branch on identity failures, policy failures, recovery
 required, storage failures, transport failures, protocol failures, and payment
 adapter failures without parsing display strings.
+For example, the protocol code `message_too_large` identifies an outbound
+private message that exceeds the 1000-byte pubky-noise message size.
 
 Underlying platform errors exposed through app-facing objects must also be
 redacted or sanitized. Raw provider/storage/adapter error strings should be
