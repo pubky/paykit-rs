@@ -361,20 +361,37 @@ where
         counterparty: PubkyPublicKey,
         context: Option<PrivateReceiveContext>,
     ) -> Result<(PrivateStreamIntakeReport, Option<PrivateInboxCheckpoint>)> {
-        self.require_legacy_private_receive_mode(&counterparty)
-            .await?;
         let (session_access, snapshot) = if let Some(context) = context {
+            self.require_legacy_private_receive_mode(&counterparty)
+                .await?;
             let access = context.session_access;
             access.capability_for_capabilities(PAYKIT_SESSION_CAPABILITIES)?;
             access.paykit_noise_secret_key()?;
             self.validate_local_noise_key_authorization(&access).await?;
             (access, Some(context.snapshot))
         } else {
-            let (access, snapshots) = self.private_receive_context(Some(&counterparty)).await?;
-            let snapshot = snapshots
+            let (access, snapshots) = match self.private_receive_context(Some(&counterparty)).await
+            {
+                Ok(context) => context,
+                Err(error) => {
+                    if let Err(conflict @ PaykitSdkError::PrivateIntakeModeConflict { .. }) = self
+                        .require_legacy_private_receive_mode(&counterparty)
+                        .await
+                    {
+                        return Err(conflict);
+                    }
+                    return Err(error);
+                }
+            };
+            let (_, snapshot, conflicts) = snapshots
                 .into_iter()
                 .next()
-                .and_then(|(_, snapshot)| snapshot);
+                .expect("counterparty context contains requested peer");
+            if conflicts {
+                return Err(PaykitSdkError::PrivateIntakeModeConflict {
+                    counterparty: counterparty.clone(),
+                });
+            }
             (access, snapshot)
         };
         let probe = self
@@ -473,17 +490,11 @@ where
                     .collect());
             }
         };
-        let mut reports = Vec::with_capacity(counterparties.len());
-        let ownership = self
-            .storage
-            .transaction(|tx| Ok(tx.export_storage_state()))
-            .await?;
-        let now = self.clock.now();
-        let (conflicts, counterparties): (Vec<_>, Vec<_>) =
-            counterparties.into_iter().partition(|(counterparty, _)| {
-                legacy_private_receive_conflicts(&ownership, counterparty, now)
-            });
-        reports.extend(conflicts.into_iter().map(|(counterparty, _)| {
+        let (conflicts, counterparties): (Vec<_>, Vec<_>) = counterparties
+            .into_iter()
+            .partition(|(_, _, conflicts)| *conflicts);
+        let mut reports = Vec::with_capacity(conflicts.len() + counterparties.len());
+        reports.extend(conflicts.into_iter().map(|(counterparty, _, _)| {
             PrivateStreamCounterpartyIntakeReport {
                 error: Some(
                     PaykitSdkError::PrivateIntakeModeConflict {
@@ -496,7 +507,7 @@ where
             }
         }));
         let probes = stream::iter(counterparties)
-            .map(|(counterparty, snapshot)| {
+            .map(|(counterparty, snapshot, _)| {
                 let session_access = &session_access;
                 async move {
                     let probe = self
@@ -567,17 +578,20 @@ where
         counterparty: Option<&PubkyPublicKey>,
     ) -> Result<(
         GuardedSessionAccess,
-        Vec<(PubkyPublicKey, Option<PrivateReceiveSnapshot>)>,
+        Vec<(PubkyPublicKey, Option<PrivateReceiveSnapshot>, bool)>,
     )> {
+        let now = self.clock.now();
         let (access, _, peers) = self
             .load_session_access_and_refresh_identity_with(|tx| {
                 let peers = counterparty
                     .map_or_else(|| linked_counterparties(tx), |peer| vec![peer.clone()]);
+                let state = tx.export_storage_state();
                 Ok(peers
                     .into_iter()
                     .map(|peer| {
                         let snapshot = private_receive_snapshot(tx, &peer);
-                        (peer, snapshot)
+                        let conflicts = legacy_private_receive_conflicts(&state, &peer, now);
+                        (peer, snapshot, conflicts)
                     })
                     .collect())
             })

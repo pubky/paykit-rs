@@ -1217,7 +1217,7 @@ where
         let snapshot = snapshots
             .into_iter()
             .next()
-            .and_then(|(_, snapshot)| snapshot)
+            .and_then(|(_, snapshot, _)| snapshot)
             .ok_or_else(|| PaykitSdkError::RecoveryRequired {
                 context: "Linked Peer has no current Encrypted Link snapshot".into(),
                 source: None,

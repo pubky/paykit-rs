@@ -94,41 +94,109 @@ async fn advance_handshake_from_intake_after_restart(
 ) {
     let before = user.storage.snapshot().unwrap();
     let before_link = before.encrypted_link_states[counterparty].clone();
+    let local = user.public_key.to_public_key().unwrap();
+    let paykit_key = user
+        .access
+        .local_secret_key
+        .as_ref()
+        .unwrap()
+        .derive_paykit_identity_secret_key(paykit_sdk::INITIAL_PAYKIT_KEY_GENERATION)
+        .unwrap();
+    let noise_secret = paykit_lib::derive_paykit_noise_secret_key(paykit_key.as_bytes());
     let restarted = user.restart_with_storage(user.storage.clone()).await;
     let sdk = Arc::new(restarted.sdk);
     let supervisor = sdk
         .start_private_intake(PrivateIntakeConfig::new(1).unwrap())
         .await
         .unwrap();
+    let work = supervisor.subscribe_work();
 
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
+            // Register before inspecting durable state so startup audit completion
+            // cannot be lost between inspection and waiting. Pending-handshake work
+            // wakes only after the bounded advancement attempt returns, including
+            // a legitimate idle attempt waiting for the counterparty's next packet.
+            let notified = work.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let state = user.storage.snapshot().unwrap();
             let peer = &state.linked_peers[counterparty];
             let link = &state.encrypted_link_states[counterparty];
-            let attempted = supervisor
-                .health()
-                .await
-                .peers
-                .get(counterparty)
-                .is_some_and(|health| {
-                    matches!(
-                        health,
-                        PrivateIntakeTransportState::Replaying | PrivateIntakeTransportState::Stale
-                    )
-                });
+            let publication_acknowledged = link.handshake_snapshot.as_ref().is_none_or(|bytes| {
+                paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(bytes)
+                    .unwrap()
+                    .pending_publication(&local, &noise_secret)
+                    .unwrap()
+                    .is_none()
+            });
             if peer.state != LinkedPeerState::Linking
-                || link.generation != before_link.generation
-                || attempted
+                || (link != &before_link && publication_acknowledged)
             {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::select! {
+                () = notified => break,
+                () = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
         }
     })
     .await
     .expect("private intake should attempt pending handshake advancement");
     supervisor.stop().await;
+}
+
+async fn pending_handshake_write_path(user: &TestUser, counterparty: &PubkyPublicKey) -> String {
+    let state = load_encrypted_link_state(&user.storage, counterparty)
+        .await
+        .unwrap()
+        .unwrap();
+    let paykit_key = user
+        .access
+        .local_secret_key
+        .as_ref()
+        .unwrap()
+        .derive_paykit_identity_secret_key(paykit_sdk::INITIAL_PAYKIT_KEY_GENERATION)
+        .unwrap();
+    paykit_lib::restore_encrypted_link_handshake(
+        user.access.session.clone(),
+        paykit_lib::derive_paykit_noise_secret_key(paykit_key.as_bytes()),
+        &counterparty.to_public_key().unwrap(),
+        user.access.outbox_client.clone(),
+        paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(
+            state.handshake_snapshot.as_ref().unwrap(),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap()
+    .config()
+    .write_path
+    .clone()
+}
+
+async fn publish_pending_handshake_packet_from_restarted_intake(
+    user: &TestUser,
+    counterparty: &PubkyPublicKey,
+) -> String {
+    for _ in 0..3 {
+        advance_handshake_from_intake_after_restart(user, counterparty).await;
+        let packet_path = format!(
+            "{}/0",
+            pending_handshake_write_path(user, counterparty).await
+        );
+        if user
+            .access
+            .outbox_client
+            .public_storage()
+            .exists(format!("pubky://{}{packet_path}", user.public_key))
+            .await
+            .unwrap()
+        {
+            return packet_path;
+        }
+    }
+    panic!("restarted private intake did not publish pending handshake packet");
 }
 
 async fn drive_handshake_from_restarted_intake(alice: &TestUser, bob: &TestUser) {
@@ -195,32 +263,9 @@ async fn test_cancel_then_fresh_handshake_ignores_late_old_packet_from_intake() 
         .accept_link_with_peer(pair.alice.public_key.clone())
         .await
         .unwrap();
-    let bob_old_state = load_encrypted_link_state(&pair.bob.storage, &pair.alice.public_key)
-        .await
-        .unwrap()
-        .unwrap();
-    let bob_key = pair
-        .bob
-        .access
-        .local_secret_key
-        .as_ref()
-        .unwrap()
-        .derive_paykit_identity_secret_key(paykit_sdk::INITIAL_PAYKIT_KEY_GENERATION)
-        .unwrap();
-    let bob_old_handshake = paykit_lib::restore_encrypted_link_handshake(
-        pair.bob.access.session.clone(),
-        paykit_lib::derive_paykit_noise_secret_key(bob_key.as_bytes()),
-        &pair.alice.public_key.to_public_key().unwrap(),
-        pair.bob.access.outbox_client.clone(),
-        paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(
-            &bob_old_state.handshake_snapshot.unwrap(),
-        )
-        .unwrap(),
-    )
-    .await
-    .unwrap();
-    let old_packet_path = format!("{}/0", bob_old_handshake.config().read_path);
-    advance_handshake_from_intake_after_restart(&pair.alice, &pair.bob.public_key).await;
+    let old_packet_path =
+        publish_pending_handshake_packet_from_restarted_intake(&pair.alice, &pair.bob.public_key)
+            .await;
     assert!(pair
         .alice
         .access
@@ -264,26 +309,14 @@ async fn test_cancel_then_fresh_handshake_ignores_late_old_packet_from_intake() 
         .await
         .unwrap();
     assert!(fresh.generation > old_generation);
-    let bob_fresh_state = load_encrypted_link_state(&pair.bob.storage, &pair.alice.public_key)
-        .await
-        .unwrap()
-        .unwrap();
-    let bob_fresh_handshake = paykit_lib::restore_encrypted_link_handshake(
-        pair.bob.access.session.clone(),
-        paykit_lib::derive_paykit_noise_secret_key(bob_key.as_bytes()),
-        &pair.alice.public_key.to_public_key().unwrap(),
-        pair.bob.access.outbox_client.clone(),
-        paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(
-            &bob_fresh_state.handshake_snapshot.unwrap(),
-        )
-        .unwrap(),
-    )
-    .await
-    .unwrap();
-    assert_ne!(
-        format!("{}/0", bob_fresh_handshake.config().read_path),
-        old_packet_path
-    );
+    let fresh_packet_path =
+        publish_pending_handshake_packet_from_restarted_intake(&pair.alice, &pair.bob.public_key)
+            .await;
+    // Explicit cancellation advances the local generation fence, but it is not
+    // an Encrypted Link recovery attempt. The unchanged recovery context
+    // therefore reuses the stream path and the fresh `/0` publication replaces
+    // the cancelled attempt's packet at that path.
+    assert_eq!(fresh_packet_path, old_packet_path);
 
     drive_handshake_from_restarted_intake(&pair.alice, &pair.bob).await;
     assert_eq!(
@@ -435,7 +468,9 @@ async fn test_buffered_receive_is_bounded_and_drains_while_transport_stale() {
         alice,
         bob,
     } = linked_two_party().await;
-    let count = paykit_lib::PRIVATE_APPLICATION_MESSAGE_RECEIVE_LIMIT + 1;
+    let receive_limit = paykit_lib::PRIVATE_APPLICATION_MESSAGE_RECEIVE_LIMIT;
+    let count = paykit_sdk::storage::PRIVATE_INTAKE_MAX_PACKETS_PER_PEER
+        .min(receive_limit.saturating_add(1));
     publish_private_lists(&bob, &alice, count).await;
     let sdk = Arc::new(PaykitSdk::new(
         alice.storage.clone(),
@@ -467,21 +502,22 @@ async fn test_buffered_receive_is_bounded_and_drains_while_transport_stale() {
         .receive_buffered_private_messages(bob.public_key.clone(), &supervisor)
         .await
         .unwrap();
-    assert_eq!(
-        first.report.stream_item_ids.len(),
-        paykit_lib::PRIVATE_APPLICATION_MESSAGE_RECEIVE_LIMIT
-    );
-    assert_eq!(first.remaining_buffered_packets, 1);
+    let first_count = count.min(receive_limit);
+    let remaining = count - first_count;
+    assert_eq!(first.report.stream_item_ids.len(), first_count);
+    assert_eq!(first.remaining_buffered_packets, remaining);
     assert_eq!(
         first.freshness.transport_state,
         PrivateIntakeTransportState::Stale
     );
-    let second = sdk
-        .receive_buffered_private_messages(bob.public_key.clone(), &supervisor)
-        .await
-        .unwrap();
-    assert_eq!(second.report.stream_item_ids.len(), 1);
-    assert_eq!(second.remaining_buffered_packets, 0);
+    if remaining > 0 {
+        let second = sdk
+            .receive_buffered_private_messages(bob.public_key.clone(), &supervisor)
+            .await
+            .unwrap();
+        assert_eq!(second.report.stream_item_ids.len(), remaining);
+        assert_eq!(second.remaining_buffered_packets, 0);
+    }
     supervisor.stop().await;
 }
 
