@@ -196,7 +196,14 @@ pub struct PrivatePaymentListDeliveryReport {
     pub cleared: Vec<PrivatePaymentListSyncChange>,
     /// Counterparties that could not be queued or cleared.
     pub failed_to_queue: Vec<PrivatePaymentListSyncChange>,
-    /// Counterparties queued successfully but failed during outbound delivery.
+    /// Delivery and reservation cleanup failures after queueing.
+    ///
+    /// Empty means every list in `queued` and `cleared` was sent, except lists
+    /// for counterparties whose Encrypted Link Handshake is still pending; those
+    /// stay eligible for a later run. A list that was not sent is reported with
+    /// its `outbound_message_id`, for example one left queued behind an older
+    /// message in retry backoff, one superseded by a newer Private Payment List,
+    /// or one whose outbound record is gone.
     pub failed_to_deliver: Vec<PrivatePaymentListDeliveryFailure>,
 }
 
