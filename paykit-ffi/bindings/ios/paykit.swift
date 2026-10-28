@@ -1793,11 +1793,20 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      *
      * A request's required Paykit App constrains the payee endpoint, not the
      * payer app that responds.
+     *
+     * Includes active recurring requests with no time filter: an ended Recurrence
+     * stays listed after `terms.recurrence.ends_at`, and releasing the execution
+     * claim does not remove it. Compare `ends_at` with trusted local time.
      */
     func actionableReceivedPaymentRequests() async throws  -> [PaymentRequestRecord]
 
     /**
      * Return accepted recurring Payment Requests across non-blocked counterparties.
+     *
+     * Covers both payer and payee roles with no time filter: an ended Recurrence
+     * stays listed after `terms.recurrence.ends_at`, and releasing the execution
+     * claim does not remove it. Compare `ends_at` with trusted local time to hide
+     * or label it.
      */
     func activeRecurringPaymentRequests() async throws  -> [PaymentRequestRecord]
 
@@ -2408,6 +2417,9 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Release this App's unresolved execution claim without rejecting the request.
+     *
+     * Releasing does not hide the record: it stays in the active recurring and
+     * actionable lists, available to every local App.
      */
     func releasePaymentRequestExecutionClaim(counterparty: String, paymentRequestId: String) async throws  -> PaymentRequestRecord
 
@@ -2630,6 +2642,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Publish current public receiving details and remove stale SDK-managed endpoints.
      *
+     * The adapter's answer is the complete desired set, removed as in
+     * `sync_public_endpoints_with_receiving_details`. Call this only after
+     * every receive backend the wallet publishes has loaded. If the adapter
+     * throws, the sync fails before any publication record or endpoint changes.
+     *
      * This writes SDK-managed state, so `restore_backup_state` is refused on
      * this state backing afterwards; restore a backup first.
      */
@@ -2637,6 +2654,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Publish explicit public receiving details and remove stale SDK-managed endpoints.
+     *
+     * `receiving_details` is this Paykit App ID's complete desired public set,
+     * shared by every runtime on the identity. Every managed endpoint missing
+     * from it is removed; check `removed` and `failed` in the report. An empty
+     * list removes them all and keeps the App registered.
      *
      * This writes SDK-managed state, so `restore_backup_state` is refused on
      * this state backing afterwards; restore a backup first.
@@ -2939,6 +2961,10 @@ open func acceptPaymentRequestAutomatically(scope: PaymentRequestScope, selectio
      *
      * A request's required Paykit App constrains the payee endpoint, not the
      * payer app that responds.
+     *
+     * Includes active recurring requests with no time filter: an ended Recurrence
+     * stays listed after `terms.recurrence.ends_at`, and releasing the execution
+     * claim does not remove it. Compare `ends_at` with trusted local time.
      */
 open func actionableReceivedPaymentRequests()async throws  -> [PaymentRequestRecord]  {
     return
@@ -2959,6 +2985,11 @@ open func actionableReceivedPaymentRequests()async throws  -> [PaymentRequestRec
 
     /**
      * Return accepted recurring Payment Requests across non-blocked counterparties.
+     *
+     * Covers both payer and payee roles with no time filter: an ended Recurrence
+     * stays listed after `terms.recurrence.ends_at`, and releasing the execution
+     * claim does not remove it. Compare `ends_at` with trusted local time to hide
+     * or label it.
      */
 open func activeRecurringPaymentRequests()async throws  -> [PaymentRequestRecord]  {
     return
@@ -4929,6 +4960,9 @@ open func rejectPaymentRequest(counterparty: String, paymentRequestId: String, r
 
     /**
      * Release this App's unresolved execution claim without rejecting the request.
+     *
+     * Releasing does not hide the record: it stays in the active recurring and
+     * actionable lists, available to every local App.
      */
 open func releasePaymentRequestExecutionClaim(counterparty: String, paymentRequestId: String)async throws  -> PaymentRequestRecord  {
     return
@@ -5591,6 +5625,11 @@ open func syncPublicContactMarkers()async throws  -> [ContactRecord]  {
     /**
      * Publish current public receiving details and remove stale SDK-managed endpoints.
      *
+     * The adapter's answer is the complete desired set, removed as in
+     * `sync_public_endpoints_with_receiving_details`. Call this only after
+     * every receive backend the wallet publishes has loaded. If the adapter
+     * throws, the sync fails before any publication record or endpoint changes.
+     *
      * This writes SDK-managed state, so `restore_backup_state` is refused on
      * this state backing afterwards; restore a backup first.
      */
@@ -5613,6 +5652,11 @@ open func syncPublicEndpoints()async throws  -> EndpointSyncReport  {
 
     /**
      * Publish explicit public receiving details and remove stale SDK-managed endpoints.
+     *
+     * `receiving_details` is this Paykit App ID's complete desired public set,
+     * shared by every runtime on the identity. Every managed endpoint missing
+     * from it is removed; check `removed` and `failed` in the report. An empty
+     * list removes them all and keeps the App registered.
      *
      * This writes SDK-managed state, so `restore_backup_state` is refused on
      * this state backing afterwards; restore a backup first.
@@ -7876,6 +7920,15 @@ public protocol SdkPaymentAdapter: AnyObject, Sendable {
 
     /**
      * Return receiving details intended for public Payment Endpoints.
+     *
+     * The result is this Paykit App's complete desired public set: sync removes
+     * every SDK-managed endpoint missing from it, and an empty list removes all
+     * of them. While any receive backend the wallet publishes is not ready,
+     * throw the `PaymentAdapter` case of the Paykit error type (Swift
+     * `PaykitError.PaymentAdapter(code:context:)`, Kotlin
+     * `PaykitException.PaymentAdapter`), never an empty list or a subset.
+     * The sync then fails without changing publication records or endpoints.
+     * Other foreign exceptions are not mapped to a clean Paykit error.
      */
     func currentPublicReceivingDetails() throws  -> [PublicReceivingDetail]
 
@@ -7978,6 +8031,15 @@ open class SdkPaymentAdapterImpl: SdkPaymentAdapter, @unchecked Sendable {
 
     /**
      * Return receiving details intended for public Payment Endpoints.
+     *
+     * The result is this Paykit App's complete desired public set: sync removes
+     * every SDK-managed endpoint missing from it, and an empty list removes all
+     * of them. While any receive backend the wallet publishes is not ready,
+     * throw the `PaymentAdapter` case of the Paykit error type (Swift
+     * `PaykitError.PaymentAdapter(code:context:)`, Kotlin
+     * `PaykitException.PaymentAdapter`), never an empty list or a subset.
+     * The sync then fails without changing publication records or endpoints.
+     * Other foreign exceptions are not mapped to a clean Paykit error.
      */
 open func currentPublicReceivingDetails()throws  -> [PublicReceivingDetail]  {
     return try  FfiConverterSequenceTypePublicReceivingDetail.lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
@@ -20602,6 +20664,9 @@ extension EncryptedLinkHandshakeRole: Codable {}
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
  * SDK policy for public Payment Endpoint cleanup.
+ *
+ * Public endpoint sync removes every managed endpoint missing from the
+ * receiving details it is given.
  */
 
 public enum EndpointManagementScope {
@@ -20612,6 +20677,9 @@ public enum EndpointManagementScope {
     case managedOnly
     /**
      * Manage the configured application's full public endpoint namespace.
+     *
+     * Sync also removes endpoint files in the App's endpoint directory that
+     * the SDK never created.
      */
     case fullAppEndpointNamespace
     /**
@@ -26180,10 +26248,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request_automatically() != 16194) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_actionable_received_payment_requests() != 36729) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_actionable_received_payment_requests() != 45140) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_active_recurring_payment_requests() != 2902) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_active_recurring_payment_requests() != 4814) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_advance_link_handshake() != 20770) {
@@ -26459,7 +26527,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_reject_payment_request() != 8097) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_release_payment_request_execution_claim() != 52784) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_release_payment_request_execution_claim() != 2234) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 39834) {
@@ -26549,10 +26617,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_contact_markers() != 39954) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_endpoints() != 585) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_endpoints() != 5074) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_endpoints_with_receiving_details() != 13996) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_endpoints_with_receiving_details() != 61566) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_unblock_peer() != 22658) {
@@ -26648,7 +26716,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffisdkbackupblob_export_bytes() != 44480) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_current_public_receiving_details() != 46945) {
+    if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_current_public_receiving_details() != 1235) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_current_private_receiving_details() != 22405) {

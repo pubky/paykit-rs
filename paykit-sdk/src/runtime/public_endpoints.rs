@@ -15,6 +15,12 @@ where
 {
     /// Publish current public receiving details and remove stale SDK-managed endpoints.
     ///
+    /// The adapter's answer is the complete desired set, with the removal rules
+    /// of [`Self::sync_public_endpoints_with_receiving_details`]. Call this only
+    /// after every receive backend the wallet publishes has loaded. If the
+    /// adapter returns an error, the sync fails before any publication record
+    /// or remote endpoint changes.
+    ///
     /// Requires a published Paykit App. Like publication, it writes SDK-managed
     /// public Payment Endpoint records, so [`Self::restore_backup_state`] is
     /// refused on this state backing afterwards; restore a backup first.
@@ -42,6 +48,13 @@ where
     }
 
     /// Publish explicit public receiving details and remove stale SDK-managed endpoints.
+    ///
+    /// `details` is this Paykit App ID's complete desired public set, shared by
+    /// every runtime on the identity. Every endpoint the
+    /// [`crate::EndpointManagementScope`] manages whose identifier is missing is
+    /// stale and removed; check [`crate::EndpointSyncReport::removed`] and
+    /// [`crate::EndpointSyncReport::failed`].
+    /// An empty list removes them all and keeps the App registered.
     ///
     /// Like [`Self::sync_public_endpoints`], this requires a published Paykit App
     /// and writes public Payment Endpoint records that block

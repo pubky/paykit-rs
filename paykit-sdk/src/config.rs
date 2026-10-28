@@ -3,12 +3,18 @@ use serde::{Deserialize, Serialize};
 use paykit_lib::PaykitAppId;
 
 /// Policy for SDK-managed public Payment Endpoint cleanup.
+///
+/// Public endpoint sync removes every managed endpoint missing from the
+/// receiving details it is given.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum EndpointManagementScope {
     /// Manage only endpoints previously published by the SDK.
     ManagedOnly,
     /// Manage the configured application's full public endpoint namespace.
+    ///
+    /// Sync also removes endpoint files in the App's endpoint directory that
+    /// the SDK never created.
     FullAppEndpointNamespace,
 }
 

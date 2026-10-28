@@ -458,6 +458,11 @@ impl FfiPaykitSdk {
     }
 
     /// Return accepted recurring Payment Requests across non-blocked counterparties.
+    ///
+    /// Covers both payer and payee roles with no time filter: an ended Recurrence
+    /// stays listed after `terms.recurrence.ends_at`, and releasing the execution
+    /// claim does not remove it. Compare `ends_at` with trusted local time to hide
+    /// or label it.
     pub async fn active_recurring_payment_requests(
         &self,
     ) -> Result<Vec<FfiPaymentRequestRecord>, PaykitFfiError> {
@@ -469,6 +474,10 @@ impl FfiPaykitSdk {
     ///
     /// A request's required Paykit App constrains the payee endpoint, not the
     /// payer app that responds.
+    ///
+    /// Includes active recurring requests with no time filter: an ended Recurrence
+    /// stays listed after `terms.recurrence.ends_at`, and releasing the execution
+    /// claim does not remove it. Compare `ends_at` with trusted local time.
     pub async fn actionable_received_payment_requests(
         &self,
     ) -> Result<Vec<FfiPaymentRequestRecord>, PaykitFfiError> {
@@ -533,6 +542,9 @@ impl FfiPaykitSdk {
     }
 
     /// Release this App's unresolved execution claim without rejecting the request.
+    ///
+    /// Releasing does not hide the record: it stays in the active recurring and
+    /// actionable lists, available to every local App.
     pub async fn release_payment_request_execution_claim(
         &self,
         counterparty: String,
