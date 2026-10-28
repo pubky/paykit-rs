@@ -1956,12 +1956,23 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func evaluateAllowanceCandidates(scope: PaymentRequestScope, trustedTime: String) async throws  -> [AllowanceCandidate]
 
     /**
-     * Export SDK-managed backup state as an opaque blob.
+     * Export SDK-managed backup state as unencrypted SDK backup bytes.
+     *
+     * The blob is sensitive plaintext that includes Noise secret key material;
+     * see `SdkBackupBlob` for its contents and required protection.
      */
     func exportBackupState() async throws  -> SdkBackupBlob
 
     /**
      * Export SDK-managed backup state as a hex string.
+     *
+     * Hex is not encryption. The string holds unencrypted SDK backup bytes:
+     * Encrypted Link snapshots (including the current Paykit Noise static
+     * secret key and session ephemeral secrets), raw Private Application
+     * Messages, outbound payloads, and Receipt Decryption Keys. It is a plain
+     * `String`, so neither redaction nor zeroize applies to it. Encrypt it
+     * before storage or transport and never log it. If it is exposed, call
+     * `rotate_paykit_identity_key` and relink with the affected peers.
      */
     func exportBackupString() async throws  -> String
 
@@ -2235,6 +2246,9 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Add or replace this application in the identity-wide registry.
+     *
+     * Publishing writes SDK-managed state, so `restore_backup_state` is
+     * refused on this state backing afterwards; restore a backup first.
      */
     func publishPaykitApp(displayName: String, capabilities: PaykitAppCapabilities) async throws  -> PaykitAppRegistry
 
@@ -2336,6 +2350,12 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Merge complete wallet-attested history. An empty history cannot reset existing evidence.
      *
+     * Manual and automatic payment admission require it after initialization,
+     * while no ledger exists, and again after restore. The wallet must inspect
+     * every manual and automatic payment path and its external idempotency
+     * records. No Payment Proof, timeout, or missing local file establishes
+     * nonpayment.
+     *
      * After restoring an older backup, an empty or incomplete history re-enables payment of
      * anything paid after the export and frees the Allowance capacity it used. This is a
      * ledger-wide recovery step, not a routine call: it starts a new epoch and turns every
@@ -2363,6 +2383,8 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * recovery and payment execution requires complete wallet reconciliation.
      * State newer than the backup is not recovered. Unreadable generation
      * headers and corrupt replacement-generation state are rejected, not overwritten.
+     *
+     * The backup is sensitive plaintext; see `SdkBackupBlob`.
      *
      * Reconcile payment accounting with every payment made after the backup was exported,
      * or those payments can be made again; see `reconcile_allowance_accounting`.
@@ -2468,7 +2490,27 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func resolvePublicPaymentRequest(counterparty: String, paymentRequestId: String) async throws  -> PublicContactPaymentResolution
 
     /**
-     * Restore SDK-managed backup state from an opaque blob.
+     * Restore SDK-managed backup state from an SDK backup blob.
+     *
+     * Restores only into a state backing that holds nothing but identity
+     * metadata, authorized Paykit App records, and operation leases; otherwise
+     * the refusal names the blocking record kinds. Restore is also refused
+     * while a peer-link or Paykit App operation lease is unexpired. A backup
+     * with identity-scoped state needs an active Pubky session for the same
+     * identity, private-link-capable when the backup holds private state.
+     *
+     * Restore before `publish_paykit_app`: publishing (and the public endpoint
+     * sync it enables) writes SDK-managed state that blocks restore. With
+     * callback storage, discard the state blob and initialize again only when
+     * the app independently knows it is the only Paykit App and SDK handle
+     * using that backing for this identity, and the refusal names nothing but
+     * registered Paykit Apps and public Payment Endpoint records; then restore
+     * with `RequireRecovery`. The SDK cannot check ownership: those labels
+     * combine every app's records and omit Paykit App IDs, so another app's
+     * setup produces the same refusal. Otherwise do not discard. After restore,
+     * payment accounting requires `reconcile_allowance_accounting` with
+     * complete wallet history; an empty history attests that there were no
+     * previous payments.
      *
      * `link_policy` decides whether saved Encrypted Links resume or require a
      * fresh Encrypted Link Handshake. Resuming a backup that is not current
@@ -2482,9 +2524,10 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Restore SDK-managed backup state from a hex string.
      *
-     * `link_policy` decides whether saved Encrypted Links resume or require a
-     * fresh Encrypted Link Handshake. Resuming a backup that is not current
-     * reuses a transport key and nonce.
+     * Hex-string form of `restore_backup_state`, with the same preconditions,
+     * onboarding order (restore before `publish_paykit_app`), post-restore
+     * reconciliation, and `link_policy` semantics. Resuming a backup that is
+     * not current reuses a transport key and nonce.
      *
      * Reconcile payment accounting with every payment made after the backup was exported,
      * or those payments can be made again; see `reconcile_allowance_accounting`.
@@ -2586,11 +2629,17 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Publish current public receiving details and remove stale SDK-managed endpoints.
+     *
+     * This writes SDK-managed state, so `restore_backup_state` is refused on
+     * this state backing afterwards; restore a backup first.
      */
     func syncPublicEndpoints() async throws  -> EndpointSyncReport
 
     /**
      * Publish explicit public receiving details and remove stale SDK-managed endpoints.
+     *
+     * This writes SDK-managed state, so `restore_backup_state` is refused on
+     * this state backing afterwards; restore a backup first.
      */
     func syncPublicEndpointsWithReceivingDetails(receivingDetails: [PublicReceivingDetail]) async throws  -> EndpointSyncReport
 
@@ -3463,7 +3512,10 @@ open func evaluateAllowanceCandidates(scope: PaymentRequestScope, trustedTime: S
 }
 
     /**
-     * Export SDK-managed backup state as an opaque blob.
+     * Export SDK-managed backup state as unencrypted SDK backup bytes.
+     *
+     * The blob is sensitive plaintext that includes Noise secret key material;
+     * see `SdkBackupBlob` for its contents and required protection.
      */
 open func exportBackupState()async throws  -> SdkBackupBlob  {
     return
@@ -3484,6 +3536,14 @@ open func exportBackupState()async throws  -> SdkBackupBlob  {
 
     /**
      * Export SDK-managed backup state as a hex string.
+     *
+     * Hex is not encryption. The string holds unencrypted SDK backup bytes:
+     * Encrypted Link snapshots (including the current Paykit Noise static
+     * secret key and session ephemeral secrets), raw Private Application
+     * Messages, outbound payloads, and Receipt Decryption Keys. It is a plain
+     * `String`, so neither redaction nor zeroize applies to it. Encrypt it
+     * before storage or transport and never log it. If it is exposed, call
+     * `rotate_paykit_identity_key` and relink with the affected peers.
      */
 open func exportBackupString()async throws  -> String  {
     return
@@ -4362,6 +4422,9 @@ open func publishEncryptedLinkRecoveryMarker(counterparty: String)async throws  
 
     /**
      * Add or replace this application in the identity-wide registry.
+     *
+     * Publishing writes SDK-managed state, so `restore_backup_state` is
+     * refused on this state backing afterwards; restore a backup first.
      */
 open func publishPaykitApp(displayName: String, capabilities: PaykitAppCapabilities)async throws  -> PaykitAppRegistry  {
     return
@@ -4718,6 +4781,12 @@ open func receivedPaymentRequestsFrom(counterparty: String)async throws  -> [Pay
     /**
      * Merge complete wallet-attested history. An empty history cannot reset existing evidence.
      *
+     * Manual and automatic payment admission require it after initialization,
+     * while no ledger exists, and again after restore. The wallet must inspect
+     * every manual and automatic payment path and its external idempotency
+     * records. No Payment Proof, timeout, or missing local file establishes
+     * nonpayment.
+     *
      * After restoring an older backup, an empty or incomplete history re-enables payment of
      * anything paid after the export and frees the Allowance capacity it used. This is a
      * ledger-wide recovery step, not a routine call: it starts a new epoch and turns every
@@ -4775,6 +4844,8 @@ open func recordPaymentOutcome(report: PaymentOutcomeReport)async throws  -> Pay
      * recovery and payment execution requires complete wallet reconciliation.
      * State newer than the backup is not recovered. Unreadable generation
      * headers and corrupt replacement-generation state are rejected, not overwritten.
+     *
+     * The backup is sensitive plaintext; see `SdkBackupBlob`.
      *
      * Reconcile payment accounting with every payment made after the backup was exported,
      * or those payments can be made again; see `reconcile_allowance_accounting`.
@@ -5135,7 +5206,27 @@ open func resolvePublicPaymentRequest(counterparty: String, paymentRequestId: St
 }
 
     /**
-     * Restore SDK-managed backup state from an opaque blob.
+     * Restore SDK-managed backup state from an SDK backup blob.
+     *
+     * Restores only into a state backing that holds nothing but identity
+     * metadata, authorized Paykit App records, and operation leases; otherwise
+     * the refusal names the blocking record kinds. Restore is also refused
+     * while a peer-link or Paykit App operation lease is unexpired. A backup
+     * with identity-scoped state needs an active Pubky session for the same
+     * identity, private-link-capable when the backup holds private state.
+     *
+     * Restore before `publish_paykit_app`: publishing (and the public endpoint
+     * sync it enables) writes SDK-managed state that blocks restore. With
+     * callback storage, discard the state blob and initialize again only when
+     * the app independently knows it is the only Paykit App and SDK handle
+     * using that backing for this identity, and the refusal names nothing but
+     * registered Paykit Apps and public Payment Endpoint records; then restore
+     * with `RequireRecovery`. The SDK cannot check ownership: those labels
+     * combine every app's records and omit Paykit App IDs, so another app's
+     * setup produces the same refusal. Otherwise do not discard. After restore,
+     * payment accounting requires `reconcile_allowance_accounting` with
+     * complete wallet history; an empty history attests that there were no
+     * previous payments.
      *
      * `link_policy` decides whether saved Encrypted Links resume or require a
      * fresh Encrypted Link Handshake. Resuming a backup that is not current
@@ -5164,9 +5255,10 @@ open func restoreBackupState(backup: SdkBackupBlob, linkPolicy: RestoredLinkPoli
     /**
      * Restore SDK-managed backup state from a hex string.
      *
-     * `link_policy` decides whether saved Encrypted Links resume or require a
-     * fresh Encrypted Link Handshake. Resuming a backup that is not current
-     * reuses a transport key and nonce.
+     * Hex-string form of `restore_backup_state`, with the same preconditions,
+     * onboarding order (restore before `publish_paykit_app`), post-restore
+     * reconciliation, and `link_policy` semantics. Resuming a backup that is
+     * not current reuses a transport key and nonce.
      *
      * Reconcile payment accounting with every payment made after the backup was exported,
      * or those payments can be made again; see `reconcile_allowance_accounting`.
@@ -5498,6 +5590,9 @@ open func syncPublicContactMarkers()async throws  -> [ContactRecord]  {
 
     /**
      * Publish current public receiving details and remove stale SDK-managed endpoints.
+     *
+     * This writes SDK-managed state, so `restore_backup_state` is refused on
+     * this state backing afterwards; restore a backup first.
      */
 open func syncPublicEndpoints()async throws  -> EndpointSyncReport  {
     return
@@ -5518,6 +5613,9 @@ open func syncPublicEndpoints()async throws  -> EndpointSyncReport  {
 
     /**
      * Publish explicit public receiving details and remove stale SDK-managed endpoints.
+     *
+     * This writes SDK-managed state, so `restore_backup_state` is refused on
+     * this state backing afterwards; restore a backup first.
      */
 open func syncPublicEndpointsWithReceivingDetails(receivingDetails: [PublicReceivingDetail])async throws  -> EndpointSyncReport  {
     return
@@ -7593,18 +7691,43 @@ public func FfiConverterTypeReservationAttribution_lower(_ value: ReservationAtt
 
 
 /**
- * SDK backup blob owned by the app.
+ * Unencrypted SDK backup bytes owned by the app.
+ *
+ * The SDK does not seal or encrypt this blob. It contains Encrypted Link
+ * snapshots (including the current Paykit Noise static secret key and session
+ * ephemeral secrets), raw Private Application Messages, outbound payloads, and
+ * Receipt Decryption Keys. It does not contain the Pubky identity secret or the
+ * Paykit Identity Secret. Encrypt it before storage or transport and never log
+ * it. If a backup is exposed, call `rotate_paykit_identity_key` and relink
+ * with the affected peers.
+ *
+ * `Debug` output is redacted and the bytes are zeroized on drop. Copies taken
+ * with `export_bytes` or `export_backup_string` are the app's responsibility.
  */
 public protocol SdkBackupBlobProtocol: AnyObject, Sendable {
 
     /**
-     * Export the raw bytes for app-controlled backup storage.
+     * Export the unencrypted backup bytes for app-controlled backup storage.
+     *
+     * The returned copy is not redacted or zeroized. Encrypt it before storage
+     * or transport and never log it; see `SdkBackupBlob`.
      */
     func exportBytes()  -> Data
 
 }
 /**
- * SDK backup blob owned by the app.
+ * Unencrypted SDK backup bytes owned by the app.
+ *
+ * The SDK does not seal or encrypt this blob. It contains Encrypted Link
+ * snapshots (including the current Paykit Noise static secret key and session
+ * ephemeral secrets), raw Private Application Messages, outbound payloads, and
+ * Receipt Decryption Keys. It does not contain the Pubky identity secret or the
+ * Paykit Identity Secret. Encrypt it before storage or transport and never log
+ * it. If a backup is exposed, call `rotate_paykit_identity_key` and relink
+ * with the affected peers.
+ *
+ * `Debug` output is redacted and the bytes are zeroized on drop. Copies taken
+ * with `export_bytes` or `export_backup_string` are the app's responsibility.
  */
 open class SdkBackupBlob: SdkBackupBlobProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -7646,7 +7769,7 @@ open class SdkBackupBlob: SdkBackupBlobProtocol, @unchecked Sendable {
         return try! rustCall { uniffi_paykit_fn_clone_ffisdkbackupblob(self.pointer, $0) }
     }
     /**
-     * Create an SDK backup blob from app-owned bytes.
+     * Create an SDK backup blob from app-owned bytes the app has decrypted.
      */
 public convenience init(bytes: Data) {
     let pointer =
@@ -7670,7 +7793,10 @@ public convenience init(bytes: Data) {
 
 
     /**
-     * Export the raw bytes for app-controlled backup storage.
+     * Export the unencrypted backup bytes for app-controlled backup storage.
+     *
+     * The returned copy is not redacted or zeroized. Encrypt it before storage
+     * or transport and never log it; see `SdkBackupBlob`.
      */
 open func exportBytes() -> Data  {
     return try!  FfiConverterData.lift(try! rustCall() {
@@ -8491,19 +8617,43 @@ public func FfiConverterTypeSdkPubkySessionProvider_lower(_ value: SdkPubkySessi
 /**
  * Identity-wide SDK state blob owned by the configured storage boundary.
  *
+ * With callback storage, the SDK passes this blob to `SdkStateBlobStore`
+ * unencrypted on every state change. It holds the same kind of sensitive
+ * plaintext as `SdkBackupBlob`, including the Paykit Noise static secret
+ * key. Store it only in platform-protected storage (Keychain- or
+ * Keystore-backed encryption or equivalent); never log it or upload it
+ * unencrypted. Pubky shared-state runtimes do not use this blob; they encrypt
+ * their shared state.
+ *
+ * `Debug` output is redacted and the bytes are zeroized on drop. Copies taken
+ * with `export_bytes` are the app's responsibility.
+ *
  * Android storage callbacks should export callback-supplied blob bytes and
  * close the generated native wrapper before returning.
  */
 public protocol SdkStateBlobProtocol: AnyObject, Sendable {
 
     /**
-     * Export the raw bytes for platform storage.
+     * Export the unencrypted state bytes for platform-protected storage.
+     *
+     * The returned copy is not redacted or zeroized; never log it.
      */
     func exportBytes()  -> Data
 
 }
 /**
  * Identity-wide SDK state blob owned by the configured storage boundary.
+ *
+ * With callback storage, the SDK passes this blob to `SdkStateBlobStore`
+ * unencrypted on every state change. It holds the same kind of sensitive
+ * plaintext as `SdkBackupBlob`, including the Paykit Noise static secret
+ * key. Store it only in platform-protected storage (Keychain- or
+ * Keystore-backed encryption or equivalent); never log it or upload it
+ * unencrypted. Pubky shared-state runtimes do not use this blob; they encrypt
+ * their shared state.
+ *
+ * `Debug` output is redacted and the bytes are zeroized on drop. Copies taken
+ * with `export_bytes` are the app's responsibility.
  *
  * Android storage callbacks should export callback-supplied blob bytes and
  * close the generated native wrapper before returning.
@@ -8572,7 +8722,9 @@ public convenience init(bytes: Data) {
 
 
     /**
-     * Export the raw bytes for platform storage.
+     * Export the unencrypted state bytes for platform-protected storage.
+     *
+     * The returned copy is not redacted or zeroized; never log it.
      */
 open func exportBytes() -> Data  {
     return try!  FfiConverterData.lift(try! rustCall() {
@@ -8642,6 +8794,10 @@ public func FfiConverterTypeSdkStateBlob_lower(_ value: SdkStateBlob) -> UnsafeM
 /**
  * Platform-owned durable blob store for SDK state.
  *
+ * Callback storage only: the SDK writes the whole state on every change as
+ * unencrypted `SdkStateBlob` bytes, including the Paykit Noise static
+ * secret key. See `SdkStateBlob` for the required protection.
+ *
  * The SDK invokes these callbacks while holding its per-handle storage lock.
  * Implementations must not call back into the same SDK handle from either
  * callback because doing so would deadlock.
@@ -8671,6 +8827,10 @@ public protocol SdkStateBlobStore: AnyObject, Sendable {
 }
 /**
  * Platform-owned durable blob store for SDK state.
+ *
+ * Callback storage only: the SDK writes the whole state on every change as
+ * unencrypted `SdkStateBlob` bytes, including the Paykit Noise static
+ * secret key. See `SdkStateBlob` for the required protection.
  *
  * The SDK invokes these callbacks while holding its per-handle storage lock.
  * Implementations must not call back into the same SDK handle from either
@@ -25677,6 +25837,9 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
 }
 /**
  * Decode an SDK state blob snapshot previously encoded by Paykit FFI.
+ *
+ * The input is unencrypted state bytes with the same sensitivity as
+ * `SdkStateBlob`; see `encode_sdk_state_blob_snapshot`.
  */
 public func decodeSdkStateBlobSnapshot(bytes: Data)throws  -> SdkStateBlobSnapshot  {
     return try  FfiConverterTypeSdkStateBlobSnapshot_lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
@@ -25706,6 +25869,10 @@ public func defaultPubkyClientConfig() -> PubkyClientConfig  {
 }
 /**
  * Encode an SDK state blob snapshot for apps that store blob and revision together.
+ *
+ * The result is unencrypted state bytes with the same sensitivity as
+ * `SdkStateBlob`; store it only in platform-protected storage and never
+ * log it.
  */
 public func encodeSdkStateBlobSnapshot(snapshot: SdkStateBlobSnapshot)throws  -> Data  {
     return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
@@ -25859,7 +26026,7 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_paykit_checksum_func_decode_sdk_state_blob_snapshot() != 4823) {
+    if (uniffi_paykit_checksum_func_decode_sdk_state_blob_snapshot() != 21363) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_default_config() != 51069) {
@@ -25868,7 +26035,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_default_pubky_client_config() != 12841) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_func_encode_sdk_state_blob_snapshot() != 49508) {
+    if (uniffi_paykit_checksum_func_encode_sdk_state_blob_snapshot() != 54569) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_func_generate_receipt_id() != 34487) {
@@ -26066,10 +26233,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_evaluate_allowance_candidates() != 24568) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_export_backup_state() != 29122) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_export_backup_state() != 48543) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_export_backup_string() != 15207) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_export_backup_string() != 63831) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_fetch_paykit_profile() != 57253) {
@@ -26192,7 +26359,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_encrypted_link_recovery_marker() != 29039) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_app() != 55330) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_app() != 24342) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_paykit_blob() != 27941) {
@@ -26243,13 +26410,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_received_payment_requests_from() != 4199) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_reconcile_allowance_accounting() != 55123) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_reconcile_allowance_accounting() != 33732) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_record_payment_outcome() != 56035) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_recover_shared_state_from_backup() != 4141) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_recover_shared_state_from_backup() != 13220) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_refresh_contact_paykit_profile() != 15127) {
@@ -26300,10 +26467,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_public_payment_request() != 44750) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_state() != 42686) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_state() != 8423) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_string() != 49317) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_string() != 50668) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_retrieve_receipt() != 26622) {
@@ -26351,10 +26518,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_contact_markers() != 39954) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_endpoints() != 41929) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_endpoints() != 585) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_endpoints_with_receiving_details() != 37396) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_endpoints_with_receiving_details() != 13996) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_unblock_peer() != 22658) {
@@ -26447,7 +26614,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffireservationattribution_export_fields() != 11904) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffisdkbackupblob_export_bytes() != 43352) {
+    if (uniffi_paykit_checksum_method_ffisdkbackupblob_export_bytes() != 44480) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_current_public_receiving_details() != 46945) {
@@ -26483,7 +26650,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffisdkpubkysessionprovider_clear_session_access() != 61806) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffisdkstateblob_export_bytes() != 31016) {
+    if (uniffi_paykit_checksum_method_ffisdkstateblob_export_bytes() != 44826) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffisdkstateblobstore_load_state_blob() != 17391) {
@@ -26561,7 +26728,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_constructor_ffireservationattribution_new() != 43638) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_constructor_ffisdkbackupblob_new() != 36734) {
+    if (uniffi_paykit_checksum_constructor_ffisdkbackupblob_new() != 55136) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_constructor_ffisdkstateblob_new() != 33848) {

@@ -29,6 +29,12 @@ impl FfiPaykitSdk {
 
     /// Merge complete wallet-attested history. An empty history cannot reset existing evidence.
     ///
+    /// Manual and automatic payment admission require it after initialization,
+    /// while no ledger exists, and again after restore. The wallet must inspect
+    /// every manual and automatic payment path and its external idempotency
+    /// records. No Payment Proof, timeout, or missing local file establishes
+    /// nonpayment.
+    ///
     /// After restoring an older backup, an empty or incomplete history re-enables payment of
     /// anything paid after the export and frees the Allowance capacity it used. This is a
     /// ledger-wide recovery step, not a routine call: it starts a new epoch and turns every
