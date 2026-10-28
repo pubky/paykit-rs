@@ -443,10 +443,12 @@ fn storage_state_is_empty_except_identity(state: &StorageState) -> bool {
         authorized_paykit_apps: state.authorized_paykit_apps.clone(),
         peer_link_operation_leases: state.peer_link_operation_leases.clone(),
         paykit_app_operation_leases: state.paykit_app_operation_leases.clone(),
+        private_intake_supervisor_lease: state.private_intake_supervisor_lease.clone(),
         ..StorageState::default()
     };
     empty.next_peer_link_operation_lease_id = state.next_peer_link_operation_lease_id;
     empty.next_paykit_app_operation_lease_id = state.next_paykit_app_operation_lease_id;
+    empty.next_private_intake_supervisor_lease_id = state.next_private_intake_supervisor_lease_id;
     state == &empty
 }
 
@@ -787,6 +789,8 @@ impl SdkBackupState {
             next_peer_link_operation_lease_id,
             paykit_app_operation_leases: HashMap::new(),
             next_paykit_app_operation_lease_id,
+            private_intake_supervisor_lease: None,
+            next_private_intake_supervisor_lease_id: 0,
             payment_request_execution_claims,
             outbound_private_messages,
             next_outbound_private_message_id,

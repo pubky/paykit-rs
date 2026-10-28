@@ -4,8 +4,9 @@ use super::StorageState;
 use crate::{PaykitSdkError, Result};
 
 /// Current encoded SDK state-blob version.
-pub const SDK_STATE_BLOB_VERSION: u32 = 2;
+pub const SDK_STATE_BLOB_VERSION: u32 = 3;
 const SDK_STATE_BLOB_VERSION_V1: u32 = 1;
+const SDK_STATE_BLOB_VERSION_V2: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct StorageStateEnvelope<T> {
@@ -90,6 +91,8 @@ impl From<StorageStateV1> for StorageState {
             next_peer_link_operation_lease_id: state.next_peer_link_operation_lease_id,
             paykit_app_operation_leases: state.paykit_app_operation_leases,
             next_paykit_app_operation_lease_id: state.next_paykit_app_operation_lease_id,
+            private_intake_supervisor_lease: None,
+            next_private_intake_supervisor_lease_id: 0,
             payment_request_execution_claims: state.payment_request_execution_claims,
             outbound_private_messages: state.outbound_private_messages,
             next_outbound_private_message_id: state.next_outbound_private_message_id,
@@ -138,9 +141,28 @@ pub fn decode_storage_state_blob(bytes: &[u8]) -> Result<StorageState> {
                 })?;
             (state.into(), remainder)
         }
+        SDK_STATE_BLOB_VERSION_V2 => {
+            // Version 3 only appends two defaultable supervisor-lease fields.
+            // Postcard does not synthesize missing sequence fields, so append
+            // their canonical `None`/zero encoding before decoding frozen v2.
+            let mut upgraded = state_bytes.to_vec();
+            upgraded.extend_from_slice(&[0, 0]);
+            let (state, remainder) =
+                postcard::take_from_bytes(&upgraded).map_err(|err| PaykitSdkError::Storage {
+                    context: "decode SDK state blob version 2".into(),
+                    source: Some(err.into()),
+                })?;
+            if !remainder.is_empty() {
+                return Err(PaykitSdkError::Storage {
+                    context: "SDK state blob version 2 contains trailing bytes".into(),
+                    source: None,
+                });
+            }
+            (state, &[][..])
+        }
         SDK_STATE_BLOB_VERSION => {
             postcard::take_from_bytes(state_bytes).map_err(|err| PaykitSdkError::Storage {
-                context: "decode SDK state blob version 2".into(),
+                context: "decode SDK state blob version 3".into(),
                 source: Some(err.into()),
             })?
         }
@@ -272,11 +294,23 @@ mod tests {
     }
 
     #[test]
+    fn test_storage_state_blob_decodes_v2_before_supervisor_lease_fields() {
+        let mut encoded = encode_storage_state_blob(&StorageState::default()).unwrap();
+        encoded[0] = SDK_STATE_BLOB_VERSION_V2 as u8;
+        assert_eq!(encoded.pop(), Some(0));
+        assert_eq!(encoded.pop(), Some(0));
+
+        let decoded = decode_storage_state_blob(&encoded).unwrap();
+        assert!(decoded.private_intake_supervisor_lease.is_none());
+        assert_eq!(decoded.next_private_intake_supervisor_lease_id, 0);
+    }
+
+    #[test]
     fn test_storage_state_blob_upgrades_real_v1_fixture() {
         let encoded = include_bytes!("tests/fixtures/sdk-state-v1.postcard");
         let state = decode_storage_state_blob(encoded).unwrap();
 
-        assert_eq!(SDK_STATE_BLOB_VERSION, 2);
+        assert_eq!(SDK_STATE_BLOB_VERSION, 3);
         assert_eq!(
             state.identity_state.unwrap().public_key.unwrap().as_str(),
             "7jfgaa9nutjyixzikb7tgmsf9gkwq7iqz498zr1nd5ig1fng4esy"
@@ -288,7 +322,7 @@ mod tests {
 
         let current = encode_storage_state_blob(&StorageState::default()).unwrap();
         let (version, _): (u32, _) = postcard::take_from_bytes(&current).unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     #[test]

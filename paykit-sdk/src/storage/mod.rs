@@ -19,8 +19,8 @@ pub use records::{
     NewOutboundPrivateMessage, NewPrivateStreamItem, OutboundPrivateMessageRecord,
     PaykitAppOperationLease, PaymentEndpointReservationRecord, PaymentRequestExecutionClaim,
     PeerLinkOperationLease, PreparedOutboundPrivateSend, PrivateIntakeBufferOutcome,
-    PrivateIntakeCursorRecord, PrivateIntakePeerRecord, PrivateStreamItemRecord,
-    PublicEndpointRecord, StorageState, PRIVATE_INTAKE_MAX_BYTES_GLOBAL,
+    PrivateIntakeCursorRecord, PrivateIntakePeerRecord, PrivateIntakeSupervisorLease,
+    PrivateStreamItemRecord, PublicEndpointRecord, StorageState, PRIVATE_INTAKE_MAX_BYTES_GLOBAL,
     PRIVATE_INTAKE_MAX_BYTES_PER_PEER, PRIVATE_INTAKE_MAX_PACKETS_GLOBAL,
     PRIVATE_INTAKE_MAX_PACKETS_PER_PEER, PRIVATE_INTAKE_PACKET_BYTES,
 };
@@ -568,6 +568,20 @@ pub trait StorageTransaction {
 
     /// Release a previously claimed Paykit App operation.
     fn release_paykit_app_operation(&mut self, app_id: &paykit_lib::PaykitAppId, lease_id: u64);
+
+    /// Claim dedicated identity-wide ownership of private-intake supervision.
+    fn claim_private_intake_supervisor(
+        &mut self,
+        now: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Option<PrivateIntakeSupervisorLease>>;
+
+    /// Extend private-intake ownership only while lease id still matches.
+    fn renew_private_intake_supervisor(&mut self, lease_id: u64, expires_at: DateTime<Utc>)
+        -> bool;
+
+    /// Release private-intake ownership only while lease id still matches.
+    fn release_private_intake_supervisor(&mut self, lease_id: u64);
 
     /// Load one identity-wide Payment Request execution claim.
     fn payment_request_execution_claim(

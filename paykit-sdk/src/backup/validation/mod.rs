@@ -197,6 +197,7 @@ fn has_identity_scoped_live_state(state: &StorageState) -> bool {
         || !state.encrypted_link_states.is_empty()
         || !state.peer_link_operation_leases.is_empty()
         || !state.paykit_app_operation_leases.is_empty()
+        || state.private_intake_supervisor_lease.is_some()
         || !state.payment_request_execution_claims.is_empty()
         || !state.outbound_private_messages.is_empty()
         || !state.private_stream_items.is_empty()
@@ -290,7 +291,17 @@ fn validate_live_record_keys(state: &StorageState) -> Result<()> {
         &state.private_intake_peers,
         |key, record| key == &record.counterparty,
         "private intake peer key does not match its counterparty",
-    )
+    )?;
+    if state
+        .private_intake_supervisor_lease
+        .as_ref()
+        .is_some_and(|lease| lease.lease_id >= state.next_private_intake_supervisor_lease_id)
+    {
+        return Err(invalid_live_state(
+            "private intake supervisor lease id is outside its allocated range",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_record_keys<K, V>(

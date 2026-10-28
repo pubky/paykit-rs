@@ -683,6 +683,57 @@ impl StorageTransaction for StorageStateTransaction {
         true
     }
 
+    fn claim_private_intake_supervisor(
+        &mut self,
+        now: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Option<PrivateIntakeSupervisorLease>> {
+        if self
+            .state
+            .private_intake_supervisor_lease
+            .as_ref()
+            .is_some_and(|lease| lease.expires_at > now)
+        {
+            return Ok(None);
+        }
+        let lease_id = self.state.next_private_intake_supervisor_lease_id;
+        self.state.next_private_intake_supervisor_lease_id =
+            lease_id.checked_add(1).ok_or_else(storage_id_exhausted)?;
+        let lease = PrivateIntakeSupervisorLease {
+            lease_id,
+            claimed_at: now,
+            expires_at,
+        };
+        self.state.private_intake_supervisor_lease = Some(lease.clone());
+        Ok(Some(lease))
+    }
+
+    fn renew_private_intake_supervisor(
+        &mut self,
+        lease_id: u64,
+        expires_at: DateTime<Utc>,
+    ) -> bool {
+        let Some(lease) = self.state.private_intake_supervisor_lease.as_mut() else {
+            return false;
+        };
+        if lease.lease_id != lease_id {
+            return false;
+        }
+        lease.expires_at = lease.expires_at.max(expires_at);
+        true
+    }
+
+    fn release_private_intake_supervisor(&mut self, lease_id: u64) {
+        if self
+            .state
+            .private_intake_supervisor_lease
+            .as_ref()
+            .is_some_and(|lease| lease.lease_id == lease_id)
+        {
+            self.state.private_intake_supervisor_lease = None;
+        }
+    }
+
     fn payment_request_execution_claim(
         &self,
         counterparty: &PubkyPublicKey,

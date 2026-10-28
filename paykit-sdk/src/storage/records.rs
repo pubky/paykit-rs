@@ -215,6 +215,17 @@ pub struct PaykitAppOperationLease {
     pub expires_at: DateTime<Utc>,
 }
 
+/// Storage-backed identity-wide private-intake supervisor lease.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivateIntakeSupervisorLease {
+    /// Assigned lease id within dedicated supervisor namespace.
+    pub lease_id: u64,
+    /// Claim time.
+    pub claimed_at: DateTime<Utc>,
+    /// Expiry time after which another supervisor may retry.
+    pub expires_at: DateTime<Utc>,
+}
+
 /// Identity-wide ownership claim made before an application executes a payment.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentRequestExecutionClaim {
@@ -819,6 +830,16 @@ pub struct StorageState {
     pub private_intake_cursors: HashMap<PubkyPublicKey, PrivateIntakeCursorRecord>,
     /// Durable bounded encrypted packet queues by Linked Peer.
     pub private_intake_peers: HashMap<PubkyPublicKey, PrivateIntakePeerRecord>,
+    /// Active identity-wide private-intake supervisor lease.
+    ///
+    /// Appended with a default to preserve decoding of state-blob version 2.
+    #[serde(default)]
+    pub private_intake_supervisor_lease: Option<PrivateIntakeSupervisorLease>,
+    /// Next private-intake supervisor lease id.
+    ///
+    /// Appended with a default to preserve decoding of state-blob version 2.
+    #[serde(default)]
+    pub next_private_intake_supervisor_lease_id: u64,
 }
 
 impl fmt::Debug for StorageState {
@@ -879,6 +900,14 @@ impl fmt::Debug for StorageState {
             .field(
                 "next_paykit_app_operation_lease_id",
                 &self.next_paykit_app_operation_lease_id,
+            )
+            .field(
+                "private_intake_supervisor_lease",
+                &self.private_intake_supervisor_lease,
+            )
+            .field(
+                "next_private_intake_supervisor_lease_id",
+                &self.next_private_intake_supervisor_lease_id,
             )
             .field(
                 "payment_request_execution_claims",

@@ -1,7 +1,7 @@
 use super::*;
 use crate::storage::{
-    BufferedPrivatePacketRecord, PaykitAppOperationLease, PrivateIntakeBufferOutcome,
-    PrivateIntakeCursorRecord,
+    BufferedPrivatePacketRecord, PrivateIntakeBufferOutcome, PrivateIntakeCursorRecord,
+    PrivateIntakeSupervisorLease,
 };
 use futures_util::StreamExt;
 use std::{
@@ -22,7 +22,6 @@ const MAX_AUDIT_JITTER: Duration = Duration::from_secs(5);
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const SUPERVISOR_LEASE_TIMEOUT: chrono::Duration = chrono::Duration::minutes(2);
 const SUPERVISOR_LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(30);
-const SUPERVISOR_LEASE_APP_ID: &str = "paykit-private-intake-supervisor";
 
 /// Validated limits for SSE-assisted private intake.
 #[derive(Clone, Debug)]
@@ -217,26 +216,56 @@ fn reserve_stream_capacity(capacity: usize, required: usize) -> Result<usize> {
     Ok(required)
 }
 
-fn supervisor_lease_app_id() -> paykit_lib::PaykitAppId {
-    paykit_lib::PaykitAppId::new(SUPERVISOR_LEASE_APP_ID)
-        .expect("private intake supervisor lease app id is valid")
+fn subscribable_private_intake_peers(
+    state: &crate::storage::StorageState,
+    peers: &[PubkyPublicKey],
+) -> Vec<PubkyPublicKey> {
+    let global_count = state
+        .private_intake_peers
+        .values()
+        .map(|peer| peer.buffered_packets.len())
+        .sum::<usize>();
+    if global_count >= crate::storage::PRIVATE_INTAKE_MAX_PACKETS_GLOBAL {
+        return Vec::new();
+    }
+    peers
+        .iter()
+        .filter(|peer| {
+            state.private_intake_peers.get(*peer).is_none_or(|record| {
+                record.buffered_packets.len() < crate::storage::PRIVATE_INTAKE_MAX_PACKETS_PER_PEER
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+fn route_private_intake_event(
+    group: &SubscriptionGroup,
+    event: pubky::Event,
+) -> Option<(PubkyPublicKey, PrivateIntakeCursorRecord)> {
+    let peer = PubkyPublicKey::from_public_key(&event.resource.owner);
+    group.peers.contains(&peer).then(|| {
+        let cursor = PrivateIntakeCursorRecord {
+            subscribed_user: peer.clone(),
+            homeserver: group.homeserver_name.clone(),
+            event_id: event.cursor.id(),
+        };
+        (peer, cursor)
+    })
 }
 
 async fn claim_private_intake_lease<S: StorageAdapter>(
     storage: &S,
     now: DateTime<Utc>,
-) -> Result<PaykitAppOperationLease> {
+) -> Result<PrivateIntakeSupervisorLease> {
     storage
         .transaction(move |tx| {
-            tx.claim_paykit_app_operation(
-                &supervisor_lease_app_id(),
-                now,
-                now + SUPERVISOR_LEASE_TIMEOUT,
-            )?
-            .ok_or_else(|| PaykitSdkError::Policy {
-                context: "private intake supervisor is already running for this identity".into(),
-                source: None,
-            })
+            tx.claim_private_intake_supervisor(now, now + SUPERVISOR_LEASE_TIMEOUT)?
+                .ok_or_else(|| PaykitSdkError::Policy {
+                    context: "private intake supervisor is already running for this identity"
+                        .into(),
+                    source: None,
+                })
         })
         .await
 }
@@ -244,7 +273,7 @@ async fn claim_private_intake_lease<S: StorageAdapter>(
 async fn release_private_intake_lease<S: StorageAdapter>(storage: &S, lease_id: u64) -> Result<()> {
     storage
         .transaction(move |tx| {
-            tx.release_paykit_app_operation(&supervisor_lease_app_id(), lease_id);
+            tx.release_private_intake_supervisor(lease_id);
             Ok(())
         })
         .await
@@ -360,8 +389,7 @@ where
                         _ = renewal.tick() => {
                             let now = sdk.clock.now();
                             let renewed = sdk.storage.transaction(move |tx| {
-                                Ok(tx.renew_paykit_app_operation(
-                                    &supervisor_lease_app_id(),
+                                Ok(tx.renew_private_intake_supervisor(
                                     lease_id,
                                     now + SUPERVISOR_LEASE_TIMEOUT,
                                 ))
@@ -520,6 +548,51 @@ where
             }
             self.audit_private_intake_group(&group, &health, &work)
                 .await;
+            let active_peers = match self
+                .storage
+                .transaction({
+                    let peers = group.peers.clone();
+                    move |tx| {
+                        Ok(subscribable_private_intake_peers(
+                            &tx.export_storage_state(),
+                            &peers,
+                        ))
+                    }
+                })
+                .await
+            {
+                Ok(peers) => peers,
+                Err(_) => {
+                    set_group_state(&health, &group, PrivateIntakeTransportState::Stale).await;
+                    if wait_reconnect_or_stop(&mut stop).await {
+                        break;
+                    }
+                    continue;
+                }
+            };
+            for peer in group
+                .peers
+                .iter()
+                .filter(|peer| !active_peers.contains(peer))
+            {
+                set_peer_state(
+                    &health,
+                    peer.clone(),
+                    PrivateIntakeTransportState::Backpressured,
+                )
+                .await;
+            }
+            if active_peers.is_empty() {
+                if wait_reconnect_or_stop(&mut stop).await {
+                    break;
+                }
+                continue;
+            }
+            let active_group = SubscriptionGroup {
+                homeserver: group.homeserver.clone(),
+                homeserver_name: group.homeserver_name.clone(),
+                peers: active_peers,
+            };
             let access = match self
                 .load_session_access_for_initialized_identity("start private intake")
                 .await
@@ -536,8 +609,8 @@ where
             let cursors = match self
                 .storage
                 .transaction({
-                    let peers = group.peers.clone();
-                    let homeserver = group.homeserver_name.clone();
+                    let peers = active_group.peers.clone();
+                    let homeserver = active_group.homeserver_name.clone();
                     move |tx| {
                         let state = tx.export_storage_state();
                         Ok(peers
@@ -571,14 +644,18 @@ where
             let users = public_keys.iter().map(|(key, cursor)| (key, *cursor));
             let builder = match pubky::EventStreamBuilder::for_homeserver(
                 access.outbox_client.client().clone(),
-                &group.homeserver,
+                &active_group.homeserver,
             )
             .add_users(users)
             {
                 Ok(builder) => builder,
                 Err(_) => {
-                    set_group_state(&health, &group, PrivateIntakeTransportState::Unsupported)
-                        .await;
+                    set_group_state(
+                        &health,
+                        &active_group,
+                        PrivateIntakeTransportState::Unsupported,
+                    )
+                    .await;
                     break;
                 }
             };
@@ -592,20 +669,30 @@ where
                 Ok(stream) => stream,
                 Err(error) => {
                     if is_unsupported_event_stream(&error) {
-                        set_group_state(&health, &group, PrivateIntakeTransportState::Unsupported)
-                            .await;
+                        set_group_state(
+                            &health,
+                            &active_group,
+                            PrivateIntakeTransportState::Unsupported,
+                        )
+                        .await;
                         break;
                     }
-                    set_group_state(&health, &group, PrivateIntakeTransportState::Stale).await;
+                    set_group_state(&health, &active_group, PrivateIntakeTransportState::Stale)
+                        .await;
                     if wait_reconnect_or_stop(&mut stop).await {
                         break;
                     }
                     continue;
                 }
             };
-            set_group_state(&health, &group, PrivateIntakeTransportState::Replaying).await;
+            set_group_state(
+                &health,
+                &active_group,
+                PrivateIntakeTransportState::Replaying,
+            )
+            .await;
             let mut audit = tokio::time::interval_at(
-                tokio::time::Instant::now() + audit_jitter(&group),
+                tokio::time::Instant::now() + audit_jitter(&active_group),
                 config.healthy_audit_interval,
             );
             audit.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -619,13 +706,7 @@ where
                     }
                     event = stream.next() => match event {
                         Some(Ok(event)) => {
-                            let peer = PubkyPublicKey::from_public_key(&event.resource.owner);
-                            if group.peers.contains(&peer) {
-                                let cursor = PrivateIntakeCursorRecord {
-                                    subscribed_user: peer.clone(),
-                                    homeserver: group.homeserver_name.clone(),
-                                    event_id: event.cursor.id(),
-                                };
+                            if let Some((peer, cursor)) = route_private_intake_event(&active_group, event) {
                                 match self.acquire_expected_private_packet(peer.clone(), Some(cursor)).await {
                                     Ok(PrivatePacketAcquisition::Inserted) => {
                                         work.notify_waiters();
@@ -639,13 +720,14 @@ where
                                     }
                                     Ok(PrivatePacketAcquisition::CapacityReached) => {
                                         set_peer_state(&health, peer, PrivateIntakeTransportState::Backpressured).await;
+                                        break;
                                     }
                                     Err(_) => set_peer_state(&health, peer, PrivateIntakeTransportState::Stale).await,
                                 }
                             }
                         }
                         Some(Err(_)) | None => {
-                            set_group_state(&health, &group, PrivateIntakeTransportState::Stale).await;
+                            set_group_state(&health, &active_group, PrivateIntakeTransportState::Stale).await;
                             break;
                         }
                     }
@@ -663,7 +745,35 @@ where
         health: &Arc<AsyncRwLock<PrivateIntakeHealth>>,
         work: &Arc<Notify>,
     ) {
+        let active_peers = match self
+            .storage
+            .transaction({
+                let peers = group.peers.clone();
+                move |tx| {
+                    Ok(subscribable_private_intake_peers(
+                        &tx.export_storage_state(),
+                        &peers,
+                    ))
+                }
+            })
+            .await
+        {
+            Ok(peers) => peers,
+            Err(_) => {
+                set_group_state(health, group, PrivateIntakeTransportState::Stale).await;
+                return;
+            }
+        };
         for peer in &group.peers {
+            if !active_peers.contains(peer) {
+                set_peer_state(
+                    health,
+                    peer.clone(),
+                    PrivateIntakeTransportState::Backpressured,
+                )
+                .await;
+                continue;
+            }
             match self
                 .acquire_expected_private_packet(peer.clone(), None)
                 .await
@@ -936,6 +1046,117 @@ mod tests {
         assert!(claim_private_intake_lease(&storage, Utc::now())
             .await
             .is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_lease_does_not_collide_with_real_paykit_app() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let app_id = paykit_lib::PaykitAppId::new("paykit-private-intake-supervisor").unwrap();
+        let now = Utc::now();
+        let app_lease = storage
+            .transaction(move |tx| {
+                tx.claim_paykit_app_operation(&app_id, now, now + chrono::Duration::minutes(1))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        let supervisor = claim_private_intake_lease(&storage, now).await.unwrap();
+        assert_eq!(app_lease.lease_id, 0);
+        assert_eq!(supervisor.lease_id, 0);
+        assert!(storage
+            .snapshot()
+            .unwrap()
+            .paykit_app_operation_leases
+            .contains_key(
+                &paykit_lib::PaykitAppId::new("paykit-private-intake-supervisor").unwrap()
+            ));
+        assert!(storage
+            .snapshot()
+            .unwrap()
+            .private_intake_supervisor_lease
+            .is_some());
+    }
+
+    #[test]
+    fn test_backpressured_peer_is_detached_without_starving_sibling_and_resumes() {
+        let peers = users(2);
+        let mut state = crate::storage::StorageState::default();
+        state.private_intake_peers.insert(
+            peers[0].clone(),
+            crate::storage::PrivateIntakePeerRecord {
+                counterparty: peers[0].clone(),
+                link_generation: 1,
+                buffered_packets: (0..crate::storage::PRIVATE_INTAKE_MAX_PACKETS_PER_PEER)
+                    .map(|receive_counter| BufferedPrivatePacketRecord {
+                        counterparty: peers[0].clone(),
+                        link_generation: 1,
+                        receive_counter: receive_counter as u64,
+                        ciphertext: vec![0; crate::storage::PRIVATE_INTAKE_PACKET_BYTES],
+                        source_cursor: None,
+                        buffered_at: Utc::now(),
+                    })
+                    .collect(),
+                cancelled_handshake_through_generation: None,
+            },
+        );
+
+        assert_eq!(
+            subscribable_private_intake_peers(&state, &peers),
+            vec![peers[1].clone()]
+        );
+        state
+            .private_intake_peers
+            .get_mut(&peers[0])
+            .unwrap()
+            .buffered_packets
+            .pop();
+        assert_eq!(subscribable_private_intake_peers(&state, &peers), peers);
+    }
+
+    #[tokio::test]
+    async fn test_production_event_seam_routes_owner_and_exact_cursor_to_acquisition() {
+        let peer = users(1).remove(0);
+        let owner = peer.to_public_key().unwrap();
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: vec![peer.clone()],
+        };
+        let event = pubky::Event {
+            event_type: pubky::EventType::Put {
+                content_hash: blake3::Hash::from_bytes([7; 32]),
+            },
+            resource: format!("pubky://{}/pub/paykit/v0/private/ignored-hint", owner.z32())
+                .parse()
+                .unwrap(),
+            cursor: pubky::EventCursor::new(42),
+        };
+
+        let routed = route_private_intake_event(&group, event).unwrap();
+        assert_eq!(routed.0, peer);
+        assert_eq!(routed.1.subscribed_user, routed.0);
+        assert_eq!(routed.1.homeserver, "homeserver-a");
+        assert_eq!(routed.1.event_id, 42);
+    }
+
+    #[test]
+    fn test_production_event_seam_ignores_unsubscribed_owner() {
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers: users(1),
+        };
+        let owner = pubky::Keypair::random().public_key();
+        let event = pubky::Event {
+            event_type: pubky::EventType::Delete,
+            resource: format!("pubky://{}/pub/paykit/v0/private/unrelated", owner.z32())
+                .parse()
+                .unwrap(),
+            cursor: pubky::EventCursor::new(99),
+        };
+
+        assert!(route_private_intake_event(&group, event).is_none());
     }
 
     #[test]
