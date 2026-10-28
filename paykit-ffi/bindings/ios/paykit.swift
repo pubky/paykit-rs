@@ -1893,6 +1893,10 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Queue an empty Private Payment List and process that counterparty's queue.
+     *
+     * Each call queues a fresh empty list, which supersedes older pending
+     * lists from this Paykit App. While the counterparty is Linked, an empty
+     * `failedToQueue` and `failedToDeliver` mean the empty list was sent.
      */
     func clearPrivatePaymentListAndProcessOutbound(counterparty: String) async throws  -> PrivatePaymentListDeliveryReport
 
@@ -2425,13 +2429,15 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      *
      * To end a contact's Encrypted Link without keeping the peer blocked, call
      * `endAllowance` and `cancelPaymentRequest` for what the user wants gone.
-     * While the peer is still Linked, queue an empty Private Payment List with
-     * `clearPrivatePaymentList` and keep its `outboundMessageId`. Call
-     * `processOutboundPrivateMessages` until a returned report's `sent`
-     * contains that id, waiting out any retry backoff between calls; the
-     * queue is processed in order, so this also sends those messages first.
-     * Empty failure lists do not prove delivery, and a list that is queued
-     * without a confirmed send is parked unsent by the block. Then
+     * While the peer is still Linked, call
+     * `clearPrivatePaymentListAndProcessOutbound` and continue only when its
+     * report's `failedToQueue` and `failedToDeliver` are both empty;
+     * otherwise call it again later, since each call queues a fresh empty
+     * list. Do not block until it reports success, because the block parks an
+     * unsent list. The queue is processed in order, so this also sends those
+     * messages first. Another runtime or device of the same Paykit App that
+     * queues a list for this peer can supersede the clear, which the report
+     * shows, so pause such writers during cleanup. Then
      * persist the app's own record of intent to end the link with that peer,
      * call this method and `unblockPeer`, and clear the record. On startup,
      * unblock only peers that carry that record and are still Blocked. Never
@@ -3230,6 +3236,10 @@ open func clearPrivatePaymentList(counterparty: String)async throws  -> QueuedPr
 
     /**
      * Queue an empty Private Payment List and process that counterparty's queue.
+     *
+     * Each call queues a fresh empty list, which supersedes older pending
+     * lists from this Paykit App. While the counterparty is Linked, an empty
+     * `failedToQueue` and `failedToDeliver` mean the empty list was sent.
      */
 open func clearPrivatePaymentListAndProcessOutbound(counterparty: String)async throws  -> PrivatePaymentListDeliveryReport  {
     return
@@ -4972,13 +4982,15 @@ open func removeContact(publicKey: String)async throws  -> ContactRecord?  {
      *
      * To end a contact's Encrypted Link without keeping the peer blocked, call
      * `endAllowance` and `cancelPaymentRequest` for what the user wants gone.
-     * While the peer is still Linked, queue an empty Private Payment List with
-     * `clearPrivatePaymentList` and keep its `outboundMessageId`. Call
-     * `processOutboundPrivateMessages` until a returned report's `sent`
-     * contains that id, waiting out any retry backoff between calls; the
-     * queue is processed in order, so this also sends those messages first.
-     * Empty failure lists do not prove delivery, and a list that is queued
-     * without a confirmed send is parked unsent by the block. Then
+     * While the peer is still Linked, call
+     * `clearPrivatePaymentListAndProcessOutbound` and continue only when its
+     * report's `failedToQueue` and `failedToDeliver` are both empty;
+     * otherwise call it again later, since each call queues a fresh empty
+     * list. Do not block until it reports success, because the block parks an
+     * unsent list. The queue is processed in order, so this also sends those
+     * messages first. Another runtime or device of the same Paykit App that
+     * queues a list for this peer can supersede the clear, which the report
+     * shows, so pause such writers during cleanup. Then
      * persist the app's own record of intent to end the link with that peer,
      * call this method and `unblockPeer`, and clear the record. On startup,
      * unblock only peers that carry that record and are still Blocked. Never
@@ -16184,7 +16196,14 @@ public struct PrivatePaymentListDeliveryReport {
      */
     public var failedToQueue: [PrivatePaymentListSyncChange]
     /**
-     * Counterparties queued successfully but failed during outbound delivery.
+     * Delivery and reservation cleanup failures after queueing.
+     *
+     * Empty means every list in `queued` and `cleared` was sent, except lists
+     * for counterparties whose Encrypted Link Handshake is still pending; those
+     * stay eligible for a later run. A list that was not sent is reported with
+     * its `outboundMessageId`, for example one left queued behind an older
+     * message in retry backoff, one superseded by a newer Private Payment List,
+     * or one whose outbound record is gone.
      */
     public var failedToDeliver: [PrivatePaymentListDeliveryFailure]
 
@@ -16201,7 +16220,14 @@ public struct PrivatePaymentListDeliveryReport {
          * Counterparties that could not be queued or cleared.
          */failedToQueue: [PrivatePaymentListSyncChange],
         /**
-         * Counterparties queued successfully but failed during outbound delivery.
+         * Delivery and reservation cleanup failures after queueing.
+         *
+         * Empty means every list in `queued` and `cleared` was sent, except lists
+         * for counterparties whose Encrypted Link Handshake is still pending; those
+         * stay eligible for a later run. A list that was not sent is reported with
+         * its `outboundMessageId`, for example one left queued behind an older
+         * message in retry backoff, one superseded by a newer Private Payment List,
+         * or one whose outbound record is gone.
          */failedToDeliver: [PrivatePaymentListDeliveryFailure]) {
         self.queued = queued
         self.cleared = cleared
@@ -26098,7 +26124,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list() != 56925) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list_and_process_outbound() != 5141) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list_and_process_outbound() != 22101) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_config() != 29410) {
@@ -26344,7 +26370,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 47245) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contacts_and_block_peers() != 14890) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contacts_and_block_peers() != 63335) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_encrypted_link_recovery_marker() != 34687) {
