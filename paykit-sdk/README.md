@@ -575,12 +575,33 @@ raw private payloads, Encrypted Link snapshots, and Receipt Decryption Keys so
 custom adapters can persist exact SDK state. App code should usually prefer the
 `PaykitSdk` runtime methods and app-facing record/view types.
 
+`export_backup_state` returns unencrypted, sensitive plaintext. Its Encrypted
+Link and handshake snapshots hold the Paykit Noise static secret key current at
+export and session ephemeral secrets (not the Pubky identity secret or the
+Paykit Identity Secret). Encrypt it before storage or transport and never log
+it. If a backup is exposed, call `rotate_paykit_identity_key` and relink with
+the affected peers.
+
 Normal backup restore is accepted only into an otherwise empty SDK state backing, so
-an older app backup cannot replace newer shared state. Participating apps must
-publish their App Registry entries again after restore. Restore preserves
-terminal invalid and recovery-required outbound private records for audit,
-while pending, sending, failed, sent, and superseded outbound records are
-validated before restore.
+an older app backup cannot replace newer shared state. `publish_paykit_app` (and
+the public endpoint sync it enables) makes the backing non-empty, so after
+`initialize()` on a fresh backing, offer restore before publishing. The refusal
+names the blocking record kinds. Restore is also refused while SDK operation
+leases are unexpired, and an identity-scoped backup needs an active session for
+the same identity. With `PubkySharedStateStorage`, restore over an identity where
+any app has published is refused by design; `recover_shared_state_from_backup`
+covers only missing or corrupt state. With app-owned local storage (such as a
+callback state blob), an app may discard that state and initialize again only
+when it independently knows it is the only Paykit App and SDK handle using that
+backing for this identity, and the refusal names nothing but registered Paykit
+Apps and public Payment Endpoint records. The SDK cannot check ownership: those
+labels combine every app's records and omit Paykit App IDs, so another app's
+setup produces the same refusal; otherwise do not discard. After discarding, the
+app must restore with `RequireRecovery`.
+Participating apps must publish their App Registry entries again after restore.
+Restore preserves terminal invalid and recovery-required outbound private
+records for audit, while pending, sending, failed, sent, and superseded outbound
+records are validated before restore.
 Restore retains peer authorization pins. The SDK cannot tell whether a backup is
 current, so every `restore_backup_state` call passes a `RestoredLinkPolicy`:
 

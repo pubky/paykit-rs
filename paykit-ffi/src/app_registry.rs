@@ -155,6 +155,9 @@ impl FfiPaykitSdk {
     }
 
     /// Add or replace this application in the identity-wide registry.
+    ///
+    /// Publishing writes SDK-managed state, so `restore_backup_state` is
+    /// refused on this state backing afterwards; restore a backup first.
     pub async fn publish_paykit_app(
         &self,
         display_name: String,
