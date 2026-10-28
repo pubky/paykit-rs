@@ -185,7 +185,10 @@ pub struct FfiPrivatePaymentListDeliveryReport {
     /// stay eligible for a later run. A list that was not sent is reported with
     /// its `outboundMessageId`, for example one left queued behind an older
     /// message in retry backoff, one superseded by a newer Private Payment List,
-    /// or one whose outbound record is gone.
+    /// or one whose outbound record is gone. To recover any entry, call the same
+    /// high-level operation again with the current complete intent; it queues a
+    /// fresh list that supersedes older pending ones, while
+    /// `processPendingPrivateMessages` only advances lists still queued.
     pub failed_to_deliver: Vec<FfiPrivatePaymentListDeliveryFailure>,
 }
 

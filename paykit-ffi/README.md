@@ -751,9 +751,15 @@ counterparty. `failedToQueue` reports a queueing failure, not a rollback guarant
 inspect durable state before replacing reservations or retrying the workflow.
 `failedToDeliver` means the SDK
 queued the message, then delivery or reservation cleanup failed, the list is
-still queued, a newer list superseded it before it was sent, or its outbound
-record is gone; keep the state
-and retry with `processPendingPrivateMessages`.
+still queued, a newer list superseded it before it was sent, it is invalid, or
+its outbound record is gone. To recover any entry, call the same high-level
+operation again with the current complete intent: for a clear, call
+`clearPrivatePaymentListAndProcessOutbound` again; for reservation sync, pass
+the current complete reservations, keeping reservation IDs while they remain
+valid. Never replay an older update over newer intent. Each call queues a fresh
+list that supersedes older pending ones. `processPendingPrivateMessages` only
+advances lists that are still queued, so it alone cannot recover a superseded,
+invalid, or missing list.
 
 ### Pay A Contact
 
@@ -847,9 +853,12 @@ derivable from the Pubky public key alone.
 - `PrivatePaymentListDeliveryReport.failedToQueue` is a local persistence or
   validation problem for that counterparty; show or log it as a
   blocked update.
-- `PrivatePaymentListDeliveryReport.failedToDeliver` is retryable workflow
-  state unless the nested error says recovery is required. Keep the queued
-  state and let the retry worker continue.
+- `PrivatePaymentListDeliveryReport.failedToDeliver` is not a rollback
+  guarantee and is recoverable unless the nested error says recovery is
+  required. Call the same high-level operation again with the current complete
+  intent and still-valid reservation IDs; do not replay an older update. The
+  retry worker only advances lists that are still queued, so it alone cannot
+  recover a superseded, invalid, or missing list.
 - Private resolution reports private availability and recovery state. Public
   resolution has a separate result and does not carry private-link state.
 
