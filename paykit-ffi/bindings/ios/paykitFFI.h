@@ -1809,6 +1809,11 @@ RustBuffer uniffi_paykit_fn_func_paykit_authorizer_session_capabilities(RustCall
 RustBuffer uniffi_paykit_fn_func_payment_deadline_at(RustBuffer deadline, RustBuffer billing_period, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYMENT_PROOF_EVENT_LEN
+#define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PAYMENT_PROOF_EVENT_LEN
+uint32_t uniffi_paykit_fn_func_payment_proof_event_len(RustBuffer local_app_id, void*_Nonnull payment_reference, RustBuffer submission, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PUBKY_PUBLIC_KEY_FROM_SECRET
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_FN_FUNC_PUBKY_PUBLIC_KEY_FROM_SECRET
 RustBuffer uniffi_paykit_fn_func_pubky_public_key_from_secret(void*_Nonnull local_secret_key, RustCallStatus *_Nonnull out_status
@@ -2182,6 +2187,12 @@ uint16_t uniffi_paykit_checksum_func_paykit_authorizer_session_capabilities(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYMENT_DEADLINE_AT
 #define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYMENT_DEADLINE_AT
 uint16_t uniffi_paykit_checksum_func_payment_deadline_at(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYMENT_PROOF_EVENT_LEN
+#define UNIFFI_FFIDEF_UNIFFI_PAYKIT_CHECKSUM_FUNC_PAYMENT_PROOF_EVENT_LEN
+uint16_t uniffi_paykit_checksum_func_payment_proof_event_len(void
 
 );
 #endif

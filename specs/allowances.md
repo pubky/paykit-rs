@@ -589,9 +589,12 @@ before an irreversible payment side effect, using concurrency control. Fees do
 not add usage and refunds do not restore committed usage.
 
 A verified successful payment commits the reservation. A confirmed terminal
-failure before settlement releases it. A pending, unknown, or recovery-incomplete
-outcome remains reserved until reconciled. Retry policy is wallet-owned, but a
-retry MUST NOT create two successful payments or two committed usage entries
+failure before settlement releases it. A failure is confirmed only when the
+Rail makes it definitive, such as a conflicting transaction that spends the
+same inputs or nonce reaching the wallet's finality depth; a missing or dropped
+status is unknown. A pending, unknown, or recovery-incomplete outcome remains
+reserved until reconciled. Retry policy is wallet-owned, but a retry MUST NOT
+create two successful payments or two committed usage entries
 for one semantic payment key. When the wallet stops automatic retries after a
 confirmed terminal failure, an accepted occurrence follows the manual-only
 action rules above.

@@ -93,6 +93,12 @@ impl From<PaykitSdkError> for PaykitFfiError {
         } else {
             "policy_error"
         };
+        // Only the type of the cause selects this code; the cause is still dropped.
+        let protocol_code = if err.is_message_too_large() {
+            "message_too_large"
+        } else {
+            "protocol_error"
+        };
         match err {
             PaykitSdkError::SharedStateBusy { context, source } => {
                 callback_ffi_error(source.as_ref(), &context).unwrap_or_else(|| {
@@ -136,7 +142,7 @@ impl From<PaykitSdkError> for PaykitFfiError {
             }
             PaykitSdkError::Protocol { context, source } => {
                 callback_ffi_error(source.as_ref(), &context).unwrap_or_else(|| Self::Protocol {
-                    code: "protocol_error".into(),
+                    code: protocol_code.into(),
                     context,
                 })
             }

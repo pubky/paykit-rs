@@ -388,6 +388,9 @@ impl FfiPaykitSdk {
     /// `link_policy` decides whether saved Encrypted Links resume or require a
     /// fresh Encrypted Link Handshake. Resuming a backup that is not current
     /// reuses a transport key and nonce.
+    ///
+    /// Reconcile payment accounting with every payment made after the backup was exported,
+    /// or those payments can be made again; see `reconcile_allowance_accounting`.
     pub async fn restore_backup_state(
         &self,
         backup: Arc<FfiSdkBackupBlob>,
@@ -410,6 +413,9 @@ impl FfiPaykitSdk {
     /// headers and corrupt replacement-generation state are rejected, not overwritten.
     ///
     /// The backup is sensitive plaintext; see `FfiSdkBackupBlob`.
+    ///
+    /// Reconcile payment accounting with every payment made after the backup was exported,
+    /// or those payments can be made again; see `reconcile_allowance_accounting`.
     pub async fn recover_shared_state_from_backup(
         &self,
         backup: Arc<FfiSdkBackupBlob>,
@@ -431,6 +437,9 @@ impl FfiPaykitSdk {
     /// onboarding order (restore before `publish_paykit_app`), post-restore
     /// reconciliation, and `link_policy` semantics. Resuming a backup that is
     /// not current reuses a transport key and nonce.
+    ///
+    /// Reconcile payment accounting with every payment made after the backup was exported,
+    /// or those payments can be made again; see `reconcile_allowance_accounting`.
     pub async fn restore_backup_string(
         &self,
         backup: String,
