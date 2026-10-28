@@ -3,13 +3,13 @@ use paykit_lib::{EventId, PaymentAmount, PaymentRequestId};
 use std::collections::{HashMap, HashSet};
 
 /// Borrowed (payer, counterparty, ID) key; the ID is a Payment Request ID or an Allowance ID.
-type ScopeKey<'a> = (
+pub(super) type ScopeKey<'a> = (
     &'a crate::PubkyPublicKey,
     &'a crate::PubkyPublicKey,
     &'a str,
 );
 
-fn scope_key<'a>(scope: &'a PaymentAccountingScope, id: &'a str) -> ScopeKey<'a> {
+pub(super) fn scope_key<'a>(scope: &'a PaymentAccountingScope, id: &'a str) -> ScopeKey<'a> {
     (&scope.local_public_key, &scope.counterparty, id)
 }
 
@@ -38,7 +38,7 @@ fn occurrence_key(key: &PaymentOccurrenceKey) -> OccurrenceKey<'_> {
     (request_key(request), period)
 }
 
-fn watermark_key(watermark: &AllowanceWatermarkRecord) -> ScopeKey<'_> {
+pub(super) fn watermark_key(watermark: &AllowanceWatermarkRecord) -> ScopeKey<'_> {
     let AllowanceWatermarkRecord {
         local_public_key,
         counterparty,

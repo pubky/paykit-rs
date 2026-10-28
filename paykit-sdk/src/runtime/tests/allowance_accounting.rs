@@ -189,3 +189,77 @@ async fn test_sign_out_without_live_grant_and_forget_preserve_shared_accounting(
     sdk.forget_session_access().await.unwrap();
     assert_eq!(storage.snapshot().unwrap(), before);
 }
+
+const MISMATCHED_TRUSTED_TIME_CONTEXT: &str =
+    "Automatic Acceptance requires one trusted time for selection and execution checks";
+
+async fn accept_automatically_at(
+    storage: &InMemoryStorage,
+    selection_time: DateTime<Utc>,
+    checks_time: DateTime<Utc>,
+) -> Result<crate::AllowanceAssociationRecord> {
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("bitkit").unwrap(),
+        FixedClock,
+    );
+    sdk.accept_payment_request_automatically(
+        crate::PaymentRequestScope {
+            counterparty: PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()),
+            payment_request_id: PaymentRequestId::new_v4(),
+        },
+        crate::AllowanceSelectionInput {
+            allowance_id: AllowanceId::new_v4(),
+            expected_revision: None,
+            trusted_time: selection_time,
+        },
+        crate::PaymentExecutionChecks {
+            trusted_time: checks_time,
+            payment_endpoint_identifier: paykit_lib::PaymentEndpointIdentifier::new(
+                "btc-lightning-bolt11",
+            )
+            .unwrap(),
+            actual_amount: paykit_lib::PaymentAmount::new("1", "btc").unwrap(),
+            endpoint_current: true,
+            local_enabled: true,
+            recurrence_eligible: true,
+        },
+    )
+    .await
+}
+
+fn is_mismatched_trusted_time_error(error: &PaykitSdkError) -> bool {
+    matches!(
+        error,
+        PaykitSdkError::Protocol { context, source: None }
+            if context == MISMATCHED_TRUSTED_TIME_CONTEXT
+    )
+}
+
+#[tokio::test]
+async fn test_automatic_acceptance_rejects_mismatched_trusted_times() {
+    let storage = prepared_accounting_storage();
+    let before = storage.snapshot().unwrap();
+    let time = FixedClock.now();
+    let error = accept_automatically_at(&storage, time, time + chrono::Duration::milliseconds(1))
+        .await
+        .unwrap_err();
+    assert!(is_mismatched_trusted_time_error(&error), "{error:?}");
+    let after = storage.snapshot().unwrap();
+    assert!(after.outbound_private_messages.is_empty());
+    assert_eq!(after, before);
+}
+
+#[tokio::test]
+async fn test_automatic_acceptance_equal_trusted_times_pass_time_check() {
+    let storage = prepared_accounting_storage();
+    let time = FixedClock.now();
+    // The harness has no Payment Request, so a later step fails; only the
+    // trusted-time check is under test here.
+    let error = accept_automatically_at(&storage, time, time)
+        .await
+        .unwrap_err();
+    assert!(!is_mismatched_trusted_time_error(&error), "{error:?}");
+}

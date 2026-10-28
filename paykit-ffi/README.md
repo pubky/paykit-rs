@@ -79,6 +79,7 @@ load the native UniFFI library just to format keys.
   routing key, X25519 static key (`noiseStaticPublicKey`), and generation without
   updating peer pins. Registry key fields are unsigned discovery metadata.
 - `publishPaykitApp` — publish this app's registry entry before endpoint sync.
+  Restore any SDK backup first: publishing blocks `restoreBackupState`.
 - `rotatePaykitIdentityKey` — re-encrypt shared state with the next Paykit key
   generation and require fresh Encrypted Links while preserving durable history.
   Requires authorizer access and publishes the replacement signed key; retry
@@ -248,6 +249,12 @@ pixel and cache limits, and request timeouts remain app responsibilities.
   `receivedPaymentRequestsFrom`, `listPaymentRequests`,
   `activeRecurringPaymentRequests`, and `actionableReceivedPaymentRequests` —
   inspect SDK-derived Payment Request records.
+- `PaymentRequestRecord.proposalRecordedAt` and `acceptanceRecordedAt`
+  (`proposal_recorded_at` and `acceptance_recorded_at` in Rust) are the local
+  times this device stored the proposal and the recorded Acceptance. Their
+  meaning depends on the role: a payee queued the proposal and fetched the
+  Acceptance; a payer received the proposal and queued the Acceptance. They are
+  unauthenticated local clock times and do not prove cross-direction order.
 - `PaykitSdk.readPaymentRequests(counterparty, expectedIdentity)` - read fresh
   identity/capability and complete counterparty records under one shared-storage
   operation. Existing storage/session access errors still propagate, including
@@ -283,6 +290,19 @@ to exchange confirmations; apps do not create these messages themselves.
 `actionableReceivedPaymentRequests` includes every request that still needs a
 payer response. A required Paykit App constrains the payee endpoint, not the
 payer app that responds.
+
+`ProposalExpired` is a local view state. On the payee side it can still move to
+`Accepted`, `ProofSubmitted` or `ActiveRecurring` when an Acceptance the payer
+made in time is fetched after expiry. Payers should run `processOutboundPrivateMessages` in the
+same foreground task as `claimAndAcceptPaymentRequest`, and avoid accepting
+right at `proposalExpiresAt`. Payees should:
+
+- choose a `proposalExpiresAt` well beyond their polling interval, or `null`;
+- bound price freshness with `paymentDeadline`, not `proposalExpiresAt`;
+- use `acceptanceRecordedAt` only to flag a late fetch, not to void the request;
+- not count payment evidence earlier than `proposalRecordedAt` minus a
+  payment-method tolerance as paying the request. See
+  [Payment time and attribution](../specs/payment-requests.md#payment-time-and-attribution).
 
 ### Allowances
 
@@ -385,12 +405,14 @@ The current state and backup blob formats remain version 1; see
 Decode failure never falls back to empty state. The platform
 `saveStateBlobAtomically` callback must durably save the whole blob and enforce
 its expected revision before acknowledging success.
-Preserve opaque blobs with caller-managed encryption in storage and backups.
+State and backup blobs are unencrypted, sensitive plaintext; see
+[State and Secret Blobs](#state-and-secret-blobs).
 
 Restore rejects backups that would discard retained Allowance or Payment Request
 lifecycle evidence, including Cancellation and Event ID conflicts. Rejection
 leaves current state unchanged. Restore requires empty storage apart from
-initialized identity metadata; it cannot replace an existing shared state.
+initialized identity metadata; it cannot replace an existing shared state. See
+Backup And Restore below for the full preconditions and onboarding order.
 
 After restore or private-state loss, accounting remains blocked until complete
 wallet reconciliation. A stale but internally valid backup can omit later spend:
@@ -539,9 +561,11 @@ identity profile fields without exposing an FFI JSON value model.
 ### State and Secret Blobs
 
 - `SdkStateBlob` — internal identity-wide SDK runtime state. Store it in the
-  shared durable backing used by every runtime for that Pubky identity.
-- `SdkBackupBlob` — SDK backup/export payload for app-controlled
-  backup flows.
+  shared durable backing used by every runtime for that Pubky identity. With
+  callback storage it is unencrypted; keep it in platform-protected storage
+  (Keychain- or Keystore-backed encryption or equivalent). See below.
+- `SdkBackupBlob` — unencrypted SDK backup/export payload for app-controlled
+  backup flows. Encrypt it before storage or transport. See below.
 - `PubkyLocalSecretKey` — local Pubky secret key bytes.
 - `PaykitIdentitySecretKey` — rotatable identity-wide Paykit secret plus key
   generation.
@@ -564,11 +588,18 @@ wrappers for platforms that prefer a single encoded SDK backup string.
 after SDK-mutating workflows to mark app backups dirty. `stateRevision`
 remains the selected storage mode's revision, including transient lease changes.
 `encodeSdkStateBlobSnapshot` and `decodeSdkStateBlobSnapshot` are convenience
-helpers for apps that store the opaque state blob and revision in one platform
-record.
+helpers for apps that store the unencrypted state blob and revision in one
+platform record.
 
-These are opaque binding objects. Use their explicit export methods only at
-the shared-state storage or backup boundary.
+State and backup blobs are not sealed. They contain Encrypted Link snapshots
+(including the current Paykit Noise static secret key and session ephemeral
+secrets), raw Private Application Messages, outbound payloads, and Receipt
+Decryption Keys. They do not contain the Pubky identity secret or the Paykit
+Identity Secret. Their debug output is redacted and their bytes are zeroized
+on drop, but exported bytes and `exportBackupString` strings are plain app
+copies. Never log either. If a backup or state blob is exposed, call
+`rotatePaykitIdentityKey` and relink with the affected peers. Use the explicit
+export methods only at the shared-state storage or backup boundary.
 
 ## Mobile Workflow Guide
 
@@ -760,10 +791,41 @@ backupText = sdk.exportBackupString()
 sdk.restoreBackupString(backupText, RestoredLinkPolicy.RequireRecovery)
 ```
 
-Normal restore requires an otherwise empty SDK state backing. This prevents an older
-app backup from replacing newer state written by another app sharing the same
-identity. After restore, participating apps publish their App Registry entries
-again before creating new app-attributed work.
+Normal restore requires an otherwise empty SDK state backing: it may hold only
+identity metadata, authorized Paykit App records, and operation leases. This
+prevents an older app backup from replacing newer state written by another app
+sharing the same identity. The refusal names the blocking record kinds. Restore
+is also refused while a peer-link or Paykit App operation lease is unexpired,
+and an identity-scoped backup needs an active Pubky session for the same
+identity, private-link-capable when the backup holds private state.
+
+`publishPaykitApp` (and the public endpoint sync it enables) writes SDK-managed
+state that blocks restore. During onboarding, offer restore first:
+
+```text
+sdk.initialize()
+if user chooses to restore:
+    sdk.restoreBackupString(decryptedBackupText, RestoredLinkPolicy.RequireRecovery)
+sdk.publishPaykitApp(displayName, capabilities)
+sdk.syncPublicEndpointsWithReceivingDetails(publicDetails)
+```
+
+With Pubky shared storage, restore over an identity where any app has
+published is refused by design; `recoverSharedStateFromBackup` covers only
+missing or corrupt state. With callback storage, the app may discard its state
+blob and initialize again only when it independently knows it is the only
+Paykit App and SDK handle using that backing for this identity, and the refusal
+names nothing but registered Paykit Apps (which include their capabilities) and
+public Payment Endpoint records. The SDK cannot check ownership: those labels
+combine every app's records and omit Paykit App IDs, so another app's setup
+produces the same refusal; otherwise do not discard. After discarding, the app
+must restore with `RequireRecovery`. Discarding newer history could let a
+re-delivered Payment Request be paid again, and `Resume` could reuse a
+transport key and nonce.
+
+After restore, participating apps publish their App Registry entries again
+before creating new app-attributed work, and payment admission stays blocked
+until `reconcileAllowanceAccounting` merges complete wallet history.
 
 The SDK cannot tell whether a backup is current, so `restoreBackupState` and
 `restoreBackupString` take a `RestoredLinkPolicy` (`.resume` and

@@ -238,4 +238,5 @@ mod payment_endpoints;
 mod proofs;
 mod proposals;
 mod received_records;
+mod record_times;
 mod rejection_cancellation;

@@ -13,6 +13,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `claimPaymentRequestForPreparation` in Swift and Kotlin reject blocked
   counterparties before App Registry access and atomically recheck that policy
   when claiming a Payment Request for preparation.
+- `PaymentRequestRecord` exposes `proposal_recorded_at` and
+  `acceptance_recorded_at` in Rust, and `proposalRecordedAt` and
+  `acceptanceRecordedAt` in Swift and Kotlin. They are the local times this
+  device stored the proposal and the recorded Acceptance; their meaning depends
+  on the local role.
 - `paykit_sdk::payment_proof_event_len` in Rust and `paymentProofEventLen` in
   Swift and Kotlin return the exact byte length of the Payment Proof Event
   Message that `submitPaymentProof` would queue, so payers and payees can check
@@ -22,6 +27,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Changed
 
+- A payee no longer marks a Payment Request invalid when it stores an
+  otherwise-valid Acceptance after its local proposal expiry, such as an
+  in-time Acceptance fetched late. Later Payment Proofs are recorded and the
+  payee can cancel. Records are re-derived from the event log, so after
+  upgrading, requests a wallet showed as invalid may now appear as `Accepted`,
+  `ProofSubmitted` or `ActiveRecurring`.
 - Identify an outbound Private Application Message larger than the pubky-noise
   message size (1000 bytes) with `PaykitSdkError::is_message_too_large` and the
   `message_too_large` FFI protocol code. It is still a `Protocol` error, and
@@ -43,6 +54,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   behavior and callable signatures are unchanged by the documentation update.
   Mocks and conformers of the generated SDK interfaces must implement the new
   preparation-claim method.
+- Regenerate bindings and native libraries together: the new Payment Request
+  record fields change the generated record layout, so do not mix them with
+  earlier builds. Payees should not count payment evidence earlier than the
+  proposal record time minus a payment-method tolerance as paying a request;
+  see the Payment time and attribution rule in `specs/payment-requests.md`.
 - Regenerate bindings for `paymentProofEventLen` and the message size
   documentation on `proposePaymentRequest`, `submitPaymentProof`,
   `PaymentRequestTerms` and `PaymentProofSubmission`. Protocol errors have a new
