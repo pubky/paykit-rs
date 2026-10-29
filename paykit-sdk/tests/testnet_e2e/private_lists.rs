@@ -15,7 +15,7 @@ use tokio::sync::{Notify, Semaphore};
 
 use crate::harness::{
     build_testnet, drive_link_to_linked, linked_two_party, private_receiving_detail, two_party,
-    TestUser, TestnetSessionProvider,
+    TestUser, TestnetSessionProvider, TwoParty,
 };
 
 #[tokio::test]
@@ -1364,9 +1364,14 @@ async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
     }
 }
 
-#[tokio::test]
-async fn test_private_list_sync_reuses_sent_list_after_restart() {
-    let pair = linked_two_party().await;
+/// Send a reservation-backed list from Alice to Bob, then age the link so the
+/// send lies outside the clock margin that guards durable reuse.
+async fn send_private_list_on_aged_link(
+    pair: &TwoParty,
+) -> (
+    PrivatePaymentListReservationUpdate,
+    paykit_sdk::PrivatePaymentListDeliveryReport,
+) {
     let update = PrivatePaymentListReservationUpdate {
         counterparty: pair.bob.public_key.clone(),
         reservations: vec![PrivatePaymentEndpointReservation {
@@ -1411,6 +1416,13 @@ async fn test_private_list_sync_reuses_sent_list_after_restart() {
         })
         .await
         .unwrap();
+    (update, first)
+}
+
+#[tokio::test]
+async fn test_private_list_sync_reuses_sent_list_after_restart() {
+    let pair = linked_two_party().await;
+    let (update, first) = send_private_list_on_aged_link(&pair).await;
 
     let alice = pair
         .alice
@@ -1479,6 +1491,49 @@ async fn test_private_list_sync_reuses_sent_list_after_restart() {
         .await
         .unwrap();
     assert_eq!(intake[0].report.as_ref().unwrap().stream_item_ids.len(), 1);
+}
+
+#[tokio::test]
+async fn test_private_list_sync_after_restart_rejects_misassociated_snapshot() {
+    let pair = linked_two_party().await;
+    let (update, first) = send_private_list_on_aged_link(&pair).await;
+    // The snapshot stays valid, but the peer record now names a recovery
+    // attempt the snapshot does not carry, as after a stale or misapplied
+    // link state.
+    pair.alice
+        .storage
+        .transaction({
+            let counterparty = pair.bob.public_key.clone();
+            move |tx| {
+                let mut peer = tx.linked_peer(&counterparty).unwrap();
+                let stale = Some("3f2b8c1e-7a4d-4e9b-9c2a-1d5e6f7a8b9c".to_owned());
+                assert_ne!(peer.local_recovery_attempt_id, stale);
+                peer.local_recovery_attempt_id = stale;
+                tx.save_linked_peer(peer);
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let alice = pair
+        .alice
+        .restart_with_storage(pair.alice.storage.clone())
+        .await;
+    let report = alice
+        .sdk
+        .sync_private_payment_lists_with_reservations_and_process_outbound(vec![update], false)
+        .await
+        .unwrap();
+
+    // The sent row is not reused, so the outbound path sees the mismatch.
+    assert_eq!(report.queued.len(), 1);
+    assert_ne!(
+        report.queued[0].outbound_message_id,
+        first.queued[0].outbound_message_id
+    );
+    assert!(report.acknowledged.is_empty());
+    assert_eq!(report.failed_to_deliver.len(), 1);
 }
 
 #[tokio::test]

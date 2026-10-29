@@ -1,5 +1,6 @@
 use super::outbound_private::PrivateSendReadiness;
 use super::payment_resolution::filter_private_views_by_authorized_apps;
+use super::private_stream::associated_link_snapshot;
 use super::*;
 use crate::domain::endpoint_reservations::{
     private_payment_list_sent_after_last_link_change,
@@ -183,9 +184,15 @@ where
         tx: &dyn StorageTransaction,
         counterparty: &PubkyPublicKey,
     ) -> Option<u64> {
+        let snapshot = tx
+            .encrypted_link_state(counterparty)
+            .and_then(|state| state.link_snapshot)?;
         // Only a delivery witnessed on the current Noise link can make a sent row
-        // reusable.
-        let link_id = current_link_id(tx, counterparty)?;
+        // reusable. Corrupt snapshots fall through so the outbound worker can mark
+        // the peer as requiring recovery.
+        let link_id = paykit_lib::EncryptedLinkSnapshot::deserialize(&snapshot)
+            .ok()
+            .and_then(|snapshot| snapshot.link_id())?;
         self.private_payment_list_publications
             .lock()
             .ok()
@@ -210,7 +217,12 @@ where
     ) -> Option<u64> {
         self.published_private_payment_list_id(tx, counterparty)
             .or_else(|| {
-                current_link_id(tx, counterparty)?;
+                // Reusing a sent row queues nothing, so the outbound restore that
+                // rejects a stale or misassociated link never runs. Apply its
+                // stored-state checks here; a mismatch republishes the list and
+                // leaves recovery to the outbound worker.
+                let (_, snapshot, _) = associated_link_snapshot(tx, counterparty)?;
+                snapshot.link_id()?;
                 private_payment_list_sent_after_last_link_change(
                     tx,
                     counterparty,
@@ -417,9 +429,10 @@ where
     /// Unchanged lists with the same reservations reuse their existing outbound
     /// record, including lists already sent on the current Encrypted Link.
     /// Outbound retries and reservation cleanup still run for reused records.
-    /// After a restart, a sent list is reused only when it was sent more than
-    /// five minutes after the peer's last link change or private receive;
-    /// otherwise it is republished once.
+    /// After a restart, a sent list is reused only when the stored link state
+    /// still matches the peer record and the list was sent more than five
+    /// minutes after the peer's last link change or private receive; otherwise
+    /// it is republished once.
     pub async fn sync_private_payment_lists_with_reservations_and_process_outbound(
         &self,
         updates: Vec<PrivatePaymentListReservationUpdate>,
@@ -817,19 +830,6 @@ where
             .current_private_receiving_details(counterparty)
             .await
     }
-}
-
-/// Return the Noise link ID of the counterparty's current link snapshot.
-///
-/// Corrupt snapshots return `None` so the outbound worker can mark the peer as
-/// requiring recovery instead of a sent row being reused.
-fn current_link_id(tx: &dyn StorageTransaction, counterparty: &PubkyPublicKey) -> Option<[u8; 32]> {
-    let snapshot = tx
-        .encrypted_link_state(counterparty)
-        .and_then(|state| state.link_snapshot)?;
-    paykit_lib::EncryptedLinkSnapshot::deserialize(&snapshot)
-        .ok()
-        .and_then(|snapshot| snapshot.link_id())
 }
 
 fn linked_private_counterparties_not_in_storage_state(

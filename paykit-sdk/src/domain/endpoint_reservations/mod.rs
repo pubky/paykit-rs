@@ -58,7 +58,8 @@ fn latest_private_payment_list(
 /// so a list sent later than that, by more than the clock margin, went out on
 /// the current Encrypted Link. Receives make the check conservative: a list
 /// sent before one is republished once instead of reused. The caller must
-/// confirm that a current link snapshot exists.
+/// confirm that the current link snapshot still matches the stored peer
+/// record, because reuse skips the outbound restore that would check it.
 pub(crate) fn private_payment_list_sent_after_last_link_change(
     tx: &dyn StorageTransaction,
     counterparty: &PubkyPublicKey,

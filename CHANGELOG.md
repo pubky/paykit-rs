@@ -59,9 +59,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 - `sync_private_payment_lists_with_reservations_and_process_outbound` in Rust
   and `syncPrivatePaymentListsWithReservationsAndProcessOutbound` in Swift and
   Kotlin no longer republish every unchanged Private Payment List after an SDK
-  restart. A restarted runtime reuses a sent list when the peer is linked and
-  the list was sent more than five minutes after the peer's last link change
-  or private receive. Otherwise it republishes the list once, as before. A list
+  restart. A restarted runtime reuses a sent list when the peer is linked, the
+  stored link state still matches the peer record, and the list was sent more
+  than five minutes after the peer's last link change or private receive.
+  Otherwise it republishes the list once, as before. A list
   reused this way is not reported in `acknowledged`, because the restarted
   runtime did not witness its delivery. The storage format is unchanged.
 - `sign_up` in Rust and `signUp` in Swift and Kotlin no longer move an identity
