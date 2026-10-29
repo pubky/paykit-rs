@@ -1529,10 +1529,17 @@ async fn test_shared_operations_transaction_counts() {
         .await
         .unwrap();
     let clear_transactions = transactions.swap(0, Ordering::SeqCst);
-    assert_eq!(clear_transactions, 12);
+    // The final read verifies current-link publication before acknowledging it.
+    assert_eq!(clear_transactions, 13);
     assert_eq!(operations.swap(0, Ordering::SeqCst), 2);
     assert_eq!(commits.swap(0, Ordering::SeqCst), 4);
     assert_eq!(cleared.cleared.len(), 1);
+    assert_eq!(cleared.acknowledged.len(), 1);
+    assert_eq!(cleared.acknowledged[0].counterparty, pair.bob.public_key);
+    assert_eq!(
+        Some(cleared.acknowledged[0].outbound_message_id),
+        cleared.cleared[0].outbound_message_id
+    );
     assert!(cleared.failed_to_queue.is_empty());
     assert!(cleared.failed_to_deliver.is_empty());
     let state = pair.bitkit.storage_state().await;

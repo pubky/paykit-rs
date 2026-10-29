@@ -105,6 +105,7 @@ pub(crate) type FfiSdkRuntime =
 #[derive(uniffi::Object)]
 pub struct FfiPaykitSdk {
     pub(crate) runtime: FfiSdkRuntime,
+    pub(crate) session_provider: FfiSdkPubkySessionProviderAdapter,
     storage: FfiSdkStorageAdapter,
 }
 
@@ -471,13 +472,17 @@ fn build_sdk(
 ) -> Result<FfiPaykitSdk, PaykitFfiError> {
     let runtime = PaykitSdk::new(
         storage.clone(),
-        session_provider,
+        session_provider.clone(),
         FfiSdkPaymentAdapterAdapter {
             adapter: payment_adapter,
         },
         config.try_into()?,
     );
-    Ok(FfiPaykitSdk { runtime, storage })
+    Ok(FfiPaykitSdk {
+        runtime,
+        session_provider,
+        storage,
+    })
 }
 
 impl From<IdentityStatus> for FfiIdentityStatus {

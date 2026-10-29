@@ -1879,6 +1879,17 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func cancelPaymentRequest(counterparty: String, paymentRequestId: String, reason: String?) async throws  -> PaymentRequestRecord
 
     /**
+     * Capture the admitted owner's existing live grant without authenticating.
+     *
+     * Reads the platform session callback and an existing native cached/live
+     * handle. A missing or changed cache fails rather than restoring credentials.
+     * Call before the original operation while its owner/generation is admitted,
+     * then check admission again before retaining the returned observer. The
+     * observer cannot recover an old attempt after process death.
+     */
+    func captureGrantObserver(expectedPublicKey: String) async throws  -> PubkyGrantObserver
+
+    /**
      * Atomically claim a received Payment Request and durably queue acceptance, without sending it.
      *
      * Pass the `proposal_stream_item_id` of the record whose terms were
@@ -3275,6 +3286,32 @@ open func cancelPaymentRequest(counterparty: String, paymentRequestId: String, r
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypePaymentRequestRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Capture the admitted owner's existing live grant without authenticating.
+     *
+     * Reads the platform session callback and an existing native cached/live
+     * handle. A missing or changed cache fails rather than restoring credentials.
+     * Call before the original operation while its owner/generation is admitted,
+     * then check admission again before retaining the returned observer. The
+     * observer cannot recover an old attempt after process death.
+     */
+open func captureGrantObserver(expectedPublicKey: String)async throws  -> PubkyGrantObserver  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_capture_grant_observer(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(expectedPublicKey)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_pointer,
+            completeFunc: ffi_paykit_rust_future_complete_pointer,
+            freeFunc: ffi_paykit_rust_future_free_pointer,
+            liftFunc: FfiConverterTypePubkyGrantObserver_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -6958,6 +6995,210 @@ public func FfiConverterTypePubkyAuthRequestState_lift(_ pointer: UnsafeMutableR
 #endif
 public func FfiConverterTypePubkyAuthRequestState_lower(_ value: PubkyAuthRequestState) -> UnsafeMutableRawPointer {
     return FfiConverterTypePubkyAuthRequestState.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Live-only original-grant observer. Contains a non-exportable secret bearer.
+ */
+public protocol PubkyGrantObserverProtocol: AnyObject, Sendable {
+
+    /**
+     * Original client identifier.
+     */
+    func clientId()  -> String
+
+    /**
+     * Original grant identifier, not a bearer or local-session generation.
+     * Restoring or refreshing the same grant can retain this ID while replacing
+     * its bearer. A newly issued replacement grant has a different ID.
+     */
+    func grantId()  -> String
+
+    /**
+     * Observe without a provider callback, session restore/refresh or storage.
+     *
+     * Retain this handle with the original owner/attempt, not a replacement
+     * session. A positive result is not a lease or a completed cleanup receipt.
+     * Recheck operation admission and require fresh confirmation before any
+     * subsequent mutation. Unknown results do not authorize remote retry.
+     */
+    func observe() async  -> PubkyGrantObservation
+
+    /**
+     * Original grant owner, in the app's public-key representation.
+     */
+    func publicKey()  -> String
+
+}
+/**
+ * Live-only original-grant observer. Contains a non-exportable secret bearer.
+ */
+open class PubkyGrantObserver: PubkyGrantObserverProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffipubkygrantobserver(self.pointer, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffipubkygrantobserver(pointer, $0) }
+    }
+
+
+
+
+    /**
+     * Original client identifier.
+     */
+open func clientId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipubkygrantobserver_client_id(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Original grant identifier, not a bearer or local-session generation.
+     * Restoring or refreshing the same grant can retain this ID while replacing
+     * its bearer. A newly issued replacement grant has a different ID.
+     */
+open func grantId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipubkygrantobserver_grant_id(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Observe without a provider callback, session restore/refresh or storage.
+     *
+     * Retain this handle with the original owner/attempt, not a replacement
+     * session. A positive result is not a lease or a completed cleanup receipt.
+     * Recheck operation admission and require fresh confirmation before any
+     * subsequent mutation. Unknown results do not authorize remote retry.
+     */
+open func observe()async  -> PubkyGrantObservation  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipubkygrantobserver_observe(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePubkyGrantObservation_lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * Original grant owner, in the app's public-key representation.
+     */
+open func publicKey() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipubkygrantobserver_public_key(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePubkyGrantObserver: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = PubkyGrantObserver
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> PubkyGrantObserver {
+        return PubkyGrantObserver(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: PubkyGrantObserver) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyGrantObserver {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: PubkyGrantObserver, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantObserver_lift(_ pointer: UnsafeMutableRawPointer) throws -> PubkyGrantObserver {
+    return try FfiConverterTypePubkyGrantObserver.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantObserver_lower(_ value: PubkyGrantObserver) -> UnsafeMutableRawPointer {
+    return FfiConverterTypePubkyGrantObserver.lower(value)
 }
 
 
@@ -16456,6 +16697,94 @@ public func FfiConverterTypePrivatePaymentEndpointSelectionRequest_lower(_ value
 
 
 /**
+ * A tracked Private Payment List whose publication this runtime witnessed.
+ * This is not counterparty receipt, a lease, or proof that cleanup completed.
+ */
+public struct PrivatePaymentListAcknowledgement {
+    /**
+     * Counterparty addressed by the list.
+     */
+    public var counterparty: String
+    /**
+     * Exact outbound message in this call's queued or cleared lists.
+     */
+    public var outboundMessageId: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Counterparty addressed by the list.
+         */counterparty: String,
+        /**
+         * Exact outbound message in this call's queued or cleared lists.
+         */outboundMessageId: UInt64) {
+        self.counterparty = counterparty
+        self.outboundMessageId = outboundMessageId
+    }
+}
+
+#if compiler(>=6)
+extension PrivatePaymentListAcknowledgement: Sendable {}
+#endif
+
+
+extension PrivatePaymentListAcknowledgement: Equatable, Hashable {
+    public static func ==(lhs: PrivatePaymentListAcknowledgement, rhs: PrivatePaymentListAcknowledgement) -> Bool {
+        if lhs.counterparty != rhs.counterparty {
+            return false
+        }
+        if lhs.outboundMessageId != rhs.outboundMessageId {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(counterparty)
+        hasher.combine(outboundMessageId)
+    }
+}
+
+extension PrivatePaymentListAcknowledgement: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrivatePaymentListAcknowledgement: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrivatePaymentListAcknowledgement {
+        return
+            try PrivatePaymentListAcknowledgement(
+                counterparty: FfiConverterString.read(from: &buf),
+                outboundMessageId: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrivatePaymentListAcknowledgement, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.counterparty, into: &buf)
+        FfiConverterUInt64.write(value.outboundMessageId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrivatePaymentListAcknowledgement_lift(_ buf: RustBuffer) throws -> PrivatePaymentListAcknowledgement {
+    return try FfiConverterTypePrivatePaymentListAcknowledgement.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrivatePaymentListAcknowledgement_lower(_ value: PrivatePaymentListAcknowledgement) -> RustBuffer {
+    return FfiConverterTypePrivatePaymentListAcknowledgement.lower(value)
+}
+
+
+/**
  * Failed delivery after a Private Payment List was queued.
  */
 public struct PrivatePaymentListDeliveryFailure {
@@ -16555,6 +16884,13 @@ public struct PrivatePaymentListDeliveryReport {
      */
     public var cleared: [PrivatePaymentListSyncChange]
     /**
+     * Positively witnessed tracked publications on the current Encrypted Link.
+     * Missing entries remain unknown, including pending handshakes and stored
+     * Sent rows without a runtime witness. All cleanup failures still apply.
+     * Retain with the original owner/attempt and invalidate on local changes.
+     */
+    public var acknowledged: [PrivatePaymentListAcknowledgement]
+    /**
      * Counterparties that could not be queued or cleared.
      */
     public var failedToQueue: [PrivatePaymentListSyncChange]
@@ -16584,6 +16920,12 @@ public struct PrivatePaymentListDeliveryReport {
          * Counterparties that had an empty Private Payment List queued.
          */cleared: [PrivatePaymentListSyncChange],
         /**
+         * Positively witnessed tracked publications on the current Encrypted Link.
+         * Missing entries remain unknown, including pending handshakes and stored
+         * Sent rows without a runtime witness. All cleanup failures still apply.
+         * Retain with the original owner/attempt and invalidate on local changes.
+         */acknowledged: [PrivatePaymentListAcknowledgement],
+        /**
          * Counterparties that could not be queued or cleared.
          */failedToQueue: [PrivatePaymentListSyncChange],
         /**
@@ -16602,6 +16944,7 @@ public struct PrivatePaymentListDeliveryReport {
          */failedToDeliver: [PrivatePaymentListDeliveryFailure]) {
         self.queued = queued
         self.cleared = cleared
+        self.acknowledged = acknowledged
         self.failedToQueue = failedToQueue
         self.failedToDeliver = failedToDeliver
     }
@@ -16622,6 +16965,7 @@ public struct FfiConverterTypePrivatePaymentListDeliveryReport: FfiConverterRust
             try PrivatePaymentListDeliveryReport(
                 queued: FfiConverterSequenceTypePrivatePaymentListSyncChange.read(from: &buf),
                 cleared: FfiConverterSequenceTypePrivatePaymentListSyncChange.read(from: &buf),
+                acknowledged: FfiConverterSequenceTypePrivatePaymentListAcknowledgement.read(from: &buf),
                 failedToQueue: FfiConverterSequenceTypePrivatePaymentListSyncChange.read(from: &buf),
                 failedToDeliver: FfiConverterSequenceTypePrivatePaymentListDeliveryFailure.read(from: &buf)
         )
@@ -16630,6 +16974,7 @@ public struct FfiConverterTypePrivatePaymentListDeliveryReport: FfiConverterRust
     public static func write(_ value: PrivatePaymentListDeliveryReport, into buf: inout [UInt8]) {
         FfiConverterSequenceTypePrivatePaymentListSyncChange.write(value.queued, into: &buf)
         FfiConverterSequenceTypePrivatePaymentListSyncChange.write(value.cleared, into: &buf)
+        FfiConverterSequenceTypePrivatePaymentListAcknowledgement.write(value.acknowledged, into: &buf)
         FfiConverterSequenceTypePrivatePaymentListSyncChange.write(value.failedToQueue, into: &buf)
         FfiConverterSequenceTypePrivatePaymentListDeliveryFailure.write(value.failedToDeliver, into: &buf)
     }
@@ -22819,6 +23164,87 @@ extension PubkyAuthRequestKind: Codable {}
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * Point-in-time original-grant evidence, never permission to mutate.
+ */
+
+public enum PubkyGrantObservation {
+
+    /**
+     * The server accepted the captured bearer and its exact original binding.
+     */
+    case active
+    /**
+     * Status could not be established; this never means revoked or absent.
+     */
+    case unknown
+}
+
+
+#if compiler(>=6)
+extension PubkyGrantObservation: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePubkyGrantObservation: FfiConverterRustBuffer {
+    typealias SwiftType = PubkyGrantObservation
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyGrantObservation {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .active
+
+        case 2: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PubkyGrantObservation, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .active:
+            writeInt(&buf, Int32(1))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantObservation_lift(_ buf: RustBuffer) throws -> PubkyGrantObservation {
+    return try FfiConverterTypePubkyGrantObservation.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantObservation_lower(_ value: PubkyGrantObservation) -> RustBuffer {
+    return FfiConverterTypePubkyGrantObservation.lower(value)
+}
+
+
+extension PubkyGrantObservation: Equatable, Hashable {}
+
+extension PubkyGrantObservation: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * Pubky capability state for an identity-wide Paykit runtime.
  */
 
@@ -25591,6 +26017,31 @@ fileprivate struct FfiConverterSequenceTypePrivatePaymentEndpointReservationInpu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypePrivatePaymentListAcknowledgement: FfiConverterRustBuffer {
+    typealias SwiftType = [PrivatePaymentListAcknowledgement]
+
+    public static func write(_ value: [PrivatePaymentListAcknowledgement], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePrivatePaymentListAcknowledgement.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PrivatePaymentListAcknowledgement] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PrivatePaymentListAcknowledgement]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePrivatePaymentListAcknowledgement.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypePrivatePaymentListDeliveryFailure: FfiConverterRustBuffer {
     typealias SwiftType = [PrivatePaymentListDeliveryFailure]
 
@@ -26530,6 +26981,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_cancel_payment_request() != 58269) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_capture_grant_observer() != 37074) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_claim_and_accept_payment_request() != 38326) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -26918,6 +27372,18 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkyauthrequeststate_export_client_key_secret() != 60838) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkygrantobserver_client_id() != 51969) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkygrantobserver_grant_id() != 43900) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkygrantobserver_observe() != 18375) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkygrantobserver_public_key() != 40375) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkylocalsecretkey_derive_paykit_identity_secret_key() != 28900) {

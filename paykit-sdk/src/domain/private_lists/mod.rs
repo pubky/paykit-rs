@@ -187,6 +187,28 @@ impl fmt::Debug for PrivatePaymentListDeliveryFailure {
     }
 }
 
+/// A tracked Private Payment List whose publication this runtime witnessed.
+///
+/// This acknowledges publication, not receipt by the counterparty. The witness
+/// matches the current Encrypted Link when the report is completed; it is not a
+/// lease and does not survive replacement of the caller's original operation.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivatePaymentListAcknowledgement {
+    /// Counterparty addressed by the list.
+    pub counterparty: PubkyPublicKey,
+    /// Exact outbound message included in this call's queued or cleared lists.
+    pub outbound_message_id: u64,
+}
+
+impl fmt::Debug for PrivatePaymentListAcknowledgement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PrivatePaymentListAcknowledgement")
+            .field("counterparty", &self.counterparty.redacted_app_key())
+            .field("outbound_message_id", &self.outbound_message_id)
+            .finish()
+    }
+}
+
 /// Report from queueing and delivering Private Payment Lists.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivatePaymentListDeliveryReport {
@@ -194,6 +216,16 @@ pub struct PrivatePaymentListDeliveryReport {
     pub queued: Vec<PrivatePaymentListSyncChange>,
     /// Counterparties that had an empty Private Payment List queued.
     pub cleared: Vec<PrivatePaymentListSyncChange>,
+    /// Positively witnessed publications for tracked lists on the current link.
+    ///
+    /// A missing entry is unknown, even when there are no delivery failures.
+    /// In particular, a pending handshake or a persisted `Sent` row without this
+    /// runtime's current-link witness is not an acknowledgement. A newer list
+    /// from this Paykit App also withholds the acknowledgement, even if queued.
+    /// Other failure
+    /// fields remain authoritative: acknowledgements do not complete cleanup.
+    #[serde(default)]
+    pub acknowledged: Vec<PrivatePaymentListAcknowledgement>,
     /// Counterparties that could not be queued or cleared.
     pub failed_to_queue: Vec<PrivatePaymentListSyncChange>,
     /// Delivery and reservation cleanup failures after queueing.
@@ -216,6 +248,7 @@ impl fmt::Debug for PrivatePaymentListDeliveryReport {
         f.debug_struct("PrivatePaymentListDeliveryReport")
             .field("queued", &self.queued.len())
             .field("cleared", &self.cleared.len())
+            .field("acknowledged", &self.acknowledged.len())
             .field("failed_to_queue", &self.failed_to_queue.len())
             .field("failed_to_deliver", &self.failed_to_deliver.len())
             .finish()

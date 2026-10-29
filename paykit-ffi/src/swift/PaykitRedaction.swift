@@ -83,6 +83,11 @@ extension PrivatePaymentEndpointSelectionRequest: CustomStringConvertible, Custo
     public var debugDescription: String { description }
 }
 
+extension PrivatePaymentListAcknowledgement: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PrivatePaymentListAcknowledgement(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
 extension PrivatePaymentListDeliveryFailure: CustomStringConvertible, CustomDebugStringConvertible {
     public var description: String { "PrivatePaymentListDeliveryFailure(<redacted>)" }
     public var debugDescription: String { description }

@@ -229,6 +229,7 @@ async fn test_private_list_delivery_reports_list_left_queued_behind_retry_backof
 
     assert_eq!(report.failed_to_deliver.len(), 1);
     let failure = &report.failed_to_deliver[0];
+    assert!(report.acknowledged.is_empty());
     assert_eq!(failure.counterparty, counterparty);
     assert_eq!(failure.outbound_message_id, Some(list_id));
     assert_eq!(
@@ -283,6 +284,9 @@ async fn test_private_list_delivery_skips_sent_and_pending_handshake_lists() {
             .await
             .unwrap();
         assert!(report.failed_to_deliver.is_empty());
+        // A persisted Sent row or a send-report ID without a valid current-link
+        // publication witness does not establish an acknowledgement.
+        assert!(report.acknowledged.is_empty());
     }
 
     // The list stays eligible for a later run once the handshake completes.
@@ -296,6 +300,7 @@ async fn test_private_list_delivery_skips_sent_and_pending_handshake_lists() {
     .await
     .unwrap();
     assert!(report.failed_to_deliver.is_empty());
+    assert!(report.acknowledged.is_empty());
 }
 
 #[tokio::test]

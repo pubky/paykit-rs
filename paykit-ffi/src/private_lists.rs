@@ -2,9 +2,9 @@ use std::{collections::HashMap, fmt, sync::Arc};
 
 use paykit_sdk::{
     storage::OutboundPrivateMessageRecord, OutboundPrivateMessageStatus,
-    PrivatePaymentListDeliveryFailure, PrivatePaymentListDeliveryReport,
-    PrivatePaymentListReservationUpdate, PrivatePaymentListSyncChange,
-    PrivatePaymentListSyncReport, PrivatePaymentListView,
+    PrivatePaymentListAcknowledgement, PrivatePaymentListDeliveryFailure,
+    PrivatePaymentListDeliveryReport, PrivatePaymentListReservationUpdate,
+    PrivatePaymentListSyncChange, PrivatePaymentListSyncReport, PrivatePaymentListView,
 };
 
 use crate::{
@@ -169,6 +169,18 @@ impl fmt::Debug for FfiPrivatePaymentListDeliveryFailure {
     }
 }
 
+/// A tracked Private Payment List whose publication this runtime witnessed.
+/// This is not counterparty receipt, a lease, or proof that cleanup completed.
+#[derive(uniffi::Record, Clone)]
+pub struct FfiPrivatePaymentListAcknowledgement {
+    /// Counterparty addressed by the list.
+    pub counterparty: String,
+    /// Exact outbound message in this call's queued or cleared lists.
+    pub outbound_message_id: u64,
+}
+
+impl_redacted_debug!(FfiPrivatePaymentListAcknowledgement);
+
 /// Report from queueing and delivering Private Payment Lists.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct FfiPrivatePaymentListDeliveryReport {
@@ -176,6 +188,11 @@ pub struct FfiPrivatePaymentListDeliveryReport {
     pub queued: Vec<FfiPrivatePaymentListSyncChange>,
     /// Counterparties that had an empty Private Payment List queued.
     pub cleared: Vec<FfiPrivatePaymentListSyncChange>,
+    /// Positively witnessed tracked publications on the current Encrypted Link.
+    /// Missing entries remain unknown, including pending handshakes and stored
+    /// Sent rows without a runtime witness. All cleanup failures still apply.
+    /// Retain with the original owner/attempt and invalidate on local changes.
+    pub acknowledged: Vec<FfiPrivatePaymentListAcknowledgement>,
     /// Counterparties that could not be queued or cleared.
     pub failed_to_queue: Vec<FfiPrivatePaymentListSyncChange>,
     /// Delivery and reservation cleanup failures after queueing.
@@ -408,12 +425,22 @@ impl From<PrivatePaymentListDeliveryReport> for FfiPrivatePaymentListDeliveryRep
         Self {
             queued: value.queued.into_iter().map(Into::into).collect(),
             cleared: value.cleared.into_iter().map(Into::into).collect(),
+            acknowledged: value.acknowledged.into_iter().map(Into::into).collect(),
             failed_to_queue: value.failed_to_queue.into_iter().map(Into::into).collect(),
             failed_to_deliver: value
                 .failed_to_deliver
                 .into_iter()
                 .map(Into::into)
                 .collect(),
+        }
+    }
+}
+
+impl From<PrivatePaymentListAcknowledgement> for FfiPrivatePaymentListAcknowledgement {
+    fn from(value: PrivatePaymentListAcknowledgement) -> Self {
+        Self {
+            counterparty: app_public_key(&value.counterparty),
+            outbound_message_id: value.outbound_message_id,
         }
     }
 }
