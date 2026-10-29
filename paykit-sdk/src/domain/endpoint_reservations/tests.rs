@@ -239,6 +239,153 @@ async fn test_sync_private_payment_list_reuses_only_the_same_app() {
     );
 }
 
+async fn sent_after_last_link_change(
+    storage: &InMemoryStorage,
+    counterparty: &PubkyPublicKey,
+    app: &PaykitAppId,
+    state: crate::LinkedPeerState,
+    last_sync_at: Option<DateTime<Utc>>,
+) -> Option<u64> {
+    storage
+        .transaction(|tx| {
+            let mut peer = crate::domain::linked_peers::default_linked_peer(counterparty.clone());
+            peer.state = state;
+            peer.last_sync_at = last_sync_at;
+            tx.save_linked_peer(peer);
+            Ok(private_payment_list_sent_after_last_link_change(
+                tx,
+                counterparty,
+                app,
+            ))
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_private_payment_list_sent_after_last_link_change_reuses_later_send() {
+    use crate::LinkedPeerState;
+
+    let other_app = PaykitAppId::new("paykit-server").unwrap();
+    let storage = InMemoryStorage::with_registered_apps([app_id(), other_app.clone()]);
+    let counterparty = counterparty();
+    let mut sent = queue_private_payment_list_with_reservations(
+        &storage,
+        &counterparty,
+        app_id(),
+        vec![reservation("res-1", "ln-secret")],
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    sent.status = OutboundPrivateMessageStatus::Sent;
+    sent.attempt_count = 1;
+    sent.last_attempt_at = Some(timestamp());
+    sent.sent_at = Some(timestamp());
+    storage
+        .transaction(|tx| {
+            tx.save_outbound_private_message(sent.clone())?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let linked_long_before = Some(timestamp() - ChronoDuration::minutes(6));
+
+    assert_eq!(
+        sent_after_last_link_change(
+            &storage,
+            &counterparty,
+            &app_id(),
+            LinkedPeerState::Linked,
+            linked_long_before,
+        )
+        .await,
+        Some(sent.outbound_message_id)
+    );
+    // Another App's list is tracked separately.
+    assert_eq!(
+        sent_after_last_link_change(
+            &storage,
+            &counterparty,
+            &other_app,
+            LinkedPeerState::Linked,
+            linked_long_before,
+        )
+        .await,
+        None
+    );
+}
+
+#[tokio::test]
+async fn test_private_payment_list_sent_after_last_link_change_rejects_uncertain_send() {
+    use crate::LinkedPeerState;
+
+    let storage = registered_storage();
+    let counterparty = counterparty();
+    let mut sent = queue_private_payment_list_with_reservations(
+        &storage,
+        &counterparty,
+        app_id(),
+        vec![reservation("res-1", "ln-secret")],
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    sent.status = OutboundPrivateMessageStatus::Sent;
+    sent.attempt_count = 1;
+    sent.last_attempt_at = Some(timestamp());
+    sent.sent_at = Some(timestamp());
+    storage
+        .transaction(|tx| {
+            tx.save_outbound_private_message(sent.clone())?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let linked_long_before = Some(timestamp() - ChronoDuration::minutes(6));
+
+    for (state, last_sync_at) in [
+        // A relink or receive after the send, or one inside the clock margin.
+        (LinkedPeerState::Linked, Some(timestamp())),
+        (
+            LinkedPeerState::Linked,
+            Some(timestamp() - ChronoDuration::minutes(5)),
+        ),
+        (LinkedPeerState::Linked, None),
+        (LinkedPeerState::Linking, linked_long_before),
+        (LinkedPeerState::RecoveryRequired, linked_long_before),
+        (LinkedPeerState::Blocked, linked_long_before),
+    ] {
+        assert_eq!(
+            sent_after_last_link_change(&storage, &counterparty, &app_id(), state, last_sync_at)
+                .await,
+            None
+        );
+    }
+
+    // A newer list that is still on the retry path replaces the sent one.
+    queue_private_payment_list_with_reservations(
+        &storage,
+        &counterparty,
+        app_id(),
+        vec![reservation("res-2", "ln-secret-2")],
+        timestamp() + ChronoDuration::minutes(1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        sent_after_last_link_change(
+            &storage,
+            &counterparty,
+            &app_id(),
+            LinkedPeerState::Linked,
+            linked_long_before,
+        )
+        .await,
+        None
+    );
+}
+
 #[tokio::test]
 async fn test_sync_private_payment_list_replaces_unparseable_stored_message() {
     let storage = registered_storage();

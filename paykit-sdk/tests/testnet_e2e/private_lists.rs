@@ -1365,6 +1365,123 @@ async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
 }
 
 #[tokio::test]
+async fn test_private_list_sync_reuses_sent_list_after_restart() {
+    let pair = linked_two_party().await;
+    let update = PrivatePaymentListReservationUpdate {
+        counterparty: pair.bob.public_key.clone(),
+        reservations: vec![PrivatePaymentEndpointReservation {
+            reservation_id: "invoice-1".into(),
+            receiving_detail: private_receiving_detail("btc-lightning-bolt11", "ln-private-1"),
+            expires_at: None,
+            attribution: Default::default(),
+        }],
+    };
+    let first = pair
+        .alice
+        .sdk
+        .sync_private_payment_lists_with_reservations_and_process_outbound(
+            vec![update.clone()],
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.queued.len(), 1);
+    assert!(first.failed_to_deliver.is_empty());
+    let intake = pair
+        .bob
+        .sdk
+        .receive_private_messages_from_linked_peers()
+        .await
+        .unwrap();
+    assert_eq!(intake[0].report.as_ref().unwrap().stream_item_ids.len(), 1);
+    // Model a link established well before the list was sent, outside the
+    // clock margin that guards Paykit Apps sharing this state.
+    pair.alice
+        .storage
+        .transaction({
+            let counterparty = pair.bob.public_key.clone();
+            move |tx| {
+                let mut peer = tx.linked_peer(&counterparty).unwrap();
+                peer.last_sync_at = peer
+                    .last_sync_at
+                    .map(|linked_at| linked_at - chrono::Duration::minutes(10));
+                tx.save_linked_peer(peer);
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let alice = pair
+        .alice
+        .restart_with_storage(pair.alice.storage.clone())
+        .await;
+    let before_sync = alice.storage.snapshot().unwrap();
+    let unchanged = alice
+        .sdk
+        .sync_private_payment_lists_with_reservations_and_process_outbound(
+            vec![update.clone()],
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(unchanged.queued, first.queued);
+    assert!(unchanged.failed_to_queue.is_empty());
+    assert!(unchanged.failed_to_deliver.is_empty());
+    // Durable reuse is not delivery evidence from this runtime.
+    assert!(unchanged.acknowledged.is_empty());
+    assert_eq!(alice.storage.snapshot().unwrap(), before_sync);
+    let intake = pair
+        .bob
+        .sdk
+        .receive_private_messages_from_linked_peers()
+        .await
+        .unwrap();
+    assert!(intake[0]
+        .report
+        .as_ref()
+        .unwrap()
+        .stream_item_ids
+        .is_empty());
+
+    // A private receive after the send hides whether the link changed, so the
+    // next restart republishes the unchanged list once.
+    pair.bob
+        .sdk
+        .clear_private_payment_list_and_process_outbound(alice.public_key.clone())
+        .await
+        .unwrap();
+    alice
+        .sdk
+        .receive_private_messages_from_linked_peers()
+        .await
+        .unwrap();
+    let alice = alice.restart_with_storage(alice.storage.clone()).await;
+    let republished = alice
+        .sdk
+        .sync_private_payment_lists_with_reservations_and_process_outbound(
+            vec![update.clone()],
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(republished.queued.len(), 1);
+    assert_ne!(
+        republished.queued[0].outbound_message_id,
+        first.queued[0].outbound_message_id
+    );
+    assert!(republished.failed_to_deliver.is_empty());
+    assert_eq!(republished.acknowledged.len(), 1);
+    let intake = pair
+        .bob
+        .sdk
+        .receive_private_messages_from_linked_peers()
+        .await
+        .unwrap();
+    assert_eq!(intake[0].report.as_ref().unwrap().stream_item_ids.len(), 1);
+}
+
+#[tokio::test]
 async fn test_private_list_sync_corrupt_snapshot_marks_recovery_required() {
     let pair = linked_two_party().await;
     pair.alice

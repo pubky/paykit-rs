@@ -1,7 +1,10 @@
 use super::outbound_private::PrivateSendReadiness;
 use super::payment_resolution::filter_private_views_by_authorized_apps;
 use super::*;
-use crate::domain::endpoint_reservations::queue_private_payment_list_with_reservations_in_transaction;
+use crate::domain::endpoint_reservations::{
+    private_payment_list_sent_after_last_link_change,
+    queue_private_payment_list_with_reservations_in_transaction,
+};
 use crate::PrivatePaymentListAcknowledgement;
 use futures_util::FutureExt;
 
@@ -141,7 +144,7 @@ where
                         let policy = if reuse_unchanged {
                             PrivatePaymentListQueuePolicy::Sync {
                                 sent_message_id: self
-                                    .published_private_payment_list_id(tx, &counterparty),
+                                    .reusable_private_payment_list_id(tx, &counterparty),
                             }
                         } else {
                             PrivatePaymentListQueuePolicy::Always
@@ -180,15 +183,9 @@ where
         tx: &dyn StorageTransaction,
         counterparty: &PubkyPublicKey,
     ) -> Option<u64> {
-        let snapshot = tx
-            .encrypted_link_state(counterparty)
-            .and_then(|state| state.link_snapshot)?;
         // Only a delivery witnessed on the current Noise link can make a sent row
-        // reusable. Corrupt snapshots fall through so the outbound worker can mark
-        // the peer as requiring recovery.
-        let link_id = paykit_lib::EncryptedLinkSnapshot::deserialize(&snapshot)
-            .ok()
-            .and_then(|snapshot| snapshot.link_id())?;
+        // reusable.
+        let link_id = current_link_id(tx, counterparty)?;
         self.private_payment_list_publications
             .lock()
             .ok()
@@ -197,6 +194,28 @@ where
                     .get(&(counterparty.clone(), self.config.app_id.clone()))
                     .filter(|publication| publication.link_id == link_id)
                     .map(|publication| publication.outbound_message_id)
+            })
+    }
+
+    /// Return the sent Private Payment List an unchanged sync may reuse.
+    ///
+    /// Without a runtime witness, for example after a restart, this falls back
+    /// to durable timestamps so unchanged lists are not republished on every
+    /// launch. The fallback is not delivery evidence, so acknowledgements use
+    /// `published_private_payment_list_id` instead.
+    fn reusable_private_payment_list_id(
+        &self,
+        tx: &dyn StorageTransaction,
+        counterparty: &PubkyPublicKey,
+    ) -> Option<u64> {
+        self.published_private_payment_list_id(tx, counterparty)
+            .or_else(|| {
+                current_link_id(tx, counterparty)?;
+                private_payment_list_sent_after_last_link_change(
+                    tx,
+                    counterparty,
+                    &self.config.app_id,
+                )
             })
     }
 
@@ -398,7 +417,9 @@ where
     /// Unchanged lists with the same reservations reuse their existing outbound
     /// record, including lists already sent on the current Encrypted Link.
     /// Outbound retries and reservation cleanup still run for reused records.
-    /// Sent-list reuse is runtime-local; restarting the SDK conservatively republishes the list.
+    /// After a restart, a sent list is reused only when it was sent more than
+    /// five minutes after the peer's last link change or private receive;
+    /// otherwise it is republished once.
     pub async fn sync_private_payment_lists_with_reservations_and_process_outbound(
         &self,
         updates: Vec<PrivatePaymentListReservationUpdate>,
@@ -796,6 +817,19 @@ where
             .current_private_receiving_details(counterparty)
             .await
     }
+}
+
+/// Return the Noise link ID of the counterparty's current link snapshot.
+///
+/// Corrupt snapshots return `None` so the outbound worker can mark the peer as
+/// requiring recovery instead of a sent row being reused.
+fn current_link_id(tx: &dyn StorageTransaction, counterparty: &PubkyPublicKey) -> Option<[u8; 32]> {
+    let snapshot = tx
+        .encrypted_link_state(counterparty)
+        .and_then(|state| state.link_snapshot)?;
+    paykit_lib::EncryptedLinkSnapshot::deserialize(&snapshot)
+        .ok()
+        .and_then(|snapshot| snapshot.link_id())
 }
 
 fn linked_private_counterparties_not_in_storage_state(

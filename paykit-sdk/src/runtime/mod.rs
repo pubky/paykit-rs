@@ -186,7 +186,8 @@ pub struct PaykitSdk<S, K, P, C = SystemClock> {
     // require access to session-protected storage.
     last_identity_state: Mutex<Option<IdentityState>>,
     // Runtime-local delivery witnesses are reusable only on the same Noise link
-    // and for the same App. Restarting conservatively republishes each list.
+    // and for the same App. After a restart, reuse falls back to durable link
+    // timestamps, which are coarser than these witnesses.
     private_payment_list_publications:
         Mutex<HashMap<(PubkyPublicKey, paykit_lib::PaykitAppId), PrivatePaymentListPublication>>,
 }
