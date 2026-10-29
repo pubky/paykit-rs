@@ -42,6 +42,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   queued. `propose_payment_request_with_id` refuses oversized terms before it
   checks earlier use of the Payment Request ID.
 
+### Fixed
+
+- A platform callback (`SdkStateBlobStore`, `SdkPubkySessionProvider` or
+  `SdkPaymentAdapter`) that throws an error other than `PaykitError` (Swift) or
+  `PaykitException` (Kotlin) now returns a `Storage` error with code
+  `unexpected_callback_error` instead of panicking in Rust. Previously the panic
+  reached the app as an internal panic error that included the platform error
+  text, and a throw from `SdkStateBlobStore` left that SDK handle failing every
+  later call with `state_transaction_lock_poisoned`.
+
 ### Integration
 
 - Use the guarded preparation API before preparing payment, and compare its
@@ -68,6 +78,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   earlier builds. Payees should not count payment evidence earlier than the
   proposal record time minus a payment-method tolerance as paying a request;
   see the Payment time and attribution rule in `specs/payment-requests.md`.
+- Throw `PaykitError` (Swift) or `PaykitException` (Kotlin) from platform
+  callbacks to keep a specific error variant and code.
 - Regenerate bindings for `paymentProofEventLen` and the message size
   documentation on `proposePaymentRequest`, `submitPaymentProof`,
   `PaymentRequestTerms` and `PaymentProofSubmission`. Protocol errors have a new

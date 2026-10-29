@@ -287,6 +287,11 @@ pub struct FfiEndpointSyncReport {
 ///
 /// Callbacks must not synchronously call back into the same SDK handle while
 /// the originating SDK call is waiting for them.
+///
+/// Report callback failures by throwing the Paykit error type (Swift
+/// `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+/// its `Storage` case with code `unexpected_callback_error`, and its message
+/// is discarded.
 #[uniffi::export(with_foreign)]
 pub trait FfiSdkPaymentAdapter: Send + Sync {
     /// Return receiving details intended for public Payment Endpoints.
@@ -298,7 +303,8 @@ pub trait FfiSdkPaymentAdapter: Send + Sync {
     /// `PaykitError.PaymentAdapter(code:context:)`, Kotlin
     /// `PaykitException.PaymentAdapter`), never an empty list or a subset.
     /// The sync then fails without changing publication records or endpoints.
-    /// Other foreign exceptions are not mapped to a clean Paykit error.
+    /// Any other thrown error also fails the sync, as the `Storage` case with
+    /// code `unexpected_callback_error`.
     fn current_public_receiving_details(
         &self,
     ) -> Result<Vec<FfiPublicReceivingDetail>, PaykitFfiError>;

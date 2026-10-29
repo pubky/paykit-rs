@@ -353,6 +353,27 @@ fn test_retention_limit_cause_selects_policy_code() {
 }
 
 #[test]
+fn test_unexpected_callback_error_maps_to_redacted_storage_error() {
+    // Generated callback code reports a platform error of an undeclared type
+    // (Swift NSError, Kotlin non-PaykitException, JS Error) as UnexpectedError
+    // with the error description, then lifts it through this exact path.
+    let marker = r#"Error Domain=AppStore Code=7 "disk full at /private/app/state.bin""#;
+    let call_status = uniffi::RustCallStatus::error(marker);
+    let result = <Result<Option<String>, PaykitFfiError> as uniffi::LiftReturn<
+        crate::UniFfiTag,
+    >>::lift_foreign_return(uniffi::RustBuffer::default(), call_status);
+    let err = result.unwrap_err();
+    assert_eq!(
+        parts(&err),
+        (
+            "storage",
+            "unexpected_callback_error",
+            "platform callback failed with an undeclared error type"
+        )
+    );
+}
+
+#[test]
 fn test_message_too_large_cause_selects_protocol_code() {
     // The typed cause only picks the code. Like every cause it never reaches
     // `context`, and any other protocol cause keeps the generic code (see above).

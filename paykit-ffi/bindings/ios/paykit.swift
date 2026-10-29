@@ -8111,6 +8111,11 @@ public func FfiConverterTypeSdkBackupBlob_lower(_ value: SdkBackupBlob) -> Unsaf
  *
  * Callbacks must not synchronously call back into the same SDK handle while
  * the originating SDK call is waiting for them.
+ *
+ * Report callback failures by throwing the Paykit error type (Swift
+ * `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+ * its `Storage` case with code `unexpected_callback_error`, and its message
+ * is discarded.
  */
 public protocol SdkPaymentAdapter: AnyObject, Sendable {
 
@@ -8124,7 +8129,8 @@ public protocol SdkPaymentAdapter: AnyObject, Sendable {
      * `PaykitError.PaymentAdapter(code:context:)`, Kotlin
      * `PaykitException.PaymentAdapter`), never an empty list or a subset.
      * The sync then fails without changing publication records or endpoints.
-     * Other foreign exceptions are not mapped to a clean Paykit error.
+     * Any other thrown error also fails the sync, as the `Storage` case with
+     * code `unexpected_callback_error`.
      */
     func currentPublicReceivingDetails() throws  -> [PublicReceivingDetail]
 
@@ -8172,6 +8178,11 @@ public protocol SdkPaymentAdapter: AnyObject, Sendable {
  *
  * Callbacks must not synchronously call back into the same SDK handle while
  * the originating SDK call is waiting for them.
+ *
+ * Report callback failures by throwing the Paykit error type (Swift
+ * `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+ * its `Storage` case with code `unexpected_callback_error`, and its message
+ * is discarded.
  */
 open class SdkPaymentAdapterImpl: SdkPaymentAdapter, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -8235,7 +8246,8 @@ open class SdkPaymentAdapterImpl: SdkPaymentAdapter, @unchecked Sendable {
      * `PaykitError.PaymentAdapter(code:context:)`, Kotlin
      * `PaykitException.PaymentAdapter`), never an empty list or a subset.
      * The sync then fails without changing publication records or endpoints.
-     * Other foreign exceptions are not mapped to a clean Paykit error.
+     * Any other thrown error also fails the sync, as the `Storage` case with
+     * code `unexpected_callback_error`.
      */
 open func currentPublicReceivingDetails()throws  -> [PublicReceivingDetail]  {
     return try  FfiConverterSequenceTypePublicReceivingDetail.lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
@@ -8608,6 +8620,11 @@ public func FfiConverterTypeSdkPaymentAdapter_lower(_ value: SdkPaymentAdapter) 
  *
  * Callbacks must not synchronously call back into the same SDK handle. Session
  * workflows may hold that handle's session-operation gate while invoking them.
+ *
+ * Report callback failures by throwing the Paykit error type (Swift
+ * `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+ * its `Storage` case with code `unexpected_callback_error`, and its message
+ * is discarded.
  */
 public protocol SdkPubkySessionProvider: AnyObject, Sendable {
 
@@ -8634,6 +8651,11 @@ public protocol SdkPubkySessionProvider: AnyObject, Sendable {
  *
  * Callbacks must not synchronously call back into the same SDK handle. Session
  * workflows may hold that handle's session-operation gate while invoking them.
+ *
+ * Report callback failures by throwing the Paykit error type (Swift
+ * `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+ * its `Storage` case with code `unexpected_callback_error`, and its message
+ * is discarded.
  */
 open class SdkPubkySessionProviderImpl: SdkPubkySessionProvider, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -9061,6 +9083,11 @@ public func FfiConverterTypeSdkStateBlob_lower(_ value: SdkStateBlob) -> UnsafeM
  * callback because doing so would deadlock.
  * Independent handles for one identity must use the same atomic backing store;
  * a per-handle mutex does not coordinate separate applications or processes.
+ *
+ * Report callback failures by throwing the Paykit error type (Swift
+ * `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+ * its `Storage` case with code `unexpected_callback_error`, and its message
+ * is discarded.
  */
 public protocol SdkStateBlobStore: AnyObject, Sendable {
 
@@ -9095,6 +9122,11 @@ public protocol SdkStateBlobStore: AnyObject, Sendable {
  * callback because doing so would deadlock.
  * Independent handles for one identity must use the same atomic backing store;
  * a per-handle mutex does not coordinate separate applications or processes.
+ *
+ * Report callback failures by throwing the Paykit error type (Swift
+ * `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+ * its `Storage` case with code `unexpected_callback_error`, and its message
+ * is discarded.
  */
 open class SdkStateBlobStoreImpl: SdkStateBlobStore, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -26971,7 +27003,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffisdkbackupblob_export_bytes() != 44480) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_current_public_receiving_details() != 1235) {
+    if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_current_public_receiving_details() != 52995) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_current_private_receiving_details() != 22405) {
