@@ -2,6 +2,7 @@ use super::outbound_private::PrivateSendReadiness;
 use super::payment_resolution::filter_private_views_by_authorized_apps;
 use super::*;
 use crate::domain::endpoint_reservations::queue_private_payment_list_with_reservations_in_transaction;
+use crate::PrivatePaymentListAcknowledgement;
 use futures_util::FutureExt;
 
 impl<S, K, P, C> PaykitSdk<S, K, P, C>
@@ -589,7 +590,57 @@ where
         counterparty: &PubkyPublicKey,
         run: &OutboundListRun,
     ) -> Result<()> {
-        let mut unsent = private_list_delivery_message_ids(report, counterparty)
+        let tracked = private_list_delivery_message_ids(report, counterparty);
+        if tracked.is_empty() {
+            return Ok(());
+        }
+        let (handshake_pending, statuses, acknowledged) = self
+            .storage
+            .transaction(|tx| {
+                let readiness = Self::private_queue_readiness_in_transaction(tx, counterparty);
+                let handshake_pending =
+                    matches!(readiness, Ok(PrivateQueueReadiness::PendingHandshake));
+                let messages = tx.outbound_private_messages(counterparty);
+                let latest_list_id = messages
+                    .iter()
+                    .filter(|message| {
+                        message.app_id == self.config.app_id
+                            && message.kind == PrivateMessageKind::PrivatePaymentList.as_str()
+                    })
+                    .map(|message| message.outbound_message_id)
+                    .max();
+                let statuses = messages
+                    .into_iter()
+                    .map(|message| (message.outbound_message_id, message.status))
+                    .collect::<HashMap<_, _>>();
+                // A Sent row alone can come from restored/shared state. Require
+                // this runtime's successful publication on the current link,
+                // and refuse a witness superseded by a newer local publication.
+                let acknowledged = matches!(readiness, Ok(PrivateQueueReadiness::Ready))
+                    .then(|| self.published_private_payment_list_id(tx, counterparty))
+                    .flatten()
+                    .filter(|id| tracked.contains(id))
+                    // Another commit may complete after Sent released its lease
+                    // but before this runtime updates its publication witness.
+                    // A newer list also makes an older clear unsafe to retain.
+                    .filter(|id| latest_list_id == Some(*id))
+                    .filter(|id| {
+                        matches!(statuses.get(id), Some(OutboundPrivateMessageStatus::Sent))
+                    });
+                Ok((handshake_pending, statuses, acknowledged))
+            })
+            .await?;
+        // Acknowledgements never suppress queue, reservation, or delivery errors.
+        if let Some(outbound_message_id) = acknowledged {
+            let entry = PrivatePaymentListAcknowledgement {
+                counterparty: counterparty.clone(),
+                outbound_message_id,
+            };
+            if !report.acknowledged.contains(&entry) {
+                report.acknowledged.push(entry);
+            }
+        }
+        let mut unsent = tracked
             .into_iter()
             .filter(|message_id| !run.sent.contains(message_id))
             .filter(|message_id| {
@@ -599,25 +650,7 @@ where
                 })
             })
             .collect::<Vec<_>>();
-        if unsent.is_empty() {
-            return Ok(());
-        }
         unsent.sort_unstable();
-        let (handshake_pending, statuses) = self
-            .storage
-            .transaction(|tx| {
-                let handshake_pending = matches!(
-                    Self::private_queue_readiness_in_transaction(tx, counterparty),
-                    Ok(PrivateQueueReadiness::PendingHandshake)
-                );
-                let statuses = tx
-                    .outbound_private_messages(counterparty)
-                    .into_iter()
-                    .map(|message| (message.outbound_message_id, message.status))
-                    .collect::<HashMap<_, _>>();
-                Ok((handshake_pending, statuses))
-            })
-            .await?;
         for message_id in unsent {
             let status = statuses.get(&message_id);
             // A list still queued behind a pending handshake is sent once the
@@ -807,6 +840,7 @@ fn delivery_report_from_sync_report(
     PrivatePaymentListDeliveryReport {
         queued: sync.queued,
         cleared: sync.cleared,
+        acknowledged: Vec::new(),
         failed_to_queue: sync.failed,
         failed_to_deliver: Vec::new(),
     }

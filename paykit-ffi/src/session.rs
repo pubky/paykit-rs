@@ -362,6 +362,50 @@ impl FfiSdkPubkySessionProviderAdapter {
             cached_session: Arc::new(AsyncMutex::new(None)),
         }
     }
+
+    pub(crate) async fn capture_grant_observer(
+        &self,
+        expected_owner: &PubkyPublicKey,
+    ) -> Result<paykit_sdk::PubkyGrantObserver, PaykitFfiError> {
+        let unavailable = || {
+            identity_error(
+                "pubky_grant_observer_unavailable",
+                "the original live grant cannot be observed without authentication",
+            )
+        };
+        let access = self
+            .provider
+            .load_session_access()?
+            .ok_or_else(unavailable)?;
+        let session = if access.live_client_config.as_ref() == Some(&self.pubky_client) {
+            access
+                .live_access
+                .as_ref()
+                .map(|access| access.session.clone())
+        } else {
+            None
+        };
+        let session = match session {
+            Some(session) => session,
+            None => {
+                let fingerprint: [u8; 32] = Sha256::digest(access.session_secret.as_bytes()).into();
+                self.cached_session
+                    .lock()
+                    .await
+                    .as_ref()
+                    .filter(|cached| cached.session_secret_fingerprint == fingerprint)
+                    .map(|cached| cached.session.clone())
+                    .ok_or_else(unavailable)?
+            }
+        };
+        validate_grant_session_client_id(&session, &access.client_id).await?;
+        if PubkyPublicKey::from_public_key(&session.public_key()) != *expected_owner {
+            return Err(unavailable());
+        }
+        paykit_sdk::PubkyGrantObserver::capture(&session)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 #[async_trait]

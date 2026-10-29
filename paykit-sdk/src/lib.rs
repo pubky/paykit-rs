@@ -71,9 +71,9 @@ pub use domain::payment_resolution::{
 };
 #[doc(inline)]
 pub use domain::private_lists::{
-    PrivatePaymentListDeliveryFailure, PrivatePaymentListDeliveryReport,
-    PrivatePaymentListReservationUpdate, PrivatePaymentListSyncChange,
-    PrivatePaymentListSyncReport, PrivatePaymentListView,
+    PrivatePaymentListAcknowledgement, PrivatePaymentListDeliveryFailure,
+    PrivatePaymentListDeliveryReport, PrivatePaymentListReservationUpdate,
+    PrivatePaymentListSyncChange, PrivatePaymentListSyncReport, PrivatePaymentListView,
 };
 #[doc(inline)]
 pub use domain::private_stream::{
@@ -107,8 +107,9 @@ pub use paykit_lib::{
 pub use pubky_session::{
     parse_pubky_auth_url, parse_pubky_resource, resolve_pubky_url, PubkyAuthCompanionClaim,
     PubkyAuthCompanionClaimApprovalError, PubkyAuthDetails, PubkyAuthRequest, PubkyAuthRequestKind,
-    PubkyAuthRequestState, PubkyResourceRef, PubkySessionBootstrap, PubkySessionBootstrapResult,
-    PubkySessionSecret, PAYKIT_AUTHORIZER_SESSION_CAPABILITIES, PAYKIT_SESSION_CAPABILITIES,
+    PubkyAuthRequestState, PubkyGrantObservation, PubkyGrantObserver, PubkyResourceRef,
+    PubkySessionBootstrap, PubkySessionBootstrapResult, PubkySessionSecret,
+    PAYKIT_AUTHORIZER_SESSION_CAPABILITIES, PAYKIT_SESSION_CAPABILITIES,
 };
 #[doc(inline)]
 pub use runtime::{
