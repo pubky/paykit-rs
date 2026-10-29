@@ -584,6 +584,24 @@ that no reachable relay caches still counts as none, so a caller that knows the
 identity's homeserver should compare it with the request's homeserver before
 approving.
 
+The signup helper never moves an identity to another homeserver either. Before
+it sends anything to the requested homeserver, it looks up the identity's
+homeserver record; when that finds none, it asks the network without the
+client's cache and looks again. It fails with a `Policy` error when the record
+names a different homeserver, so no account is created, no signup code is
+spent, and nothing is published; such an identity signs in instead. When the
+record names the requested homeserver, the helper signs up, and an account
+that already exists has its record published again. When no record is found,
+or the record names no homeserver, the helper signs up on the requested
+homeserver, which also restores a record that names no homeserver. A lookup
+error fails the signup, and so does a `_pubky` target that is not a valid
+homeserver public key. A record that no reachable cache holds, one that only a
+relay cache still holds while the network finds nothing, and a partly failed
+lookup in which one backend finds nothing all count as none. Wallets that sign
+up an imported or unknown key should first probe it with `republish_identity`:
+an existing record means signing in, unless it is known to name no homeserver,
+and an error means trying again later rather than signing up.
+
 Applications can attach an app-defined companion claim to a Pubky Auth
 approval. The integrator supplies the claim query parameter, claim type,
 expected capability, and serialized unsigned payload. The SDK owns request

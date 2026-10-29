@@ -87,11 +87,16 @@ pub enum PaykitFfiError {
 
 impl From<PaykitSdkError> for PaykitFfiError {
     fn from(err: PaykitSdkError) -> Self {
-        // Only the type of the cause selects this code; the cause is still dropped.
+        // Only the type of the cause selects these codes; the cause is still dropped.
         let policy_code = if err.is_retention_limit_reached() {
             "retention_limit_reached"
         } else {
             "policy_error"
+        };
+        let identity_code = if err.is_signup_code_rejected() {
+            "signup_code_rejected"
+        } else {
+            "identity_error"
         };
         // Only the type of the cause selects this code; the cause is still dropped.
         let protocol_code = if err.is_message_too_large() {
@@ -124,7 +129,7 @@ impl From<PaykitSdkError> for PaykitFfiError {
             }
             PaykitSdkError::Identity { context, source } => {
                 callback_ffi_error(source.as_ref(), &context).unwrap_or_else(|| Self::Identity {
-                    code: "identity_error".into(),
+                    code: identity_code.into(),
                     context,
                 })
             }

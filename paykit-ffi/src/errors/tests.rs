@@ -353,6 +353,40 @@ fn test_retention_limit_cause_selects_policy_code() {
 }
 
 #[test]
+fn test_signup_code_rejected_cause_selects_identity_code() {
+    // The typed cause only picks the code. The homeserver's answer below it
+    // never reaches `context`, and a plain identity error keeps the generic code.
+    let homeserver_error = pubky::Error::Request(pubky::errors::RequestError::Server {
+        status: pubky::StatusCode::UNAUTHORIZED,
+        message: "Token already used".into(),
+    });
+    let ffi = PaykitFfiError::from(PaykitSdkError::Identity {
+        context: "sign up Pubky identity".into(),
+        source: Some(anyhow::Error::from(homeserver_error).context(paykit_sdk::SignupCodeRejected)),
+    });
+
+    assert_eq!(
+        parts(&ffi),
+        ("identity", "signup_code_rejected", "sign up Pubky identity")
+    );
+    let rendered = ffi.to_string();
+    assert_eq!(
+        rendered,
+        "identity/signup_code_rejected: sign up Pubky identity"
+    );
+    assert!(!rendered.contains("Token already used"), "{rendered}");
+
+    let plain = PaykitFfiError::from(PaykitSdkError::Identity {
+        context: "sign up Pubky identity".into(),
+        source: Some(anyhow::anyhow!("signup code was rejected")),
+    });
+    assert_eq!(
+        parts(&plain),
+        ("identity", "identity_error", "sign up Pubky identity")
+    );
+}
+
+#[test]
 fn test_unexpected_callback_error_maps_to_redacted_storage_error() {
     // Generated callback code reports a platform error of an undeclared type
     // (Swift NSError, Kotlin non-PaykitException, JS Error) as UnexpectedError

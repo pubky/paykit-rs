@@ -9,6 +9,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Added
 
+- `SignupCodeRejected`, `PaykitSdkError::is_signup_code_rejected` in Rust and
+  the `identity/signup_code_rejected` error code in Swift and Kotlin report a
+  signup code that the homeserver refused as missing, malformed, unknown or
+  already used during `sign_up` or `approve_auth`.
 - `claim_payment_request_for_preparation` in Rust and
   `claimPaymentRequestForPreparation` in Swift and Kotlin reject blocked
   counterparties before App Registry access and atomically recheck that policy
@@ -33,6 +37,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   payee can cancel. Records are re-derived from the event log, so after
   upgrading, requests a wallet showed as invalid may now appear as `Accepted`,
   `ProofSubmitted` or `ActiveRecurring`.
+- `sign_up` in Rust and `signUp` in Swift and Kotlin report network failures,
+  5xx and 429 answers, and failed PKARR publishes or resolves as transport
+  errors instead of identity errors. This covers the homeserver record lookup
+  before signup, the signup request, the record republish for an existing
+  account, and the grant exchange of the sign-in that follows. A malformed
+  homeserver record stays an identity error. The grant exchange of `sign_in`
+  and `signIn` does the same. External auth flows and `approve_auth` keep their
+  identity errors.
 - Identify an outbound Private Application Message larger than the pubky-noise
   message size (1000 bytes) with `PaykitSdkError::is_message_too_large` and the
   `message_too_large` FFI protocol code. It is still a `Protocol` error, and
@@ -44,6 +56,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Fixed
 
+- `sign_up` in Rust and `signUp` in Swift and Kotlin no longer move an identity
+  to another homeserver. They fail with a policy error, before anything is sent
+  to the homeserver or published, when the identity's homeserver record names a
+  different homeserver. A record lookup error also fails the sign-up. The check
+  adds PKARR lookups, which take longest for a first-time signup.
 - A platform callback (`SdkStateBlobStore`, `SdkPubkySessionProvider` or
   `SdkPaymentAdapter`) that throws an error other than `PaykitError` (Swift) or
   `PaykitException` (Kotlin) now returns a `Storage` error with code
@@ -73,6 +90,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   payment sequence, one trusted time for automatic Acceptance, what counts as a
   definitive `Failed` outcome on each Rail, and how to reconcile after restoring
   an older backup without paying twice.
+- Before signing up an imported or unknown key, call `republishIdentity`. On
+  `true`, sign in and never fall back to sign-up automatically; on `false`,
+  sign-up is safe; on an error, retry later. Treat a policy error from sign-up
+  as "this identity lives on another homeserver" and sign in instead.
+- Branch on sign-up and sign-in errors by category and code. Retry a
+  `transport` error later; after any sign-up failure, retrying with the same
+  identity, homeserver and signup code is safe. On `signup_code_rejected`, ask
+  for a code without telling the user to discard theirs. Never fall back from
+  a failed sign-in to sign-up automatically; call `republishIdentity` to tell
+  a missing record from a transient failure. Wallets that catch identity
+  errors from these calls must also handle transport errors. The updated
+  `signUp` and `signIn` documentation changes UniFFI checksums, so regenerate
+  the bindings and native libraries together.
 - Regenerate bindings and native libraries together: the new Payment Request
   record fields change the generated record layout, so do not mix them with
   earlier builds. Payees should not count payment evidence earlier than the
