@@ -1847,6 +1847,29 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Block a counterparty for local Paykit private workflows.
+     *
+     * Local policy; the counterparty is not notified. Clears Encrypted Link
+     * state, and fails with a `ConcurrentUpdate` error while another peer
+     * link operation, such as a send, is running.
+     *
+     * Queued outbound messages are parked as `RecoveryRequired`, not deleted.
+     * After `unblockPeer`, a fresh Encrypted Link Handshake requeues them
+     * unchanged as `Pending`, except messages whose Paykit App is then
+     * unregistered or retired, but does not send them: call
+     * `processOutboundPrivateMessages`. Event Messages keep their order; a
+     * newer Private Payment List can supersede a requeued one. No call
+     * withdraws parked work. While blocked, no new
+     * private message, including a Payment Proof, can be queued for the peer.
+     *
+     * Accepted Allowances and accepted Payment Requests are paused, not
+     * revoked, and authorize again after relink without new consent. While
+     * blocked, `endAllowance` is refused, reads that name this counterparty
+     * fail with a policy error, and reads across counterparties skip it. So
+     * first deliver pending Event Messages with
+     * `processOutboundPrivateMessages`, which is confirmed only when each
+     * message's id appears in a returned report's `sent`, and call
+     * `endAllowance` for authority the user wants gone. See "Blocking a
+     * peer" in the README.
      */
     func blockPeer(counterparty: String) async throws  -> LinkedPeerRecord
 
@@ -1891,6 +1914,10 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Queue an empty Private Payment List and process that counterparty's queue.
+     *
+     * Each call queues a fresh empty list, which supersedes older pending
+     * lists from this Paykit App. While the counterparty is Linked, an empty
+     * `failedToQueue` and `failedToDeliver` mean the empty list was sent.
      */
     func clearPrivatePaymentListAndProcessOutbound(counterparty: String) async throws  -> PrivatePaymentListDeliveryReport
 
@@ -1941,6 +1968,10 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Queue a proposal withdrawal or unilateral End for accepted authority.
+     *
+     * Fails with a policy error while the counterparty is Blocked and with a
+     * `RecoveryRequired` error while its Encrypted Link is not ready, so end
+     * Allowances before blocking a peer; see `blockPeer`.
      */
     func endAllowance(counterparty: String, allowanceId: String) async throws  -> AllowanceRecord
 
@@ -2056,6 +2087,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Return one Allowance from one exact authenticated Encrypted Link.
+     * Fails with a policy error while the counterparty is Blocked.
      */
     func getAllowance(counterparty: String, allowanceId: String) async throws  -> AllowanceRecord?
 
@@ -2109,11 +2141,18 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Return Allowances matching a local SDK filter, newest first by local record time (presentation order only).
+     *
+     * A counterparty filter naming a Blocked peer fails with a policy error
+     * when that peer has Allowance messages and returns an empty list
+     * otherwise. Without a counterparty filter, blocked peers are skipped.
+     * See `blockPeer`.
      */
     func listAllowances(filter: AllowanceFilter) async throws  -> [AllowanceRecord]
 
     /**
      * Return Payment Requests matching a local SDK filter.
+     * A filter naming a Blocked counterparty fails with a policy error; without
+     * a counterparty, blocked peers are skipped.
      */
     func listPaymentRequests(filter: PaymentRequestFilter) async throws  -> [PaymentRequestRecord]
 
@@ -2182,6 +2221,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Return Payment Requests involving one counterparty.
+     * Fails with a policy error while the counterparty is Blocked; see `blockPeer`.
      */
     func paymentRequestsWith(counterparty: String) async throws  -> [PaymentRequestRecord]
 
@@ -2359,6 +2399,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Inspect inbound proposals from one counterparty.
      * Quotes and actionable state require the full view, which includes outbound acceptance.
+     * Fails with a policy error while the counterparty is Blocked.
      */
     func receivedPaymentRequestsFrom(counterparty: String) async throws  -> [PaymentRequestRecord]
 
@@ -2431,6 +2472,15 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Remove a Contact Record when it has no public marker to clean up.
+     *
+     * Only the record is removed. The Encrypted Link, private stream intake,
+     * queued outbound messages, accepted Allowances, and the counterparty's
+     * copy of the last Private Payment List this identity sent are kept, and a
+     * later re-add reuses the same Encrypted Link. Removal restores the retained
+     * private stream item limit only when this identity has never queued or
+     * sent that counterparty a Payment Request, Payment Request Acceptance,
+     * Payment Proof, Allowance proposal, or Allowance Acceptance. To also end
+     * the Encrypted Link, see `removeContactsAndBlockPeers`.
      */
     func removeContact(publicKey: String) async throws  -> ContactRecord?
 
@@ -2438,8 +2488,29 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Block and remove contacts in one shared-state transaction.
      *
      * Returns removed records. Busy peers remain unchanged; contacts with public
-     * markers are blocked but retained. Callers enforce subscription policy and
-     * perform any best-effort withdrawal before this operation.
+     * markers are blocked but retained; keys without a Contact Record are
+     * skipped and not blocked. Blocking parks pending private work and pauses
+     * accepted Allowances and Payment Requests, as described on `blockPeer`.
+     * Callers enforce subscription policy and perform any best-effort
+     * withdrawal before this operation.
+     *
+     * To end a contact's Encrypted Link without keeping the peer blocked, call
+     * `endAllowance` and `cancelPaymentRequest` for what the user wants gone.
+     * While the peer is still Linked, call
+     * `clearPrivatePaymentListAndProcessOutbound` and continue only when its
+     * report's `failedToQueue` and `failedToDeliver` are both empty;
+     * otherwise call it again later, since each call queues a fresh empty
+     * list. Do not block until it reports success, because the block parks an
+     * unsent list. The queue is processed in order, so this also sends those
+     * messages first. Another runtime or device of the same Paykit App that
+     * queues a list for this peer can supersede the clear, which the report
+     * shows, so pause such writers during cleanup. Then
+     * persist the app's own record of intent to end the link with that peer,
+     * call this method and `unblockPeer`, and clear the record. On startup,
+     * unblock only peers that carry that record and are still Blocked. Never
+     * infer intent from a Blocked peer without a Contact Record: the block
+     * records no reason and is shared by every app and device on the
+     * identity. See "Profiles and Contacts" in the README.
      */
     func removeContactsAndBlockPeers(publicKeys: [String]) async throws  -> [ContactRecord]
 
@@ -2587,9 +2658,13 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Save contacts and unblock selected blocked peers in one atomic transaction.
      *
      * For explicit contact additions or restoration, not label edits. Unblocked
-     * peers need a fresh Encrypted Link; other links remain unchanged. Ordering,
-     * duplicates and metadata follow `save_contacts`. Invalid input or an active
-     * lease on a selected blocked peer rejects the entire batch.
+     * peers need a fresh Encrypted Link Handshake. It requeues eligible parked
+     * private work, which the next `processOutboundPrivateMessages` sends, and
+     * accepted Allowances and Payment Requests authorize again without new
+     * consent, as described on `unblockPeer`. Other links remain
+     * unchanged. Ordering, duplicates and metadata follow `save_contacts`.
+     * Invalid input or an active lease on a selected blocked peer rejects the
+     * entire batch.
      */
     func saveContactsAndUnblockPeers(updates: [ContactUpdate]) async throws  -> [ContactRecord]
 
@@ -2679,6 +2754,17 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Remove a local peer block and return the peer to NotLinked.
+     *
+     * The counterparty is not notified, and old Encrypted Link state is not
+     * restored. When a fresh Encrypted Link Handshake completes, it requeues
+     * eligible work parked by `blockPeer`, which the next
+     * `processOutboundPrivateMessages` sends, and accepted Allowances and
+     * accepted Payment Requests authorize again without new consent. If the user
+     * wanted them gone, call `endAllowance` after relink, or confirm with the
+     * user before calling `acceptPaymentRequestAutomatically` for this
+     * counterparty again. Until that handshake,
+     * `pendingOutboundPrivateCounterparties` can list the peer and sending to
+     * it fails with a `RecoveryRequired` error.
      */
     func unblockPeer(counterparty: String) async throws  -> LinkedPeerRecord
 
@@ -3132,6 +3218,29 @@ open func beginPaymentExecution(attemptId: String, checks: PaymentExecutionCheck
 
     /**
      * Block a counterparty for local Paykit private workflows.
+     *
+     * Local policy; the counterparty is not notified. Clears Encrypted Link
+     * state, and fails with a `ConcurrentUpdate` error while another peer
+     * link operation, such as a send, is running.
+     *
+     * Queued outbound messages are parked as `RecoveryRequired`, not deleted.
+     * After `unblockPeer`, a fresh Encrypted Link Handshake requeues them
+     * unchanged as `Pending`, except messages whose Paykit App is then
+     * unregistered or retired, but does not send them: call
+     * `processOutboundPrivateMessages`. Event Messages keep their order; a
+     * newer Private Payment List can supersede a requeued one. No call
+     * withdraws parked work. While blocked, no new
+     * private message, including a Payment Proof, can be queued for the peer.
+     *
+     * Accepted Allowances and accepted Payment Requests are paused, not
+     * revoked, and authorize again after relink without new consent. While
+     * blocked, `endAllowance` is refused, reads that name this counterparty
+     * fail with a policy error, and reads across counterparties skip it. So
+     * first deliver pending Event Messages with
+     * `processOutboundPrivateMessages`, which is confirmed only when each
+     * message's id appears in a returned report's `sent`, and call
+     * `endAllowance` for authority the user wants gone. See "Blocking a
+     * peer" in the README.
      */
 open func blockPeer(counterparty: String)async throws  -> LinkedPeerRecord  {
     return
@@ -3266,6 +3375,10 @@ open func clearPrivatePaymentList(counterparty: String)async throws  -> QueuedPr
 
     /**
      * Queue an empty Private Payment List and process that counterparty's queue.
+     *
+     * Each call queues a fresh empty list, which supersedes older pending
+     * lists from this Paykit App. While the counterparty is Linked, an empty
+     * `failedToQueue` and `failedToDeliver` mean the empty list was sent.
      */
 open func clearPrivatePaymentListAndProcessOutbound(counterparty: String)async throws  -> PrivatePaymentListDeliveryReport  {
     return
@@ -3456,6 +3569,10 @@ open func encryptedLinkRecoveryMarkerStatus(counterparty: String)async throws  -
 
     /**
      * Queue a proposal withdrawal or unilateral End for accepted authority.
+     *
+     * Fails with a policy error while the counterparty is Blocked and with a
+     * `RecoveryRequired` error while its Encrypted Link is not ready, so end
+     * Allowances before blocking a peer; see `blockPeer`.
      */
 open func endAllowance(counterparty: String, allowanceId: String)async throws  -> AllowanceRecord  {
     return
@@ -3796,6 +3913,7 @@ open func forgetSessionAccess()async throws  -> IdentityStatus  {
 
     /**
      * Return one Allowance from one exact authenticated Encrypted Link.
+     * Fails with a policy error while the counterparty is Blocked.
      */
 open func getAllowance(counterparty: String, allowanceId: String)async throws  -> AllowanceRecord?  {
     return
@@ -3984,6 +4102,11 @@ open func linkedPeers()async throws  -> [LinkedPeerRecord]  {
 
     /**
      * Return Allowances matching a local SDK filter, newest first by local record time (presentation order only).
+     *
+     * A counterparty filter naming a Blocked peer fails with a policy error
+     * when that peer has Allowance messages and returns an empty list
+     * otherwise. Without a counterparty filter, blocked peers are skipped.
+     * See `blockPeer`.
      */
 open func listAllowances(filter: AllowanceFilter)async throws  -> [AllowanceRecord]  {
     return
@@ -4004,6 +4127,8 @@ open func listAllowances(filter: AllowanceFilter)async throws  -> [AllowanceReco
 
     /**
      * Return Payment Requests matching a local SDK filter.
+     * A filter naming a Blocked counterparty fails with a policy error; without
+     * a counterparty, blocked peers are skipped.
      */
 open func listPaymentRequests(filter: PaymentRequestFilter)async throws  -> [PaymentRequestRecord]  {
     return
@@ -4212,6 +4337,7 @@ open func paymentRequests()async throws  -> [PaymentRequestRecord]  {
 
     /**
      * Return Payment Requests involving one counterparty.
+     * Fails with a policy error while the counterparty is Blocked; see `blockPeer`.
      */
 open func paymentRequestsWith(counterparty: String)async throws  -> [PaymentRequestRecord]  {
     return
@@ -4809,6 +4935,7 @@ open func receivePrivateMessagesFromLinkedPeers()async throws  -> [PrivateStream
     /**
      * Inspect inbound proposals from one counterparty.
      * Quotes and actionable state require the full view, which includes outbound acceptance.
+     * Fails with a policy error while the counterparty is Blocked.
      */
 open func receivedPaymentRequestsFrom(counterparty: String)async throws  -> [PaymentRequestRecord]  {
     return
@@ -5001,6 +5128,15 @@ open func releasePaymentRequestExecutionClaim(counterparty: String, paymentReque
 
     /**
      * Remove a Contact Record when it has no public marker to clean up.
+     *
+     * Only the record is removed. The Encrypted Link, private stream intake,
+     * queued outbound messages, accepted Allowances, and the counterparty's
+     * copy of the last Private Payment List this identity sent are kept, and a
+     * later re-add reuses the same Encrypted Link. Removal restores the retained
+     * private stream item limit only when this identity has never queued or
+     * sent that counterparty a Payment Request, Payment Request Acceptance,
+     * Payment Proof, Allowance proposal, or Allowance Acceptance. To also end
+     * the Encrypted Link, see `removeContactsAndBlockPeers`.
      */
 open func removeContact(publicKey: String)async throws  -> ContactRecord?  {
     return
@@ -5023,8 +5159,29 @@ open func removeContact(publicKey: String)async throws  -> ContactRecord?  {
      * Block and remove contacts in one shared-state transaction.
      *
      * Returns removed records. Busy peers remain unchanged; contacts with public
-     * markers are blocked but retained. Callers enforce subscription policy and
-     * perform any best-effort withdrawal before this operation.
+     * markers are blocked but retained; keys without a Contact Record are
+     * skipped and not blocked. Blocking parks pending private work and pauses
+     * accepted Allowances and Payment Requests, as described on `blockPeer`.
+     * Callers enforce subscription policy and perform any best-effort
+     * withdrawal before this operation.
+     *
+     * To end a contact's Encrypted Link without keeping the peer blocked, call
+     * `endAllowance` and `cancelPaymentRequest` for what the user wants gone.
+     * While the peer is still Linked, call
+     * `clearPrivatePaymentListAndProcessOutbound` and continue only when its
+     * report's `failedToQueue` and `failedToDeliver` are both empty;
+     * otherwise call it again later, since each call queues a fresh empty
+     * list. Do not block until it reports success, because the block parks an
+     * unsent list. The queue is processed in order, so this also sends those
+     * messages first. Another runtime or device of the same Paykit App that
+     * queues a list for this peer can supersede the clear, which the report
+     * shows, so pause such writers during cleanup. Then
+     * persist the app's own record of intent to end the link with that peer,
+     * call this method and `unblockPeer`, and clear the record. On startup,
+     * unblock only peers that carry that record and are still Blocked. Never
+     * infer intent from a Blocked peer without a Contact Record: the block
+     * records no reason and is shared by every app and device on the
+     * identity. See "Profiles and Contacts" in the README.
      */
 open func removeContactsAndBlockPeers(publicKeys: [String])async throws  -> [ContactRecord]  {
     return
@@ -5427,9 +5584,13 @@ open func saveContacts(updates: [ContactUpdate])async throws  -> [ContactRecord]
      * Save contacts and unblock selected blocked peers in one atomic transaction.
      *
      * For explicit contact additions or restoration, not label edits. Unblocked
-     * peers need a fresh Encrypted Link; other links remain unchanged. Ordering,
-     * duplicates and metadata follow `save_contacts`. Invalid input or an active
-     * lease on a selected blocked peer rejects the entire batch.
+     * peers need a fresh Encrypted Link Handshake. It requeues eligible parked
+     * private work, which the next `processOutboundPrivateMessages` sends, and
+     * accepted Allowances and Payment Requests authorize again without new
+     * consent, as described on `unblockPeer`. Other links remain
+     * unchanged. Ordering, duplicates and metadata follow `save_contacts`.
+     * Invalid input or an active lease on a selected blocked peer rejects the
+     * entire batch.
      */
 open func saveContactsAndUnblockPeers(updates: [ContactUpdate])async throws  -> [ContactRecord]  {
     return
@@ -5704,6 +5865,17 @@ open func syncPublicEndpointsWithReceivingDetails(receivingDetails: [PublicRecei
 
     /**
      * Remove a local peer block and return the peer to NotLinked.
+     *
+     * The counterparty is not notified, and old Encrypted Link state is not
+     * restored. When a fresh Encrypted Link Handshake completes, it requeues
+     * eligible work parked by `blockPeer`, which the next
+     * `processOutboundPrivateMessages` sends, and accepted Allowances and
+     * accepted Payment Requests authorize again without new consent. If the user
+     * wanted them gone, call `endAllowance` after relink, or confirm with the
+     * user before calling `acceptPaymentRequestAutomatically` for this
+     * counterparty again. Until that handshake,
+     * `pendingOutboundPrivateCounterparties` can list the peer and sending to
+     * it fails with a `RecoveryRequired` error.
      */
 open func unblockPeer(counterparty: String)async throws  -> LinkedPeerRecord  {
     return
@@ -7989,6 +8161,11 @@ public func FfiConverterTypeSdkBackupBlob_lower(_ value: SdkBackupBlob) -> Unsaf
  *
  * Callbacks must not synchronously call back into the same SDK handle while
  * the originating SDK call is waiting for them.
+ *
+ * Report callback failures by throwing the Paykit error type (Swift
+ * `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+ * its `Storage` case with code `unexpected_callback_error`, and its message
+ * is discarded.
  */
 public protocol SdkPaymentAdapter: AnyObject, Sendable {
 
@@ -8002,7 +8179,8 @@ public protocol SdkPaymentAdapter: AnyObject, Sendable {
      * `PaykitError.PaymentAdapter(code:context:)`, Kotlin
      * `PaykitException.PaymentAdapter`), never an empty list or a subset.
      * The sync then fails without changing publication records or endpoints.
-     * Other foreign exceptions are not mapped to a clean Paykit error.
+     * Any other thrown error also fails the sync, as the `Storage` case with
+     * code `unexpected_callback_error`.
      */
     func currentPublicReceivingDetails() throws  -> [PublicReceivingDetail]
 
@@ -8050,6 +8228,11 @@ public protocol SdkPaymentAdapter: AnyObject, Sendable {
  *
  * Callbacks must not synchronously call back into the same SDK handle while
  * the originating SDK call is waiting for them.
+ *
+ * Report callback failures by throwing the Paykit error type (Swift
+ * `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+ * its `Storage` case with code `unexpected_callback_error`, and its message
+ * is discarded.
  */
 open class SdkPaymentAdapterImpl: SdkPaymentAdapter, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -8113,7 +8296,8 @@ open class SdkPaymentAdapterImpl: SdkPaymentAdapter, @unchecked Sendable {
      * `PaykitError.PaymentAdapter(code:context:)`, Kotlin
      * `PaykitException.PaymentAdapter`), never an empty list or a subset.
      * The sync then fails without changing publication records or endpoints.
-     * Other foreign exceptions are not mapped to a clean Paykit error.
+     * Any other thrown error also fails the sync, as the `Storage` case with
+     * code `unexpected_callback_error`.
      */
 open func currentPublicReceivingDetails()throws  -> [PublicReceivingDetail]  {
     return try  FfiConverterSequenceTypePublicReceivingDetail.lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
@@ -8486,6 +8670,11 @@ public func FfiConverterTypeSdkPaymentAdapter_lower(_ value: SdkPaymentAdapter) 
  *
  * Callbacks must not synchronously call back into the same SDK handle. Session
  * workflows may hold that handle's session-operation gate while invoking them.
+ *
+ * Report callback failures by throwing the Paykit error type (Swift
+ * `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+ * its `Storage` case with code `unexpected_callback_error`, and its message
+ * is discarded.
  */
 public protocol SdkPubkySessionProvider: AnyObject, Sendable {
 
@@ -8512,6 +8701,11 @@ public protocol SdkPubkySessionProvider: AnyObject, Sendable {
  *
  * Callbacks must not synchronously call back into the same SDK handle. Session
  * workflows may hold that handle's session-operation gate while invoking them.
+ *
+ * Report callback failures by throwing the Paykit error type (Swift
+ * `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+ * its `Storage` case with code `unexpected_callback_error`, and its message
+ * is discarded.
  */
 open class SdkPubkySessionProviderImpl: SdkPubkySessionProvider, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -8939,6 +9133,11 @@ public func FfiConverterTypeSdkStateBlob_lower(_ value: SdkStateBlob) -> UnsafeM
  * callback because doing so would deadlock.
  * Independent handles for one identity must use the same atomic backing store;
  * a per-handle mutex does not coordinate separate applications or processes.
+ *
+ * Report callback failures by throwing the Paykit error type (Swift
+ * `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+ * its `Storage` case with code `unexpected_callback_error`, and its message
+ * is discarded.
  */
 public protocol SdkStateBlobStore: AnyObject, Sendable {
 
@@ -8973,6 +9172,11 @@ public protocol SdkStateBlobStore: AnyObject, Sendable {
  * callback because doing so would deadlock.
  * Independent handles for one identity must use the same atomic backing store;
  * a per-handle mutex does not coordinate separate applications or processes.
+ *
+ * Report callback failures by throwing the Paykit error type (Swift
+ * `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+ * its `Storage` case with code `unexpected_callback_error`, and its message
+ * is discarded.
  */
 open class SdkStateBlobStoreImpl: SdkStateBlobStore, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -16437,7 +16641,18 @@ public struct PrivatePaymentListDeliveryReport {
      */
     public var failedToQueue: [PrivatePaymentListSyncChange]
     /**
-     * Counterparties queued successfully but failed during outbound delivery.
+     * Delivery and reservation cleanup failures after queueing.
+     *
+     * Empty means every list in `queued` and `cleared` was sent, except lists
+     * still queued for a counterparty whose Encrypted Link Handshake is
+     * pending; those stay eligible for a later run. A list that was not sent
+     * is reported with its `outboundMessageId`, for example one left queued
+     * behind an older message in retry backoff, one superseded by a newer
+     * Private Payment List, or one whose outbound record is gone. To recover
+     * any entry, call the same high-level operation again with the current
+     * complete intent; it queues a fresh list that supersedes older pending
+     * ones, while `processPendingPrivateMessages` only advances lists still
+     * queued.
      */
     public var failedToDeliver: [PrivatePaymentListDeliveryFailure]
 
@@ -16454,7 +16669,18 @@ public struct PrivatePaymentListDeliveryReport {
          * Counterparties that could not be queued or cleared.
          */failedToQueue: [PrivatePaymentListSyncChange],
         /**
-         * Counterparties queued successfully but failed during outbound delivery.
+         * Delivery and reservation cleanup failures after queueing.
+         *
+         * Empty means every list in `queued` and `cleared` was sent, except lists
+         * still queued for a counterparty whose Encrypted Link Handshake is
+         * pending; those stay eligible for a later run. A list that was not sent
+         * is reported with its `outboundMessageId`, for example one left queued
+         * behind an older message in retry backoff, one superseded by a newer
+         * Private Payment List, or one whose outbound record is gone. To recover
+         * any entry, call the same high-level operation again with the current
+         * complete intent; it queues a fresh list that supersedes older pending
+         * ones, while `processPendingPrivateMessages` only advances lists still
+         * queued.
          */failedToDeliver: [PrivatePaymentListDeliveryFailure]) {
         self.queued = queued
         self.cleared = cleared
@@ -26380,7 +26606,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_begin_payment_execution() != 57909) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_block_peer() != 3462) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_block_peer() != 4626) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_cancel_payment_request() != 58269) {
@@ -26398,7 +26624,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list() != 56925) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list_and_process_outbound() != 5141) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list_and_process_outbound() != 22101) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_config() != 29410) {
@@ -26428,7 +26654,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_encrypted_link_recovery_marker_status() != 21009) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_end_allowance() != 22461) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_end_allowance() != 48555) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_enqueue_private_payment_list() != 42080) {
@@ -26473,7 +26699,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_forget_session_access() != 59961) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_get_allowance() != 6959) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_get_allowance() != 6417) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_identity_status() != 8559) {
@@ -26500,10 +26726,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_linked_peers() != 30970) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_list_allowances() != 36022) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_list_allowances() != 37068) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_list_payment_requests() != 43354) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_list_payment_requests() != 41021) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_list_pubky_directory_page() != 28090) {
@@ -26533,7 +26759,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_payment_requests() != 9060) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_payment_requests_with() != 33620) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_payment_requests_with() != 35692) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_pending_outbound_private_counterparties() != 36875) {
@@ -26617,7 +26843,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_receive_private_messages_from_linked_peers() != 15229) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_received_payment_requests_from() != 4199) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_received_payment_requests_from() != 55582) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_reconcile_allowance_accounting() != 33732) {
@@ -26641,10 +26867,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_release_payment_request_execution_claim() != 2234) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 39834) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 47245) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contacts_and_block_peers() != 10421) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contacts_and_block_peers() != 63335) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_encrypted_link_recovery_marker() != 34687) {
@@ -26695,7 +26921,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contacts() != 6516) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contacts_and_unblock_peers() != 14421) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contacts_and_unblock_peers() != 42160) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_select_allowance() != 13682) {
@@ -26734,7 +26960,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_endpoints_with_receiving_details() != 61566) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_unblock_peer() != 22658) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_unblock_peer() != 49850) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_upload_profile_avatar() != 49965) {
@@ -26827,7 +27053,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffisdkbackupblob_export_bytes() != 44480) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_current_public_receiving_details() != 1235) {
+    if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_current_public_receiving_details() != 52995) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_current_private_receiving_details() != 22405) {

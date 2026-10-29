@@ -1005,6 +1005,136 @@ async fn test_list_payment_requests_counterparty_filter_preserves_blocked_error(
     ));
 }
 
+/// Blocking parks the blocker's own queued Payment Proof; it does not retire it.
+/// The same proof, with the same Event ID, is queued again after relink.
+#[tokio::test]
+async fn test_block_and_relink_preserve_queued_payment_proof() {
+    let storage = registered_test_storage();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    seed_private_capable_identity_and_link(&storage, counterparty.clone()).await;
+    complete_link_handshake(&storage, &counterparty).await;
+    let request_id = PaymentRequestId::new_v4();
+    persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        vec![payment_request_message(
+            EventId::new_v4().as_str(),
+            request_id.as_str(),
+            None,
+        )],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let enqueue = |event: PaymentRequestEvent| {
+        let (storage, counterparty) = (storage.clone(), counterparty.clone());
+        async move {
+            crate::domain::payment_requests::enqueue_payment_request_event(
+                &storage,
+                counterparty,
+                &app_id(),
+                &event,
+                FixedClock.now(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    enqueue(PaymentRequestEvent::Acceptance(
+        PaymentRequestAcceptance::new(EventId::new_v4(), request_id.clone()),
+    ))
+    .await;
+    let queued_proof = enqueue(PaymentRequestEvent::Proof(PaymentProof::new(
+        EventId::new_v4(),
+        request_id,
+        paykit_lib::PaymentReference::new("invoice-2026-0001").unwrap(),
+        None,
+        app_id(),
+        PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+        JsonMap::new(),
+    )))
+    .await;
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("bitkit").unwrap(),
+        FixedClock,
+    );
+    let proof_status = |records: Vec<PaymentRequestRecord>| {
+        assert_eq!(records.len(), 1);
+        records[0].payment_proofs[0].outbound_status.clone()
+    };
+    assert_eq!(
+        proof_status(sdk.payment_requests_with(&counterparty).await.unwrap()),
+        Some(OutboundPrivateMessageStatus::Pending)
+    );
+    let before = storage.snapshot().unwrap();
+
+    sdk.block_peer(counterparty.clone()).await.unwrap();
+    let blocked = storage.snapshot().unwrap();
+    let message_ids = |messages: &[OutboundPrivateMessageRecord]| {
+        messages
+            .iter()
+            .map(|message| message.outbound_message_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        message_ids(&blocked.outbound_private_messages),
+        message_ids(&before.outbound_private_messages)
+    );
+    assert!(blocked
+        .outbound_private_messages
+        .iter()
+        .all(|message| message.status == OutboundPrivateMessageStatus::RecoveryRequired));
+    assert_eq!(blocked.private_stream_items, before.private_stream_items);
+    assert!(matches!(
+        sdk.payment_requests_with(&counterparty).await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
+    // Every private enqueue shares one readiness rule. `submit_payment_proof`
+    // checks it only after loading a live Pubky session, which this test has
+    // not got, so an Allowance proposal stands in for a new Event Message.
+    assert!(matches!(
+        enqueue_allowance_proposal(
+            &storage,
+            counterparty.clone(),
+            app_id(),
+            AllowanceLocalRole::Allower,
+            AllowanceTerms::builder("btc")
+                .lifetime_amount_limit("1")
+                .build()
+                .unwrap(),
+            FixedClock.now(),
+        )
+        .await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
+    assert_eq!(storage.snapshot().unwrap(), blocked);
+
+    let unblocked = sdk.unblock_peer(counterparty.clone()).await.unwrap();
+    assert_eq!(unblocked.state, LinkedPeerState::NotLinked);
+    assert_eq!(
+        proof_status(sdk.payment_requests_with(&counterparty).await.unwrap()),
+        Some(OutboundPrivateMessageStatus::RecoveryRequired)
+    );
+
+    complete_link_handshake(&storage, &counterparty).await;
+    assert_eq!(
+        proof_status(sdk.payment_requests_with(&counterparty).await.unwrap()),
+        Some(OutboundPrivateMessageStatus::Pending)
+    );
+    let requeued = storage
+        .snapshot()
+        .unwrap()
+        .outbound_private_messages
+        .into_iter()
+        .find(|message| message.outbound_message_id == queued_proof.outbound_message_id)
+        .unwrap();
+    assert_eq!(requeued.raw_json, queued_proof.raw_json);
+}
+
 #[tokio::test]
 async fn test_active_recurring_payment_requests_filters_accepted_recurring_requests() {
     let storage = registered_test_storage();

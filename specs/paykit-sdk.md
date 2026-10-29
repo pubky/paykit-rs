@@ -350,7 +350,9 @@ a chosen counterparty is not refused for the number of retained items, as
 before the limit existed. Nothing else lifts the limit. A rejection,
 cancellation, Allowance End, execution claim, retrieved Receipt, Delivery
 Confirmation, Private Payment List, or Receipt Access MUST NOT lift it, because
-each can follow from one unsolicited message without a local choice.
+each can follow from one unsolicited message without a local choice. Removing a
+Contact Record does not end the Encrypted Link, so intake and queued sends to
+that counterparty continue (see [Block A Peer](#block-a-peer)).
 
 - At most 4,096 private stream items are retained per counterparty, counted
   across every message kind and parse status. When a receive transaction could
@@ -1378,6 +1380,42 @@ Receive routing should extend the same raw stream log to Payment Requests,
 Payment Proofs, Allowance lifecycle events, and any other Event Message kinds.
 Allowance lifecycle/history views derive from retained events on the exact
 Encrypted Link and preserve invalid or unresolved evidence for recovery.
+
+### Block A Peer
+
+`block_peer` is local policy and does not notify the counterparty. In one
+storage transaction it claims and releases the peer link operation lease (a
+live peer operation makes the call fail with `ConcurrentUpdate`), marks the
+Linked Peer `Blocked`, and clears the Encrypted Link snapshots. No intake,
+send, or private automation then runs for that counterparty, and no new
+private message can be queued for it. `remove_contacts_and_block_peers` does
+the same for saved contacts and removes their Contact Records.
+
+Blocking parks queued work instead of deleting it. Outbound messages that are
+pending, sending, failed, or recovery required become recovery required.
+`unblock_peer` returns the peer to `NotLinked`, and the next completed
+Encrypted Link Handshake requeues parked messages unchanged as pending, except
+messages whose Paykit App is then unregistered or retired, which stay recovery
+required, and messages the counterparty already confirmed, which become sent.
+The handshake does not send them; the app's next outbound processing
+(`process_outbound_private_messages`) does. Sent
+Event Messages still waiting for a Delivery Confirmation stay queued. Parked
+work is never delivered if the peer is not linked again, and no operation
+withdraws it. Event Messages keep their per-counterparty order. A requeued
+Private Payment List is a Latest-State Message, so a newer list can supersede
+it before it is sent. An app that wants pending Event
+Messages delivered before the block sends them while the peer is still
+`Linked`.
+
+Blocking pauses accepted Allowances and accepted Payment Requests but does not
+revoke them. Payment accounting refuses them while the peer is not `Linked`, and
+after unblock and a fresh Encrypted Link Handshake they authorize again without
+new consent. An app that wants that authority gone ends each Allowance before
+blocking, or after unblock and relink before any further automatic payment.
+While the counterparty is blocked, ending an Allowance is refused and reads
+across counterparties skip it. Reads that name it (Payment Requests,
+Allowances, Receipts, and Receipt Access) fail with `Policy`, except that an
+Allowance list for a counterparty with no Allowance messages is empty.
 
 ### Forget A Blocked Peer
 

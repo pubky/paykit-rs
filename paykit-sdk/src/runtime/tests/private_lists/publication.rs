@@ -1,5 +1,6 @@
 use super::*;
 use crate::runtime::outbound_private::PrivateSendReadiness;
+use crate::runtime::private_lists::OutboundListRun;
 
 #[test]
 fn test_private_payment_list_delivery_futures_stay_stack_bounded() {
@@ -107,6 +108,269 @@ async fn test_private_list_delivery_preflight_preserves_unready_work() {
         assert_eq!(storage.snapshot().unwrap(), before);
         assert!(canceled.lock().unwrap().is_empty());
     }
+}
+
+type TestPrivateListSdk =
+    PaykitSdk<InMemoryStorage, TestPubkySessionProvider, PrivateListPaymentAdapter, FixedClock>;
+
+/// Seed a peer with one tracked empty Private Payment List in `status`.
+///
+/// With `backoff_head`, an older Event Message whose prepared send failed and
+/// is still in retry backoff holds the queue head first.
+async fn seed_tracked_private_list(
+    linked: bool,
+    backoff_head: bool,
+    status: OutboundPrivateMessageStatus,
+) -> (
+    TestPrivateListSdk,
+    PubkyPublicKey,
+    PrivatePaymentListDeliveryReport,
+) {
+    let storage = registered_test_storage();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    if linked {
+        seed_private_capable_identity_and_link(&storage, counterparty.clone()).await;
+        storage
+            .transaction(|tx| {
+                let mut peer = default_linked_peer(counterparty.clone());
+                peer.state = LinkedPeerState::Linked;
+                tx.save_linked_peer(peer);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    } else {
+        seed_private_capable_identity_and_handshake(&storage, counterparty.clone()).await;
+    }
+    if backoff_head {
+        storage
+            .transaction(|tx| {
+                let event = payment_request_message(
+                    "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d102",
+                    "b7f9c2a1-6d43-4b0e-a8d4-0fe2c712ab33",
+                    None,
+                );
+                let mut message =
+                    tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                        counterparty.clone(),
+                        app_id(),
+                        event.kind.unwrap(),
+                        event.raw_json,
+                        FixedClock.now(),
+                    ))?;
+                message.attempt_count = 1;
+                message.last_attempt_at = Some(FixedClock.now());
+                message.prepared_send = Some(PreparedOutboundPrivateSend {
+                    destination_path: "/pub/paykit/v0/private/send/0".into(),
+                    ciphertext: vec![1, 2, 3],
+                });
+                let message = mark_outbound_failed(message, "timed out".into(), FixedClock.now());
+                tx.save_outbound_private_message(message)
+            })
+            .await
+            .unwrap();
+    }
+    let list = queue_private_payment_list_with_reservations(
+        &storage,
+        &counterparty,
+        app_id(),
+        Vec::new(),
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    storage
+        .transaction(|tx| {
+            let mut list = list.clone();
+            list.status = status;
+            tx.save_outbound_private_message(list)
+        })
+        .await
+        .unwrap();
+    let report = PrivatePaymentListDeliveryReport {
+        cleared: vec![PrivatePaymentListSyncChange {
+            counterparty: counterparty.clone(),
+            outbound_message_id: Some(list.outbound_message_id),
+            error: None,
+        }],
+        ..PrivatePaymentListDeliveryReport::default()
+    };
+    let sdk = PaykitSdk::with_clock(
+        storage,
+        TestPubkySessionProvider { session: None },
+        PrivateListPaymentAdapter,
+        PaykitSdkConfig::new("bitkit").unwrap(),
+        FixedClock,
+    );
+    (sdk, counterparty, report)
+}
+
+#[tokio::test]
+async fn test_private_list_delivery_reports_list_left_queued_behind_retry_backoff() {
+    let (sdk, counterparty, mut report) =
+        seed_tracked_private_list(true, true, OutboundPrivateMessageStatus::Pending).await;
+    let list_id = report.cleared[0].outbound_message_id.unwrap();
+
+    let send_report = sdk
+        .process_outbound_private_messages_with_readiness(
+            counterparty.clone(),
+            PrivateSendReadiness::PrivatePaymentList,
+        )
+        .await
+        .unwrap();
+    assert_eq!(send_report, OutboundPrivateSendReport::default());
+    sdk.report_unsent_private_payment_lists(
+        &mut report,
+        &counterparty,
+        &OutboundListRun::from_send_report(&send_report),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.failed_to_deliver.len(), 1);
+    let failure = &report.failed_to_deliver[0];
+    assert_eq!(failure.counterparty, counterparty);
+    assert_eq!(failure.outbound_message_id, Some(list_id));
+    assert_eq!(
+        failure.error,
+        format!("Private Payment List {list_id} remains queued")
+    );
+}
+
+#[tokio::test]
+async fn test_private_list_delivery_reports_superseded_list() {
+    // Another runtime or device of the same Paykit App queued a newer list.
+    let (sdk, counterparty, mut report) =
+        seed_tracked_private_list(true, false, OutboundPrivateMessageStatus::Superseded).await;
+    let list_id = report.cleared[0].outbound_message_id.unwrap();
+
+    sdk.report_unsent_private_payment_lists(
+        &mut report,
+        &counterparty,
+        &OutboundListRun::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.failed_to_deliver.len(), 1);
+    assert_eq!(
+        report.failed_to_deliver[0].outbound_message_id,
+        Some(list_id)
+    );
+    assert!(report.failed_to_deliver[0]
+        .error
+        .contains("superseded before it was sent"));
+}
+
+#[tokio::test]
+async fn test_private_list_delivery_skips_sent_and_pending_handshake_lists() {
+    // A reused list sent by an earlier run, and a list sent by this run.
+    for (status, sent_in_run) in [
+        (OutboundPrivateMessageStatus::Sent, false),
+        (OutboundPrivateMessageStatus::Pending, true),
+    ] {
+        let (sdk, counterparty, mut report) = seed_tracked_private_list(true, false, status).await;
+        let list_id = report.cleared[0].outbound_message_id.unwrap();
+        let run = OutboundListRun::from_send_report(&OutboundPrivateSendReport {
+            sent: if sent_in_run {
+                vec![list_id]
+            } else {
+                Vec::new()
+            },
+            ..OutboundPrivateSendReport::default()
+        });
+        sdk.report_unsent_private_payment_lists(&mut report, &counterparty, &run)
+            .await
+            .unwrap();
+        assert!(report.failed_to_deliver.is_empty());
+    }
+
+    // The list stays eligible for a later run once the handshake completes.
+    let (sdk, counterparty, mut report) =
+        seed_tracked_private_list(false, false, OutboundPrivateMessageStatus::Pending).await;
+    sdk.report_unsent_private_payment_lists(
+        &mut report,
+        &counterparty,
+        &OutboundListRun::default(),
+    )
+    .await
+    .unwrap();
+    assert!(report.failed_to_deliver.is_empty());
+}
+
+#[tokio::test]
+async fn test_private_list_delivery_reports_terminal_lists_while_handshake_pending() {
+    // The handshake cannot make these lists sendable, so a pending handshake
+    // must not hide them.
+    for (status, record_missing, expected_error) in [
+        (
+            OutboundPrivateMessageStatus::Superseded,
+            false,
+            "superseded before it was sent",
+        ),
+        (
+            OutboundPrivateMessageStatus::Invalid,
+            false,
+            "is invalid and will not be sent",
+        ),
+        (
+            OutboundPrivateMessageStatus::Pending,
+            true,
+            "was not sent and is no longer queued",
+        ),
+    ] {
+        let (sdk, counterparty, mut report) = seed_tracked_private_list(false, false, status).await;
+        if record_missing {
+            // Track an id with no outbound record, as after compaction.
+            let tracked = report.cleared[0].outbound_message_id.as_mut().unwrap();
+            *tracked += 1000;
+        }
+        let list_id = report.cleared[0].outbound_message_id.unwrap();
+
+        sdk.report_unsent_private_payment_lists(
+            &mut report,
+            &counterparty,
+            &OutboundListRun::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.failed_to_deliver.len(), 1);
+        let failure = &report.failed_to_deliver[0];
+        assert_eq!(failure.counterparty, counterparty);
+        assert_eq!(failure.outbound_message_id, Some(list_id));
+        assert!(
+            failure.error.contains(expected_error),
+            "expected {expected_error:?}, got {:?}",
+            failure.error
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_private_list_delivery_does_not_duplicate_reported_list() {
+    let (sdk, counterparty, mut report) =
+        seed_tracked_private_list(true, false, OutboundPrivateMessageStatus::Failed).await;
+    let list_id = report.cleared[0].outbound_message_id.unwrap();
+    report
+        .failed_to_deliver
+        .push(PrivatePaymentListDeliveryFailure {
+            counterparty: counterparty.clone(),
+            outbound_message_id: Some(list_id),
+            reservation_id: None,
+            error: "transport failed".into(),
+        });
+
+    sdk.report_unsent_private_payment_lists(
+        &mut report,
+        &counterparty,
+        &OutboundListRun::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.failed_to_deliver.len(), 1);
+    assert_eq!(report.failed_to_deliver[0].error, "transport failed");
 }
 
 #[tokio::test]

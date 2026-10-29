@@ -178,7 +178,18 @@ pub struct FfiPrivatePaymentListDeliveryReport {
     pub cleared: Vec<FfiPrivatePaymentListSyncChange>,
     /// Counterparties that could not be queued or cleared.
     pub failed_to_queue: Vec<FfiPrivatePaymentListSyncChange>,
-    /// Counterparties queued successfully but failed during outbound delivery.
+    /// Delivery and reservation cleanup failures after queueing.
+    ///
+    /// Empty means every list in `queued` and `cleared` was sent, except lists
+    /// still queued for a counterparty whose Encrypted Link Handshake is
+    /// pending; those stay eligible for a later run. A list that was not sent
+    /// is reported with its `outboundMessageId`, for example one left queued
+    /// behind an older message in retry backoff, one superseded by a newer
+    /// Private Payment List, or one whose outbound record is gone. To recover
+    /// any entry, call the same high-level operation again with the current
+    /// complete intent; it queues a fresh list that supersedes older pending
+    /// ones, while `processPendingPrivateMessages` only advances lists still
+    /// queued.
     pub failed_to_deliver: Vec<FfiPrivatePaymentListDeliveryFailure>,
 }
 
@@ -262,6 +273,10 @@ impl FfiPaykitSdk {
     }
 
     /// Queue an empty Private Payment List and process that counterparty's queue.
+    ///
+    /// Each call queues a fresh empty list, which supersedes older pending
+    /// lists from this Paykit App. While the counterparty is Linked, an empty
+    /// `failedToQueue` and `failedToDeliver` mean the empty list was sent.
     pub async fn clear_private_payment_list_and_process_outbound(
         &self,
         counterparty: String,

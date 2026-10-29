@@ -25,6 +25,7 @@ where
     /// admission depends on the outbound acceptance history. Malformed recognized
     /// Payment Request events without a valid `payment_request_id` stay in the raw
     /// private stream log and cannot be attached to a request-scoped record.
+    /// Returns `Policy` while the counterparty is `Blocked`.
     pub async fn received_payment_requests_from(
         &self,
         counterparty: &PubkyPublicKey,
@@ -49,7 +50,8 @@ where
     /// Return Payment Requests involving one counterparty.
     ///
     /// Results combine received private-stream events and local outbound
-    /// Payment Request events. They are returned newest-first.
+    /// Payment Request events. They are returned newest-first. Returns `Policy`
+    /// while the counterparty is `Blocked`; see [`Self::block_peer`].
     pub async fn payment_requests_with(
         &self,
         counterparty: &PubkyPublicKey,
@@ -75,6 +77,7 @@ where
     ///
     /// A filter without a counterparty lists across all non-blocked
     /// counterparties that have inbound or outbound Payment Request activity.
+    /// A filter naming a `Blocked` counterparty returns `Policy`.
     /// Results are returned newest-first.
     pub async fn list_payment_requests(
         &self,
