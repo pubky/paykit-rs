@@ -201,6 +201,17 @@ struct SubscriptionGroup {
     peers: Vec<PubkyPublicKey>,
 }
 
+fn active_subscription_group(
+    group: &SubscriptionGroup,
+    peers: Vec<PubkyPublicKey>,
+) -> SubscriptionGroup {
+    SubscriptionGroup {
+        homeserver: group.homeserver.clone(),
+        homeserver_name: group.homeserver_name.clone(),
+        peers,
+    }
+}
+
 enum PrivatePacketAcquisition {
     Absent,
     Inserted,
@@ -1160,11 +1171,7 @@ where
                 }
                 continue;
             }
-            let active_group = SubscriptionGroup {
-                homeserver: group.homeserver.clone(),
-                homeserver_name: group.homeserver_name.clone(),
-                peers: active_peers,
-            };
+            let active_group = active_subscription_group(&group, active_peers);
             let access = match self
                 .load_session_access_for_initialized_identity("start private intake")
                 .await
@@ -1244,7 +1251,7 @@ where
                         audit_disconnected_private_intake_stream(
                             &error,
                             config.healthy_audit_interval,
-                            || self.audit_private_intake_group(&group, &health, &work),
+                            || self.audit_private_intake_group(&active_group, &health, &work),
                         )
                         .await;
                     if audit_outcome.backpressured {
@@ -1265,7 +1272,7 @@ where
             // publish their next packet during audit; subscribing first prevents
             // that packet from falling into the live-stream setup gap.
             let audit_outcome = self
-                .audit_private_intake_group(&group, &health, &work)
+                .audit_private_intake_group(&active_group, &health, &work)
                 .await;
             if audit_outcome.backpressured {
                 topology_changed.notify_one();
@@ -1283,7 +1290,7 @@ where
             };
             let audit_group: PrivateIntakeAudit = {
                 let sdk = Arc::clone(&self);
-                let group = group.clone();
+                let group = active_group.clone();
                 let health = Arc::clone(&health);
                 let work = Arc::clone(&work);
                 Arc::new(move || {
@@ -2653,6 +2660,87 @@ mod tests {
         .await
         .unwrap();
         assert!(supervisor.is_finished());
+    }
+
+    #[tokio::test]
+    async fn test_group_loop_audits_active_peers_so_healthy_sibling_stays_live() {
+        let peers = users(2);
+        let full_peer = peers[0].clone();
+        let healthy_peer = peers[1].clone();
+        let group = SubscriptionGroup {
+            homeserver: pubky::Keypair::random().public_key(),
+            homeserver_name: "homeserver-a".into(),
+            peers,
+        };
+        let mut state = crate::storage::StorageState::default();
+        state.private_intake_peers.insert(
+            full_peer.clone(),
+            crate::storage::PrivateIntakePeerRecord {
+                counterparty: full_peer.clone(),
+                link_generation: 1,
+                buffered_packets: (0..crate::storage::PRIVATE_INTAKE_MAX_PACKETS_PER_PEER)
+                    .map(|receive_counter| BufferedPrivatePacketRecord {
+                        counterparty: full_peer.clone(),
+                        link_generation: 1,
+                        receive_counter: receive_counter as u64,
+                        ciphertext: vec![0; crate::storage::PRIVATE_INTAKE_PACKET_BYTES],
+                        source_cursor: None,
+                        buffered_at: Utc::now(),
+                    })
+                    .collect(),
+                cancelled_handshake_through_generation: None,
+            },
+        );
+        let active_peers = subscribable_private_intake_peers(&state, &group.peers);
+        let active_group = active_subscription_group(&group, active_peers);
+        let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth::default()));
+        let work = Arc::new(Notify::new());
+        let audited = Arc::new(Notify::new());
+        let (stop, stop_rx) = watch::channel(false);
+        let audit: PrivateIntakeAudit = Arc::new({
+            let audited = Arc::clone(&audited);
+            let audited_peers = active_group.peers.clone();
+            move || {
+                let audited = Arc::clone(&audited);
+                let backpressured = audited_peers.contains(&full_peer);
+                Box::pin(async move {
+                    audited.notify_one();
+                    PrivateIntakeAuditOutcome {
+                        handshake_pending: false,
+                        backpressured,
+                    }
+                })
+            }
+        });
+        let mut running = Box::pin(run_connected_private_intake_stream(
+            &active_group,
+            Box::pin(stream::pending()),
+            Duration::from_millis(10),
+            Duration::ZERO,
+            stop_rx,
+            &health,
+            &work,
+            Arc::new(|_, _| Box::pin(async { Ok(PrivatePacketAcquisition::Absent) })),
+            audit,
+            false,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::select! {
+                _ = audited.notified() => {}
+                exit = &mut running => panic!("healthy sibling stream exited during audit: {exit:?}"),
+            }
+        })
+        .await
+        .expect("active sibling should reach live audit");
+        assert_eq!(active_group.peers, vec![healthy_peer]);
+        stop.send(true).unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), running)
+                .await
+                .unwrap(),
+            PrivateIntakeEventLoopExit::Stopped
+        ));
     }
 
     #[test]
