@@ -30,6 +30,17 @@ on low-level `paykit-lib` protocol bindings.
   `forgetSessionAccess` — app-facing account/session lifecycle for the current
   Paykit runtime. `signOut` revokes the Pubky grant and leaves identity-wide
   Paykit state intact; `forgetSessionAccess` performs local-only cleanup.
+- `PaykitSdk.captureGrantObserver(expectedPublicKey)` - capture the admitted
+  owner's existing live grant before cleanup, without restoring credentials.
+  Retain the opaque observer with the original operation and recheck the app's
+  owner/generation after capture and after `observe()`. Observation makes a
+  read-only request through the original Pubky transport without provider
+  callbacks, credential refresh or shared-storage locks. `Active` is
+  point-in-time evidence, not a lease or permission to repeat cleanup;
+  negative, expired, malformed or failed responses remain `Unknown`.
+  The handle cannot be exported or reconstructed after restart. Missing
+  acknowledgements and uncertain mutations still require reconciliation;
+  remaining cleanup requires fresh confirmation.
 - `PaykitSdk.stateRevision` — return the latest observed SDK state revision so
   apps can detect when SDK-managed state changed.
 - `PaykitSdk.observeState` - read a coherent `PaykitStateObservation` for display
@@ -205,10 +216,21 @@ For direct reservation publication, pass one
 reservation list means "publish an empty Private Payment List for this
 counterparty".
 Helpers that both queue and attempt delivery return
-`PrivatePaymentListDeliveryReport` with `queued`, `cleared`,
+`PrivatePaymentListDeliveryReport` with `queued`, `cleared`, `acknowledged`,
 `failedToQueue`, and `failedToDeliver` groups. A peer whose Encrypted Link is
 `LINKING` can appear in `queued`; the message remains eligible for a later
 outbound worker run after the link becomes `LINKED`.
+
+Each `acknowledged` entry identifies a counterparty and exact
+`outboundMessageId` whose publication this runtime witnessed on the current
+Encrypted Link. It is neither counterparty receipt nor a lease. Empty failure
+groups, a stored `Sent` row or a pending handshake do not prove acknowledgement;
+a newer list from this App also withholds acknowledgement of an older list.
+For cleanup, require a matching acknowledgement for every required clear and
+no queue, delivery or reservation-cleanup failure. Retain evidence only with
+the original owner, operation and runtime, invalidate it after relevant local
+changes, and never reconstruct it after restart or use it to replay an
+uncertain mutation.
 
 ### Public File Downloads
 
@@ -731,9 +753,11 @@ bootstrap.approveAuthWithCompanionClaim(
      after a later relink.
   2. While the peer is still Linked, call
      `clearPrivatePaymentListAndProcessOutbound` and continue only when its
-     report's `failedToQueue` and `failedToDeliver` are both empty. Otherwise
-     call it again later; each call queues a fresh empty list, which
-     supersedes older pending ones. Do not block until it reports success,
+     report's `failedToQueue` and `failedToDeliver` are both empty and
+     `acknowledged` contains the exact counterparty and outbound message ID
+     from the required `cleared` entry. Otherwise reconcile the original
+     operation before confirming a new attempt; each call queues a fresh empty
+     list, which supersedes older pending ones. Do not block until it reports success,
      because the block parks an unsent list. The queue is processed in order,
      so this also sends step 1's messages first. Another runtime or device of
      the same Paykit App that queues a list for this peer can supersede the
