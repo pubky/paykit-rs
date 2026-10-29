@@ -685,12 +685,15 @@ async fn renew_private_intake_lease<S: StorageAdapter, C: Clock>(
     storage: &S,
     clock: &C,
     lease_id: u64,
-) -> Result<bool> {
+) -> Result<Option<DateTime<Utc>>> {
     let clock = clock.clone();
     storage
         .transaction(move |tx| {
             let now = clock.now();
-            Ok(tx.renew_private_intake_supervisor(lease_id, now, now + SUPERVISOR_LEASE_TIMEOUT))
+            let expires_at = now + SUPERVISOR_LEASE_TIMEOUT;
+            Ok(tx
+                .renew_private_intake_supervisor(lease_id, now, expires_at)
+                .then_some(expires_at))
         })
         .await
 }
@@ -699,15 +702,39 @@ async fn renew_private_intake_lease_or_stop<S: StorageAdapter, C: Clock>(
     storage: &S,
     clock: &C,
     lease_id: u64,
+    confirmed_expires_at: DateTime<Utc>,
     stop: &watch::Sender<bool>,
-) -> bool {
-    let renewed = renew_private_intake_lease(storage, clock, lease_id)
-        .await
-        .unwrap_or(false);
-    if !renewed {
-        let _ = stop.send(true);
+) -> Option<DateTime<Utc>> {
+    let mut stopped = stop.subscribe();
+    loop {
+        match renew_private_intake_lease(storage, clock, lease_id).await {
+            Ok(Some(expires_at)) => return Some(expires_at),
+            Ok(None) => break,
+            Err(error)
+                if is_transient_private_intake_storage_error(&error)
+                    && clock.now()
+                        < confirmed_expires_at
+                            - chrono::Duration::from_std(SUPERVISOR_LEASE_RENEW_INTERVAL)
+                                .expect("renew interval fits chrono duration") =>
+            {
+                if wait_reconnect_or_stop(&mut stopped).await {
+                    return None;
+                }
+            }
+            Err(_) => break,
+        }
     }
-    renewed
+    let _ = stop.send(true);
+    None
+}
+
+fn is_transient_private_intake_storage_error(error: &PaykitSdkError) -> bool {
+    matches!(
+        error,
+        PaykitSdkError::SharedStateBusy { .. }
+            | PaykitSdkError::ConcurrentUpdate { .. }
+            | PaykitSdkError::Transport { .. }
+    )
 }
 
 async fn replace_private_intake_admissions<S: StorageAdapter, C: Clock>(
@@ -722,6 +749,32 @@ async fn replace_private_intake_admissions<S: StorageAdapter, C: Clock>(
             tx.replace_private_intake_admissions(lease_id, clock.now(), admitted_homeservers)
         })
         .await
+}
+
+async fn replace_private_intake_admissions_with_retry<S: StorageAdapter, C: Clock>(
+    storage: &S,
+    clock: &C,
+    lease_id: u64,
+    admitted_homeservers: HashMap<PubkyPublicKey, String>,
+    stop: &mut watch::Receiver<bool>,
+) -> Result<bool> {
+    loop {
+        match replace_private_intake_admissions(
+            storage,
+            clock,
+            lease_id,
+            admitted_homeservers.clone(),
+        )
+        .await
+        {
+            Err(error) if is_transient_private_intake_storage_error(&error) => {
+                if wait_reconnect_or_stop(stop).await {
+                    return Ok(false);
+                }
+            }
+            result => return result,
+        }
+    }
 }
 
 async fn release_private_intake_lease<S: StorageAdapter>(storage: &S, lease_id: u64) -> Result<()> {
@@ -837,6 +890,7 @@ where
             let mut stop_rx = stop.subscribe();
             let stop_tx = stop.clone();
             tasks.push(tokio::spawn(async move {
+                let mut confirmed_expires_at = lease.expires_at;
                 let mut renewal = tokio::time::interval(SUPERVISOR_LEASE_RENEW_INTERVAL);
                 renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 renewal.tick().await;
@@ -850,11 +904,11 @@ where
                                 &sdk.storage,
                                 &sdk.clock,
                                 lease_id,
+                                confirmed_expires_at,
                                 &stop_tx,
                             ).await;
-                            if !renewed {
-                                return;
-                            }
+                            let Some(expires_at) = renewed else { return; };
+                            confirmed_expires_at = expires_at;
                         }
                     }
                 }
@@ -996,11 +1050,20 @@ where
                         match self.resolve_private_intake_groups().await {
                             Ok(resolved) if resolved != groups => {
                                 let admissions = admitted_homeservers(&resolved);
-                                let replaced = replace_private_intake_admissions(
+                                for group in &resolved {
+                                    set_group_state(
+                                        &health,
+                                        group,
+                                        PrivateIntakeTransportState::Stale,
+                                    )
+                                    .await;
+                                }
+                                let replaced = replace_private_intake_admissions_with_retry(
                                     &self.storage,
                                     &self.clock,
                                     lease_id,
                                     admissions,
+                                    &mut stop,
                                 )
                                 .await;
                                 match replaced {
@@ -1115,6 +1178,8 @@ where
                     continue;
                 }
             };
+            let client = access.outbox_client.client().clone();
+            drop(access);
             let cursors = match self
                 .storage
                 .transaction({
@@ -1151,23 +1216,21 @@ where
                 .filter_map(|(peer, cursor)| peer.to_public_key().ok().map(|key| (key, *cursor)))
                 .collect::<Vec<_>>();
             let users = public_keys.iter().map(|(key, cursor)| (key, *cursor));
-            let builder = match pubky::EventStreamBuilder::for_homeserver(
-                access.outbox_client.client().clone(),
-                &active_group.homeserver,
-            )
-            .add_users(users)
-            {
-                Ok(builder) => builder,
-                Err(_) => {
-                    set_group_state(
-                        &health,
-                        &active_group,
-                        PrivateIntakeTransportState::Unsupported,
-                    )
-                    .await;
-                    break;
-                }
-            };
+            let builder =
+                match pubky::EventStreamBuilder::for_homeserver(client, &active_group.homeserver)
+                    .add_users(users)
+                {
+                    Ok(builder) => builder,
+                    Err(_) => {
+                        set_group_state(
+                            &health,
+                            &active_group,
+                            PrivateIntakeTransportState::Unsupported,
+                        )
+                        .await;
+                        break;
+                    }
+                };
             let stream = match builder
                 .path(paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX)
                 .max_event_bytes(config.max_event_bytes)
@@ -1177,19 +1240,22 @@ where
             {
                 Ok(stream) => stream,
                 Err(error) => {
-                    if is_unsupported_event_stream(&error) {
-                        set_group_state(
-                            &health,
-                            &active_group,
-                            PrivateIntakeTransportState::Unsupported,
+                    let (state, retry_after, audit_outcome) =
+                        audit_disconnected_private_intake_stream(
+                            &error,
+                            config.healthy_audit_interval,
+                            || self.audit_private_intake_group(&group, &health, &work),
                         )
                         .await;
-                        break;
+                    if audit_outcome.backpressured {
+                        topology_changed.notify_one();
+                    } else {
+                        set_group_state(&health, &active_group, state).await;
                     }
-                    set_group_state(&health, &active_group, PrivateIntakeTransportState::Stale)
-                        .await;
-                    topology_changed.notify_one();
-                    if wait_reconnect_or_stop(&mut stop).await {
+                    if state == PrivateIntakeTransportState::Stale {
+                        topology_changed.notify_one();
+                    }
+                    if wait_retry_or_stop(&mut stop, retry_after).await {
                         break;
                     }
                     continue;
@@ -1343,25 +1409,7 @@ where
             })
             .await?;
         if matches!(phase, Some(PrivateIntakePeerPhase::PendingHandshake { .. })) {
-            let report =
-                match self.advance_link_handshake(counterparty.clone()).await {
-                    Ok(report) => report,
-                    Err(error) => {
-                        let counterparty_for_recovery = counterparty.clone();
-                        let recovery_required =
-                            self.storage
-                                .transaction(move |tx| {
-                                    Ok(tx.linked_peer(&counterparty_for_recovery).is_some_and(
-                                        |peer| peer.state == LinkedPeerState::RecoveryRequired,
-                                    ))
-                                })
-                                .await?;
-                        if !recovery_required {
-                            return Err(error);
-                        }
-                        self.ensure_link_with_peer(counterparty.clone(), 1).await?
-                    }
-                };
+            let report = self.advance_link_handshake(counterparty.clone()).await?;
             if report.state == LinkedPeerState::Linking {
                 if let Some(cursor) = cursor {
                     self.storage
@@ -1465,10 +1513,48 @@ async fn set_group_state(
 }
 
 async fn wait_reconnect_or_stop(stop: &mut watch::Receiver<bool>) -> bool {
+    wait_retry_or_stop(stop, RECONNECT_DELAY).await
+}
+
+async fn wait_retry_or_stop(stop: &mut watch::Receiver<bool>, delay: Duration) -> bool {
+    if *stop.borrow() {
+        return true;
+    }
     tokio::select! {
-        _ = tokio::time::sleep(RECONNECT_DELAY) => false,
+        _ = tokio::time::sleep(delay) => false,
         changed = stop.changed() => changed.is_err() || *stop.borrow(),
     }
+}
+
+fn disconnected_stream_retry(
+    error: &pubky::Error,
+    healthy_audit_interval: Duration,
+) -> (PrivateIntakeTransportState, Duration) {
+    if is_unsupported_event_stream(error) {
+        (
+            PrivateIntakeTransportState::Unsupported,
+            healthy_audit_interval,
+        )
+    } else {
+        (PrivateIntakeTransportState::Stale, RECONNECT_DELAY)
+    }
+}
+
+async fn audit_disconnected_private_intake_stream<F, Fut>(
+    error: &pubky::Error,
+    healthy_audit_interval: Duration,
+    audit: F,
+) -> (
+    PrivateIntakeTransportState,
+    Duration,
+    PrivateIntakeAuditOutcome,
+)
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = PrivateIntakeAuditOutcome>,
+{
+    let (state, retry_after) = disconnected_stream_retry(error, healthy_audit_interval);
+    (state, retry_after, audit().await)
 }
 
 fn is_unsupported_event_stream(error: &pubky::Error) -> bool {
@@ -1485,7 +1571,13 @@ fn is_unsupported_event_stream(error: &pubky::Error) -> bool {
 mod tests {
     use super::*;
     use futures_util::stream;
-    use std::sync::Mutex as StdMutex;
+    use std::{
+        collections::VecDeque,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Mutex as StdMutex,
+        },
+    };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -1537,6 +1629,27 @@ mod tests {
                 while !*released {
                     released = condition.wait(released).unwrap();
                 }
+            }
+            self.inner.transaction_erased(callback).await
+        }
+    }
+
+    #[derive(Clone)]
+    struct ScriptedTransactionStorage {
+        inner: crate::storage::InMemoryStorage,
+        errors: Arc<StdMutex<VecDeque<PaykitSdkError>>>,
+        attempts: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::storage::StorageAdapter for ScriptedTransactionStorage {
+        async fn transaction_erased<'a>(
+            &self,
+            callback: crate::storage::StorageTransactionCallback<'a>,
+        ) -> Result<Box<dyn std::any::Any + Send>> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            if let Some(error) = self.errors.lock().unwrap().pop_front() {
+                return Err(error);
             }
             self.inner.transaction_erased(callback).await
         }
@@ -1927,14 +2040,79 @@ mod tests {
         assert_eq!(current.last_successful_audit_at[&peer], audited_at);
     }
 
-    #[test]
-    fn test_private_intake_treats_not_implemented_event_stream_as_unsupported() {
-        let error = pubky::Error::Request(pubky::errors::RequestError::Server {
-            status: pubky::StatusCode::NOT_IMPLEMENTED,
-            message: "event stream is not implemented".into(),
+    #[tokio::test]
+    async fn test_private_intake_retries_unsupported_and_transient_event_stream_errors() {
+        let healthy_cadence = Duration::from_secs(17);
+        let audits = Arc::new(AtomicUsize::new(0));
+        let storage = crate::storage::InMemoryStorage::new();
+        let subscribed_user = users(1).remove(0);
+        for status in [
+            pubky::StatusCode::NOT_FOUND,
+            pubky::StatusCode::METHOD_NOT_ALLOWED,
+            pubky::StatusCode::NOT_IMPLEMENTED,
+        ] {
+            let error = pubky::Error::Request(pubky::errors::RequestError::Server {
+                status,
+                message: "event stream is unavailable".into(),
+            });
+            let (state, retry_after, outcome) =
+                audit_disconnected_private_intake_stream(&error, healthy_cadence, {
+                    let audits = Arc::clone(&audits);
+                    let storage = storage.clone();
+                    let subscribed_user = subscribed_user.clone();
+                    move || async move {
+                        let event_id = audits.fetch_add(1, Ordering::SeqCst) as u64 + 1;
+                        storage
+                            .transaction(move |tx| {
+                                tx.advance_private_intake_cursor(PrivateIntakeCursorRecord {
+                                    subscribed_user,
+                                    homeserver: "homeserver-a".into(),
+                                    event_id,
+                                })
+                            })
+                            .await
+                            .unwrap();
+                        PrivateIntakeAuditOutcome::default()
+                    }
+                })
+                .await;
+            assert_eq!(state, PrivateIntakeTransportState::Unsupported);
+            assert_eq!(retry_after, healthy_cadence);
+            assert_eq!(outcome, PrivateIntakeAuditOutcome::default());
+        }
+        let transient = pubky::Error::Request(pubky::errors::RequestError::Server {
+            status: pubky::StatusCode::INTERNAL_SERVER_ERROR,
+            message: "temporary proxy failure".into(),
         });
-
-        assert!(is_unsupported_event_stream(&error));
+        let (state, retry_after, outcome) =
+            audit_disconnected_private_intake_stream(&transient, healthy_cadence, {
+                let audits = Arc::clone(&audits);
+                let storage = storage.clone();
+                let subscribed_user = subscribed_user.clone();
+                move || async move {
+                    let event_id = audits.fetch_add(1, Ordering::SeqCst) as u64 + 1;
+                    storage
+                        .transaction(move |tx| {
+                            tx.advance_private_intake_cursor(PrivateIntakeCursorRecord {
+                                subscribed_user,
+                                homeserver: "homeserver-a".into(),
+                                event_id,
+                            })
+                        })
+                        .await
+                        .unwrap();
+                    PrivateIntakeAuditOutcome::default()
+                }
+            })
+            .await;
+        assert_eq!(state, PrivateIntakeTransportState::Stale);
+        assert_eq!(retry_after, RECONNECT_DELAY);
+        assert_eq!(outcome, PrivateIntakeAuditOutcome::default());
+        assert_eq!(audits.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            storage.snapshot().unwrap().private_intake_cursors[&subscribed_user].event_id,
+            4
+        );
     }
 
     #[tokio::test]
@@ -2037,7 +2215,14 @@ mod tests {
             let storage = storage.clone();
             let clock = clock.clone();
             async move {
-                renew_private_intake_lease_or_stop(&storage, &clock, lease.lease_id, &stop).await
+                renew_private_intake_lease_or_stop(
+                    &storage,
+                    &clock,
+                    lease.lease_id,
+                    expires_at,
+                    &stop,
+                )
+                .await
             }
         });
 
@@ -2047,13 +2232,160 @@ mod tests {
         clock.set(expires_at);
         storage.release();
 
-        assert!(!task.await.unwrap());
+        assert!(task.await.unwrap().is_none());
         stopped.changed().await.unwrap();
         assert!(*stopped.borrow());
         let contender = claim_private_intake_lease(&inner, expires_at, 1, HashMap::new())
             .await
             .unwrap();
         assert_ne!(contender.lease_id, lease.lease_id);
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_renewal_retries_transient_storage_errors() {
+        for error in [
+            PaykitSdkError::SharedStateBusy {
+                context: "busy".into(),
+                source: None,
+            },
+            PaykitSdkError::ConcurrentUpdate {
+                context: "conflict".into(),
+                source: None,
+            },
+            PaykitSdkError::Transport {
+                context: "transport".into(),
+                source: None,
+            },
+        ] {
+            let inner = crate::storage::InMemoryStorage::new();
+            let claimed_at = Utc::now();
+            let expires_at = claimed_at + SUPERVISOR_LEASE_TIMEOUT;
+            let lease = claim_private_intake_lease(&inner, claimed_at, 1, HashMap::new())
+                .await
+                .unwrap();
+            let storage = ScriptedTransactionStorage {
+                inner,
+                errors: Arc::new(StdMutex::new(VecDeque::from([error]))),
+                attempts: Arc::new(AtomicUsize::new(0)),
+            };
+            let clock = MutableClock::new(claimed_at + chrono::Duration::seconds(30));
+            let (stop, stopped) = watch::channel(false);
+
+            assert!(renew_private_intake_lease_or_stop(
+                &storage,
+                &clock,
+                lease.lease_id,
+                expires_at,
+                &stop,
+            )
+            .await
+            .is_some());
+            assert_eq!(storage.attempts.load(Ordering::SeqCst), 2);
+            assert!(!*stopped.borrow());
+        }
+
+        let inner = crate::storage::InMemoryStorage::new();
+        let claimed_at = Utc::now();
+        let expires_at = claimed_at + SUPERVISOR_LEASE_TIMEOUT;
+        let lease = claim_private_intake_lease(&inner, claimed_at, 1, HashMap::new())
+            .await
+            .unwrap();
+        let storage = ScriptedTransactionStorage {
+            inner,
+            errors: Arc::new(StdMutex::new(VecDeque::from([PaykitSdkError::Transport {
+                context: "transport".into(),
+                source: None,
+            }]))),
+            attempts: Arc::new(AtomicUsize::new(0)),
+        };
+        let margin = chrono::Duration::from_std(SUPERVISOR_LEASE_RENEW_INTERVAL).unwrap();
+        let clock = MutableClock::new(expires_at - margin);
+        let (stop, mut stopped) = watch::channel(false);
+
+        assert!(renew_private_intake_lease_or_stop(
+            &storage,
+            &clock,
+            lease.lease_id,
+            expires_at,
+            &stop,
+        )
+        .await
+        .is_none());
+        stopped.changed().await.unwrap();
+        assert!(*stopped.borrow());
+        assert_eq!(storage.attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_admission_retries_transient_storage_errors() {
+        for error in [
+            PaykitSdkError::SharedStateBusy {
+                context: "busy".into(),
+                source: None,
+            },
+            PaykitSdkError::ConcurrentUpdate {
+                context: "conflict".into(),
+                source: None,
+            },
+            PaykitSdkError::Transport {
+                context: "transport".into(),
+                source: None,
+            },
+        ] {
+            let inner = crate::storage::InMemoryStorage::new();
+            let now = Utc::now();
+            let lease = claim_private_intake_lease(&inner, now, 1, HashMap::new())
+                .await
+                .unwrap();
+            let peer = users(1).remove(0);
+            let replacement = HashMap::from([(peer, "homeserver-a".to_owned())]);
+            let storage = ScriptedTransactionStorage {
+                inner: inner.clone(),
+                errors: Arc::new(StdMutex::new(VecDeque::from([error]))),
+                attempts: Arc::new(AtomicUsize::new(0)),
+            };
+            let (_stop_tx, mut stop_rx) = watch::channel(false);
+
+            assert!(replace_private_intake_admissions_with_retry(
+                &storage,
+                &MutableClock::new(now),
+                lease.lease_id,
+                replacement.clone(),
+                &mut stop_rx,
+            )
+            .await
+            .unwrap());
+            assert_eq!(storage.attempts.load(Ordering::SeqCst), 2);
+            assert_eq!(
+                inner
+                    .snapshot()
+                    .unwrap()
+                    .private_intake_admitted_homeservers,
+                replacement
+            );
+        }
+
+        let inner = crate::storage::InMemoryStorage::new();
+        let now = Utc::now();
+        let lease = claim_private_intake_lease(&inner, now, 1, HashMap::new())
+            .await
+            .unwrap();
+        let storage = ScriptedTransactionStorage {
+            inner,
+            errors: Arc::new(StdMutex::new(VecDeque::new())),
+            attempts: Arc::new(AtomicUsize::new(0)),
+        };
+        let (_stop_tx, mut stop_rx) = watch::channel(false);
+        assert!(!replace_private_intake_admissions_with_retry(
+            &storage,
+            &MutableClock::new(now),
+            lease.lease_id + 1,
+            HashMap::new(),
+            &mut stop_rx,
+        )
+        .await
+        .unwrap());
+        assert_eq!(storage.attempts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

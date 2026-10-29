@@ -535,15 +535,16 @@ async fn test_buffered_receive_replays_atomic_commit_once_across_sdk_handles() {
 }
 
 #[tokio::test]
-async fn test_buffered_receive_is_bounded_and_drains_while_transport_stale() {
+async fn test_buffered_receive_drains_while_transport_stale() {
     let TwoParty {
         _testnet,
         alice,
         bob,
     } = linked_two_party().await;
     let receive_limit = paykit_lib::PRIVATE_APPLICATION_MESSAGE_RECEIVE_LIMIT;
-    let count = paykit_sdk::storage::PRIVATE_INTAKE_MAX_PACKETS_PER_PEER
-        .min(receive_limit.saturating_add(1));
+    // Stay below the durable queue cap so the active stream remains attached;
+    // capacity/backpressure behavior has separate focused coverage.
+    let count = 1;
     publish_private_lists(&bob, &alice, count).await;
     let sdk = Arc::new(PaykitSdk::new(
         alice.storage.clone(),
@@ -592,6 +593,44 @@ async fn test_buffered_receive_is_bounded_and_drains_while_transport_stale() {
         assert_eq!(second.remaining_buffered_packets, 0);
     }
     supervisor.stop().await;
+}
+
+#[tokio::test]
+async fn test_sign_out_and_stop_finish_with_healthy_private_intake_supervisor() {
+    let pair = linked_two_party().await;
+    let sdk = Arc::new(PaykitSdk::new(
+        pair.alice.storage.clone(),
+        TestnetSessionProvider::with_session_secret(
+            pair.alice.access.clone(),
+            pair.alice.session_secret.clone(),
+        ),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    ));
+    let supervisor = sdk
+        .start_private_intake(PrivateIntakeConfig::new(1).unwrap())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if supervisor.health().await.peers.get(&pair.bob.public_key)
+                == Some(&PrivateIntakeTransportState::CaughtUp)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("private intake stream should become healthy");
+
+    tokio::time::timeout(Duration::from_secs(5), sdk.sign_out())
+        .await
+        .expect("sign-out must not deadlock behind healthy private intake")
+        .expect("sign-out should revoke the test grant and clear session access");
+    tokio::time::timeout(Duration::from_secs(5), supervisor.stop())
+        .await
+        .expect("supervisor stop must finish after sign-out");
 }
 
 #[tokio::test]

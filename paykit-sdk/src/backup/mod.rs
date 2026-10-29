@@ -803,7 +803,7 @@ impl SdkBackupState {
             |record| (record.counterparty.clone(), record.receipt_id.clone()),
             "Receipt issuance",
         )?;
-        let private_intake_cursors = keyed_by_tuple(
+        let mut private_intake_cursors = keyed_by_tuple(
             self.private_intake_cursors,
             |record| record.subscribed_user.clone(),
             "private intake cursor",
@@ -831,6 +831,8 @@ impl SdkBackupState {
         if key_changed {
             // Snapshots and prepared ciphertext from another key cannot resume.
             encrypted_link_states.clear();
+            private_intake_peers.clear();
+            private_intake_cursors.clear();
         }
         let recovery_required_peers = reconcile_restored_linked_peers(
             &mut linked_peers,
