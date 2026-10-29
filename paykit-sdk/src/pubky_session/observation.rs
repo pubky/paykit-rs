@@ -153,8 +153,17 @@ impl PubkyGrantObserver {
             }
             body.extend_from_slice(&chunk);
         }
+        // Mint/restore and GET report different creation timestamps for the
+        // same grant. Bind identity and scope; check lifetimes independently.
         match serde_json::from_slice::<GrantSessionInfo>(&body) {
-            Ok(info) if info == self.session && is_unexpired(&info) => {
+            Ok(info)
+                if info.homeserver == self.session.homeserver
+                    && info.pubky == self.session.pubky
+                    && info.client_id == self.session.client_id
+                    && info.grant_id == self.session.grant_id
+                    && info.capabilities == self.session.capabilities
+                    && is_unexpired(&info) =>
+            {
                 PubkyGrantObservation::Active
             }
             _ => PubkyGrantObservation::Unknown,
@@ -166,7 +175,7 @@ fn is_unexpired(info: &GrantSessionInfo) -> bool {
     let Ok(now) = u64::try_from(chrono::Utc::now().timestamp()) else {
         return false;
     };
-    info.created_at <= now && now < info.token_expires_at && now < info.grant_expires_at
+    now < info.token_expires_at && now < info.grant_expires_at
 }
 
 #[cfg(test)]

@@ -241,12 +241,33 @@ async fn test_ffi_session_provider_caches_restores_and_revokes_rotated_bearer() 
         paykit_sdk::PubkyGrantObservation::Active
     );
 
+    let original_created_at = result
+        .access
+        .session
+        .as_grant()
+        .unwrap()
+        .session_info()
+        .await
+        .created_at;
+    // Mint/restore timestamps describe the bearer, while GET reports the grant
+    // row's original creation time. Cross a server timestamp boundary.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     let (first, second, third) = tokio::join!(
         adapter.load_session_access(),
         adapter.load_session_access(),
         adapter.load_session_access(),
     );
     let first = first.unwrap().expect("restored access should be available");
+    assert!(
+        first
+            .session
+            .as_grant()
+            .unwrap()
+            .session_info()
+            .await
+            .created_at
+            > original_created_at
+    );
     for access in [
         first.clone(),
         second.unwrap().unwrap(),

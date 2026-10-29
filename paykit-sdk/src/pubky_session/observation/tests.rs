@@ -92,14 +92,14 @@ async fn server(reply: Reply) -> (String, tokio::task::JoinHandle<()>) {
 }
 
 #[tokio::test]
-async fn test_observation_accepts_only_exact_active_original_grant() {
+async fn test_observation_requires_original_binding_and_current_expiry() {
     let original = info();
     let mut replies = vec![(
         StatusCode::OK,
         serde_json::to_vec(&original).unwrap(),
         PubkyGrantObservation::Active,
     )];
-    for field in 0..8 {
+    for field in 0..10 {
         let mut changed = original.clone();
         match field {
             0 => changed.grant_id = GrantId::generate(),
@@ -110,12 +110,18 @@ async fn test_observation_accepts_only_exact_active_original_grant() {
             5 => changed.token_expires_at = 0,
             6 => changed.grant_expires_at = 0,
             7 => changed.created_at += 1,
+            8 => changed.token_expires_at += 1,
+            9 => changed.grant_expires_at += 1,
             _ => unreachable!(),
         }
         replies.push((
             StatusCode::OK,
             serde_json::to_vec(&changed).unwrap(),
-            PubkyGrantObservation::Unknown,
+            if field < 7 {
+                PubkyGrantObservation::Unknown
+            } else {
+                PubkyGrantObservation::Active
+            },
         ));
     }
     for status in [
@@ -157,6 +163,13 @@ async fn test_observation_accepts_only_exact_active_original_grant() {
         );
         task.abort();
     }
+}
+
+#[test]
+fn test_creation_timestamp_ahead_of_device_clock_is_not_expiry() {
+    let mut session = info();
+    session.created_at += 60;
+    assert!(is_unexpired(&session));
 }
 
 #[tokio::test]
