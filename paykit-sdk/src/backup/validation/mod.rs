@@ -27,6 +27,7 @@ pub fn validate_storage_state(state: &StorageState) -> Result<()> {
     validate_live_record_keys(state)?;
     validate_live_app_state(state)?;
     validate_live_link_state(state)?;
+    validate_private_intake_state(state)?;
 
     let outbound_private_messages =
         unique_outbound_messages(state.outbound_private_messages.clone())?;
@@ -196,6 +197,7 @@ fn has_identity_scoped_live_state(state: &StorageState) -> bool {
         || !state.encrypted_link_states.is_empty()
         || !state.peer_link_operation_leases.is_empty()
         || !state.paykit_app_operation_leases.is_empty()
+        || state.private_intake_supervisor_lease.is_some()
         || !state.payment_request_execution_claims.is_empty()
         || !state.outbound_private_messages.is_empty()
         || !state.private_stream_items.is_empty()
@@ -203,6 +205,8 @@ fn has_identity_scoped_live_state(state: &StorageState) -> bool {
         || !state.receipt_access_records.is_empty()
         || !state.receipt_records.is_empty()
         || !state.receipt_issuance_records.is_empty()
+        || !state.private_intake_cursors.is_empty()
+        || !state.private_intake_peers.is_empty()
 }
 
 fn validate_live_record_keys(state: &StorageState) -> Result<()> {
@@ -277,7 +281,27 @@ fn validate_live_record_keys(state: &StorageState) -> Result<()> {
             counterparty == &record.counterparty && receipt_id == &record.receipt_id
         },
         "Receipt issuance key does not match its record",
-    )
+    )?;
+    validate_record_keys(
+        &state.private_intake_cursors,
+        |key, record| key == &record.subscribed_user,
+        "private intake cursor key does not match its subscribed user",
+    )?;
+    validate_record_keys(
+        &state.private_intake_peers,
+        |key, record| key == &record.counterparty,
+        "private intake peer key does not match its counterparty",
+    )?;
+    if state
+        .private_intake_supervisor_lease
+        .as_ref()
+        .is_some_and(|lease| lease.lease_id >= state.next_private_intake_supervisor_lease_id)
+    {
+        return Err(invalid_live_state(
+            "private intake supervisor lease id is outside its allocated range",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_record_keys<K, V>(
@@ -388,6 +412,145 @@ fn validate_live_link_state(state: &StorageState) -> Result<()> {
                 "Encrypted Link handshake snapshot and role must be stored together",
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_private_intake_state(state: &StorageState) -> Result<()> {
+    match (
+        state.private_intake_supervisor_lease.as_ref(),
+        state.private_intake_stream_capacity,
+    ) {
+        (Some(_), Some(capacity))
+            if capacity > 0
+                && crate::storage::private_intake_stream_count(
+                    &state.private_intake_admitted_homeservers,
+                ) <= capacity => {}
+        (None, None) if state.private_intake_admitted_homeservers.is_empty() => {}
+        _ => {
+            return Err(invalid_live_state(
+                "private intake supervisor capacity ownership is inconsistent",
+            ));
+        }
+    }
+    if state
+        .private_intake_admitted_homeservers
+        .values()
+        .any(String::is_empty)
+    {
+        return Err(invalid_live_state(
+            "private intake admission has an empty homeserver",
+        ));
+    }
+    for cursor in state.private_intake_cursors.values() {
+        if cursor.homeserver.is_empty() {
+            return Err(invalid_live_state(
+                "private intake cursor has an empty homeserver",
+            ));
+        }
+    }
+
+    let mut global_count = 0usize;
+    let mut global_bytes = 0usize;
+    for peer in state.private_intake_peers.values() {
+        let recovery_required = state
+            .linked_peers
+            .get(&peer.counterparty)
+            .is_some_and(|linked| linked.state == LinkedPeerState::RecoveryRequired);
+        let link = state.encrypted_link_states.get(&peer.counterparty);
+        if let Some(link) = link {
+            let fenced_recovery_generation = recovery_required
+                && link.link_snapshot.is_none()
+                && link.handshake_snapshot.is_none()
+                && link.handshake_role.is_none()
+                && link.generation > peer.link_generation;
+            if link.generation != peer.link_generation && !fenced_recovery_generation {
+                return Err(invalid_live_state(
+                    "private intake peer generation does not match Encrypted Link",
+                ));
+            }
+        } else if !recovery_required {
+            return Err(invalid_live_state(
+                "private intake peer without Encrypted Link is not recovery-required",
+            ));
+        }
+        if peer.buffered_packets.len() > crate::storage::PRIVATE_INTAKE_MAX_PACKETS_PER_PEER {
+            return Err(invalid_live_state(
+                "private intake peer packet capacity is exceeded",
+            ));
+        }
+        let mut peer_bytes = 0usize;
+        let mut previous_counter: Option<u64> = None;
+        for packet in &peer.buffered_packets {
+            if packet.counterparty != peer.counterparty
+                || packet.link_generation != peer.link_generation
+            {
+                return Err(invalid_live_state(
+                    "private intake packet scope does not match its peer",
+                ));
+            }
+            if packet.ciphertext.len() != crate::storage::PRIVATE_INTAKE_PACKET_BYTES {
+                return Err(invalid_live_state(
+                    "private intake packet has invalid ciphertext length",
+                ));
+            }
+            if let Some(previous) = previous_counter {
+                if previous.checked_add(1) != Some(packet.receive_counter) {
+                    return Err(invalid_live_state(
+                        "private intake receive counters are not contiguous",
+                    ));
+                }
+            }
+            previous_counter = Some(packet.receive_counter);
+            peer_bytes = peer_bytes
+                .checked_add(packet.ciphertext.len())
+                .ok_or_else(|| invalid_live_state("private intake peer byte count overflow"))?;
+            if let Some(source_cursor) = &packet.source_cursor {
+                let durable_cursor = state
+                    .private_intake_cursors
+                    .get(&source_cursor.subscribed_user)
+                    .ok_or_else(|| {
+                        invalid_live_state("private intake packet cursor is not durable")
+                    })?;
+                if durable_cursor.homeserver != source_cursor.homeserver
+                    || durable_cursor.event_id < source_cursor.event_id
+                {
+                    return Err(invalid_live_state(
+                        "private intake packet cursor exceeds durable cursor",
+                    ));
+                }
+            }
+        }
+        if peer_bytes > crate::storage::PRIVATE_INTAKE_MAX_BYTES_PER_PEER {
+            return Err(invalid_live_state(
+                "private intake peer byte capacity is exceeded",
+            ));
+        }
+        if peer
+            .cancelled_handshake_through_generation
+            .is_some_and(|cancelled| {
+                link.is_some_and(|link| {
+                    link.handshake_snapshot.is_some() && link.generation <= cancelled
+                })
+            })
+        {
+            return Err(invalid_live_state(
+                "cancelled private intake handshake generation remains active",
+            ));
+        }
+        global_count = global_count
+            .checked_add(peer.buffered_packets.len())
+            .ok_or_else(|| invalid_live_state("private intake packet count overflow"))?;
+        global_bytes = global_bytes
+            .checked_add(peer_bytes)
+            .ok_or_else(|| invalid_live_state("private intake global byte count overflow"))?;
+    }
+    if global_count > crate::storage::PRIVATE_INTAKE_MAX_PACKETS_GLOBAL
+        || global_bytes > crate::storage::PRIVATE_INTAKE_MAX_BYTES_GLOBAL
+    {
+        return Err(invalid_live_state(
+            "private intake global capacity is exceeded",
+        ));
     }
     Ok(())
 }

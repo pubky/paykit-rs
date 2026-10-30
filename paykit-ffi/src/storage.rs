@@ -9,15 +9,17 @@ use paykit_sdk::storage::{
     PubkySharedStateStorage, StorageAdapter, StorageKeyRotationCallback, StorageOperation,
     StorageState, StorageTransactionCallback,
 };
-use paykit_sdk::{validate_storage_state, PaykitSdkError, SdkBackupState};
+use paykit_sdk::{validate_storage_state, PaykitSdkError, SdkBackupState, SdkBackupStateV1};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{ffi_error_to_sdk, storage_error, PaykitFfiError};
 use crate::secrets::FfiSdkStateBlob;
-use crate::{SDK_BACKUP_BLOB_VERSION, SDK_STATE_BLOB_VERSION};
+use crate::SDK_BACKUP_BLOB_VERSION;
 
 const INVALID_STATE_BLOB_CODE: &str = "invalid_state_blob";
 const INVALID_STATE_BLOB_CONTEXT: &str = "SDK state blob failed validation";
+const STATE_BLOB_SNAPSHOT_VERSION_V1: u32 = 1;
+const STATE_BLOB_SNAPSHOT_VERSION: u32 = 2;
 
 /// Current SDK state blob with its platform storage revision.
 #[derive(uniffi::Record, Clone, Debug)]
@@ -245,6 +247,12 @@ struct BackupStateEnvelope {
     backup: SdkBackupState,
 }
 
+#[derive(Deserialize)]
+struct BackupStateEnvelopeV1 {
+    version: u32,
+    backup: SdkBackupStateV1,
+}
+
 #[derive(Serialize, Deserialize)]
 struct StateBlobSnapshotEnvelope {
     version: u32,
@@ -285,29 +293,68 @@ pub(crate) fn encode_backup_state(backup: &SdkBackupState) -> Result<Vec<u8>, Pa
 }
 
 pub(crate) fn decode_backup_state(bytes: &[u8]) -> Result<SdkBackupState, PaykitFfiError> {
-    let (envelope, remainder): (BackupStateEnvelope, _) = postcard::take_from_bytes(bytes)
-        .map_err(|err| {
-            storage_error(
-                "decode_backup_blob",
-                format!("decode SDK backup blob: {err}"),
-            )
-        })?;
-    if !remainder.is_empty() {
-        return Err(storage_error(
+    let (version, _): (u32, _) = postcard::take_from_bytes(bytes).map_err(|err| {
+        storage_error(
             "decode_backup_blob",
-            "SDK backup blob contains trailing bytes",
-        ));
-    }
-    if envelope.version != SDK_BACKUP_BLOB_VERSION {
-        return Err(storage_error(
+            format!("decode SDK backup blob: {err}"),
+        )
+    })?;
+
+    match version {
+        1 => {
+            let (envelope, remainder): (BackupStateEnvelopeV1, _) =
+                postcard::take_from_bytes(bytes).map_err(|err| {
+                    storage_error(
+                        "decode_backup_blob",
+                        format!("decode SDK backup blob: {err}"),
+                    )
+                })?;
+            if !remainder.is_empty() {
+                return Err(storage_error(
+                    "decode_backup_blob",
+                    "SDK backup blob contains trailing bytes",
+                ));
+            }
+            if envelope.version != 1 || envelope.backup.version() != 1 {
+                return Err(storage_error(
+                    "unsupported_backup_blob_version",
+                    "version 1 SDK backup blob contains a mismatched payload version",
+                ));
+            }
+            Ok(envelope.backup.into())
+        }
+        SDK_BACKUP_BLOB_VERSION => {
+            let (envelope, remainder): (BackupStateEnvelope, _) = postcard::take_from_bytes(bytes)
+                .map_err(|err| {
+                    storage_error(
+                        "decode_backup_blob",
+                        format!("decode SDK backup blob: {err}"),
+                    )
+                })?;
+            if !remainder.is_empty() {
+                return Err(storage_error(
+                    "decode_backup_blob",
+                    "SDK backup blob contains trailing bytes",
+                ));
+            }
+            if envelope.version != SDK_BACKUP_BLOB_VERSION
+                || envelope.backup.version != paykit_sdk::SDK_BACKUP_VERSION
+            {
+                return Err(storage_error(
+                    "unsupported_backup_blob_version",
+                    "current SDK backup blob contains a mismatched payload version",
+                ));
+            }
+            Ok(envelope.backup)
+        }
+        _ => Err(storage_error(
             "unsupported_backup_blob_version",
             format!(
-                "unsupported SDK backup blob version {}, expected {}",
-                envelope.version, SDK_BACKUP_BLOB_VERSION
+                "unsupported SDK backup blob version {version}, expected 1 or {}",
+                SDK_BACKUP_BLOB_VERSION
             ),
-        ));
+        )),
     }
-    Ok(envelope.backup)
 }
 
 /// Encode an SDK state blob snapshot for apps that store blob and revision together.
@@ -323,7 +370,7 @@ pub fn encode_sdk_state_blob_snapshot(
         return Err(invalid_state_blob_error());
     }
     postcard::to_allocvec(&StateBlobSnapshotEnvelope {
-        version: SDK_STATE_BLOB_VERSION,
+        version: STATE_BLOB_SNAPSHOT_VERSION,
         revision: snapshot.revision,
         blob: snapshot.blob.export_bytes(),
     })
@@ -356,12 +403,15 @@ pub fn decode_sdk_state_blob_snapshot(
             "SDK state snapshot contains trailing bytes",
         ));
     }
-    if envelope.version != SDK_STATE_BLOB_VERSION {
+    if !matches!(
+        envelope.version,
+        STATE_BLOB_SNAPSHOT_VERSION_V1 | STATE_BLOB_SNAPSHOT_VERSION
+    ) {
         return Err(storage_error(
             "unsupported_state_snapshot_blob_version",
             format!(
-                "unsupported SDK state snapshot blob version {}, expected {}",
-                envelope.version, SDK_STATE_BLOB_VERSION
+                "unsupported SDK state snapshot blob version {}, expected {} or {}",
+                envelope.version, STATE_BLOB_SNAPSHOT_VERSION_V1, STATE_BLOB_SNAPSHOT_VERSION
             ),
         ));
     }

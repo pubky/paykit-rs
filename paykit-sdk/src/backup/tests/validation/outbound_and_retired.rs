@@ -128,6 +128,8 @@ async fn test_restore_backup_state_preserves_invalid_outbound_audit_record() {
         next_outbound_private_message_id: 8,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     restore_backup_state(&storage, backup).await.unwrap();
@@ -171,6 +173,8 @@ async fn test_restore_backup_state_preserves_recovery_required_outbound_audit_re
         next_outbound_private_message_id: 8,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     restore_backup_state(&storage, backup).await.unwrap();
@@ -212,6 +216,8 @@ async fn test_restore_rejects_retired_app_recovery_required_message() {
         next_outbound_private_message_id: 8,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -249,6 +255,8 @@ async fn test_restore_rejects_retired_app_shared_private_payment_list() {
         next_outbound_private_message_id: 8,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -288,6 +296,8 @@ async fn test_restore_rejects_retired_app_active_payment_request() {
         next_outbound_private_message_id: 8,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -339,6 +349,8 @@ async fn test_restore_rejects_retired_app_incomplete_receipt_issuance() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -387,6 +399,8 @@ async fn test_restore_backup_state_discards_prepared_sends_on_recovery() {
         next_outbound_private_message_id: 9,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     restore_backup_state(&storage, backup.clone())

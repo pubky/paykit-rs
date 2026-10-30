@@ -575,6 +575,92 @@ where
         .await
     }
 
+    /// Cancel one local pending Encrypted Link Handshake.
+    ///
+    /// Cancellation is local-only: no remote notification is sent. It persists
+    /// a generation fence, clears buffered work from the cancelled attempt, and
+    /// leaves late packets unable to revive that attempt after restart. Pending
+    /// handshakes do not expire automatically; callers cancel them explicitly.
+    pub async fn cancel_pending_handshake(
+        &self,
+        counterparty: PubkyPublicKey,
+    ) -> Result<LinkedPeerHandshakeReport> {
+        self.retry_storage_transaction(|| {
+            let counterparty = counterparty.clone();
+            move |tx| {
+                let local = initialized_identity_in_transaction(tx, "cancel pending handshake")?;
+                require_distinct_link_identity(&local, &counterparty)?;
+                let now = self.clock.now();
+                let lease = tx
+                    .claim_peer_link_operation(
+                        &counterparty,
+                        now,
+                        now + ChronoDuration::from_std(PEER_LINK_OPERATION_LEASE_TIMEOUT)
+                            .expect("fixed peer link lease timeout must fit chrono duration"),
+                    )?
+                    .ok_or_else(|| PaykitSdkError::ConcurrentUpdate {
+                        context: format!(
+                            "peer link operation already in progress for counterparty {counterparty}"
+                        ),
+                        source: None,
+                    })?;
+                let result = (|| {
+                    let mut peer = tx.linked_peer(&counterparty).ok_or_else(|| {
+                        PaykitSdkError::Policy {
+                            context: format!(
+                                "no pending Encrypted Link Handshake for counterparty {counterparty}"
+                            ),
+                            source: None,
+                        }
+                    })?;
+                    let state = tx.encrypted_link_state(&counterparty).ok_or_else(|| {
+                        PaykitSdkError::Policy {
+                            context: format!(
+                                "no pending Encrypted Link Handshake for counterparty {counterparty}"
+                            ),
+                            source: None,
+                        }
+                    })?;
+                    if peer.state != LinkedPeerState::Linking
+                        || state.link_snapshot.is_some()
+                        || state.handshake_snapshot.is_none()
+                        || state.handshake_role.is_none()
+                    {
+                        return Err(PaykitSdkError::Policy {
+                            context: format!(
+                                "no pending Encrypted Link Handshake for counterparty {counterparty}"
+                            ),
+                            source: None,
+                        });
+                    }
+                    tx.cancel_private_intake_handshake_generation(
+                        &counterparty,
+                        state.generation,
+                    )?;
+                    let mut cancelled_state = tx
+                        .encrypted_link_state(&counterparty)
+                        .expect("cancellation preserves fenced Encrypted Link state");
+                    cancelled_state.checkpointed_at = now;
+                    let generation = cancelled_state.generation;
+                    tx.save_encrypted_link_state(cancelled_state);
+                    peer.state = LinkedPeerState::NotLinked;
+                    peer.last_sync_at = Some(now);
+                    peer.failure_count = 0;
+                    tx.save_linked_peer(peer.clone());
+                    Ok(LinkedPeerHandshakeReport {
+                        counterparty: counterparty.clone(),
+                        state: peer.state,
+                        generation,
+                        handshake_role: None,
+                    })
+                })();
+                tx.release_peer_link_operation(&counterparty, lease.lease_id);
+                result
+            }
+        })
+        .await
+    }
+
     /// Ensure an Encrypted Link is started or advanced for one counterparty.
     ///
     /// The SDK deterministically chooses the local handshake role from the two
@@ -1506,6 +1592,73 @@ where
         .await
     }
 
+    async fn private_intake_link_admission_homeserver(
+        &self,
+        access: &GuardedSessionAccess,
+        counterparty: &PubkyPublicKey,
+    ) -> Result<Option<String>> {
+        let now = self.clock.now();
+        let active = self
+            .storage
+            .transaction(move |tx| {
+                Ok(tx
+                    .export_storage_state()
+                    .private_intake_supervisor_lease
+                    .is_some_and(|lease| lease.expires_at > now))
+            })
+            .await?;
+        if !active {
+            return Ok(None);
+        }
+        let remote = counterparty.to_public_key()?;
+        let homeserver = access
+            .outbox_client
+            .get_homeserver_of(&remote)
+            .await
+            .map_err(|error| PaykitSdkError::Transport {
+                context: "resolve private intake admission homeserver".into(),
+                source: Some(error.into()),
+            })?
+            .ok_or_else(|| PaykitSdkError::NotFound {
+                context: "Linked Peer has no Pubky homeserver".into(),
+                source: None,
+            })?;
+        let homeserver = homeserver.to_string();
+        let proposed_peer = counterparty.clone();
+        let proposed_homeserver = homeserver.clone();
+        self.storage
+            .transaction(move |tx| {
+                let state = tx.export_storage_state();
+                if state
+                    .private_intake_supervisor_lease
+                    .as_ref()
+                    .is_none_or(|lease| lease.expires_at <= now)
+                {
+                    return Ok(());
+                }
+                let capacity = state.private_intake_stream_capacity.ok_or_else(|| {
+                    PaykitSdkError::RecoveryRequired {
+                        context: "active private intake supervisor has no stream capacity".into(),
+                        source: None,
+                    }
+                })?;
+                let mut proposed = state.private_intake_admitted_homeservers;
+                proposed.insert(proposed_peer, proposed_homeserver);
+                let required = crate::storage::private_intake_stream_count(&proposed);
+                if required > capacity {
+                    return Err(PaykitSdkError::Policy {
+                        context: format!(
+                            "private intake requires {required} streams but caller reserved {capacity}"
+                        ),
+                        source: None,
+                    });
+                }
+                Ok(())
+            })
+            .await?;
+        Ok(Some(homeserver))
+    }
+
     pub(super) async fn start_link_handshake_with_claim(
         &self,
         counterparty: PubkyPublicKey,
@@ -1514,6 +1667,9 @@ where
         remote_noise_public_key: &paykit_lib::PublicKey,
     ) -> Result<LinkedPeerHandshakeReport> {
         let (session_access, secret_key) = self.private_link_session_access().await?;
+        let private_intake_homeserver = self
+            .private_intake_link_admission_homeserver(&session_access, &counterparty)
+            .await?;
         self.observe_remote_recovery_marker_with_lease(
             &counterparty,
             &session_access,
@@ -1636,15 +1792,18 @@ where
             )?,
         };
 
-        save_link_handshake_state_with_lease(
+        let report = save_link_handshake_state_with_lease(
             &self.storage,
             counterparty,
             role,
             handshake.serialize()?,
             lease,
             self.clock.now(),
+            private_intake_homeserver,
         )
-        .await
+        .await?;
+        self.private_intake_topology_changed.notify_one();
+        Ok(report)
     }
 
     pub(super) async fn claim_peer_link_operation(
@@ -1817,7 +1976,7 @@ pub(super) fn block_peer_in_transaction(
     record.last_sync_at = Some(now);
     record.failure_count = 0;
     tx.save_linked_peer(record.clone());
-    clear_encrypted_link_state(tx, counterparty, now);
+    clear_encrypted_link_state(tx, counterparty, now)?;
     tx.release_peer_link_operation(counterparty, lease.lease_id);
     Ok(Some(record))
 }
@@ -1843,7 +2002,7 @@ pub(super) fn unblock_peer_in_transaction(
         record.last_sync_at = Some(now);
         record.failure_count = 0;
         tx.save_linked_peer(record.clone());
-        clear_encrypted_link_state(tx, counterparty, now);
+        clear_encrypted_link_state(tx, counterparty, now)?;
     }
     tx.release_peer_link_operation(counterparty, lease.lease_id);
     Ok(Some(record))
@@ -2004,17 +2163,24 @@ fn clear_encrypted_link_state(
     tx: &mut dyn StorageTransaction,
     counterparty: &PubkyPublicKey,
     now: DateTime<Utc>,
-) {
+) -> Result<()> {
     if let Some(link_state) = tx.encrypted_link_state(counterparty) {
+        let resulting_generation = link_state.generation.saturating_add(1);
+        tx.invalidate_buffered_private_intake_generation(
+            counterparty,
+            link_state.generation,
+            resulting_generation,
+        )?;
         tx.save_encrypted_link_state(EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
             link_snapshot: None,
             handshake_snapshot: None,
             handshake_role: None,
-            generation: link_state.generation.saturating_add(1),
+            generation: resulting_generation,
             checkpointed_at: now,
         });
     }
+    Ok(())
 }
 
 fn deterministic_handshake_role(

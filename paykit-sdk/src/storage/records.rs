@@ -215,6 +215,17 @@ pub struct PaykitAppOperationLease {
     pub expires_at: DateTime<Utc>,
 }
 
+/// Storage-backed identity-wide private-intake supervisor lease.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivateIntakeSupervisorLease {
+    /// Assigned lease id within dedicated supervisor namespace.
+    pub lease_id: u64,
+    /// Claim time.
+    pub claimed_at: DateTime<Utc>,
+    /// Expiry time after which another supervisor may retry.
+    pub expires_at: DateTime<Utc>,
+}
+
 /// Identity-wide ownership claim made before an application executes a payment.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaymentRequestExecutionClaim {
@@ -619,6 +630,120 @@ impl PrivateStreamItemRecord {
     }
 }
 
+/// Exact fixed size of one stored pubky-noise transport packet.
+pub const PRIVATE_INTAKE_PACKET_BYTES: usize =
+    pubky_noise::snow_crypto::PUBKY_NOISE_TRANSPORT_PACKET_LEN;
+/// Hard persisted queue limit for one Linked Peer.
+pub const PRIVATE_INTAKE_MAX_PACKETS_PER_PEER: usize = 64;
+/// Hard persisted queue limit across one identity's Linked Peers.
+pub const PRIVATE_INTAKE_MAX_PACKETS_GLOBAL: usize = 1024;
+/// Hard persisted ciphertext-byte limit for one Linked Peer.
+pub const PRIVATE_INTAKE_MAX_BYTES_PER_PEER: usize =
+    PRIVATE_INTAKE_PACKET_BYTES * PRIVATE_INTAKE_MAX_PACKETS_PER_PEER;
+/// Hard persisted ciphertext-byte limit across one identity.
+pub const PRIVATE_INTAKE_MAX_BYTES_GLOBAL: usize =
+    PRIVATE_INTAKE_PACKET_BYTES * PRIVATE_INTAKE_MAX_PACKETS_GLOBAL;
+
+/// Durable homeserver event cursor for one subscribed Pubky user.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivateIntakeCursorRecord {
+    /// Pubky user whose homeserver event log is being consumed.
+    pub subscribed_user: PubkyPublicKey,
+    /// Resolved homeserver origin against which `event_id` is meaningful.
+    pub homeserver: String,
+    /// Last durably handled homeserver event ID.
+    pub event_id: u64,
+}
+
+impl fmt::Debug for PrivateIntakeCursorRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PrivateIntakeCursorRecord")
+            .field("subscribed_user", &self.subscribed_user)
+            .field("homeserver", &"<redacted>")
+            .field("event_id", &self.event_id)
+            .finish()
+    }
+}
+
+/// Encrypted pubky-noise packet durably waiting for ordered application processing.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BufferedPrivatePacketRecord {
+    /// Linked Peer that owns the expected Noise receive slot.
+    pub counterparty: PubkyPublicKey,
+    /// Encrypted Link generation at acquisition time.
+    pub link_generation: u64,
+    /// Expected immutable pubky-noise receive counter.
+    pub receive_counter: u64,
+    /// Exact fixed-size encrypted transport packet.
+    pub ciphertext: Vec<u8>,
+    /// Relevant event cursor committed atomically with this packet, if any.
+    pub source_cursor: Option<PrivateIntakeCursorRecord>,
+    /// Local acquisition time.
+    pub buffered_at: DateTime<Utc>,
+}
+
+impl fmt::Debug for BufferedPrivatePacketRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BufferedPrivatePacketRecord")
+            .field("counterparty", &self.counterparty)
+            .field("link_generation", &self.link_generation)
+            .field("receive_counter", &self.receive_counter)
+            .field(
+                "ciphertext",
+                &format!("<redacted:{} bytes>", self.ciphertext.len()),
+            )
+            .field("has_source_cursor", &self.source_cursor.is_some())
+            .field("buffered_at", &self.buffered_at)
+            .finish()
+    }
+}
+
+/// Durable bounded private-intake state for one Linked Peer.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivateIntakePeerRecord {
+    /// Linked Peer whose ordered packets are buffered.
+    pub counterparty: PubkyPublicKey,
+    /// Encrypted Link generation fencing all buffered packets.
+    pub link_generation: u64,
+    /// Ordered contiguous encrypted packets.
+    pub buffered_packets: Vec<BufferedPrivatePacketRecord>,
+    /// Ignore handshake work from this generation and all older generations.
+    pub cancelled_handshake_through_generation: Option<u64>,
+}
+
+impl fmt::Debug for PrivateIntakePeerRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PrivateIntakePeerRecord")
+            .field("counterparty", &self.counterparty)
+            .field("link_generation", &self.link_generation)
+            .field("buffered_packets", &self.buffered_packets.len())
+            .field(
+                "buffered_bytes",
+                &self
+                    .buffered_packets
+                    .iter()
+                    .map(|packet| packet.ciphertext.len())
+                    .sum::<usize>(),
+            )
+            .field(
+                "cancelled_handshake_through_generation",
+                &self.cancelled_handshake_through_generation,
+            )
+            .finish()
+    }
+}
+
+/// Result of attempting to durably buffer one private-intake packet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrivateIntakeBufferOutcome {
+    /// Packet and relevant cursor were committed.
+    Inserted,
+    /// Exact packet was already buffered; no cursor or packet state changed.
+    AlreadyBuffered,
+    /// Persisted hard queue capacity was reached; nothing changed.
+    CapacityReached,
+}
+
 /// Event Message dedupe/conflict record.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventDedupRecord {
@@ -701,6 +826,26 @@ pub struct StorageState {
     pub receipt_records: HashMap<(PubkyPublicKey, String), ReceiptRecord>,
     /// Local receipt issuance records by counterparty and Receipt ID.
     pub receipt_issuance_records: HashMap<(PubkyPublicKey, String), ReceiptIssuanceRecord>,
+    /// Durable homeserver cursors by subscribed Pubky user.
+    pub private_intake_cursors: HashMap<PubkyPublicKey, PrivateIntakeCursorRecord>,
+    /// Durable bounded encrypted packet queues by Linked Peer.
+    pub private_intake_peers: HashMap<PubkyPublicKey, PrivateIntakePeerRecord>,
+    /// Active identity-wide private-intake supervisor lease.
+    ///
+    /// Appended with a default to preserve decoding of state-blob version 2.
+    #[serde(default)]
+    pub private_intake_supervisor_lease: Option<PrivateIntakeSupervisorLease>,
+    /// Next private-intake supervisor lease id.
+    ///
+    /// Appended with a default to preserve decoding of state-blob version 2.
+    #[serde(default)]
+    pub next_private_intake_supervisor_lease_id: u64,
+    /// Stream capacity reserved by active private-intake supervisor.
+    #[serde(default)]
+    pub private_intake_stream_capacity: Option<usize>,
+    /// Homeserver admission owned by active supervisor for each covered peer.
+    #[serde(default)]
+    pub private_intake_admitted_homeservers: HashMap<PubkyPublicKey, String>,
 }
 
 impl fmt::Debug for StorageState {
@@ -763,6 +908,14 @@ impl fmt::Debug for StorageState {
                 &self.next_paykit_app_operation_lease_id,
             )
             .field(
+                "private_intake_supervisor_lease",
+                &self.private_intake_supervisor_lease,
+            )
+            .field(
+                "next_private_intake_supervisor_lease_id",
+                &self.next_private_intake_supervisor_lease_id,
+            )
+            .field(
                 "payment_request_execution_claims",
                 &format_args!("{} records", self.payment_request_execution_claims.len()),
             )
@@ -798,6 +951,14 @@ impl fmt::Debug for StorageState {
             .field(
                 "receipt_issuance_records",
                 &format_args!("{} records", self.receipt_issuance_records.len()),
+            )
+            .field(
+                "private_intake_cursors",
+                &format_args!("{} records", self.private_intake_cursors.len()),
+            )
+            .field(
+                "private_intake_peers",
+                &format_args!("{} peers", self.private_intake_peers.len()),
             )
             .finish()
     }

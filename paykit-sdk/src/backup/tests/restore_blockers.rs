@@ -146,6 +146,27 @@ fn test_restore_blockers_name_single_history_kinds() {
     }
 }
 
+#[test]
+fn test_restore_blockers_name_private_intake_state() {
+    let mut state = StorageState::default();
+    let subscribed_user = public_key();
+    state.private_intake_cursors.insert(
+        subscribed_user.clone(),
+        PrivateIntakeCursorRecord {
+            subscribed_user: subscribed_user.clone(),
+            homeserver: "https://homeserver.test".into(),
+            event_id: 1,
+        },
+    );
+    assert_eq!(restore_blockers(&state), ["private intake state"]);
+
+    state.private_intake_stream_capacity = Some(1);
+    state
+        .private_intake_admitted_homeservers
+        .insert(subscribed_user, "https://homeserver.test".into());
+    assert_eq!(restore_blockers(&state), ["private intake state"]);
+}
+
 #[tokio::test]
 async fn test_restore_backup_state_refusal_names_public_endpoint_records() {
     let local = public_key();

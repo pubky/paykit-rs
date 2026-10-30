@@ -77,9 +77,12 @@ where
                 | PaykitSdkError::Policy { context, .. }
                 | PaykitSdkError::PaymentAdapter { context, .. }
                 | PaykitSdkError::RecoveryRequired { context, .. }
-                | PaykitSdkError::LinkObservation { context } => context,
+                | PaykitSdkError::LinkObservation { context } => Some(context),
+                PaykitSdkError::PrivateIntakeModeConflict { .. } => None,
             };
-            context.push_str("; reservation cleanup also failed");
+            if let Some(context) = context {
+                context.push_str("; reservation cleanup also failed");
+            }
         }
         Err(err)
     }

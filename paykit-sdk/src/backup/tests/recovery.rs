@@ -32,6 +32,8 @@ async fn test_restore_backup_state_marks_link_state_without_peer_recovery_requir
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     restore_backup_state(&storage, backup).await.unwrap();
@@ -82,6 +84,8 @@ async fn test_restore_backup_state_preserves_private_stream_without_forcing_reco
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
+            private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     restore_backup_state(&storage, backup).await.unwrap();

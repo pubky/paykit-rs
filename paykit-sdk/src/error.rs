@@ -16,6 +16,13 @@ pub enum PaykitSdkError {
         source: Option<anyhow::Error>,
     },
 
+    /// Legacy polling was requested for a peer owned by SSE-assisted intake.
+    #[error("private intake mode conflict for {counterparty}")]
+    PrivateIntakeModeConflict {
+        /// Linked Peer already owned by SSE-assisted intake.
+        counterparty: crate::PubkyPublicKey,
+    },
+
     /// Shared state remains locked after bounded acquisition retries.
     ///
     /// The holder may be active or waiting for write recovery. Back off rather than
@@ -128,6 +135,10 @@ impl fmt::Debug for PaykitSdkError {
             Self::ConcurrentUpdate { context, source } => {
                 debug_error_variant(f, "ConcurrentUpdate", context, source)
             }
+            Self::PrivateIntakeModeConflict { counterparty } => f
+                .debug_struct("PrivateIntakeModeConflict")
+                .field("counterparty", counterparty)
+                .finish(),
             Self::SharedStateBusy { context, source } => {
                 debug_error_variant(f, "SharedStateBusy", context, source)
             }

@@ -109,6 +109,80 @@ async fn test_mark_private_recovery_pending_skips_newer_link_generation() {
 }
 
 #[tokio::test]
+async fn test_recovery_discards_buffered_private_intake_and_allows_relink() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                let mut peer =
+                    crate::domain::linked_peers::default_linked_peer(counterparty.clone());
+                peer.state = LinkedPeerState::Linked;
+                tx.save_linked_peer(peer);
+                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                    counterparty: counterparty.clone(),
+                    link_snapshot: Some(vec![1, 2, 3]),
+                    handshake_snapshot: None,
+                    handshake_role: None,
+                    generation: 7,
+                    checkpointed_at: FixedClock.now(),
+                });
+                tx.buffer_private_intake_packet(crate::storage::BufferedPrivatePacketRecord {
+                    counterparty,
+                    link_generation: 7,
+                    receive_counter: 0,
+                    ciphertext: vec![0; crate::storage::PRIVATE_INTAKE_PACKET_BYTES],
+                    source_cursor: None,
+                    buffered_at: FixedClock.now(),
+                })?;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                crate::domain::linked_peers::mark_recovery_required_in_transaction(
+                    tx,
+                    &counterparty,
+                    FixedClock.now(),
+                )
+            }
+        })
+        .await
+        .unwrap();
+
+    let recovered = storage.snapshot().unwrap();
+    assert_eq!(recovered.encrypted_link_states[&counterparty].generation, 8);
+    assert_eq!(
+        recovered.private_intake_peers[&counterparty].link_generation,
+        8
+    );
+    assert!(recovered.private_intake_peers[&counterparty]
+        .buffered_packets
+        .is_empty());
+
+    let relinked = crate::domain::linked_peers::save_link_handshake_state(
+        &storage,
+        counterparty.clone(),
+        EncryptedLinkHandshakeRole::Initiator,
+        vec![4, 5, 6],
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(relinked.generation, 9);
+    assert_eq!(
+        storage.snapshot().unwrap().private_intake_peers[&counterparty].link_generation,
+        9
+    );
+}
+
+#[tokio::test]
 async fn test_encrypted_link_recovery_marker_status_reports_peer_fields() {
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());

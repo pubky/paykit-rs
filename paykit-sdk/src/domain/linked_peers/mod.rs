@@ -298,12 +298,18 @@ where
     }
     tx.save_linked_peer(record);
     if let Some(link_state) = tx.encrypted_link_state(counterparty) {
+        let resulting_generation = link_state.generation.saturating_add(1);
+        tx.invalidate_buffered_private_intake_generation(
+            counterparty,
+            link_state.generation,
+            resulting_generation,
+        )?;
         tx.save_encrypted_link_state(EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
             link_snapshot: None,
             handshake_snapshot: None,
             handshake_role: None,
-            generation: link_state.generation.saturating_add(1),
+            generation: resulting_generation,
             checkpointed_at: now,
         });
     }
@@ -375,6 +381,7 @@ where
         handshake_snapshot,
         None,
         now,
+        None,
     )
     .await
 }
@@ -387,6 +394,7 @@ pub(crate) async fn save_link_handshake_state_with_lease<S>(
     handshake_snapshot: Vec<u8>,
     lease: PeerLinkOperationLease,
     now: DateTime<Utc>,
+    private_intake_homeserver: Option<String>,
 ) -> Result<LinkedPeerHandshakeReport>
 where
     S: StorageAdapter,
@@ -398,6 +406,7 @@ where
         handshake_snapshot,
         Some(lease),
         now,
+        private_intake_homeserver,
     )
     .await
 }
@@ -409,6 +418,7 @@ async fn save_link_handshake_state_inner<S>(
     handshake_snapshot: Vec<u8>,
     lease: Option<PeerLinkOperationLease>,
     now: DateTime<Utc>,
+    private_intake_homeserver: Option<String>,
 ) -> Result<LinkedPeerHandshakeReport>
 where
     S: StorageAdapter,
@@ -417,6 +427,7 @@ where
         let counterparty = counterparty.clone();
         let handshake_snapshot = handshake_snapshot.clone();
         let lease = lease.clone();
+        let private_intake_homeserver = private_intake_homeserver.clone();
         move |tx| {
             if let Some(lease) = lease.as_ref() {
                 require_peer_link_operation_lease(tx, lease)?;
@@ -429,6 +440,9 @@ where
                 let snapshot =
                     paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(&handshake_snapshot)?;
                 require_recovery_context(&peer, snapshot.recovery_context())?;
+            }
+            if let Some(homeserver) = private_intake_homeserver {
+                tx.reserve_private_intake_admission(counterparty.clone(), homeserver, now)?;
             }
             peer.state = LinkedPeerState::Linking;
             peer.last_sync_at = Some(now);
@@ -448,6 +462,13 @@ where
                 checkpointed_at: now,
             };
 
+            if let Some(existing) = existing {
+                tx.rebase_buffered_private_intake_generation(
+                    &counterparty,
+                    existing.generation,
+                    generation,
+                )?;
+            }
             tx.save_linked_peer(peer.clone());
             tx.save_encrypted_link_state(link_state.clone());
             Ok(LinkedPeerHandshakeReport {
@@ -602,6 +623,11 @@ pub(crate) fn save_handshake_checkpoint_in_transaction(
         generation: state.generation,
         handshake_role: state.handshake_role,
     };
+    tx.rebase_buffered_private_intake_generation(
+        counterparty,
+        expected_state.generation,
+        state.generation,
+    )?;
     tx.save_encrypted_link_state(state);
     tx.save_linked_peer(peer);
     Ok(HandshakeCheckpointSave::Applied(report))

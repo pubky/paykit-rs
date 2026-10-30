@@ -69,6 +69,8 @@ async fn test_restore_backup_state_rejects_receipt_access_context_mismatch() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -149,6 +151,8 @@ async fn test_restore_backup_state_rejects_receipt_access_location_mismatch() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -226,6 +230,8 @@ async fn test_restore_backup_state_rejects_inconsistent_receipt_access_status() 
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 2,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;

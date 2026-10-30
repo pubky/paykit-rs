@@ -31,8 +31,9 @@ use crate::{
     identity::{IdentityState, PubkyPublicKey},
     storage::{
         EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord, OutboundPrivateMessageRecord,
-        PaymentEndpointReservationRecord, PaymentRequestExecutionClaim, PrivateStreamItemRecord,
-        PublicEndpointRecord, StorageAdapter, StorageState, ValidatedStorageState,
+        PaymentEndpointReservationRecord, PaymentRequestExecutionClaim, PrivateIntakeCursorRecord,
+        PrivateIntakePeerRecord, PrivateStreamItemRecord, PublicEndpointRecord, StorageAdapter,
+        StorageState, ValidatedStorageState,
     },
     OutboundPrivateMessageStatus, PaykitSdkError, Result,
 };
@@ -46,7 +47,7 @@ pub(crate) mod validation;
 use validation::*;
 
 /// Current SDK backup schema version.
-pub const SDK_BACKUP_VERSION: u32 = 1;
+pub const SDK_BACKUP_VERSION: u32 = 2;
 
 /// Versioned SDK-managed backup payload.
 ///
@@ -104,6 +105,76 @@ pub struct SdkBackupState {
     pub next_receive_batch_id: u64,
     /// Next private stream item id.
     pub next_private_stream_item_id: u64,
+    /// Durable homeserver cursors. Version 1 backups upgrade this to an empty list.
+    #[serde(default)]
+    pub private_intake_cursors: Vec<PrivateIntakeCursorRecord>,
+    /// Durable bounded encrypted packet queues and generation fences.
+    #[serde(default)]
+    pub private_intake_peers: Vec<PrivateIntakePeerRecord>,
+}
+
+/// Frozen positional postcard shape used by FFI backup blobs before durable
+/// private-intake state was added.
+#[doc(hidden)]
+#[derive(Deserialize)]
+pub struct SdkBackupStateV1 {
+    paykit_noise_public_key: Option<PubkyPublicKey>,
+    allowance_accounting: Option<crate::AllowanceAccountingState>,
+    version: u32,
+    identity_state: Option<IdentityState>,
+    linked_peers: Vec<LinkedPeerRecord>,
+    contact_records: Vec<ContactRecord>,
+    retired_paykit_apps: Vec<paykit_lib::PaykitAppId>,
+    public_endpoint_records: Vec<PublicEndpointRecord>,
+    payment_endpoint_reservations: Vec<PaymentEndpointReservationRecord>,
+    payment_request_execution_claims: Vec<PaymentRequestExecutionClaim>,
+    encrypted_link_states: Vec<EncryptedLinkStateRecord>,
+    outbound_private_messages: Vec<OutboundPrivateMessageRecord>,
+    private_stream_items: Vec<PrivateStreamItemRecord>,
+    event_dedup_records: Vec<EventDedupRecord>,
+    receipt_access_records: Vec<ReceiptAccessRecord>,
+    receipt_records: Vec<ReceiptRecord>,
+    receipt_issuance_records: Vec<ReceiptIssuanceRecord>,
+    next_outbound_private_message_id: u64,
+    next_receive_batch_id: u64,
+    next_private_stream_item_id: u64,
+}
+
+impl SdkBackupStateV1 {
+    /// Return embedded SDK backup schema version.
+    #[doc(hidden)]
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+}
+
+impl From<SdkBackupStateV1> for SdkBackupState {
+    fn from(value: SdkBackupStateV1) -> Self {
+        Self {
+            paykit_noise_public_key: value.paykit_noise_public_key,
+            allowance_accounting: value.allowance_accounting,
+            version: SDK_BACKUP_VERSION,
+            identity_state: value.identity_state,
+            linked_peers: value.linked_peers,
+            contact_records: value.contact_records,
+            retired_paykit_apps: value.retired_paykit_apps,
+            public_endpoint_records: value.public_endpoint_records,
+            payment_endpoint_reservations: value.payment_endpoint_reservations,
+            payment_request_execution_claims: value.payment_request_execution_claims,
+            encrypted_link_states: value.encrypted_link_states,
+            outbound_private_messages: value.outbound_private_messages,
+            private_stream_items: value.private_stream_items,
+            event_dedup_records: value.event_dedup_records,
+            receipt_access_records: value.receipt_access_records,
+            receipt_records: value.receipt_records,
+            receipt_issuance_records: value.receipt_issuance_records,
+            next_outbound_private_message_id: value.next_outbound_private_message_id,
+            next_receive_batch_id: value.next_receive_batch_id,
+            next_private_stream_item_id: value.next_private_stream_item_id,
+            private_intake_cursors: Vec::new(),
+            private_intake_peers: Vec::new(),
+        }
+    }
 }
 
 impl fmt::Debug for SdkBackupState {
@@ -151,6 +222,8 @@ impl fmt::Debug for SdkBackupState {
                 "next_private_stream_item_id",
                 &self.next_private_stream_item_id,
             )
+            .field("private_intake_cursors", &self.private_intake_cursors.len())
+            .field("private_intake_peers", &self.private_intake_peers.len())
             .finish()
     }
 }
@@ -402,6 +475,10 @@ fn restore_blockers(state: &StorageState) -> Vec<&'static str> {
         next_peer_link_operation_lease_id: _,
         paykit_app_operation_leases: _,
         next_paykit_app_operation_lease_id: _,
+        private_intake_supervisor_lease: _,
+        next_private_intake_supervisor_lease_id: _,
+        private_intake_stream_capacity,
+        private_intake_admitted_homeservers,
         allowance_accounting,
         linked_peers,
         contact_records,
@@ -421,6 +498,8 @@ fn restore_blockers(state: &StorageState) -> Vec<&'static str> {
         receipt_access_records,
         receipt_records,
         receipt_issuance_records,
+        private_intake_cursors,
+        private_intake_peers,
     } = state;
     [
         ("Allowance accounting", is_set(allowance_accounting)),
@@ -453,6 +532,13 @@ fn restore_blockers(state: &StorageState) -> Vec<&'static str> {
             is_set(private_stream_items)
                 || is_set(next_receive_batch_id)
                 || is_set(next_private_stream_item_id),
+        ),
+        (
+            "private intake state",
+            is_set(private_intake_cursors)
+                || is_set(private_intake_peers)
+                || is_set(private_intake_stream_capacity)
+                || is_set(private_intake_admitted_homeservers),
         ),
         ("Event Message dedupe records", is_set(event_dedup_records)),
         ("Receipt Access records", is_set(receipt_access_records)),
@@ -575,6 +661,20 @@ impl SdkBackupState {
                 .then(left.receipt_id.cmp(&right.receipt_id))
         });
 
+        let mut private_intake_cursors = state
+            .private_intake_cursors
+            .into_values()
+            .collect::<Vec<_>>();
+        private_intake_cursors.sort_by(|left, right| {
+            left.subscribed_user
+                .as_str()
+                .cmp(right.subscribed_user.as_str())
+        });
+
+        let mut private_intake_peers = state.private_intake_peers.into_values().collect::<Vec<_>>();
+        private_intake_peers
+            .sort_by(|left, right| left.counterparty.as_str().cmp(right.counterparty.as_str()));
+
         Self {
             version: SDK_BACKUP_VERSION,
             paykit_noise_public_key: state.paykit_noise_public_key,
@@ -596,6 +696,8 @@ impl SdkBackupState {
             next_outbound_private_message_id: state.next_outbound_private_message_id,
             next_receive_batch_id: state.next_receive_batch_id,
             next_private_stream_item_id: state.next_private_stream_item_id,
+            private_intake_cursors,
+            private_intake_peers,
         }
     }
 
@@ -701,6 +803,16 @@ impl SdkBackupState {
             |record| (record.counterparty.clone(), record.receipt_id.clone()),
             "Receipt issuance",
         )?;
+        let mut private_intake_cursors = keyed_by_tuple(
+            self.private_intake_cursors,
+            |record| record.subscribed_user.clone(),
+            "private intake cursor",
+        )?;
+        let mut private_intake_peers = keyed_by_tuple(
+            self.private_intake_peers,
+            |record| record.counterparty.clone(),
+            "private intake peer",
+        )?;
         validate_receipt_issuance_records(&receipt_issuance_records, &outbound_private_messages)?;
         validate_retired_app_payment_requests(
             &retired_paykit_apps,
@@ -719,6 +831,8 @@ impl SdkBackupState {
         if key_changed {
             // Snapshots and prepared ciphertext from another key cannot resume.
             encrypted_link_states.clear();
+            private_intake_peers.clear();
+            private_intake_cursors.clear();
         }
         let recovery_required_peers = reconcile_restored_linked_peers(
             &mut linked_peers,
@@ -728,6 +842,7 @@ impl SdkBackupState {
         )?;
         clear_recovery_required_link_snapshots(
             &mut encrypted_link_states,
+            &mut private_intake_peers,
             &recovery_required_peers,
         );
         mark_restored_outbound_recovery_required(
@@ -780,6 +895,10 @@ impl SdkBackupState {
             next_peer_link_operation_lease_id,
             paykit_app_operation_leases: HashMap::new(),
             next_paykit_app_operation_lease_id,
+            private_intake_supervisor_lease: None,
+            next_private_intake_supervisor_lease_id: 0,
+            private_intake_stream_capacity: None,
+            private_intake_admitted_homeservers: HashMap::new(),
             payment_request_execution_claims,
             outbound_private_messages,
             next_outbound_private_message_id,
@@ -790,6 +909,8 @@ impl SdkBackupState {
             receipt_access_records,
             receipt_records,
             receipt_issuance_records,
+            private_intake_cursors,
+            private_intake_peers,
         };
 
         validation::validate_storage_state(&state)?;
@@ -797,9 +918,17 @@ impl SdkBackupState {
     }
 
     fn validate(&self, current_identity: Option<&IdentityState>) -> Result<()> {
-        if self.version != SDK_BACKUP_VERSION {
+        if self.version != 1 && self.version != SDK_BACKUP_VERSION {
             return Err(PaykitSdkError::Protocol {
                 context: format!("unsupported SDK backup version {}", self.version),
+                source: None,
+            });
+        }
+        if self.version == 1
+            && (!self.private_intake_cursors.is_empty() || !self.private_intake_peers.is_empty())
+        {
+            return Err(PaykitSdkError::Protocol {
+                context: "SDK backup version 1 cannot contain private intake state".into(),
                 source: None,
             });
         }
@@ -852,6 +981,8 @@ impl SdkBackupState {
             || !self.receipt_access_records.is_empty()
             || !self.receipt_records.is_empty()
             || !self.receipt_issuance_records.is_empty()
+            || !self.private_intake_cursors.is_empty()
+            || !self.private_intake_peers.is_empty()
     }
 
     pub(crate) fn has_private_state(&self) -> bool {
@@ -867,6 +998,8 @@ impl SdkBackupState {
             || !self.receipt_access_records.is_empty()
             || !self.receipt_records.is_empty()
             || !self.receipt_issuance_records.is_empty()
+            || !self.private_intake_cursors.is_empty()
+            || !self.private_intake_peers.is_empty()
     }
 }
 

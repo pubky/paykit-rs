@@ -142,6 +142,7 @@ mod outbound_private;
 mod payment_request_read;
 mod payment_requests;
 mod payment_resolution;
+mod private_intake;
 mod private_lists;
 mod private_stream;
 mod profiles;
@@ -154,6 +155,10 @@ pub use app_removal::PaykitAppRemovalBlockers;
 pub use observation::PaykitStateObservation;
 pub use outbound_private::PrivateMessageSchedulingSnapshot;
 pub use payment_request_read::PaymentRequestRead;
+pub use private_intake::{
+    BufferedPrivateStreamIntakeReport, PrivateIntakeConfig, PrivateIntakeHealth,
+    PrivateIntakePeerFreshness, PrivateIntakeSupervisor, PrivateIntakeTransportState,
+};
 
 /// Clock abstraction used by SDK workflows and tests.
 pub trait Clock: Clone + Send + Sync + 'static {
@@ -189,6 +194,7 @@ pub struct PaykitSdk<S, K, P, C = SystemClock> {
     // and for the same App. Restarting conservatively republishes each list.
     private_payment_list_publications:
         Mutex<HashMap<(PubkyPublicKey, paykit_lib::PaykitAppId), PrivatePaymentListPublication>>,
+    private_intake_topology_changed: Arc<tokio::sync::Notify>,
 }
 
 struct PrivatePaymentListPublication {
@@ -267,6 +273,7 @@ where
             session_operation_gate: Arc::new(RwLock::new(())),
             last_identity_state: Mutex::new(None),
             private_payment_list_publications: Mutex::new(HashMap::new()),
+            private_intake_topology_changed: Arc::new(tokio::sync::Notify::new()),
         }
     }
 

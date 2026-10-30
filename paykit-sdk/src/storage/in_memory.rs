@@ -101,6 +101,36 @@ struct StorageStateTransaction {
     state: StorageState,
 }
 
+fn advance_private_intake_cursor(
+    state: &mut StorageState,
+    cursor: PrivateIntakeCursorRecord,
+) -> Result<()> {
+    if cursor.homeserver.is_empty() {
+        return Err(PaykitSdkError::Storage {
+            context: "private intake cursor has an empty homeserver".into(),
+            source: None,
+        });
+    }
+    if let Some(existing) = state.private_intake_cursors.get(&cursor.subscribed_user) {
+        if existing.homeserver != cursor.homeserver {
+            return Err(PaykitSdkError::Storage {
+                context: "private intake cursor homeserver changed without reconciliation".into(),
+                source: None,
+            });
+        }
+        if existing.event_id > cursor.event_id {
+            return Err(PaykitSdkError::Storage {
+                context: "private intake cursor regressed".into(),
+                source: None,
+            });
+        }
+    }
+    state
+        .private_intake_cursors
+        .insert(cursor.subscribed_user.clone(), cursor);
+    Ok(())
+}
+
 impl StorageTransaction for StorageStateTransaction {
     fn paykit_noise_public_key(&self) -> Option<crate::PubkyPublicKey> {
         self.state.paykit_noise_public_key.clone()
@@ -310,6 +340,274 @@ impl StorageTransaction for StorageStateTransaction {
             .insert(record.counterparty.clone(), record);
     }
 
+    fn buffer_private_intake_packet(
+        &mut self,
+        packet: BufferedPrivatePacketRecord,
+    ) -> Result<PrivateIntakeBufferOutcome> {
+        if packet.ciphertext.len() != PRIVATE_INTAKE_PACKET_BYTES {
+            return Err(PaykitSdkError::Storage {
+                context: "private intake packet has invalid ciphertext length".into(),
+                source: None,
+            });
+        }
+        let link = self
+            .state
+            .encrypted_link_states
+            .get(&packet.counterparty)
+            .ok_or_else(|| PaykitSdkError::Storage {
+                context: "private intake packet has no Encrypted Link state".into(),
+                source: None,
+            })?;
+        if link.generation != packet.link_generation {
+            return Err(PaykitSdkError::Storage {
+                context: "private intake packet generation does not match Encrypted Link".into(),
+                source: None,
+            });
+        }
+
+        if let Some(existing) = self.state.private_intake_peers.get(&packet.counterparty) {
+            if existing.link_generation != packet.link_generation {
+                return Err(PaykitSdkError::Storage {
+                    context: "private intake peer generation changed with buffered state".into(),
+                    source: None,
+                });
+            }
+            if let Some(buffered) = existing
+                .buffered_packets
+                .iter()
+                .find(|buffered| buffered.receive_counter == packet.receive_counter)
+            {
+                if buffered.ciphertext != packet.ciphertext {
+                    return Err(PaykitSdkError::Storage {
+                        context: "private intake receive slot changed ciphertext".into(),
+                        source: None,
+                    });
+                }
+                return Ok(PrivateIntakeBufferOutcome::AlreadyBuffered);
+            }
+            if let Some(tail) = existing.buffered_packets.last() {
+                let expected =
+                    tail.receive_counter
+                        .checked_add(1)
+                        .ok_or_else(|| PaykitSdkError::Storage {
+                            context: "private intake receive counter is exhausted".into(),
+                            source: None,
+                        })?;
+                if packet.receive_counter != expected {
+                    return Err(PaykitSdkError::Storage {
+                        context: "private intake packet is not the next ordered receive slot"
+                            .into(),
+                        source: None,
+                    });
+                }
+            }
+        }
+
+        let peer_count = self
+            .state
+            .private_intake_peers
+            .get(&packet.counterparty)
+            .map_or(0, |record| record.buffered_packets.len());
+        let global_count = self
+            .state
+            .private_intake_peers
+            .values()
+            .try_fold(0usize, |total, record| {
+                total.checked_add(record.buffered_packets.len())
+            })
+            .ok_or_else(|| PaykitSdkError::Storage {
+                context: "private intake packet count overflow".into(),
+                source: None,
+            })?;
+        let peer_bytes = peer_count
+            .checked_mul(PRIVATE_INTAKE_PACKET_BYTES)
+            .ok_or_else(|| PaykitSdkError::Storage {
+                context: "private intake peer byte count overflow".into(),
+                source: None,
+            })?;
+        let global_bytes = global_count
+            .checked_mul(PRIVATE_INTAKE_PACKET_BYTES)
+            .ok_or_else(|| PaykitSdkError::Storage {
+                context: "private intake global byte count overflow".into(),
+                source: None,
+            })?;
+        if peer_count >= PRIVATE_INTAKE_MAX_PACKETS_PER_PEER
+            || global_count >= PRIVATE_INTAKE_MAX_PACKETS_GLOBAL
+            || peer_bytes
+                .checked_add(packet.ciphertext.len())
+                .is_none_or(|bytes| bytes > PRIVATE_INTAKE_MAX_BYTES_PER_PEER)
+            || global_bytes
+                .checked_add(packet.ciphertext.len())
+                .is_none_or(|bytes| bytes > PRIVATE_INTAKE_MAX_BYTES_GLOBAL)
+        {
+            return Ok(PrivateIntakeBufferOutcome::CapacityReached);
+        }
+
+        if let Some(cursor) = packet.source_cursor.clone() {
+            advance_private_intake_cursor(&mut self.state, cursor)?;
+        }
+        let peer = self
+            .state
+            .private_intake_peers
+            .entry(packet.counterparty.clone())
+            .or_insert_with(|| PrivateIntakePeerRecord {
+                counterparty: packet.counterparty.clone(),
+                link_generation: packet.link_generation,
+                buffered_packets: Vec::new(),
+                cancelled_handshake_through_generation: None,
+            });
+        peer.buffered_packets.push(packet);
+        Ok(PrivateIntakeBufferOutcome::Inserted)
+    }
+
+    fn advance_private_intake_cursor(&mut self, cursor: PrivateIntakeCursorRecord) -> Result<()> {
+        advance_private_intake_cursor(&mut self.state, cursor)
+    }
+
+    fn reconcile_private_intake_cursor_homeserver(
+        &mut self,
+        subscribed_user: &PubkyPublicKey,
+        homeserver: &str,
+    ) {
+        if self
+            .state
+            .private_intake_cursors
+            .get(subscribed_user)
+            .is_some_and(|cursor| cursor.homeserver != homeserver)
+        {
+            self.state.private_intake_cursors.remove(subscribed_user);
+        }
+    }
+
+    fn remove_buffered_private_intake_packet(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        link_generation: u64,
+        receive_counter: u64,
+    ) -> Result<BufferedPrivatePacketRecord> {
+        let peer = self
+            .state
+            .private_intake_peers
+            .get_mut(counterparty)
+            .ok_or_else(|| PaykitSdkError::Storage {
+                context: "private intake peer state is missing".into(),
+                source: None,
+            })?;
+        if peer.link_generation != link_generation {
+            return Err(PaykitSdkError::Storage {
+                context: "private intake dequeue generation mismatch".into(),
+                source: None,
+            });
+        }
+        if peer
+            .buffered_packets
+            .first()
+            .is_none_or(|packet| packet.receive_counter != receive_counter)
+        {
+            return Err(PaykitSdkError::Storage {
+                context: "private intake dequeue must match the ordered queue head".into(),
+                source: None,
+            });
+        }
+        Ok(peer.buffered_packets.remove(0))
+    }
+
+    fn rebase_buffered_private_intake_generation(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        expected_generation: u64,
+        resulting_generation: u64,
+    ) -> Result<()> {
+        let Some(peer) = self.state.private_intake_peers.get_mut(counterparty) else {
+            return Ok(());
+        };
+        if peer.link_generation != expected_generation {
+            return Err(PaykitSdkError::Storage {
+                context: "private intake generation changed before buffered rebase".into(),
+                source: None,
+            });
+        }
+        peer.link_generation = resulting_generation;
+        for packet in &mut peer.buffered_packets {
+            packet.link_generation = resulting_generation;
+        }
+        Ok(())
+    }
+
+    fn invalidate_buffered_private_intake_generation(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        expected_generation: u64,
+        resulting_generation: u64,
+    ) -> Result<()> {
+        let Some(peer) = self.state.private_intake_peers.get_mut(counterparty) else {
+            return Ok(());
+        };
+        if peer.link_generation != expected_generation {
+            return Err(PaykitSdkError::Storage {
+                context: "private intake generation changed before link invalidation".into(),
+                source: None,
+            });
+        }
+        peer.link_generation = resulting_generation;
+        peer.buffered_packets.clear();
+        Ok(())
+    }
+
+    fn cancel_private_intake_handshake_generation(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        generation: u64,
+    ) -> Result<()> {
+        let link = self
+            .state
+            .encrypted_link_states
+            .get_mut(counterparty)
+            .ok_or_else(|| PaykitSdkError::Storage {
+                context: "private intake cancellation has no Encrypted Link state".into(),
+                source: None,
+            })?;
+        if link.generation != generation {
+            return Err(PaykitSdkError::Storage {
+                context: "private intake cancellation generation mismatch".into(),
+                source: None,
+            });
+        }
+        let next_generation = generation
+            .checked_add(1)
+            .ok_or_else(|| PaykitSdkError::Storage {
+                context: "private intake cancellation generation is exhausted".into(),
+                source: None,
+            })?;
+        link.link_snapshot = None;
+        link.handshake_snapshot = None;
+        link.handshake_role = None;
+        link.generation = next_generation;
+        let peer = self
+            .state
+            .private_intake_peers
+            .entry(counterparty.clone())
+            .or_insert_with(|| PrivateIntakePeerRecord {
+                counterparty: counterparty.clone(),
+                link_generation: next_generation,
+                buffered_packets: Vec::new(),
+                cancelled_handshake_through_generation: None,
+            });
+        if peer.link_generation != generation && peer.link_generation != next_generation {
+            return Err(PaykitSdkError::Storage {
+                context: "private intake cancellation conflicts with buffered generation".into(),
+                source: None,
+            });
+        }
+        peer.link_generation = next_generation;
+        peer.buffered_packets.clear();
+        peer.cancelled_handshake_through_generation = Some(
+            peer.cancelled_handshake_through_generation
+                .map_or(generation, |current| current.max(generation)),
+        );
+        Ok(())
+    }
+
     fn claim_peer_link_operation(
         &mut self,
         counterparty: &PubkyPublicKey,
@@ -425,6 +723,141 @@ impl StorageTransaction for StorageStateTransaction {
         }
         lease.expires_at = lease.expires_at.max(expires_at);
         true
+    }
+
+    fn claim_private_intake_supervisor(
+        &mut self,
+        now: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+        stream_capacity: usize,
+        admitted_homeservers: HashMap<PubkyPublicKey, String>,
+    ) -> Result<Option<PrivateIntakeSupervisorLease>> {
+        let required = crate::storage::private_intake_stream_count(&admitted_homeservers);
+        if stream_capacity == 0 || required > stream_capacity {
+            return Err(PaykitSdkError::Policy {
+                context: format!(
+                    "private intake requires {required} streams but caller reserved {stream_capacity}"
+                ),
+                source: None,
+            });
+        }
+        if self
+            .state
+            .private_intake_supervisor_lease
+            .as_ref()
+            .is_some_and(|lease| lease.expires_at > now)
+        {
+            return Ok(None);
+        }
+        let lease_id = self.state.next_private_intake_supervisor_lease_id;
+        self.state.next_private_intake_supervisor_lease_id =
+            lease_id.checked_add(1).ok_or_else(storage_id_exhausted)?;
+        let lease = PrivateIntakeSupervisorLease {
+            lease_id,
+            claimed_at: now,
+            expires_at,
+        };
+        self.state.private_intake_supervisor_lease = Some(lease.clone());
+        self.state.private_intake_stream_capacity = Some(stream_capacity);
+        self.state.private_intake_admitted_homeservers = admitted_homeservers;
+        Ok(Some(lease))
+    }
+
+    fn reserve_private_intake_admission(
+        &mut self,
+        counterparty: PubkyPublicKey,
+        homeserver: String,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        if self
+            .state
+            .private_intake_supervisor_lease
+            .as_ref()
+            .is_none_or(|lease| lease.expires_at <= now)
+        {
+            return Ok(false);
+        }
+        let capacity = self.state.private_intake_stream_capacity.ok_or_else(|| {
+            PaykitSdkError::RecoveryRequired {
+                context: "active private intake supervisor has no stream capacity".into(),
+                source: None,
+            }
+        })?;
+        let mut proposed = self.state.private_intake_admitted_homeservers.clone();
+        proposed.insert(counterparty, homeserver);
+        let required = crate::storage::private_intake_stream_count(&proposed);
+        if required > capacity {
+            return Err(PaykitSdkError::Policy {
+                context: format!(
+                    "private intake requires {required} streams but caller reserved {capacity}"
+                ),
+                source: None,
+            });
+        }
+        self.state.private_intake_admitted_homeservers = proposed;
+        Ok(true)
+    }
+
+    fn replace_private_intake_admissions(
+        &mut self,
+        lease_id: u64,
+        now: DateTime<Utc>,
+        admitted_homeservers: HashMap<PubkyPublicKey, String>,
+    ) -> Result<bool> {
+        if self
+            .state
+            .private_intake_supervisor_lease
+            .as_ref()
+            .is_none_or(|lease| lease.lease_id != lease_id || lease.expires_at <= now)
+        {
+            return Ok(false);
+        }
+        let capacity = self.state.private_intake_stream_capacity.ok_or_else(|| {
+            PaykitSdkError::RecoveryRequired {
+                context: "active private intake supervisor has no stream capacity".into(),
+                source: None,
+            }
+        })?;
+        let required = crate::storage::private_intake_stream_count(&admitted_homeservers);
+        if required > capacity {
+            return Err(PaykitSdkError::Policy {
+                context: format!(
+                    "private intake requires {required} streams but caller reserved {capacity}"
+                ),
+                source: None,
+            });
+        }
+        self.state.private_intake_admitted_homeservers = admitted_homeservers;
+        Ok(true)
+    }
+
+    fn renew_private_intake_supervisor(
+        &mut self,
+        lease_id: u64,
+        now: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> bool {
+        let Some(lease) = self.state.private_intake_supervisor_lease.as_mut() else {
+            return false;
+        };
+        if lease.lease_id != lease_id || lease.expires_at <= now {
+            return false;
+        }
+        lease.expires_at = lease.expires_at.max(expires_at);
+        true
+    }
+
+    fn release_private_intake_supervisor(&mut self, lease_id: u64) {
+        if self
+            .state
+            .private_intake_supervisor_lease
+            .as_ref()
+            .is_some_and(|lease| lease.lease_id == lease_id)
+        {
+            self.state.private_intake_supervisor_lease = None;
+            self.state.private_intake_stream_capacity = None;
+            self.state.private_intake_admitted_homeservers.clear();
+        }
     }
 
     fn payment_request_execution_claim(

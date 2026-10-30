@@ -137,6 +137,96 @@ if status.capability == paykit_sdk::PubkyIdentityCapability::PrivateLinkCapable 
 # }
 ```
 
+### SSE-Assisted Private Intake
+
+Rust integrations that own a long-lived runtime can opt into SSE-assisted
+private intake. SSE is only a wake-up hint: the SDK derives and fetches the next
+expected immutable Noise slot, stores ciphertext and the per-user replay cursor
+atomically, and advances the Noise receive checkpoint only when the application
+explicitly drains buffered work. A healthy stream still audits expected slots
+about every 60 seconds by default, so a skipped or missed event does not become
+permanent message loss.
+
+```rust,no_run
+use std::sync::Arc;
+use paykit_sdk::{PaykitSdk, PrivateIntakeConfig};
+
+# async fn run<S, K, P>(sdk: Arc<PaykitSdk<S, K, P>>) -> paykit_sdk::Result<()>
+# where
+#     S: paykit_sdk::StorageAdapter + 'static,
+#     K: paykit_sdk::PubkySessionProvider + 'static,
+#     P: paykit_sdk::PaymentAdapter + 'static,
+# {
+let supervisor = sdk
+    .start_private_intake(PrivateIntakeConfig::new(4)?)
+    .await?;
+let work = supervisor.subscribe_work();
+
+// Register before inspecting durable state. Notifications are coalesced hints;
+// enabling first closes the inspect-then-wait race.
+let notified = work.notified();
+tokio::pin!(notified);
+notified.as_mut().enable();
+for peer in sdk.linked_peers().await? {
+    let result = sdk
+        .receive_buffered_private_messages(peer.counterparty, &supervisor)
+        .await?;
+    // Queue emptiness is meaningful only together with result.freshness.
+    let _ = result;
+}
+
+// Await the registered hint, then inspect durable state again. Production
+// runtimes repeat this cycle under their own shutdown signal.
+notified.await;
+for peer in sdk.linked_peers().await? {
+    let _ = sdk
+        .receive_buffered_private_messages(peer.counterparty, &supervisor)
+        .await?;
+}
+
+supervisor.stop().await;
+# Ok(())
+# }
+```
+
+`stream_capacity` reserves actual homeserver connections, not peers. Public
+subscriptions group at most 50 users from one homeserver per connection, so 51
+users on one homeserver require two reserved streams; peers on different
+homeservers require separate streams. Startup fails instead of silently leaving
+peers uncovered when capacity is insufficient. Active supervisor capacity is
+identity-wide: new handshakes are rejected before becoming pending when their
+resolved homeserver would need another stream. A later topology move that no
+longer fits marks affected health stale and stops supervision instead of keeping
+old streams plus healthy-audit polling for an uncovered peer. Queue limits are 64 ciphertext
+packets per Linked Peer and 1,024 per identity. A full peer is detached without
+advancing its cursor; draining durable work releases capacity and lets it
+resume.
+
+Inspect `PrivateIntakeSupervisor::health` and each buffered result's `freshness`.
+`Connecting`, `Replaying`, `Stale`, `Backpressured`, `Unsupported`, and `Stopped`
+must not be interpreted as remote queue emptiness. A homeserver that rejects or
+does not implement SSE is `Unsupported`; SSE mode does not fall back to
+continuous slot polling. Already buffered packets remain drainable during an
+outage. Reconnects reuse durable per-user cursors and reconcile expected slots.
+Use synchronous `PrivateIntakeSupervisor::is_finished` to detect authoritative
+supervisor task termination, including autonomous lease or topology failure.
+It remains false while any owned task is live and is true after `stop`; do not
+infer supervisor liveness from transport health.
+
+Only one supervisor may own an identity-wide state backing. While it owns a
+Linked Peer, legacy `receive_private_messages*` calls return
+`PrivateIntakeModeConflict`; legacy polling remains available for peers not
+owned by SSE. Pending Encrypted Link Handshakes are advanced by the supervisor
+and never expire automatically. `cancel_pending_handshake` is explicit,
+local-only cancellation that persists a generation fence against late packets.
+
+This lifecycle API is currently Rust-only. `paykit-ffi` migrates and preserves
+the durable intake records in state snapshots and backups, but does not expose
+the long-lived supervisor, notification, buffered-drain, or cancellation APIs.
+Swift/Kotlin applications must continue using existing polling bindings until a
+platform lifecycle contract is added; they must not run polling concurrently
+with a Rust-owned supervisor over the same identity state.
+
 Common workflows:
 
 - call `initialize` on startup to refresh identity status from the Pubky
@@ -208,7 +298,7 @@ Common workflows:
   Encrypted Link state, and uses the next generation derived from the Pubky
   secret. Delegated apps import that key from their authorizer. Every remaining
   authorized app must persist it before private work resumes
-- call `receive_private_messages` before deriving Private Payment Lists,
+- in legacy polling mode, call `receive_private_messages` before deriving Private Payment Lists,
   Payment Requests, Allowances, Receipt Access state, or resolving a private
   contact payment when the freshest private endpoints matter. Idle checks verify
   signed key authorization, recovery markers, and the next message slot without
@@ -229,7 +319,9 @@ Common workflows:
   contact with `save_contact`. Save a payee you only pay through public Payment
   Endpoints as a contact so its Receipt Access is never refused. Detect the
   refusal with `PaykitSdkError::is_retention_limit_reached` on the
-  single-counterparty call; batch reports carry only error text
+  single-counterparty call; batch reports carry only error text. Do not call
+  these polling APIs for a peer owned by SSE-assisted private intake; drain its
+  durable buffer through `receive_buffered_private_messages` instead
 - call `forget_peer` to delete what a blocked counterparty sent when you never
   acted on it, for example an unsolicited flood that reached that limit. It
   requires `block_peer` first, is local and irreversible, and applies to every

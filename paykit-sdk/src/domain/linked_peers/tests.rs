@@ -790,6 +790,7 @@ async fn test_lease_checked_handshake_save_rejects_stale_lease() {
         vec![1, 2, 3],
         first_lease,
         timestamp() + chrono::Duration::seconds(12),
+        None,
     )
     .await;
 

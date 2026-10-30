@@ -15,14 +15,33 @@ pub use in_memory::{run_storage_state_transaction, InMemoryStorage};
 pub(crate) use pubky_shared::shared_state_operation_active;
 pub use pubky_shared::{ObservedBackupStateRevision, PubkySharedStateStorage};
 pub use records::{
-    EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord, NewOutboundPrivateMessage,
-    NewPrivateStreamItem, OutboundPrivateMessageRecord, PaykitAppOperationLease,
-    PaymentEndpointReservationRecord, PaymentRequestExecutionClaim, PeerLinkOperationLease,
-    PreparedOutboundPrivateSend, PrivateStreamItemRecord, PublicEndpointRecord, StorageState,
+    BufferedPrivatePacketRecord, EncryptedLinkStateRecord, EventDedupRecord, LinkedPeerRecord,
+    NewOutboundPrivateMessage, NewPrivateStreamItem, OutboundPrivateMessageRecord,
+    PaykitAppOperationLease, PaymentEndpointReservationRecord, PaymentRequestExecutionClaim,
+    PeerLinkOperationLease, PreparedOutboundPrivateSend, PrivateIntakeBufferOutcome,
+    PrivateIntakeCursorRecord, PrivateIntakePeerRecord, PrivateIntakeSupervisorLease,
+    PrivateStreamItemRecord, PublicEndpointRecord, StorageState, PRIVATE_INTAKE_MAX_BYTES_GLOBAL,
+    PRIVATE_INTAKE_MAX_BYTES_PER_PEER, PRIVATE_INTAKE_MAX_PACKETS_GLOBAL,
+    PRIVATE_INTAKE_MAX_PACKETS_PER_PEER, PRIVATE_INTAKE_PACKET_BYTES,
 };
 pub use state_blob::{
     decode_storage_state_blob, encode_storage_state_blob, SDK_STATE_BLOB_VERSION,
 };
+
+pub(crate) const PRIVATE_INTAKE_MAX_EVENT_STREAM_USERS: usize = 50;
+
+pub(crate) fn private_intake_stream_count(
+    admitted_homeservers: &HashMap<PubkyPublicKey, String>,
+) -> usize {
+    let mut users_per_homeserver = HashMap::<&str, usize>::new();
+    for homeserver in admitted_homeservers.values() {
+        *users_per_homeserver.entry(homeserver.as_str()).or_default() += 1;
+    }
+    users_per_homeserver
+        .values()
+        .map(|users| users.div_ceil(PRIVATE_INTAKE_MAX_EVENT_STREAM_USERS))
+        .sum()
+}
 
 pub(crate) use queue::outbound_private_queue_head_is_claimable;
 pub(crate) use records::NewPrivateStreamItemDetails;
@@ -490,6 +509,54 @@ pub trait StorageTransaction {
     /// Save one Encrypted Link state record.
     fn save_encrypted_link_state(&mut self, record: EncryptedLinkStateRecord);
 
+    /// Buffer one expected encrypted private packet and its relevant cursor atomically.
+    fn buffer_private_intake_packet(
+        &mut self,
+        packet: BufferedPrivatePacketRecord,
+    ) -> Result<PrivateIntakeBufferOutcome>;
+
+    /// Advance one subscribed user's durable homeserver cursor monotonically.
+    fn advance_private_intake_cursor(&mut self, cursor: PrivateIntakeCursorRecord) -> Result<()>;
+
+    /// Drop one user's replay cursor when authoritative homeserver resolution moves it.
+    /// Other users' independent cursors remain unchanged.
+    fn reconcile_private_intake_cursor_homeserver(
+        &mut self,
+        subscribed_user: &PubkyPublicKey,
+        homeserver: &str,
+    );
+
+    /// Remove only the expected queue head after its durable processing commits.
+    fn remove_buffered_private_intake_packet(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        link_generation: u64,
+        receive_counter: u64,
+    ) -> Result<BufferedPrivatePacketRecord>;
+
+    /// Move any remaining buffered packets to a newly persisted link generation.
+    fn rebase_buffered_private_intake_generation(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        expected_generation: u64,
+        resulting_generation: u64,
+    ) -> Result<()>;
+
+    /// Discard packets from an invalidated link and advance its intake generation.
+    fn invalidate_buffered_private_intake_generation(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        expected_generation: u64,
+        resulting_generation: u64,
+    ) -> Result<()>;
+
+    /// Fence locally cancelled Encrypted Link Handshake work through one generation.
+    fn cancel_private_intake_handshake_generation(
+        &mut self,
+        counterparty: &PubkyPublicKey,
+        generation: u64,
+    ) -> Result<()>;
+
     /// Claim exclusive local work on one peer's Encrypted Link.
     fn claim_peer_link_operation(
         &mut self,
@@ -532,6 +599,43 @@ pub trait StorageTransaction {
 
     /// Release a previously claimed Paykit App operation.
     fn release_paykit_app_operation(&mut self, app_id: &paykit_lib::PaykitAppId, lease_id: u64);
+
+    /// Claim dedicated identity-wide ownership of private-intake supervision.
+    fn claim_private_intake_supervisor(
+        &mut self,
+        now: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+        stream_capacity: usize,
+        admitted_homeservers: HashMap<PubkyPublicKey, String>,
+    ) -> Result<Option<PrivateIntakeSupervisorLease>>;
+
+    /// Reserve one peer's resolved homeserver under active supervisor capacity.
+    /// Returns false when no unexpired supervisor owns intake.
+    fn reserve_private_intake_admission(
+        &mut self,
+        counterparty: PubkyPublicKey,
+        homeserver: String,
+        now: DateTime<Utc>,
+    ) -> Result<bool>;
+
+    /// Replace resolved topology while lease ownership is unexpired and still matches.
+    fn replace_private_intake_admissions(
+        &mut self,
+        lease_id: u64,
+        now: DateTime<Utc>,
+        admitted_homeservers: HashMap<PubkyPublicKey, String>,
+    ) -> Result<bool>;
+
+    /// Extend private-intake ownership only while its lease is unexpired and still matches.
+    fn renew_private_intake_supervisor(
+        &mut self,
+        lease_id: u64,
+        now: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> bool;
+
+    /// Release private-intake ownership only while lease id still matches.
+    fn release_private_intake_supervisor(&mut self, lease_id: u64);
 
     /// Load one identity-wide Payment Request execution claim.
     fn payment_request_execution_claim(
