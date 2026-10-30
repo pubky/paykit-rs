@@ -29,11 +29,16 @@ async fn test_allowance_mutations_reject_concurrent_identity_operation() {
             .await,
         sdk.reject_allowance(counterparty.clone(), &allowance_id)
             .await,
-        sdk.end_allowance(counterparty, &allowance_id).await,
+        sdk.end_allowance(counterparty.clone(), &allowance_id).await,
     ];
     for result in results {
         assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
     }
+    assert!(matches!(
+        sdk.accept_pending_allowance_proposals(counterparty, 4)
+            .await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
     assert!(storage
         .snapshot()
         .unwrap()

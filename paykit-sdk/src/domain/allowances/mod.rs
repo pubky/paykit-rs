@@ -18,11 +18,44 @@ mod restore;
 pub(crate) use restore::ensure_payment_lifecycle_history_retained;
 
 pub(crate) use commands::{
-    enqueue_allowance_end, enqueue_allowance_proposal, enqueue_allowance_response,
-    AllowanceResponse,
+    accept_pending_allowance_proposals, enqueue_allowance_end, enqueue_allowance_proposal,
+    enqueue_allowance_response, AllowanceResponse,
 };
 #[cfg(test)]
-pub(crate) use derivation::LINK_HISTORY_LOADS;
+pub(crate) use derivation::{LINK_HISTORY_LOADS, LINK_HISTORY_RECORDS_READ};
+
+/// Most inbound and outbound records one Encrypted Link may hold for
+/// accepting its pending Allowance proposals.
+///
+/// Above it, the link's history is not read and nothing is accepted, so the
+/// work of one call does not grow with the history a counterparty sends. A
+/// counterparty the local identity has not chosen is refused new items at
+/// 4096 retained inbound items, so its link stays under this cap with every
+/// Delivery Confirmation and local message. A chosen counterparty, for
+/// example one whose proposal was accepted, has no such limit; past this cap
+/// its proposals are left for [`crate::PaykitSdk::accept_allowance`].
+pub const MAX_PENDING_ALLOWANCE_LINK_RECORDS: usize =
+    4 * crate::domain::private_stream::MAX_RETAINED_PRIVATE_STREAM_ITEMS_PER_COUNTERPARTY;
+
+/// Outcome of accepting one link's pending Allowance proposals.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PendingAllowanceAcceptance {
+    /// Acceptances queued in this call, oldest proposal first.
+    Accepted {
+        /// Derived records after the Acceptances were queued.
+        records: Vec<AllowanceRecord>,
+        /// Whether pending proposals beyond the requested limit remain.
+        more_pending: bool,
+    },
+    /// The link holds more than [`MAX_PENDING_ALLOWANCE_LINK_RECORDS`]
+    /// records. Its history was not read and nothing was accepted.
+    LinkHistoryTooLarge {
+        /// The cap the link's inbound and outbound records exceed. The exact
+        /// count is not computed, so refusing stays bounded.
+        record_cap: usize,
+    },
+}
 pub(crate) use derivation::{
     allowance_record, allowance_records, allowance_records_in_transaction, allowance_scopes,
     sort_allowances_newest_first,

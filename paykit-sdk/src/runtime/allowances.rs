@@ -153,6 +153,40 @@ where
         .await
     }
 
+    /// Accept up to `limit` pending proposals from one exact counterparty.
+    ///
+    /// Pending proposals are received proposals that make the local identity
+    /// the Allowee, are `Proposed`, and have `Consistent` history. They are
+    /// accepted oldest first by [`AllowanceRecord::proposal_stream_item_id`],
+    /// each with the same lifecycle, role, history, link, and append checks as
+    /// [`Self::accept_allowance`], all in one durable transaction.
+    /// `more_pending` reports whether pending proposals remain beyond `limit`.
+    ///
+    /// The link's history is derived once before and once after the appends,
+    /// not once per proposal. A link holding more than
+    /// [`crate::MAX_PENDING_ALLOWANCE_LINK_RECORDS`] records returns
+    /// [`PendingAllowanceAcceptance::LinkHistoryTooLarge`] without reading its
+    /// history. The caller remains responsible for Pubky session creation,
+    /// capability scope, key rotation, and timeouts.
+    pub async fn accept_pending_allowance_proposals(
+        &self,
+        counterparty: PubkyPublicKey,
+        limit: usize,
+    ) -> Result<PendingAllowanceAcceptance> {
+        let _identity_guard = self.claim_identity_operation("accept Allowance")?;
+        let _session_access = self
+            .load_session_access_for_initialized_identity("accept Allowance")
+            .await?;
+        accept_pending_allowance_proposals(
+            &self.storage,
+            counterparty,
+            self.config.app_id.clone(),
+            limit,
+            self.clock.now(),
+        )
+        .await
+    }
+
     /// Queue rejection as the authenticated proposal recipient.
     ///
     /// The lifecycle, role, history, link, and append checks occur in one

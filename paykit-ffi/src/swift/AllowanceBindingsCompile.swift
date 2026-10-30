@@ -47,6 +47,18 @@ private func compileAllowanceBindingsSurface(
         allowanceId: allowanceId,
         expectedProposalStreamItemId: 1
     )
+    let pending: PendingAllowanceAcceptance = try await sdk.acceptPendingAllowanceProposals(
+        counterparty: counterparty,
+        limit: 4
+    )
+    switch pending {
+    case let .accepted(records, morePending):
+        _ = (records as [AllowanceRecord], morePending as Bool)
+    case let .linkHistoryTooLarge(recordCap):
+        _ = recordCap as UInt64
+    case .unknown:
+        break
+    }
     let rejected: AllowanceRecord = try await sdk.rejectAllowance(
         counterparty: counterparty,
         allowanceId: allowanceId

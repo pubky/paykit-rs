@@ -6,7 +6,7 @@ use paykit_lib::{
 };
 use paykit_sdk::{
     AllowanceFilter, AllowanceHistoryStatus, AllowanceLifecycleState, AllowanceLocalRole,
-    AllowanceRecord, AllowanceTermsRecord,
+    AllowanceRecord, AllowanceTermsRecord, PendingAllowanceAcceptance,
 };
 
 use crate::{
@@ -18,7 +18,7 @@ use crate::{
 
 use super::{
     FfiAllowanceFilter, FfiAllowanceHistoryStatus, FfiAllowanceLifecycleState,
-    FfiAllowanceLocalRole, FfiAllowanceRecord, FfiAllowanceTerms,
+    FfiAllowanceLocalRole, FfiAllowanceRecord, FfiAllowanceTerms, FfiPendingAllowanceAcceptance,
 };
 
 impl From<AllowanceLocalRole> for FfiAllowanceLocalRole {
@@ -117,6 +117,31 @@ impl TryFrom<AllowanceTermsRecord> for FfiAllowanceTerms {
             value.allowed_payment_endpoint_identifiers,
         )
         .map(Self::from_validated_terms)
+    }
+}
+
+impl TryFrom<PendingAllowanceAcceptance> for FfiPendingAllowanceAcceptance {
+    type Error = PaykitFfiError;
+
+    fn try_from(value: PendingAllowanceAcceptance) -> Result<Self, Self::Error> {
+        Ok(match value {
+            PendingAllowanceAcceptance::Accepted {
+                records,
+                more_pending,
+            } => Self::Accepted {
+                records: records
+                    .into_iter()
+                    .map(TryInto::try_into)
+                    .collect::<Result<_, _>>()?,
+                more_pending,
+            },
+            PendingAllowanceAcceptance::LinkHistoryTooLarge { record_cap } => {
+                Self::LinkHistoryTooLarge {
+                    record_cap: record_cap as u64,
+                }
+            }
+            _ => Self::Unknown,
+        })
     }
 }
 

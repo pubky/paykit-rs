@@ -87,12 +87,26 @@ impl StorageAdapter for InMemoryStorage {
     }
 }
 
+// Count link records copied out of state, and records examined while
+// counting a link, so tests can prove a call refused a history without
+// loading it and with bounded work.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LINK_RECORDS_LOADED: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    pub(crate) static LINK_RECORDS_VISITED: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// Run one logical SDK storage transaction against an owned storage state.
 pub fn run_storage_state_transaction(
     state: StorageState,
     f: StorageTransactionCallback<'_>,
 ) -> Result<(StorageState, Box<dyn std::any::Any + Send>)> {
     let mut transaction = StorageStateTransaction { state };
+    // O(1) when the index matches the records; rebuilt only after records
+    // changed outside the transaction methods, such as compaction.
+    transaction.state.refresh_link_record_index();
     let value = f(&mut transaction)?;
     Ok((transaction.state, value))
 }
@@ -122,6 +136,7 @@ impl StorageTransaction for StorageStateTransaction {
 
     fn replace_storage_state(&mut self, state: ValidatedStorageState) {
         self.state = state.into_storage_state();
+        self.state.refresh_link_record_index();
     }
 
     fn load_identity_state(&self) -> Option<IdentityState> {
@@ -471,7 +486,7 @@ impl StorageTransaction for StorageStateTransaction {
             .checked_add(1)
             .ok_or_else(storage_id_exhausted)?;
         let record = OutboundPrivateMessageRecord::from_new(outbound_message_id, message);
-        self.state.outbound_private_messages.push(record.clone());
+        self.state.push_outbound_private_message(record.clone());
         Ok(record)
     }
 
@@ -487,6 +502,8 @@ impl StorageTransaction for StorageStateTransaction {
             .cloned()
             .collect::<Vec<_>>();
         messages.sort_by_key(|message| message.outbound_message_id);
+        #[cfg(test)]
+        LINK_RECORDS_LOADED.with(|loaded| loaded.set(loaded.get() + messages.len()));
         messages
     }
 
@@ -573,18 +590,52 @@ impl StorageTransaction for StorageStateTransaction {
             .checked_add(1)
             .ok_or_else(storage_id_exhausted)?;
         self.state
-            .private_stream_items
-            .push(PrivateStreamItemRecord::from_new(stream_item_id, item));
+            .push_private_stream_item(PrivateStreamItemRecord::from_new(stream_item_id, item));
         Ok(stream_item_id)
     }
 
     fn private_stream_items(&self, counterparty: &PubkyPublicKey) -> Vec<PrivateStreamItemRecord> {
-        self.state
+        let items = self
+            .state
             .private_stream_items
             .iter()
             .filter(|item| &item.counterparty == counterparty)
             .cloned()
-            .collect()
+            .collect::<Vec<_>>();
+        #[cfg(test)]
+        LINK_RECORDS_LOADED.with(|loaded| loaded.set(loaded.get() + items.len()));
+        items
+    }
+
+    fn link_record_count_up_to(&self, counterparty: &PubkyPublicKey, max: usize) -> usize {
+        if let Some(count) = self.state.indexed_link_records(counterparty) {
+            return count;
+        }
+        // Records changed earlier in this transaction outside the methods
+        // that keep the index current. Count without the index, stopping
+        // past `max`; the next transaction rebuilds it.
+        let inbound = self
+            .state
+            .private_stream_items
+            .iter()
+            .map(|item| &item.counterparty);
+        let outbound = self
+            .state
+            .outbound_private_messages
+            .iter()
+            .map(|message| &message.counterparty);
+        let mut count = 0;
+        for record_counterparty in inbound.chain(outbound) {
+            #[cfg(test)]
+            LINK_RECORDS_VISITED.with(|visited| visited.set(visited.get() + 1));
+            if record_counterparty == counterparty {
+                count += 1;
+                if count > max {
+                    break;
+                }
+            }
+        }
+        count
     }
 
     fn event_dedup_record(
