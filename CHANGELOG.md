@@ -9,6 +9,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Added
 
+- React Native package `@synonymdev/react-native-paykit` in
+  `paykit-react-native/`, generated from the `paykit-ffi` UniFFI metadata with
+  uniffi-bindgen-react-native. It exposes the same SDK surface as Swift and
+  Kotlin, but TypeScript names keep the `Ffi` prefix (`FfiPaykitSdk`,
+  `FfiSdkStateBlobStore`, and so on). It requires the React Native New
+  Architecture, supports React Native 0.78 and later (including 0.80 and
+  later, Expo SDK 54 and later), and is published to npm by the `npm Package`
+  workflow.
 - `SignupCodeRejected`, `PaykitSdkError::is_signup_code_rejected` in Rust and
   the `identity/signup_code_rejected` error code in Swift and Kotlin report a
   signup code that the homeserver refused as missing, malformed, unknown or
@@ -68,6 +76,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   reached the app as an internal panic error that included the platform error
   text, and a throw from `SdkStateBlobStore` left that SDK handle failing every
   later call with `state_transaction_lock_poisoned`.
+
+### Fixed
+
+- `FfiPaykitSdk.stateRevision` returns `SharedStateBusy` instead of blocking
+  while a state transaction is running.
 
 ### Integration
 

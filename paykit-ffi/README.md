@@ -1,7 +1,10 @@
 # Paykit FFI
 
 UniFFI bindings for [paykit-sdk](../paykit-sdk/), targeting iOS (Swift) and
-Android (Kotlin).
+Android (Kotlin). The React Native package in
+[`paykit-react-native`](../paykit-react-native/) is generated from the same
+UniFFI metadata; its TypeScript names keep the `Ffi` prefix (for example
+`FfiPaykitSdk`).
 
 The generated bindings expose the SDK runtime foundation: configuration, Pubky
 session bootstrap helpers, opaque SDK state storage callbacks, payment adapter
