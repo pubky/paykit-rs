@@ -21,10 +21,9 @@ use paykit_sdk::{
     PaykitApp, PaykitAppCapabilities, PaykitAppId, PaykitSdk, PaykitSdkConfig, PaykitSdkError,
     PaymentRequestLifecycleState, PrivatePaymentEndpointReservation,
     PrivatePaymentListReservationUpdate, PrivateReceivingDetail, PubkyIdentityCapability,
-    PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess, PubkySessionBootstrap,
-    PubkySharedStateStorage, PublicReceivingDetail, ReceiptDraftBuilder, ReceiptIssuanceStatus,
-    Result as PaykitResult, StorageAdapter, PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
-    PAYKIT_SESSION_CAPABILITIES,
+    PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess, PubkySharedStateStorage,
+    PublicReceivingDetail, ReceiptDraftBuilder, ReceiptIssuanceStatus, Result as PaykitResult,
+    StorageAdapter, PAYKIT_AUTHORIZER_SESSION_CAPABILITIES, PAYKIT_SESSION_CAPABILITIES,
 };
 use serde_json::Map as JsonMap;
 use tokio::sync::oneshot;
@@ -249,17 +248,15 @@ async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sig
     let testnet = build_testnet().await;
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
-    let bitkit_result =
-        PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap(), "paykit-sdk.test")
-            .unwrap()
-            .sign_up(
-                &secret,
-                &homeserver,
-                None,
-                PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
-            )
-            .await
-            .unwrap();
+    let bitkit_result = session_bootstrap(&testnet, "paykit-sdk.test")
+        .sign_up(
+            &secret,
+            &homeserver,
+            None,
+            PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        )
+        .await
+        .unwrap();
     let bitkit_session_secret = bitkit_result
         .export_session_secret()
         .await
@@ -2917,8 +2914,7 @@ async fn test_paykit_identity_key_rotation_rekeys_shared_state_and_registry() {
     let testnet = build_testnet().await;
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
-    let access = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap(), "paykit-sdk.test")
-        .unwrap()
+    let access = session_bootstrap(&testnet, "paykit-sdk.test")
         .sign_up(
             &secret,
             &homeserver,
@@ -3548,8 +3544,7 @@ async fn test_pubky_shared_state_rejects_a_competing_writer_until_lock_release()
     let testnet = build_testnet().await;
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
-    let access = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap(), "paykit-sdk.test")
-        .unwrap()
+    let access = session_bootstrap(&testnet, "paykit-sdk.test")
         .sign_up(
             &secret,
             &homeserver,
@@ -3651,8 +3646,7 @@ async fn test_pubky_shared_state_rejects_a_missing_previously_observed_resource(
     let testnet = build_testnet().await;
     let secret = PubkyLocalSecretKey::new(pubky::Keypair::random().secret_key());
     let homeserver = PubkyPublicKey::from_public_key(&testnet.homeserver_app().public_key());
-    let access = PubkySessionBootstrap::with_pubky(testnet.sdk().unwrap(), "paykit-sdk.test")
-        .unwrap()
+    let access = session_bootstrap(&testnet, "paykit-sdk.test")
         .sign_up(
             &secret,
             &homeserver,
