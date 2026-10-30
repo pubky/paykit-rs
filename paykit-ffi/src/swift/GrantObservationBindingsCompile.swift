@@ -25,13 +25,16 @@ private func compileGrantObservationBindingsSurface(
 // Compile-only consumer fixture; lifecycle admission and confirmation belong to the app.
 private func compileGrantLogoutBindingsSurface(
     sdk: PaykitSdkProtocol,
-    originalOwner: String
+    originalOwner: String,
+    access: PubkySessionAccess,
+    key: PaykitIdentitySecretKey
 ) async throws {
+    let keyedAccess: PubkySessionAccess = access.withPaykitIdentitySecretKey(key: key)
     let logout: PubkyGrantLogout = try await sdk.captureGrantLogout(expectedPublicKey: originalOwner)
     let binding: PubkyGrantLogoutReceipt = logout.binding()
     let attempt: PubkyGrantLogoutAttempt = try await logout.prepareAttempt()
     let receipt: PubkyGrantLogoutReceipt = try await attempt.execute()
     let acknowledged: PubkyGrantLogoutReceipt? = logout.acknowledged()
     logout.revokeAdmission()
-    _ = (binding.publicKey, receipt.grantId, acknowledged)
+    _ = (binding.publicKey, receipt.grantId, acknowledged, keyedAccess)
 }

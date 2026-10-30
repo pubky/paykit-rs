@@ -7779,6 +7779,16 @@ public protocol PubkySessionAccessProtocol: AnyObject, Sendable {
      */
     func exportSessionSecret()  -> String
 
+    /**
+     * Attach a Paykit Identity Secret without reconstructing the Pubky session.
+     *
+     * The original grant, client configuration and any existing live session
+     * remain unchanged. Access created from secure storage remains non-live;
+     * this method never restores, refreshes or authenticates it. Callers must
+     * end previously captured logout admission before replacing key material.
+     */
+    func withPaykitIdentitySecretKey(key: PaykitIdentitySecretKey)  -> PubkySessionAccess
+
 }
 /**
  * Live Pubky access material supplied by platform session storage.
@@ -7891,6 +7901,22 @@ open func exportPaykitIdentitySecretKey() -> PaykitIdentitySecretKey?  {
 open func exportSessionSecret() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
     uniffi_paykit_fn_method_ffipubkysessionaccess_export_session_secret(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Attach a Paykit Identity Secret without reconstructing the Pubky session.
+     *
+     * The original grant, client configuration and any existing live session
+     * remain unchanged. Access created from secure storage remains non-live;
+     * this method never restores, refreshes or authenticates it. Callers must
+     * end previously captured logout admission before replacing key material.
+     */
+open func withPaykitIdentitySecretKey(key: PaykitIdentitySecretKey) -> PubkySessionAccess  {
+    return try!  FfiConverterTypePubkySessionAccess_lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipubkysessionaccess_with_paykit_identity_secret_key(self.uniffiClonePointer(),
+        FfiConverterTypePaykitIdentitySecretKey_lower(key),$0
     )
 })
 }
@@ -28028,6 +28054,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_session_secret() != 34434) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkysessionaccess_with_paykit_identity_secret_key() != 24572) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth() != 27473) {

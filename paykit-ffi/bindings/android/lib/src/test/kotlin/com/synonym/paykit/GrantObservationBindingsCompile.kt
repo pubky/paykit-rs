@@ -27,7 +27,10 @@ internal suspend fun compileGrantObservationBindingsSurface(
 internal suspend fun compileGrantLogoutBindingsSurface(
     sdk: PaykitSdkInterface,
     originalOwner: String,
+    access: PubkySessionAccess,
+    key: PaykitIdentitySecretKey,
 ) {
+    val keyedAccess: PubkySessionAccess = access.withPaykitIdentitySecretKey(key)
     val logout: PubkyGrantLogout = sdk.captureGrantLogout(expectedPublicKey = originalOwner)
     val binding: PubkyGrantLogoutReceipt = logout.binding()
     val attempt: PubkyGrantLogoutAttempt = logout.prepareAttempt()

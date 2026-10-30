@@ -142,6 +142,26 @@ impl FfiPubkySessionAccess {
     pub fn export_paykit_identity_secret_key(&self) -> Option<Arc<FfiPaykitIdentitySecretKey>> {
         self.paykit_identity_secret_key.clone()
     }
+
+    /// Attach a Paykit Identity Secret without reconstructing the Pubky session.
+    ///
+    /// The original grant, client configuration and any existing live session
+    /// remain unchanged. Access created from secure storage remains non-live;
+    /// this method never restores, refreshes or authenticates it. Callers must
+    /// end previously captured logout admission before replacing key material.
+    pub fn with_paykit_identity_secret_key(
+        &self,
+        key: Arc<FfiPaykitIdentitySecretKey>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            client_id: self.client_id.clone(),
+            session_secret: self.session_secret.clone(),
+            local_secret_key: self.local_secret_key.clone(),
+            paykit_identity_secret_key: Some(key),
+            live_access: self.live_access.clone(),
+            live_client_config: self.live_client_config.clone(),
+        })
+    }
 }
 
 /// Result of creating or importing a Pubky session.

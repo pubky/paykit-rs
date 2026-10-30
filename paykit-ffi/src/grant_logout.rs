@@ -323,6 +323,17 @@ mod tests {
             .is_err());
         assert!(live.session.revalidate().await.unwrap().is_some());
 
+        let identity_key = Arc::new(FfiPaykitIdentitySecretKey::new(vec![7; 32], 1).unwrap());
+        let restored_with_key =
+            persisted_access.with_paykit_identity_secret_key(identity_key.clone());
+        assert!(restored_with_key.live_access.is_none());
+        assert!(restored_with_key.live_client_config.is_none());
+        *provider.current.lock().unwrap() = Some(restored_with_key);
+        assert!(adapter
+            .capture_grant_logout(&result.public_key)
+            .await
+            .is_err());
+
         let original_access = Arc::new(FfiPubkySessionAccess {
             client_id: persisted_access.client_id.clone(),
             session_secret: persisted_access.session_secret.clone(),
@@ -331,6 +342,24 @@ mod tests {
             live_access: Some(result.access.clone()),
             live_client_config: Some(default_pubky_client_config()),
         });
+        let attached_access = original_access.with_paykit_identity_secret_key(identity_key.clone());
+        assert!(original_access
+            .export_paykit_identity_secret_key()
+            .is_none());
+        assert!(Arc::ptr_eq(
+            &attached_access.export_paykit_identity_secret_key().unwrap(),
+            &identity_key
+        ));
+        assert_eq!(attached_access.client_id(), original_access.client_id());
+        assert_eq!(
+            attached_access.export_session_secret(),
+            original_access.export_session_secret()
+        );
+        assert_eq!(
+            attached_access.live_client_config,
+            original_access.live_client_config
+        );
+        let original_access = attached_access;
         let mut different_config = default_pubky_client_config();
         different_config.request_timeout_secs += 1;
         *provider.current.lock().unwrap() = Some(Arc::new(FfiPubkySessionAccess {
