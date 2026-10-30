@@ -19,6 +19,155 @@ use crate::harness::{
 };
 
 #[tokio::test]
+async fn test_empty_private_list_withdraws_after_disable_and_restart() {
+    let pair = linked_two_party().await;
+    let first = pair
+        .alice
+        .sdk
+        .clear_private_payment_list_and_process_outbound(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    assert!(first.failed_to_queue.is_empty());
+    assert!(first.failed_to_deliver.is_empty());
+    assert_eq!(first.acknowledged.len(), 1);
+    let first_id = first.cleared[0].outbound_message_id.unwrap();
+    pair.bob
+        .sdk
+        .receive_private_messages(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    let before_receive = pair
+        .bob
+        .storage
+        .snapshot()
+        .unwrap()
+        .next_private_stream_item_id;
+
+    let capabilities = paykit_lib::PaykitAppCapabilities {
+        private_payments: false,
+        payment_requests: true,
+        receipts: true,
+        outgoing_payments: true,
+    };
+    pair.alice
+        .sdk
+        .publish_paykit_app(paykit_lib::PaykitApp::new("Test app", capabilities).unwrap())
+        .await
+        .unwrap();
+    let before = pair.alice.storage.snapshot().unwrap();
+    assert_eq!(
+        before.registered_paykit_app_capabilities[&pair.alice.app_id],
+        capabilities
+    );
+    // A fresh runtime cannot reuse the previous process's publication acknowledgement.
+    let sdk = PaykitSdk::new(
+        pair.alice.storage.clone(),
+        TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    );
+    let report = sdk
+        .sync_private_payment_lists_with_reservations_and_process_outbound(
+            vec![PrivatePaymentListReservationUpdate {
+                counterparty: pair.bob.public_key.clone(),
+                reservations: Vec::new(),
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(
+        report.failed_to_queue.is_empty(),
+        "{:?}",
+        report.failed_to_queue
+    );
+    assert!(report.failed_to_deliver.is_empty());
+    assert_eq!(report.cleared.len(), 1);
+    let new_id = report.cleared[0].outbound_message_id.unwrap();
+    assert!(new_id > first_id);
+    assert_eq!(report.acknowledged.len(), 1);
+    assert_eq!(report.acknowledged[0].outbound_message_id, new_id);
+    assert_eq!(report.acknowledged[0].counterparty, pair.bob.public_key);
+    assert_eq!(
+        pair.alice
+            .storage
+            .snapshot()
+            .unwrap()
+            .registered_paykit_app_capabilities,
+        before.registered_paykit_app_capabilities
+    );
+    let registry = sdk
+        .paykit_app_registry(pair.alice.public_key.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        registry.apps()[&pair.alice.app_id].capabilities(),
+        capabilities
+    );
+
+    let received = pair
+        .bob
+        .sdk
+        .receive_private_messages(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(received.stream_item_ids.len(), 1);
+    // A filtered public view hides a disabled app; inspect the actual received payload.
+    let state = pair.bob.storage.snapshot().unwrap();
+    let item = state
+        .private_stream_items
+        .iter()
+        .find(|item| item.stream_item_id == received.stream_item_ids[0])
+        .unwrap();
+    assert!(item.stream_item_id >= before_receive);
+    assert_eq!(item.counterparty, pair.alice.public_key);
+    assert_eq!(
+        item.parse_status,
+        paykit_sdk::PrivateStreamParseStatus::Valid
+    );
+    let list = paykit_lib::parse_private_payment_list_json(&item.raw_json).unwrap();
+    assert_eq!(list.app_id(), &pair.alice.app_id);
+    assert!(list.is_empty());
+
+    let before_rejected = pair.alice.storage.snapshot().unwrap();
+    let rejected = sdk
+        .sync_private_payment_lists_with_reservations_and_process_outbound(
+            vec![PrivatePaymentListReservationUpdate {
+                counterparty: pair.bob.public_key.clone(),
+                reservations: vec![PrivatePaymentEndpointReservation {
+                    reservation_id: "disabled-new-invoice".into(),
+                    receiving_detail: private_receiving_detail(
+                        "btc-lightning-bolt11",
+                        "ln-disabled",
+                    ),
+                    expires_at: None,
+                    attribution: Default::default(),
+                }],
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.failed_to_queue.len(), 1);
+    assert!(rejected.acknowledged.is_empty());
+    assert!(rejected.queued.is_empty());
+    let after_rejected = pair.alice.storage.snapshot().unwrap();
+    assert_eq!(
+        after_rejected.outbound_private_messages,
+        before_rejected.outbound_private_messages
+    );
+    assert_eq!(
+        after_rejected.encrypted_link_states,
+        before_rejected.encrypted_link_states
+    );
+    assert_eq!(
+        after_rejected.registered_paykit_app_capabilities,
+        before_rejected.registered_paykit_app_capabilities
+    );
+}
+
+#[tokio::test]
 async fn test_private_receive_refreshes_cached_app_authorization() {
     let pair = linked_two_party().await;
     pair.bob
