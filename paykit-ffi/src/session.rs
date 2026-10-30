@@ -431,9 +431,15 @@ impl FfiSdkPubkySessionProviderAdapter {
             .load_session_access()?
             .ok_or_else(unavailable)?;
         let fingerprint = session_access_fingerprint(&access);
-        let session = self
-            .existing_session(&access)
-            .await
+        // The ordinary session cache can contain credentials restored after
+        // restart. It must not recreate a live-only removal authority.
+        if access.live_client_config.as_ref() != Some(&self.pubky_client) {
+            return Err(unavailable());
+        }
+        let session = access
+            .live_access
+            .as_ref()
+            .map(|access| access.session.clone())
             .ok_or_else(unavailable)?;
         validate_grant_session_client_id(&session, &access.client_id).await?;
         if PubkyPublicKey::from_public_key(&session.public_key()) != *expected_owner {

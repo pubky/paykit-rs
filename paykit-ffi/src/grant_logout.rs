@@ -290,7 +290,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let original_access = Arc::new(
+        let persisted_access = Arc::new(
             FfiPubkySessionAccess::new(
                 "bitkit.test".into(),
                 result.export_session_secret().await.unwrap().into_inner(),
@@ -300,7 +300,7 @@ mod tests {
             .unwrap(),
         );
         let provider = Arc::new(Provider {
-            current: Mutex::new(Some(original_access.clone())),
+            current: Mutex::new(Some(persisted_access.clone())),
             revoke_during_callback: Mutex::new(None),
         });
         let adapter = FfiSdkPubkySessionProviderAdapter::new(
@@ -315,6 +315,37 @@ mod tests {
             .is_err());
         assert!(result.access.session.revalidate().await.unwrap().is_some());
         let live = adapter.load_session_access().await.unwrap().unwrap();
+        // Ordinary restoration may populate the cache, but must not recreate
+        // the live-only authority to capture a removal intent after restart.
+        assert!(adapter
+            .capture_grant_logout(&result.public_key)
+            .await
+            .is_err());
+        assert!(live.session.revalidate().await.unwrap().is_some());
+
+        let original_access = Arc::new(FfiPubkySessionAccess {
+            client_id: persisted_access.client_id.clone(),
+            session_secret: persisted_access.session_secret.clone(),
+            local_secret_key: None,
+            paykit_identity_secret_key: None,
+            live_access: Some(result.access.clone()),
+            live_client_config: Some(default_pubky_client_config()),
+        });
+        let mut different_config = default_pubky_client_config();
+        different_config.request_timeout_secs += 1;
+        *provider.current.lock().unwrap() = Some(Arc::new(FfiPubkySessionAccess {
+            client_id: persisted_access.client_id.clone(),
+            session_secret: persisted_access.session_secret.clone(),
+            local_secret_key: None,
+            paykit_identity_secret_key: None,
+            live_access: Some(result.access.clone()),
+            live_client_config: Some(different_config),
+        }));
+        assert!(adapter
+            .capture_grant_logout(&result.public_key)
+            .await
+            .is_err());
+        *provider.current.lock().unwrap() = Some(original_access.clone());
         let wrong_owner = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
         assert!(adapter.capture_grant_logout(&wrong_owner).await.is_err());
 
