@@ -1282,3 +1282,31 @@ paykit-ffi/
 ├── bindings/android/       # Android Gradle source/config files
 └── dist/ios/               # Ignored generated XCFramework release artifacts
 ```
+
+### Original-grant removal intent
+
+`captureGrantLogout(expectedPublicKey)` captures an existing native session from
+this SDK's original provider without importing, exchanging or restoring it. A
+cache miss fails closed. Retain that handle with the original lifecycle and
+confirmation; its `binding()` is metadata, not evidence of remote completion.
+After a fresh confirmation, call `prepareAttempt()` and then consume the returned
+attempt with `execute()`. A missing `grant-proof-logout` feature, malformed support
+response, redirect or unknown response fails closed with no bearer-only fallback.
+Same-grant bearer refresh is allowed; a different owner, grant, signer, client,
+private-key generation or provider bundle is rejected.
+
+Before replacing the original lifecycle (including same-seed replacement), call
+`revokeAdmission()` and drain the caller's active operation. Provider checks are
+not an atomic replacement lock and cannot detect an entire unobserved ABA cycle.
+The app must enforce this boundary. Cancellation after dispatch remains unknown.
+Only a new confirmation can prepare another attempt, using the retained original
+grant and a fresh nonce. Restart offers local-only recovery, not reconstructed
+remote authority. `acknowledged()` preserves known remote success even if the app
+is cancelled or local persistence fails. No method invokes the provider's erase
+callback: conditionally clear only the original credentials after acknowledged
+remote cleanup, retaining watermark/marker ordering and completed private/public
+withdrawal progress. Ordinary `signOut()` remains a separate existing API.
+
+To validate all native bindings without publishing an existing Maven version,
+run `PAYKIT_SKIP_MAVEN_LOCAL=1 ./build.sh all` in `paykit-ffi`. This still builds the
+release AAR and compiles the Kotlin consumer fixtures; it skips Maven Local only.

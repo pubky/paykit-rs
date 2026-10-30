@@ -588,6 +588,25 @@ Paykit state or withdraw another application's data. If live access, remote
 revocation, or provider clearing fails, shared state remains intact and the
 operation returns an error.
 
+Native applications that retain an original removal intent can instead capture a
+`PubkyGrantLogout` from its existing live session before confirmation. This helper
+uses the existing `grant-proof-logout` capability: it revokes that original grant,
+including refreshed bearers of the same grant, without restoring credentials,
+loading a replacement grant, or falling back to bearer-only logout. Preparation
+reads support on the original homeserver; consuming execution sends one fresh
+proof. The original owner must remain admitted across both operations.
+
+A failed or cancelled request can have committed remotely. Only a fresh explicit
+confirmation permits preparing another attempt with a new nonce. A known success
+is retained by `acknowledged()` independently of local cleanup. The returned
+receipt records the authenticated endpoint's success; it is not server-signed,
+does not prove which attempt first revoked the grant, and does not acknowledge
+local credential erasure. `binding()` is pre-execution metadata only. Restart must
+not reconstruct this live authority. Apps still own conditional local credential
+erasure and durable cleanup progress, and must not replay acknowledged endpoint
+or private-list withdrawal. This native helper inherits the original PKARR client
+and caller timeout; it does not inherit custom ICANN trust anchors.
+
 `forget_session_access` clears local access without revoking the grant. It is
 an explicit recovery operation; other persisted copies of that grant remain
 valid until expiry or remote revocation.

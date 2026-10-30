@@ -1,10 +1,14 @@
 //! Pubky account, session, and auth-flow helpers.
 
 mod companion_claim;
+#[cfg(not(target_arch = "wasm32"))]
+mod logout;
 mod observation;
 mod republish;
 
 pub use companion_claim::{PubkyAuthCompanionClaim, PubkyAuthCompanionClaimApprovalError};
+#[cfg(not(target_arch = "wasm32"))]
+pub use logout::{PubkyGrantLogout, PubkyGrantLogoutAttempt, PubkyGrantLogoutReceipt};
 pub use observation::{PubkyGrantObservation, PubkyGrantObserver};
 
 use std::{fmt, str::FromStr};
