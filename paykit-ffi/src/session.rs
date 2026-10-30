@@ -377,27 +377,10 @@ impl FfiSdkPubkySessionProviderAdapter {
             .provider
             .load_session_access()?
             .ok_or_else(unavailable)?;
-        let session = if access.live_client_config.as_ref() == Some(&self.pubky_client) {
-            access
-                .live_access
-                .as_ref()
-                .map(|access| access.session.clone())
-        } else {
-            None
-        };
-        let session = match session {
-            Some(session) => session,
-            None => {
-                let fingerprint: [u8; 32] = Sha256::digest(access.session_secret.as_bytes()).into();
-                self.cached_session
-                    .lock()
-                    .await
-                    .as_ref()
-                    .filter(|cached| cached.session_secret_fingerprint == fingerprint)
-                    .map(|cached| cached.session.clone())
-                    .ok_or_else(unavailable)?
-            }
-        };
+        let session = self
+            .existing_session(&access)
+            .await
+            .ok_or_else(unavailable)?;
         validate_grant_session_client_id(&session, &access.client_id).await?;
         if PubkyPublicKey::from_public_key(&session.public_key()) != *expected_owner {
             return Err(unavailable());
@@ -406,6 +389,119 @@ impl FfiSdkPubkySessionProviderAdapter {
             .await
             .map_err(Into::into)
     }
+
+    async fn existing_session(
+        &self,
+        access: &FfiPubkySessionAccess,
+    ) -> Option<pubky::PubkySession> {
+        let session = if access.live_client_config.as_ref() == Some(&self.pubky_client) {
+            access
+                .live_access
+                .as_ref()
+                .map(|access| access.session.clone())
+        } else {
+            None
+        };
+        match session {
+            Some(session) => Some(session),
+            None => {
+                let fingerprint: [u8; 32] = Sha256::digest(access.session_secret.as_bytes()).into();
+                self.cached_session
+                    .lock()
+                    .await
+                    .as_ref()
+                    .filter(|cached| cached.session_secret_fingerprint == fingerprint)
+                    .map(|cached| cached.session.clone())
+            }
+        }
+    }
+
+    pub(crate) async fn capture_grant_logout(
+        &self,
+        expected_owner: &PubkyPublicKey,
+    ) -> Result<(paykit_sdk::PubkyGrantLogout, [u8; 32]), PaykitFfiError> {
+        let unavailable = || {
+            identity_error(
+                "pubky_grant_logout_unavailable",
+                "original live grant is unavailable",
+            )
+        };
+        let access = self
+            .provider
+            .load_session_access()?
+            .ok_or_else(unavailable)?;
+        let fingerprint = session_access_fingerprint(&access);
+        let session = self
+            .existing_session(&access)
+            .await
+            .ok_or_else(unavailable)?;
+        validate_grant_session_client_id(&session, &access.client_id).await?;
+        if PubkyPublicKey::from_public_key(&session.public_key()) != *expected_owner {
+            return Err(unavailable());
+        }
+        let logout = paykit_sdk::PubkyGrantLogout::capture(
+            &session,
+            Duration::from_secs(self.pubky_client.request_timeout_secs),
+        )
+        .await?;
+        if !self.matches_session_access(&fingerprint)? {
+            return Err(unavailable());
+        }
+        Ok((logout, fingerprint))
+    }
+
+    pub(crate) fn matches_session_access(
+        &self,
+        fingerprint: &[u8; 32],
+    ) -> Result<bool, PaykitFfiError> {
+        Ok(self
+            .provider
+            .load_session_access()?
+            .is_some_and(|access| session_access_fingerprint(&access) == *fingerprint))
+    }
+}
+
+pub(crate) fn session_access_fingerprint(access: &FfiPubkySessionAccess) -> [u8; 32] {
+    fn field(hash: &mut Sha256, value: Option<&[u8]>) {
+        hash.update([u8::from(value.is_some())]);
+        if let Some(value) = value {
+            hash.update((value.len() as u64).to_be_bytes());
+            hash.update(value);
+        }
+    }
+    let mut hash = Sha256::new();
+    field(&mut hash, Some(access.client_id.as_bytes()));
+    field(&mut hash, Some(access.session_secret.as_bytes()));
+    let local = access
+        .local_secret_key
+        .as_ref()
+        .map(|key| Zeroizing::new(key.export_bytes()));
+    let private = access
+        .paykit_identity_secret_key
+        .as_ref()
+        .map(|key| Zeroizing::new(key.export_bytes()));
+    field(&mut hash, local.as_ref().map(|bytes| bytes.as_slice()));
+    field(&mut hash, private.as_ref().map(|bytes| bytes.as_slice()));
+    if let Some(key) = &access.paykit_identity_secret_key {
+        field(&mut hash, Some(&key.key_generation().to_be_bytes()));
+    }
+    if let Some(config) = &access.live_client_config {
+        field(&mut hash, Some(&config.request_timeout_secs.to_be_bytes()));
+        field(
+            &mut hash,
+            config
+                .local_testnet_host
+                .as_ref()
+                .map(|value| value.as_bytes()),
+        );
+        field(
+            &mut hash,
+            config.auth_relay_url.as_ref().map(|value| value.as_bytes()),
+        );
+    } else {
+        field(&mut hash, None);
+    }
+    hash.finalize().into()
 }
 
 #[async_trait]

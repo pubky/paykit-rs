@@ -103,7 +103,6 @@ pub use paykit_lib::INITIAL_PAYKIT_KEY_GENERATION;
 pub use paykit_lib::{
     PaykitApp, PaykitAppCapabilities, PaykitAppId, PaykitAppRegistry, PaykitNoiseKeyAuthorization,
 };
-#[doc(inline)]
 pub use pubky_session::{
     parse_pubky_auth_url, parse_pubky_resource, resolve_pubky_url, PubkyAuthCompanionClaim,
     PubkyAuthCompanionClaimApprovalError, PubkyAuthDetails, PubkyAuthRequest, PubkyAuthRequestKind,
@@ -111,6 +110,9 @@ pub use pubky_session::{
     PubkySessionBootstrap, PubkySessionBootstrapResult, PubkySessionSecret,
     PAYKIT_AUTHORIZER_SESSION_CAPABILITIES, PAYKIT_SESSION_CAPABILITIES,
 };
+#[doc(inline)]
+#[cfg(not(target_arch = "wasm32"))]
+pub use pubky_session::{PubkyGrantLogout, PubkyGrantLogoutAttempt, PubkyGrantLogoutReceipt};
 #[doc(inline)]
 pub use runtime::{
     Clock, PaykitAppRemovalBlockers, PaykitSdk, PaykitStateObservation, PaymentRequestRead,

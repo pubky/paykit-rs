@@ -297,13 +297,22 @@ else
     sed -i '' "s/^version=.*/version=$CARGO_VERSION/" "$ANDROID_LIB_DIR/gradle.properties"
 fi
 
-echo "Testing Android library publish and Allowance binding compilation..."
-"$ANDROID_LIB_DIR"/gradlew --project-dir "$ANDROID_LIB_DIR" \
-    clean publishToMavenLocal :lib:compileDebugUnitTestKotlin
+# Validation of an already published version must not overwrite Maven Local.
+if [ "${PAYKIT_SKIP_MAVEN_LOCAL:-0}" = "1" ]; then
+    echo "Building Android library and binding compile fixtures without publishing..."
+    "$ANDROID_LIB_DIR"/gradlew --project-dir "$ANDROID_LIB_DIR" \
+        clean :lib:assembleRelease :lib:compileDebugUnitTestKotlin
+else
+    echo "Testing Android library publish and binding compilation..."
+    "$ANDROID_LIB_DIR"/gradlew --project-dir "$ANDROID_LIB_DIR" \
+        clean publishToMavenLocal :lib:compileDebugUnitTestKotlin
+fi
 validate_android_aar_symbols
 
 echo "Android build process completed successfully!"
 echo ""
 echo "Artifact: com.synonym:paykit-android:$CARGO_VERSION"
-echo "Published to Maven Local for testing."
+if [ "${PAYKIT_SKIP_MAVEN_LOCAL:-0}" != "1" ]; then
+    echo "Published to Maven Local for testing."
+fi
 echo "To publish to GitHub Packages, create a release or run the gradle-publish workflow."

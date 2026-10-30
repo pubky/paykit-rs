@@ -21,3 +21,17 @@ internal suspend fun compileGrantObservationBindingsSurface(
         val message: ULong = acknowledgement.outboundMessageId
     }
 }
+
+// Compile-only consumer fixture; lifecycle admission and confirmation belong to the app.
+@Suppress("UNUSED_VARIABLE")
+internal suspend fun compileGrantLogoutBindingsSurface(
+    sdk: PaykitSdkInterface,
+    originalOwner: String,
+) {
+    val logout: PubkyGrantLogout = sdk.captureGrantLogout(expectedPublicKey = originalOwner)
+    val binding: PubkyGrantLogoutReceipt = logout.binding()
+    val attempt: PubkyGrantLogoutAttempt = logout.prepareAttempt()
+    val receipt: PubkyGrantLogoutReceipt = attempt.execute()
+    val acknowledged: PubkyGrantLogoutReceipt? = logout.acknowledged()
+    logout.revokeAdmission()
+}

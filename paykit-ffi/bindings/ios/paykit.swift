@@ -1879,6 +1879,13 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func cancelPaymentRequest(counterparty: String, paymentRequestId: String, reason: String?) async throws  -> PaymentRequestRecord
 
     /**
+     * Capture the original provider's existing live grant without authentication.
+     * The caller must already admit the original owner and recheck its lifecycle
+     * after this await. No cache restore, session import or remote write occurs.
+     */
+    func captureGrantLogout(expectedPublicKey: String) async throws  -> PubkyGrantLogout
+
+    /**
      * Capture the admitted owner's existing live grant without authenticating.
      *
      * Reads the platform session callback and an existing native cached/live
@@ -3286,6 +3293,28 @@ open func cancelPaymentRequest(counterparty: String, paymentRequestId: String, r
             completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
             freeFunc: ffi_paykit_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypePaymentRequestRecord_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Capture the original provider's existing live grant without authentication.
+     * The caller must already admit the original owner and recheck its lifecycle
+     * after this await. No cache restore, session import or remote write occurs.
+     */
+open func captureGrantLogout(expectedPublicKey: String)async throws  -> PubkyGrantLogout  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_capture_grant_logout(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(expectedPublicKey)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_pointer,
+            completeFunc: ffi_paykit_rust_future_complete_pointer,
+            freeFunc: ffi_paykit_rust_future_free_pointer,
+            liftFunc: FfiConverterTypePubkyGrantLogout_lift,
             errorHandler: FfiConverterTypePaykitError_lift
         )
 }
@@ -6995,6 +7024,364 @@ public func FfiConverterTypePubkyAuthRequestState_lift(_ pointer: UnsafeMutableR
 #endif
 public func FfiConverterTypePubkyAuthRequestState_lower(_ value: PubkyAuthRequestState) -> UnsafeMutableRawPointer {
     return FfiConverterTypePubkyAuthRequestState.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Live original grant/signer retained with the caller's original removal intent.
+ *
+ * Capture before confirmation. The app must revoke admission when its original
+ * owner/lifecycle ends, including same-seed replacement, and drain its active
+ * operation before installing replacement credentials. This object never
+ * restores credentials or clears storage. Restart offers local recovery only.
+ */
+public protocol PubkyGrantLogoutProtocol: AnyObject, Sendable {
+
+    /**
+     * Keep known remote completion even if app storage cleanup fails or is cancelled.
+     * This never implies that local credentials, watermarks or markers were cleared.
+     */
+    func acknowledged()  -> PubkyGrantLogoutReceipt?
+
+    /**
+     * Original non-secret binding to retain with the confirmation and marker.
+     */
+    func binding()  -> PubkyGrantLogoutReceipt
+
+    /**
+     * Prepare only after fresh confirmation of this original intent.
+     *
+     * This reads current proof-logout support without mutating remote state.
+     * Same-grant bearer refresh is permitted. Replacement bundles and ended
+     * admission are refused. A failed or lost response does not authorize an
+     * automatic retry or replay of endpoint/private-list cleanup.
+     */
+    func prepareAttempt() async throws  -> PubkyGrantLogoutAttempt
+
+    /**
+     * Permanently stop this handle's admission and interrupt active waits.
+     * Cancellation after dispatch does not prove that the server did not commit.
+     */
+    func revokeAdmission()
+
+}
+/**
+ * Live original grant/signer retained with the caller's original removal intent.
+ *
+ * Capture before confirmation. The app must revoke admission when its original
+ * owner/lifecycle ends, including same-seed replacement, and drain its active
+ * operation before installing replacement credentials. This object never
+ * restores credentials or clears storage. Restart offers local recovery only.
+ */
+open class PubkyGrantLogout: PubkyGrantLogoutProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffipubkygrantlogout(self.pointer, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffipubkygrantlogout(pointer, $0) }
+    }
+
+
+
+
+    /**
+     * Keep known remote completion even if app storage cleanup fails or is cancelled.
+     * This never implies that local credentials, watermarks or markers were cleared.
+     */
+open func acknowledged() -> PubkyGrantLogoutReceipt?  {
+    return try!  FfiConverterOptionTypePubkyGrantLogoutReceipt.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipubkygrantlogout_acknowledged(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Original non-secret binding to retain with the confirmation and marker.
+     */
+open func binding() -> PubkyGrantLogoutReceipt  {
+    return try!  FfiConverterTypePubkyGrantLogoutReceipt_lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipubkygrantlogout_binding(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Prepare only after fresh confirmation of this original intent.
+     *
+     * This reads current proof-logout support without mutating remote state.
+     * Same-grant bearer refresh is permitted. Replacement bundles and ended
+     * admission are refused. A failed or lost response does not authorize an
+     * automatic retry or replay of endpoint/private-list cleanup.
+     */
+open func prepareAttempt()async throws  -> PubkyGrantLogoutAttempt  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipubkygrantlogout_prepare_attempt(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_pointer,
+            completeFunc: ffi_paykit_rust_future_complete_pointer,
+            freeFunc: ffi_paykit_rust_future_free_pointer,
+            liftFunc: FfiConverterTypePubkyGrantLogoutAttempt_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Permanently stop this handle's admission and interrupt active waits.
+     * Cancellation after dispatch does not prove that the server did not commit.
+     */
+open func revokeAdmission()  {try! rustCall() {
+    uniffi_paykit_fn_method_ffipubkygrantlogout_revoke_admission(self.uniffiClonePointer(),$0
+    )
+}
+}
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePubkyGrantLogout: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = PubkyGrantLogout
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> PubkyGrantLogout {
+        return PubkyGrantLogout(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: PubkyGrantLogout) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyGrantLogout {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: PubkyGrantLogout, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantLogout_lift(_ pointer: UnsafeMutableRawPointer) throws -> PubkyGrantLogout {
+    return try FfiConverterTypePubkyGrantLogout.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantLogout_lower(_ value: PubkyGrantLogout) -> UnsafeMutableRawPointer {
+    return FfiConverterTypePubkyGrantLogout.lower(value)
+}
+
+
+
+
+
+
+/**
+ * A single confirmed proof-logout attempt, consumed before any execution await.
+ */
+public protocol PubkyGrantLogoutAttemptProtocol: AnyObject, Sendable {
+
+    /**
+     * Recheck original provider/admission, then execute this attempt once.
+     * No platform erase callback is invoked, even after remote acknowledgement.
+     */
+    func execute() async throws  -> PubkyGrantLogoutReceipt
+
+}
+/**
+ * A single confirmed proof-logout attempt, consumed before any execution await.
+ */
+open class PubkyGrantLogoutAttempt: PubkyGrantLogoutAttemptProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffipubkygrantlogoutattempt(self.pointer, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffipubkygrantlogoutattempt(pointer, $0) }
+    }
+
+
+
+
+    /**
+     * Recheck original provider/admission, then execute this attempt once.
+     * No platform erase callback is invoked, even after remote acknowledgement.
+     */
+open func execute()async throws  -> PubkyGrantLogoutReceipt  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipubkygrantlogoutattempt_execute(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePubkyGrantLogoutReceipt_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePubkyGrantLogoutAttempt: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = PubkyGrantLogoutAttempt
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> PubkyGrantLogoutAttempt {
+        return PubkyGrantLogoutAttempt(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: PubkyGrantLogoutAttempt) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyGrantLogoutAttempt {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: PubkyGrantLogoutAttempt, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantLogoutAttempt_lift(_ pointer: UnsafeMutableRawPointer) throws -> PubkyGrantLogoutAttempt {
+    return try FfiConverterTypePubkyGrantLogoutAttempt.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantLogoutAttempt_lower(_ value: PubkyGrantLogoutAttempt) -> UnsafeMutableRawPointer {
+    return FfiConverterTypePubkyGrantLogoutAttempt.lower(value)
 }
 
 
@@ -18291,6 +18678,121 @@ public func FfiConverterTypePubkyClientConfig_lower(_ value: PubkyClientConfig) 
 
 
 /**
+ * Acknowledged original-grant logout, independent of local credential erasure.
+ */
+public struct PubkyGrantLogoutReceipt {
+    /**
+     * Original identity in app public-key representation.
+     */
+    public var publicKey: String
+    /**
+     * Homeserver that acknowledged proof logout.
+     */
+    public var homeserver: String
+    /**
+     * Original grant, including refreshed bearers belonging to that grant.
+     */
+    public var grantId: String
+    /**
+     * Original application client identifier.
+     */
+    public var clientId: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Original identity in app public-key representation.
+         */publicKey: String,
+        /**
+         * Homeserver that acknowledged proof logout.
+         */homeserver: String,
+        /**
+         * Original grant, including refreshed bearers belonging to that grant.
+         */grantId: String,
+        /**
+         * Original application client identifier.
+         */clientId: String) {
+        self.publicKey = publicKey
+        self.homeserver = homeserver
+        self.grantId = grantId
+        self.clientId = clientId
+    }
+}
+
+#if compiler(>=6)
+extension PubkyGrantLogoutReceipt: Sendable {}
+#endif
+
+
+extension PubkyGrantLogoutReceipt: Equatable, Hashable {
+    public static func ==(lhs: PubkyGrantLogoutReceipt, rhs: PubkyGrantLogoutReceipt) -> Bool {
+        if lhs.publicKey != rhs.publicKey {
+            return false
+        }
+        if lhs.homeserver != rhs.homeserver {
+            return false
+        }
+        if lhs.grantId != rhs.grantId {
+            return false
+        }
+        if lhs.clientId != rhs.clientId {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(publicKey)
+        hasher.combine(homeserver)
+        hasher.combine(grantId)
+        hasher.combine(clientId)
+    }
+}
+
+extension PubkyGrantLogoutReceipt: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePubkyGrantLogoutReceipt: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyGrantLogoutReceipt {
+        return
+            try PubkyGrantLogoutReceipt(
+                publicKey: FfiConverterString.read(from: &buf),
+                homeserver: FfiConverterString.read(from: &buf),
+                grantId: FfiConverterString.read(from: &buf),
+                clientId: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PubkyGrantLogoutReceipt, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.publicKey, into: &buf)
+        FfiConverterString.write(value.homeserver, into: &buf)
+        FfiConverterString.write(value.grantId, into: &buf)
+        FfiConverterString.write(value.clientId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantLogoutReceipt_lift(_ buf: RustBuffer) throws -> PubkyGrantLogoutReceipt {
+    return try FfiConverterTypePubkyGrantLogoutReceipt.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantLogoutReceipt_lower(_ value: PubkyGrantLogoutReceipt) -> RustBuffer {
+    return FfiConverterTypePubkyGrantLogoutReceipt.lower(value)
+}
+
+
+/**
  * Public profile metadata from the Pubky app namespace.
  */
 public struct PubkyProfile {
@@ -25137,6 +25639,30 @@ fileprivate struct FfiConverterOptionTypeProfileResolution: FfiConverterRustBuff
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypePubkyGrantLogoutReceipt: FfiConverterRustBuffer {
+    typealias SwiftType = PubkyGrantLogoutReceipt?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePubkyGrantLogoutReceipt.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePubkyGrantLogoutReceipt.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypePubkyProfile: FfiConverterRustBuffer {
     typealias SwiftType = PubkyProfile?
 
@@ -27063,6 +27589,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_cancel_payment_request() != 58269) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_capture_grant_logout() != 21013) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_capture_grant_observer() != 37074) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -27454,6 +27983,21 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkyauthrequeststate_export_client_key_secret() != 60838) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkygrantlogout_acknowledged() != 24278) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkygrantlogout_binding() != 12383) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkygrantlogout_prepare_attempt() != 46854) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkygrantlogout_revoke_admission() != 54683) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkygrantlogoutattempt_execute() != 50144) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkygrantobserver_client_id() != 51969) {
