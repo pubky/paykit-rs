@@ -95,8 +95,10 @@ where
 
     /// Enqueue a reservation-backed Private Payment List for one counterparty.
     ///
-    /// An empty reservation list queues an empty Private Payment List. If a
-    /// non-empty reservation list fails, the SDK acquires the peer lease before
+    /// An empty reservation list queues an empty Private Payment List, including
+    /// after private payments are disabled for an active registered app. Unknown
+    /// or retired app registrations still fail. If a non-empty reservation list
+    /// fails, the SDK acquires the peer lease before
     /// asking the payment adapter to cancel any unpersisted reservations.
     pub async fn enqueue_private_payment_list_with_reservations(
         &self,
