@@ -762,6 +762,29 @@ pub(super) fn private_receive_snapshot(
     tx: &dyn StorageTransaction,
     counterparty: &PubkyPublicKey,
 ) -> Option<PrivateReceiveSnapshot> {
+    let (state, link, authorization) = associated_link_snapshot(tx, counterparty)?;
+    Some(PrivateReceiveSnapshot {
+        link,
+        state,
+        authorization,
+        has_peer_lease: tx.peer_link_operation_lease(counterparty).is_some(),
+    })
+}
+
+/// Return the current link snapshot when stored state still associates it
+/// with `counterparty`.
+///
+/// The peer must be linked, and the snapshot's recipient, recovery context,
+/// and remote Noise key must match the stored peer record. This checks stored
+/// state only; it does not fetch the counterparty's current authorization.
+pub(super) fn associated_link_snapshot(
+    tx: &dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+) -> Option<(
+    EncryptedLinkStateRecord,
+    paykit_lib::EncryptedLinkSnapshot,
+    paykit_lib::PaykitNoiseKeyAuthorization,
+)> {
     let peer = tx.linked_peer(counterparty)?;
     if peer.state != LinkedPeerState::Linked {
         return None;
@@ -778,12 +801,7 @@ pub(super) fn private_receive_snapshot(
     if snapshot.remote_noise_public_key() != authorization.noise_public_key() {
         return None;
     }
-    Some(PrivateReceiveSnapshot {
-        link: snapshot,
-        state,
-        authorization,
-        has_peer_lease: tx.peer_link_operation_lease(counterparty).is_some(),
-    })
+    Some((state, snapshot, authorization))
 }
 
 fn require_private_receive_checkpoint(

@@ -1,7 +1,11 @@
 use super::outbound_private::PrivateSendReadiness;
 use super::payment_resolution::filter_private_views_by_authorized_apps;
+use super::private_stream::associated_link_snapshot;
 use super::*;
-use crate::domain::endpoint_reservations::queue_private_payment_list_with_reservations_in_transaction;
+use crate::domain::endpoint_reservations::{
+    private_payment_list_sent_after_last_link_change,
+    queue_private_payment_list_with_reservations_in_transaction,
+};
 use crate::PrivatePaymentListAcknowledgement;
 use futures_util::FutureExt;
 
@@ -143,7 +147,7 @@ where
                         let policy = if reuse_unchanged {
                             PrivatePaymentListQueuePolicy::Sync {
                                 sent_message_id: self
-                                    .published_private_payment_list_id(tx, &counterparty),
+                                    .reusable_private_payment_list_id(tx, &counterparty),
                             }
                         } else {
                             PrivatePaymentListQueuePolicy::Always
@@ -199,6 +203,33 @@ where
                     .get(&(counterparty.clone(), self.config.app_id.clone()))
                     .filter(|publication| publication.link_id == link_id)
                     .map(|publication| publication.outbound_message_id)
+            })
+    }
+
+    /// Return the sent Private Payment List an unchanged sync may reuse.
+    ///
+    /// Without a runtime witness, for example after a restart, this falls back
+    /// to durable timestamps so unchanged lists are not republished on every
+    /// launch. The fallback is not delivery evidence, so acknowledgements use
+    /// `published_private_payment_list_id` instead.
+    fn reusable_private_payment_list_id(
+        &self,
+        tx: &dyn StorageTransaction,
+        counterparty: &PubkyPublicKey,
+    ) -> Option<u64> {
+        self.published_private_payment_list_id(tx, counterparty)
+            .or_else(|| {
+                // Reusing a sent row queues nothing, so the outbound restore that
+                // rejects a stale or misassociated link never runs. Apply its
+                // stored-state checks here; a mismatch republishes the list and
+                // leaves recovery to the outbound worker.
+                let (_, snapshot, _) = associated_link_snapshot(tx, counterparty)?;
+                snapshot.link_id()?;
+                private_payment_list_sent_after_last_link_change(
+                    tx,
+                    counterparty,
+                    &self.config.app_id,
+                )
             })
     }
 
@@ -400,7 +431,10 @@ where
     /// Unchanged lists with the same reservations reuse their existing outbound
     /// record, including lists already sent on the current Encrypted Link.
     /// Outbound retries and reservation cleanup still run for reused records.
-    /// Sent-list reuse is runtime-local; restarting the SDK conservatively republishes the list.
+    /// After a restart, a sent list is reused only when the stored link state
+    /// still matches the peer record and the list was sent more than five
+    /// minutes after the peer's last link change or private receive; otherwise
+    /// it is republished once.
     pub async fn sync_private_payment_lists_with_reservations_and_process_outbound(
         &self,
         updates: Vec<PrivatePaymentListReservationUpdate>,
