@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use paykit_lib::{PaymentRequestTerms, RecurrenceUnit};
 use paykit_sdk::{
     AmountRecord, BillingPeriodRecord, OutboundPrivateMessageStatus, PaymentProofRecord,
@@ -141,14 +141,13 @@ fn test_payment_request_filter_rejects_unknown_state() {
     ));
 }
 
-#[test]
-fn test_payment_request_record_conversion_redacts_references() {
+fn payment_request_record() -> PaymentRequestRecord {
     let mut metadata = JsonMap::new();
     metadata.insert("source".into(), JsonValue::String("test".into()));
     let mut proof = JsonMap::new();
     proof.insert("preimage".into(), JsonValue::String("secret".into()));
 
-    let record = PaymentRequestRecord {
+    PaymentRequestRecord {
         conversion_quotes: Vec::new(),
         counterparty: public_key(),
         payment_request_id: "550e8400-e29b-41d4-a716-446655440000".into(),
@@ -159,6 +158,7 @@ fn test_payment_request_record_conversion_redacts_references() {
         proposal_outbound_status: None,
         proposal_event_id: Some("650e8400-e29b-41d4-a716-446655440000".into()),
         proposal_app_id: Some(paykit_sdk::PaykitAppId::new("bitkit").unwrap()),
+        proposal_recorded_at: None,
         payer_app_id: Some(paykit_sdk::PaykitAppId::new("wallet").unwrap()),
         execution_claim_app_id: Some(paykit_sdk::PaykitAppId::new("wallet").unwrap()),
         terms: Some(PaymentRequestTermsRecord {
@@ -178,6 +178,7 @@ fn test_payment_request_record_conversion_redacts_references() {
         }),
         accepted_event_id: None,
         accepted_outbound_status: Some(OutboundPrivateMessageStatus::Pending),
+        acceptance_recorded_at: None,
         rejected_event_id: None,
         rejected_outbound_status: None,
         canceled_event_id: None,
@@ -204,9 +205,12 @@ fn test_payment_request_record_conversion_redacts_references() {
         last_outbound_status: Some(OutboundPrivateMessageStatus::Sent),
         last_event_at: Some(Utc::now()),
         invalid_reason: None,
-    };
+    }
+}
 
-    let ffi = FfiPaymentRequestRecord::try_from(record).unwrap();
+#[test]
+fn test_payment_request_record_conversion_redacts_references() {
+    let ffi = FfiPaymentRequestRecord::try_from(payment_request_record()).unwrap();
 
     assert_eq!(ffi.state, FfiPaymentRequestLifecycleState::Accepted);
     assert_eq!(ffi.payer_app_id.as_deref(), Some("wallet"));
@@ -226,6 +230,31 @@ fn test_payment_request_record_conversion_redacts_references() {
         .export_text()
         .contains("\"preimage\":\"secret\""));
     assert!(!format!("{:?}", ffi.payment_proofs[0].proof).contains("secret"));
+}
+
+#[test]
+fn test_payment_request_record_conversion_formats_record_times() {
+    let proposed_at = Utc.with_ymd_and_hms(2026, 6, 3, 12, 0, 0).unwrap();
+    let accepted_at = Utc.with_ymd_and_hms(2026, 6, 3, 12, 5, 30).unwrap();
+    let mut record = payment_request_record();
+    record.proposal_recorded_at = Some(proposed_at);
+    record.acceptance_recorded_at = Some(accepted_at);
+
+    let ffi = FfiPaymentRequestRecord::try_from(record).unwrap();
+
+    assert_eq!(
+        ffi.proposal_recorded_at.as_deref(),
+        Some("2026-06-03T12:00:00+00:00")
+    );
+    assert_eq!(
+        ffi.acceptance_recorded_at.as_deref(),
+        Some("2026-06-03T12:05:30+00:00")
+    );
+
+    let ffi = FfiPaymentRequestRecord::try_from(payment_request_record()).unwrap();
+
+    assert!(ffi.proposal_recorded_at.is_none());
+    assert!(ffi.acceptance_recorded_at.is_none());
 }
 
 #[test]
@@ -436,4 +465,107 @@ fn test_erc20_receipt_log_index_max_survives_ffi_submission_boundary() {
             .and_then(serde_json::Value::as_str),
         Some(maximum)
     );
+}
+
+fn measured_proof_len(reference: &str, submission: FfiPaymentProofSubmission) -> usize {
+    let reference = Arc::new(FfiPaymentReference::new(reference.into()).unwrap());
+    payment_proof_event_len("bitkit".into(), reference, submission).unwrap() as usize
+}
+
+fn proof_object(text: &str) -> Arc<FfiPrivateJsonObject> {
+    Arc::new(FfiPrivateJsonObject::new(text.into()).unwrap())
+}
+
+#[test]
+fn test_payment_proof_event_len_counts_optional_ids() {
+    let reference = "invoice-\u{20ac}-1";
+    let quote_id = "8a0d8b4c-913f-4e31-9f2c-2a6f5bb4d103";
+    let without_ids = measured_proof_len(reference, proof_submission(None));
+
+    let with_allowance = measured_proof_len(reference, proof_submission(Some(ALLOWANCE_ID.into())));
+    assert_eq!(
+        with_allowance - without_ids,
+        format!(r#","allowance_id":"{ALLOWANCE_ID}""#).len()
+    );
+
+    let mut with_quote = proof_submission(None);
+    with_quote.conversion_quote_id = Some(quote_id.into());
+    assert_eq!(
+        measured_proof_len(reference, with_quote) - without_ids,
+        format!(r#","conversion_quote_id":"{quote_id}""#).len()
+    );
+}
+
+#[test]
+fn test_payment_proof_event_len_measures_canonical_proof_json() {
+    let empty_proof_len = measured_proof_len("invoice-1", proof_submission(None));
+    // Wallet text and the canonical JSON the SDK writes for it. Key order does
+    // not change the length.
+    for (wallet_text, canonical) in [
+        (
+            "{\"memo\":\"\u{20ac}\u{20ac}\u{20ac}\"}",
+            "{\"memo\":\"\u{20ac}\u{20ac}\u{20ac}\"}",
+        ),
+        (
+            "{ \"preimage\" :\n  \"ab12\" ,\t\"index\" : 7 }",
+            r#"{"index":7,"preimage":"ab12"}"#,
+        ),
+        (
+            r#"{"memo":"\u20ac\u00e9"}"#,
+            "{\"memo\":\"\u{20ac}\u{e9}\"}",
+        ),
+        (r#"{"amount":1.0}"#, r#"{"amount":1.0}"#),
+    ] {
+        let mut submission = proof_submission(None);
+        submission.proof = proof_object(wallet_text);
+
+        assert_eq!(
+            measured_proof_len("invoice-1", submission),
+            empty_proof_len - "{}".len() + canonical.len()
+        );
+    }
+}
+
+#[test]
+fn test_payment_proof_event_len_uses_local_app_id() {
+    let measure = |local_app_id: &str, payment_app_id: &str| {
+        let reference = Arc::new(FfiPaymentReference::new("invoice-1".into()).unwrap());
+        let mut submission = proof_submission(None);
+        submission.payment_app_id = payment_app_id.into();
+        payment_proof_event_len(local_app_id.into(), reference, submission).unwrap() as usize
+    };
+    let base = measure("bitkit", "merchant");
+
+    // The local App ID is the outer Event Message `app_id`; changing it alone
+    // moves the length by its own length difference.
+    assert_eq!(
+        measure("bitkit-wallet", "merchant") - base,
+        "bitkit-wallet".len() - "bitkit".len()
+    );
+    // The submission's `payment_app_id` is a separate field.
+    assert_eq!(
+        measure("bitkit", "merchant-store") - base,
+        "merchant-store".len() - "merchant".len()
+    );
+}
+
+#[test]
+fn test_payment_proof_event_len_rejects_invalid_app_id() {
+    for app_id in ["", "../bitkit"] {
+        let reference = Arc::new(FfiPaymentReference::new("invoice-1".into()).unwrap());
+        assert!(matches!(
+            payment_proof_event_len(app_id.into(), reference, proof_submission(None)),
+            Err(PaykitFfiError::Protocol { code, .. }) if code == "validation"
+        ));
+    }
+}
+
+#[test]
+fn test_payment_proof_event_len_returns_lengths_above_limit() {
+    let mut submission = proof_submission(None);
+    submission.proof = proof_object(&format!(r#"{{"memo":"{}"}}"#, "\u{20ac}".repeat(400)));
+
+    let measured = measured_proof_len("invoice-1", submission);
+
+    assert!(measured > paykit_lib::pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN);
 }

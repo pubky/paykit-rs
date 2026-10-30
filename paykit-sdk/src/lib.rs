@@ -57,9 +57,10 @@ pub use domain::outbound_private::{
 };
 #[doc(inline)]
 pub use domain::payment_requests::{
-    PaymentConversionQuoteRecord, PaymentProofRecord, PaymentProofSubmission, PaymentRequestFilter,
-    PaymentRequestLifecycleState, PaymentRequestLocalRole, PaymentRequestRecord,
-    PaymentRequestRecurrenceRecord, PaymentRequestTermsRecord,
+    payment_proof_event_len, PaymentConversionQuoteRecord, PaymentProofRecord,
+    PaymentProofSubmission, PaymentRequestFilter, PaymentRequestLifecycleState,
+    PaymentRequestLocalRole, PaymentRequestRecord, PaymentRequestRecurrenceRecord,
+    PaymentRequestTermsRecord,
 };
 #[doc(inline)]
 pub use domain::payment_resolution::{
@@ -70,9 +71,9 @@ pub use domain::payment_resolution::{
 };
 #[doc(inline)]
 pub use domain::private_lists::{
-    PrivatePaymentListDeliveryFailure, PrivatePaymentListDeliveryReport,
-    PrivatePaymentListReservationUpdate, PrivatePaymentListSyncChange,
-    PrivatePaymentListSyncReport, PrivatePaymentListView,
+    PrivatePaymentListAcknowledgement, PrivatePaymentListDeliveryFailure,
+    PrivatePaymentListDeliveryReport, PrivatePaymentListReservationUpdate,
+    PrivatePaymentListSyncChange, PrivatePaymentListSyncReport, PrivatePaymentListView,
 };
 #[doc(inline)]
 pub use domain::private_stream::{
@@ -91,7 +92,7 @@ pub use domain::records::{AmountRecord, BillingPeriodRecord};
 #[doc(inline)]
 pub use domain::recovery::EncryptedLinkRecoveryMarkerReport;
 #[doc(inline)]
-pub use error::{PaykitSdkError, RetentionLimitReached};
+pub use error::{MessageTooLarge, PaykitSdkError, RetentionLimitReached, SignupCodeRejected};
 #[doc(inline)]
 pub use identity::{
     IdentityState, IdentityStatus, PaykitIdentitySecretKey, PubkyIdentityCapability,
@@ -102,13 +103,16 @@ pub use paykit_lib::INITIAL_PAYKIT_KEY_GENERATION;
 pub use paykit_lib::{
     PaykitApp, PaykitAppCapabilities, PaykitAppId, PaykitAppRegistry, PaykitNoiseKeyAuthorization,
 };
-#[doc(inline)]
 pub use pubky_session::{
     parse_pubky_auth_url, parse_pubky_resource, resolve_pubky_url, PubkyAuthCompanionClaim,
     PubkyAuthCompanionClaimApprovalError, PubkyAuthDetails, PubkyAuthRequest, PubkyAuthRequestKind,
-    PubkyAuthRequestState, PubkyResourceRef, PubkySessionBootstrap, PubkySessionBootstrapResult,
-    PubkySessionSecret, PAYKIT_AUTHORIZER_SESSION_CAPABILITIES, PAYKIT_SESSION_CAPABILITIES,
+    PubkyAuthRequestState, PubkyGrantObservation, PubkyGrantObserver, PubkyResourceRef,
+    PubkySessionBootstrap, PubkySessionBootstrapResult, PubkySessionSecret,
+    PAYKIT_AUTHORIZER_SESSION_CAPABILITIES, PAYKIT_SESSION_CAPABILITIES,
 };
+#[doc(inline)]
+#[cfg(not(target_arch = "wasm32"))]
+pub use pubky_session::{PubkyGrantLogout, PubkyGrantLogoutAttempt, PubkyGrantLogoutReceipt};
 #[doc(inline)]
 pub use runtime::{
     Clock, PaykitAppRemovalBlockers, PaykitSdk, PaykitStateObservation, PaymentRequestRead,

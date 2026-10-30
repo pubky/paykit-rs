@@ -350,7 +350,9 @@ a chosen counterparty is not refused for the number of retained items, as
 before the limit existed. Nothing else lifts the limit. A rejection,
 cancellation, Allowance End, execution claim, retrieved Receipt, Delivery
 Confirmation, Private Payment List, or Receipt Access MUST NOT lift it, because
-each can follow from one unsolicited message without a local choice.
+each can follow from one unsolicited message without a local choice. Removing a
+Contact Record does not end the Encrypted Link, so intake and queued sends to
+that counterparty continue (see [Block A Peer](#block-a-peer)).
 
 - At most 4,096 private stream items are retained per counterparty, counted
   across every message kind and parse status. When a receive transaction could
@@ -581,6 +583,24 @@ record
 that no reachable relay caches still counts as none, so a caller that knows the
 identity's homeserver should compare it with the request's homeserver before
 approving.
+
+The signup helper never moves an identity to another homeserver either. Before
+it sends anything to the requested homeserver, it looks up the identity's
+homeserver record; when that finds none, it asks the network without the
+client's cache and looks again. It fails with a `Policy` error when the record
+names a different homeserver, so no account is created, no signup code is
+spent, and nothing is published; such an identity signs in instead. When the
+record names the requested homeserver, the helper signs up, and an account
+that already exists has its record published again. When no record is found,
+or the record names no homeserver, the helper signs up on the requested
+homeserver, which also restores a record that names no homeserver. A lookup
+error fails the signup, and so does a `_pubky` target that is not a valid
+homeserver public key. A record that no reachable cache holds, one that only a
+relay cache still holds while the network finds nothing, and a partly failed
+lookup in which one backend finds nothing all count as none. Wallets that sign
+up an imported or unknown key should first probe it with `republish_identity`:
+an existing record means signing in, unless it is known to name no homeserver,
+and an error means trying again later rather than signing up.
 
 Applications can attach an app-defined companion claim to a Pubky Auth
 approval. The integrator supplies the claim query parameter, claim type,
@@ -825,6 +845,30 @@ validate payment-method-specific settlement, or decide service entitlements.
 Those responsibilities belong to the integrating application/runtime. See
 [Recurring Payment Requests And Subscriptions](payment-requests.md#recurring-payment-requests-and-subscriptions).
 
+`active_recurring` has no time bound. When `terms.recurrence.ends_at` passes,
+the record keeps that state and stays in `active_recurring_payment_requests`
+(for both payer and payee) and in the payer's
+`actionable_received_payment_requests`. Wallets handle an ended Recurrence:
+
+1. Treat the Recurrence as ended once trusted local time is at or after
+   `terms.recurrence.ends_at`, and hide or label the record. Compare parsed
+   RFC 3339 instants, not strings.
+2. Decide whether it is fully paid by comparing the wallet's own expected
+   Billing Periods with `payment_proofs[].billing_period`. The SDK does not
+   expand Billing Periods.
+3. Once every outstanding Billing Period is settled, the payer calls
+   `release_payment_request_execution_claim`. It refuses while a payment is
+   unresolved or a successful payment is unreported. The payee holds no claim.
+4. Do not send a Cancellation for a Recurrence that completed normally. The
+   payee would then see `canceled`, and `reserve_manual_payment` and
+   `reserve_automatic_payment` block a `canceled` request, so an unpaid final
+   Billing Period can no longer be paid through the SDK.
+
+Releasing the claim does not remove the record from
+`active_recurring_payment_requests` or `actionable_received_payment_requests`:
+an unclaimed record is listed for every local App. A late Payment Proof for an
+earlier Billing Period is still accepted after `ends_at`.
+
 ### Logger And Clock
 
 The SDK should accept:
@@ -971,10 +1015,19 @@ Derived record per Payment Request:
 - immutable terms
 - proposal event id
 - proposal expiry state
+- proposal record time: when this device stored the proposal (payee: queued
+  it; payer: received it)
+- acceptance record time: when this device stored the recorded Acceptance
+  (payer: queued it; payee: fetched it)
 - lifecycle state
 - accepted/rejected/canceled event ids
 - latest Payment Proof records
 - recurrence schedule metadata
+
+Record times use the local clock. They are not authenticated and are not
+cross-direction causal-order evidence. The SDK records an otherwise-valid
+Acceptance received after local proposal expiry instead of marking the request
+invalid.
 
 SDK lifecycle states should be explicit and local:
 
@@ -1061,6 +1114,11 @@ for all Private Application Message kinds. Event Messages are processed as FIFO
 per counterparty Encrypted Link. Private Payment Lists use latest-state
 semantics per source App ID, so older lists never sent by the same app may be
 superseded by a newer complete list.
+The exact raw JSON payload must fit `PUBKY_NOISE_MSG_LEN` (1000) UTF-8 bytes;
+Noise framing and the AEAD tag are outside that budget. A larger message is
+refused with `Protocol` before it is queued. `is_message_too_large` identifies
+that error in Rust and bindings report it with the `message_too_large` code.
+Proposals and Payment Proofs are measured before link readiness checks.
 Send workers must claim the next sendable message through storage before
 sending it. A stale `Sending` queue head can be reclaimed after the lease
 timeout, but the SDK must retry that same message before later private messages
@@ -1194,9 +1252,16 @@ storage extends the durable leases across devices and processes.
 3. Convert receiving details into Payment Endpoint payloads.
 4. Validate identifiers and payloads through `paykit-lib`.
 5. Persist all pending publication and removal records in one transaction.
-6. Publish pending endpoints and remove stale managed endpoints.
+6. Remove stale managed endpoints, then publish pending endpoints. Removing
+   first keeps a replacement at the endpoint limit discoverable.
 7. Persist each confirmed or failed result while verifying the lease.
 8. Release the lease and return an `EndpointSyncReport`.
+
+The receiving details are the App's complete desired public set across every
+runtime sharing the identity. A managed endpoint is stale when its identifier
+is missing from that set, so an empty set removes every managed endpoint while
+the App stays registered. An adapter error at step 2 ends the sync before step 5
+changes any record or endpoint.
 
 The SDK should not remove endpoints it did not create for the configured App ID
 unless explicitly configured to manage that app's complete endpoint namespace.
@@ -1315,6 +1380,42 @@ Receive routing should extend the same raw stream log to Payment Requests,
 Payment Proofs, Allowance lifecycle events, and any other Event Message kinds.
 Allowance lifecycle/history views derive from retained events on the exact
 Encrypted Link and preserve invalid or unresolved evidence for recovery.
+
+### Block A Peer
+
+`block_peer` is local policy and does not notify the counterparty. In one
+storage transaction it claims and releases the peer link operation lease (a
+live peer operation makes the call fail with `ConcurrentUpdate`), marks the
+Linked Peer `Blocked`, and clears the Encrypted Link snapshots. No intake,
+send, or private automation then runs for that counterparty, and no new
+private message can be queued for it. `remove_contacts_and_block_peers` does
+the same for saved contacts and removes their Contact Records.
+
+Blocking parks queued work instead of deleting it. Outbound messages that are
+pending, sending, failed, or recovery required become recovery required.
+`unblock_peer` returns the peer to `NotLinked`, and the next completed
+Encrypted Link Handshake requeues parked messages unchanged as pending, except
+messages whose Paykit App is then unregistered or retired, which stay recovery
+required, and messages the counterparty already confirmed, which become sent.
+The handshake does not send them; the app's next outbound processing
+(`process_outbound_private_messages`) does. Sent
+Event Messages still waiting for a Delivery Confirmation stay queued. Parked
+work is never delivered if the peer is not linked again, and no operation
+withdraws it. Event Messages keep their per-counterparty order. A requeued
+Private Payment List is a Latest-State Message, so a newer list can supersede
+it before it is sent. An app that wants pending Event
+Messages delivered before the block sends them while the peer is still
+`Linked`.
+
+Blocking pauses accepted Allowances and accepted Payment Requests but does not
+revoke them. Payment accounting refuses them while the peer is not `Linked`, and
+after unblock and a fresh Encrypted Link Handshake they authorize again without
+new consent. An app that wants that authority gone ends each Allowance before
+blocking, or after unblock and relink before any further automatic payment.
+While the counterparty is blocked, ending an Allowance is refused and reads
+across counterparties skip it. Reads that name it (Payment Requests,
+Allowances, Receipts, and Receipt Access) fail with `Policy`, except that an
+Allowance list for a counterparty with no Allowance messages is empty.
 
 ### Forget A Blocked Peer
 
@@ -1548,8 +1649,9 @@ settlement confirmation.
 4. Persist proof event before sending.
 5. Send Payment Proof.
 6. Derive local state from the retained lifecycle events: preserve `canceled`
-   after Cancellation, retain `active_recurring` for an ongoing Recurring Payment
-   Request, and use `proof_submitted` for a non-canceled one-time request.
+   after Cancellation, retain `active_recurring` for a Recurring Payment Request
+   (also after its Recurrence has ended), and use `proof_submitted` for a
+   non-canceled one-time request.
 
 A proof after Cancellation may report only an execution the payer durably
 recorded as past its irreversible boundary before observing Cancellation. It
@@ -1802,7 +1904,10 @@ SDK errors should be structured:
 - `Identity`: Pubky session/key/capability failure
 - `Transport`: Pubky or Encrypted Link transport failure
 - `NotFound`: required local or Pubky resource is missing
-- `Protocol`: invalid Paykit message, conflict, or unsupported version
+- `Protocol`: invalid Paykit message, conflict, unsupported version, or an
+  outbound message larger than the pubky-noise message size. The size refusal
+  carries a typed cause (`is_message_too_large`) and the binding code
+  `message_too_large`
 - `Policy`: operation blocked by configuration, privacy policy, or a
   per-counterparty retention limit. The retention limit refusal carries a typed
   cause (`is_retention_limit_reached`) and the binding code
@@ -1925,6 +2030,8 @@ external execution/idempotency records and every payment path. Empty recovered
 history attests no prior payments when initializing; it never clears existing
 evidence. Only explicit outcome reports resolve already retained uncertainty.
 Payment Proofs and Receipts never construct, commit, or release this accounting.
+This accounting also coordinates manual Payment Request payments through
+`reserve_manual_payment`, `begin_payment_execution`, and `record_payment_outcome`.
 
 `evaluate_allowance_candidates` returns advisory static/time/lifecycle results.
 `select_allowance` persists exactly one choice. The atomic
@@ -1937,7 +2044,8 @@ consumes no capacity, and reservation always rechecks it atomically. Existing
 manual Acceptance, Rejection, and Cancellation operations
 serialize with the same ledger and recheck current request state before queuing.
 Automatic Acceptance requires the current app's execution claim, as manual
-Acceptance does.
+Acceptance does. Its selection input and execution checks carry one trusted
+time; differing instants are refused.
 A manual response excludes conflicting automatic handling; it can revoke an
 unissued preparation but never releases a Submitted or Unknown attempt.
 

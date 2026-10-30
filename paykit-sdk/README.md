@@ -143,7 +143,11 @@ Common workflows:
   provider
 - call `publish_paykit_app` before publishing this app's public Payment
   Endpoints or creating app-attributed private work
-- call `sync_public_endpoints` after local receiving details change
+- call `sync_public_endpoints` after local receiving details change and every
+  receive backend the wallet publishes has loaded. The adapter's details are
+  this Paykit App's complete public set: SDK-managed endpoints missing from it
+  are removed, and an empty set removes all of them. An adapter that is not
+  ready, or only partly ready, returns `Err`, never an empty or partial list
 - request and validate `PAYKIT_SESSION_CAPABILITIES` for full SDK
   auth/session handoff
 - use `publish_paykit_profile` / `fetch_paykit_profile` for identity-wide
@@ -409,20 +413,33 @@ The SDK implements this durable coordination through the following workflow:
 
 1. Call `reconcile_allowance_accounting` with complete authoritative wallet
    history before first admission or after recovery. Missing history never means
-   zero usage; an empty reconciliation cannot erase retained evidence.
+   zero usage; an empty reconciliation cannot erase retained evidence. Pass
+   `expected_revision` equal to the state's revision, or `None` only when no
+   state exists. A manual Acceptance, Rejection, or Cancellation creates state
+   that requires reconciliation when none exists, so read the state first.
 2. Inspect `evaluate_allowance_candidates`, then persist a choice with
    `select_allowance` or atomically select and queue ordinary Acceptance through
    `accept_payment_request_automatically`. Claim the request for this app with
    `claim_payment_request_for_preparation` before preparing or accepting it;
    revalidate the returned proposal and applicable Billing Period against the
-   selected terms. Acceptance reserves no capacity.
+   selected terms. Acceptance reserves no capacity. Read the trusted clock once
+   for automatic Acceptance: `AllowanceSelectionInput::trusted_time` and
+   `PaymentExecutionChecks::trusted_time` must be the same instant, otherwise
+   the call is refused before any network or storage work with
+   `PaykitSdkError::Protocol`, "Automatic Acceptance requires one trusted time
+   for selection and execution checks".
 3. Call `reserve_automatic_payment` for an occurrence and expected association
    revision, or `reserve_manual_payment` for an explicitly authorized manual
    payment. Both use the same scoped exclusion key.
 4. Immediately before execution, call `begin_payment_execution` with fresh
    wallet checks. Only Ready with status Submitted grants one handoff. Use the
    returned attempt ID for external wallet idempotency, then report the verified
-   outcome through `record_payment_outcome`.
+   outcome through `record_payment_outcome`. `Failed` is permanent for the
+   attempt: it releases Allowance usage and reopens the occurrence. After
+   handoff, report anything short of a definitive failure on the Rail as
+   `Unknown`. A blocked `Prepared` attempt that was never handed off is retried
+   through `begin_payment_execution` with corrected checks or, once no handoff
+   occurred, aborted and reported `Failed`.
 
 `defer_payment_occurrence` retains temporary failures for reconsideration;
 `mark_payment_manual_only` is sticky. A pending execution cannot be relabeled
@@ -443,6 +460,25 @@ prove accounting freshness; reconcile it with authoritative wallet execution
 records before resuming automatic handling. Optional Payment Proofs cannot
 reconstruct complete spending history. See [Allowances](../specs/allowances.md)
 for the normative rules.
+
+The same accounting coordinates manual Payment Request payments. It is required
+when the identity may also run automatic payments, and recommended otherwise.
+Use `reserve_manual_payment`, `begin_payment_execution`, and
+`record_payment_outcome` around every manual payment.
+
+`reconcile_allowance_accounting` is a ledger-wide recovery step, not a routine
+call: it starts a new epoch and turns every Prepared attempt, including other
+apps' preparations, into Unknown. Reconciling an empty or incomplete history
+after restoring an older backup re-enables payment of anything paid after the
+export and frees the Allowance capacity it used. Back up off-device after
+reservation and before the irreversible handoff (compare
+`SdkBackupState::content_fingerprint` to detect changes), and again after the
+outcome. Keep every `PaymentAttemptRecord` that admission returns and resubmit
+all of them when reconciling. The FFI README has the full
+[manual payment sequence](../paykit-ffi/README.md#pay-a-payment-request), the
+per-Rail rules for a
+[definitive failure](../paykit-ffi/README.md#definitive-failure), and the
+[history rebuild recipe](../paykit-ffi/README.md#stale-backups-and-reconciliation).
 
 ## Profile And Contacts
 
@@ -552,6 +588,25 @@ Paykit state or withdraw another application's data. If live access, remote
 revocation, or provider clearing fails, shared state remains intact and the
 operation returns an error.
 
+Native applications that retain an original removal intent can instead capture a
+`PubkyGrantLogout` from its existing live session before confirmation. This helper
+uses the existing `grant-proof-logout` capability: it revokes that original grant,
+including refreshed bearers of the same grant, without restoring credentials,
+loading a replacement grant, or falling back to bearer-only logout. Preparation
+reads support on the original homeserver; consuming execution sends one fresh
+proof. The original owner must remain admitted across both operations.
+
+A failed or cancelled request can have committed remotely. Only a fresh explicit
+confirmation permits preparing another attempt with a new nonce. A known success
+is retained by `acknowledged()` independently of local cleanup. The returned
+receipt records the authenticated endpoint's success; it is not server-signed,
+does not prove which attempt first revoked the grant, and does not acknowledge
+local credential erasure. `binding()` is pre-execution metadata only. Restart must
+not reconstruct this live authority. Apps still own conditional local credential
+erasure and durable cleanup progress, and must not replay acknowledged endpoint
+or private-list withdrawal. This native helper inherits the original PKARR client
+and caller timeout; it does not inherit custom ICANN trust anchors.
+
 `forget_session_access` clears local access without revoking the grant. It is
 an explicit recovery operation; other persisted copies of that grant remain
 valid until expiry or remote revocation.
@@ -575,12 +630,33 @@ raw private payloads, Encrypted Link snapshots, and Receipt Decryption Keys so
 custom adapters can persist exact SDK state. App code should usually prefer the
 `PaykitSdk` runtime methods and app-facing record/view types.
 
+`export_backup_state` returns unencrypted, sensitive plaintext. Its Encrypted
+Link and handshake snapshots hold the Paykit Noise static secret key current at
+export and session ephemeral secrets (not the Pubky identity secret or the
+Paykit Identity Secret). Encrypt it before storage or transport and never log
+it. If a backup is exposed, call `rotate_paykit_identity_key` and relink with
+the affected peers.
+
 Normal backup restore is accepted only into an otherwise empty SDK state backing, so
-an older app backup cannot replace newer shared state. Participating apps must
-publish their App Registry entries again after restore. Restore preserves
-terminal invalid and recovery-required outbound private records for audit,
-while pending, sending, failed, sent, and superseded outbound records are
-validated before restore.
+an older app backup cannot replace newer shared state. `publish_paykit_app` (and
+the public endpoint sync it enables) makes the backing non-empty, so after
+`initialize()` on a fresh backing, offer restore before publishing. The refusal
+names the blocking record kinds. Restore is also refused while SDK operation
+leases are unexpired, and an identity-scoped backup needs an active session for
+the same identity. With `PubkySharedStateStorage`, restore over an identity where
+any app has published is refused by design; `recover_shared_state_from_backup`
+covers only missing or corrupt state. With app-owned local storage (such as a
+callback state blob), an app may discard that state and initialize again only
+when it independently knows it is the only Paykit App and SDK handle using that
+backing for this identity, and the refusal names nothing but registered Paykit
+Apps and public Payment Endpoint records. The SDK cannot check ownership: those
+labels combine every app's records and omit Paykit App IDs, so another app's
+setup produces the same refusal; otherwise do not discard. After discarding, the
+app must restore with `RequireRecovery`.
+Participating apps must publish their App Registry entries again after restore.
+Restore preserves terminal invalid and recovery-required outbound private
+records for audit, while pending, sending, failed, sent, and superseded outbound
+records are validated before restore.
 Restore retains peer authorization pins. The SDK cannot tell whether a backup is
 current, so every `restore_backup_state` call passes a `RestoredLinkPolicy`:
 
@@ -601,6 +677,10 @@ current, so every `restore_backup_state` call passes a `RestoredLinkPolicy`:
   read from the old link; only unconfirmed Event Messages are replayed.
 
 Missing or unsafe checkpoints pause private automation until relink.
+
+A restored backup has no record of payments made after its export. Reconcile
+payment accounting with those payments before paying again; see
+[Allowance Integration](#allowance-integration).
 
 For missing or corrupt Pubky shared state, use
 `recover_shared_state_from_backup(backup, replacement_key)` with a matching

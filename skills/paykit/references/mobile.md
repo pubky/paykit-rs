@@ -33,6 +33,9 @@ registry = await sdk.publishPaykitApp(
 )
 ```
 
+Offer any SDK backup restore between `initialize()` and `publishPaykitApp`;
+publishing blocks restore ([Identity and State](identity-state.md#backups-and-restore)).
+
 Use `sessionCapabilities` (a `String`) when authorizing the Pubky session behind
 `sessionProvider`. The `appCapabilities` record advertises supported features in
 the App Registry; it does not grant session permissions.

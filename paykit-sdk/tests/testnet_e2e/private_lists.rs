@@ -19,6 +19,155 @@ use crate::harness::{
 };
 
 #[tokio::test]
+async fn test_empty_private_list_withdraws_after_disable_and_restart() {
+    let pair = linked_two_party().await;
+    let first = pair
+        .alice
+        .sdk
+        .clear_private_payment_list_and_process_outbound(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    assert!(first.failed_to_queue.is_empty());
+    assert!(first.failed_to_deliver.is_empty());
+    assert_eq!(first.acknowledged.len(), 1);
+    let first_id = first.cleared[0].outbound_message_id.unwrap();
+    pair.bob
+        .sdk
+        .receive_private_messages(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    let before_receive = pair
+        .bob
+        .storage
+        .snapshot()
+        .unwrap()
+        .next_private_stream_item_id;
+
+    let capabilities = paykit_lib::PaykitAppCapabilities {
+        private_payments: false,
+        payment_requests: true,
+        receipts: true,
+        outgoing_payments: true,
+    };
+    pair.alice
+        .sdk
+        .publish_paykit_app(paykit_lib::PaykitApp::new("Test app", capabilities).unwrap())
+        .await
+        .unwrap();
+    let before = pair.alice.storage.snapshot().unwrap();
+    assert_eq!(
+        before.registered_paykit_app_capabilities[&pair.alice.app_id],
+        capabilities
+    );
+    // A fresh runtime cannot reuse the previous process's publication acknowledgement.
+    let sdk = PaykitSdk::new(
+        pair.alice.storage.clone(),
+        TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    );
+    let report = sdk
+        .sync_private_payment_lists_with_reservations_and_process_outbound(
+            vec![PrivatePaymentListReservationUpdate {
+                counterparty: pair.bob.public_key.clone(),
+                reservations: Vec::new(),
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(
+        report.failed_to_queue.is_empty(),
+        "{:?}",
+        report.failed_to_queue
+    );
+    assert!(report.failed_to_deliver.is_empty());
+    assert_eq!(report.cleared.len(), 1);
+    let new_id = report.cleared[0].outbound_message_id.unwrap();
+    assert!(new_id > first_id);
+    assert_eq!(report.acknowledged.len(), 1);
+    assert_eq!(report.acknowledged[0].outbound_message_id, new_id);
+    assert_eq!(report.acknowledged[0].counterparty, pair.bob.public_key);
+    assert_eq!(
+        pair.alice
+            .storage
+            .snapshot()
+            .unwrap()
+            .registered_paykit_app_capabilities,
+        before.registered_paykit_app_capabilities
+    );
+    let registry = sdk
+        .paykit_app_registry(pair.alice.public_key.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        registry.apps()[&pair.alice.app_id].capabilities(),
+        capabilities
+    );
+
+    let received = pair
+        .bob
+        .sdk
+        .receive_private_messages(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(received.stream_item_ids.len(), 1);
+    // A filtered public view hides a disabled app; inspect the actual received payload.
+    let state = pair.bob.storage.snapshot().unwrap();
+    let item = state
+        .private_stream_items
+        .iter()
+        .find(|item| item.stream_item_id == received.stream_item_ids[0])
+        .unwrap();
+    assert!(item.stream_item_id >= before_receive);
+    assert_eq!(item.counterparty, pair.alice.public_key);
+    assert_eq!(
+        item.parse_status,
+        paykit_sdk::PrivateStreamParseStatus::Valid
+    );
+    let list = paykit_lib::parse_private_payment_list_json(&item.raw_json).unwrap();
+    assert_eq!(list.app_id(), &pair.alice.app_id);
+    assert!(list.is_empty());
+
+    let before_rejected = pair.alice.storage.snapshot().unwrap();
+    let rejected = sdk
+        .sync_private_payment_lists_with_reservations_and_process_outbound(
+            vec![PrivatePaymentListReservationUpdate {
+                counterparty: pair.bob.public_key.clone(),
+                reservations: vec![PrivatePaymentEndpointReservation {
+                    reservation_id: "disabled-new-invoice".into(),
+                    receiving_detail: private_receiving_detail(
+                        "btc-lightning-bolt11",
+                        "ln-disabled",
+                    ),
+                    expires_at: None,
+                    attribution: Default::default(),
+                }],
+            }],
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.failed_to_queue.len(), 1);
+    assert!(rejected.acknowledged.is_empty());
+    assert!(rejected.queued.is_empty());
+    let after_rejected = pair.alice.storage.snapshot().unwrap();
+    assert_eq!(
+        after_rejected.outbound_private_messages,
+        before_rejected.outbound_private_messages
+    );
+    assert_eq!(
+        after_rejected.encrypted_link_states,
+        before_rejected.encrypted_link_states
+    );
+    assert_eq!(
+        after_rejected.registered_paykit_app_capabilities,
+        before_rejected.registered_paykit_app_capabilities
+    );
+}
+
+#[tokio::test]
 async fn test_private_receive_refreshes_cached_app_authorization() {
     let pair = linked_two_party().await;
     pair.bob
@@ -1016,7 +1165,117 @@ async fn test_private_payment_list_roundtrip_between_linked_peers() {
 }
 
 #[tokio::test]
+async fn test_private_list_acknowledgement_rejects_delayed_older_publication() {
+    struct DelayedSentCommit {
+        inner: InMemoryStorage,
+        paused: AtomicBool,
+        committed: Semaphore,
+        resume: Semaphore,
+    }
+
+    #[async_trait]
+    impl StorageAdapter for DelayedSentCommit {
+        async fn transaction_erased<'a>(
+            &self,
+            f: StorageTransactionCallback<'a>,
+        ) -> PaykitResult<Box<dyn std::any::Any + Send>> {
+            let result = self.inner.transaction_erased(f).await?;
+            let has_sent = self
+                .inner
+                .snapshot()?
+                .outbound_private_messages
+                .iter()
+                .any(|row| {
+                    row.kind == paykit_lib::PrivateMessageKind::PrivatePaymentList.as_str()
+                        && row.status == OutboundPrivateMessageStatus::Sent
+                });
+            // A callback-backed store may finish the durable commit and let a
+            // later operation proceed before this future returns to the SDK.
+            if has_sent && !self.paused.swap(true, Ordering::SeqCst) {
+                self.committed.add_permits(1);
+                self.resume.acquire().await.unwrap().forget();
+            }
+            Ok(result)
+        }
+    }
+
+    let pair = linked_two_party().await;
+    let storage = Arc::new(DelayedSentCommit {
+        inner: pair.alice.storage.clone(),
+        paused: AtomicBool::new(false),
+        committed: Semaphore::new(0),
+        resume: Semaphore::new(0),
+    });
+    let sdk = PaykitSdk::new(
+        storage.clone(),
+        TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    );
+    let mut clear =
+        Box::pin(sdk.clear_private_payment_list_and_process_outbound(pair.bob.public_key.clone()));
+    tokio::select! {
+        result = &mut clear => panic!("clear returned before delayed commit: {result:?}"),
+        ready = tokio::time::timeout(Duration::from_secs(10), storage.committed.acquire()) => {
+            ready.unwrap().unwrap().forget();
+        }
+    }
+    let newer = tokio::time::timeout(
+        Duration::from_secs(10),
+        sdk.sync_private_payment_lists_with_reservations_and_process_outbound(
+            vec![PrivatePaymentListReservationUpdate {
+                counterparty: pair.bob.public_key.clone(),
+                reservations: vec![PrivatePaymentEndpointReservation {
+                    reservation_id: "newer-invoice".into(),
+                    receiving_detail: private_receiving_detail("btc-lightning-bolt11", "ln-newer"),
+                    expires_at: None,
+                    attribution: Default::default(),
+                }],
+            }],
+            false,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(newer.failed_to_queue.is_empty());
+    assert!(newer.failed_to_deliver.is_empty());
+    assert_eq!(newer.acknowledged.len(), 1);
+    storage.resume.add_permits(1);
+    let older = tokio::time::timeout(Duration::from_secs(10), clear)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(older.failed_to_deliver.is_empty());
+    assert!(older.cleared[0].outbound_message_id < newer.queued[0].outbound_message_id);
+    assert!(
+        older.acknowledged.is_empty(),
+        "a newer publication superseded the clear"
+    );
+}
+
+#[tokio::test]
 async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
+    fn assert_acknowledged(report: &paykit_sdk::PrivatePaymentListDeliveryReport) {
+        let tracked = report
+            .queued
+            .iter()
+            .chain(&report.cleared)
+            .map(|entry| {
+                (
+                    entry.counterparty.clone(),
+                    entry.outbound_message_id.unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let acknowledged = report
+            .acknowledged
+            .iter()
+            .map(|entry| (entry.counterparty.clone(), entry.outbound_message_id))
+            .collect::<Vec<_>>();
+        assert_eq!(acknowledged, tracked);
+    }
+
     let pair = linked_two_party().await;
     let mut update = PrivatePaymentListReservationUpdate {
         counterparty: pair.bob.public_key.clone(),
@@ -1038,6 +1297,7 @@ async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
         .unwrap();
     assert_eq!(first.queued.len(), 1);
     assert!(first.failed_to_deliver.is_empty());
+    assert_acknowledged(&first);
     let intake = pair
         .bob
         .sdk
@@ -1071,6 +1331,7 @@ async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
         assert_eq!(unchanged.queued, first.queued);
         assert!(unchanged.failed_to_queue.is_empty());
         assert!(unchanged.failed_to_deliver.is_empty());
+        assert_acknowledged(&unchanged);
         assert_eq!(pair.alice.storage.snapshot().unwrap(), before_sync);
         let intake = pair
             .bob
@@ -1125,6 +1386,7 @@ async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
             .unwrap();
         assert!(report.failed_to_deliver.is_empty());
         if expired {
+            assert_acknowledged(&report);
             assert_eq!(report.queued, first.queued);
             assert!(report.failed_to_queue.is_empty());
             // Lease ownership is ID-based, so the expired handle must no longer be stored.
@@ -1135,6 +1397,7 @@ async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
                 Some(lease.clone())
             );
         } else {
+            assert!(report.acknowledged.is_empty());
             assert!(report.queued.is_empty());
             assert_eq!(report.failed_to_queue.len(), 1);
             assert!(report.failed_to_queue[0]
@@ -1174,6 +1437,7 @@ async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
         .await
         .unwrap();
     assert_eq!(after_receive.queued, first.queued);
+    assert_acknowledged(&after_receive);
 
     update.reservations[0].reservation_id = "invoice-2".into();
     update.reservations[0].receiving_detail.payload = "ln-private-2".into();
@@ -1192,6 +1456,7 @@ async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
         first.queued[0].outbound_message_id
     );
     assert!(changed.failed_to_deliver.is_empty());
+    assert_acknowledged(&changed);
     pair.bob
         .sdk
         .receive_private_messages_from_linked_peers()
@@ -1227,6 +1492,7 @@ async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
             .unwrap();
         assert_eq!(cleared.cleared.len(), 1);
         assert!(cleared.failed_to_deliver.is_empty());
+        assert_acknowledged(&cleared);
         if clear_id.is_some() {
             assert_eq!(cleared.cleared[0].outbound_message_id, clear_id);
         }
@@ -1241,6 +1507,7 @@ async fn test_private_list_sync_only_sends_changed_details_on_current_link() {
             .unwrap();
         assert_eq!(explicit.cleared.len(), 1);
         assert!(explicit.failed_to_deliver.is_empty());
+        assert_acknowledged(&explicit);
         assert_ne!(explicit.cleared[0].outbound_message_id, clear_id);
         clear_id = explicit.cleared[0].outbound_message_id;
     }

@@ -621,6 +621,52 @@ fn test_state_revision_redacts_callback_error_context() {
     }
 }
 
+#[test]
+fn test_state_revision_recovers_after_unexpected_callback_error() {
+    struct FailOnceStore {
+        loads: AtomicUsize,
+    }
+
+    impl FfiSdkStateBlobStore for FailOnceStore {
+        fn load_state_blob(&self) -> Result<Option<FfiSdkStateBlobSnapshot>, PaykitFfiError> {
+            if self.loads.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(uniffi::UnexpectedUniFFICallbackError::new(
+                    "disk full at /private/app/state.bin",
+                )
+                .into());
+            }
+            Ok(None)
+        }
+
+        fn save_state_blob_atomically(
+            &self,
+            _blob: Arc<FfiSdkStateBlob>,
+            _expected_revision: Option<String>,
+        ) -> Result<String, PaykitFfiError> {
+            unreachable!("state revision lookup must not write")
+        }
+    }
+
+    let sdk = FfiPaykitSdk::new(
+        Arc::new(FailOnceStore {
+            loads: AtomicUsize::new(0),
+        }),
+        Arc::new(NoSessionProvider),
+        default_config("bitkit".into()).unwrap(),
+    )
+    .unwrap();
+
+    match sdk.state_revision().unwrap_err() {
+        PaykitFfiError::Storage { code, context } => {
+            assert_eq!(code, "unexpected_callback_error");
+            assert_eq!(context, "load SDK state blob: unexpected_callback_error");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+    // The handle stays usable: the failure did not poison the storage lock.
+    assert_eq!(sdk.state_revision().unwrap(), None);
+}
+
 #[tokio::test]
 async fn test_state_blob_transaction_rejects_exhausted_id_counter() {
     struct ExhaustedStateStore {

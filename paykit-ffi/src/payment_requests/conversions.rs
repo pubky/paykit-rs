@@ -272,6 +272,7 @@ impl TryFrom<PaymentRequestRecord> for FfiPaymentRequestRecord {
             proposal_outbound_status: value.proposal_outbound_status.map(Into::into),
             proposal_event_id: value.proposal_event_id,
             proposal_app_id: value.proposal_app_id.map(|app_id| app_id.to_string()),
+            proposal_recorded_at: value.proposal_recorded_at.map(|time| time.to_rfc3339()),
             payer_app_id: value.payer_app_id.map(|app_id| app_id.to_string()),
             execution_claim_app_id: value
                 .execution_claim_app_id
@@ -279,6 +280,7 @@ impl TryFrom<PaymentRequestRecord> for FfiPaymentRequestRecord {
             terms: value.terms.map(TryInto::try_into).transpose()?,
             accepted_event_id: value.accepted_event_id,
             accepted_outbound_status: value.accepted_outbound_status.map(Into::into),
+            acceptance_recorded_at: value.acceptance_recorded_at.map(|time| time.to_rfc3339()),
             rejected_event_id: value.rejected_event_id,
             rejected_outbound_status: value.rejected_outbound_status.map(Into::into),
             canceled_event_id: value.canceled_event_id,

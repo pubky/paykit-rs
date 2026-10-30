@@ -256,9 +256,12 @@ Paykit defines recurrence terms for communication. Paykit does not run the sched
 ## Recurring Payment Requests And Subscriptions
 
 A Subscription is product shorthand for an accepted Recurring Payment Request.
-It is not a separate protocol object, message family, or SDK subsystem. A
-Recurring Payment Request remains active across multiple payments until it is
-cancelled or its recurrence ends.
+It is not a separate protocol object, message family, or SDK subsystem. An
+accepted Recurring Payment Request remains active across multiple payments until
+a Cancellation. Reaching `recurrence.ends_at` sends no message and is not a
+lifecycle transition: whether the Recurrence has ended is a local wallet view
+computed from `ends_at` and trusted local time. A Payment Proof for an earlier
+Billing Period may still arrive after `ends_at`.
 
 A recurring flow works as follows:
 
@@ -299,7 +302,10 @@ accepted Allowance as prior permission to send the ordinary Acceptance and pay
 automatically. This is optional wallet behavior, not a Payment Request
 requirement or a guarantee of payment. Allowance matching, accepted-but-unpaid
 recovery, and per-Billing-Period metering are specified in
-[allowances.md](allowances.md) and are not repeated here.
+[allowances.md](allowances.md) and are not repeated here. The protocol flow for a
+manual payment is unchanged; a wallet that wants SDK duplicate-payment
+protection for it uses the SDK's
+[payment accounting](paykit-sdk.md#durable-allowance-payment-accounting).
 
 ## paykit.payment_request
 
@@ -369,6 +375,11 @@ Validation rules:
   at the acceptance decision. Payees that receive an acceptance after local
   expiry MAY reject or flag it according to local policy; deterministic replay
   requires the SDK/runtime to persist its local decision or processing time.
+  Note (non-normative): an Acceptance received after local expiry may still
+  have been made in time, for example when the payee was offline across the
+  expiry and fetched it late. Rejecting it also discards later Payment Proofs
+  for that request. The Paykit SDK records such an Acceptance and exposes its
+  local record time so applications can flag it.
 - A payee that has already recorded its own Cancellation MUST record an
   otherwise-valid later-received Acceptance from the payer as crossing, without
   reopening the request, only when no earlier Acceptance has been recorded; the
@@ -557,6 +568,28 @@ payer observed cancellation is durable payer-wallet state and cannot be proven
 from Event Message order alone. Payment-method-specific code validates whether
 the proof actually proves payment.
 
+### Payment time and attribution
+
+A payee SHOULD NOT treat evidence as proving a Payment Request when its
+verified payment time is earlier than the payee's local proposal record time
+(when it stored its own proposal) minus a payment-method-specific tolerance.
+It SHOULD hold or flag such evidence and MUST NOT mark the request paid on that
+evidence alone. The funds remain real received funds. This check compares
+payment time with the payee's own clock. It is not evidence of cross-direction
+causal order under [Message transport](#message-transport).
+[Payment deadlines](payment-conversion.md#payment-deadlines) describes the
+tolerance.
+
+Payment for a recurring Billing Period before its `starts_at` is recurrence
+policy. Applications may hold or flag it; this specification does not require
+rejecting it.
+
+A bare transaction ID paid to a reused or public address does not identify the
+payer. For one-time on-chain requests, payees should use request-specific
+`payment_endpoints`; a per-counterparty address is the middle ground. Every
+Billing Period of a recurring request shares its `payment_endpoints`, so they
+do not attribute a payment to one period.
+
 ## Billing period
 
 For recurring requests, `billing_period` uses this shape:
@@ -633,6 +666,8 @@ are never released automatically after ambiguous payment failures.
 Implementations MAY expose `proposal_expired` as a local view state for a
 proposed request whose trusted local time is past `proposal_expires_at`.
 `proposal_expired` is not an Event Message and is not event-log-derived.
+On the payee side, a request in this view state can still move to `accepted`
+when, after local expiry, it receives an Acceptance that the payer made in time.
 SDKs that need deterministic audit or replay of expiry decisions should persist
 the local decision or processing timestamp used for the expiry check.
 

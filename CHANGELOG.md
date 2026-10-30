@@ -17,10 +17,65 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   Architecture, supports React Native 0.78 and later (including 0.80 and
   later, Expo SDK 54 and later), and is published to npm by the `npm Package`
   workflow.
+- `SignupCodeRejected`, `PaykitSdkError::is_signup_code_rejected` in Rust and
+  the `identity/signup_code_rejected` error code in Swift and Kotlin report a
+  signup code that the homeserver refused as missing, malformed, unknown or
+  already used during `sign_up` or `approve_auth`.
 - `claim_payment_request_for_preparation` in Rust and
   `claimPaymentRequestForPreparation` in Swift and Kotlin reject blocked
   counterparties before App Registry access and atomically recheck that policy
   when claiming a Payment Request for preparation.
+- `PaymentRequestRecord` exposes `proposal_recorded_at` and
+  `acceptance_recorded_at` in Rust, and `proposalRecordedAt` and
+  `acceptanceRecordedAt` in Swift and Kotlin. They are the local times this
+  device stored the proposal and the recorded Acceptance; their meaning depends
+  on the local role.
+- `paykit_sdk::payment_proof_event_len` in Rust and `paymentProofEventLen` in
+  Swift and Kotlin return the exact byte length of the Payment Proof Event
+  Message that `submitPaymentProof` would queue, so payers and payees can check
+  it against the 1000-byte limit before payment approval or before offering a
+  method. It takes the local (sending) App ID from `PaykitSdkConfig`, not the
+  submission's `payment_app_id`. It is a measurement, not a validity check.
+
+### Changed
+
+- A payee no longer marks a Payment Request invalid when it stores an
+  otherwise-valid Acceptance after its local proposal expiry, such as an
+  in-time Acceptance fetched late. Later Payment Proofs are recorded and the
+  payee can cancel. Records are re-derived from the event log, so after
+  upgrading, requests a wallet showed as invalid may now appear as `Accepted`,
+  `ProofSubmitted` or `ActiveRecurring`.
+- `sign_up` in Rust and `signUp` in Swift and Kotlin report network failures,
+  5xx and 429 answers, and failed PKARR publishes or resolves as transport
+  errors instead of identity errors. This covers the homeserver record lookup
+  before signup, the signup request, the record republish for an existing
+  account, and the grant exchange of the sign-in that follows. A malformed
+  homeserver record stays an identity error. The grant exchange of `sign_in`
+  and `signIn` does the same. External auth flows and `approve_auth` keep their
+  identity errors.
+- Identify an outbound Private Application Message larger than the pubky-noise
+  message size (1000 bytes) with `PaykitSdkError::is_message_too_large` and the
+  `message_too_large` FFI protocol code. It is still a `Protocol` error, and
+  its context now carries the message and limit byte counts. Proposing a
+  Payment Request and submitting a Payment Proof check the size before link
+  readiness, so a not-ready link no longer hides the size error, and nothing is
+  queued. `propose_payment_request_with_id` refuses oversized terms before it
+  checks earlier use of the Payment Request ID.
+
+### Fixed
+
+- `sign_up` in Rust and `signUp` in Swift and Kotlin no longer move an identity
+  to another homeserver. They fail with a policy error, before anything is sent
+  to the homeserver or published, when the identity's homeserver record names a
+  different homeserver. A record lookup error also fails the sign-up. The check
+  adds PKARR lookups, which take longest for a first-time signup.
+- A platform callback (`SdkStateBlobStore`, `SdkPubkySessionProvider` or
+  `SdkPaymentAdapter`) that throws an error other than `PaykitError` (Swift) or
+  `PaykitException` (Kotlin) now returns a `Storage` error with code
+  `unexpected_callback_error` instead of panicking in Rust. Previously the panic
+  reached the app as an internal panic error that included the platform error
+  text, and a throw from `SdkStateBlobStore` left that SDK handle failing every
+  later call with `state_transaction_lock_poisoned`.
 
 ### Fixed
 
@@ -39,6 +94,39 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   behavior and callable signatures are unchanged by the documentation update.
   Mocks and conformers of the generated SDK interfaces must implement the new
   preparation-claim method.
+- The corrected payment accounting, Payment Request Acceptance, and backup
+  restore FFI documentation also changes UniFFI compatibility checksums.
+  `allowanceAccountingState` returns null only when no accounting state exists;
+  state that requires reconciliation is returned. Payment behavior and callable
+  signatures are unchanged.
+- The payment accounting guidance now documents the manual Payment Request
+  payment sequence, one trusted time for automatic Acceptance, what counts as a
+  definitive `Failed` outcome on each Rail, and how to reconcile after restoring
+  an older backup without paying twice.
+- Before signing up an imported or unknown key, call `republishIdentity`. On
+  `true`, sign in and never fall back to sign-up automatically; on `false`,
+  sign-up is safe; on an error, retry later. Treat a policy error from sign-up
+  as "this identity lives on another homeserver" and sign in instead.
+- Branch on sign-up and sign-in errors by category and code. Retry a
+  `transport` error later; after any sign-up failure, retrying with the same
+  identity, homeserver and signup code is safe. On `signup_code_rejected`, ask
+  for a code without telling the user to discard theirs. Never fall back from
+  a failed sign-in to sign-up automatically; call `republishIdentity` to tell
+  a missing record from a transient failure. Wallets that catch identity
+  errors from these calls must also handle transport errors. The updated
+  `signUp` and `signIn` documentation changes UniFFI checksums, so regenerate
+  the bindings and native libraries together.
+- Regenerate bindings and native libraries together: the new Payment Request
+  record fields change the generated record layout, so do not mix them with
+  earlier builds. Payees should not count payment evidence earlier than the
+  proposal record time minus a payment-method tolerance as paying a request;
+  see the Payment time and attribution rule in `specs/payment-requests.md`.
+- Throw `PaykitError` (Swift) or `PaykitException` (Kotlin) from platform
+  callbacks to keep a specific error variant and code.
+- Regenerate bindings for `paymentProofEventLen` and the message size
+  documentation on `proposePaymentRequest`, `submitPaymentProof`,
+  `PaymentRequestTerms` and `PaymentProofSubmission`. Protocol errors have a new
+  code value, `message_too_large`; apps that branch on codes should handle it.
 
 ## [0.1.1-rc1] - 2026-10-20
 

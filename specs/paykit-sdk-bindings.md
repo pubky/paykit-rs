@@ -205,6 +205,22 @@ local-only forget operation; it must not be presented as remote revocation.
 Apps that should also withdraw their public Payment Endpoints call
 `removePaykitApp` before sign-out.
 
+For recovery of an already admitted operation, `captureGrantObserver` captures
+the expected owner's existing live grant without restoring credentials. It
+fails if the platform callback and native cache do not identify that original
+session. Retain the opaque observer with the original operation and recheck
+the app's owner/generation admission after capture and after observation.
+`observe` performs a read through the original configured Pubky transport,
+without provider callbacks, credential refresh, shared-storage locks or cleanup.
+The transport's timeout, redirect and retry policy still applies; a response
+finishing at another URL is unknown. Only matching, unexpired metadata produces
+`Active`. Negative responses, expired or rotated bearers, malformed metadata and
+transport failures produce `Unknown`, never proof of revocation or absence.
+`Active` is point-in-time evidence, not a lease or permission to repeat a
+destructive operation. Apps still need positive evidence for all prior steps
+and fresh confirmation before any remaining cleanup. The handle cannot be
+exported or reconstructed after restart, and it exposes no bearer text.
+
 The binding-level session API should not ask Swift or Kotlin to construct Rust
 `pubky::PubkySession` or `pubky::Pubky` values directly. For
 ordinary app use, SDK bindings should turn app-provided session material,
@@ -338,6 +354,8 @@ At minimum, platform errors should expose:
 Apps should be able to branch on identity failures, policy failures, recovery
 required, storage failures, transport failures, protocol failures, and payment
 adapter failures without parsing display strings.
+For example, the protocol code `message_too_large` identifies an outbound
+private message that exceeds the 1000-byte pubky-noise message size.
 
 Underlying platform errors exposed through app-facing objects must also be
 redacted or sanitized. Raw provider/storage/adapter error strings should be
@@ -442,6 +460,18 @@ Bindings should expose high-level workflows before low-level records:
 
 Bindings should avoid typed private receive helpers that bypass durable ordered
 stream handling.
+
+Private Payment List delivery reports distinguish queued empty lists from
+acknowledged publications. An `acknowledged` entry names a tracked counterparty
+and outbound message ID whose successful publication this runtime witnessed on
+the current Encrypted Link at completion. It is not counterparty receipt or a
+lease. A stored `Sent` row, pending handshake, or empty failure list alone does
+not establish acknowledgement. A newer list from the same App, even if still
+queued, withholds acknowledgement of an older list. Missing entries remain unknown, and queue,
+delivery and reservation-cleanup failures still prevent complete cleanup.
+Callers retaining this evidence must bind it to the original owner, operation
+and runtime, invalidate it after relevant local state changes, and never infer
+it after restart or use it to replay an uncertain mutation.
 
 Private-derived app records should carry enough freshness context for mobile UI
 and payment logic. Where applicable, expose fields such as `received_at`,

@@ -104,3 +104,77 @@ fn test_retention_limit_is_detected_only_from_its_policy_cause() {
         assert!(!other.is_retention_limit_reached());
     }
 }
+
+#[test]
+fn test_signup_code_rejected_is_detected_only_from_its_identity_cause() {
+    // Sign-up wraps the homeserver's error in the cause, as context.
+    let homeserver_error = pubky::Error::Request(pubky::errors::RequestError::Server {
+        status: pubky::StatusCode::UNAUTHORIZED,
+        message: "Token already used".into(),
+    });
+    let rejected = PaykitSdkError::Identity {
+        context: "sign up Pubky identity".into(),
+        source: Some(anyhow::Error::from(homeserver_error).context(SignupCodeRejected)),
+    };
+    assert!(rejected.is_signup_code_rejected());
+    let PaykitSdkError::Identity {
+        source: Some(source),
+        ..
+    } = &rejected
+    else {
+        panic!("expected Identity error, got {rejected:?}");
+    };
+    assert!(matches!(
+        source.downcast_ref::<pubky::Error>(),
+        Some(pubky::Error::Request(
+            pubky::errors::RequestError::Server { status, .. }
+        )) if *status == pubky::StatusCode::UNAUTHORIZED
+    ));
+
+    // Neither another identity cause nor the same cause on another variant counts.
+    for other in [
+        PaykitSdkError::Identity {
+            context: "sign up Pubky identity".into(),
+            source: None,
+        },
+        PaykitSdkError::Identity {
+            context: "sign up Pubky identity".into(),
+            source: Some(anyhow::anyhow!("signup code was rejected")),
+        },
+        PaykitSdkError::Transport {
+            context: "sign up Pubky identity".into(),
+            source: Some(SignupCodeRejected.into()),
+        },
+    ] {
+        assert!(!other.is_signup_code_rejected());
+    }
+}
+
+#[test]
+fn test_message_too_large_is_detected_only_from_its_protocol_cause() {
+    let too_large = PaykitSdkError::Protocol {
+        context:
+            "Private Application Message (1001 bytes) exceeds pubky-noise message size (1000 bytes)"
+                .into(),
+        source: Some(MessageTooLarge.into()),
+    };
+    assert!(too_large.is_message_too_large());
+
+    // Neither another protocol cause nor the same cause on another variant counts.
+    for other in [
+        PaykitSdkError::Protocol {
+            context: "Private Application Message exceeds pubky-noise message size".into(),
+            source: None,
+        },
+        PaykitSdkError::Protocol {
+            context: "invalid private message JSON".into(),
+            source: Some(anyhow::anyhow!("exceeds pubky-noise message size")),
+        },
+        PaykitSdkError::Policy {
+            context: "message refused".into(),
+            source: Some(MessageTooLarge.into()),
+        },
+    ] {
+        assert!(!other.is_message_too_large());
+    }
+}

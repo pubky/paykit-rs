@@ -167,6 +167,23 @@ impl fmt::Debug for PaykitSdkError {
 #[error("counterparty reached its retained private stream item limit")]
 pub struct RetentionLimitReached;
 
+/// Cause carried by the [`PaykitSdkError::Identity`] that reports a signup code
+/// the homeserver refused as missing, malformed, unknown or already used.
+///
+/// Check for it with [`PaykitSdkError::is_signup_code_rejected`]. The
+/// homeserver's own error stays in the cause chain below it.
+#[derive(Debug, Error)]
+#[error("signup code was rejected")]
+pub struct SignupCodeRejected;
+
+/// Cause carried by the [`PaykitSdkError::Protocol`] that refuses an outbound
+/// Private Application Message larger than `PUBKY_NOISE_MSG_LEN`.
+///
+/// Check for it with [`PaykitSdkError::is_message_too_large`].
+#[derive(Debug, Error)]
+#[error("Private Application Message exceeds pubky-noise message size")]
+pub struct MessageTooLarge;
+
 impl PaykitSdkError {
     /// Return whether retrying from current shared state after contention is appropriate.
     pub fn is_concurrent_update(&self) -> bool {
@@ -186,6 +203,35 @@ impl PaykitSdkError {
                 source: Some(source),
                 ..
             } if source.is::<RetentionLimitReached>()
+        )
+    }
+
+    /// Return whether sign-up failed because the homeserver refused the
+    /// signup code as missing, malformed, unknown or already used.
+    ///
+    /// Ask the user for a signup code. A malformed code can be a typo that the
+    /// user can fix, so do not tell them to discard it. Failures such as a
+    /// device clock that is too far off are other identity errors, because a
+    /// new code cannot fix them.
+    pub fn is_signup_code_rejected(&self) -> bool {
+        matches!(
+            self,
+            Self::Identity {
+                source: Some(source),
+                ..
+            } if source.is::<SignupCodeRejected>()
+        )
+    }
+
+    /// Return whether an outbound Private Application Message was refused
+    /// because its serialized JSON exceeds `PUBKY_NOISE_MSG_LEN` bytes.
+    pub fn is_message_too_large(&self) -> bool {
+        matches!(
+            self,
+            Self::Protocol {
+                source: Some(source),
+                ..
+            } if source.is::<MessageTooLarge>()
         )
     }
 }

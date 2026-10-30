@@ -1,6 +1,6 @@
 [package]
 name = "paykit-lib"
-version = "0.1.1-rc1"
+version = "0.1.1-rc3"
 authors = ["denys@synonym.to"]
 description = "Paykit library implementation"
 license = "MIT"
@@ -31,9 +31,12 @@ tokio = { version = "1", features = ["macros", "time"] }
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
 
+[target.'cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 proptest = "1"
 pubky-noise = { version = "=0.1.0", features = ["test-utils"] }
 pubky-testnet = { version = "0.16.2", features = ["docker-postgres"] }
-tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-subscriber = "0.3"

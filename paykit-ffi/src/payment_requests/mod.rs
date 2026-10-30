@@ -159,6 +159,9 @@ pub struct FfiPaymentConversionQuoteRecord {
 }
 
 /// Immutable terms for a Payment Request proposal.
+///
+/// The complete Event Message must fit 1000 bytes of canonical JSON: `metadata`
+/// is re-serialized and non-ASCII text is written raw. See `proposePaymentRequest`.
 #[derive(uniffi::Record, Clone)]
 pub struct FfiPaymentRequestTerms {
     /// Requested amount.
@@ -306,6 +309,11 @@ pub struct FfiPaymentRequestRecord {
     pub proposal_event_id: Option<String>,
     /// Application that created the proposal.
     pub proposal_app_id: Option<String>,
+    /// Local time this device stored the proposal, as RFC3339 text: queued by
+    /// a payee, received by a payer. Unauthenticated local clock time. A payee
+    /// subtracts a payment-method tolerance to get a payment not-before bound;
+    /// a payer uses it only as a search hint.
+    pub proposal_recorded_at: Option<String>,
     /// Payer application associated with the request, independent of its current execution claim.
     pub payer_app_id: Option<String>,
     /// Paykit App currently preparing to execute this payment.
@@ -316,6 +324,11 @@ pub struct FfiPaymentRequestRecord {
     pub accepted_event_id: Option<String>,
     /// Local outbound delivery status for an acceptance event.
     pub accepted_outbound_status: Option<FfiOutboundPrivateMessageStatus>,
+    /// Local time this device stored the recorded acceptance, as RFC3339 text:
+    /// queued by a payer, fetched by a payee. Unauthenticated local clock time.
+    /// A payee value after `proposal_expires_at` does not show a late
+    /// acceptance, and it is not a lower bound on payment time.
+    pub acceptance_recorded_at: Option<String>,
     /// Rejection Event ID.
     pub rejected_event_id: Option<String>,
     /// Local outbound delivery status for a rejection event.
@@ -341,6 +354,10 @@ pub struct FfiPaymentRequestRecord {
 }
 
 /// Method-specific Payment Proof submission data.
+///
+/// The complete Event Message must fit 1000 bytes of canonical JSON: `proof` is
+/// re-serialized and non-ASCII text is written raw. Measure it with
+/// `paymentProofEventLen`.
 #[derive(uniffi::Record, Clone, PartialEq, Eq)]
 pub struct FfiPaymentProofSubmission {
     /// Billing Period for recurring Payment Requests.
@@ -406,6 +423,7 @@ impl FfiPaykitSdk {
 
     /// Inspect inbound proposals from one counterparty.
     /// Quotes and actionable state require the full view, which includes outbound acceptance.
+    /// Fails with a policy error while the counterparty is Blocked.
     pub async fn received_payment_requests_from(
         &self,
         counterparty: String,
@@ -418,6 +436,7 @@ impl FfiPaykitSdk {
     }
 
     /// Return Payment Requests involving one counterparty.
+    /// Fails with a policy error while the counterparty is Blocked; see `blockPeer`.
     pub async fn payment_requests_with(
         &self,
         counterparty: String,
@@ -430,6 +449,8 @@ impl FfiPaykitSdk {
     }
 
     /// Return Payment Requests matching a local SDK filter.
+    /// A filter naming a Blocked counterparty fails with a policy error; without
+    /// a counterparty, blocked peers are skipped.
     pub async fn list_payment_requests(
         &self,
         filter: FfiPaymentRequestFilter,
@@ -448,6 +469,11 @@ impl FfiPaykitSdk {
     }
 
     /// Return accepted recurring Payment Requests across non-blocked counterparties.
+    ///
+    /// Covers both payer and payee roles with no time filter: an ended Recurrence
+    /// stays listed after `terms.recurrence.ends_at`, and releasing the execution
+    /// claim does not remove it. Compare `ends_at` with trusted local time to hide
+    /// or label it.
     pub async fn active_recurring_payment_requests(
         &self,
     ) -> Result<Vec<FfiPaymentRequestRecord>, PaykitFfiError> {
@@ -459,6 +485,10 @@ impl FfiPaykitSdk {
     ///
     /// A request's required Paykit App constrains the payee endpoint, not the
     /// payer app that responds.
+    ///
+    /// Includes active recurring requests with no time filter: an ended Recurrence
+    /// stays listed after `terms.recurrence.ends_at`, and releasing the execution
+    /// claim does not remove it. Compare `ends_at` with trusted local time.
     pub async fn actionable_received_payment_requests(
         &self,
     ) -> Result<Vec<FfiPaymentRequestRecord>, PaykitFfiError> {
@@ -468,6 +498,12 @@ impl FfiPaykitSdk {
 
     /// Queue a new Payment Request proposal and return local derived state.
     /// The caller must establish peer support before including conversion or payment deadlines.
+    ///
+    /// The complete Event Message must fit 1000 bytes of canonical JSON
+    /// (`metadata` is re-serialized, non-ASCII is written raw). An oversized
+    /// message fails with code `message_too_large` (category protocol), whose
+    /// context reports the byte counts, before link readiness checks and before
+    /// anything is queued.
     pub async fn propose_payment_request(
         &self,
         counterparty: String,
@@ -523,6 +559,9 @@ impl FfiPaykitSdk {
     }
 
     /// Release this App's unresolved execution claim without rejecting the request.
+    ///
+    /// Releasing does not hide the record: it stays in the active recurring and
+    /// actionable lists, available to every local App.
     pub async fn release_payment_request_execution_claim(
         &self,
         counterparty: String,
@@ -546,6 +585,9 @@ impl FfiPaykitSdk {
     /// the current request for this Payment Request ID is a different stream
     /// item, which happens when the counterparty was forgotten and sent the id
     /// again.
+    ///
+    /// Success only queues acceptance; accounting callers must still reserve payment and
+    /// obtain a fresh handoff.
     pub async fn accept_payment_request(
         &self,
         counterparty: String,
@@ -569,6 +611,8 @@ impl FfiPaykitSdk {
     /// Pass the `proposal_stream_item_id` of the record whose terms were
     /// approved, as it was displayed. On a mismatch nothing is claimed or
     /// queued and the call fails with a policy error.
+    ///
+    /// Accounting callers must still reserve payment and obtain a fresh handoff.
     pub async fn claim_and_accept_payment_request(
         &self,
         counterparty: String,
@@ -641,6 +685,12 @@ impl FfiPaykitSdk {
     }
 
     /// Queue a Payment Proof for an accepted Payment Request.
+    ///
+    /// The complete Event Message must fit 1000 bytes of canonical JSON
+    /// (`proof` is re-serialized, non-ASCII is written raw). An oversized
+    /// message fails with code `message_too_large` (category protocol), whose
+    /// context reports the byte counts, before link readiness checks and before
+    /// anything is queued. Measure with `paymentProofEventLen` before payment.
     pub async fn submit_payment_proof(
         &self,
         counterparty: String,
@@ -674,4 +724,36 @@ pub fn payment_deadline_at(
     deadline
         .at(period.as_ref())
         .map_err(|err| validation_error(err.to_string()))
+}
+
+/// Return the exact UTF-8 byte length of the Payment Proof Event Message that
+/// `submitPaymentProof` would queue for this App, Payment Reference and submission.
+///
+/// `local_app_id` is the App ID this SDK is configured with (the
+/// `PaykitSdkConfig` App ID that `submitPaymentProof` sends from, written as the
+/// outer `app_id`), not the payee App in `submission.payment_app_id`. Passing
+/// the wrong one measures the wrong length.
+///
+/// Compare it with the 1000-byte (`PUBKY_NOISE_MSG_LEN`) limit. This is a
+/// measurement, not a validity check: a proof that fits can still be refused by
+/// role, state or conversion checks, and lengths above the limit are returned.
+/// Payers must measure before payment approval and payees before offering a
+/// method. Pass maximum-length placeholders for variable fields (for example a
+/// 78-digit ERC-20 log index) and every optional ID you will send, or "fits" is
+/// false assurance. The proof JSON is re-serialized canonically, so do not
+/// measure the wallet's own string.
+#[uniffi::export]
+pub fn payment_proof_event_len(
+    local_app_id: String,
+    payment_reference: Arc<FfiPaymentReference>,
+    submission: FfiPaymentProofSubmission,
+) -> Result<u32, PaykitFfiError> {
+    let local_app_id = paykit_lib::PaykitAppId::new(local_app_id)
+        .map_err(|err| validation_error(err.to_string()))?;
+    let payment_reference = PaymentReference::new(payment_reference.export_text())
+        .map_err(|err| validation_error(err.to_string()))?;
+    let submission = PaymentProofSubmission::try_from(submission)?;
+    let len = paykit_sdk::payment_proof_event_len(&local_app_id, &payment_reference, submission)?;
+    u32::try_from(len)
+        .map_err(|_| validation_error("Payment Proof Event Message length exceeds u32"))
 }

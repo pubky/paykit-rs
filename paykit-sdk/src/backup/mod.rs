@@ -53,6 +53,15 @@ pub const SDK_BACKUP_VERSION: u32 = 1;
 /// This payload includes private SDK recovery data such as Encrypted Link
 /// snapshots, raw Private Application Messages, outbound payloads, and Receipt
 /// Decryption Keys. Store and transport it with caller-managed encryption.
+///
+/// The SDK does not encrypt it. Each Encrypted Link and Encrypted Link
+/// Handshake snapshot holds the Paykit Noise static secret key of the key
+/// generation current at export, plus that session's ephemeral secret. The
+/// backup does not contain the Pubky identity secret or the Paykit Identity
+/// Secret. Never log it. If a backup is exposed, call
+/// [`PaykitSdk::rotate_paykit_identity_key`](crate::PaykitSdk::rotate_paykit_identity_key),
+/// which removes the old snapshots and publishes a replacement Noise key, then
+/// relink with the affected peers.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SdkBackupState {
     /// Identity-wide Noise public key associated with the private snapshots.
@@ -311,9 +320,10 @@ where
                     });
                 }
             }
-            if !storage_state_is_empty_except_identity(&current_state) {
+            let blockers = restore_blockers(&current_state);
+            if !blockers.is_empty() {
                 return Err(PaykitSdkError::Policy {
-                    context: "cannot restore a backup over existing SDK-managed state".into(),
+                    context: format!("{RESTORE_TARGET_NOT_EMPTY}: {}", blockers.join(", ")),
                     source: None,
                 });
             }
@@ -363,18 +373,100 @@ where
         .await
 }
 
-fn storage_state_is_empty_except_identity(state: &StorageState) -> bool {
-    let mut empty = StorageState {
-        paykit_noise_public_key: state.paykit_noise_public_key.clone(),
-        identity_state: state.identity_state.clone(),
-        authorized_paykit_apps: state.authorized_paykit_apps.clone(),
-        peer_link_operation_leases: state.peer_link_operation_leases.clone(),
-        paykit_app_operation_leases: state.paykit_app_operation_leases.clone(),
-        ..StorageState::default()
-    };
-    empty.next_peer_link_operation_lease_id = state.next_peer_link_operation_lease_id;
-    empty.next_paykit_app_operation_lease_id = state.next_paykit_app_operation_lease_id;
-    state == &empty
+/// Refusal prefix for a restore over SDK-managed state; [`restore_blockers`] names follow it.
+const RESTORE_TARGET_NOT_EMPTY: &str = "cannot restore a backup over existing SDK-managed state";
+
+/// Name the SDK-managed record kinds that block a normal restore, in a stable order.
+///
+/// An empty list means the backing holds only identity metadata, the authorized
+/// Paykit App cache, and operation leases, so the restore cannot replace newer
+/// state. Every other field blocks when it differs from its default value.
+///
+/// The destructure is exhaustive on purpose (no `..`): a new `StorageState`
+/// field fails to compile here until someone decides whether it blocks restore.
+/// The names are static because the refusal crosses the FFI verbatim; never add
+/// ids, public keys, payloads, Paykit App IDs, or counts. The restore docs tell
+/// callback-storage apps they may discard state only when they independently
+/// know they are the only Paykit App and SDK handle using the backing and the
+/// refusal names nothing but "registered Paykit Apps" and "public Payment
+/// Endpoint records". These labels aggregate every app sharing the backing, so
+/// they never prove which app owns the records. Renaming or regrouping those two
+/// labels changes that rule; update the `restore_backup_state` docs and READMEs
+/// with them.
+fn restore_blockers(state: &StorageState) -> Vec<&'static str> {
+    let StorageState {
+        paykit_noise_public_key: _,
+        identity_state: _,
+        authorized_paykit_apps: _,
+        peer_link_operation_leases: _,
+        next_peer_link_operation_lease_id: _,
+        paykit_app_operation_leases: _,
+        next_paykit_app_operation_lease_id: _,
+        allowance_accounting,
+        linked_peers,
+        contact_records,
+        registered_paykit_apps,
+        registered_paykit_app_capabilities,
+        retired_paykit_apps,
+        public_endpoint_records,
+        payment_endpoint_reservations,
+        encrypted_link_states,
+        payment_request_execution_claims,
+        outbound_private_messages,
+        next_outbound_private_message_id,
+        private_stream_items,
+        next_receive_batch_id,
+        next_private_stream_item_id,
+        event_dedup_records,
+        receipt_access_records,
+        receipt_records,
+        receipt_issuance_records,
+    } = state;
+    [
+        ("Allowance accounting", is_set(allowance_accounting)),
+        ("Linked Peers", is_set(linked_peers)),
+        ("Contact Records", is_set(contact_records)),
+        (
+            "registered Paykit Apps",
+            is_set(registered_paykit_apps) || is_set(registered_paykit_app_capabilities),
+        ),
+        ("retired Paykit Apps", is_set(retired_paykit_apps)),
+        (
+            "public Payment Endpoint records",
+            is_set(public_endpoint_records),
+        ),
+        (
+            "Payment Endpoint Reservation records",
+            is_set(payment_endpoint_reservations),
+        ),
+        ("Encrypted Link state", is_set(encrypted_link_states)),
+        (
+            "Payment Request execution claims",
+            is_set(payment_request_execution_claims),
+        ),
+        (
+            "outbound Private Application Messages",
+            is_set(outbound_private_messages) || is_set(next_outbound_private_message_id),
+        ),
+        (
+            "received Private Application Messages",
+            is_set(private_stream_items)
+                || is_set(next_receive_batch_id)
+                || is_set(next_private_stream_item_id),
+        ),
+        ("Event Message dedupe records", is_set(event_dedup_records)),
+        ("Receipt Access records", is_set(receipt_access_records)),
+        ("Receipts", is_set(receipt_records)),
+        ("Receipt issuance records", is_set(receipt_issuance_records)),
+    ]
+    .into_iter()
+    .filter_map(|(kind, blocks)| blocks.then_some(kind))
+    .collect()
+}
+
+/// Whether a field differs from its value in `StorageState::default()`.
+fn is_set<T: Default + PartialEq>(value: &T) -> bool {
+    *value != T::default()
 }
 
 impl SdkBackupState {

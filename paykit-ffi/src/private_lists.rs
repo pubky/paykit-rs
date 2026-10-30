@@ -2,9 +2,9 @@ use std::{collections::HashMap, fmt, sync::Arc};
 
 use paykit_sdk::{
     storage::OutboundPrivateMessageRecord, OutboundPrivateMessageStatus,
-    PrivatePaymentListDeliveryFailure, PrivatePaymentListDeliveryReport,
-    PrivatePaymentListReservationUpdate, PrivatePaymentListSyncChange,
-    PrivatePaymentListSyncReport, PrivatePaymentListView,
+    PrivatePaymentListAcknowledgement, PrivatePaymentListDeliveryFailure,
+    PrivatePaymentListDeliveryReport, PrivatePaymentListReservationUpdate,
+    PrivatePaymentListSyncChange, PrivatePaymentListSyncReport, PrivatePaymentListView,
 };
 
 use crate::{
@@ -169,6 +169,18 @@ impl fmt::Debug for FfiPrivatePaymentListDeliveryFailure {
     }
 }
 
+/// A tracked Private Payment List whose publication this runtime witnessed.
+/// This is not counterparty receipt, a lease, or proof that cleanup completed.
+#[derive(uniffi::Record, Clone)]
+pub struct FfiPrivatePaymentListAcknowledgement {
+    /// Counterparty addressed by the list.
+    pub counterparty: String,
+    /// Exact outbound message in this call's queued or cleared lists.
+    pub outbound_message_id: u64,
+}
+
+impl_redacted_debug!(FfiPrivatePaymentListAcknowledgement);
+
 /// Report from queueing and delivering Private Payment Lists.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct FfiPrivatePaymentListDeliveryReport {
@@ -176,9 +188,25 @@ pub struct FfiPrivatePaymentListDeliveryReport {
     pub queued: Vec<FfiPrivatePaymentListSyncChange>,
     /// Counterparties that had an empty Private Payment List queued.
     pub cleared: Vec<FfiPrivatePaymentListSyncChange>,
+    /// Positively witnessed tracked publications on the current Encrypted Link.
+    /// Missing entries remain unknown, including pending handshakes and stored
+    /// Sent rows without a runtime witness. All cleanup failures still apply.
+    /// Retain with the original owner/attempt and invalidate on local changes.
+    pub acknowledged: Vec<FfiPrivatePaymentListAcknowledgement>,
     /// Counterparties that could not be queued or cleared.
     pub failed_to_queue: Vec<FfiPrivatePaymentListSyncChange>,
-    /// Counterparties queued successfully but failed during outbound delivery.
+    /// Delivery and reservation cleanup failures after queueing.
+    ///
+    /// Empty means every list in `queued` and `cleared` was sent, except lists
+    /// still queued for a counterparty whose Encrypted Link Handshake is
+    /// pending; those stay eligible for a later run. A list that was not sent
+    /// is reported with its `outboundMessageId`, for example one left queued
+    /// behind an older message in retry backoff, one superseded by a newer
+    /// Private Payment List, or one whose outbound record is gone. To recover
+    /// any entry, call the same high-level operation again with the current
+    /// complete intent; it queues a fresh list that supersedes older pending
+    /// ones, while `processPendingPrivateMessages` only advances lists still
+    /// queued.
     pub failed_to_deliver: Vec<FfiPrivatePaymentListDeliveryFailure>,
 }
 
@@ -262,6 +290,10 @@ impl FfiPaykitSdk {
     }
 
     /// Queue an empty Private Payment List and process that counterparty's queue.
+    ///
+    /// Each call queues a fresh empty list, which supersedes older pending
+    /// lists from this Paykit App. While the counterparty is Linked, an empty
+    /// `failedToQueue` and `failedToDeliver` mean the empty list was sent.
     pub async fn clear_private_payment_list_and_process_outbound(
         &self,
         counterparty: String,
@@ -393,12 +425,22 @@ impl From<PrivatePaymentListDeliveryReport> for FfiPrivatePaymentListDeliveryRep
         Self {
             queued: value.queued.into_iter().map(Into::into).collect(),
             cleared: value.cleared.into_iter().map(Into::into).collect(),
+            acknowledged: value.acknowledged.into_iter().map(Into::into).collect(),
             failed_to_queue: value.failed_to_queue.into_iter().map(Into::into).collect(),
             failed_to_deliver: value
                 .failed_to_deliver
                 .into_iter()
                 .map(Into::into)
                 .collect(),
+        }
+    }
+}
+
+impl From<PrivatePaymentListAcknowledgement> for FfiPrivatePaymentListAcknowledgement {
+    fn from(value: PrivatePaymentListAcknowledgement) -> Self {
+        Self {
+            counterparty: app_public_key(&value.counterparty),
+            outbound_message_id: value.outbound_message_id,
         }
     }
 }

@@ -105,6 +105,7 @@ pub(crate) type FfiSdkRuntime =
 #[derive(uniffi::Object)]
 pub struct FfiPaykitSdk {
     pub(crate) runtime: FfiSdkRuntime,
+    pub(crate) session_provider: FfiSdkPubkySessionProviderAdapter,
     storage: FfiSdkStorageAdapter,
 }
 
@@ -342,7 +343,10 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
-    /// Export SDK-managed backup state as an opaque blob.
+    /// Export SDK-managed backup state as unencrypted SDK backup bytes.
+    ///
+    /// The blob is sensitive plaintext that includes Noise secret key material;
+    /// see `FfiSdkBackupBlob` for its contents and required protection.
     pub async fn export_backup_state(&self) -> Result<Arc<FfiSdkBackupBlob>, PaykitFfiError> {
         let backup = self.runtime.export_backup_state().await?;
         Ok(Arc::new(FfiSdkBackupBlob::new(encode_backup_state(
@@ -351,17 +355,48 @@ impl FfiPaykitSdk {
     }
 
     /// Export SDK-managed backup state as a hex string.
+    ///
+    /// Hex is not encryption. The string holds unencrypted SDK backup bytes:
+    /// Encrypted Link snapshots (including the current Paykit Noise static
+    /// secret key and session ephemeral secrets), raw Private Application
+    /// Messages, outbound payloads, and Receipt Decryption Keys. It is a plain
+    /// `String`, so neither redaction nor zeroize applies to it. Encrypt it
+    /// before storage or transport and never log it. If it is exposed, call
+    /// `rotate_paykit_identity_key` and relink with the affected peers.
     pub async fn export_backup_string(&self) -> Result<String, PaykitFfiError> {
         self.export_backup_state()
             .await
             .map(|backup| hex::encode(backup.export_bytes()))
     }
 
-    /// Restore SDK-managed backup state from an opaque blob.
+    /// Restore SDK-managed backup state from an SDK backup blob.
+    ///
+    /// Restores only into a state backing that holds nothing but identity
+    /// metadata, authorized Paykit App records, and operation leases; otherwise
+    /// the refusal names the blocking record kinds. Restore is also refused
+    /// while a peer-link or Paykit App operation lease is unexpired. A backup
+    /// with identity-scoped state needs an active Pubky session for the same
+    /// identity, private-link-capable when the backup holds private state.
+    ///
+    /// Restore before `publish_paykit_app`: publishing (and the public endpoint
+    /// sync it enables) writes SDK-managed state that blocks restore. With
+    /// callback storage, discard the state blob and initialize again only when
+    /// the app independently knows it is the only Paykit App and SDK handle
+    /// using that backing for this identity, and the refusal names nothing but
+    /// registered Paykit Apps and public Payment Endpoint records; then restore
+    /// with `RequireRecovery`. The SDK cannot check ownership: those labels
+    /// combine every app's records and omit Paykit App IDs, so another app's
+    /// setup produces the same refusal. Otherwise do not discard. After restore,
+    /// payment accounting requires `reconcile_allowance_accounting` with
+    /// complete wallet history; an empty history attests that there were no
+    /// previous payments.
     ///
     /// `link_policy` decides whether saved Encrypted Links resume or require a
     /// fresh Encrypted Link Handshake. Resuming a backup that is not current
     /// reuses a transport key and nonce.
+    ///
+    /// Reconcile payment accounting with every payment made after the backup was exported,
+    /// or those payments can be made again; see `reconcile_allowance_accounting`.
     pub async fn restore_backup_state(
         &self,
         backup: Arc<FfiSdkBackupBlob>,
@@ -382,6 +417,11 @@ impl FfiPaykitSdk {
     /// recovery and payment execution requires complete wallet reconciliation.
     /// State newer than the backup is not recovered. Unreadable generation
     /// headers and corrupt replacement-generation state are rejected, not overwritten.
+    ///
+    /// The backup is sensitive plaintext; see `FfiSdkBackupBlob`.
+    ///
+    /// Reconcile payment accounting with every payment made after the backup was exported,
+    /// or those payments can be made again; see `reconcile_allowance_accounting`.
     pub async fn recover_shared_state_from_backup(
         &self,
         backup: Arc<FfiSdkBackupBlob>,
@@ -399,9 +439,13 @@ impl FfiPaykitSdk {
 
     /// Restore SDK-managed backup state from a hex string.
     ///
-    /// `link_policy` decides whether saved Encrypted Links resume or require a
-    /// fresh Encrypted Link Handshake. Resuming a backup that is not current
-    /// reuses a transport key and nonce.
+    /// Hex-string form of `restore_backup_state`, with the same preconditions,
+    /// onboarding order (restore before `publish_paykit_app`), post-restore
+    /// reconciliation, and `link_policy` semantics. Resuming a backup that is
+    /// not current reuses a transport key and nonce.
+    ///
+    /// Reconcile payment accounting with every payment made after the backup was exported,
+    /// or those payments can be made again; see `reconcile_allowance_accounting`.
     pub async fn restore_backup_string(
         &self,
         backup: String,
@@ -433,13 +477,17 @@ fn build_sdk(
 ) -> Result<FfiPaykitSdk, PaykitFfiError> {
     let runtime = PaykitSdk::new(
         storage.clone(),
-        session_provider,
+        session_provider.clone(),
         FfiSdkPaymentAdapterAdapter {
             adapter: payment_adapter,
         },
         config.try_into()?,
     );
-    Ok(FfiPaykitSdk { runtime, storage })
+    Ok(FfiPaykitSdk {
+        runtime,
+        session_provider,
+        storage,
+    })
 }
 
 impl From<IdentityStatus> for FfiIdentityStatus {

@@ -280,6 +280,11 @@ where
     }
 
     /// List counterparties with queued private messages ready for retry.
+    ///
+    /// `Blocked`, `Linking`, and `RecoveryRequired` peers are listed only when
+    /// this app has reservation cleanup for them. A peer that was unblocked but
+    /// not yet linked again can be listed; sending to it fails with
+    /// `RecoveryRequired` until a fresh Encrypted Link Handshake completes.
     pub async fn pending_outbound_private_counterparties(&self) -> Result<Vec<PubkyPublicKey>> {
         let now = self.clock.now();
         let (stale_before, failed_retry_after) = self.outbound_retry_thresholds(now)?;

@@ -19,11 +19,11 @@ use crate::{
 };
 
 mod locks;
-#[cfg(test)]
-pub(crate) use locks::with_write_lock_timeout;
 pub use locks::{
     delete_resource_if_revision, is_write_conflict, put_resource_if_revision, with_write_lock,
 };
+#[cfg(test)]
+pub(crate) use locks::{with_write_lock_clock, with_write_lock_timeout};
 
 /// Content fingerprint used to detect an application-level stale edit.
 pub fn content_revision(bytes: &[u8]) -> String {

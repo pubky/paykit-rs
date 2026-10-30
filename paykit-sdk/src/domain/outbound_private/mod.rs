@@ -201,6 +201,7 @@ where
 }
 
 /// Load private messages that should be attempted for one counterparty.
+#[cfg(test)]
 pub(crate) async fn queued_outbound_private_messages<S>(
     storage: &S,
     counterparty: &PubkyPublicKey,
@@ -296,15 +297,31 @@ pub(crate) fn validate_queued_outbound_private_message(
     Ok(())
 }
 
+/// Refuse a serialized Private Application Message that one pubky-noise
+/// message cannot carry.
+///
+/// The limit applies to the serialized JSON plaintext; Noise framing and the
+/// AEAD tag sit outside it. The error reports byte counts only, never payload
+/// text, because messages can carry Payment References and other private data.
+pub(crate) fn require_outbound_private_message_fits(raw_json: &str) -> Result<()> {
+    let limit = paykit_lib::pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN;
+    if raw_json.len() > limit {
+        return Err(PaykitSdkError::Protocol {
+            context: format!(
+                "Private Application Message ({} bytes) exceeds pubky-noise message size ({} bytes)",
+                raw_json.len(),
+                limit
+            ),
+            source: Some(crate::MessageTooLarge.into()),
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_outbound_private_message(
     raw_json: &str,
 ) -> Result<(paykit_lib::PaykitAppId, String)> {
-    if raw_json.len() > paykit_lib::pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN {
-        return Err(PaykitSdkError::Protocol {
-            context: "Private Application Message exceeds pubky-noise message size".into(),
-            source: None,
-        });
-    }
+    require_outbound_private_message_fits(raw_json)?;
 
     let value: serde_json::Value =
         serde_json::from_str(raw_json).map_err(|err| PaykitSdkError::Protocol {

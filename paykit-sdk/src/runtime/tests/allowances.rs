@@ -388,3 +388,148 @@ async fn test_list_allowances_blocked_peer_policy() {
     assert!(matches!(targeted, Err(PaykitSdkError::Policy { .. })));
     assert!(unfiltered.is_empty());
 }
+
+/// An Allowance ended before blocking stays ended across block, unblock and
+/// relink, and its End is sent again after relink. Blocking alone does not end
+/// accepted Allowances.
+#[tokio::test]
+async fn test_block_and_relink_keep_allowance_ended_before_block() {
+    let storage = registered_test_storage();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    seed_private_capable_identity_and_link(&storage, counterparty.clone()).await;
+    complete_link_handshake(&storage, &counterparty).await;
+    let allowance_id = AllowanceId::new_v4();
+    let request_id = PaymentRequestId::new_v4();
+    // The peer proposes as Allowee, so the local wallet is the paying Allower.
+    let proposal_stream_item_id = persist_private_stream_batch(
+        &storage,
+        counterparty.clone(),
+        vec![
+            allowance_message(
+                allowance_id.as_str(),
+                EventId::new_v4().as_str(),
+                AllowanceRole::Allowee,
+            ),
+            payment_request_message(EventId::new_v4().as_str(), request_id.as_str(), None),
+        ],
+        None,
+        FixedClock.now(),
+    )
+    .await
+    .unwrap()
+    .stream_item_ids[0];
+    enqueue_allowance_response(
+        &storage,
+        counterparty.clone(),
+        app_id(),
+        allowance_id.clone(),
+        AllowanceResponse::Acceptance {
+            expected_proposal_stream_item_id: proposal_stream_item_id,
+        },
+        FixedClock.now(),
+    )
+    .await
+    .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("bitkit").unwrap(),
+        FixedClock,
+    );
+    sdk.reconcile_allowance_accounting(crate::AllowanceAccountingReconciliation {
+        expected_revision: None,
+        history: Default::default(),
+        outcomes: vec![],
+        trusted_time: FixedClock.now(),
+    })
+    .await
+    .unwrap();
+    let scope = crate::PaymentRequestScope {
+        counterparty: counterparty.clone(),
+        payment_request_id: request_id,
+    };
+    let candidates = sdk
+        .evaluate_allowance_candidates(scope.clone(), FixedClock.now())
+        .await
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].blocked, None);
+
+    // `end_allowance` runs this command after loading a live Pubky session.
+    let end = || {
+        enqueue_allowance_end(
+            &storage,
+            counterparty.clone(),
+            app_id(),
+            allowance_id.clone(),
+            FixedClock.now(),
+        )
+    };
+    let ended = end().await.unwrap();
+    assert_eq!(ended.state, crate::AllowanceLifecycleState::Ended);
+    sdk.block_peer(counterparty.clone()).await.unwrap();
+    let blocked = derive_allowance_record(&storage, &counterparty, &allowance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(blocked.state, crate::AllowanceLifecycleState::Ended);
+    assert_eq!(blocked.end_event_id, ended.end_event_id);
+    assert_eq!(
+        blocked.end_outbound_status,
+        Some(OutboundPrivateMessageStatus::RecoveryRequired)
+    );
+    assert!(matches!(
+        sdk.list_allowances(AllowanceFilter {
+            counterparty: Some(counterparty.clone()),
+            ..AllowanceFilter::default()
+        })
+        .await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
+    assert!(matches!(
+        sdk.allowance_record(&counterparty, &allowance_id).await,
+        Err(PaykitSdkError::Policy { .. })
+    ));
+    let parked = storage.snapshot().unwrap();
+    assert!(matches!(
+        end().await,
+        Err(PaykitSdkError::Policy { context, .. }) if context.contains("is blocked")
+    ));
+    assert_eq!(storage.snapshot().unwrap(), parked);
+
+    let unblocked = sdk.unblock_peer(counterparty.clone()).await.unwrap();
+    assert_eq!(unblocked.state, LinkedPeerState::NotLinked);
+    assert_eq!(
+        derive_allowance_record(&storage, &counterparty, &allowance_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .end_outbound_status,
+        Some(OutboundPrivateMessageStatus::RecoveryRequired)
+    );
+
+    complete_link_handshake(&storage, &counterparty).await;
+    let relinked = sdk
+        .allowance_record(&counterparty, &allowance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(relinked.state, crate::AllowanceLifecycleState::Ended);
+    assert_eq!(relinked.end_event_id, ended.end_event_id);
+    assert_eq!(
+        relinked.end_outbound_status,
+        Some(OutboundPrivateMessageStatus::Pending)
+    );
+    assert_eq!(
+        sdk.evaluate_allowance_candidates(scope, FixedClock.now())
+            .await
+            .unwrap()[0]
+            .blocked,
+        Some(crate::AllowanceAccountingBlock::InvalidLifecycle)
+    );
+    assert!(matches!(
+        end().await,
+        Err(PaykitSdkError::Policy { context, .. }) if context.contains("in state Ended")
+    ));
+}

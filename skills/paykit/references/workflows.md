@@ -15,8 +15,20 @@ Endpoints are app-scoped; the private link is identity-wide. Preserve candidate
 or a Payment Request's required payee App.
 
 - Public: call `sync_public_endpoints()` or
-  `sync_public_endpoints_with_receiving_details(details)`. Keep `ManagedOnly`
-  unless the app intentionally owns its entire app endpoint namespace.
+  `sync_public_endpoints_with_receiving_details(details)` only after every
+  receive backend the app publishes has loaded (a backends-ready event, not app
+  start). The details are this app's complete public set across every runtime
+  on the identity: SDK-managed endpoints missing from it are removed, so partial
+  details remove the missing methods. A not-ready or partly ready adapter returns
+  `Err` (FFI: throw `PaykitError.PaymentAdapter`, Kotlin
+  `PaykitException.PaymentAdapter`), never `[]` or a subset; the sync then
+  changes nothing. Check `EndpointSyncReport.removed`.
+- An empty public set removes every managed endpoint and keeps the app
+  registered; `remove_paykit_app` is not a substitute, since it needs the app's
+  Payment Requests and private financial work complete and deactivates the app.
+  Keep `ManagedOnly` unless the app intentionally owns its entire app endpoint
+  namespace; `FullAppEndpointNamespace` also removes endpoint files the SDK never
+  created.
 - Private: first call `ensure_link_with_peer(counterparty, max_advance_steps)`.
   List queueing needs an active link or persisted handshake; sync does not
   initiate one. Use
@@ -50,6 +62,32 @@ For explicit user-authorized re-add/import that should unblock selected contacts
 use `save_contacts_and_unblock_peers(updates)`; do not use it for label edits or
 automatic refresh. Unblocked peers still need a fresh Encrypted Link. FFI names
 are `saveContacts` and `saveContactsAndUnblockPeers`.
+
+Remove a contact: `remove_contact` deletes only the Contact Record. The
+Encrypted Link, intake, queued sends, accepted Allowances and the peer's copy of
+your last Private Payment List stay, and a re-add reuses the link. To also end
+the link, follow the steps on `remove_contacts_and_block_peers`: end or cancel
+what the user wants gone; while still Linked, call
+`clear_private_payment_list_and_process_outbound` until its `failed_to_queue`
+and `failed_to_deliver` are both empty, and do not block before then (pause
+other runtimes or devices of the same Paykit App that queue lists for that peer,
+since they can supersede the clear); persist the app's own record of intent to
+end the link, then `remove_contacts_and_block_peers`, `unblock_peer`, and clear
+the record.
+On startup, unblock only peers that carry that record and are still `Blocked`.
+Never infer intent from a `Blocked` peer without a Contact Record: the block
+records no reason and is shared by every app and device on the identity.
+
+Blocking a peer: `block_peer` parks queued private messages; it does not delete
+them or notify the peer. After unblock, a fresh Encrypted Link Handshake requeues
+eligible parked messages, and the next `process_outbound_private_messages` sends
+them; a newer Private Payment List can supersede a requeued one. Accepted
+Allowances and Payment Requests are paused, not revoked, and authorize again
+after relink without new consent. Deliver pending
+events (for example a Payment Proof) with `process_outbound_private_messages`,
+confirmed only once its id appears in a report's `sent`, and call
+`end_allowance` for authority the user wants gone before blocking; both are
+refused while blocked. See the `block_peer` docs.
 
 ## Pay a Contact
 
@@ -130,10 +168,18 @@ identities run receive and outbound workers, including Delivery Confirmations.
    calls take the `proposal_stream_item_id` of the record whose terms were
    approved, as displayed, and fail with a policy error when the request was
    replaced; read the record again and ask again.
-3. Resolve through the request-specific API and execute only through the wallet.
-   Retain one execution identity per occurrence across manual/automatic paths.
-   Do not release claims or unresolved reservations to let another app retry an
-   uncertain financial execution.
+3. Read `allowance_accounting_state()`. If it is `None` or
+   `requires_reconciliation`, reconcile complete wallet history with
+   `expected_revision` set to the state's revision (`None` only when no state
+   exists; after Acceptance the state exists, so `None` fails as stale). Resolve
+   through the request-specific API, then `reserve_manual_payment` and
+   `begin_payment_execution`. Execute only through the wallet, only on Ready
+   with Submitted status, with the attempt ID as the executor idempotency key,
+   then `record_payment_outcome`. This payment accounting is required when the
+   identity may also run automatic Allowance payments, and recommended
+   otherwise. Retain one execution identity per occurrence across
+   manual/automatic paths. Do not release claims or unresolved reservations to
+   let another app retry an uncertain financial execution.
 4. Submit method-specific Payment Proof through SDK lifecycle APIs. Preserve the
    Payment Reference, chosen payee App/endpoint, and applicable Billing Period
    and conversion quote correlation. `ProofSubmitted` is not settlement.
@@ -154,6 +200,15 @@ durable queue in background maintenance; delivery can lag if the app stops.
 Likewise, queued Acceptance is distinct from its delivery. Neither permits
 skipping wallet validation, payment accounting, or uncertain-outcome recovery.
 
+For a freshly generated key (not imported or restored), reconcile once at
+sign-up with an empty history while the state is still `None`. An empty history
+is truthful only when the wallet has established that no previous manual or
+automatic payment exists for this identity. Never reconcile an empty history
+just to clear `ReconciliationRequired`: reconciliation never erases retained
+evidence, but it cannot know about payments made after an older backup was
+exported or outside payment accounting, and those can then be paid twice. See
+the [manual payment sequence](https://github.com/pubky/paykit-rs/blob/master/paykit-ffi/README.md#pay-a-payment-request).
+
 Recurring requests still need app scheduling, user/local authorization, payment
 execution, and one-payment-per-Billing-Period policy. Cancellation is not a refund.
 For conversion/deadline features, establish peer support, preserve the selected
@@ -168,13 +223,27 @@ for fixed terms versus per-period quotes, manual approval and payment-time check
 Explicitly priced endpoints require manual approval, including same-asset fixed
 rail prices; an Allowance does not authorize repricing.
 
+A payee can fetch an in-time Acceptance after its own `proposal_expires_at`,
+so `ProposalExpired` can still become accepted. Use `acceptance_recorded_at`
+only to flag a late fetch. Hold or flag payment evidence earlier than
+`proposal_recorded_at` minus a payment-method tolerance, per the
+[payment time rule](https://github.com/pubky/paykit-rs/blob/master/specs/payment-requests.md#payment-time-and-attribution).
+See the [FFI README](https://github.com/pubky/paykit-rs/blob/master/paykit-ffi/README.md#payment-requests)
+for payer and payee timing patterns.
+
 For Allowance-based automation, use SDK accounting rather than a parallel local
 counter: reconcile complete wallet history, persist selection/association,
 reserve with `reserve_automatic_payment` or `reserve_manual_payment`, obtain a
 fresh handoff through `begin_payment_execution`, then `record_payment_outcome`.
 Only Ready with Submitted status grants one handoff; use its attempt ID for wallet
-idempotency. Unknown outcomes stay reserved. Restore/relink requires complete
-reconciliation before automation; an empty history, timeout, or Payment Proof
+idempotency. Unknown outcomes stay reserved. `Failed` is permanent, releases
+usage, and reopens the occurrence, so after handoff report it only for a
+[definitive failure](https://github.com/pubky/paykit-rs/blob/master/paykit-ffi/README.md#definitive-failure)
+on the Rail; an RPC "dropped" or "not found" status is `Unknown`. Retry only by
+replacement (same inputs or nonce). A blocked `Prepared` attempt that was never
+handed off is instead retried through `begin_payment_execution` with corrected
+checks or, once no handoff occurred, aborted and reported `Failed`.
+Restore/relink requires complete reconciliation before automation; an empty history, timeout, or Payment Proof
 cannot establish unused capacity. Read the
 [Allowance contract](https://github.com/pubky/paykit-rs/blob/master/specs/allowances.md)
 and [SDK accounting workflow](https://github.com/pubky/paykit-rs/blob/master/paykit-sdk/README.md#allowance-integration)
