@@ -330,9 +330,14 @@ async fn test_pubky_shared_state_is_visible_to_independent_apps_and_survives_sig
     assert_no_pending_shared_state_writes(&server_session).await;
 }
 
+tokio::task_local! {
+    static COUNTED_STORAGE_OPERATION: ();
+}
+
 struct CountedStorage {
     inner: PubkySharedStateStorage,
     operations: Arc<AtomicUsize>,
+    unbatched_transactions: Arc<AtomicUsize>,
     transactions: Arc<AtomicUsize>,
     commits: Arc<AtomicUsize>,
     reject_next_transaction: Arc<AtomicBool>,
@@ -345,7 +350,9 @@ impl StorageAdapter for CountedStorage {
         operation: StorageOperation<'a>,
     ) -> PaykitResult<Box<dyn Any + Send>> {
         self.operations.fetch_add(1, Ordering::SeqCst);
-        self.inner.run_operation_erased(operation).await
+        COUNTED_STORAGE_OPERATION
+            .scope((), self.inner.run_operation_erased(operation))
+            .await
     }
 
     async fn transaction_erased<'a>(
@@ -353,6 +360,9 @@ impl StorageAdapter for CountedStorage {
         f: StorageTransactionCallback<'a>,
     ) -> PaykitResult<Box<dyn Any + Send>> {
         self.transactions.fetch_add(1, Ordering::SeqCst);
+        if COUNTED_STORAGE_OPERATION.try_with(|_| ()).is_err() {
+            self.unbatched_transactions.fetch_add(1, Ordering::SeqCst);
+        }
         if self.reject_next_transaction.swap(false, Ordering::SeqCst) {
             return Err(PaykitSdkError::ConcurrentUpdate {
                 context: "shared-state transaction conflict".into(),
@@ -416,6 +426,7 @@ async fn test_private_message_scheduling_snapshot_reads_once_and_observes_shared
         CountedStorage {
             inner: pair.bitkit.storage.clone(),
             operations: operations.clone(),
+            unbatched_transactions: Arc::new(AtomicUsize::new(0)),
             transactions: transactions.clone(),
             commits: commits.clone(),
             reject_next_transaction: Arc::new(AtomicBool::new(false)),
@@ -514,6 +525,7 @@ async fn test_payment_execution_shared_operations() {
         CountedStorage {
             inner: pair.bitkit.storage.clone(),
             operations: operations.clone(),
+            unbatched_transactions: Arc::new(AtomicUsize::new(0)),
             transactions: transactions.clone(),
             commits: commits.clone(),
             reject_next_transaction: Arc::new(AtomicBool::new(false)),
@@ -793,6 +805,7 @@ async fn test_request_preparation_preserves_confirmation_for_restart() {
         CountedStorage {
             inner: pair.bitkit.storage.clone(),
             operations: Arc::new(AtomicUsize::new(0)),
+            unbatched_transactions: Arc::new(AtomicUsize::new(0)),
             transactions: transactions.clone(),
             commits: commits.clone(),
             reject_next_transaction: Arc::new(AtomicBool::new(false)),
@@ -1481,6 +1494,7 @@ async fn test_wallet_reservation_cleanup_does_not_hold_shared_state_lock() {
 async fn test_shared_operations_transaction_counts() {
     let pair = linked_homeserver_shared_pair().await;
     let operations = Arc::new(AtomicUsize::new(0));
+    let unbatched_transactions = Arc::new(AtomicUsize::new(0));
     let transactions = Arc::new(AtomicUsize::new(0));
     let commits = Arc::new(AtomicUsize::new(0));
     let reject_next_transaction = Arc::new(AtomicBool::new(false));
@@ -1488,6 +1502,7 @@ async fn test_shared_operations_transaction_counts() {
         CountedStorage {
             inner: pair.bitkit.storage.clone(),
             operations: operations.clone(),
+            unbatched_transactions: unbatched_transactions.clone(),
             transactions: transactions.clone(),
             commits: commits.clone(),
             reject_next_transaction: reject_next_transaction.clone(),
@@ -1641,9 +1656,11 @@ async fn test_shared_operations_transaction_counts() {
     let before_publication = pair.bitkit.storage_state().await;
     let revision = pair.bitkit.storage.last_revision().unwrap();
     commits.store(0, Ordering::SeqCst);
+    unbatched_transactions.store(0, Ordering::SeqCst);
     sdk.publish_paykit_app(test_app("Bitkit")).await.unwrap();
     let unchanged_transactions = transactions.swap(0, Ordering::SeqCst);
     assert_eq!(unchanged_transactions, 2);
+    assert_eq!(unbatched_transactions.swap(0, Ordering::SeqCst), 0);
     assert_eq!(commits.swap(0, Ordering::SeqCst), 0);
     assert_eq!(pair.bitkit.storage.last_revision().unwrap(), revision);
     assert_eq!(pair.bitkit.storage_state().await, before_publication);
@@ -1657,6 +1674,7 @@ async fn test_shared_operations_transaction_counts() {
     let downgrade_commits = commits.swap(0, Ordering::SeqCst);
     assert_eq!(downgrade_commits, 2);
     assert_eq!(downgrade_transactions, 6);
+    assert_eq!(unbatched_transactions.swap(0, Ordering::SeqCst), 0);
     assert_eq!(
         registry
             .apps()
@@ -2187,6 +2205,7 @@ async fn test_idle_polling_reads_shared_state_once_without_rewriting_it() {
             CountedStorage {
                 inner: user.storage.clone(),
                 operations: Arc::new(AtomicUsize::new(0)),
+                unbatched_transactions: Arc::new(AtomicUsize::new(0)),
                 transactions: transactions.clone(),
                 commits: Arc::new(AtomicUsize::new(0)),
                 reject_next_transaction: Arc::new(AtomicBool::new(false)),
@@ -5116,6 +5135,7 @@ async fn test_claim_and_accept_commits_once_and_preserves_ownership_on_failure()
         CountedStorage {
             inner: pair.bitkit.storage.clone(),
             operations: Arc::new(AtomicUsize::new(0)),
+            unbatched_transactions: Arc::new(AtomicUsize::new(0)),
             transactions: transactions.clone(),
             commits: commits.clone(),
             reject_next_transaction: Arc::new(AtomicBool::new(false)),
