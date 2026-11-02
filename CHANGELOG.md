@@ -28,6 +28,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   it against the 1000-byte limit before payment approval or before offering a
   method. It takes the local (sending) App ID from `PaykitSdkConfig`, not the
   submission's `payment_app_id`. It is a measurement, not a validity check.
+- `accept_pending_allowance_proposals` in Rust and
+  `acceptPendingAllowanceProposals` in Swift and Kotlin accept up to a limit of
+  one counterparty's pending Allowance proposals in one transaction, with work
+  bounded by a per-link record cap instead of the link's whole history.
 
 ### Changed
 

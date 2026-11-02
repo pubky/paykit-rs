@@ -14,6 +14,16 @@ use super::*;
 
 /// Validate a decoded live SDK storage snapshot without repairing it.
 pub fn validate_storage_state(state: &StorageState) -> Result<()> {
+    validate_storage_state_counting_links(state, None)
+}
+
+/// [`validate_storage_state`], also counting each counterparty's private
+/// stream items and outbound private messages in the passes it already makes
+/// over both lists, when `link_counts` is given.
+pub(in crate::backup) fn validate_storage_state_counting_links(
+    state: &StorageState,
+    mut link_counts: Option<&mut HashMap<PubkyPublicKey, usize>>,
+) -> Result<()> {
     validate_live_identity(state)?;
     if let Some(accounting) = &state.allowance_accounting {
         crate::domain::allowance_accounting::validate_accounting(accounting)?;
@@ -28,14 +38,19 @@ pub fn validate_storage_state(state: &StorageState) -> Result<()> {
     validate_live_app_state(state)?;
     validate_live_link_state(state)?;
 
-    let outbound_private_messages =
-        unique_outbound_messages(state.outbound_private_messages.clone())?;
+    let outbound_private_messages = unique_outbound_messages_counting_links(
+        state.outbound_private_messages.clone(),
+        link_counts.as_deref_mut(),
+    )?;
     require_original_order(
         &outbound_private_messages,
         &state.outbound_private_messages,
         "outbound Private Application Message records are not ordered by id",
     )?;
-    let private_stream_items = unique_private_stream_items(state.private_stream_items.clone())?;
+    let private_stream_items = unique_private_stream_items_counting_links(
+        state.private_stream_items.clone(),
+        link_counts,
+    )?;
     require_original_order(
         &private_stream_items,
         &state.private_stream_items,

@@ -27,10 +27,11 @@ use crate::{
     },
     config::{EndpointManagementScope, PaykitSdkConfig, PublicContactSharingPolicy},
     domain::allowances::{
-        allowance_record as derive_allowance_record, allowance_records as derive_allowance_records,
-        allowance_scopes, enqueue_allowance_end, enqueue_allowance_proposal,
-        enqueue_allowance_response, sort_allowances_newest_first, AllowanceFilter,
-        AllowanceLocalRole, AllowanceRecord, AllowanceResponse,
+        accept_pending_allowance_proposals, allowance_record as derive_allowance_record,
+        allowance_records as derive_allowance_records, allowance_scopes, enqueue_allowance_end,
+        enqueue_allowance_proposal, enqueue_allowance_response, sort_allowances_newest_first,
+        AllowanceFilter, AllowanceLocalRole, AllowanceRecord, AllowanceResponse,
+        PendingAllowanceAcceptance,
     },
     domain::contacts::{
         parse_profile_json, parse_pubky_profile_json, paykit_blob_path,

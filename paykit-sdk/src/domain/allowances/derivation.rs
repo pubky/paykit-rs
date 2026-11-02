@@ -51,13 +51,48 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
+// Counts the inbound and outbound records loaded for derivation, so tests can
+// prove the work of one call stays bounded.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LINK_HISTORY_RECORDS_READ: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 impl AllowanceLinkHistory {
     pub(super) fn load(tx: &dyn StorageTransaction, counterparty: &PubkyPublicKey) -> Self {
+        let items = tx.private_stream_items(counterparty);
+        let outbound = tx.outbound_private_messages(counterparty);
+        Self::from_records(tx, counterparty, items, outbound)
+    }
+
+    /// Load link history only when the link holds at most `max_records`
+    /// inbound and outbound records, otherwise return `None`.
+    ///
+    /// The cap is checked by a count that stops at `max_records + 1` before
+    /// any record is loaded, so a link over the cap costs no copying or
+    /// payload parsing, and its count examines no more than that many of its
+    /// records.
+    pub(super) fn load_at_most(
+        tx: &dyn StorageTransaction,
+        counterparty: &PubkyPublicKey,
+        max_records: usize,
+    ) -> Option<Self> {
+        (tx.link_record_count_up_to(counterparty, max_records) <= max_records)
+            .then(|| Self::load(tx, counterparty))
+    }
+
+    fn from_records(
+        tx: &dyn StorageTransaction,
+        counterparty: &PubkyPublicKey,
+        items: Vec<PrivateStreamItemRecord>,
+        outbound: Vec<OutboundPrivateMessageRecord>,
+    ) -> Self {
         #[cfg(test)]
         LINK_HISTORY_LOADS.with(|loads| loads.set(loads.get() + 1));
-        let items = tx.private_stream_items(counterparty);
-        let outbound = tx
-            .outbound_private_messages(counterparty)
+        #[cfg(test)]
+        LINK_HISTORY_RECORDS_READ.with(|read| read.set(read.get() + items.len() + outbound.len()));
+        let outbound = outbound
             .into_iter()
             .filter(|message| {
                 !matches!(
@@ -250,7 +285,7 @@ pub(super) fn derive_allowance_record(
     derive_records(history, Some(allowance_id.as_str())).pop()
 }
 
-fn derive_records(
+pub(super) fn derive_records(
     history: &AllowanceLinkHistory,
     only_allowance_id: Option<&str>,
 ) -> Vec<AllowanceRecord> {
