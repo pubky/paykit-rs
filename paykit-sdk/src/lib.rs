@@ -34,7 +34,7 @@ pub use domain::allowance_accounting::*;
 pub use domain::allowances::{
     AllowanceAmountRangeRecord, AllowanceFilter, AllowanceHistoryStatus, AllowanceLifecycleState,
     AllowanceLocalRole, AllowancePeriodLimitRecord, AllowancePeriodRecord, AllowanceRecord,
-    AllowanceTermsRecord,
+    AllowanceTermsRecord, PendingAllowanceAcceptance, MAX_PENDING_ALLOWANCE_LINK_RECORDS,
 };
 #[doc(inline)]
 pub use domain::contacts::{

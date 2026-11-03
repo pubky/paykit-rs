@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use paykit_sdk::{
     AllowanceAmountRangeRecord, AllowanceFilter, AllowanceHistoryStatus, AllowanceLifecycleState,
     AllowanceLocalRole, AllowancePeriodLimitRecord, AllowancePeriodRecord, AllowanceRecord,
-    AllowanceTermsRecord, OutboundPrivateMessageStatus, PubkyPublicKey,
+    AllowanceTermsRecord, OutboundPrivateMessageStatus, PendingAllowanceAcceptance, PubkyPublicKey,
 };
 
 use super::*;
@@ -497,4 +497,58 @@ fn test_allowance_private_objects_redact_debug_and_display() {
     for rendered in [format!("{limit:?}"), limit.to_string()] {
         assert_eq!(rendered, "AllowancePeriodLimit(<redacted>)");
     }
+}
+
+#[test]
+fn test_pending_allowance_acceptance_conversion_keeps_outcome() {
+    let record = AllowanceRecord {
+        counterparty: public_key(),
+        allowance_id: ALLOWANCE_ID.into(),
+        local_role: Some(AllowanceLocalRole::Allowee),
+        state: AllowanceLifecycleState::Accepted,
+        history_status: AllowanceHistoryStatus::Consistent,
+        proposal_event_id: None,
+        terms: None,
+        proposal_stream_item_id: Some(3),
+        proposal_outbound_message_id: None,
+        proposal_outbound_status: None,
+        acceptance_event_id: None,
+        acceptance_outbound_status: Some(OutboundPrivateMessageStatus::Pending),
+        rejection_event_id: None,
+        rejection_outbound_status: None,
+        end_event_id: None,
+        end_outbound_status: None,
+        pending_causal_event_ids: Vec::new(),
+        conflict_event_ids: Vec::new(),
+        last_stream_item_id: Some(3),
+        last_outbound_message_id: Some(4),
+        last_outbound_status: Some(OutboundPrivateMessageStatus::Pending),
+        last_event_at: None,
+        invalid_reason: None,
+    };
+    let accepted = FfiPendingAllowanceAcceptance::try_from(PendingAllowanceAcceptance::Accepted {
+        records: vec![record],
+        more_pending: true,
+    })
+    .unwrap();
+    let FfiPendingAllowanceAcceptance::Accepted {
+        records,
+        more_pending,
+    } = accepted
+    else {
+        panic!("expected Accepted");
+    };
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].allowance_id, ALLOWANCE_ID);
+    assert!(more_pending);
+
+    let too_large =
+        FfiPendingAllowanceAcceptance::try_from(PendingAllowanceAcceptance::LinkHistoryTooLarge {
+            record_cap: 16_384,
+        })
+        .unwrap();
+    assert!(matches!(
+        too_large,
+        FfiPendingAllowanceAcceptance::LinkHistoryTooLarge { record_cap: 16_384 }
+    ));
 }
