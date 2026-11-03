@@ -341,7 +341,7 @@ fn is_retryable_private_receive_error(err: &pubky_noise::PubkyNoiseError) -> boo
     )
 }
 
-fn is_not_found(err: &PubkyError) -> bool {
+pub(super) fn is_not_found(err: &PubkyError) -> bool {
     matches!(
         err,
         PubkyError::Request(RequestError::Server { status, .. })

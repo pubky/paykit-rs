@@ -8,6 +8,9 @@ use super::{
     EncryptedLinkRecoveryContext, EncryptedLinkSnapshot,
 };
 
+/// Exhausted write cursor: pubky-noise refuses to write at or past this slot.
+const LAST_WRITE_SLOT: u32 = u32::MAX - 1;
+
 /// Outbound private message prepared for atomic persistence before publication.
 ///
 /// Persist [`destination_path`](Self::destination_path),
@@ -47,6 +50,25 @@ impl std::fmt::Debug for PreparedPrivateApplicationMessageSend {
             .field("resulting_snapshot", &"<redacted>")
             .finish()
     }
+}
+
+/// What the destination slot of a prepared send already holds.
+///
+/// Each write slot of an Encrypted Link is encrypted under its own sending
+/// nonce. Link state restored from an older copy can point at a slot that a
+/// later send already used, so a slot holding a different packet must never
+/// receive a second ciphertext.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreparedPrivateSendSlot {
+    /// The slot is empty, so the prepared ciphertext can be published.
+    Free,
+    /// The slot already holds this exact ciphertext from an earlier publication.
+    Published,
+    /// The slot holds a different packet. Do not publish the prepared
+    /// ciphertext: call
+    /// [`skip_published_write_slots`](EncryptedLink::skip_published_write_slots)
+    /// and prepare the message again.
+    Taken,
 }
 
 /// Inbound private message prepared for atomic application-state persistence.
@@ -372,28 +394,16 @@ impl EncryptedLink {
     /// Publish an exact prepared ciphertext, retrying without re-encryption.
     ///
     /// This accepts values restored from durable SDK state after a crash. The
-    /// destination must belong to this link's local write stream.
+    /// destination must belong to this link's local write stream. Check the
+    /// destination with
+    /// [`prepared_private_send_slot`](Self::prepared_private_send_slot) first:
+    /// this method replaces whatever the slot holds.
     pub async fn publish_prepared_private_application_message(
         &self,
         destination_path: &str,
         ciphertext: &[u8],
     ) -> Result<()> {
-        let expected_prefix = format!("{}/", self.config.write_path);
-        if !destination_path.starts_with(&expected_prefix)
-            || destination_path[expected_prefix.len()..]
-                .parse::<u32>()
-                .is_err()
-        {
-            return Err(PaykitError::Validation(
-                "prepared private send destination does not belong to this Encrypted Link".into(),
-            ));
-        }
-        if ciphertext.len() != pubky_noise::snow_crypto::PUBKY_NOISE_TRANSPORT_PACKET_LEN {
-            return Err(PaykitError::InvalidData {
-                context: "prepared private send ciphertext has an invalid length".into(),
-                source: None,
-            });
-        }
+        self.validate_prepared_send(destination_path, ciphertext)?;
 
         let max_attempts = self.max_send_retries.saturating_add(1);
         let mut last_error = None;
@@ -427,6 +437,148 @@ impl EncryptedLink {
                 .expect("at least one prepared private send attempt must run")
                 .into(),
         })
+    }
+
+    /// Check what the destination slot of a prepared send already holds.
+    ///
+    /// Call before every
+    /// [`publish_prepared_private_application_message`](Self::publish_prepared_private_application_message),
+    /// including for values restored from durable state. Link state restored
+    /// from an older copy can point at a slot that a later send already used;
+    /// publishing there would put two packets under one key and nonce.
+    ///
+    /// Costs one `HEAD` request, plus a bounded `GET` when the slot exists. It
+    /// reads this identity's own homeserver and relies on it to report stored
+    /// packets.
+    pub async fn prepared_private_send_slot(
+        &self,
+        destination_path: &str,
+        ciphertext: &[u8],
+    ) -> Result<PreparedPrivateSendSlot> {
+        self.validate_prepared_send(destination_path, ciphertext)?;
+        if !self.write_path_exists(destination_path).await? {
+            return Ok(PreparedPrivateSendSlot::Free);
+        }
+        let response = match self
+            .config
+            .local_session
+            .storage()
+            .get(destination_path)
+            .await
+        {
+            Ok(response) => response,
+            Err(err) if private_application_message::is_not_found(&err) => {
+                return Ok(PreparedPrivateSendSlot::Free)
+            }
+            Err(err) => {
+                return Err(PaykitError::Transport {
+                    context: "read prepared private send slot".into(),
+                    source: err.into(),
+                })
+            }
+        };
+        match crate::pubky_routing::read_bounded_body(
+            response,
+            pubky_noise::snow_crypto::PUBKY_NOISE_TRANSPORT_PACKET_LEN,
+            "read prepared private send slot",
+        )
+        .await
+        {
+            Ok(stored) if stored == ciphertext => Ok(PreparedPrivateSendSlot::Published),
+            // An oversized body is not a packet this link wrote, but it still occupies the slot.
+            Ok(_) | Err(PaykitError::InvalidData { .. }) => Ok(PreparedPrivateSendSlot::Taken),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Move the next write slot past packets already on this link's write stream.
+    ///
+    /// Use when [`prepared_private_send_slot`](Self::prepared_private_send_slot)
+    /// reports [`PreparedPrivateSendSlot::Taken`]. The sending nonce moves with
+    /// the slot, so no nonce whose slot holds a packet is used again. The peer
+    /// reads the packets already in the skipped slots before this link's next
+    /// packet. Returns the number of slots skipped.
+    ///
+    /// Stored slots are contiguous from the link's first transport slot: each
+    /// packet is published before the next one is prepared, and an outbox is
+    /// only ever cleared as a whole. The first free slot is therefore found with
+    /// a logarithmic number of `HEAD` requests.
+    ///
+    /// Fails while a prepared send awaits
+    /// [`acknowledge_persisted_private_send`](Self::acknowledge_persisted_private_send).
+    /// Persist the resulting [`snapshot`](Self::snapshot) before relying on the
+    /// skip after a restart.
+    pub async fn skip_published_write_slots(&mut self) -> Result<u32> {
+        let mut state = self.snapshot()?.into_state();
+        let next_slot = state.write_counter;
+        let free_slot = self.first_free_write_slot(next_slot).await?;
+        let skipped = free_slot - next_slot;
+        if skipped == 0 {
+            return Ok(0);
+        }
+        state.write_counter = free_slot;
+        state.sending_nonce = state
+            .sending_nonce
+            .checked_add(u64::from(skipped))
+            .ok_or_else(|| PaykitError::InvalidData {
+                context: "Encrypted Link sending nonces are exhausted".into(),
+                source: None,
+            })?;
+        let snapshot = EncryptedLinkSnapshot::from_state(
+            state,
+            self.recipient.clone(),
+            self.remote_noise_public_key.clone(),
+            self.recovery_context.clone(),
+        );
+        let mut advanced =
+            restore_encrypted_link_inner(self.config.clone(), &self.recipient, snapshot).await?;
+        advanced.max_send_retries = self.max_send_retries;
+        let mut previous = std::mem::replace(self, advanced);
+        previous.encryptor.close();
+        debug!(skipped, "skipped published Encrypted Link write slots");
+        Ok(skipped)
+    }
+
+    /// First slot at or after `start` that holds no packet.
+    async fn first_free_write_slot(&self, start: u32) -> Result<u32> {
+        first_free_slot(start, |slot| self.write_slot_exists(slot)).await
+    }
+
+    async fn write_slot_exists(&self, slot: u32) -> Result<bool> {
+        self.write_path_exists(&format!("{}/{slot}", self.config.write_path))
+            .await
+    }
+
+    async fn write_path_exists(&self, path: &str) -> Result<bool> {
+        self.config
+            .local_session
+            .storage()
+            .exists(path)
+            .await
+            .map_err(|err| PaykitError::Transport {
+                context: "check Encrypted Link write slot".into(),
+                source: err.into(),
+            })
+    }
+
+    fn validate_prepared_send(&self, destination_path: &str, ciphertext: &[u8]) -> Result<()> {
+        let expected_prefix = format!("{}/", self.config.write_path);
+        if !destination_path.starts_with(&expected_prefix)
+            || destination_path[expected_prefix.len()..]
+                .parse::<u32>()
+                .is_err()
+        {
+            return Err(PaykitError::Validation(
+                "prepared private send destination does not belong to this Encrypted Link".into(),
+            ));
+        }
+        if ciphertext.len() != pubky_noise::snow_crypto::PUBKY_NOISE_TRANSPORT_PACKET_LEN {
+            return Err(PaykitError::InvalidData {
+                context: "prepared private send ciphertext has an invalid length".into(),
+                source: None,
+            });
+        }
+        Ok(())
     }
 
     /// Fetch and prepare the next available inbound Private Application Message.
@@ -545,6 +697,47 @@ impl EncryptedLink {
     ) -> Result<Vec<PrivateApplicationMessage>> {
         private_application_message::receive_private_application_messages(&mut self.encryptor).await
     }
+}
+
+/// First slot at or after `start` for which `exists` is false.
+///
+/// Assumes stored slots are contiguous, so it gallops to a free slot and then
+/// bisects back to the first one. A free result can be [`LAST_WRITE_SLOT`],
+/// which pubky-noise reports as exhausted on the next write.
+async fn first_free_slot<F, Fut>(start: u32, mut exists: F) -> Result<u32>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = Result<bool>>,
+{
+    if !exists(start).await? {
+        return Ok(start);
+    }
+    let mut taken = start;
+    let mut step = 1u32;
+    let mut free = loop {
+        if taken >= LAST_WRITE_SLOT {
+            return Err(PaykitError::InvalidData {
+                context: "Encrypted Link write slots are exhausted".into(),
+                source: None,
+            });
+        }
+        let candidate = taken.saturating_add(step).min(LAST_WRITE_SLOT);
+        if exists(candidate).await? {
+            taken = candidate;
+            step = step.saturating_mul(2);
+        } else {
+            break candidate;
+        }
+    };
+    while free - taken > 1 {
+        let middle = taken + (free - taken) / 2;
+        if exists(middle).await? {
+            taken = middle;
+        } else {
+            free = middle;
+        }
+    }
+    Ok(free)
 }
 
 fn validate_private_application_message_json(raw_json: &str) -> Result<()> {
@@ -723,6 +916,77 @@ async fn restore_encrypted_link_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn first_free_slot_in(start: u32, stored: std::ops::Range<u32>) -> Result<u32> {
+        first_free_slot(start, |slot| {
+            let exists = stored.contains(&slot);
+            async move { Ok(exists) }
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_first_free_slot_finds_end_of_stored_slots() {
+        assert_eq!(first_free_slot_in(5, 0..5).await.unwrap(), 5);
+        assert_eq!(first_free_slot_in(0, 0..0).await.unwrap(), 0);
+        for end in 1..300 {
+            assert_eq!(first_free_slot_in(0, 0..end).await.unwrap(), end);
+            assert_eq!(first_free_slot_in(end / 2, 0..end).await.unwrap(), end);
+        }
+        assert_eq!(
+            first_free_slot_in(7, 0..4_000_000_000).await.unwrap(),
+            4_000_000_000
+        );
+    }
+
+    #[tokio::test]
+    async fn test_first_free_slot_uses_logarithmic_checks() {
+        let mut checks = 0u32;
+        let free = first_free_slot(0, |slot| {
+            checks += 1;
+            async move { Ok(slot < 1_000_000) }
+        })
+        .await
+        .unwrap();
+        assert_eq!(free, 1_000_000);
+        // One start check, then at most 20 gallop and 20 bisect checks below 2^20.
+        assert!(checks <= 41, "{checks} checks");
+    }
+
+    #[tokio::test]
+    async fn test_first_free_slot_stops_at_exhausted_cursor() {
+        assert_eq!(
+            first_free_slot_in(0, 0..LAST_WRITE_SLOT).await.unwrap(),
+            LAST_WRITE_SLOT
+        );
+        assert_eq!(
+            first_free_slot_in(LAST_WRITE_SLOT - 1, 0..LAST_WRITE_SLOT)
+                .await
+                .unwrap(),
+            LAST_WRITE_SLOT
+        );
+        assert!(matches!(
+            first_free_slot_in(0, 0..u32::MAX).await,
+            Err(PaykitError::InvalidData { .. })
+        ));
+        assert!(matches!(
+            first_free_slot_in(LAST_WRITE_SLOT, 0..u32::MAX).await,
+            Err(PaykitError::InvalidData { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_first_free_slot_returns_check_errors() {
+        let result = first_free_slot(0, |slot| async move {
+            if slot < 3 {
+                Ok(true)
+            } else {
+                Err(PaykitError::Validation("check failed".into()))
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(PaykitError::Validation(_))));
+    }
 
     #[test]
     fn test_validate_private_application_message_json_requires_header() {

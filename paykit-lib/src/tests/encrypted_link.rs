@@ -955,6 +955,194 @@ async fn test_prepared_private_message_advances_only_after_persistence_acknowled
     setup.receiver_session.signout().await.unwrap();
 }
 
+fn test_packet_json(payload: &str) -> String {
+    serde_json::json!({
+        "version": 1,
+        "kind": "paykit.test_packet",
+        "app_id": "bitkit",
+        "payload": payload,
+    })
+    .to_string()
+}
+
+/// Prepare, acknowledge, check and publish one packet the way the SDK does.
+async fn publish_checked_test_packet(link: &mut EncryptedLink, raw_json: &str) {
+    let prepared = link
+        .prepare_private_application_message_json(raw_json)
+        .unwrap();
+    let destination_path = prepared.destination_path().to_owned();
+    let ciphertext = prepared.ciphertext().to_vec();
+    link.acknowledge_persisted_private_send(prepared).unwrap();
+    assert_eq!(
+        link.prepared_private_send_slot(&destination_path, &ciphertext)
+            .await
+            .unwrap(),
+        PreparedPrivateSendSlot::Free
+    );
+    link.publish_prepared_private_application_message(&destination_path, &ciphertext)
+        .await
+        .unwrap();
+    assert_eq!(
+        link.prepared_private_send_slot(&destination_path, &ciphertext)
+            .await
+            .unwrap(),
+        PreparedPrivateSendSlot::Published
+    );
+}
+
+#[tokio::test]
+async fn test_prepared_private_send_slot_reports_free_then_published() {
+    let mut setup = PrivateTestSetup::new().await;
+    let before = setup.sender_link.serialize().unwrap();
+    assert_eq!(
+        setup
+            .sender_link
+            .skip_published_write_slots()
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(setup.sender_link.serialize().unwrap(), before);
+
+    let raw_json = test_packet_json("only");
+    publish_checked_test_packet(&mut setup.sender_link, &raw_json).await;
+    let after = setup.sender_link.serialize().unwrap();
+    assert_eq!(
+        setup
+            .sender_link
+            .skip_published_write_slots()
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(setup.sender_link.serialize().unwrap(), after);
+
+    let received = setup
+        .receiver_link
+        .receive_private_application_messages()
+        .await
+        .unwrap();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].raw_json, raw_json);
+
+    close_encrypted_link(setup.sender_link).await.unwrap();
+    close_encrypted_link(setup.receiver_link).await.unwrap();
+    setup.sender_session.signout().await.unwrap();
+    setup.receiver_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_skip_published_write_slots_moves_older_link_state_past_stored_packets() {
+    let mut setup = PrivateTestSetup::new().await;
+    let older = setup.sender_link.snapshot().unwrap();
+    let recipient = older.recipient().clone();
+    let sent = ["first", "second", "third"].map(test_packet_json);
+    for raw_json in &sent {
+        publish_checked_test_packet(&mut setup.sender_link, raw_json).await;
+    }
+
+    let mut restored =
+        restore_encrypted_link_from_config(setup.sender_link.config().clone(), &recipient, older)
+            .await
+            .unwrap();
+    let fourth = test_packet_json("fourth");
+    let prepared = restored
+        .prepare_private_application_message_json(&fourth)
+        .unwrap();
+    let destination_path = prepared.destination_path().to_owned();
+    let ciphertext = prepared.ciphertext().to_vec();
+    restored
+        .acknowledge_persisted_private_send(prepared)
+        .unwrap();
+    assert_eq!(
+        restored
+            .prepared_private_send_slot(&destination_path, &ciphertext)
+            .await
+            .unwrap(),
+        PreparedPrivateSendSlot::Taken
+    );
+
+    // The rejected packet's slot is already behind the link, so two slots remain.
+    assert_eq!(restored.skip_published_write_slots().await.unwrap(), 2);
+    // Compare restored links: a transport restore does not carry the handshake step.
+    let current = restore_encrypted_link_from_config(
+        setup.sender_link.config().clone(),
+        &recipient,
+        setup.sender_link.snapshot().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(restored.serialize().unwrap(), current.serialize().unwrap());
+    close_encrypted_link(current).await.unwrap();
+    publish_checked_test_packet(&mut restored, &fourth).await;
+
+    let received = setup
+        .receiver_link
+        .receive_private_application_messages()
+        .await
+        .unwrap();
+    let received = received
+        .iter()
+        .map(|message| message.raw_json.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(received, [&sent[0], &sent[1], &sent[2], &fourth]);
+
+    close_encrypted_link(restored).await.unwrap();
+    close_encrypted_link(setup.sender_link).await.unwrap();
+    close_encrypted_link(setup.receiver_link).await.unwrap();
+    setup.sender_session.signout().await.unwrap();
+    setup.receiver_session.signout().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_prepared_private_send_slot_rejects_invalid_prepared_send() {
+    let mut setup = PrivateTestSetup::new().await;
+    let prepared = setup
+        .sender_link
+        .prepare_private_application_message_json(&test_packet_json("pending"))
+        .unwrap();
+    let destination_path = prepared.destination_path().to_owned();
+    let ciphertext = prepared.ciphertext().to_vec();
+
+    // Skipping needs the link snapshot, which an unacknowledged send blocks.
+    assert!(setup
+        .sender_link
+        .skip_published_write_slots()
+        .await
+        .is_err());
+    setup
+        .sender_link
+        .acknowledge_persisted_private_send(prepared)
+        .unwrap();
+
+    assert!(matches!(
+        setup
+            .sender_link
+            .prepared_private_send_slot("/pub/paykit/v0/other-link/0", &ciphertext)
+            .await,
+        Err(PaykitError::Validation(_))
+    ));
+    assert!(matches!(
+        setup
+            .sender_link
+            .prepared_private_send_slot(&format!("{destination_path}/extra"), &ciphertext)
+            .await,
+        Err(PaykitError::Validation(_))
+    ));
+    assert!(matches!(
+        setup
+            .sender_link
+            .prepared_private_send_slot(&destination_path, &ciphertext[1..])
+            .await,
+        Err(PaykitError::InvalidData { .. })
+    ));
+
+    close_encrypted_link(setup.sender_link).await.unwrap();
+    close_encrypted_link(setup.receiver_link).await.unwrap();
+    setup.sender_session.signout().await.unwrap();
+    setup.receiver_session.signout().await.unwrap();
+}
+
 #[tokio::test]
 async fn test_encrypted_link_snapshot_deserialize_rejects_garbage() {
     let result = EncryptedLinkSnapshot::deserialize(&[0u8; 10]);

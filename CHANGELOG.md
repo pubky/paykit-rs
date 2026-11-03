@@ -32,6 +32,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `acceptPendingAllowanceProposals` in Swift and Kotlin accept up to a limit of
   one counterparty's pending Allowance proposals in one transaction, with work
   bounded by a per-link record cap instead of the link's whole history.
+- `EncryptedLink::prepared_private_send_slot` and `PreparedPrivateSendSlot`
+  report whether the destination slot of a prepared send is free, already holds
+  that exact ciphertext, or holds another packet.
+  `EncryptedLink::skip_published_write_slots` moves the next write slot and
+  sending nonce past packets already stored on the link's write stream.
 
 ### Changed
 
