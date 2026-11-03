@@ -379,7 +379,8 @@ message again. Never publish into a `Taken` slot. On receive, use
 `prepare_next_private_application_message`, persist the plaintext application
 result and resulting snapshot together, and only then call
 `acknowledge_persisted_private_receive`. The SDK runtime implements this staged
-flow; the direct stateless send helpers remain convenience APIs.
+flow; the direct stateless send helpers remain convenience APIs. Before they
+encrypt, they move the link past write slots that already hold packets.
 
 All Private Application Messages share one ordered encrypted stream and carry a
 source `app_id`. Use `EncryptedLink::receive_private_application_messages` when

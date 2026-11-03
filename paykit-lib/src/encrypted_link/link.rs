@@ -225,6 +225,13 @@ impl EncryptedLink {
         plaintext: &[u8],
         context: &'static str,
     ) -> Result<()> {
+        private_application_message::validate_private_application_message_size(plaintext, context)?;
+        // Callers restore this link from their own storage, which can be older
+        // than its write stream. Never write a second packet into a used slot.
+        // A retained failed send must be republished first; the send reports it.
+        if self.encryptor.snapshot().is_ok() {
+            self.skip_published_write_slots().await?;
+        }
         private_application_message::send_private_application_message(
             &mut self.encryptor,
             self.max_send_retries,
@@ -308,6 +315,11 @@ impl EncryptedLink {
     ///
     /// Higher-level callers should persist the exact JSON before sending when
     /// retrying the same message matters.
+    ///
+    /// Before encrypting, the send moves this link past write slots that
+    /// already hold packets, as
+    /// [`skip_published_write_slots`](Self::skip_published_write_slots) does.
+    /// This costs one `HEAD` request when the next slot is free.
     ///
     /// Transient outbox write failures are retried up to the configured budget.
     /// If every attempt fails, the prepared packet is retained and blocks
@@ -505,7 +517,8 @@ impl EncryptedLink {
     /// a logarithmic number of `HEAD` requests.
     ///
     /// Fails while a prepared send awaits
-    /// [`acknowledge_persisted_private_send`](Self::acknowledge_persisted_private_send).
+    /// [`acknowledge_persisted_private_send`](Self::acknowledge_persisted_private_send)
+    /// or a failed convenience send awaits [`retry_pending_send`](Self::retry_pending_send).
     /// Persist the resulting [`snapshot`](Self::snapshot) before relying on the
     /// skip after a restart.
     pub async fn skip_published_write_slots(&mut self) -> Result<u32> {

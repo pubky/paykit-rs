@@ -1095,6 +1095,48 @@ async fn test_skip_published_write_slots_moves_older_link_state_past_stored_pack
 }
 
 #[tokio::test]
+async fn test_send_private_application_message_json_skips_published_write_slots() {
+    let mut setup = PrivateTestSetup::new().await;
+    let older = setup.sender_link.snapshot().unwrap();
+    let recipient = older.recipient().clone();
+    let sent = ["first", "second"].map(test_packet_json);
+    for raw_json in &sent {
+        setup
+            .sender_link
+            .send_private_application_message_json(raw_json)
+            .await
+            .unwrap();
+    }
+
+    let mut restored =
+        restore_encrypted_link_from_config(setup.sender_link.config().clone(), &recipient, older)
+            .await
+            .unwrap();
+    let third = test_packet_json("third");
+    restored
+        .send_private_application_message_json(&third)
+        .await
+        .unwrap();
+
+    let received = setup
+        .receiver_link
+        .receive_private_application_messages()
+        .await
+        .unwrap();
+    let received = received
+        .iter()
+        .map(|message| message.raw_json.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(received, [&sent[0], &sent[1], &third]);
+
+    close_encrypted_link(restored).await.unwrap();
+    close_encrypted_link(setup.sender_link).await.unwrap();
+    close_encrypted_link(setup.receiver_link).await.unwrap();
+    setup.sender_session.signout().await.unwrap();
+    setup.receiver_session.signout().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_prepared_private_send_slot_rejects_invalid_prepared_send() {
     let mut setup = PrivateTestSetup::new().await;
     let prepared = setup
@@ -1345,6 +1387,12 @@ async fn test_send_can_recover_retained_packet_after_write_failure() {
 
     // The retained packet blocks other operations on this link.
     assert!(setup.sender_link.snapshot().is_err());
+    assert!(setup
+        .sender_link
+        .send_private_application_message_for_test(json.as_bytes())
+        .await
+        .expect_err("a retained packet blocks the next send")
+        .is_non_retryable_private_send_error());
 
     // Once connectivity recovers, the retained packet can be republished and
     // the original message still reaches the receiver.

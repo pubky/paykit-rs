@@ -46,7 +46,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   overwritten: the SDK moves the link past the stored packets and prepares the
   message again on the next free slot. Each send costs one extra `HEAD`
   request to the sender's own homeserver.
-
+- `EncryptedLink::send_private_application_message_json` and the `paykit-lib`
+  send helpers built on the same path, such as `set_private_payment_list`,
+  move the link past write slots that already hold packets before they
+  encrypt. This also costs one `HEAD` request per send.
 - A payee no longer marks a Payment Request invalid when it stores an
   otherwise-valid Acceptance after its local proposal expiry, such as an
   in-time Acceptance fetched late. Later Payment Proofs are recorded and the

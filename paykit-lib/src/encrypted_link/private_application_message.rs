@@ -373,8 +373,6 @@ pub(super) async fn send_private_application_message(
     plaintext: &[u8],
     context: &'static str,
 ) -> Result<()> {
-    validate_private_application_message_size(plaintext, context)?;
-
     let max_attempts = send_attempts_from_retries(max_send_retries);
     let mut last_error: Option<String> = None;
     // A failed outbox write leaves the prepared packet unacknowledged.
