@@ -15,8 +15,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   Kotlin, but TypeScript names keep the `Ffi` prefix (`FfiPaykitSdk`,
   `FfiSdkStateBlobStore`, and so on). It requires the React Native New
   Architecture, supports React Native 0.78 and later (including 0.80 and
-  later, Expo SDK 54 and later), and is published to npm by the `npm Package`
-  workflow.
+  later, Expo SDK 54 and later) and 64-bit Android only (`arm64-v8a` and
+  `x86_64`), and is published to npm by the `npm Package` workflow.
 - `SignupCodeRejected`, `PaykitSdkError::is_signup_code_rejected` in Rust and
   the `identity/signup_code_rejected` error code in Swift and Kotlin report a
   signup code that the homeserver refused as missing, malformed, unknown or

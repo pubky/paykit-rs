@@ -60,6 +60,27 @@ describe('Android TurboModule install', () => {
       /noOverwrite:[\s\S]*- android\/cpp-adapter\.cpp/
     );
   });
+
+  test('test_android_abis_are_64_bit_while_rust_buffer_uses_size_t', () => {
+    // The ubrn 0.29.3-1 runtime declares RustBuffer with size_t fields, but
+    // UniFFI's are uint64_t, so the layouts differ on 32-bit ABIs.
+    const rustBuffer = read(
+      packageDir,
+      'node_modules/uniffi-bindgen-react-native/cpp/includes/RustBuffer.h'
+    );
+    if (!/size_t capacity;/.test(rustBuffer)) {
+      return;
+    }
+    const config = read(packageDir, 'ubrn.config.yaml');
+    const androidTargets = config
+      .slice(config.indexOf('\nandroid:'))
+      .match(/targets:\n((?:\s+(?:#.*|- \S+)\n)+)/)?.[1]
+      ?.match(/- \S+/g);
+    expect(androidTargets).toEqual(['- arm64-v8a', '- x86_64']);
+    expect(read(packageDir, 'android/build.gradle')).toContain(
+      'def supported = ["x86_64", "arm64-v8a"]'
+    );
+  });
 });
 
 describe('iOS build', () => {

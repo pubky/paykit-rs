@@ -101,7 +101,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          targets: aarch64-linux-android,x86_64-linux-android
 
       # Same setup as the React Native workflow, with no Gradle cache.
       - uses: ./.github/actions/rn-android-setup

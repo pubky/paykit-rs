@@ -18,9 +18,14 @@ buildscript {
   }
 }
 
+// Paykit: 64-bit ABIs only, the targets in ubrn.config.yaml. The ubrn
+// 0.29.3-1 C++ runtime has the wrong RustBuffer layout on 32-bit ABIs, so
+// 32-bit ABIs from the app's reactNativeArchitectures are dropped.
 def reactNativeArchitectures() {
+  def supported = ["x86_64", "arm64-v8a"]
   def value = rootProject.getProperties().get("reactNativeArchitectures")
-  return value ? value.split(",") : ["armeabi-v7a", "x86", "x86_64", "arm64-v8a"]
+  def requested = value ? value.split(",").collect { it.trim() } : supported
+  return requested.findAll { supported.contains(it) }
 }
 
 def isNewArchitectureEnabled() {

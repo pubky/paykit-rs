@@ -15,6 +15,22 @@ typed TypeScript and JSI C++.
   not supported.
 - Hermes.
 - iOS 15.1 or later; Android API 24 or later.
+- 64-bit Android only (`arm64-v8a` and `x86_64`). See
+  [Android: 64-bit only](#android-64-bit-only).
+
+### Android: 64-bit only
+
+The package ships `libpaykit.so` for `arm64-v8a` and `x86_64` only. The
+uniffi-bindgen-react-native 0.29.3-1 runtime it is generated with passes
+Rust buffers with the wrong layout on 32-bit ABIs, so `armeabi-v7a` and `x86`
+are not built. The library's Gradle build skips them even when the app's
+`reactNativeArchitectures` lists them. An app that still ships 32-bit ABIs
+fails to load the module on 32-bit devices, so drop them from
+`reactNativeArchitectures` in `android/gradle.properties`:
+
+```properties
+reactNativeArchitectures=arm64-v8a,x86_64
+```
 
 ### Android TLS initialization
 
@@ -255,8 +271,7 @@ checkout of this repository:
   (`28.2.13676358`) and cargo-ndk 3.5.4. Add the Rust targets:
 
   ```sh
-  rustup target add aarch64-linux-android armv7-linux-androideabi \
-    i686-linux-android x86_64-linux-android
+  rustup target add aarch64-linux-android x86_64-linux-android
   cargo install cargo-ndk --version 3.5.4 --locked
   export ANDROID_HOME=<Android SDK>
   export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358
@@ -281,9 +296,9 @@ targets come from `ubrn.config.yaml`. It builds:
 - `SynonymdevReactNativePaykitFramework.xcframework` from `aarch64-apple-ios`
   and `aarch64-apple-ios-sim`, with `IPHONEOS_DEPLOYMENT_TARGET` 13.4 as in
   `paykit-ffi/build_ios.sh`;
-- `android/src/main/jniLibs/<abi>/libpaykit.so` for `arm64-v8a`,
-  `armeabi-v7a`, `x86_64` and `x86`, with the 16 KB page-size and linker
-  flags from the workspace `.cargo/config.toml`;
+- `android/src/main/jniLibs/<abi>/libpaykit.so` for `arm64-v8a` and
+  `x86_64`, with the 16 KB page-size and linker flags from the workspace
+  `.cargo/config.toml`;
 - `android/libs/rustls-platform-verifier.jar`, the verifier's Kotlin classes,
   taken from `vendor/rustls-platform-verifier-android`.
 

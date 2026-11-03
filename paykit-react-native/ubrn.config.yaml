@@ -20,12 +20,14 @@ ios:
   cargoExtras:
     - --locked
 android:
-  # Same ABIs as paykit-ffi/build_android.sh.
+  # 64-bit ABIs only. The ubrn 0.29.3-1 C++ runtime declares RustBuffer with
+  # size_t fields, but UniFFI's are uint64_t, so on armeabi-v7a and x86 every
+  # RustBuffer crossing JSI has the wrong layout. ubrn 0.30.0-1 fixes this;
+  # add the 32-bit ABIs back with that upgrade. android/build.gradle drops
+  # them from the app's reactNativeArchitectures for the same reason.
   targets:
     - arm64-v8a
-    - armeabi-v7a
     - x86_64
-    - x86
   # cargo-ndk's own default, which paykit-ffi/build_android.sh also uses.
   apiLevel: 21
   cargoExtras:
