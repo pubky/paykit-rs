@@ -27,6 +27,8 @@
     "target": "ESNext",
     "verbatimModuleSyntax": true
   },
-  // The example app has its own tsconfig and dependencies.
-  "exclude": ["example", "lib", "node_modules"]
+  // Includes the example app's sources, so CI type-checks its SDK calls and
+  // callback mocks against the generated bindings. "paths" resolves the
+  // package to ./src instead of the installed tarball.
+  "exclude": ["example/node_modules", "lib", "node_modules"]
 }
