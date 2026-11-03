@@ -44,8 +44,9 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   Application Message. A slot that already holds the same ciphertext counts as
   sent without a second write. A slot that holds another packet is never
   overwritten: the SDK moves the link past the stored packets and prepares the
-  message again on the next free slot. Each send costs one extra `HEAD`
-  request to the sender's own homeserver.
+  message again on the next free slot. A message that meets a second taken
+  slot in the same run waits for the normal retry backoff. Each send costs one
+  extra `HEAD` request to the sender's own homeserver.
 - `EncryptedLink::send_private_application_message_json` and the `paykit-lib`
   send helpers built on the same path, such as `set_private_payment_list`,
   move the link past write slots that already hold packets before they

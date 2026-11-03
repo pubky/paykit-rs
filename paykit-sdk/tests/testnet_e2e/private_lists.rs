@@ -1659,3 +1659,112 @@ async fn test_private_list_send_from_older_link_state_uses_next_free_slot() {
         "ln-private-3"
     );
 }
+
+#[tokio::test]
+async fn test_private_send_never_overwrites_slots_taken_before_publication() {
+    const STORED: &[u8] = b"packet stored by another writer";
+
+    /// Stores a packet in each slot the SDK prepares, before it publishes.
+    struct SlotTakingStorage {
+        inner: InMemoryStorage,
+        session: pubky::PubkySession,
+        taken: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl StorageAdapter for SlotTakingStorage {
+        async fn transaction_erased<'a>(
+            &self,
+            f: StorageTransactionCallback<'a>,
+        ) -> PaykitResult<Box<dyn std::any::Any + Send>> {
+            let result = self.inner.transaction_erased(f).await?;
+            let prepared = self
+                .inner
+                .snapshot()?
+                .outbound_private_messages
+                .into_iter()
+                .filter_map(|message| message.prepared_send)
+                .map(|prepared| prepared.destination_path)
+                .find(|path| !self.taken.lock().unwrap().contains(path));
+            if let Some(path) = prepared {
+                self.session
+                    .storage()
+                    .put(path.as_str(), STORED.to_vec())
+                    .await
+                    .unwrap();
+                self.taken.lock().unwrap().push(path);
+            }
+            Ok(result)
+        }
+    }
+
+    let pair = linked_two_party().await;
+    pair.alice
+        .adapter
+        .set_private_details(vec![private_receiving_detail(
+            "btc-lightning-bolt11",
+            "ln-private",
+        )]);
+    let message = pair
+        .alice
+        .sdk
+        .enqueue_private_payment_list(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    let storage = Arc::new(SlotTakingStorage {
+        inner: pair.alice.storage.clone(),
+        session: pair.alice.access.session.clone(),
+        taken: Default::default(),
+    });
+    let sdk = PaykitSdk::new(
+        storage.clone(),
+        TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    );
+
+    let report = sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+
+    // The message is prepared again once, then waits for the retry backoff.
+    assert_eq!(report.attempted, vec![message.outbound_message_id]);
+    assert!(report.sent.is_empty());
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(
+        report.failed[0].outbound_message_id,
+        message.outbound_message_id
+    );
+    assert!(report.failed[0]
+        .error
+        .contains("already holds another packet"));
+    let state = pair.alice.storage.snapshot().unwrap();
+    let failed = state
+        .outbound_private_messages
+        .iter()
+        .find(|record| record.outbound_message_id == message.outbound_message_id)
+        .unwrap();
+    assert_eq!(failed.status, OutboundPrivateMessageStatus::Failed);
+    assert!(failed.prepared_send.is_none());
+    assert_eq!(
+        state.linked_peers[&pair.bob.public_key].state,
+        LinkedPeerState::Linked
+    );
+    let taken = storage.taken.lock().unwrap().clone();
+    assert_eq!(taken.len(), 2);
+    for path in taken {
+        let stored = pair
+            .alice
+            .access
+            .session
+            .storage()
+            .get(path.as_str())
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(stored.as_ref(), STORED);
+    }
+}

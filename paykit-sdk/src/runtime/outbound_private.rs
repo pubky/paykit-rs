@@ -595,7 +595,10 @@ where
         report: &mut OutboundPrivateSendReport,
         sending: OutboundPrivateMessageRecord,
     ) -> Result<PrivateSendPreparation> {
-        report.attempted.push(sending.outbound_message_id);
+        // A message requeued after a taken slot is prepared again in the same run.
+        if !report.attempted.contains(&sending.outbound_message_id) {
+            report.attempted.push(sending.outbound_message_id);
+        }
 
         let prepared_message_id = sending
             .prepared_send
@@ -1074,9 +1077,7 @@ where
     /// again, persisting the link after it skipped `skipped` stored slots.
     ///
     /// The unpublished ciphertext is dropped: its slot and sending nonce belong
-    /// to the packet already stored there, which the peer reads first. Without
-    /// `retry_now` the message waits for the failed-send backoff instead. An
-    /// event the peer already confirmed is marked sent rather than queued.
+    /// to the packet already stored there, which the peer reads first.
     async fn requeue_private_send_after_taken_slot(
         &self,
         link: &paykit_lib::EncryptedLink,
@@ -1093,19 +1094,7 @@ where
             advanced_state.generation = advanced_state.generation.saturating_add(1);
             advanced_state.checkpointed_at = now;
         }
-        let mut requeued = sending;
-        requeued.prepared_send = None;
-        requeued.updated_at = now;
-        if requeued.confirmed_at.is_some() {
-            requeued = mark_outbound_sent(requeued, now);
-        } else if retry_now {
-            requeued.status = OutboundPrivateMessageStatus::Pending;
-            requeued.last_error = None;
-        } else {
-            requeued.status = OutboundPrivateMessageStatus::Failed;
-            requeued.last_error =
-                Some("Encrypted Link write slot already holds another packet".to_owned());
-        }
+        let requeued = mark_outbound_slot_taken(sending, retry_now, now);
         self.retry_storage_transaction(|| {
             let requeued = requeued.clone();
             let advanced_state = advanced_state.clone();
@@ -1124,7 +1113,7 @@ where
         tracing::warn!(
             outbound_message_id = requeued.outbound_message_id,
             skipped,
-            "skipped Encrypted Link write slots that already hold packets"
+            "prepared Encrypted Link write slot already holds another packet"
         );
         Ok(requeued)
     }
