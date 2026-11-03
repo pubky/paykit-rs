@@ -50,6 +50,7 @@ enum PrivateSendStep {
     Skipped(Option<u64>),
     Sent { has_more: bool },
     Complete,
+    SlotTaken(Box<OutboundPrivateMessageRecord>),
     Failed(Box<OutboundPrivateMessageRecord>, paykit_lib::PaykitError),
 }
 
@@ -398,6 +399,8 @@ where
             }))
             .await?;
 
+        // Requeue at most once per run so a misreporting homeserver cannot spin the drain.
+        let mut requeued_after_taken_slot = false;
         loop {
             let (step, cancellations) = outcome;
             // Wallet callbacks run without the identity-wide lock.
@@ -432,6 +435,47 @@ where
                     )
                     .await?;
                     break;
+                }
+                PrivateSendStep::SlotTaken(sending) => {
+                    let skipped = match link.skip_published_write_slots().await {
+                        Ok(skipped) => skipped,
+                        Err(error) => {
+                            // A retryable error keeps the prepared send, so the
+                            // next run checks the same slot before publishing.
+                            self.record_private_send_error(
+                                &counterparty,
+                                *sending,
+                                error,
+                                &lease,
+                                &session_access,
+                                &mut report,
+                            )
+                            .await?;
+                            break;
+                        }
+                    };
+                    let requeued = self
+                        .requeue_private_send_after_taken_slot(
+                            &link,
+                            &mut link_state,
+                            *sending,
+                            skipped,
+                            &lease,
+                            !requeued_after_taken_slot,
+                        )
+                        .await?;
+                    if let Some(error) = requeued.last_error {
+                        report.failed.push(OutboundPrivateSendFailure {
+                            outbound_message_id: requeued.outbound_message_id,
+                            error,
+                        });
+                        break;
+                    }
+                    if requeued.status == OutboundPrivateMessageStatus::Sent {
+                        report.sent.push(requeued.outbound_message_id);
+                    } else {
+                        requeued_after_taken_slot = true;
+                    }
                 }
                 PrivateSendStep::Sent { has_more: false } => break,
                 PrivateSendStep::Sent { has_more: true } => {}
@@ -613,6 +657,23 @@ where
             .prepared_send
             .as_ref()
             .expect("prepared send must be durable before publication");
+        // Link state restored from an older copy can point at a slot that a
+        // later send already used. Never write a second packet into it.
+        match link
+            .prepared_private_send_slot(&prepared.destination_path, &prepared.ciphertext)
+            .await
+        {
+            Ok(paykit_lib::PreparedPrivateSendSlot::Free) => {}
+            Ok(paykit_lib::PreparedPrivateSendSlot::Published) => {
+                return self
+                    .record_private_send_success(sending, lease, report, retry_thresholds)
+                    .await;
+            }
+            Ok(paykit_lib::PreparedPrivateSendSlot::Taken) => {
+                return Ok(PrivateSendStep::SlotTaken(Box::new(sending)));
+            }
+            Err(error) => return Ok(PrivateSendStep::Failed(Box::new(sending), error)),
+        }
         match link
             .publish_prepared_private_application_message(
                 &prepared.destination_path,
@@ -1007,6 +1068,65 @@ where
                 .await,
         );
         Ok(())
+    }
+
+    /// Queue a message whose prepared slot holds another packet to be prepared
+    /// again, persisting the link after it skipped `skipped` stored slots.
+    ///
+    /// The unpublished ciphertext is dropped: its slot and sending nonce belong
+    /// to the packet already stored there, which the peer reads first. Without
+    /// `retry_now` the message waits for the failed-send backoff instead. An
+    /// event the peer already confirmed is marked sent rather than queued.
+    async fn requeue_private_send_after_taken_slot(
+        &self,
+        link: &paykit_lib::EncryptedLink,
+        link_state: &mut EncryptedLinkStateRecord,
+        sending: OutboundPrivateMessageRecord,
+        skipped: u32,
+        lease: &PeerLinkOperationLease,
+        retry_now: bool,
+    ) -> Result<OutboundPrivateMessageRecord> {
+        let now = self.clock.now();
+        let mut advanced_state = link_state.clone();
+        if skipped > 0 {
+            advanced_state.link_snapshot = Some(link.serialize()?);
+            advanced_state.generation = advanced_state.generation.saturating_add(1);
+            advanced_state.checkpointed_at = now;
+        }
+        let mut requeued = sending;
+        requeued.prepared_send = None;
+        requeued.updated_at = now;
+        if requeued.confirmed_at.is_some() {
+            requeued = mark_outbound_sent(requeued, now);
+        } else if retry_now {
+            requeued.status = OutboundPrivateMessageStatus::Pending;
+            requeued.last_error = None;
+        } else {
+            requeued.status = OutboundPrivateMessageStatus::Failed;
+            requeued.last_error =
+                Some("Encrypted Link write slot already holds another packet".to_owned());
+        }
+        self.retry_storage_transaction(|| {
+            let requeued = requeued.clone();
+            let advanced_state = advanced_state.clone();
+            let lease = lease.clone();
+            move |tx| {
+                crate::storage::require_peer_link_operation_lease(tx, &lease)?;
+                tx.save_outbound_private_message(requeued)?;
+                if skipped > 0 {
+                    tx.save_encrypted_link_state(advanced_state);
+                }
+                Ok(())
+            }
+        })
+        .await?;
+        *link_state = advanced_state;
+        tracing::warn!(
+            outbound_message_id = requeued.outbound_message_id,
+            skipped,
+            "skipped Encrypted Link write slots that already hold packets"
+        );
+        Ok(requeued)
     }
 
     async fn save_outbound_with_lease(

@@ -1582,3 +1582,80 @@ async fn test_enqueue_private_payment_list_without_link_fails() {
         "unexpected error: {err:?}"
     );
 }
+
+#[tokio::test]
+async fn test_private_list_send_from_older_link_state_uses_next_free_slot() {
+    async fn send_private_list(alice: &TestUser, bob: &TestUser, payload: &str) {
+        alice
+            .adapter
+            .set_private_details(vec![private_receiving_detail(
+                "btc-lightning-bolt11",
+                payload,
+            )]);
+        alice
+            .sdk
+            .enqueue_private_payment_list(bob.public_key.clone())
+            .await
+            .unwrap();
+        let report = alice
+            .sdk
+            .process_outbound_private_messages(bob.public_key.clone())
+            .await
+            .unwrap();
+        assert_eq!(report.sent.len(), 1);
+        assert!(report.failed.is_empty());
+    }
+
+    let pair = linked_two_party().await;
+    let older = pair
+        .alice
+        .storage
+        .transaction({
+            let counterparty = pair.bob.public_key.clone();
+            move |tx| Ok(tx.encrypted_link_state(&counterparty).unwrap())
+        })
+        .await
+        .unwrap();
+    send_private_list(&pair.alice, &pair.bob, "ln-private-1").await;
+    send_private_list(&pair.alice, &pair.bob, "ln-private-2").await;
+
+    pair.alice
+        .storage
+        .transaction(move |tx| {
+            tx.save_encrypted_link_state(older);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    send_private_list(&pair.alice, &pair.bob, "ln-private-3").await;
+
+    let receive = pair
+        .bob
+        .sdk
+        .receive_private_messages(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(receive.stream_item_ids.len(), 3);
+    let peer = pair
+        .bob
+        .storage
+        .transaction({
+            let counterparty = pair.alice.public_key.clone();
+            move |tx| Ok(tx.linked_peer(&counterparty))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(peer.state, LinkedPeerState::Linked);
+    let prepared = pair
+        .bob
+        .sdk
+        .prepare_and_resolve_private_contact_payment(pair.alice.public_key.clone(), None, None, 1)
+        .await
+        .unwrap();
+    assert_eq!(prepared.resolution.payable_endpoints.len(), 1);
+    assert_eq!(
+        prepared.resolution.payable_endpoints[0].endpoint.payload,
+        "ln-private-3"
+    );
+}

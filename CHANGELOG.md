@@ -40,6 +40,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Changed
 
+- The SDK checks the destination slot before it publishes a prepared Private
+  Application Message. A slot that already holds the same ciphertext counts as
+  sent without a second write. A slot that holds another packet is never
+  overwritten: the SDK moves the link past the stored packets and prepares the
+  message again on the next free slot. Each send costs one extra `HEAD`
+  request to the sender's own homeserver.
+
 - A payee no longer marks a Payment Request invalid when it stores an
   otherwise-valid Acceptance after its local proposal expiry, such as an
   in-time Acceptance fetched late. Later Payment Proofs are recorded and the
