@@ -495,9 +495,13 @@ impl FfiPaykitSdk {
     /// Save contacts and unblock selected blocked peers in one atomic transaction.
     ///
     /// For explicit contact additions or restoration, not label edits. Unblocked
-    /// peers need a fresh Encrypted Link; other links remain unchanged. Ordering,
-    /// duplicates and metadata follow `save_contacts`. Invalid input or an active
-    /// lease on a selected blocked peer rejects the entire batch.
+    /// peers need a fresh Encrypted Link Handshake. It requeues eligible parked
+    /// private work, which the next `processOutboundPrivateMessages` sends, and
+    /// accepted Allowances and Payment Requests authorize again without new
+    /// consent, as described on `unblockPeer`. Other links remain
+    /// unchanged. Ordering, duplicates and metadata follow `save_contacts`.
+    /// Invalid input or an active lease on a selected blocked peer rejects the
+    /// entire batch.
     pub async fn save_contacts_and_unblock_peers(
         &self,
         updates: Vec<FfiContactUpdate>,
@@ -535,6 +539,15 @@ impl FfiPaykitSdk {
     }
 
     /// Remove a Contact Record when it has no public marker to clean up.
+    ///
+    /// Only the record is removed. The Encrypted Link, private stream intake,
+    /// queued outbound messages, accepted Allowances, and the counterparty's
+    /// copy of the last Private Payment List this identity sent are kept, and a
+    /// later re-add reuses the same Encrypted Link. Removal restores the retained
+    /// private stream item limit only when this identity has never queued or
+    /// sent that counterparty a Payment Request, Payment Request Acceptance,
+    /// Payment Proof, Allowance proposal, or Allowance Acceptance. To also end
+    /// the Encrypted Link, see `removeContactsAndBlockPeers`.
     pub async fn remove_contact(
         &self,
         public_key: String,
@@ -549,8 +562,29 @@ impl FfiPaykitSdk {
     /// Block and remove contacts in one shared-state transaction.
     ///
     /// Returns removed records. Busy peers remain unchanged; contacts with public
-    /// markers are blocked but retained. Callers enforce subscription policy and
-    /// perform any best-effort withdrawal before this operation.
+    /// markers are blocked but retained; keys without a Contact Record are
+    /// skipped and not blocked. Blocking parks pending private work and pauses
+    /// accepted Allowances and Payment Requests, as described on `blockPeer`.
+    /// Callers enforce subscription policy and perform any best-effort
+    /// withdrawal before this operation.
+    ///
+    /// To end a contact's Encrypted Link without keeping the peer blocked, call
+    /// `endAllowance` and `cancelPaymentRequest` for what the user wants gone.
+    /// While the peer is still Linked, call
+    /// `clearPrivatePaymentListAndProcessOutbound` and continue only when its
+    /// report's `failedToQueue` and `failedToDeliver` are both empty;
+    /// otherwise call it again later, since each call queues a fresh empty
+    /// list. Do not block until it reports success, because the block parks an
+    /// unsent list. The queue is processed in order, so this also sends those
+    /// messages first. Another runtime or device of the same Paykit App that
+    /// queues a list for this peer can supersede the clear, which the report
+    /// shows, so pause such writers during cleanup. Then
+    /// persist the app's own record of intent to end the link with that peer,
+    /// call this method and `unblockPeer`, and clear the record. On startup,
+    /// unblock only peers that carry that record and are still Blocked. Never
+    /// infer intent from a Blocked peer without a Contact Record: the block
+    /// records no reason and is shared by every app and device on the
+    /// identity. See "Profiles and Contacts" in the README.
     pub async fn remove_contacts_and_block_peers(
         &self,
         public_keys: Vec<String>,

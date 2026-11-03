@@ -846,6 +846,11 @@ pub struct StorageState {
     /// Homeserver admission owned by active supervisor for each covered peer.
     #[serde(default)]
     pub private_intake_admitted_homeservers: HashMap<PubkyPublicKey, String>,
+    /// Derived per-link record counts. Never stored, so the encoded state is
+    /// unchanged; the SDK rebuilds it whenever it no longer matches the
+    /// records.
+    #[serde(skip)]
+    pub link_record_index: super::LinkRecordIndex,
 }
 
 impl fmt::Debug for StorageState {

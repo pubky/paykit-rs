@@ -381,9 +381,34 @@ pub struct FfiAllowanceRecord {
     pub invalid_reason: Option<String>,
 }
 
+/// Outcome of accepting one link's pending Allowance proposals.
+#[derive(uniffi::Enum, Clone, Debug)]
+pub enum FfiPendingAllowanceAcceptance {
+    /// Acceptances queued in this call, oldest proposal first.
+    Accepted {
+        /// Derived records after the Acceptances were queued.
+        records: Vec<FfiAllowanceRecord>,
+        /// Whether pending proposals beyond the requested limit remain.
+        more_pending: bool,
+    },
+    /// The link holds more records than the SDK reads for this operation. Its
+    /// history was not read and nothing was accepted.
+    LinkHistoryTooLarge {
+        /// The cap the link's inbound and outbound records exceed.
+        record_cap: u64,
+    },
+    /// SDK returned a value this binding version does not understand.
+    Unknown,
+}
+
 #[uniffi::export(async_runtime = "tokio")]
 impl FfiPaykitSdk {
     /// Return Allowances matching a local SDK filter, newest first by local record time (presentation order only).
+    ///
+    /// A counterparty filter naming a Blocked peer fails with a policy error
+    /// when that peer has Allowance messages and returns an empty list
+    /// otherwise. Without a counterparty filter, blocked peers are skipped.
+    /// See `blockPeer`.
     pub async fn list_allowances(
         &self,
         filter: FfiAllowanceFilter,
@@ -398,6 +423,7 @@ impl FfiPaykitSdk {
     }
 
     /// Return one Allowance from one exact authenticated Encrypted Link.
+    /// Fails with a policy error while the counterparty is Blocked.
     pub async fn get_allowance(
         &self,
         counterparty: String,
@@ -452,6 +478,26 @@ impl FfiPaykitSdk {
             .try_into()
     }
 
+    /// Accept up to `limit` pending proposals from one exact counterparty.
+    ///
+    /// Pending proposals are received proposals that make the local identity
+    /// the Allowee, are `Proposed`, and have `Consistent` history. They are
+    /// accepted oldest first, each with the same checks as `accept_allowance`,
+    /// in one durable transaction, without deriving the link's history once
+    /// per proposal. A link with too large a history returns
+    /// `LinkHistoryTooLarge` without reading it.
+    pub async fn accept_pending_allowance_proposals(
+        &self,
+        counterparty: String,
+        limit: u32,
+    ) -> Result<FfiPendingAllowanceAcceptance, PaykitFfiError> {
+        let counterparty = crate::session::parse_public_key(counterparty)?;
+        self.runtime
+            .accept_pending_allowance_proposals(counterparty, limit as usize)
+            .await?
+            .try_into()
+    }
+
     /// Queue rejection for a received Allowance proposal.
     pub async fn reject_allowance(
         &self,
@@ -467,6 +513,10 @@ impl FfiPaykitSdk {
     }
 
     /// Queue a proposal withdrawal or unilateral End for accepted authority.
+    ///
+    /// Fails with a policy error while the counterparty is Blocked and with a
+    /// `RecoveryRequired` error while its Encrypted Link is not ready, so end
+    /// Allowances before blocking a peer; see `blockPeer`.
     pub async fn end_allowance(
         &self,
         counterparty: String,

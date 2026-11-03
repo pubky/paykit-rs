@@ -256,9 +256,12 @@ Paykit defines recurrence terms for communication. Paykit does not run the sched
 ## Recurring Payment Requests And Subscriptions
 
 A Subscription is product shorthand for an accepted Recurring Payment Request.
-It is not a separate protocol object, message family, or SDK subsystem. A
-Recurring Payment Request remains active across multiple payments until it is
-cancelled or its recurrence ends.
+It is not a separate protocol object, message family, or SDK subsystem. An
+accepted Recurring Payment Request remains active across multiple payments until
+a Cancellation. Reaching `recurrence.ends_at` sends no message and is not a
+lifecycle transition: whether the Recurrence has ended is a local wallet view
+computed from `ends_at` and trusted local time. A Payment Proof for an earlier
+Billing Period may still arrive after `ends_at`.
 
 A recurring flow works as follows:
 
@@ -299,7 +302,10 @@ accepted Allowance as prior permission to send the ordinary Acceptance and pay
 automatically. This is optional wallet behavior, not a Payment Request
 requirement or a guarantee of payment. Allowance matching, accepted-but-unpaid
 recovery, and per-Billing-Period metering are specified in
-[allowances.md](allowances.md) and are not repeated here.
+[allowances.md](allowances.md) and are not repeated here. The protocol flow for a
+manual payment is unchanged; a wallet that wants SDK duplicate-payment
+protection for it uses the SDK's
+[payment accounting](paykit-sdk.md#durable-allowance-payment-accounting).
 
 ## paykit.payment_request
 

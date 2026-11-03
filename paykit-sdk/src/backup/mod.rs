@@ -315,7 +315,13 @@ pub(crate) fn refresh_storage_state_classification(state: &mut StorageState) -> 
         &mut state.event_dedup_records,
         &mut state.receipt_access_records,
     )?;
-    validation::validate_storage_state(state)
+    // Validation already passes over both record lists, so it counts each
+    // link's records on the way and the state gets its index without a
+    // separate pass.
+    let mut link_counts = HashMap::new();
+    validation::validate_storage_state_counting_links(state, Some(&mut link_counts))?;
+    state.install_link_record_counts(link_counts);
+    Ok(())
 }
 
 /// Export SDK-managed state from storage.
@@ -479,6 +485,8 @@ fn restore_blockers(state: &StorageState) -> Vec<&'static str> {
         next_private_intake_supervisor_lease_id: _,
         private_intake_stream_capacity,
         private_intake_admitted_homeservers,
+        // A cache of the record lists below, never stored.
+        link_record_index: _,
         allowance_accounting,
         linked_peers,
         contact_records,
@@ -911,6 +919,7 @@ impl SdkBackupState {
             receipt_issuance_records,
             private_intake_cursors,
             private_intake_peers,
+            link_record_index: Default::default(),
         };
 
         validation::validate_storage_state(&state)?;

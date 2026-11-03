@@ -30,6 +30,17 @@ on low-level `paykit-lib` protocol bindings.
   `forgetSessionAccess` — app-facing account/session lifecycle for the current
   Paykit runtime. `signOut` revokes the Pubky grant and leaves identity-wide
   Paykit state intact; `forgetSessionAccess` performs local-only cleanup.
+- `PaykitSdk.captureGrantObserver(expectedPublicKey)` - capture the admitted
+  owner's existing live grant before cleanup, without restoring credentials.
+  Retain the opaque observer with the original operation and recheck the app's
+  owner/generation after capture and after `observe()`. Observation makes a
+  read-only request through the original Pubky transport without provider
+  callbacks, credential refresh or shared-storage locks. `Active` is
+  point-in-time evidence, not a lease or permission to repeat cleanup;
+  negative, expired, malformed or failed responses remain `Unknown`.
+  The handle cannot be exported or reconstructed after restart. Missing
+  acknowledgements and uncertain mutations still require reconciliation;
+  remaining cleanup requires fresh confirmation.
 - `PaykitSdk.stateRevision` — return the latest observed SDK state revision so
   apps can detect when SDK-managed state changed.
 - `PaykitSdk.observeState` - read a coherent `PaykitStateObservation` for display
@@ -94,6 +105,9 @@ load the native UniFFI library just to format keys.
   and remove stale SDK-managed public Payment Endpoints.
 - `PaykitSdk.syncPublicEndpointsWithReceivingDetails` — publish explicit
   public receiving details without relying on adapter-side mutable state.
+- Both sync calls treat the details as this App's complete public set and
+  remove every managed endpoint missing from it, all of them for an empty
+  list. See [Publish Receive Details](#publish-receive-details).
 - `EndpointSyncReport` — published, removed, and failed endpoint changes.
 
 The payment adapter returns receiving details and candidate ids. Apps execute
@@ -106,6 +120,22 @@ Paykit-side workflow.
   `advanceLinkHandshake` — establish Encrypted Links with counterparties.
 - `PaykitSdk.linkedPeers`, `blockPeer`, and `unblockPeer` — inspect and
   manage local peer state.
+- Blocking a peer: `blockPeer` is local and does not notify the peer. It parks
+  queued private messages instead of deleting them. After `unblockPeer`, a
+  fresh Encrypted Link Handshake requeues eligible parked messages, and the
+  next `processOutboundPrivateMessages` sends them; a newer Private Payment
+  List can supersede a requeued one. Accepted Allowances and Payment Requests
+  are paused, not revoked, and authorize again after relink without new
+  consent. While the peer is blocked, nothing new can
+  be queued for it, `endAllowance` is refused, and reads that name it fail
+  with a policy error. Before blocking, while the peer is still Linked, deliver
+  pending events such as a Payment Proof with `processOutboundPrivateMessages`
+  (delivered only once its id appears in a report's `sent`), retrieve any
+  Receipt you need, and call `endAllowance` for each `Accepted`
+  Allowance, and each `Proposed` one this identity proposed, that the user
+  wants gone. If the peer was already blocked, after unblock and relink call
+  `endAllowance`, or confirm with the user before calling
+  `acceptPaymentRequestAutomatically` for that peer again.
 - `PaykitSdk.forgetPeer`: irreversibly delete what a blocked counterparty
   sent, for every Paykit App on the identity, when the local identity never
   acted on it. It releases a counterparty whose `receivePrivateMessages` fails
@@ -134,7 +164,10 @@ fallback. See [Establish Encrypted Link](../specs/paykit-sdk.md#establish-encryp
 for setup, restore, and send/receive checks.
 
 Private operation errors expose stable category/code fields and redacted
-context. Raw diagnostic details require an explicit debug export method.
+context. Raw diagnostic details require an explicit debug export method. A
+private message whose serialized JSON exceeds 1000 bytes (`PUBKY_NOISE_MSG_LEN`)
+fails with the protocol code `message_too_large`, and its context reports the
+message and limit byte counts. Nothing is queued.
 
 ### Private Payment Lists and Payment Resolution
 
@@ -183,10 +216,21 @@ For direct reservation publication, pass one
 reservation list means "publish an empty Private Payment List for this
 counterparty".
 Helpers that both queue and attempt delivery return
-`PrivatePaymentListDeliveryReport` with `queued`, `cleared`,
+`PrivatePaymentListDeliveryReport` with `queued`, `cleared`, `acknowledged`,
 `failedToQueue`, and `failedToDeliver` groups. A peer whose Encrypted Link is
 `LINKING` can appear in `queued`; the message remains eligible for a later
 outbound worker run after the link becomes `LINKED`.
+
+Each `acknowledged` entry identifies a counterparty and exact
+`outboundMessageId` whose publication this runtime witnessed on the current
+Encrypted Link. It is neither counterparty receipt nor a lease. Empty failure
+groups, a stored `Sent` row or a pending handshake do not prove acknowledgement;
+a newer list from this App also withholds acknowledgement of an older list.
+For cleanup, require a matching acknowledgement for every required clear and
+no queue, delivery or reservation-cleanup failure. Retain evidence only with
+the original owner, operation and runtime, invalidate it after relevant local
+changes, and never reconstruct it after restart or use it to replay an
+uncertain mutation.
 
 ### Public File Downloads
 
@@ -219,6 +263,16 @@ pixel and cache limits, and request timeouts remain app responsibilities.
 - `PaykitSdk.proposePaymentRequest`, `acceptPaymentRequest`,
   `rejectPaymentRequest`, `cancelPaymentRequest`, and `submitPaymentProof` —
   queue Payment Request lifecycle events through the SDK outbound stream.
+  Each Event Message must fit 1000 bytes of canonical JSON. `metadata` and
+  `proof` objects are re-serialized and non-ASCII text is written raw, so a
+  wallet's own byte count is not authoritative.
+- `paymentProofEventLen(localAppId, paymentReference, submission)` - return the
+  exact byte length of the Payment Proof Event Message that `submitPaymentProof`
+  would queue. `localAppId` is the local (sending) App ID from
+  `PaykitSdkConfig`, not the payee App in `submission.paymentAppId`. It is a
+  measurement, not a validity check. Payers measure before payment approval and
+  payees before offering a method, with maximum-length placeholders for
+  variable fields and every optional ID they will send.
 - `PaykitSdk.claimPaymentRequestForPreparation` - claim before preparing payment.
   It rejects blocked counterparties before App Registry access and rechecks the
   policy atomically with the claim. Compare the returned proposal and applicable
@@ -291,6 +345,14 @@ right at `proposalExpiresAt`. Payees should:
   payment-method tolerance as paying the request. See
   [Payment time and attribution](../specs/payment-requests.md#payment-time-and-attribution).
 
+Payment accounting also covers manual Payment Request payments. It is required
+when this identity may also run automatic Allowance payments, and recommended
+otherwise: it gives each occurrence crash-safe idempotency and coordinates
+manual work with automatic work. Acceptance does not reserve or permit a
+payment: accounting callers still reserve with `reserveManualPayment` and
+obtain a fresh handoff from `beginPaymentExecution`. See
+[Pay A Payment Request](#pay-a-payment-request) for the full sequence.
+
 ### Allowances
 
 - `PaykitSdk.proposeAllowance`, `acceptAllowance`, `rejectAllowance`, and
@@ -327,6 +389,10 @@ responsibility.
    wallet journal through `reconcileAllowanceAccounting`. Supply an empty history
    only when the wallet has established that no previous manual or automatic
    payment exists. Initialization is an explicit completeness attestation.
+   Pass `expectedRevision` equal to the state's `revision`, or null only when
+   the state is null. Read
+   [Stale backups and reconciliation](#stale-backups-and-reconciliation) before
+   reconciling after a restore.
 2. Call `evaluateAllowanceCandidates` with a scoped Payment Request and trusted
    UTC time. Apply wallet priority or obtain user choice among eligible candidates.
    `selectAllowance` persists one choice with its expected revision; candidate
@@ -341,6 +407,26 @@ responsibility.
    `claimPaymentRequestForExecution` remains a compatibility API without this
    blocked-peer guard. Recurring Acceptance reserves
    no amount or count. Each scheduled Billing Period needs its own later admission.
+   Read the trusted clock once: `selection.trustedTime` and `checks.trustedTime`
+   must be the same instant, otherwise the call is refused before any network
+   or storage work with a `Protocol` error (code `protocol_error`), "Automatic
+   Acceptance requires one trusted time for selection and execution checks".
+
+   ```text
+   checks = PaymentExecutionChecks(
+       trustedTime: trustedNow(), // the only clock read
+       paymentEndpointIdentifier, actualAmount,
+       endpointCurrent, localEnabled, recurrenceEligible
+   )
+   selection = AllowanceSelectionInput(
+       allowanceId,
+       // latest association revision for this request; null only for the initial selection
+       expectedAssociationRevision,
+       checks.trustedTime
+   )
+   sdk.acceptPaymentRequestAutomatically(scope, selection, checks)
+   ```
+
 4. Call `reserveAutomaticPayment` with the occurrence, expected association
    revision, and fresh `PaymentExecutionChecks`. The checks include the actual
    validated `AccountingAmount`, selected Payment Endpoint, trusted UTC time, and
@@ -351,12 +437,51 @@ responsibility.
    status permits handoff. Use its stable attempt ID as the external wallet's
    idempotency key. An admission or handoff `Blocked` result is a successful
    durable decision: its updated trusted-time watermark must remain saved.
+   `ReconciliationRequired` is the exception: it returns before any change.
    Reservation and handoff require this app's execution claim and outgoing
    payment capability; unresolved attempts keep the claim held.
 6. Report wallet-verified settlement through `recordPaymentOutcome`. `Succeeded`
    commits usage; verified terminal `Failed` releases it. Timeouts, missing
    callbacks, or uncertain settlement are `Unknown` and keep capacity reserved.
    A crash between handoff and settlement requires external reconciliation.
+   Report `Failed` only for a [definitive failure](#definitive-failure).
+
+#### Definitive failure
+
+`Failed` is permanent for that attempt: `recordPaymentOutcome` cannot change
+it later. It releases Allowance usage, reopens the occurrence for a new
+reservation, and can let the execution claim be released before a Payment Proof
+is sent. For an attempt that received a handoff (`Submitted` or `Unknown`),
+report anything short of a definitive failure as `Unknown`; an `Unknown`
+attempt can later become `Succeeded` or `Failed`. A failure on the Rail is
+definitive only when:
+
+- Bitcoin: a conflicting spend of the same inputs is confirmed to the wallet's
+  reorg-safety depth.
+- EVM: the account nonce was consumed by a different transaction at the
+  wallet's finality depth. One RPC reporting "dropped" or "not found" never
+  counts.
+- Lightning: the wallet's own node reports the payment failed with no HTLC
+  still in flight.
+
+A `Prepared` attempt that never received a handoff, for example because
+`beginPaymentExecution` returned `Blocked`, has nothing on a Rail to wait for.
+Either call `beginPaymentExecution` again with corrected fresh checks, or abort
+it: verify that no handoff occurred (no executor call with that attempt ID),
+then report `Failed`, which releases the reservation and reopens the
+occurrence. Never report `Unknown` for it just to wait; that keeps the
+occurrence occupied and the execution claim held.
+
+To end an `Unknown` attempt, make the failure definitive yourself, for example
+with a replace-by-fee (RBF) spend back to the wallet or a self-transfer that
+consumes the same nonce, rather than inferring failure from absence. RBF needs
+the original transaction to be replaceable. Retry by replacement (same inputs or
+same nonce) so the original and the retry cannot both settle, and check the
+executor's idempotency records for the previous attempt ID first. Keep any
+post-handoff result that is not definitive as `Unknown` until it is verified
+successful or made definitively failed. After a definitive automatic failure,
+call `markPaymentManualOnly` on the occurrence if product policy requires user
+authorization before any retry. It is sticky.
 
 `deferPaymentOccurrence` records a temporary private reason; reconsideration must
 repeat all checks. `markPaymentManualOnly` is sticky and background matching never
@@ -411,6 +536,72 @@ Allowance lifecycle events, Payment Proofs, timeouts, or missing files. Unresolv
 attempts remain reserved, and prepared tokens from an earlier recovery epoch
 cannot be used as fresh handoff permits.
 
+#### Stale backups and reconciliation
+
+`reconcileAllowanceAccounting` is a ledger-wide recovery step, not a routine
+call. It starts a new recovery epoch, turns every `Prepared` attempt into
+`Unknown` (including other apps' in-flight preparations), and fails unless
+`expectedRevision` matches the current state. Call it for recovery, normally
+when `allowanceAccountingState` is null or has `requiresReconciliation` set.
+
+Reconciling an empty or incomplete history after restoring an older backup
+re-enables payment of anything paid after the export. Lost automatic attempts
+also free the Allowance capacity they used, for the period and lifetime limits
+of every request under that Allowance. The same applies after
+`recoverSharedStateFromBackup`.
+
+- **Write-ahead backup.** After `reserveAutomaticPayment`,
+  `reserveManualPayment`, or `beginPaymentExecution`, and before the
+  irreversible wallet handoff, schedule an off-device backup and wait for it to
+  finish. Use a change in `backupStateRevision` as the trigger, and back up
+  again after `recordPaymentOutcome`. A restored `Prepared` attempt becomes
+  `Unknown`; it still blocks the occurrence and, when automatic, counts as
+  Allowance usage, so restoring that backup fails closed. Resolve it with an
+  explicit entry in the reconciliation `outcomes`; a terminal status copied
+  into `history` does not change it. Backing up only after the outcome leaves
+  the handoff window unprotected.
+- **Keep every attempt.** Keep each `PaymentAttemptRecord` that admission
+  returns with the wallet's own payment records, and resubmit all of them when
+  reconciling, not only a recent time window. Reconciliation deduplicates by
+  `attemptId`, so resubmitting retained attempts is safe.
+- **Search start.** Right after restore, the latest `admittedAt` or
+  `evaluatedAt` value in `allowanceAccountingState` is a hint for where to start
+  searching wallet records for missing payments; watermarks do not advance
+  while reconciliation is required. It comes from wallet-supplied trusted time,
+  so treat it as a hint only.
+
+Reconciliation merges the supplied `history` into the retained ledger,
+validates it against the retained associations, and sets every watermark to
+`trustedTime`. So `history` needs only the missing occurrences and attempts,
+not copies of retained associations or watermarks. To rebuild it:
+
+1. For each attempt already in the retained history (for example a restored
+   `Unknown`) whose result the wallet has verified, add an entry to
+   `outcomes`. Reconciliation keeps a retained attempt's nonterminal status
+   even when `history` supplies `Succeeded` or `Failed`; a terminal status in
+   the supplied `history` applies only to a newly reconstructed attempt.
+   Add each externally verified payment the history lacks, as an attempt with
+   its verified status on the matching occurrence (or a new occurrence record).
+   For such an attempt, reuse the kept `PaymentAttemptRecord` when there is
+   one; otherwise use a new lowercase UUID v4 `attemptId`, the state's `epoch`,
+   and the original admission or payment time as `admittedAt`.
+   - Manual: mode `Manual`, no `allowanceId` or `associationRevision`, and the
+     verified actual amount.
+   - Automatic: mode `Automatic`, the request terms amount, and `allowanceId`
+     and `associationRevision` set from the effective association revision on
+     both the attempt and its occurrence. That revision must be in the
+     retained history or in the supplied `associations`.
+2. Use a reconciliation `trustedTime` at or after every `admittedAt`,
+   `evaluatedAt`, and association `authorizedAt`.
+3. An association created or replaced after the export is missing from the
+   restored history. Reconstruct its complete, contiguous association history
+   in `associations`, and the payment's original automatic attribution, from
+   authoritative wallet records. If that evidence is unavailable, do not
+   reconcile: leave accounting blocked (fail closed) rather than recording the
+   payment as `Manual`.
+
+Never build attempts from Payment Proofs or Receipts.
+
 The Swift and Kotlin `AllowanceBindingsCompile` fixtures exercise all accounting
 methods and typed records. They are compile-only surface checks, not a payment
 workflow to execute in sequence. SDK protocol mocks must implement these methods
@@ -445,6 +636,33 @@ object.
   owns timeouts.
 - `PubkySessionBootstrap(clientId)` — create/import grant sessions and grant
   auth flows for a stable app-owned Pubky client ID.
+- `PubkySessionBootstrap.signUp(...)` — fails with a policy error when the
+  identity's homeserver record names a different homeserver. Nothing is sent
+  to the homeserver, so the signup code is not spent. A lookup failure is an
+  error, never "no record". The check cannot see a record that no reachable
+  PKARR cache holds, so for an imported or unknown key, call
+  `republishIdentity(publicKey)` first:
+  - `true`: the identity already exists. Use `signIn`, and never fall back to
+    `signUp` automatically. `true` also covers a record that names no
+    homeserver; there, `signUp` with a homeserver the app trusts restores it.
+  - `false`: no record was found, so `signUp` is safe.
+  - an error: do neither, and retry later.
+
+  A signup code is spent only when the homeserver creates the account. After
+  any `signUp` failure, retrying with the same identity, the same trusted
+  homeserver and the same code is safe; a malformed code, or a device clock
+  that is too far off, fails every retry. A `transport/transport_error` error
+  means retry later. `identity/signup_code_rejected` means the homeserver
+  refused the code as missing, malformed, unknown or already used: ask for a
+  code, but do not tell the user to discard it, because a malformed code can be
+  a fixable typo.
+- `PubkySessionBootstrap.signIn(...)` — a `transport/transport_error` from
+  completing the grant exchange means retry later. A failure does not show
+  whether an account exists, so never fall back to `signUp` automatically.
+  Call `republishIdentity(publicKey)` to tell the cases apart: `true` means
+  retry `signIn`; `false` means offer a restore through `signUp` with a
+  homeserver the app already trusts; an error means retry later. The call
+  also rebroadcasts the record it finds.
 - `PubkyClientConfig.authRelayUrl` — select a local or private grant-auth
   relay; leave unset for Pubky's production default.
 - `PubkyAuthRequest` — pending external auth-flow handle; call `saveState()` to
@@ -524,7 +742,37 @@ bootstrap.approveAuthWithCompanionClaim(
   blobs and read public Pubky resources with caller-provided size limits.
 - `PaykitSdk.saveContact`, `contactRecord`, `contactRecords`, and
   `removeContact` — manage Contact Records. Each contact is one Pubky
-  identity.
+  identity. `removeContact` deletes only the record: the Encrypted Link,
+  intake, queued sends, accepted Allowances and the peer's copy of your last
+  Private Payment List stay, and a re-add reuses the link.
+- `PaykitSdk.removeContactsAndBlockPeers(publicKeys)`: remove contacts and
+  block their peers in one transaction, as `blockPeer` does. To end a
+  contact's Encrypted Link without keeping the peer blocked:
+  1. Call `endAllowance` and `cancelPaymentRequest` for the Allowances and
+     Payment Requests the user wants gone. Otherwise they authorize again
+     after a later relink.
+  2. While the peer is still Linked, call
+     `clearPrivatePaymentListAndProcessOutbound` and continue only when its
+     report's `failedToQueue` and `failedToDeliver` are both empty and
+     `acknowledged` contains the exact counterparty and outbound message ID
+     from the required `cleared` entry. Otherwise reconcile the original
+     operation before confirming a new attempt; each call queues a fresh empty
+     list, which supersedes older pending ones. Do not block until it reports success,
+     because the block parks an unsent list. The queue is processed in order,
+     so this also sends step 1's messages first. Another runtime or device of
+     the same Paykit App that queues a list for this peer can supersede the
+     clear, which the report shows, so pause such writers during cleanup.
+     This is best effort for this Paykit App only and cannot take back
+     details the peer already read.
+  3. Persist the app's own record of intent to end the link with that peer.
+     Call `removeContactsAndBlockPeers`, then `unblockPeer`, then clear the
+     record.
+
+  A crash between the two calls in step 3 leaves the peer Blocked, which hides
+  its Payment Requests and Receipts. On startup, unblock only peers that carry
+  that record and are still Blocked, then clear it. Never infer intent from a
+  Blocked peer without a Contact Record: the block records no reason and is
+  shared by every app and device on the identity.
 - `PaykitSdk.saveContacts(updates)` — save a batch in one atomic storage
   transaction after validating every update and the initialized identity. Results
   follow input order; duplicate keys are applied in order, with the last update
@@ -534,7 +782,10 @@ bootstrap.approveAuthWithCompanionClaim(
 - `PaykitSdk.saveContactsAndUnblockPeers(updates)` — explicitly add or restore
   contacts and unblock their blocked peers in the same atomic transaction. Other
   peers and existing links are unchanged. A busy blocked peer rejects the batch;
-  unblocked peers need a fresh Encrypted Link. Use `saveContact` for label edits.
+  unblocked peers need a fresh Encrypted Link Handshake, which requeues parked
+  work for the next `processOutboundPrivateMessages`, and accepted Allowances
+  and Payment Requests authorize again (see Blocking a peer). Use
+  `saveContact` for label edits.
 - `PaykitSdk.fetchPubkyProfile` and bounded `fetchPubkyFollows` — read Pubky
   app profile and follow data.
 - `PaykitSdk.resolveProfile` and `currentProfile` — resolve profile display
@@ -702,6 +953,7 @@ contacts, queue private lists:
 
 ```text
 sdk.publishPaykitApp(displayName, capabilities)
+// After every published receive backend is ready. publicDetails is complete.
 sdk.syncPublicEndpointsWithReceivingDetails(publicDetails)
 
 updates = [
@@ -725,6 +977,31 @@ report = sdk.syncPrivatePaymentListsWithReservationsAndProcessOutbound(
 )
 ```
 
+Public receiving details are the complete desired set for this Paykit App ID
+across every device and runtime on the identity, because publication records
+live in shared state. Sync removes every SDK-managed endpoint of the App whose
+identifier is missing from the set and reports it in `EndpointSyncReport.removed`,
+or in `failed` if the removal fails.
+With `FullAppEndpointNamespace`, it also removes endpoint files in the App's
+endpoint directory that the SDK never created. Partial details, for example
+on-chain loaded but Lightning not yet, remove the missing methods. An empty
+list removes every managed endpoint. This is the supported way to stop public
+receiving while the App stays registered.
+
+Sync only after every receive backend the wallet publishes has finished
+loading: trigger it from a backends-ready event, not from app start. While any
+backend is not ready, `currentPublicReceivingDetails` must throw
+`PaykitError.PaymentAdapter` (Kotlin: `PaykitException.PaymentAdapter`), never
+return an empty list or a subset. The sync then fails before any publication
+record or endpoint changes. Throw this case specifically: any other thrown error
+also fails the sync, but arrives as `PaykitError.Storage` (Kotlin:
+`PaykitException.Storage`) with code `unexpected_callback_error`. Handles
+created without a payment adapter already throw this error.
+
+`removePaykitApp` is not a substitute for an empty sync. It requires the App's
+Payment Requests and private financial work to be complete, and it deactivates
+the App.
+
 Publishing the app is required before it can create app-attributed private
 work. Call `paykitAppRemovalBlockers` before de-registration to inspect active
 requests, undelivered events, incomplete Receipt issuance, and Private Payment
@@ -734,8 +1011,16 @@ An empty `reservations` list publishes an empty Private Payment List for that
 counterparty. `failedToQueue` reports a queueing failure, not a rollback guarantee;
 inspect durable state before replacing reservations or retrying the workflow.
 `failedToDeliver` means the SDK
-queued the message, then delivery or reservation cleanup failed; keep the state
-and retry with `processPendingPrivateMessages`.
+queued the message, then delivery or reservation cleanup failed, the list is
+still queued, a newer list superseded it before it was sent, it is invalid, or
+its outbound record is gone. To recover any entry, call the same high-level
+operation again with the current complete intent: for a clear, call
+`clearPrivatePaymentListAndProcessOutbound` again; for reservation sync, pass
+the current complete reservations, keeping reservation IDs while they remain
+valid. Never replay an older update over newer intent. Each call queues a fresh
+list that supersedes older pending ones. `processPendingPrivateMessages` only
+advances lists that are still queued, so it alone cannot recover a superseded,
+invalid, or missing list.
 
 ### Pay A Contact
 
@@ -767,6 +1052,70 @@ resolution = sdk.resolvePublicContactPayment(
 
 No API combines these results or falls back from one mode to the other. The
 application chooses which payment mode to present and invoke.
+
+### Pay A Payment Request
+
+A manual Payment Request payment with payment accounting runs in this order:
+
+```text
+record = sdk.claimPaymentRequestForPreparation(counterparty, paymentRequestId)
+if record.state == Proposed:
+    // Wallet checks: show the terms and Billing Period, obtain user approval.
+    sdk.claimAndAcceptPaymentRequest(
+        counterparty, paymentRequestId, record.proposalStreamItemId)
+else:
+    // Accepted (unpaid one-time) or ActiveRecurring: do not accept again.
+    // Check the accepted terms and this Billing Period against what the
+    // user approved, then continue under the execution claim just taken.
+
+state = sdk.allowanceAccountingState()
+if state == nil/null || state.requiresReconciliation:
+    // On a stale-revision policy error, read the state again and retry.
+    sdk.reconcileAllowanceAccounting(AllowanceAccountingReconciliation(
+        expectedRevision: state?.revision ?? nil/null,
+        history: completeWalletHistory,
+        outcomes: verifiedOutcomes,
+        trustedTime: trustedNow()
+    ))
+
+// Resolve the target with the request-specific API, then build fresh checks.
+reserved = sdk.reserveManualPayment(occurrence, checks)
+// Continue only on Ready; Blocked authorizes nothing.
+handoff = sdk.beginPaymentExecution(reserved.attempt.attemptId, freshChecks)
+// Execute only on Ready with status Submitted.
+attemptId = handoff.attempt.attemptId
+outcome = wallet.execute(target, idempotencyKey: attemptId)
+sdk.recordPaymentOutcome(PaymentOutcomeReport(attemptId, outcome))
+// After Succeeded, submit the Payment Proof.
+sdk.submitPaymentProof(counterparty, paymentRequestId, proof)
+```
+
+- A manual Acceptance, Rejection, or Cancellation creates accounting state
+  when none exists, with `requiresReconciliation` set, at revision 1. After
+  Acceptance, `expectedRevision: nil/null` therefore fails with a
+  stale-revision policy error. Read the state first and pass its `revision`.
+  Restore and Paykit identity key rotation also set `requiresReconciliation`.
+- Onboarding: for a freshly generated key (not imported and not restored),
+  reconcile once at sign-up with an empty history and `expectedRevision:
+  nil/null` while the state is still null. Later Acceptances keep the state
+  reconciled, so the reconcile step above is skipped. Otherwise follow the
+  empty-history rule in [Allowance payment accounting](#allowance-payment-accounting)
+  step 1; never reconcile an empty history just to clear
+  `ReconciliationRequired`. Reconciliation never erases retained evidence, so
+  the risk is payments the accounting never saw: payments made after an older
+  backup was exported (see
+  [Stale backups and reconciliation](#stale-backups-and-reconciliation)) or
+  outside payment accounting, such as on another device. Leaving them out lets
+  the same occurrence be paid twice.
+- `occurrence` names the Payment Request and, for a Recurring Payment Request,
+  the Billing Period. Reservation and handoff each need fresh
+  `PaymentExecutionChecks` with the selected Payment Endpoint Identifier, the
+  verified actual amount, and trusted time. `Blocked` with
+  `PaymentAlreadyRecorded` means a successful or unresolved attempt already
+  owns this occurrence; do not pay again.
+- Report uncertain settlement as `Unknown` and resolve it later; see
+  [Definitive failure](#definitive-failure). Do not submit a Payment Proof
+  for an `Unknown` or `Failed` attempt.
 
 ### Backup And Restore
 
@@ -850,19 +1199,32 @@ rediscovered from Pubky, but private link checkpoints, private stream indexes,
 receipt keys, queued outbound messages, and Contact Records are not
 derivable from the Pubky public key alone.
 
+A restored backup has no record of payments made after its export. Before
+paying again, read
+[Stale backups and reconciliation](#stale-backups-and-reconciliation).
+
 ### Error And Report Handling
 
 - `PrivateOperationError.category` and `code` are for app branching.
   `redactedContext` is safe for normal UI/logging. Use `exportDebugDetails`
   only for explicit diagnostics.
+- `PubkySessionBootstrap.signUp` and the grant-exchange step of `signIn`
+  report retryable failures as `transport/transport_error`: a network failure,
+  a 5xx or 429 answer, or a failed PKARR publish or resolve, including
+  republishing the homeserver record of an existing account. Other failures
+  stay `identity/identity_error`, except `identity/signup_code_rejected` from
+  `signUp` for a missing, malformed, unknown or already used signup code.
 - `EndpointSyncReport.failed` means public endpoint publication/removal was not
   fully applied. Keep local receiving details and retry sync later.
 - `PrivatePaymentListDeliveryReport.failedToQueue` is a local persistence or
   validation problem for that counterparty; show or log it as a
   blocked update.
-- `PrivatePaymentListDeliveryReport.failedToDeliver` is retryable workflow
-  state unless the nested error says recovery is required. Keep the queued
-  state and let the retry worker continue.
+- `PrivatePaymentListDeliveryReport.failedToDeliver` is not a rollback
+  guarantee and is recoverable unless the nested error says recovery is
+  required. Call the same high-level operation again with the current complete
+  intent and still-valid reservation IDs; do not replay an older update. The
+  retry worker only advances lists that are still queued, so it alone cannot
+  recover a superseded, invalid, or missing list.
 - Private resolution reports private availability and recovery state. Public
   resolution has a separate result and does not carry private-link state.
 
@@ -920,3 +1282,31 @@ paykit-ffi/
 ├── bindings/android/       # Android Gradle source/config files
 └── dist/ios/               # Ignored generated XCFramework release artifacts
 ```
+
+### Original-grant removal intent
+
+`captureGrantLogout(expectedPublicKey)` captures an existing native session from
+this SDK's original provider without importing, exchanging or restoring it. A
+cache miss fails closed. Retain that handle with the original lifecycle and
+confirmation; its `binding()` is metadata, not evidence of remote completion.
+After a fresh confirmation, call `prepareAttempt()` and then consume the returned
+attempt with `execute()`. A missing `grant-proof-logout` feature, malformed support
+response, redirect or unknown response fails closed with no bearer-only fallback.
+Same-grant bearer refresh is allowed; a different owner, grant, signer, client,
+private-key generation or provider bundle is rejected.
+
+Before replacing the original lifecycle (including same-seed replacement), call
+`revokeAdmission()` and drain the caller's active operation. Provider checks are
+not an atomic replacement lock and cannot detect an entire unobserved ABA cycle.
+The app must enforce this boundary. Cancellation after dispatch remains unknown.
+Only a new confirmation can prepare another attempt, using the retained original
+grant and a fresh nonce. Restart offers local-only recovery, not reconstructed
+remote authority. `acknowledged()` preserves known remote success even if the app
+is cancelled or local persistence fails. No method invokes the provider's erase
+callback: conditionally clear only the original credentials after acknowledged
+remote cleanup, retaining watermark/marker ordering and completed private/public
+withdrawal progress. Ordinary `signOut()` remains a separate existing API.
+
+To validate all native bindings without publishing an existing Maven version,
+run `PAYKIT_SKIP_MAVEN_LOCAL=1 ./build.sh all` in `paykit-ffi`. This still builds the
+release AAR and compiles the Kotlin consumer fixtures; it skips Maven Local only.

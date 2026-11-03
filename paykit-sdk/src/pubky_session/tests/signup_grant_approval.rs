@@ -1,10 +1,12 @@
-//! Approval of externally supplied Pubky signup auth URLs.
+//! Approval of externally supplied Pubky signup auth URLs, and the homeserver
+//! check that sign-up runs before it signs up.
 //!
 //! The fixtures listen on loopback only and use fixed dummy keys. One server
 //! plays both the PKARR relay and the auth relay inbox. The other is the
-//! homeserver named by the auth URL; it answers every request with one fixed
-//! status, as a requester-controlled homeserver could. Both record what they
-//! receive, so each test asserts what approval sent and what it did not.
+//! requested homeserver, named by the auth URL or passed to sign-up; it
+//! answers every request with one fixed status, as a requester-controlled
+//! homeserver could. Both record what they receive, so each test asserts what
+//! was sent and what was not.
 
 use std::{
     collections::HashMap,
@@ -172,6 +174,11 @@ impl Fixture {
     /// Start the relay and the requested homeserver, which answers every
     /// request with `homeserver_status`.
     fn start(homeserver_status: &'static str) -> Self {
+        Self::start_with_body(homeserver_status, "")
+    }
+
+    /// Like [`Self::start`], with `homeserver_body` as every response body.
+    fn start_with_body(homeserver_status: &'static str, homeserver_body: &'static str) -> Self {
         let relay = Arc::new(Relay::default());
         let relay_address = {
             let relay = relay.clone();
@@ -184,7 +191,13 @@ impl Fixture {
             let tls = Arc::new(homeserver.to_rpk_rustls_server_config());
             let requests = homeserver_requests.clone();
             serve(move |stream| {
-                serve_homeserver_request(stream, tls.clone(), homeserver_status, &requests);
+                serve_homeserver_request(
+                    stream,
+                    tls.clone(),
+                    homeserver_status,
+                    homeserver_body,
+                    &requests,
+                );
             })
         };
         // Pubky clients find the homeserver's TLS endpoint through its record.
@@ -345,11 +358,12 @@ fn serve(handle: impl Fn(TcpStream) + Send + Sync + 'static) -> SocketAddr {
 }
 
 /// Record one connection to the requested homeserver and answer it with
-/// `status`.
+/// `status` and `body`.
 fn serve_homeserver_request(
     stream: TcpStream,
     tls: Arc<rustls::ServerConfig>,
     status: &str,
+    body: &str,
     requests: &Mutex<Vec<String>>,
 ) {
     // Logged before any I/O, so even a connection that never completes a
@@ -365,7 +379,7 @@ fn serve_homeserver_request(
     let mut stream = rustls::StreamOwned::new(connection, stream);
     if let Some((request_line, _)) = read_request(&mut stream) {
         requests.lock().unwrap()[entry] = request_line;
-        respond(&mut stream, status, &[]);
+        respond(&mut stream, status, body.as_bytes());
         stream.conn.send_close_notify();
         let _ = stream.flush();
     }
@@ -517,6 +531,50 @@ async fn test_approve_auth_signup_grant_does_not_publish_after_signup_conflict()
         matches!(
             &result,
             Err(PaykitSdkError::Identity { context, .. }) if context.contains("sign_up")
+        ),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_approve_auth_signup_grant_reports_rejected_signup_code() {
+    let fixture = Fixture::start_with_body("401 Unauthorized", "Token already used");
+    let auth_url = format!("{}&st=invite", fixture.signup_auth_url());
+
+    let result = fixture
+        .bootstrap()
+        .approve_auth(&auth_url, CAPABILITIES, &identity())
+        .await;
+
+    assert_eq!(
+        fixture.effects().await,
+        Effects {
+            homeserver: None,
+            records_published: 0,
+            inbox_deliveries: 0,
+            homeserver_requests: vec![
+                "POST /auth/grant/signup?signup_token=invite HTTP/1.1".to_owned()
+            ],
+        }
+    );
+    let error = result.unwrap_err();
+    assert!(error.is_signup_code_rejected(), "{error:?}");
+    assert_eq!(error.to_string(), "identity error: sign up Pubky identity");
+}
+
+#[tokio::test]
+async fn test_approve_auth_signup_grant_keeps_retryable_signup_failure_an_identity_error() {
+    let fixture = Fixture::start("503 Service Unavailable");
+
+    let result = fixture
+        .bootstrap()
+        .approve_auth(&fixture.signup_auth_url(), CAPABILITIES, &identity())
+        .await;
+
+    assert!(
+        matches!(
+            &result,
+            Err(PaykitSdkError::Identity { context, .. }) if context == "sign up Pubky identity"
         ),
         "{result:?}"
     );
@@ -921,4 +979,235 @@ async fn test_approve_auth_with_companion_claim_fails_closed_before_delivery_whe
         ),
         "{result:?}"
     );
+}
+
+/// Sign up the identity on the fixture's requested homeserver.
+///
+/// The requested homeserver must answer with an error status in tests that
+/// get past the guard: a successful signup goes on to sign in through Pubky's
+/// default auth relay, which is not a loopback fixture.
+async fn sign_up_on_requested_homeserver(
+    bootstrap: &PubkySessionBootstrap,
+) -> Result<PubkySessionBootstrapResult> {
+    let homeserver = PubkyPublicKey::from_public_key(&requested_homeserver().public_key().into());
+    bootstrap
+        .sign_up(&identity(), &homeserver, None, CAPABILITIES)
+        .await
+}
+
+/// Sign up on a homeserver other than the one the identity publishes, which
+/// answers with `homeserver_status` if it is ever asked.
+async fn assert_sign_up_on_different_homeserver_is_rejected(homeserver_status: &'static str) {
+    let fixture = Fixture::start(homeserver_status);
+    fixture.publish_identity_record(&published_homeserver());
+
+    let result = sign_up_on_requested_homeserver(&fixture.bootstrap()).await;
+
+    assert_eq!(
+        fixture.effects().await,
+        Effects {
+            homeserver: Some(z32(&published_homeserver())),
+            records_published: 0,
+            inbox_deliveries: 0,
+            homeserver_requests: vec![],
+        }
+    );
+    assert!(
+        matches!(
+            &result,
+            Err(PaykitSdkError::Policy { context, .. })
+                if context.contains(&z32(&published_homeserver()))
+                    && context.contains(&z32(&requested_homeserver()))
+        ),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_sign_up_rejects_different_published_homeserver() {
+    assert_sign_up_on_different_homeserver_is_rejected("204 No Content").await;
+}
+
+#[tokio::test]
+async fn test_sign_up_rejects_different_published_homeserver_with_existing_account() {
+    // A 409 would otherwise republish the record naming the requested
+    // homeserver.
+    assert_sign_up_on_different_homeserver_is_rejected("409 Conflict").await;
+}
+
+#[tokio::test]
+async fn test_sign_up_rejects_different_homeserver_behind_outdated_cached_record() {
+    let fixture = Fixture::start("204 No Content");
+    let bootstrap = fixture
+        .bootstrap_with_outdated_identity_record(&published_homeserver())
+        .await;
+
+    let result = sign_up_on_requested_homeserver(&bootstrap).await;
+
+    assert_eq!(
+        fixture.effects().await,
+        Effects {
+            homeserver: Some(z32(&published_homeserver())),
+            records_published: 0,
+            inbox_deliveries: 0,
+            homeserver_requests: vec![],
+        }
+    );
+    assert!(
+        matches!(result, Err(PaykitSdkError::Policy { .. })),
+        "{result:?}"
+    );
+}
+
+/// Sign up while the relay does not simply return the identity's record,
+/// which points at another homeserver.
+///
+/// The relay's 503 answer reaches the guard as a PKARR resolve error, which
+/// may succeed later, so the sign-up fails with a transport error.
+async fn assert_sign_up_fails_closed_on_lookup_fault(fault: LookupFault) {
+    let fixture = Fixture::start("204 No Content");
+    fixture.publish_identity_record(&published_homeserver());
+    fixture.set_identity_lookup_fault(Some(fault));
+
+    let result = sign_up_on_requested_homeserver(&fixture.bootstrap()).await;
+
+    fixture.set_identity_lookup_fault(None);
+    assert_eq!(
+        fixture.effects().await,
+        Effects {
+            homeserver: Some(z32(&published_homeserver())),
+            records_published: 0,
+            inbox_deliveries: 0,
+            homeserver_requests: vec![],
+        }
+    );
+    assert!(
+        matches!(
+            &result,
+            Err(PaykitSdkError::Transport { source: Some(source), .. })
+                if matches!(
+                    source.downcast_ref::<pubky::Error>(),
+                    Some(pubky::Error::Pkarr(pubky::errors::PkarrError::Resolve(_)))
+                )
+        ),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_sign_up_fails_closed_when_homeserver_lookup_fails() {
+    assert_sign_up_fails_closed_on_lookup_fault(LookupFault::Unavailable).await;
+}
+
+#[tokio::test]
+async fn test_sign_up_fails_closed_when_network_lookup_fails() {
+    assert_sign_up_fails_closed_on_lookup_fault(LookupFault::NetworkUnavailable).await;
+}
+
+#[tokio::test]
+async fn test_sign_up_fails_closed_on_malformed_homeserver_record() {
+    let fixture = Fixture::start("204 No Content");
+    fixture.relay.put_record(
+        &SignedPacket::builder()
+            .https(
+                "_pubky".try_into().unwrap(),
+                SVCB::new(0, "example.com".try_into().unwrap()),
+                3600,
+            )
+            .sign(&identity_record_signer())
+            .unwrap(),
+    );
+
+    let result = sign_up_on_requested_homeserver(&fixture.bootstrap()).await;
+
+    // The malformed record also fails the lookup in `Fixture::effects`.
+    let relay_requests = fixture.relay.requests.lock().unwrap().clone();
+    assert!(
+        !relay_requests
+            .iter()
+            .any(|request| request.starts_with("PUT /")),
+        "{relay_requests:?}"
+    );
+    assert_eq!(
+        *fixture.homeserver_requests.lock().unwrap(),
+        Vec::<String>::new()
+    );
+    // A malformed record does not become valid on a retry, so it stays an
+    // identity error.
+    assert!(
+        matches!(
+            &result,
+            Err(PaykitSdkError::Identity { context, source: Some(source) })
+                if context == "resolve Pubky homeserver record"
+                    && matches!(
+                        source.downcast_ref::<pubky::Error>(),
+                        Some(pubky::Error::Pkarr(pubky::errors::PkarrError::InvalidRecord(_)))
+                    )
+        ),
+        "{result:?}"
+    );
+}
+
+/// Sign up where the guard lets the signup through. The homeserver answers
+/// it with a retryable error, so the sign-up fails before signing in and
+/// reports a transport error.
+async fn assert_sign_up_reaches_homeserver(fixture: &Fixture, homeserver: Option<String>) {
+    let result = sign_up_on_requested_homeserver(&fixture.bootstrap()).await;
+
+    assert_eq!(
+        fixture.effects().await,
+        Effects {
+            homeserver,
+            records_published: 0,
+            inbox_deliveries: 0,
+            homeserver_requests: vec![SIGNUP_REQUEST.to_owned()],
+        }
+    );
+    assert!(
+        matches!(result, Err(PaykitSdkError::Transport { .. })),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_sign_up_signs_up_on_published_homeserver() {
+    let fixture = Fixture::start("503 Service Unavailable");
+    fixture.publish_identity_record(&requested_homeserver());
+
+    assert_sign_up_reaches_homeserver(&fixture, Some(z32(&requested_homeserver()))).await;
+}
+
+#[tokio::test]
+async fn test_sign_up_signs_up_identity_without_record() {
+    let fixture = Fixture::start("503 Service Unavailable");
+
+    assert_sign_up_reaches_homeserver(&fixture, None).await;
+}
+
+#[tokio::test]
+async fn test_sign_up_signs_up_identity_whose_record_names_no_homeserver() {
+    let fixture = Fixture::start("503 Service Unavailable");
+    fixture.publish_identity_record_without_homeserver();
+
+    assert_sign_up_reaches_homeserver(&fixture, None).await;
+}
+
+#[tokio::test]
+async fn test_sign_up_reports_rejected_signup_code() {
+    let fixture = Fixture::start_with_body("400 Bad Request", "Token required");
+
+    let result = sign_up_on_requested_homeserver(&fixture.bootstrap()).await;
+
+    assert_eq!(
+        fixture.effects().await,
+        Effects {
+            homeserver: None,
+            records_published: 0,
+            inbox_deliveries: 0,
+            homeserver_requests: vec![SIGNUP_REQUEST.to_owned()],
+        }
+    );
+    let error = result.err().unwrap();
+    assert!(error.is_signup_code_rejected(), "{error:?}");
+    assert_eq!(error.to_string(), "identity error: sign up Pubky identity");
 }

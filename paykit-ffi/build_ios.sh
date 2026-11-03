@@ -76,6 +76,7 @@ xcrun --sdk iphonesimulator swiftc \
     ./src/swift/PaymentConversionBindingsCompile.swift \
     ./src/swift/PaymentRequestPreparationBindingsCompile.swift \
     ./src/swift/PrivateMessageSchedulingBindingsCompile.swift \
+    ./src/swift/GrantObservationBindingsCompile.swift \
     || { echo "Failed to type-check generated Swift bindings"; exit 1; }
 
 echo "Cleaning up existing XCFramework..."

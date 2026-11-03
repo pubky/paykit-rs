@@ -230,12 +230,44 @@ async fn test_ffi_session_provider_caches_restores_and_revokes_rotated_bearer() 
         default_pubky_client_config(),
     );
 
+    // Observation must not manufacture a bearer on a cache miss. The original
+    // bootstrap bearer remains usable, unlike the ordinary restore path below.
+    let bootstrap_observer = paykit_sdk::PubkyGrantObserver::capture(&result.access.session)
+        .await
+        .unwrap();
+    assert!(adapter.capture_grant_observer(&public_key).await.is_err());
+    assert_eq!(
+        bootstrap_observer.observe().await,
+        paykit_sdk::PubkyGrantObservation::Active
+    );
+
+    let original_created_at = result
+        .access
+        .session
+        .as_grant()
+        .unwrap()
+        .session_info()
+        .await
+        .created_at;
+    // Mint/restore timestamps describe the bearer, while GET reports the grant
+    // row's original creation time. Cross a server timestamp boundary.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     let (first, second, third) = tokio::join!(
         adapter.load_session_access(),
         adapter.load_session_access(),
         adapter.load_session_access(),
     );
     let first = first.unwrap().expect("restored access should be available");
+    assert!(
+        first
+            .session
+            .as_grant()
+            .unwrap()
+            .session_info()
+            .await
+            .created_at
+            > original_created_at
+    );
     for access in [
         first.clone(),
         second.unwrap().unwrap(),
@@ -248,10 +280,33 @@ async fn test_ffi_session_provider_caches_restores_and_revokes_rotated_bearer() 
         assert!(access.session.revalidate().await.unwrap().is_some());
     }
 
-    pubky
+    let observer = adapter.capture_grant_observer(&public_key).await.unwrap();
+    assert_eq!(observer.public_key(), public_key);
+    assert_eq!(observer.client_id(), TEST_CLIENT_ID);
+    assert_eq!(
+        observer.observe().await,
+        paykit_sdk::PubkyGrantObservation::Active
+    );
+    assert!(first.session.revalidate().await.unwrap().is_some());
+    let other_owner = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    assert!(adapter.capture_grant_observer(&other_owner).await.is_err());
+
+    let replacement = pubky
         .restore_session(&session_secret)
         .await
         .expect("a second runtime should rotate the cached bearer");
+    let replacement_observer = paykit_sdk::PubkyGrantObserver::capture(&replacement)
+        .await
+        .unwrap();
+    assert_eq!(
+        observer.observe().await,
+        paykit_sdk::PubkyGrantObservation::Unknown
+    );
+    // A rejected old bearer must not refresh and invalidate the replacement.
+    assert_eq!(
+        replacement_observer.observe().await,
+        paykit_sdk::PubkyGrantObservation::Active
+    );
     adapter
         .revoke_session_access(&first)
         .await

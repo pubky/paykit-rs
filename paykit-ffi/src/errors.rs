@@ -87,11 +87,22 @@ pub enum PaykitFfiError {
 
 impl From<PaykitSdkError> for PaykitFfiError {
     fn from(err: PaykitSdkError) -> Self {
-        // Only the type of the cause selects this code; the cause is still dropped.
+        // Only the type of the cause selects these codes; the cause is still dropped.
         let policy_code = if err.is_retention_limit_reached() {
             "retention_limit_reached"
         } else {
             "policy_error"
+        };
+        let identity_code = if err.is_signup_code_rejected() {
+            "signup_code_rejected"
+        } else {
+            "identity_error"
+        };
+        // Only the type of the cause selects this code; the cause is still dropped.
+        let protocol_code = if err.is_message_too_large() {
+            "message_too_large"
+        } else {
+            "protocol_error"
         };
         match err {
             PaykitSdkError::SharedStateBusy { context, source } => {
@@ -118,7 +129,7 @@ impl From<PaykitSdkError> for PaykitFfiError {
             }
             PaykitSdkError::Identity { context, source } => {
                 callback_ffi_error(source.as_ref(), &context).unwrap_or_else(|| Self::Identity {
-                    code: "identity_error".into(),
+                    code: identity_code.into(),
                     context,
                 })
             }
@@ -136,7 +147,7 @@ impl From<PaykitSdkError> for PaykitFfiError {
             }
             PaykitSdkError::Protocol { context, source } => {
                 callback_ffi_error(source.as_ref(), &context).unwrap_or_else(|| Self::Protocol {
-                    code: "protocol_error".into(),
+                    code: protocol_code.into(),
                     context,
                 })
             }
@@ -239,6 +250,20 @@ fn callback_ffi_error(source: Option<&anyhow::Error>, context: &str) -> Option<P
             context,
         },
     })
+}
+
+// UNDECLARED CALLBACK ERRORS: UniFFI calls this when a platform callback throws
+// an error other than `PaykitFfiError` or returns a value it cannot lift.
+// Without it UniFFI panics inside the SDK and poisons the storage transaction
+// lock. `Storage` triggers no SDK retry or recovery path. `reason` holds the
+// platform error description, which can carry sensitive text, so it is dropped.
+impl From<uniffi::UnexpectedUniFFICallbackError> for PaykitFfiError {
+    fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        storage_error(
+            "unexpected_callback_error",
+            "platform callback failed with an undeclared error type",
+        )
+    }
 }
 
 pub(crate) fn ffi_error_to_sdk(err: PaykitFfiError, context: &'static str) -> PaykitSdkError {

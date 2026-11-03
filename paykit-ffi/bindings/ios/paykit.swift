@@ -1774,25 +1774,51 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * the current request for this Payment Request ID is a different stream
      * item, which happens when the counterparty was forgotten and sent the id
      * again.
+     *
+     * Success only queues acceptance; accounting callers must still reserve payment and
+     * obtain a fresh handoff.
      */
     func acceptPaymentRequest(counterparty: String, paymentRequestId: String, expectedProposalStreamItemId: UInt64) async throws  -> PaymentRequestRecord
 
     /**
      * Select and queue automatic Acceptance after SDK validation. This does not reserve or execute a payment.
      * The current app must first claim the Payment Request for execution.
+     * Read the clock once: `selection.trusted_time` and `checks.trusted_time` must be the
+     * same instant, or the call is refused.
      */
     func acceptPaymentRequestAutomatically(scope: PaymentRequestScope, selection: AllowanceSelectionInput, checks: PaymentExecutionChecks) async throws  -> AllowanceAssociationRecord
+
+    /**
+     * Accept up to `limit` pending proposals from one exact counterparty.
+     *
+     * Pending proposals are received proposals that make the local identity
+     * the Allowee, are `Proposed`, and have `Consistent` history. They are
+     * accepted oldest first, each with the same checks as `accept_allowance`,
+     * in one durable transaction, without deriving the link's history once
+     * per proposal. A link with too large a history returns
+     * `LinkHistoryTooLarge` without reading it.
+     */
+    func acceptPendingAllowanceProposals(counterparty: String, limit: UInt32) async throws  -> PendingAllowanceAcceptance
 
     /**
      * Return received Payment Requests that still need a payer response.
      *
      * A request's required Paykit App constrains the payee endpoint, not the
      * payer app that responds.
+     *
+     * Includes active recurring requests with no time filter: an ended Recurrence
+     * stays listed after `terms.recurrence.ends_at`, and releasing the execution
+     * claim does not remove it. Compare `ends_at` with trusted local time.
      */
     func actionableReceivedPaymentRequests() async throws  -> [PaymentRequestRecord]
 
     /**
      * Return accepted recurring Payment Requests across non-blocked counterparties.
+     *
+     * Covers both payer and payee roles with no time filter: an ended Recurrence
+     * stays listed after `terms.recurrence.ends_at`, and releasing the execution
+     * claim does not remove it. Compare `ends_at` with trusted local time to hide
+     * or label it.
      */
     func activeRecurringPaymentRequests() async throws  -> [PaymentRequestRecord]
 
@@ -1802,7 +1828,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func advanceLinkHandshake(counterparty: String) async throws  -> LinkedPeerHandshakeReport
 
     /**
-     * Return durable accounting, or None before complete wallet reconciliation.
+     * Return durable accounting, or None only when no accounting state exists.
+     *
+     * State that requires reconciliation is still returned, for example after restore, key
+     * rotation, or a manual Payment Request Acceptance, Rejection, or Cancellation made
+     * before any accounting existed.
      */
     func allowanceAccountingState() async throws  -> AllowanceAccountingState?
 
@@ -1822,12 +1852,36 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Recheck a preparation and durably issue a handoff before wallet execution. Use the returned attempt ID for executor idempotency.
-     * A Blocked value is a successful durable decision, including its updated watermark.
+     * A Blocked value is a successful result, not an error, and may include an updated
+     * watermark. Nothing is persisted while accounting is absent or requires reconciliation.
      */
     func beginPaymentExecution(attemptId: String, checks: PaymentExecutionChecks) async throws  -> PaymentAttemptDecision
 
     /**
      * Block a counterparty for local Paykit private workflows.
+     *
+     * Local policy; the counterparty is not notified. Clears Encrypted Link
+     * state, and fails with a `ConcurrentUpdate` error while another peer
+     * link operation, such as a send, is running.
+     *
+     * Queued outbound messages are parked as `RecoveryRequired`, not deleted.
+     * After `unblockPeer`, a fresh Encrypted Link Handshake requeues them
+     * unchanged as `Pending`, except messages whose Paykit App is then
+     * unregistered or retired, but does not send them: call
+     * `processOutboundPrivateMessages`. Event Messages keep their order; a
+     * newer Private Payment List can supersede a requeued one. No call
+     * withdraws parked work. While blocked, no new
+     * private message, including a Payment Proof, can be queued for the peer.
+     *
+     * Accepted Allowances and accepted Payment Requests are paused, not
+     * revoked, and authorize again after relink without new consent. While
+     * blocked, `endAllowance` is refused, reads that name this counterparty
+     * fail with a policy error, and reads across counterparties skip it. So
+     * first deliver pending Event Messages with
+     * `processOutboundPrivateMessages`, which is confirmed only when each
+     * message's id appears in a returned report's `sent`, and call
+     * `endAllowance` for authority the user wants gone. See "Blocking a
+     * peer" in the README.
      */
     func blockPeer(counterparty: String) async throws  -> LinkedPeerRecord
 
@@ -1837,11 +1891,31 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func cancelPaymentRequest(counterparty: String, paymentRequestId: String, reason: String?) async throws  -> PaymentRequestRecord
 
     /**
+     * Capture the original provider's existing live grant without authentication.
+     * The caller must already admit the original owner and recheck its lifecycle
+     * after this await. No cache restore, session import or remote write occurs.
+     */
+    func captureGrantLogout(expectedPublicKey: String) async throws  -> PubkyGrantLogout
+
+    /**
+     * Capture the admitted owner's existing live grant without authenticating.
+     *
+     * Reads the platform session callback and an existing native cached/live
+     * handle. A missing or changed cache fails rather than restoring credentials.
+     * Call before the original operation while its owner/generation is admitted,
+     * then check admission again before retaining the returned observer. The
+     * observer cannot recover an old attempt after process death.
+     */
+    func captureGrantObserver(expectedPublicKey: String) async throws  -> PubkyGrantObserver
+
+    /**
      * Atomically claim a received Payment Request and durably queue acceptance, without sending it.
      *
      * Pass the `proposal_stream_item_id` of the record whose terms were
      * approved, as it was displayed. On a mismatch nothing is claimed or
      * queued and the call fails with a policy error.
+     *
+     * Accounting callers must still reserve payment and obtain a fresh handoff.
      */
     func claimAndAcceptPaymentRequest(counterparty: String, paymentRequestId: String, expectedProposalStreamItemId: UInt64) async throws  -> PaymentRequestRecord
 
@@ -1870,6 +1944,10 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Queue an empty Private Payment List and process that counterparty's queue.
+     *
+     * Each call queues a fresh empty list, which supersedes older pending
+     * lists from this Paykit App. While the counterparty is Linked, an empty
+     * `failedToQueue` and `failedToDeliver` mean the empty list was sent.
      */
     func clearPrivatePaymentListAndProcessOutbound(counterparty: String) async throws  -> PrivatePaymentListDeliveryReport
 
@@ -1920,6 +1998,10 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Queue a proposal withdrawal or unilateral End for accepted authority.
+     *
+     * Fails with a policy error while the counterparty is Blocked and with a
+     * `RecoveryRequired` error while its Encrypted Link is not ready, so end
+     * Allowances before blocking a peer; see `blockPeer`.
      */
     func endAllowance(counterparty: String, allowanceId: String) async throws  -> AllowanceRecord
 
@@ -2035,6 +2117,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Return one Allowance from one exact authenticated Encrypted Link.
+     * Fails with a policy error while the counterparty is Blocked.
      */
     func getAllowance(counterparty: String, allowanceId: String) async throws  -> AllowanceRecord?
 
@@ -2088,11 +2171,18 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Return Allowances matching a local SDK filter, newest first by local record time (presentation order only).
+     *
+     * A counterparty filter naming a Blocked peer fails with a policy error
+     * when that peer has Allowance messages and returns an empty list
+     * otherwise. Without a counterparty filter, blocked peers are skipped.
+     * See `blockPeer`.
      */
     func listAllowances(filter: AllowanceFilter) async throws  -> [AllowanceRecord]
 
     /**
      * Return Payment Requests matching a local SDK filter.
+     * A filter naming a Blocked counterparty fails with a policy error; without
+     * a counterparty, blocked peers are skipped.
      */
     func listPaymentRequests(filter: PaymentRequestFilter) async throws  -> [PaymentRequestRecord]
 
@@ -2161,6 +2251,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Return Payment Requests involving one counterparty.
+     * Fails with a policy error while the counterparty is Blocked; see `blockPeer`.
      */
     func paymentRequestsWith(counterparty: String) async throws  -> [PaymentRequestRecord]
 
@@ -2224,6 +2315,12 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Queue a new Payment Request proposal and return local derived state.
      * The caller must establish peer support before including conversion or payment deadlines.
+     *
+     * The complete Event Message must fit 1000 bytes of canonical JSON
+     * (`metadata` is re-serialized, non-ASCII is written raw). An oversized
+     * message fails with code `message_too_large` (category protocol), whose
+     * context reports the byte counts, before link readiness checks and before
+     * anything is queued.
      */
     func proposePaymentRequest(counterparty: String, terms: PaymentRequestTerms) async throws  -> PaymentRequestRecord
 
@@ -2332,6 +2429,7 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Inspect inbound proposals from one counterparty.
      * Quotes and actionable state require the full view, which includes outbound acceptance.
+     * Fails with a policy error while the counterparty is Blocked.
      */
     func receivedPaymentRequestsFrom(counterparty: String) async throws  -> [PaymentRequestRecord]
 
@@ -2343,11 +2441,23 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * every manual and automatic payment path and its external idempotency
      * records. No Payment Proof, timeout, or missing local file establishes
      * nonpayment.
+     *
+     * After restoring an older backup, an empty or incomplete history re-enables payment of
+     * anything paid after the export and frees the Allowance capacity it used. This is a
+     * ledger-wide recovery step, not a routine call: it starts a new epoch and turns every
+     * Prepared attempt, including other apps' preparations, into Unknown.
+     * See `paykit-ffi/README.md` for the recipe.
      */
     func reconcileAllowanceAccounting(reconciliation: AllowanceAccountingReconciliation) async throws  -> AllowanceAccountingState
 
     /**
      * Record wallet-verified settlement. A timeout is Unknown; only definitive failure releases capacity.
+     *
+     * Report Failed only when the payment can never settle; anything less is Unknown, which can
+     * later become Succeeded or Failed. This method cannot change Failed later. Failed
+     * releases Allowance usage, reopens the occurrence for a new reservation, and can let the
+     * execution claim be released before a Payment Proof is sent. See `paykit-ffi/README.md`
+     * for what counts as definitive on each Rail.
      */
     func recordPaymentOutcome(report: PaymentOutcomeReport) async throws  -> PaymentAttemptRecord
 
@@ -2361,6 +2471,9 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * headers and corrupt replacement-generation state are rejected, not overwritten.
      *
      * The backup is sensitive plaintext; see `SdkBackupBlob`.
+     *
+     * Reconcile payment accounting with every payment made after the backup was exported,
+     * or those payments can be made again; see `reconcile_allowance_accounting`.
      */
     func recoverSharedStateFromBackup(backup: SdkBackupBlob, replacementKey: PaykitIdentitySecretKey) async throws  -> PaykitAppRegistry
 
@@ -2381,11 +2494,23 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Release this App's unresolved execution claim without rejecting the request.
+     *
+     * Releasing does not hide the record: it stays in the active recurring and
+     * actionable lists, available to every local App.
      */
     func releasePaymentRequestExecutionClaim(counterparty: String, paymentRequestId: String) async throws  -> PaymentRequestRecord
 
     /**
      * Remove a Contact Record when it has no public marker to clean up.
+     *
+     * Only the record is removed. The Encrypted Link, private stream intake,
+     * queued outbound messages, accepted Allowances, and the counterparty's
+     * copy of the last Private Payment List this identity sent are kept, and a
+     * later re-add reuses the same Encrypted Link. Removal restores the retained
+     * private stream item limit only when this identity has never queued or
+     * sent that counterparty a Payment Request, Payment Request Acceptance,
+     * Payment Proof, Allowance proposal, or Allowance Acceptance. To also end
+     * the Encrypted Link, see `removeContactsAndBlockPeers`.
      */
     func removeContact(publicKey: String) async throws  -> ContactRecord?
 
@@ -2393,8 +2518,29 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Block and remove contacts in one shared-state transaction.
      *
      * Returns removed records. Busy peers remain unchanged; contacts with public
-     * markers are blocked but retained. Callers enforce subscription policy and
-     * perform any best-effort withdrawal before this operation.
+     * markers are blocked but retained; keys without a Contact Record are
+     * skipped and not blocked. Blocking parks pending private work and pauses
+     * accepted Allowances and Payment Requests, as described on `blockPeer`.
+     * Callers enforce subscription policy and perform any best-effort
+     * withdrawal before this operation.
+     *
+     * To end a contact's Encrypted Link without keeping the peer blocked, call
+     * `endAllowance` and `cancelPaymentRequest` for what the user wants gone.
+     * While the peer is still Linked, call
+     * `clearPrivatePaymentListAndProcessOutbound` and continue only when its
+     * report's `failedToQueue` and `failedToDeliver` are both empty;
+     * otherwise call it again later, since each call queues a fresh empty
+     * list. Do not block until it reports success, because the block parks an
+     * unsent list. The queue is processed in order, so this also sends those
+     * messages first. Another runtime or device of the same Paykit App that
+     * queues a list for this peer can supersede the clear, which the report
+     * shows, so pause such writers during cleanup. Then
+     * persist the app's own record of intent to end the link with that peer,
+     * call this method and `unblockPeer`, and clear the record. On startup,
+     * unblock only peers that carry that record and are still Blocked. Never
+     * infer intent from a Blocked peer without a Contact Record: the block
+     * records no reason and is shared by every app and device on the
+     * identity. See "Profiles and Contacts" in the README.
      */
     func removeContactsAndBlockPeers(publicKeys: [String]) async throws  -> [ContactRecord]
 
@@ -2419,13 +2565,15 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Atomically reserve one occurrence. Ready with Prepared status is not an execution permit.
-     * A Blocked value is a successful durable decision, including its updated watermark.
+     * A Blocked value is a successful result, not an error, and may include an updated
+     * watermark. Nothing is persisted while accounting is absent or requires reconciliation.
      */
     func reserveAutomaticPayment(occurrence: PaymentOccurrence, expectedAssociationRevision: UInt64, checks: PaymentExecutionChecks) async throws  -> PaymentAttemptDecision
 
     /**
      * Reserve manual execution under the same semantic dedupe key without consuming Allowance capacity.
-     * A Blocked value is a successful durable decision, including its updated watermark.
+     * A Blocked value is a successful result, not an error, and may include an updated
+     * watermark. Nothing is persisted while accounting is absent or requires reconciliation.
      */
     func reserveManualPayment(occurrence: PaymentOccurrence, checks: PaymentExecutionChecks) async throws  -> PaymentAttemptDecision
 
@@ -2486,6 +2634,9 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * `link_policy` decides whether saved Encrypted Links resume or require a
      * fresh Encrypted Link Handshake. Resuming a backup that is not current
      * reuses a transport key and nonce.
+     *
+     * Reconcile payment accounting with every payment made after the backup was exported,
+     * or those payments can be made again; see `reconcile_allowance_accounting`.
      */
     func restoreBackupState(backup: SdkBackupBlob, linkPolicy: RestoredLinkPolicy) async throws  -> RestoreReport
 
@@ -2496,6 +2647,9 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * onboarding order (restore before `publish_paykit_app`), post-restore
      * reconciliation, and `link_policy` semantics. Resuming a backup that is
      * not current reuses a transport key and nonce.
+     *
+     * Reconcile payment accounting with every payment made after the backup was exported,
+     * or those payments can be made again; see `reconcile_allowance_accounting`.
      */
     func restoreBackupString(backup: String, linkPolicy: RestoredLinkPolicy) async throws  -> RestoreReport
 
@@ -2534,9 +2688,13 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
      * Save contacts and unblock selected blocked peers in one atomic transaction.
      *
      * For explicit contact additions or restoration, not label edits. Unblocked
-     * peers need a fresh Encrypted Link; other links remain unchanged. Ordering,
-     * duplicates and metadata follow `save_contacts`. Invalid input or an active
-     * lease on a selected blocked peer rejects the entire batch.
+     * peers need a fresh Encrypted Link Handshake. It requeues eligible parked
+     * private work, which the next `processOutboundPrivateMessages` sends, and
+     * accepted Allowances and Payment Requests authorize again without new
+     * consent, as described on `unblockPeer`. Other links remain
+     * unchanged. Ordering, duplicates and metadata follow `save_contacts`.
+     * Invalid input or an active lease on a selected blocked peer rejects the
+     * entire batch.
      */
     func saveContactsAndUnblockPeers(updates: [ContactUpdate]) async throws  -> [ContactRecord]
 
@@ -2569,6 +2727,12 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Queue a Payment Proof for an accepted Payment Request.
+     *
+     * The complete Event Message must fit 1000 bytes of canonical JSON
+     * (`proof` is re-serialized, non-ASCII is written raw). An oversized
+     * message fails with code `message_too_large` (category protocol), whose
+     * context reports the byte counts, before link readiness checks and before
+     * anything is queued. Measure with `paymentProofEventLen` before payment.
      */
     func submitPaymentProof(counterparty: String, paymentRequestId: String, proof: PaymentProofSubmission) async throws  -> PaymentRequestRecord
 
@@ -2595,6 +2759,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Publish current public receiving details and remove stale SDK-managed endpoints.
      *
+     * The adapter's answer is the complete desired set, removed as in
+     * `sync_public_endpoints_with_receiving_details`. Call this only after
+     * every receive backend the wallet publishes has loaded. If the adapter
+     * throws, the sync fails before any publication record or endpoint changes.
+     *
      * This writes SDK-managed state, so `restore_backup_state` is refused on
      * this state backing afterwards; restore a backup first.
      */
@@ -2603,6 +2772,11 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     /**
      * Publish explicit public receiving details and remove stale SDK-managed endpoints.
      *
+     * `receiving_details` is this Paykit App ID's complete desired public set,
+     * shared by every runtime on the identity. Every managed endpoint missing
+     * from it is removed; check `removed` and `failed` in the report. An empty
+     * list removes them all and keeps the App registered.
+     *
      * This writes SDK-managed state, so `restore_backup_state` is refused on
      * this state backing afterwards; restore a backup first.
      */
@@ -2610,6 +2784,17 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Remove a local peer block and return the peer to NotLinked.
+     *
+     * The counterparty is not notified, and old Encrypted Link state is not
+     * restored. When a fresh Encrypted Link Handshake completes, it requeues
+     * eligible work parked by `blockPeer`, which the next
+     * `processOutboundPrivateMessages` sends, and accepted Allowances and
+     * accepted Payment Requests authorize again without new consent. If the user
+     * wanted them gone, call `endAllowance` after relink, or confirm with the
+     * user before calling `acceptPaymentRequestAutomatically` for this
+     * counterparty again. Until that handshake,
+     * `pendingOutboundPrivateCounterparties` can list the peer and sending to
+     * it fails with a `RecoveryRequired` error.
      */
     func unblockPeer(counterparty: String) async throws  -> LinkedPeerRecord
 
@@ -2855,6 +3040,9 @@ open func acceptLinkWithPeer(counterparty: String)async throws  -> LinkedPeerHan
      * the current request for this Payment Request ID is a different stream
      * item, which happens when the counterparty was forgotten and sent the id
      * again.
+     *
+     * Success only queues acceptance; accounting callers must still reserve payment and
+     * obtain a fresh handoff.
      */
 open func acceptPaymentRequest(counterparty: String, paymentRequestId: String, expectedProposalStreamItemId: UInt64)async throws  -> PaymentRequestRecord  {
     return
@@ -2876,6 +3064,8 @@ open func acceptPaymentRequest(counterparty: String, paymentRequestId: String, e
     /**
      * Select and queue automatic Acceptance after SDK validation. This does not reserve or execute a payment.
      * The current app must first claim the Payment Request for execution.
+     * Read the clock once: `selection.trusted_time` and `checks.trusted_time` must be the
+     * same instant, or the call is refused.
      */
 open func acceptPaymentRequestAutomatically(scope: PaymentRequestScope, selection: AllowanceSelectionInput, checks: PaymentExecutionChecks)async throws  -> AllowanceAssociationRecord  {
     return
@@ -2895,10 +3085,41 @@ open func acceptPaymentRequestAutomatically(scope: PaymentRequestScope, selectio
 }
 
     /**
+     * Accept up to `limit` pending proposals from one exact counterparty.
+     *
+     * Pending proposals are received proposals that make the local identity
+     * the Allowee, are `Proposed`, and have `Consistent` history. They are
+     * accepted oldest first, each with the same checks as `accept_allowance`,
+     * in one durable transaction, without deriving the link's history once
+     * per proposal. A link with too large a history returns
+     * `LinkHistoryTooLarge` without reading it.
+     */
+open func acceptPendingAllowanceProposals(counterparty: String, limit: UInt32)async throws  -> PendingAllowanceAcceptance  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_accept_pending_allowance_proposals(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(counterparty),FfiConverterUInt32.lower(limit)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePendingAllowanceAcceptance_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
      * Return received Payment Requests that still need a payer response.
      *
      * A request's required Paykit App constrains the payee endpoint, not the
      * payer app that responds.
+     *
+     * Includes active recurring requests with no time filter: an ended Recurrence
+     * stays listed after `terms.recurrence.ends_at`, and releasing the execution
+     * claim does not remove it. Compare `ends_at` with trusted local time.
      */
 open func actionableReceivedPaymentRequests()async throws  -> [PaymentRequestRecord]  {
     return
@@ -2919,6 +3140,11 @@ open func actionableReceivedPaymentRequests()async throws  -> [PaymentRequestRec
 
     /**
      * Return accepted recurring Payment Requests across non-blocked counterparties.
+     *
+     * Covers both payer and payee roles with no time filter: an ended Recurrence
+     * stays listed after `terms.recurrence.ends_at`, and releasing the execution
+     * claim does not remove it. Compare `ends_at` with trusted local time to hide
+     * or label it.
      */
 open func activeRecurringPaymentRequests()async throws  -> [PaymentRequestRecord]  {
     return
@@ -2958,7 +3184,11 @@ open func advanceLinkHandshake(counterparty: String)async throws  -> LinkedPeerH
 }
 
     /**
-     * Return durable accounting, or None before complete wallet reconciliation.
+     * Return durable accounting, or None only when no accounting state exists.
+     *
+     * State that requires reconciliation is still returned, for example after restore, key
+     * rotation, or a manual Payment Request Acceptance, Rejection, or Cancellation made
+     * before any accounting existed.
      */
 open func allowanceAccountingState()async throws  -> AllowanceAccountingState?  {
     return
@@ -3023,7 +3253,8 @@ open func backupStateRevision()async throws  -> String  {
 
     /**
      * Recheck a preparation and durably issue a handoff before wallet execution. Use the returned attempt ID for executor idempotency.
-     * A Blocked value is a successful durable decision, including its updated watermark.
+     * A Blocked value is a successful result, not an error, and may include an updated
+     * watermark. Nothing is persisted while accounting is absent or requires reconciliation.
      */
 open func beginPaymentExecution(attemptId: String, checks: PaymentExecutionChecks)async throws  -> PaymentAttemptDecision  {
     return
@@ -3044,6 +3275,29 @@ open func beginPaymentExecution(attemptId: String, checks: PaymentExecutionCheck
 
     /**
      * Block a counterparty for local Paykit private workflows.
+     *
+     * Local policy; the counterparty is not notified. Clears Encrypted Link
+     * state, and fails with a `ConcurrentUpdate` error while another peer
+     * link operation, such as a send, is running.
+     *
+     * Queued outbound messages are parked as `RecoveryRequired`, not deleted.
+     * After `unblockPeer`, a fresh Encrypted Link Handshake requeues them
+     * unchanged as `Pending`, except messages whose Paykit App is then
+     * unregistered or retired, but does not send them: call
+     * `processOutboundPrivateMessages`. Event Messages keep their order; a
+     * newer Private Payment List can supersede a requeued one. No call
+     * withdraws parked work. While blocked, no new
+     * private message, including a Payment Proof, can be queued for the peer.
+     *
+     * Accepted Allowances and accepted Payment Requests are paused, not
+     * revoked, and authorize again after relink without new consent. While
+     * blocked, `endAllowance` is refused, reads that name this counterparty
+     * fail with a policy error, and reads across counterparties skip it. So
+     * first deliver pending Event Messages with
+     * `processOutboundPrivateMessages`, which is confirmed only when each
+     * message's id appears in a returned report's `sent`, and call
+     * `endAllowance` for authority the user wants gone. See "Blocking a
+     * peer" in the README.
      */
 open func blockPeer(counterparty: String)async throws  -> LinkedPeerRecord  {
     return
@@ -3083,11 +3337,61 @@ open func cancelPaymentRequest(counterparty: String, paymentRequestId: String, r
 }
 
     /**
+     * Capture the original provider's existing live grant without authentication.
+     * The caller must already admit the original owner and recheck its lifecycle
+     * after this await. No cache restore, session import or remote write occurs.
+     */
+open func captureGrantLogout(expectedPublicKey: String)async throws  -> PubkyGrantLogout  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_capture_grant_logout(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(expectedPublicKey)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_pointer,
+            completeFunc: ffi_paykit_rust_future_complete_pointer,
+            freeFunc: ffi_paykit_rust_future_free_pointer,
+            liftFunc: FfiConverterTypePubkyGrantLogout_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Capture the admitted owner's existing live grant without authenticating.
+     *
+     * Reads the platform session callback and an existing native cached/live
+     * handle. A missing or changed cache fails rather than restoring credentials.
+     * Call before the original operation while its owner/generation is admitted,
+     * then check admission again before retaining the returned observer. The
+     * observer cannot recover an old attempt after process death.
+     */
+open func captureGrantObserver(expectedPublicKey: String)async throws  -> PubkyGrantObserver  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_capture_grant_observer(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(expectedPublicKey)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_pointer,
+            completeFunc: ffi_paykit_rust_future_complete_pointer,
+            freeFunc: ffi_paykit_rust_future_free_pointer,
+            liftFunc: FfiConverterTypePubkyGrantObserver_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
      * Atomically claim a received Payment Request and durably queue acceptance, without sending it.
      *
      * Pass the `proposal_stream_item_id` of the record whose terms were
      * approved, as it was displayed. On a mismatch nothing is claimed or
      * queued and the call fails with a policy error.
+     *
+     * Accounting callers must still reserve payment and obtain a fresh handoff.
      */
 open func claimAndAcceptPaymentRequest(counterparty: String, paymentRequestId: String, expectedProposalStreamItemId: UInt64)async throws  -> PaymentRequestRecord  {
     return
@@ -3176,6 +3480,10 @@ open func clearPrivatePaymentList(counterparty: String)async throws  -> QueuedPr
 
     /**
      * Queue an empty Private Payment List and process that counterparty's queue.
+     *
+     * Each call queues a fresh empty list, which supersedes older pending
+     * lists from this Paykit App. While the counterparty is Linked, an empty
+     * `failedToQueue` and `failedToDeliver` mean the empty list was sent.
      */
 open func clearPrivatePaymentListAndProcessOutbound(counterparty: String)async throws  -> PrivatePaymentListDeliveryReport  {
     return
@@ -3366,6 +3674,10 @@ open func encryptedLinkRecoveryMarkerStatus(counterparty: String)async throws  -
 
     /**
      * Queue a proposal withdrawal or unilateral End for accepted authority.
+     *
+     * Fails with a policy error while the counterparty is Blocked and with a
+     * `RecoveryRequired` error while its Encrypted Link is not ready, so end
+     * Allowances before blocking a peer; see `blockPeer`.
      */
 open func endAllowance(counterparty: String, allowanceId: String)async throws  -> AllowanceRecord  {
     return
@@ -3706,6 +4018,7 @@ open func forgetSessionAccess()async throws  -> IdentityStatus  {
 
     /**
      * Return one Allowance from one exact authenticated Encrypted Link.
+     * Fails with a policy error while the counterparty is Blocked.
      */
 open func getAllowance(counterparty: String, allowanceId: String)async throws  -> AllowanceRecord?  {
     return
@@ -3894,6 +4207,11 @@ open func linkedPeers()async throws  -> [LinkedPeerRecord]  {
 
     /**
      * Return Allowances matching a local SDK filter, newest first by local record time (presentation order only).
+     *
+     * A counterparty filter naming a Blocked peer fails with a policy error
+     * when that peer has Allowance messages and returns an empty list
+     * otherwise. Without a counterparty filter, blocked peers are skipped.
+     * See `blockPeer`.
      */
 open func listAllowances(filter: AllowanceFilter)async throws  -> [AllowanceRecord]  {
     return
@@ -3914,6 +4232,8 @@ open func listAllowances(filter: AllowanceFilter)async throws  -> [AllowanceReco
 
     /**
      * Return Payment Requests matching a local SDK filter.
+     * A filter naming a Blocked counterparty fails with a policy error; without
+     * a counterparty, blocked peers are skipped.
      */
 open func listPaymentRequests(filter: PaymentRequestFilter)async throws  -> [PaymentRequestRecord]  {
     return
@@ -4122,6 +4442,7 @@ open func paymentRequests()async throws  -> [PaymentRequestRecord]  {
 
     /**
      * Return Payment Requests involving one counterparty.
+     * Fails with a policy error while the counterparty is Blocked; see `blockPeer`.
      */
 open func paymentRequestsWith(counterparty: String)async throws  -> [PaymentRequestRecord]  {
     return
@@ -4335,6 +4656,12 @@ open func proposeAllowance(counterparty: String, localRole: AllowanceLocalRole, 
     /**
      * Queue a new Payment Request proposal and return local derived state.
      * The caller must establish peer support before including conversion or payment deadlines.
+     *
+     * The complete Event Message must fit 1000 bytes of canonical JSON
+     * (`metadata` is re-serialized, non-ASCII is written raw). An oversized
+     * message fails with code `message_too_large` (category protocol), whose
+     * context reports the byte counts, before link readiness checks and before
+     * anything is queued.
      */
 open func proposePaymentRequest(counterparty: String, terms: PaymentRequestTerms)async throws  -> PaymentRequestRecord  {
     return
@@ -4713,6 +5040,7 @@ open func receivePrivateMessagesFromLinkedPeers()async throws  -> [PrivateStream
     /**
      * Inspect inbound proposals from one counterparty.
      * Quotes and actionable state require the full view, which includes outbound acceptance.
+     * Fails with a policy error while the counterparty is Blocked.
      */
 open func receivedPaymentRequestsFrom(counterparty: String)async throws  -> [PaymentRequestRecord]  {
     return
@@ -4739,6 +5067,12 @@ open func receivedPaymentRequestsFrom(counterparty: String)async throws  -> [Pay
      * every manual and automatic payment path and its external idempotency
      * records. No Payment Proof, timeout, or missing local file establishes
      * nonpayment.
+     *
+     * After restoring an older backup, an empty or incomplete history re-enables payment of
+     * anything paid after the export and frees the Allowance capacity it used. This is a
+     * ledger-wide recovery step, not a routine call: it starts a new epoch and turns every
+     * Prepared attempt, including other apps' preparations, into Unknown.
+     * See `paykit-ffi/README.md` for the recipe.
      */
 open func reconcileAllowanceAccounting(reconciliation: AllowanceAccountingReconciliation)async throws  -> AllowanceAccountingState  {
     return
@@ -4759,6 +5093,12 @@ open func reconcileAllowanceAccounting(reconciliation: AllowanceAccountingReconc
 
     /**
      * Record wallet-verified settlement. A timeout is Unknown; only definitive failure releases capacity.
+     *
+     * Report Failed only when the payment can never settle; anything less is Unknown, which can
+     * later become Succeeded or Failed. This method cannot change Failed later. Failed
+     * releases Allowance usage, reopens the occurrence for a new reservation, and can let the
+     * execution claim be released before a Payment Proof is sent. See `paykit-ffi/README.md`
+     * for what counts as definitive on each Rail.
      */
 open func recordPaymentOutcome(report: PaymentOutcomeReport)async throws  -> PaymentAttemptRecord  {
     return
@@ -4787,6 +5127,9 @@ open func recordPaymentOutcome(report: PaymentOutcomeReport)async throws  -> Pay
      * headers and corrupt replacement-generation state are rejected, not overwritten.
      *
      * The backup is sensitive plaintext; see `SdkBackupBlob`.
+     *
+     * Reconcile payment accounting with every payment made after the backup was exported,
+     * or those payments can be made again; see `reconcile_allowance_accounting`.
      */
 open func recoverSharedStateFromBackup(backup: SdkBackupBlob, replacementKey: PaykitIdentitySecretKey)async throws  -> PaykitAppRegistry  {
     return
@@ -4867,6 +5210,9 @@ open func rejectPaymentRequest(counterparty: String, paymentRequestId: String, r
 
     /**
      * Release this App's unresolved execution claim without rejecting the request.
+     *
+     * Releasing does not hide the record: it stays in the active recurring and
+     * actionable lists, available to every local App.
      */
 open func releasePaymentRequestExecutionClaim(counterparty: String, paymentRequestId: String)async throws  -> PaymentRequestRecord  {
     return
@@ -4887,6 +5233,15 @@ open func releasePaymentRequestExecutionClaim(counterparty: String, paymentReque
 
     /**
      * Remove a Contact Record when it has no public marker to clean up.
+     *
+     * Only the record is removed. The Encrypted Link, private stream intake,
+     * queued outbound messages, accepted Allowances, and the counterparty's
+     * copy of the last Private Payment List this identity sent are kept, and a
+     * later re-add reuses the same Encrypted Link. Removal restores the retained
+     * private stream item limit only when this identity has never queued or
+     * sent that counterparty a Payment Request, Payment Request Acceptance,
+     * Payment Proof, Allowance proposal, or Allowance Acceptance. To also end
+     * the Encrypted Link, see `removeContactsAndBlockPeers`.
      */
 open func removeContact(publicKey: String)async throws  -> ContactRecord?  {
     return
@@ -4909,8 +5264,29 @@ open func removeContact(publicKey: String)async throws  -> ContactRecord?  {
      * Block and remove contacts in one shared-state transaction.
      *
      * Returns removed records. Busy peers remain unchanged; contacts with public
-     * markers are blocked but retained. Callers enforce subscription policy and
-     * perform any best-effort withdrawal before this operation.
+     * markers are blocked but retained; keys without a Contact Record are
+     * skipped and not blocked. Blocking parks pending private work and pauses
+     * accepted Allowances and Payment Requests, as described on `blockPeer`.
+     * Callers enforce subscription policy and perform any best-effort
+     * withdrawal before this operation.
+     *
+     * To end a contact's Encrypted Link without keeping the peer blocked, call
+     * `endAllowance` and `cancelPaymentRequest` for what the user wants gone.
+     * While the peer is still Linked, call
+     * `clearPrivatePaymentListAndProcessOutbound` and continue only when its
+     * report's `failedToQueue` and `failedToDeliver` are both empty;
+     * otherwise call it again later, since each call queues a fresh empty
+     * list. Do not block until it reports success, because the block parks an
+     * unsent list. The queue is processed in order, so this also sends those
+     * messages first. Another runtime or device of the same Paykit App that
+     * queues a list for this peer can supersede the clear, which the report
+     * shows, so pause such writers during cleanup. Then
+     * persist the app's own record of intent to end the link with that peer,
+     * call this method and `unblockPeer`, and clear the record. On startup,
+     * unblock only peers that carry that record and are still Blocked. Never
+     * infer intent from a Blocked peer without a Contact Record: the block
+     * records no reason and is shared by every app and device on the
+     * identity. See "Profiles and Contacts" in the README.
      */
 open func removeContactsAndBlockPeers(publicKeys: [String])async throws  -> [ContactRecord]  {
     return
@@ -4995,7 +5371,8 @@ open func removePublicContact(publicKey: String)async throws  -> ContactRecord? 
 
     /**
      * Atomically reserve one occurrence. Ready with Prepared status is not an execution permit.
-     * A Blocked value is a successful durable decision, including its updated watermark.
+     * A Blocked value is a successful result, not an error, and may include an updated
+     * watermark. Nothing is persisted while accounting is absent or requires reconciliation.
      */
 open func reserveAutomaticPayment(occurrence: PaymentOccurrence, expectedAssociationRevision: UInt64, checks: PaymentExecutionChecks)async throws  -> PaymentAttemptDecision  {
     return
@@ -5016,7 +5393,8 @@ open func reserveAutomaticPayment(occurrence: PaymentOccurrence, expectedAssocia
 
     /**
      * Reserve manual execution under the same semantic dedupe key without consuming Allowance capacity.
-     * A Blocked value is a successful durable decision, including its updated watermark.
+     * A Blocked value is a successful result, not an error, and may include an updated
+     * watermark. Nothing is persisted while accounting is absent or requires reconciliation.
      */
 open func reserveManualPayment(occurrence: PaymentOccurrence, checks: PaymentExecutionChecks)async throws  -> PaymentAttemptDecision  {
     return
@@ -5167,6 +5545,9 @@ open func resolvePublicPaymentRequest(counterparty: String, paymentRequestId: St
      * `link_policy` decides whether saved Encrypted Links resume or require a
      * fresh Encrypted Link Handshake. Resuming a backup that is not current
      * reuses a transport key and nonce.
+     *
+     * Reconcile payment accounting with every payment made after the backup was exported,
+     * or those payments can be made again; see `reconcile_allowance_accounting`.
      */
 open func restoreBackupState(backup: SdkBackupBlob, linkPolicy: RestoredLinkPolicy)async throws  -> RestoreReport  {
     return
@@ -5192,6 +5573,9 @@ open func restoreBackupState(backup: SdkBackupBlob, linkPolicy: RestoredLinkPoli
      * onboarding order (restore before `publish_paykit_app`), post-restore
      * reconciliation, and `link_policy` semantics. Resuming a backup that is
      * not current reuses a transport key and nonce.
+     *
+     * Reconcile payment accounting with every payment made after the backup was exported,
+     * or those payments can be made again; see `reconcile_allowance_accounting`.
      */
 open func restoreBackupString(backup: String, linkPolicy: RestoredLinkPolicy)async throws  -> RestoreReport  {
     return
@@ -5305,9 +5689,13 @@ open func saveContacts(updates: [ContactUpdate])async throws  -> [ContactRecord]
      * Save contacts and unblock selected blocked peers in one atomic transaction.
      *
      * For explicit contact additions or restoration, not label edits. Unblocked
-     * peers need a fresh Encrypted Link; other links remain unchanged. Ordering,
-     * duplicates and metadata follow `save_contacts`. Invalid input or an active
-     * lease on a selected blocked peer rejects the entire batch.
+     * peers need a fresh Encrypted Link Handshake. It requeues eligible parked
+     * private work, which the next `processOutboundPrivateMessages` sends, and
+     * accepted Allowances and Payment Requests authorize again without new
+     * consent, as described on `unblockPeer`. Other links remain
+     * unchanged. Ordering, duplicates and metadata follow `save_contacts`.
+     * Invalid input or an active lease on a selected blocked peer rejects the
+     * entire batch.
      */
 open func saveContactsAndUnblockPeers(updates: [ContactUpdate])async throws  -> [ContactRecord]  {
     return
@@ -5420,6 +5808,12 @@ open func stateRevision()throws  -> String?  {
 
     /**
      * Queue a Payment Proof for an accepted Payment Request.
+     *
+     * The complete Event Message must fit 1000 bytes of canonical JSON
+     * (`proof` is re-serialized, non-ASCII is written raw). An oversized
+     * message fails with code `message_too_large` (category protocol), whose
+     * context reports the byte counts, before link readiness checks and before
+     * anything is queued. Measure with `paymentProofEventLen` before payment.
      */
 open func submitPaymentProof(counterparty: String, paymentRequestId: String, proof: PaymentProofSubmission)async throws  -> PaymentRequestRecord  {
     return
@@ -5521,6 +5915,11 @@ open func syncPublicContactMarkers()async throws  -> [ContactRecord]  {
     /**
      * Publish current public receiving details and remove stale SDK-managed endpoints.
      *
+     * The adapter's answer is the complete desired set, removed as in
+     * `sync_public_endpoints_with_receiving_details`. Call this only after
+     * every receive backend the wallet publishes has loaded. If the adapter
+     * throws, the sync fails before any publication record or endpoint changes.
+     *
      * This writes SDK-managed state, so `restore_backup_state` is refused on
      * this state backing afterwards; restore a backup first.
      */
@@ -5544,6 +5943,11 @@ open func syncPublicEndpoints()async throws  -> EndpointSyncReport  {
     /**
      * Publish explicit public receiving details and remove stale SDK-managed endpoints.
      *
+     * `receiving_details` is this Paykit App ID's complete desired public set,
+     * shared by every runtime on the identity. Every managed endpoint missing
+     * from it is removed; check `removed` and `failed` in the report. An empty
+     * list removes them all and keeps the App registered.
+     *
      * This writes SDK-managed state, so `restore_backup_state` is refused on
      * this state backing afterwards; restore a backup first.
      */
@@ -5566,6 +5970,17 @@ open func syncPublicEndpointsWithReceivingDetails(receivingDetails: [PublicRecei
 
     /**
      * Remove a local peer block and return the peer to NotLinked.
+     *
+     * The counterparty is not notified, and old Encrypted Link state is not
+     * restored. When a fresh Encrypted Link Handshake completes, it requeues
+     * eligible work parked by `blockPeer`, which the next
+     * `processOutboundPrivateMessages` sends, and accepted Allowances and
+     * accepted Payment Requests authorize again without new consent. If the user
+     * wanted them gone, call `endAllowance` after relink, or confirm with the
+     * user before calling `acceptPaymentRequestAutomatically` for this
+     * counterparty again. Until that handshake,
+     * `pendingOutboundPrivateCounterparties` can list the peer and sending to
+     * it fails with a `RecoveryRequired` error.
      */
 open func unblockPeer(counterparty: String)async throws  -> LinkedPeerRecord  {
     return
@@ -6656,6 +7071,568 @@ public func FfiConverterTypePubkyAuthRequestState_lower(_ value: PubkyAuthReques
 
 
 /**
+ * Live original grant/signer retained with the caller's original removal intent.
+ *
+ * Capture before confirmation. The app must revoke admission when its original
+ * owner/lifecycle ends, including same-seed replacement, and drain its active
+ * operation before installing replacement credentials. This object never
+ * restores credentials or clears storage. Restart offers local recovery only.
+ */
+public protocol PubkyGrantLogoutProtocol: AnyObject, Sendable {
+
+    /**
+     * Keep known remote completion even if app storage cleanup fails or is cancelled.
+     * This never implies that local credentials, watermarks or markers were cleared.
+     */
+    func acknowledged()  -> PubkyGrantLogoutReceipt?
+
+    /**
+     * Original non-secret binding to retain with the confirmation and marker.
+     */
+    func binding()  -> PubkyGrantLogoutReceipt
+
+    /**
+     * Prepare only after fresh confirmation of this original intent.
+     *
+     * This reads current proof-logout support without mutating remote state.
+     * Same-grant bearer refresh is permitted. Replacement bundles and ended
+     * admission are refused. A failed or lost response does not authorize an
+     * automatic retry or replay of endpoint/private-list cleanup.
+     */
+    func prepareAttempt() async throws  -> PubkyGrantLogoutAttempt
+
+    /**
+     * Permanently stop this handle's admission and interrupt active waits.
+     * Cancellation after dispatch does not prove that the server did not commit.
+     */
+    func revokeAdmission()
+
+}
+/**
+ * Live original grant/signer retained with the caller's original removal intent.
+ *
+ * Capture before confirmation. The app must revoke admission when its original
+ * owner/lifecycle ends, including same-seed replacement, and drain its active
+ * operation before installing replacement credentials. This object never
+ * restores credentials or clears storage. Restart offers local recovery only.
+ */
+open class PubkyGrantLogout: PubkyGrantLogoutProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffipubkygrantlogout(self.pointer, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffipubkygrantlogout(pointer, $0) }
+    }
+
+
+
+
+    /**
+     * Keep known remote completion even if app storage cleanup fails or is cancelled.
+     * This never implies that local credentials, watermarks or markers were cleared.
+     */
+open func acknowledged() -> PubkyGrantLogoutReceipt?  {
+    return try!  FfiConverterOptionTypePubkyGrantLogoutReceipt.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipubkygrantlogout_acknowledged(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Original non-secret binding to retain with the confirmation and marker.
+     */
+open func binding() -> PubkyGrantLogoutReceipt  {
+    return try!  FfiConverterTypePubkyGrantLogoutReceipt_lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipubkygrantlogout_binding(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Prepare only after fresh confirmation of this original intent.
+     *
+     * This reads current proof-logout support without mutating remote state.
+     * Same-grant bearer refresh is permitted. Replacement bundles and ended
+     * admission are refused. A failed or lost response does not authorize an
+     * automatic retry or replay of endpoint/private-list cleanup.
+     */
+open func prepareAttempt()async throws  -> PubkyGrantLogoutAttempt  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipubkygrantlogout_prepare_attempt(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_pointer,
+            completeFunc: ffi_paykit_rust_future_complete_pointer,
+            freeFunc: ffi_paykit_rust_future_free_pointer,
+            liftFunc: FfiConverterTypePubkyGrantLogoutAttempt_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Permanently stop this handle's admission and interrupt active waits.
+     * Cancellation after dispatch does not prove that the server did not commit.
+     */
+open func revokeAdmission()  {try! rustCall() {
+    uniffi_paykit_fn_method_ffipubkygrantlogout_revoke_admission(self.uniffiClonePointer(),$0
+    )
+}
+}
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePubkyGrantLogout: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = PubkyGrantLogout
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> PubkyGrantLogout {
+        return PubkyGrantLogout(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: PubkyGrantLogout) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyGrantLogout {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: PubkyGrantLogout, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantLogout_lift(_ pointer: UnsafeMutableRawPointer) throws -> PubkyGrantLogout {
+    return try FfiConverterTypePubkyGrantLogout.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantLogout_lower(_ value: PubkyGrantLogout) -> UnsafeMutableRawPointer {
+    return FfiConverterTypePubkyGrantLogout.lower(value)
+}
+
+
+
+
+
+
+/**
+ * A single confirmed proof-logout attempt, consumed before any execution await.
+ */
+public protocol PubkyGrantLogoutAttemptProtocol: AnyObject, Sendable {
+
+    /**
+     * Recheck original provider/admission, then execute this attempt once.
+     * No platform erase callback is invoked, even after remote acknowledgement.
+     */
+    func execute() async throws  -> PubkyGrantLogoutReceipt
+
+}
+/**
+ * A single confirmed proof-logout attempt, consumed before any execution await.
+ */
+open class PubkyGrantLogoutAttempt: PubkyGrantLogoutAttemptProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffipubkygrantlogoutattempt(self.pointer, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffipubkygrantlogoutattempt(pointer, $0) }
+    }
+
+
+
+
+    /**
+     * Recheck original provider/admission, then execute this attempt once.
+     * No platform erase callback is invoked, even after remote acknowledgement.
+     */
+open func execute()async throws  -> PubkyGrantLogoutReceipt  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipubkygrantlogoutattempt_execute(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePubkyGrantLogoutReceipt_lift,
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePubkyGrantLogoutAttempt: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = PubkyGrantLogoutAttempt
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> PubkyGrantLogoutAttempt {
+        return PubkyGrantLogoutAttempt(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: PubkyGrantLogoutAttempt) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyGrantLogoutAttempt {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: PubkyGrantLogoutAttempt, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantLogoutAttempt_lift(_ pointer: UnsafeMutableRawPointer) throws -> PubkyGrantLogoutAttempt {
+    return try FfiConverterTypePubkyGrantLogoutAttempt.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantLogoutAttempt_lower(_ value: PubkyGrantLogoutAttempt) -> UnsafeMutableRawPointer {
+    return FfiConverterTypePubkyGrantLogoutAttempt.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Live-only original-grant observer. Contains a non-exportable secret bearer.
+ */
+public protocol PubkyGrantObserverProtocol: AnyObject, Sendable {
+
+    /**
+     * Original client identifier.
+     */
+    func clientId()  -> String
+
+    /**
+     * Original grant identifier, not a bearer or local-session generation.
+     * Restoring or refreshing the same grant can retain this ID while replacing
+     * its bearer. A newly issued replacement grant has a different ID.
+     */
+    func grantId()  -> String
+
+    /**
+     * Observe without a provider callback, session restore/refresh or storage.
+     *
+     * Retain this handle with the original owner/attempt, not a replacement
+     * session. A positive result is not a lease or a completed cleanup receipt.
+     * Recheck operation admission and require fresh confirmation before any
+     * subsequent mutation. Unknown results do not authorize remote retry.
+     */
+    func observe() async  -> PubkyGrantObservation
+
+    /**
+     * Original grant owner, in the app's public-key representation.
+     */
+    func publicKey()  -> String
+
+}
+/**
+ * Live-only original-grant observer. Contains a non-exportable secret bearer.
+ */
+open class PubkyGrantObserver: PubkyGrantObserverProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_paykit_fn_clone_ffipubkygrantobserver(self.pointer, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_paykit_fn_free_ffipubkygrantobserver(pointer, $0) }
+    }
+
+
+
+
+    /**
+     * Original client identifier.
+     */
+open func clientId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipubkygrantobserver_client_id(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Original grant identifier, not a bearer or local-session generation.
+     * Restoring or refreshing the same grant can retain this ID while replacing
+     * its bearer. A newly issued replacement grant has a different ID.
+     */
+open func grantId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipubkygrantobserver_grant_id(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Observe without a provider callback, session restore/refresh or storage.
+     *
+     * Retain this handle with the original owner/attempt, not a replacement
+     * session. A positive result is not a lease or a completed cleanup receipt.
+     * Recheck operation admission and require fresh confirmation before any
+     * subsequent mutation. Unknown results do not authorize remote retry.
+     */
+open func observe()async  -> PubkyGrantObservation  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipubkygrantobserver_observe(
+                    self.uniffiClonePointer()
+
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_rust_buffer,
+            completeFunc: ffi_paykit_rust_future_complete_rust_buffer,
+            freeFunc: ffi_paykit_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypePubkyGrantObservation_lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * Original grant owner, in the app's public-key representation.
+     */
+open func publicKey() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipubkygrantobserver_public_key(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePubkyGrantObserver: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = PubkyGrantObserver
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> PubkyGrantObserver {
+        return PubkyGrantObserver(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: PubkyGrantObserver) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyGrantObserver {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: PubkyGrantObserver, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantObserver_lift(_ pointer: UnsafeMutableRawPointer) throws -> PubkyGrantObserver {
+    return try FfiConverterTypePubkyGrantObserver.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantObserver_lower(_ value: PubkyGrantObserver) -> UnsafeMutableRawPointer {
+    return FfiConverterTypePubkyGrantObserver.lower(value)
+}
+
+
+
+
+
+
+/**
  * Local Pubky secret key bytes supplied by platform secure storage.
  */
 public protocol PubkyLocalSecretKeyProtocol: AnyObject, Sendable {
@@ -6841,6 +7818,16 @@ public protocol PubkySessionAccessProtocol: AnyObject, Sendable {
      */
     func exportSessionSecret()  -> String
 
+    /**
+     * Attach a Paykit Identity Secret without reconstructing the Pubky session.
+     *
+     * The original grant, client configuration and any existing live session
+     * remain unchanged. Access created from secure storage remains non-live;
+     * this method never restores, refreshes or authenticates it. Callers must
+     * end previously captured logout admission before replacing key material.
+     */
+    func withPaykitIdentitySecretKey(key: PaykitIdentitySecretKey)  -> PubkySessionAccess
+
 }
 /**
  * Live Pubky access material supplied by platform session storage.
@@ -6953,6 +7940,22 @@ open func exportPaykitIdentitySecretKey() -> PaykitIdentitySecretKey?  {
 open func exportSessionSecret() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
     uniffi_paykit_fn_method_ffipubkysessionaccess_export_session_secret(self.uniffiClonePointer(),$0
+    )
+})
+}
+
+    /**
+     * Attach a Paykit Identity Secret without reconstructing the Pubky session.
+     *
+     * The original grant, client configuration and any existing live session
+     * remain unchanged. Access created from secure storage remains non-live;
+     * this method never restores, refreshes or authenticates it. Callers must
+     * end previously captured logout admission before replacing key material.
+     */
+open func withPaykitIdentitySecretKey(key: PaykitIdentitySecretKey) -> PubkySessionAccess  {
+    return try!  FfiConverterTypePubkySessionAccess_lift(try! rustCall() {
+    uniffi_paykit_fn_method_ffipubkysessionaccess_with_paykit_identity_secret_key(self.uniffiClonePointer(),
+        FfiConverterTypePaykitIdentitySecretKey_lower(key),$0
     )
 })
 }
@@ -7086,14 +8089,39 @@ public protocol PubkySessionBootstrapProtocol: AnyObject, Sendable {
 
     /**
      * Sign in with a local Pubky secret key and return session access material.
+     *
+     * A `transport` error from completing the grant exchange means retry
+     * later. A sign-in failure does not show whether an account exists, so
+     * never fall back to `sign_up` automatically. To tell the cases apart,
+     * call `republish_identity` with the identity's public key: `true` means
+     * retry sign-in; `false` means offer a restore through `sign_up` with a
+     * homeserver the app already trusts; an error means retry later. That
+     * call also rebroadcasts the record it finds.
      */
     func signIn(localSecretKey: PubkyLocalSecretKey, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
     /**
      * Sign up on a homeserver and return session access material.
      *
-     * Signing up an identity that already has an account on that homeserver
-     * publishes its homeserver record again.
+     * The identity's homeserver record is looked up first. If it names a
+     * different homeserver, this fails with a policy error before anything
+     * is sent to the homeserver, so no signup code is spent; call `sign_in`
+     * instead. If it names this homeserver, an identity that already has an
+     * account here has its homeserver record published again. If no record
+     * is found, or the record names no homeserver, the identity is signed up
+     * here. A lookup error, or a record whose homeserver is not a valid
+     * public key, fails the sign-up. A record that no reachable cache holds
+     * counts as none.
+     *
+     * A signup code is spent only when the homeserver creates the account.
+     * After any failure, retrying with the same identity, the same trusted
+     * homeserver and the same signup code is safe, because a homeserver that
+     * already has the account takes the republish path. A malformed code,
+     * or a device clock that is too far off, fails every retry. A `transport`
+     * error means retry later. The `identity/signup_code_rejected` error
+     * means the homeserver refused the code as missing, malformed, unknown or
+     * already used: ask the user for a code, and do not tell them to discard
+     * it, because a malformed code can be a fixable typo.
      */
     func signUp(localSecretKey: PubkyLocalSecretKey, homeserverPublicKey: String, signupCode: String?, requiredCapabilities: String) async throws  -> PubkySessionBootstrapResult
 
@@ -7330,6 +8358,14 @@ open func resumeAuth(state: PubkyAuthRequestState, expectedCapabilities: String)
 
     /**
      * Sign in with a local Pubky secret key and return session access material.
+     *
+     * A `transport` error from completing the grant exchange means retry
+     * later. A sign-in failure does not show whether an account exists, so
+     * never fall back to `sign_up` automatically. To tell the cases apart,
+     * call `republish_identity` with the identity's public key: `true` means
+     * retry sign-in; `false` means offer a restore through `sign_up` with a
+     * homeserver the app already trusts; an error means retry later. That
+     * call also rebroadcasts the record it finds.
      */
 open func signIn(localSecretKey: PubkyLocalSecretKey, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
     return
@@ -7351,8 +8387,25 @@ open func signIn(localSecretKey: PubkyLocalSecretKey, requiredCapabilities: Stri
     /**
      * Sign up on a homeserver and return session access material.
      *
-     * Signing up an identity that already has an account on that homeserver
-     * publishes its homeserver record again.
+     * The identity's homeserver record is looked up first. If it names a
+     * different homeserver, this fails with a policy error before anything
+     * is sent to the homeserver, so no signup code is spent; call `sign_in`
+     * instead. If it names this homeserver, an identity that already has an
+     * account here has its homeserver record published again. If no record
+     * is found, or the record names no homeserver, the identity is signed up
+     * here. A lookup error, or a record whose homeserver is not a valid
+     * public key, fails the sign-up. A record that no reachable cache holds
+     * counts as none.
+     *
+     * A signup code is spent only when the homeserver creates the account.
+     * After any failure, retrying with the same identity, the same trusted
+     * homeserver and the same signup code is safe, because a homeserver that
+     * already has the account takes the republish path. A malformed code,
+     * or a device clock that is too far off, fails every retry. A `transport`
+     * error means retry later. The `identity/signup_code_rejected` error
+     * means the homeserver refused the code as missing, malformed, unknown or
+     * already used: ask the user for a code, and do not tell them to discard
+     * it, because a malformed code can be a fixable typo.
      */
 open func signUp(localSecretKey: PubkyLocalSecretKey, homeserverPublicKey: String, signupCode: String?, requiredCapabilities: String)async throws  -> PubkySessionBootstrapResult  {
     return
@@ -7801,11 +8854,26 @@ public func FfiConverterTypeSdkBackupBlob_lower(_ value: SdkBackupBlob) -> Unsaf
  *
  * Callbacks must not synchronously call back into the same SDK handle while
  * the originating SDK call is waiting for them.
+ *
+ * Report callback failures by throwing the Paykit error type (Swift
+ * `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+ * its `Storage` case with code `unexpected_callback_error`, and its message
+ * is discarded.
  */
 public protocol SdkPaymentAdapter: AnyObject, Sendable {
 
     /**
      * Return receiving details intended for public Payment Endpoints.
+     *
+     * The result is this Paykit App's complete desired public set: sync removes
+     * every SDK-managed endpoint missing from it, and an empty list removes all
+     * of them. While any receive backend the wallet publishes is not ready,
+     * throw the `PaymentAdapter` case of the Paykit error type (Swift
+     * `PaykitError.PaymentAdapter(code:context:)`, Kotlin
+     * `PaykitException.PaymentAdapter`), never an empty list or a subset.
+     * The sync then fails without changing publication records or endpoints.
+     * Any other thrown error also fails the sync, as the `Storage` case with
+     * code `unexpected_callback_error`.
      */
     func currentPublicReceivingDetails() throws  -> [PublicReceivingDetail]
 
@@ -7853,6 +8921,11 @@ public protocol SdkPaymentAdapter: AnyObject, Sendable {
  *
  * Callbacks must not synchronously call back into the same SDK handle while
  * the originating SDK call is waiting for them.
+ *
+ * Report callback failures by throwing the Paykit error type (Swift
+ * `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+ * its `Storage` case with code `unexpected_callback_error`, and its message
+ * is discarded.
  */
 open class SdkPaymentAdapterImpl: SdkPaymentAdapter, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -7908,6 +8981,16 @@ open class SdkPaymentAdapterImpl: SdkPaymentAdapter, @unchecked Sendable {
 
     /**
      * Return receiving details intended for public Payment Endpoints.
+     *
+     * The result is this Paykit App's complete desired public set: sync removes
+     * every SDK-managed endpoint missing from it, and an empty list removes all
+     * of them. While any receive backend the wallet publishes is not ready,
+     * throw the `PaymentAdapter` case of the Paykit error type (Swift
+     * `PaykitError.PaymentAdapter(code:context:)`, Kotlin
+     * `PaykitException.PaymentAdapter`), never an empty list or a subset.
+     * The sync then fails without changing publication records or endpoints.
+     * Any other thrown error also fails the sync, as the `Storage` case with
+     * code `unexpected_callback_error`.
      */
 open func currentPublicReceivingDetails()throws  -> [PublicReceivingDetail]  {
     return try  FfiConverterSequenceTypePublicReceivingDetail.lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
@@ -8280,6 +9363,11 @@ public func FfiConverterTypeSdkPaymentAdapter_lower(_ value: SdkPaymentAdapter) 
  *
  * Callbacks must not synchronously call back into the same SDK handle. Session
  * workflows may hold that handle's session-operation gate while invoking them.
+ *
+ * Report callback failures by throwing the Paykit error type (Swift
+ * `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+ * its `Storage` case with code `unexpected_callback_error`, and its message
+ * is discarded.
  */
 public protocol SdkPubkySessionProvider: AnyObject, Sendable {
 
@@ -8306,6 +9394,11 @@ public protocol SdkPubkySessionProvider: AnyObject, Sendable {
  *
  * Callbacks must not synchronously call back into the same SDK handle. Session
  * workflows may hold that handle's session-operation gate while invoking them.
+ *
+ * Report callback failures by throwing the Paykit error type (Swift
+ * `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+ * its `Storage` case with code `unexpected_callback_error`, and its message
+ * is discarded.
  */
 open class SdkPubkySessionProviderImpl: SdkPubkySessionProvider, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -8733,6 +9826,11 @@ public func FfiConverterTypeSdkStateBlob_lower(_ value: SdkStateBlob) -> UnsafeM
  * callback because doing so would deadlock.
  * Independent handles for one identity must use the same atomic backing store;
  * a per-handle mutex does not coordinate separate applications or processes.
+ *
+ * Report callback failures by throwing the Paykit error type (Swift
+ * `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+ * its `Storage` case with code `unexpected_callback_error`, and its message
+ * is discarded.
  */
 public protocol SdkStateBlobStore: AnyObject, Sendable {
 
@@ -8767,6 +9865,11 @@ public protocol SdkStateBlobStore: AnyObject, Sendable {
  * callback because doing so would deadlock.
  * Independent handles for one identity must use the same atomic backing store;
  * a per-handle mutex does not coordinate separate applications or processes.
+ *
+ * Report callback failures by throwing the Paykit error type (Swift
+ * `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+ * its `Storage` case with code `unexpected_callback_error`, and its message
+ * is discarded.
  */
 open class SdkStateBlobStoreImpl: SdkStateBlobStore, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
@@ -9157,6 +10260,10 @@ public func FfiConverterTypeAllowanceAccountingHistory_lower(_ value: AllowanceA
  * The caller must reconcile external idempotency records and all payment paths.
  * An empty history attests that there were no previous payments; it never
  * clears evidence already retained by this SDK.
+ *
+ * After restoring an older backup, add every payment made after the export;
+ * retained rows need not be resubmitted. An omitted payment can be paid again,
+ * and the Allowance capacity it used is freed. See `paykit-ffi/README.md`.
  *
  * Treat these fields as private wallet data; do not log or describe the record.
  */
@@ -10180,7 +11287,8 @@ public struct AllowanceSelectionInput {
      */
     public var expectedRevision: UInt64?
     /**
-     * Wallet-supplied trusted UTC time.
+     * Wallet-supplied trusted UTC time. Automatic Acceptance requires the same
+     * instant as `checks.trusted_time`; read the clock once.
      */
     public var trustedTime: String
 
@@ -10194,7 +11302,8 @@ public struct AllowanceSelectionInput {
          * Absent only for an initial decision.
          */expectedRevision: UInt64?,
         /**
-         * Wallet-supplied trusted UTC time.
+         * Wallet-supplied trusted UTC time. Automatic Acceptance requires the same
+         * instant as `checks.trusted_time`; read the clock once.
          */trustedTime: String) {
         self.allowanceId = allowanceId
         self.expectedRevision = expectedRevision
@@ -13585,7 +14694,8 @@ public func FfiConverterTypePaymentConversionQuoteRecord_lower(_ value: PaymentC
  */
 public struct PaymentExecutionChecks {
     /**
-     * Trusted UTC time for this decision.
+     * Trusted UTC time for this decision. Automatic Acceptance requires the same
+     * instant as `selection.trusted_time`; read the clock once.
      */
     public var trustedTime: String
     /**
@@ -13617,7 +14727,8 @@ public struct PaymentExecutionChecks {
     // declare one manually.
     public init(
         /**
-         * Trusted UTC time for this decision.
+         * Trusted UTC time for this decision. Automatic Acceptance requires the same
+         * instant as `selection.trusted_time`; read the clock once.
          */trustedTime: String,
         /**
          * Method actually selected by the wallet.
@@ -14232,6 +15343,10 @@ public func FfiConverterTypePaymentProofRecord_lower(_ value: PaymentProofRecord
 
 /**
  * Method-specific Payment Proof submission data.
+ *
+ * The complete Event Message must fit 1000 bytes of canonical JSON: `proof` is
+ * re-serialized and non-ASCII text is written raw. Measure it with
+ * `paymentProofEventLen`.
  */
 public struct PaymentProofSubmission {
     /**
@@ -15175,6 +16290,9 @@ public func FfiConverterTypePaymentRequestScope_lower(_ value: PaymentRequestSco
 
 /**
  * Immutable terms for a Payment Request proposal.
+ *
+ * The complete Event Message must fit 1000 bytes of canonical JSON: `metadata`
+ * is re-serialized and non-ASCII text is written raw. See `proposePaymentRequest`.
  */
 public struct PaymentRequestTerms {
     /**
@@ -16113,6 +17231,94 @@ public func FfiConverterTypePrivatePaymentEndpointSelectionRequest_lower(_ value
 
 
 /**
+ * A tracked Private Payment List whose publication this runtime witnessed.
+ * This is not counterparty receipt, a lease, or proof that cleanup completed.
+ */
+public struct PrivatePaymentListAcknowledgement {
+    /**
+     * Counterparty addressed by the list.
+     */
+    public var counterparty: String
+    /**
+     * Exact outbound message in this call's queued or cleared lists.
+     */
+    public var outboundMessageId: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Counterparty addressed by the list.
+         */counterparty: String,
+        /**
+         * Exact outbound message in this call's queued or cleared lists.
+         */outboundMessageId: UInt64) {
+        self.counterparty = counterparty
+        self.outboundMessageId = outboundMessageId
+    }
+}
+
+#if compiler(>=6)
+extension PrivatePaymentListAcknowledgement: Sendable {}
+#endif
+
+
+extension PrivatePaymentListAcknowledgement: Equatable, Hashable {
+    public static func ==(lhs: PrivatePaymentListAcknowledgement, rhs: PrivatePaymentListAcknowledgement) -> Bool {
+        if lhs.counterparty != rhs.counterparty {
+            return false
+        }
+        if lhs.outboundMessageId != rhs.outboundMessageId {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(counterparty)
+        hasher.combine(outboundMessageId)
+    }
+}
+
+extension PrivatePaymentListAcknowledgement: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePrivatePaymentListAcknowledgement: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PrivatePaymentListAcknowledgement {
+        return
+            try PrivatePaymentListAcknowledgement(
+                counterparty: FfiConverterString.read(from: &buf),
+                outboundMessageId: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PrivatePaymentListAcknowledgement, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.counterparty, into: &buf)
+        FfiConverterUInt64.write(value.outboundMessageId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrivatePaymentListAcknowledgement_lift(_ buf: RustBuffer) throws -> PrivatePaymentListAcknowledgement {
+    return try FfiConverterTypePrivatePaymentListAcknowledgement.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePrivatePaymentListAcknowledgement_lower(_ value: PrivatePaymentListAcknowledgement) -> RustBuffer {
+    return FfiConverterTypePrivatePaymentListAcknowledgement.lower(value)
+}
+
+
+/**
  * Failed delivery after a Private Payment List was queued.
  */
 public struct PrivatePaymentListDeliveryFailure {
@@ -16212,11 +17418,29 @@ public struct PrivatePaymentListDeliveryReport {
      */
     public var cleared: [PrivatePaymentListSyncChange]
     /**
+     * Positively witnessed tracked publications on the current Encrypted Link.
+     * Missing entries remain unknown, including pending handshakes and stored
+     * Sent rows without a runtime witness. All cleanup failures still apply.
+     * Retain with the original owner/attempt and invalidate on local changes.
+     */
+    public var acknowledged: [PrivatePaymentListAcknowledgement]
+    /**
      * Counterparties that could not be queued or cleared.
      */
     public var failedToQueue: [PrivatePaymentListSyncChange]
     /**
-     * Counterparties queued successfully but failed during outbound delivery.
+     * Delivery and reservation cleanup failures after queueing.
+     *
+     * Empty means every list in `queued` and `cleared` was sent, except lists
+     * still queued for a counterparty whose Encrypted Link Handshake is
+     * pending; those stay eligible for a later run. A list that was not sent
+     * is reported with its `outboundMessageId`, for example one left queued
+     * behind an older message in retry backoff, one superseded by a newer
+     * Private Payment List, or one whose outbound record is gone. To recover
+     * any entry, call the same high-level operation again with the current
+     * complete intent; it queues a fresh list that supersedes older pending
+     * ones, while `processPendingPrivateMessages` only advances lists still
+     * queued.
      */
     public var failedToDeliver: [PrivatePaymentListDeliveryFailure]
 
@@ -16230,13 +17454,31 @@ public struct PrivatePaymentListDeliveryReport {
          * Counterparties that had an empty Private Payment List queued.
          */cleared: [PrivatePaymentListSyncChange],
         /**
+         * Positively witnessed tracked publications on the current Encrypted Link.
+         * Missing entries remain unknown, including pending handshakes and stored
+         * Sent rows without a runtime witness. All cleanup failures still apply.
+         * Retain with the original owner/attempt and invalidate on local changes.
+         */acknowledged: [PrivatePaymentListAcknowledgement],
+        /**
          * Counterparties that could not be queued or cleared.
          */failedToQueue: [PrivatePaymentListSyncChange],
         /**
-         * Counterparties queued successfully but failed during outbound delivery.
+         * Delivery and reservation cleanup failures after queueing.
+         *
+         * Empty means every list in `queued` and `cleared` was sent, except lists
+         * still queued for a counterparty whose Encrypted Link Handshake is
+         * pending; those stay eligible for a later run. A list that was not sent
+         * is reported with its `outboundMessageId`, for example one left queued
+         * behind an older message in retry backoff, one superseded by a newer
+         * Private Payment List, or one whose outbound record is gone. To recover
+         * any entry, call the same high-level operation again with the current
+         * complete intent; it queues a fresh list that supersedes older pending
+         * ones, while `processPendingPrivateMessages` only advances lists still
+         * queued.
          */failedToDeliver: [PrivatePaymentListDeliveryFailure]) {
         self.queued = queued
         self.cleared = cleared
+        self.acknowledged = acknowledged
         self.failedToQueue = failedToQueue
         self.failedToDeliver = failedToDeliver
     }
@@ -16257,6 +17499,7 @@ public struct FfiConverterTypePrivatePaymentListDeliveryReport: FfiConverterRust
             try PrivatePaymentListDeliveryReport(
                 queued: FfiConverterSequenceTypePrivatePaymentListSyncChange.read(from: &buf),
                 cleared: FfiConverterSequenceTypePrivatePaymentListSyncChange.read(from: &buf),
+                acknowledged: FfiConverterSequenceTypePrivatePaymentListAcknowledgement.read(from: &buf),
                 failedToQueue: FfiConverterSequenceTypePrivatePaymentListSyncChange.read(from: &buf),
                 failedToDeliver: FfiConverterSequenceTypePrivatePaymentListDeliveryFailure.read(from: &buf)
         )
@@ -16265,6 +17508,7 @@ public struct FfiConverterTypePrivatePaymentListDeliveryReport: FfiConverterRust
     public static func write(_ value: PrivatePaymentListDeliveryReport, into buf: inout [UInt8]) {
         FfiConverterSequenceTypePrivatePaymentListSyncChange.write(value.queued, into: &buf)
         FfiConverterSequenceTypePrivatePaymentListSyncChange.write(value.cleared, into: &buf)
+        FfiConverterSequenceTypePrivatePaymentListAcknowledgement.write(value.acknowledged, into: &buf)
         FfiConverterSequenceTypePrivatePaymentListSyncChange.write(value.failedToQueue, into: &buf)
         FfiConverterSequenceTypePrivatePaymentListDeliveryFailure.write(value.failedToDeliver, into: &buf)
     }
@@ -17495,6 +18739,121 @@ public func FfiConverterTypePubkyClientConfig_lift(_ buf: RustBuffer) throws -> 
 #endif
 public func FfiConverterTypePubkyClientConfig_lower(_ value: PubkyClientConfig) -> RustBuffer {
     return FfiConverterTypePubkyClientConfig.lower(value)
+}
+
+
+/**
+ * Acknowledged original-grant logout, independent of local credential erasure.
+ */
+public struct PubkyGrantLogoutReceipt {
+    /**
+     * Original identity in app public-key representation.
+     */
+    public var publicKey: String
+    /**
+     * Homeserver that acknowledged proof logout.
+     */
+    public var homeserver: String
+    /**
+     * Original grant, including refreshed bearers belonging to that grant.
+     */
+    public var grantId: String
+    /**
+     * Original application client identifier.
+     */
+    public var clientId: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Original identity in app public-key representation.
+         */publicKey: String,
+        /**
+         * Homeserver that acknowledged proof logout.
+         */homeserver: String,
+        /**
+         * Original grant, including refreshed bearers belonging to that grant.
+         */grantId: String,
+        /**
+         * Original application client identifier.
+         */clientId: String) {
+        self.publicKey = publicKey
+        self.homeserver = homeserver
+        self.grantId = grantId
+        self.clientId = clientId
+    }
+}
+
+#if compiler(>=6)
+extension PubkyGrantLogoutReceipt: Sendable {}
+#endif
+
+
+extension PubkyGrantLogoutReceipt: Equatable, Hashable {
+    public static func ==(lhs: PubkyGrantLogoutReceipt, rhs: PubkyGrantLogoutReceipt) -> Bool {
+        if lhs.publicKey != rhs.publicKey {
+            return false
+        }
+        if lhs.homeserver != rhs.homeserver {
+            return false
+        }
+        if lhs.grantId != rhs.grantId {
+            return false
+        }
+        if lhs.clientId != rhs.clientId {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(publicKey)
+        hasher.combine(homeserver)
+        hasher.combine(grantId)
+        hasher.combine(clientId)
+    }
+}
+
+extension PubkyGrantLogoutReceipt: Codable {}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePubkyGrantLogoutReceipt: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyGrantLogoutReceipt {
+        return
+            try PubkyGrantLogoutReceipt(
+                publicKey: FfiConverterString.read(from: &buf),
+                homeserver: FfiConverterString.read(from: &buf),
+                grantId: FfiConverterString.read(from: &buf),
+                clientId: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PubkyGrantLogoutReceipt, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.publicKey, into: &buf)
+        FfiConverterString.write(value.homeserver, into: &buf)
+        FfiConverterString.write(value.grantId, into: &buf)
+        FfiConverterString.write(value.clientId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantLogoutReceipt_lift(_ buf: RustBuffer) throws -> PubkyGrantLogoutReceipt {
+    return try FfiConverterTypePubkyGrantLogoutReceipt.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantLogoutReceipt_lower(_ value: PubkyGrantLogoutReceipt) -> RustBuffer {
+    return FfiConverterTypePubkyGrantLogoutReceipt.lower(value)
 }
 
 
@@ -19966,7 +21325,9 @@ public func FfiConverterTypeSdkStateBlobSnapshot_lower(_ value: SdkStateBlobSnap
 public enum AllowanceAccountingBlock {
 
     /**
-     * Accounting is absent or requires wallet reconciliation.
+     * Accounting is absent or requires wallet reconciliation: on first use, after
+     * restore, or after key rotation. Read `allowance_accounting_state` and reconcile
+     * with `expected_revision` set to its revision, or null only when no state exists.
      */
     case reconciliationRequired
     /**
@@ -20522,6 +21883,9 @@ extension EncryptedLinkHandshakeRole: Codable {}
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
  * SDK policy for public Payment Endpoint cleanup.
+ *
+ * Public endpoint sync removes every managed endpoint missing from the
+ * receiving details it is given.
  */
 
 public enum EndpointManagementScope {
@@ -20532,6 +21896,9 @@ public enum EndpointManagementScope {
     case managedOnly
     /**
      * Manage the configured application's full public endpoint namespace.
+     *
+     * Sync also removes endpoint files in the App's endpoint directory that
+     * the SDK never created.
      */
     case fullAppEndpointNamespace
     /**
@@ -21342,7 +22709,8 @@ public enum PaymentExecutionStatus {
      */
     case succeeded
     /**
-     * Wallet confirmed terminal failure before settlement.
+     * Wallet confirmed terminal failure before settlement. Permanent for this
+     * attempt: it releases Allowance usage and reopens the occurrence.
      */
     case failed
 }
@@ -21441,7 +22809,8 @@ public enum PaymentOutcome {
      */
     case succeeded
     /**
-     * Terminal failure before settlement was verified.
+     * Terminal failure before settlement was verified: the payment can never settle.
+     * Permanent for the attempt; report anything less certain as Unknown.
      */
     case failed
     /**
@@ -21765,6 +23134,109 @@ public func FfiConverterTypePaymentRequestLocalRole_lower(_ value: PaymentReques
 extension PaymentRequestLocalRole: Equatable, Hashable {}
 
 extension PaymentRequestLocalRole: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Outcome of accepting one link's pending Allowance proposals.
+ */
+
+public enum PendingAllowanceAcceptance {
+
+    /**
+     * Acceptances queued in this call, oldest proposal first.
+     */
+    case accepted(
+        /**
+         * Derived records after the Acceptances were queued.
+         */records: [AllowanceRecord],
+        /**
+         * Whether pending proposals beyond the requested limit remain.
+         */morePending: Bool
+    )
+    /**
+     * The link holds more records than the SDK reads for this operation. Its
+     * history was not read and nothing was accepted.
+     */
+    case linkHistoryTooLarge(
+        /**
+         * The cap the link's inbound and outbound records exceed.
+         */recordCap: UInt64
+    )
+    /**
+     * SDK returned a value this binding version does not understand.
+     */
+    case unknown
+}
+
+
+#if compiler(>=6)
+extension PendingAllowanceAcceptance: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePendingAllowanceAcceptance: FfiConverterRustBuffer {
+    typealias SwiftType = PendingAllowanceAcceptance
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PendingAllowanceAcceptance {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .accepted(records: try FfiConverterSequenceTypeAllowanceRecord.read(from: &buf), morePending: try FfiConverterBool.read(from: &buf)
+        )
+
+        case 2: return .linkHistoryTooLarge(recordCap: try FfiConverterUInt64.read(from: &buf)
+        )
+
+        case 3: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PendingAllowanceAcceptance, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .accepted(records,morePending):
+            writeInt(&buf, Int32(1))
+            FfiConverterSequenceTypeAllowanceRecord.write(records, into: &buf)
+            FfiConverterBool.write(morePending, into: &buf)
+
+
+        case let .linkHistoryTooLarge(recordCap):
+            writeInt(&buf, Int32(2))
+            FfiConverterUInt64.write(recordCap, into: &buf)
+
+
+        case .unknown:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePendingAllowanceAcceptance_lift(_ buf: RustBuffer) throws -> PendingAllowanceAcceptance {
+    return try FfiConverterTypePendingAllowanceAcceptance.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePendingAllowanceAcceptance_lower(_ value: PendingAllowanceAcceptance) -> RustBuffer {
+    return FfiConverterTypePendingAllowanceAcceptance.lower(value)
+}
 
 
 
@@ -22435,6 +23907,87 @@ public func FfiConverterTypePubkyAuthRequestKind_lower(_ value: PubkyAuthRequest
 extension PubkyAuthRequestKind: Equatable, Hashable {}
 
 extension PubkyAuthRequestKind: Codable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Point-in-time original-grant evidence, never permission to mutate.
+ */
+
+public enum PubkyGrantObservation {
+
+    /**
+     * The server accepted the captured bearer and its exact original binding.
+     */
+    case active
+    /**
+     * Status could not be established; this never means revoked or absent.
+     */
+    case unknown
+}
+
+
+#if compiler(>=6)
+extension PubkyGrantObservation: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePubkyGrantObservation: FfiConverterRustBuffer {
+    typealias SwiftType = PubkyGrantObservation
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PubkyGrantObservation {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .active
+
+        case 2: return .unknown
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PubkyGrantObservation, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .active:
+            writeInt(&buf, Int32(1))
+
+
+        case .unknown:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantObservation_lift(_ buf: RustBuffer) throws -> PubkyGrantObservation {
+    return try FfiConverterTypePubkyGrantObservation.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePubkyGrantObservation_lower(_ value: PubkyGrantObservation) -> RustBuffer {
+    return FfiConverterTypePubkyGrantObservation.lower(value)
+}
+
+
+extension PubkyGrantObservation: Equatable, Hashable {}
+
+extension PubkyGrantObservation: Codable {}
 
 
 
@@ -24254,6 +25807,30 @@ fileprivate struct FfiConverterOptionTypeProfileResolution: FfiConverterRustBuff
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypePubkyGrantLogoutReceipt: FfiConverterRustBuffer {
+    typealias SwiftType = PubkyGrantLogoutReceipt?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePubkyGrantLogoutReceipt.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePubkyGrantLogoutReceipt.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypePubkyProfile: FfiConverterRustBuffer {
     typealias SwiftType = PubkyProfile?
 
@@ -25216,6 +26793,31 @@ fileprivate struct FfiConverterSequenceTypePrivatePaymentEndpointReservationInpu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypePrivatePaymentListAcknowledgement: FfiConverterRustBuffer {
+    typealias SwiftType = [PrivatePaymentListAcknowledgement]
+
+    public static func write(_ value: [PrivatePaymentListAcknowledgement], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePrivatePaymentListAcknowledgement.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PrivatePaymentListAcknowledgement] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PrivatePaymentListAcknowledgement]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePrivatePaymentListAcknowledgement.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypePrivatePaymentListDeliveryFailure: FfiConverterRustBuffer {
     typealias SwiftType = [PrivatePaymentListDeliveryFailure]
 
@@ -25891,6 +27493,33 @@ public func paymentDeadlineAt(deadline: PaymentDeadline, billingPeriod: BillingP
 })
 }
 /**
+ * Return the exact UTF-8 byte length of the Payment Proof Event Message that
+ * `submitPaymentProof` would queue for this App, Payment Reference and submission.
+ *
+ * `local_app_id` is the App ID this SDK is configured with (the
+ * `PaykitSdkConfig` App ID that `submitPaymentProof` sends from, written as the
+ * outer `app_id`), not the payee App in `submission.payment_app_id`. Passing
+ * the wrong one measures the wrong length.
+ *
+ * Compare it with the 1000-byte (`PUBKY_NOISE_MSG_LEN`) limit. This is a
+ * measurement, not a validity check: a proof that fits can still be refused by
+ * role, state or conversion checks, and lengths above the limit are returned.
+ * Payers must measure before payment approval and payees before offering a
+ * method. Pass maximum-length placeholders for variable fields (for example a
+ * 78-digit ERC-20 log index) and every optional ID you will send, or "fits" is
+ * false assurance. The proof JSON is re-serialized canonically, so do not
+ * measure the wallet's own string.
+ */
+public func paymentProofEventLen(localAppId: String, paymentReference: PaymentReference, submission: PaymentProofSubmission)throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
+    uniffi_paykit_fn_func_payment_proof_event_len(
+        FfiConverterString.lower(localAppId),
+        FfiConverterTypePaymentReference_lower(paymentReference),
+        FfiConverterTypePaymentProofSubmission_lower(submission),$0
+    )
+})
+}
+/**
  * Return the Pubky public key for a local secret key.
  */
 public func pubkyPublicKeyFromSecret(localSecretKey: PubkyLocalSecretKey)throws  -> String  {
@@ -26005,6 +27634,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_func_payment_deadline_at() != 2507) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_func_payment_proof_event_len() != 55765) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_func_pubky_public_key_from_secret() != 41462) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -26092,22 +27724,25 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_link_with_peer() != 32868) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request() != 16435) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request() != 55386) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request_automatically() != 49289) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_payment_request_automatically() != 16194) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_actionable_received_payment_requests() != 36729) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_accept_pending_allowance_proposals() != 63256) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_active_recurring_payment_requests() != 2902) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_actionable_received_payment_requests() != 45140) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_active_recurring_payment_requests() != 4814) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_advance_link_handshake() != 20770) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_allowance_accounting_state() != 43672) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_allowance_accounting_state() != 58415) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_authorize_allowance_reassociation() != 14050) {
@@ -26116,16 +27751,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_backup_state_revision() != 60914) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_begin_payment_execution() != 18142) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_begin_payment_execution() != 57909) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_block_peer() != 3462) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_block_peer() != 4626) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_cancel_payment_request() != 58269) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_claim_and_accept_payment_request() != 49298) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_capture_grant_logout() != 21013) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_capture_grant_observer() != 37074) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_claim_and_accept_payment_request() != 38326) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_claim_payment_request_for_execution() != 44314) {
@@ -26137,7 +27778,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list() != 56925) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list_and_process_outbound() != 5141) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_clear_private_payment_list_and_process_outbound() != 22101) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_config() != 29410) {
@@ -26167,7 +27808,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_encrypted_link_recovery_marker_status() != 21009) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_end_allowance() != 22461) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_end_allowance() != 48555) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_enqueue_private_payment_list() != 42080) {
@@ -26212,7 +27853,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_forget_session_access() != 59961) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_get_allowance() != 6959) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_get_allowance() != 6417) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_identity_status() != 8559) {
@@ -26239,10 +27880,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_linked_peers() != 30970) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_list_allowances() != 36022) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_list_allowances() != 37068) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_list_payment_requests() != 43354) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_list_payment_requests() != 41021) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_list_pubky_directory_page() != 28090) {
@@ -26272,7 +27913,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_payment_requests() != 9060) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_payment_requests_with() != 33620) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_payment_requests_with() != 35692) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_pending_outbound_private_counterparties() != 36875) {
@@ -26302,7 +27943,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_allowance() != 43457) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_payment_request() != 10421) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_propose_payment_request() != 45442) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_publish_encrypted_link_recovery_marker() != 29039) {
@@ -26356,16 +27997,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_receive_private_messages_from_linked_peers() != 15229) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_received_payment_requests_from() != 4199) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_received_payment_requests_from() != 55582) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_reconcile_allowance_accounting() != 53346) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_reconcile_allowance_accounting() != 33732) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_record_payment_outcome() != 2286) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_record_payment_outcome() != 56035) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_recover_shared_state_from_backup() != 47733) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_recover_shared_state_from_backup() != 13220) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_refresh_contact_paykit_profile() != 15127) {
@@ -26377,13 +28018,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_reject_payment_request() != 8097) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_release_payment_request_execution_claim() != 52784) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_release_payment_request_execution_claim() != 2234) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 39834) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contact() != 47245) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contacts_and_block_peers() != 10421) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_contacts_and_block_peers() != 63335) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_encrypted_link_recovery_marker() != 34687) {
@@ -26395,10 +28036,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_remove_public_contact() != 46208) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_reserve_automatic_payment() != 11908) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_reserve_automatic_payment() != 12458) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_reserve_manual_payment() != 65334) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_reserve_manual_payment() != 46485) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_private_contact_payment() != 42116) {
@@ -26416,10 +28057,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_resolve_public_payment_request() != 44750) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_state() != 2813) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_state() != 8423) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_string() != 62177) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_restore_backup_string() != 50668) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_retrieve_receipt() != 26622) {
@@ -26434,7 +28075,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contacts() != 6516) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contacts_and_unblock_peers() != 14421) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_save_contacts_and_unblock_peers() != 42160) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_select_allowance() != 13682) {
@@ -26452,7 +28093,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_state_revision() != 17936) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_submit_payment_proof() != 59922) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_submit_payment_proof() != 58760) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_contact_private_payment_lists() != 4039) {
@@ -26467,13 +28108,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_contact_markers() != 39954) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_endpoints() != 585) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_endpoints() != 5074) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_endpoints_with_receiving_details() != 13996) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_sync_public_endpoints_with_receiving_details() != 61566) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_unblock_peer() != 22658) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_unblock_peer() != 49850) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_upload_profile_avatar() != 49965) {
@@ -26515,6 +28156,33 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkyauthrequeststate_export_client_key_secret() != 60838) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipubkygrantlogout_acknowledged() != 24278) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkygrantlogout_binding() != 12383) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkygrantlogout_prepare_attempt() != 46854) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkygrantlogout_revoke_admission() != 54683) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkygrantlogoutattempt_execute() != 50144) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkygrantobserver_client_id() != 51969) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkygrantobserver_grant_id() != 43900) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkygrantobserver_observe() != 18375) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipubkygrantobserver_public_key() != 40375) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipubkylocalsecretkey_derive_paykit_identity_secret_key() != 28900) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -26533,6 +28201,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkysessionaccess_export_session_secret() != 34434) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_paykit_checksum_method_ffipubkysessionaccess_with_paykit_identity_secret_key() != 24572) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_approve_auth() != 27473) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -26548,10 +28219,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_resume_auth() != 52728) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_in() != 15662) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_in() != 61814) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_up() != 13465) {
+    if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_sign_up() != 28501) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipubkysessionbootstrap_start_sign_in_auth() != 47023) {
@@ -26566,7 +28237,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffisdkbackupblob_export_bytes() != 44480) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_current_public_receiving_details() != 46945) {
+    if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_current_public_receiving_details() != 52995) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffisdkpaymentadapter_current_private_receiving_details() != 22405) {

@@ -50,6 +50,12 @@ pub trait PubkySessionProvider: Send + Sync {
 #[async_trait]
 pub trait PaymentAdapter: Send + Sync {
     /// Return receiving details intended for public Payment Endpoints.
+    ///
+    /// The result is this Paykit App's complete desired public set: sync removes
+    /// every SDK-managed endpoint missing from it, and an empty list removes all
+    /// of them. While any receive backend the wallet publishes is not ready,
+    /// return `Err`, never an empty list or a subset. The sync then fails
+    /// without changing publication records or endpoints.
     async fn current_public_receiving_details(&self) -> Result<Vec<PublicReceivingDetail>> {
         Err(unsupported_operation("public receiving details"))
     }

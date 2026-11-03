@@ -354,6 +354,113 @@ fn test_confirmed_inactive_grant_error_rejects_clock_skew_and_invalid_pop() {
     }
 }
 
+#[test]
+fn test_signup_code_rejection_matches_homeserver_0_16_2_strings() {
+    // Bodies from pubky-homeserver 0.16.2 `POST /auth/grant/signup`. Change
+    // them only together with a homeserver upgrade that changes them.
+    for (status, message) in [
+        (400, "Token required"),
+        (400, "Invalid signup token format: invalid length"),
+        (401, "Invalid token"),
+        (401, "Token already used"),
+    ] {
+        let error = pubky_server_error(status, message);
+        assert!(is_signup_code_rejection(&error), "{status} {message}");
+        assert!(map_pubky_signup_error("sign up Pubky identity", error).is_signup_code_rejected());
+    }
+}
+
+#[test]
+fn test_signup_code_rejection_rejects_other_server_errors() {
+    for (status, message) in [
+        // Canonical reasons that replace the body when the client keeps none.
+        (400, "Bad Request"),
+        (401, "Unauthorized"),
+        // Clock skew and proof-of-possession failures, which a new code cannot fix.
+        (400, "signup grant iat is too far in the future"),
+        (401, "Invalid grant: grant has expired"),
+        (401, "PoP nonce already used"),
+        (409, "User already exists"),
+        (404, "Not Found"),
+        (401, "Token required"),
+        (400, "Token requ\n[response body truncated at 10 bytes]"),
+    ] {
+        let error = pubky_server_error(status, message);
+        assert!(!is_signup_code_rejection(&error), "{status} {message}");
+        let mapped = map_pubky_signup_error("sign up Pubky identity", error);
+        assert!(
+            matches!(&mapped, PaykitSdkError::Identity { .. }) && !mapped.is_signup_code_rejected(),
+            "{status} {message}: {mapped:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_map_pubky_signup_error_reports_retryable_failures_as_transport() {
+    // Keep the loopback socket open without answering so the request times out.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let transport = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_millis(20))
+        .build()
+        .unwrap()
+        .post(format!(
+            "http://{}/auth/grant/signup?signup_token=SENTINEL_CODE",
+            listener.local_addr().unwrap()
+        ))
+        .send()
+        .await
+        .unwrap_err();
+
+    let retryable = [
+        pubky::Error::Request(pubky::errors::RequestError::Transport(transport)),
+        pubky_server_error(500, "Internal Server Error"),
+        pubky_server_error(503, "Service Unavailable"),
+        pubky_server_error(429, "Too Many Requests"),
+        pubky::pkarr::errors::ResolveError::NoResponses.into(),
+        pubky::pkarr::errors::PublishError::NoResponses.into(),
+    ];
+    for error in retryable {
+        let rendered = error.to_string();
+        let mapped = map_pubky_signup_error("sign up Pubky identity", error);
+        assert!(
+            matches!(
+                &mapped,
+                PaykitSdkError::Transport { context, .. } if context == "sign up Pubky identity"
+            ),
+            "{rendered}: {mapped:?}"
+        );
+        assert!(!mapped.to_string().contains("SENTINEL_CODE"), "{mapped}");
+    }
+
+    let not_retryable = [
+        pubky::Error::Pkarr(pubky::errors::PkarrError::InvalidRecord(
+            "_pubky target is not a public key".into(),
+        )),
+        pubky::Error::Request(pubky::errors::RequestError::Validation {
+            message: "could not resolve homeserver".into(),
+        }),
+    ];
+    for error in not_retryable {
+        let rendered = error.to_string();
+        let mapped = map_pubky_signup_error("sign up Pubky identity", error);
+        assert!(
+            matches!(&mapped, PaykitSdkError::Identity { .. }) && !mapped.is_signup_code_rejected(),
+            "{rendered}: {mapped:?}"
+        );
+    }
+
+    // Sign-in completion gets the Transport category but never the signup cause.
+    let mapped = map_pubky_retryable_error(
+        "complete Pubky auth flow",
+        pubky_server_error(401, "Invalid token"),
+    );
+    assert!(
+        matches!(&mapped, PaykitSdkError::Identity { .. }) && !mapped.is_signup_code_rejected(),
+        "{mapped:?}"
+    );
+}
+
 fn pubky_server_error(status: u16, message: &str) -> pubky::Error {
     pubky::Error::Request(pubky::errors::RequestError::Server {
         status: status.try_into().unwrap(),

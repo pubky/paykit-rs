@@ -93,6 +93,15 @@ fn private_message(raw_json: String) -> PrivateApplicationMessage {
 }
 
 #[test]
+fn test_private_list_delivery_report_without_acknowledgements_remains_unknown() {
+    let prior_report = serde_json::json!({
+        "queued": [], "cleared": [], "failed_to_queue": [], "failed_to_deliver": []
+    });
+    let report: PrivatePaymentListDeliveryReport = serde_json::from_value(prior_report).unwrap();
+    assert!(report.acknowledged.is_empty());
+}
+
+#[test]
 fn test_derive_private_payment_list_views_uses_latest_valid_list() {
     let first = list_json("ln-old");
     let latest = list_json("ln-new");

@@ -24,6 +24,12 @@ where
     /// The wallet must inspect every manual and automatic payment path and its
     /// external idempotency records. An empty input never erases retained history.
     /// No Payment Proof, timeout, or missing local file establishes nonpayment.
+    ///
+    /// After restoring an older backup, an empty or incomplete history re-enables
+    /// payment of anything paid after the export and frees the Allowance capacity
+    /// it used. This is a ledger-wide recovery step, not a routine call: it starts
+    /// a new epoch and turns every Prepared attempt, including other apps'
+    /// preparations, into Unknown. See `paykit-ffi/README.md` for the recipe.
     pub async fn reconcile_allowance_accounting(
         &self,
         input: AllowanceAccountingReconciliation,
@@ -77,7 +83,9 @@ where
     /// the request proposed. Recurring Acceptance defers capacity checks until due.
     /// Neither reserves or consumes usage. Every actual occurrence still requires
     /// atomic reservation and a fresh handoff check before execution.
-    /// Selection and checks must carry the same trusted time.
+    ///
+    /// Read the clock once: `input.trusted_time` and `checks.trusted_time` must be
+    /// the same instant, or the call is refused.
     pub async fn accept_payment_request_automatically(
         &self,
         scope: PaymentRequestScope,
@@ -241,6 +249,12 @@ where
     /// Record wallet-attested settlement or definitive failure for one attempt.
     /// A timeout or lost callback is Unknown and continues consuming capacity.
     /// A verified terminal outcome is immutable; Payment Proofs provide no evidence here.
+    ///
+    /// Report Failed only when the payment can never settle; anything less is
+    /// Unknown, which can later become Succeeded or Failed. Failed releases Allowance
+    /// usage, reopens the occurrence for a new reservation, and can let the execution
+    /// claim be released before a Payment Proof is sent. See `paykit-ffi/README.md`
+    /// for what counts as definitive on each Rail.
     pub async fn record_payment_outcome(
         &self,
         input: PaymentOutcomeReport,

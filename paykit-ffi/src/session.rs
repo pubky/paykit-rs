@@ -142,6 +142,26 @@ impl FfiPubkySessionAccess {
     pub fn export_paykit_identity_secret_key(&self) -> Option<Arc<FfiPaykitIdentitySecretKey>> {
         self.paykit_identity_secret_key.clone()
     }
+
+    /// Attach a Paykit Identity Secret without reconstructing the Pubky session.
+    ///
+    /// The original grant, client configuration and any existing live session
+    /// remain unchanged. Access created from secure storage remains non-live;
+    /// this method never restores, refreshes or authenticates it. Callers must
+    /// end previously captured logout admission before replacing key material.
+    pub fn with_paykit_identity_secret_key(
+        &self,
+        key: Arc<FfiPaykitIdentitySecretKey>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            client_id: self.client_id.clone(),
+            session_secret: self.session_secret.clone(),
+            local_secret_key: self.local_secret_key.clone(),
+            paykit_identity_secret_key: Some(key),
+            live_access: self.live_access.clone(),
+            live_client_config: self.live_client_config.clone(),
+        })
+    }
 }
 
 /// Result of creating or importing a Pubky session.
@@ -317,6 +337,11 @@ pub struct FfiPubkyResourceRef {
 ///
 /// Callbacks must not synchronously call back into the same SDK handle. Session
 /// workflows may hold that handle's session-operation gate while invoking them.
+///
+/// Report callback failures by throwing the Paykit error type (Swift
+/// `PaykitError`, Kotlin `PaykitException`). Any other thrown error becomes
+/// its `Storage` case with code `unexpected_callback_error`, and its message
+/// is discarded.
 #[uniffi::export(with_foreign)]
 pub trait FfiSdkPubkySessionProvider: Send + Sync {
     /// Load current live Pubky session access, when available.
@@ -357,6 +382,152 @@ impl FfiSdkPubkySessionProviderAdapter {
             cached_session: Arc::new(AsyncMutex::new(None)),
         }
     }
+
+    pub(crate) async fn capture_grant_observer(
+        &self,
+        expected_owner: &PubkyPublicKey,
+    ) -> Result<paykit_sdk::PubkyGrantObserver, PaykitFfiError> {
+        let unavailable = || {
+            identity_error(
+                "pubky_grant_observer_unavailable",
+                "the original live grant cannot be observed without authentication",
+            )
+        };
+        let access = self
+            .provider
+            .load_session_access()?
+            .ok_or_else(unavailable)?;
+        let session = self
+            .existing_session(&access)
+            .await
+            .ok_or_else(unavailable)?;
+        validate_grant_session_client_id(&session, &access.client_id).await?;
+        if PubkyPublicKey::from_public_key(&session.public_key()) != *expected_owner {
+            return Err(unavailable());
+        }
+        paykit_sdk::PubkyGrantObserver::capture(&session)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn existing_session(
+        &self,
+        access: &FfiPubkySessionAccess,
+    ) -> Option<pubky::PubkySession> {
+        let session = if access.live_client_config.as_ref() == Some(&self.pubky_client) {
+            access
+                .live_access
+                .as_ref()
+                .map(|access| access.session.clone())
+        } else {
+            None
+        };
+        match session {
+            Some(session) => Some(session),
+            None => {
+                let fingerprint: [u8; 32] = Sha256::digest(access.session_secret.as_bytes()).into();
+                self.cached_session
+                    .lock()
+                    .await
+                    .as_ref()
+                    .filter(|cached| cached.session_secret_fingerprint == fingerprint)
+                    .map(|cached| cached.session.clone())
+            }
+        }
+    }
+
+    pub(crate) async fn capture_grant_logout(
+        &self,
+        expected_owner: &PubkyPublicKey,
+    ) -> Result<(paykit_sdk::PubkyGrantLogout, [u8; 32]), PaykitFfiError> {
+        let unavailable = || {
+            identity_error(
+                "pubky_grant_logout_unavailable",
+                "original live grant is unavailable",
+            )
+        };
+        let access = self
+            .provider
+            .load_session_access()?
+            .ok_or_else(unavailable)?;
+        let fingerprint = session_access_fingerprint(&access);
+        // The ordinary session cache can contain credentials restored after
+        // restart. It must not recreate a live-only removal authority.
+        if access.live_client_config.as_ref() != Some(&self.pubky_client) {
+            return Err(unavailable());
+        }
+        let session = access
+            .live_access
+            .as_ref()
+            .map(|access| access.session.clone())
+            .ok_or_else(unavailable)?;
+        validate_grant_session_client_id(&session, &access.client_id).await?;
+        if PubkyPublicKey::from_public_key(&session.public_key()) != *expected_owner {
+            return Err(unavailable());
+        }
+        let logout = paykit_sdk::PubkyGrantLogout::capture(
+            &session,
+            Duration::from_secs(self.pubky_client.request_timeout_secs),
+        )
+        .await?;
+        if !self.matches_session_access(&fingerprint)? {
+            return Err(unavailable());
+        }
+        Ok((logout, fingerprint))
+    }
+
+    pub(crate) fn matches_session_access(
+        &self,
+        fingerprint: &[u8; 32],
+    ) -> Result<bool, PaykitFfiError> {
+        Ok(self
+            .provider
+            .load_session_access()?
+            .is_some_and(|access| session_access_fingerprint(&access) == *fingerprint))
+    }
+}
+
+pub(crate) fn session_access_fingerprint(access: &FfiPubkySessionAccess) -> [u8; 32] {
+    fn field(hash: &mut Sha256, value: Option<&[u8]>) {
+        hash.update([u8::from(value.is_some())]);
+        if let Some(value) = value {
+            hash.update((value.len() as u64).to_be_bytes());
+            hash.update(value);
+        }
+    }
+    let mut hash = Sha256::new();
+    field(&mut hash, Some(access.client_id.as_bytes()));
+    field(&mut hash, Some(access.session_secret.as_bytes()));
+    let local = access
+        .local_secret_key
+        .as_ref()
+        .map(|key| Zeroizing::new(key.export_bytes()));
+    let private = access
+        .paykit_identity_secret_key
+        .as_ref()
+        .map(|key| Zeroizing::new(key.export_bytes()));
+    field(&mut hash, local.as_ref().map(|bytes| bytes.as_slice()));
+    field(&mut hash, private.as_ref().map(|bytes| bytes.as_slice()));
+    if let Some(key) = &access.paykit_identity_secret_key {
+        field(&mut hash, Some(&key.key_generation().to_be_bytes()));
+    }
+    if let Some(config) = &access.live_client_config {
+        field(&mut hash, Some(&config.request_timeout_secs.to_be_bytes()));
+        field(
+            &mut hash,
+            config
+                .local_testnet_host
+                .as_ref()
+                .map(|value| value.as_bytes()),
+        );
+        field(
+            &mut hash,
+            config.auth_relay_url.as_ref().map(|value| value.as_bytes()),
+        );
+    } else {
+        field(&mut hash, None);
+    }
+    hash.finalize().into()
 }
 
 #[async_trait]
@@ -547,8 +718,25 @@ impl FfiPubkySessionBootstrap {
 
     /// Sign up on a homeserver and return session access material.
     ///
-    /// Signing up an identity that already has an account on that homeserver
-    /// publishes its homeserver record again.
+    /// The identity's homeserver record is looked up first. If it names a
+    /// different homeserver, this fails with a policy error before anything
+    /// is sent to the homeserver, so no signup code is spent; call `sign_in`
+    /// instead. If it names this homeserver, an identity that already has an
+    /// account here has its homeserver record published again. If no record
+    /// is found, or the record names no homeserver, the identity is signed up
+    /// here. A lookup error, or a record whose homeserver is not a valid
+    /// public key, fails the sign-up. A record that no reachable cache holds
+    /// counts as none.
+    ///
+    /// A signup code is spent only when the homeserver creates the account.
+    /// After any failure, retrying with the same identity, the same trusted
+    /// homeserver and the same signup code is safe, because a homeserver that
+    /// already has the account takes the republish path. A malformed code,
+    /// or a device clock that is too far off, fails every retry. A `transport`
+    /// error means retry later. The `identity/signup_code_rejected` error
+    /// means the homeserver refused the code as missing, malformed, unknown or
+    /// already used: ask the user for a code, and do not tell them to discard
+    /// it, because a malformed code can be a fixable typo.
     pub async fn sign_up(
         &self,
         local_secret_key: Arc<FfiPubkyLocalSecretKey>,
@@ -571,6 +759,14 @@ impl FfiPubkySessionBootstrap {
     }
 
     /// Sign in with a local Pubky secret key and return session access material.
+    ///
+    /// A `transport` error from completing the grant exchange means retry
+    /// later. A sign-in failure does not show whether an account exists, so
+    /// never fall back to `sign_up` automatically. To tell the cases apart,
+    /// call `republish_identity` with the identity's public key: `true` means
+    /// retry sign-in; `false` means offer a restore through `sign_up` with a
+    /// homeserver the app already trusts; an error means retry later. That
+    /// call also rebroadcasts the record it finds.
     pub async fn sign_in(
         &self,
         local_secret_key: Arc<FfiPubkyLocalSecretKey>,

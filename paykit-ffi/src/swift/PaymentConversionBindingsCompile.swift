@@ -1,7 +1,9 @@
-// Compile-only consumer fixture for conversion quotes and payment deadlines.
+// Compile-only consumer fixture for conversion quotes, payment deadlines, and
+// Payment Proof length measurement.
 private func compilePaymentConversionBindingsSurface(
     sdk: PaykitSdkProtocol,
     counterparty: String,
+    localAppId: String,
     paymentAppId: String,
     requestId: String
 ) async throws {
@@ -24,5 +26,8 @@ private func compilePaymentConversionBindingsSurface(
         allowanceId: nil, conversionQuoteId: quotes.first?.eventId,
         proof: proofBody
     )
-    _ = (fixed, recurring, proof)
+    let proofLen: UInt32 = try paymentProofEventLen(
+        localAppId: localAppId, paymentReference: try PaymentReference(text: "invoice-1"), submission: proof
+    )
+    _ = (fixed, recurring, proof, proofLen)
 }

@@ -153,9 +153,16 @@ async fn test_payment_endpoints_enforce_existing_message_size_limit() {
         if extra == 0 {
             assert!(result.is_ok());
         } else {
+            let error = result.unwrap_err();
+            assert!(error.is_message_too_large(), "{error:?}");
+            let PaykitSdkError::Protocol { context, .. } = &error else {
+                panic!("expected Protocol error");
+            };
             assert!(
-                matches!(result, Err(PaykitSdkError::Protocol { context, .. }) if context.contains("message size"))
+                context.contains(&format!("({} bytes)", limit + 1)),
+                "{context}"
             );
+            assert!(context.contains(&format!("({limit} bytes)")), "{context}");
             assert_eq!(storage.snapshot().unwrap(), before);
         }
     }

@@ -27,10 +27,11 @@ use crate::{
     },
     config::{EndpointManagementScope, PaykitSdkConfig, PublicContactSharingPolicy},
     domain::allowances::{
-        allowance_record as derive_allowance_record, allowance_records as derive_allowance_records,
-        allowance_scopes, enqueue_allowance_end, enqueue_allowance_proposal,
-        enqueue_allowance_response, sort_allowances_newest_first, AllowanceFilter,
-        AllowanceLocalRole, AllowanceRecord, AllowanceResponse,
+        accept_pending_allowance_proposals, allowance_record as derive_allowance_record,
+        allowance_records as derive_allowance_records, allowance_scopes, enqueue_allowance_end,
+        enqueue_allowance_proposal, enqueue_allowance_response, sort_allowances_newest_first,
+        AllowanceFilter, AllowanceLocalRole, AllowanceRecord, AllowanceResponse,
+        PendingAllowanceAcceptance,
     },
     domain::contacts::{
         parse_profile_json, parse_pubky_profile_json, paykit_blob_path,
@@ -60,10 +61,10 @@ use crate::{
     },
     domain::outbound_private::{
         mark_outbound_failed, mark_outbound_invalid, mark_outbound_recovery_required,
-        mark_outbound_sent, queued_outbound_private_messages,
-        validate_queued_outbound_private_message, OutboundPrivateCounterpartySendReport,
-        OutboundPrivateMessageStatus, OutboundPrivateSendFailure, OutboundPrivateSendReport,
-        RecoveryMarkerPublishFailure, ReservationCleanupFailure,
+        mark_outbound_sent, validate_queued_outbound_private_message,
+        OutboundPrivateCounterpartySendReport, OutboundPrivateMessageStatus,
+        OutboundPrivateSendFailure, OutboundPrivateSendReport, RecoveryMarkerPublishFailure,
+        ReservationCleanupFailure,
     },
     domain::payment_requests::{
         claim_payment_request_execution, enqueue_checked_payment_request_action,

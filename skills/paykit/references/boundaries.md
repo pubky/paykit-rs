@@ -54,8 +54,13 @@ An extension must participate in SDK durability and recovery, not fork its state
 
 Serialized private messages, including their JSON envelope, must fit
 `PUBKY_NOISE_MSG_LEN` (currently 1000 bytes). Do not truncate or invent attachment
-chunking. A `private` segment under `/pub/` is not an access-control boundary;
-use encrypted protocol helpers, never plaintext secret-bearing state there.
+chunking. An oversized message fails with the protocol code `message_too_large`
+before anything is queued. Measure a Payment Proof with
+`payment_proof_event_len` (bindings: `paymentProofEventLen`); call it before payment approval, with the local
+(sending) App ID, not the submission's `payment_app_id`, and maximum-length
+placeholder values. A `private` segment under `/pub/` is not an access-control
+boundary; use encrypted protocol helpers, never plaintext secret-bearing state
+there.
 
 Sources: [workspace](https://github.com/pubky/paykit-rs/blob/master/Cargo.toml),
 [SDK manifest](https://github.com/pubky/paykit-rs/blob/master/paykit-sdk/Cargo.toml),

@@ -110,6 +110,67 @@ async fn test_queue_private_payment_list_requires_app_capability() {
 }
 
 #[tokio::test]
+async fn test_empty_private_payment_list_withdraws_after_capability_disabled() {
+    let storage = storage_without_private_payment_capability().await;
+    let before = storage.snapshot().unwrap();
+    let outbound = queue_private_payment_list_with_reservations(
+        &storage,
+        &counterparty(),
+        app_id(),
+        Vec::new(),
+        timestamp(),
+    )
+    .await
+    .unwrap();
+    assert!(parse_private_payment_list_json(&outbound.raw_json)
+        .unwrap()
+        .is_empty());
+    let after = storage.snapshot().unwrap();
+    assert_eq!(after.registered_paykit_apps, before.registered_paykit_apps);
+    assert_eq!(
+        after.registered_paykit_app_capabilities,
+        before.registered_paykit_app_capabilities
+    );
+    assert!(after.payment_endpoint_reservations.is_empty());
+    assert_eq!(after.outbound_private_messages.len(), 1);
+}
+
+#[tokio::test]
+async fn test_empty_private_payment_list_requires_active_known_registration() {
+    for missing in ["unregistered", "retired", "capabilities"] {
+        let mut state = storage_without_private_payment_capability()
+            .await
+            .snapshot()
+            .unwrap();
+        match missing {
+            "unregistered" => {
+                state.registered_paykit_apps.remove(&app_id());
+            }
+            "retired" => {
+                state.retired_paykit_apps.insert(app_id());
+            }
+            _ => {
+                state.registered_paykit_app_capabilities.remove(&app_id());
+            }
+        }
+        let storage = InMemoryStorage::from_state(state.clone());
+        let result = queue_private_payment_list_with_reservations(
+            &storage,
+            &counterparty(),
+            app_id(),
+            Vec::new(),
+            timestamp(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(PaykitSdkError::Policy { .. })),
+            "{missing}"
+        );
+        assert_eq!(storage.snapshot().unwrap(), state);
+    }
+}
+
+#[tokio::test]
 async fn test_sync_private_payment_list_preserves_delivery_and_reservation_state() {
     for status in [
         OutboundPrivateMessageStatus::Pending,

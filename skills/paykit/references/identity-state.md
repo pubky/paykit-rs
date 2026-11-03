@@ -171,6 +171,11 @@ complete wallet execution history before automation. Restore retains peer
 authorization pins; a saved snapshot does not bypass checks against current
 signed keys.
 
+Reconciling an empty or incomplete history after restoring an older backup
+re-enables payment of anything paid after the export and frees its Allowance
+capacity. Back up before each wallet handoff and follow the
+[stale-backup recipe](https://github.com/pubky/paykit-rs/blob/master/paykit-ffi/README.md#stale-backups-and-reconciliation).
+
 The restored link policy is required because the SDK cannot tell whether a
 backup is current. Pass `RequireRecovery` unless the app knows no runtime for
 this identity sent or received private messages after the backup was exported,

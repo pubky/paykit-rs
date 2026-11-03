@@ -108,6 +108,7 @@ impl From<StorageStateV1> for StorageState {
             receipt_issuance_records: state.receipt_issuance_records,
             private_intake_cursors: std::collections::HashMap::new(),
             private_intake_peers: std::collections::HashMap::new(),
+            link_record_index: Default::default(),
         }
     }
 }

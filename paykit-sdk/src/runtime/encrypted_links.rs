@@ -353,9 +353,55 @@ where
 
     /// Block a counterparty for local Paykit private workflows.
     ///
-    /// Blocking is local policy. It clears stored Encrypted Link state so the
-    /// peer cannot resume private workflows until explicitly unblocked and
-    /// linked again.
+    /// Blocking is local policy, and the counterparty is not notified. It
+    /// clears stored Encrypted Link state so the peer cannot resume private
+    /// workflows until explicitly unblocked and linked again. Returns
+    /// `ConcurrentUpdate` while another peer link operation, such as a send,
+    /// holds the peer lease.
+    ///
+    /// Queued work is parked, not deleted. Outbound messages that are
+    /// `Pending`, `Sending`, `Failed`, or `RecoveryRequired` become
+    /// `RecoveryRequired`. After [`Self::unblock_peer`], the next completed
+    /// Encrypted Link Handshake requeues them unchanged as `Pending`; it does
+    /// not send them, and the next [`Self::process_outbound_private_messages`]
+    /// does. Messages the peer already confirmed become `Sent`, and messages
+    /// whose Paykit App is then unregistered or retired stay
+    /// `RecoveryRequired`. If the peer is never linked again, they are never
+    /// delivered. `Sent` Event Messages still waiting for a Delivery
+    /// Confirmation stay queued. No API withdraws parked work. Event Messages
+    /// keep their order per counterparty, so a parked Acceptance is sent before
+    /// a cancellation queued later. A requeued Private Payment List is a
+    /// Latest-State Message, so a newer list can supersede it before it is
+    /// sent. While the peer is blocked, no new private message, including a
+    /// Payment Proof, can be queued for it.
+    ///
+    /// Accepted Allowances and accepted Payment Requests are paused, not
+    /// revoked. Payment accounting refuses them while the peer is not `Linked`,
+    /// but after unblock and a fresh handshake they authorize again without new
+    /// consent. While blocked, [`Self::end_allowance`] is refused, reads that
+    /// name this counterparty, such as [`Self::list_allowances`] with a
+    /// counterparty filter, [`Self::payment_requests_with`] and
+    /// [`Self::receipt_records`], return `Policy`, and unfiltered reads skip it.
+    ///
+    /// Recommended order:
+    ///
+    /// 1. While the peer is still `Linked`, queue any pending Event Message,
+    ///    such as [`Self::submit_payment_proof`], and deliver it with
+    ///    [`Self::process_outbound_private_messages`]. Delivery is confirmed
+    ///    only when the message's `outbound_message_id` appears in a returned
+    ///    report's `sent`. Retrieve any Receipt you need.
+    /// 2. To revoke Allowances, call [`Self::list_allowances`] filtered to this
+    ///    counterparty and [`Self::end_allowance`] for each `Accepted` one and
+    ///    each `Proposed` one this identity proposed. An End keeps the
+    ///    Allowance `Ended` while parked; a relink requeues it, and the next
+    ///    outbound processing sends it.
+    /// 3. Call `block_peer`.
+    ///
+    /// If the peer is already blocked, or its link was not ready so End was
+    /// refused: after unblock and relink, call [`Self::end_allowance`], or get
+    /// the user's confirmation before calling
+    /// [`Self::accept_payment_request_automatically`] for this counterparty
+    /// again. The SDK never pays automatically on its own.
     pub async fn block_peer(&self, counterparty: PubkyPublicKey) -> Result<LinkedPeerRecord> {
         self.retry_storage_transaction(|| {
             let counterparty = counterparty.clone();
@@ -383,7 +429,14 @@ where
     /// Remove a local peer block and return the peer to `NotLinked`.
     ///
     /// Existing Encrypted Link snapshots are not restored. Callers should start
-    /// a fresh Encrypted Link Handshake before private workflows resume.
+    /// a fresh Encrypted Link Handshake before private workflows resume. When
+    /// it completes, it requeues eligible work parked by [`Self::block_peer`],
+    /// which the next [`Self::process_outbound_private_messages`] sends, and
+    /// accepted Allowances and accepted Payment Requests authorize again
+    /// without new consent; `block_peer` describes how to end them. The
+    /// counterparty is not notified. Until that handshake,
+    /// [`Self::pending_outbound_private_counterparties`] can list the peer and
+    /// sending to it fails with `RecoveryRequired`.
     pub async fn unblock_peer(&self, counterparty: PubkyPublicKey) -> Result<LinkedPeerRecord> {
         self.retry_storage_transaction(|| {
             let counterparty = counterparty.clone();

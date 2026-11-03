@@ -13,9 +13,10 @@ use crate::{
     domain::outbound_private::{validate_outbound_private_message, OutboundPrivateMessageStatus},
     domain::private_lists::normalize_private_receiving_details,
     storage::{
-        require_paykit_app_capability, require_peer_link_operation_lease,
-        NewOutboundPrivateMessage, OutboundPrivateMessageRecord, PaymentEndpointReservationRecord,
-        PeerLinkOperationLease, StorageAdapter, StorageTransaction,
+        require_paykit_app_active, require_paykit_app_capability,
+        require_peer_link_operation_lease, NewOutboundPrivateMessage, OutboundPrivateMessageRecord,
+        PaymentEndpointReservationRecord, PeerLinkOperationLease, StorageAdapter,
+        StorageTransaction,
     },
     PaykitSdkError, PubkyPublicKey, Result,
 };
@@ -247,7 +248,14 @@ pub(crate) fn queue_private_payment_list_with_reservations_in_transaction(
     let (message_app_id, kind) = validate_outbound_private_message(&raw_json)?;
     let counterparty = counterparty.clone();
 
-    require_paykit_app_capability(tx, &message_app_id, PrivateMessageKind::PrivatePaymentList)?;
+    // An empty complete list withdraws existing details; it does not enable
+    // private payments. Missing registration must still fail closed.
+    if list.is_empty() && drafts.is_empty() && tx.paykit_app_capabilities(&message_app_id).is_some()
+    {
+        require_paykit_app_active(tx, &message_app_id)?;
+    } else {
+        require_paykit_app_capability(tx, &message_app_id, PrivateMessageKind::PrivatePaymentList)?;
+    }
     let mut checked_drafts = Vec::with_capacity(drafts.len());
     for draft in drafts {
         let existing = tx.payment_endpoint_reservation(

@@ -83,6 +83,11 @@ extension PrivatePaymentEndpointSelectionRequest: CustomStringConvertible, Custo
     public var debugDescription: String { description }
 }
 
+extension PrivatePaymentListAcknowledgement: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PrivatePaymentListAcknowledgement(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
 extension PrivatePaymentListDeliveryFailure: CustomStringConvertible, CustomDebugStringConvertible {
     public var description: String { "PrivatePaymentListDeliveryFailure(<redacted>)" }
     public var debugDescription: String { description }
@@ -290,6 +295,11 @@ extension PaymentRequestRecurrence: CustomStringConvertible, CustomDebugStringCo
 
 extension AllowanceRecord: CustomStringConvertible, CustomDebugStringConvertible {
     public var description: String { "AllowanceRecord(<redacted>)" }
+    public var debugDescription: String { description }
+}
+
+extension PendingAllowanceAcceptance: CustomStringConvertible, CustomDebugStringConvertible {
+    public var description: String { "PendingAllowanceAcceptance(<redacted>)" }
     public var debugDescription: String { description }
 }
 
