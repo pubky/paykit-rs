@@ -74,15 +74,16 @@ impl<'a> PrivateReceiveObservation<'a> {
     }
 }
 
-pub(super) async fn require_current_private_receive_observation_with_lease<S>(
+pub(super) async fn require_current_private_receive_observation_with_lease<S, C>(
     storage: &S,
     counterparty: &PubkyPublicKey,
     lease: &PeerLinkOperationLease,
     observation: PrivateReceiveObservation<'_>,
-    now: DateTime<Utc>,
+    clock: &C,
 ) -> Result<()>
 where
     S: StorageAdapter,
+    C: Clock,
 {
     let PrivateReceiveObservation {
         expected_authorization,
@@ -106,7 +107,17 @@ where
         let authorization = authorization.clone();
         let marker_attempt_id = marker_attempt_id.clone();
         move |tx| {
+            let now = clock.now();
             crate::storage::require_peer_link_operation_lease(tx, &lease)?;
+            let current_lease = tx
+                .peer_link_operation_lease(&counterparty)
+                .expect("required peer lease must remain present");
+            if current_lease.expires_at <= now {
+                return Err(PaykitSdkError::Policy {
+                    context: "peer link operation lease expired".into(),
+                    source: None,
+                });
+            }
             let peer = tx.linked_peer(&counterparty);
             if observation_matches
                 && peer.as_ref().is_some_and(|peer| {
@@ -388,12 +399,11 @@ where
                         if err.is_non_retryable_private_receive_error()
                             || matches!(err, paykit_lib::PaykitError::InvalidData { .. }) =>
                     {
-                        let now = self.clock.now();
                         mark_recovery_required_with_lease(
                             &self.storage,
                             counterparty.clone(),
                             lease.clone(),
-                            now,
+                            &self.clock,
                         )
                         .await?;
                         let _ = self
@@ -918,7 +928,7 @@ where
                 &authorization,
                 marker.as_ref(),
             ),
-            self.clock.now(),
+            &self.clock,
         )
         .await?;
         let remote_noise_public_key = authorization.noise_public_key().clone();
@@ -930,12 +940,11 @@ where
                 source: None,
             })?;
         let Some(snapshot_bytes) = stored_link_state.link_snapshot.as_ref() else {
-            let now = self.clock.now();
             mark_recovery_required_with_lease(
                 &self.storage,
                 counterparty.clone(),
                 lease.clone(),
-                now,
+                &self.clock,
             )
             .await?;
             let _ = self
@@ -956,12 +965,11 @@ where
         let snapshot = match paykit_lib::EncryptedLinkSnapshot::deserialize(snapshot_bytes) {
             Ok(snapshot) => snapshot,
             Err(err) => {
-                let now = self.clock.now();
                 mark_recovery_required_with_lease(
                     &self.storage,
                     counterparty.clone(),
                     lease.clone(),
-                    now,
+                    &self.clock,
                 )
                 .await?;
                 let _ = self
@@ -977,12 +985,11 @@ where
         };
         crate::domain::linked_peers::require_recovery_context(&peer, snapshot.recovery_context())?;
         if snapshot.remote_noise_public_key() != &remote_noise_public_key {
-            let now = self.clock.now();
             mark_recovery_required_with_lease(
                 &self.storage,
                 counterparty.clone(),
                 lease.clone(),
-                now,
+                &self.clock,
             )
             .await?;
             let _ = self
@@ -1019,12 +1026,11 @@ where
             Ok(link) => link,
             Err(err @ PaykitSdkError::Transport { .. }) => return Err(err),
             Err(err) => {
-                let now = self.clock.now();
                 mark_recovery_required_with_lease(
                     &self.storage,
                     counterparty.clone(),
                     lease.clone(),
-                    now,
+                    &self.clock,
                 )
                 .await?;
                 let _ = self
@@ -1099,12 +1105,11 @@ where
                         // The speculative read cannot authorize recovery of possibly newer state.
                         return Ok(None);
                     };
-                    let now = self.clock.now();
                     mark_recovery_required_with_lease(
                         &self.storage,
                         counterparty.clone(),
                         lease.clone(),
-                        now,
+                        &self.clock,
                     )
                     .await?;
                     let _ = self
@@ -1372,7 +1377,220 @@ fn require_private_intake_supervisor_lease(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::{
+        decode_storage_state_blob, encode_storage_state_blob, NewOutboundPrivateMessage,
+        PrivateIntakeCursorRecord, StorageTransactionCallback,
+    };
     use crate::InMemoryStorage;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    #[derive(Clone)]
+    struct TransactionObservedStorage {
+        inner: InMemoryStorage,
+        transaction_started: Arc<StdMutex<Option<std::sync::mpsc::Sender<()>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StorageAdapter for TransactionObservedStorage {
+        async fn load_local_identity_state(&self) -> Result<Option<IdentityState>> {
+            self.inner.load_local_identity_state().await
+        }
+
+        async fn transaction_erased<'a>(
+            &self,
+            callback: StorageTransactionCallback<'a>,
+        ) -> Result<Box<dyn std::any::Any + Send>> {
+            if let Some(started) = self.transaction_started.lock().unwrap().take() {
+                started.send(()).unwrap();
+            }
+            self.inner.transaction_erased(callback).await
+        }
+    }
+
+    #[derive(Clone)]
+    struct MutableClock(Arc<StdMutex<DateTime<Utc>>>);
+
+    impl MutableClock {
+        fn new(now: DateTime<Utc>) -> Self {
+            Self(Arc::new(StdMutex::new(now)))
+        }
+
+        fn set(&self, now: DateTime<Utc>) {
+            *self.0.lock().unwrap() = now;
+        }
+    }
+
+    impl Clock for MutableClock {
+        fn now(&self) -> DateTime<Utc> {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_observation_expiry_after_storage_fence_is_atomic_and_reclaimable() {
+        let inner = InMemoryStorage::new();
+        let identity = pubky::Keypair::random();
+        let counterparty = PubkyPublicKey::from_public_key(&identity.public_key());
+        let generation_1 =
+            paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[1; 32], 1).unwrap();
+        let generation_2 =
+            paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[2; 32], 2).unwrap();
+        let claimed_at = Utc::now();
+        let expires_at = claimed_at + chrono::Duration::seconds(1);
+        let lease = inner
+            .transaction(|tx| {
+                let mut peer = default_linked_peer(counterparty.clone());
+                peer.state = LinkedPeerState::Linked;
+                peer.last_sync_at = Some(claimed_at);
+                peer.noise_key_authorization = Some(generation_1.clone());
+                tx.save_linked_peer(peer);
+                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                    counterparty: counterparty.clone(),
+                    link_snapshot: Some(vec![1, 2, 3]),
+                    handshake_snapshot: None,
+                    handshake_role: None,
+                    generation: 7,
+                    checkpointed_at: claimed_at,
+                });
+                tx.advance_private_intake_cursor(PrivateIntakeCursorRecord {
+                    subscribed_user: counterparty.clone(),
+                    homeserver: "https://homeserver.example".into(),
+                    event_id: 9,
+                })?;
+                let app_id = paykit_lib::PaykitAppId::new("bitkit").unwrap();
+                tx.save_paykit_app_capabilities(
+                    &app_id,
+                    paykit_lib::PaykitAppCapabilities {
+                        private_payments: true,
+                        payment_requests: true,
+                        receipts: true,
+                        outgoing_payments: true,
+                    },
+                );
+                tx.activate_paykit_app(&app_id);
+                tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                    counterparty.clone(),
+                    app_id,
+                    paykit_lib::PrivateMessageKind::PaymentRequest
+                        .as_str()
+                        .into(),
+                    "{}".into(),
+                    claimed_at,
+                ))?;
+                tx.claim_peer_link_operation(&counterparty, claimed_at, expires_at)?
+                    .ok_or_else(|| PaykitSdkError::ConcurrentUpdate {
+                        context: "test peer lease unavailable".into(),
+                        source: None,
+                    })
+            })
+            .await
+            .unwrap();
+        let before = inner.snapshot().unwrap();
+        let recovery_context = paykit_lib::EncryptedLinkRecoveryContext::new(None, None).unwrap();
+        let clock = MutableClock::new(claimed_at);
+        let (holder_entered_tx, holder_entered_rx) = tokio::sync::oneshot::channel();
+        let (release_holder_tx, release_holder_rx) = std::sync::mpsc::channel();
+        let holder_storage = inner.clone();
+        let holder = tokio::spawn(async move {
+            holder_storage
+                .transaction(move |_tx| {
+                    holder_entered_tx.send(()).unwrap();
+                    release_holder_rx.recv().unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        holder_entered_rx.await.unwrap();
+
+        let (observation_started_tx, observation_started_rx) = std::sync::mpsc::channel();
+        let storage = TransactionObservedStorage {
+            inner: inner.clone(),
+            transaction_started: Arc::new(StdMutex::new(Some(observation_started_tx))),
+        };
+        let observation_counterparty = counterparty.clone();
+        let observation_lease = lease.clone();
+        let observation_generation_1 = generation_1.clone();
+        let observation_generation_2 = generation_2.clone();
+        let observation_recovery_context = recovery_context.clone();
+        let observation_clock = clock.clone();
+        let observation = tokio::spawn(async move {
+            require_current_private_receive_observation_with_lease(
+                &storage,
+                &observation_counterparty,
+                &observation_lease,
+                PrivateReceiveObservation::new(
+                    &observation_generation_1,
+                    &observation_recovery_context,
+                    &observation_generation_2,
+                    None,
+                ),
+                &observation_clock,
+            )
+            .await
+        });
+        observation_started_rx.recv().unwrap();
+        clock.set(expires_at);
+        release_holder_tx.send(()).unwrap();
+        holder.await.unwrap().unwrap();
+
+        assert!(matches!(
+            observation.await.unwrap(),
+            Err(PaykitSdkError::Policy { .. })
+        ));
+        assert_eq!(inner.snapshot().unwrap(), before);
+
+        let reclaimed_lease = inner
+            .transaction(|tx| {
+                tx.claim_peer_link_operation(
+                    &counterparty,
+                    expires_at,
+                    expires_at + chrono::Duration::minutes(1),
+                )?
+                .ok_or_else(|| PaykitSdkError::ConcurrentUpdate {
+                    context: "test peer lease was not reclaimable at expiry boundary".into(),
+                    source: None,
+                })
+            })
+            .await
+            .unwrap();
+        assert_ne!(reclaimed_lease.lease_id, lease.lease_id);
+        assert!(matches!(
+            require_current_private_receive_observation_with_lease(
+                &inner,
+                &counterparty,
+                &reclaimed_lease,
+                PrivateReceiveObservation::new(
+                    &generation_1,
+                    &recovery_context,
+                    &generation_2,
+                    None,
+                ),
+                &clock,
+            )
+            .await,
+            Err(PaykitSdkError::RecoveryRequired { .. })
+        ));
+        let recovered = inner.snapshot().unwrap();
+        let peer = &recovered.linked_peers[&counterparty];
+        assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
+        assert_eq!(peer.noise_key_authorization.as_ref(), Some(&generation_2));
+        assert_eq!(peer.last_sync_at, Some(expires_at));
+        assert!(recovered.encrypted_link_states[&counterparty]
+            .link_snapshot
+            .is_none());
+        assert_eq!(
+            recovered.private_intake_cursors,
+            before.private_intake_cursors
+        );
+        assert_eq!(
+            recovered.outbound_private_messages[0].status,
+            OutboundPrivateMessageStatus::RecoveryRequired
+        );
+        assert_eq!(
+            recovered.outbound_private_messages[0].updated_at,
+            expires_at
+        );
+    }
 
     #[tokio::test]
     async fn test_changed_authorization_persists_pin_and_rejects_rollback_replay() {
@@ -1383,9 +1601,15 @@ mod tests {
             paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[1; 32], 1).unwrap();
         let generation_2 =
             paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[2; 32], 2).unwrap();
+        let local_identity =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
         let now = Utc::now();
         let lease = storage
             .transaction(|tx| {
+                tx.save_identity_state(IdentityState {
+                    public_key: Some(local_identity),
+                    initialized_at: now,
+                });
                 let mut peer = default_linked_peer(counterparty.clone());
                 peer.state = LinkedPeerState::Linked;
                 peer.noise_key_authorization = Some(generation_1.clone());
@@ -1396,6 +1620,21 @@ mod tests {
             .unwrap()
             .unwrap();
         let recovery_context = paykit_lib::EncryptedLinkRecoveryContext::new(None, None).unwrap();
+        let clock = MutableClock::new(now);
+        let initial = storage.snapshot().unwrap();
+        let initial_blob = encode_storage_state_blob(&initial).unwrap();
+        let storage =
+            InMemoryStorage::from_state(decode_storage_state_blob(&initial_blob).unwrap());
+        require_current_private_receive_observation_with_lease(
+            &storage,
+            &counterparty,
+            &lease,
+            PrivateReceiveObservation::new(&generation_1, &recovery_context, &generation_1, None),
+            &clock,
+        )
+        .await
+        .unwrap();
+        assert_eq!(storage.snapshot().unwrap(), initial);
 
         assert!(matches!(
             require_current_private_receive_observation_with_lease(
@@ -1408,7 +1647,7 @@ mod tests {
                     &generation_2,
                     None,
                 ),
-                now,
+                &clock,
             )
             .await,
             Err(PaykitSdkError::RecoveryRequired { .. })
@@ -1424,10 +1663,14 @@ mod tests {
             advanced.linked_peers[&counterparty].state,
             LinkedPeerState::RecoveryRequired
         );
+        crate::validate_storage_state(&advanced).unwrap();
+        let state_blob = encode_storage_state_blob(&advanced).unwrap();
+        let reloaded = InMemoryStorage::from_state(decode_storage_state_blob(&state_blob).unwrap());
+        assert_eq!(reloaded.snapshot().unwrap(), advanced);
 
         assert!(matches!(
             require_current_private_receive_observation_with_lease(
-                &storage,
+                &reloaded,
                 &counterparty,
                 &lease,
                 PrivateReceiveObservation::new(
@@ -1436,12 +1679,12 @@ mod tests {
                     &generation_1,
                     None,
                 ),
-                now,
+                &clock,
             )
             .await,
             Err(PaykitSdkError::LinkObservation { .. })
         ));
-        assert_eq!(storage.snapshot().unwrap(), advanced);
+        assert_eq!(reloaded.snapshot().unwrap(), advanced);
     }
 
     #[tokio::test]
@@ -1451,6 +1694,8 @@ mod tests {
         let counterparty = PubkyPublicKey::from_public_key(&identity.public_key());
         let authorization =
             paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[1; 32], 1).unwrap();
+        let local_identity =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
         let old_marker = paykit_lib::EncryptedLinkRecoveryMarker::new_v4(
             Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         )
@@ -1462,6 +1707,10 @@ mod tests {
         let now = Utc::now();
         let lease = storage
             .transaction(|tx| {
+                tx.save_identity_state(IdentityState {
+                    public_key: Some(local_identity),
+                    initialized_at: now,
+                });
                 let mut peer = default_linked_peer(counterparty.clone());
                 peer.state = LinkedPeerState::Linked;
                 peer.noise_key_authorization = Some(authorization.clone());
@@ -1488,12 +1737,17 @@ mod tests {
                     &authorization,
                     Some(&new_marker),
                 ),
-                now,
+                &MutableClock::new(now),
             )
             .await,
             Err(PaykitSdkError::RecoveryRequired { .. })
         ));
-        let peer = &storage.snapshot().unwrap().linked_peers[&counterparty];
+        let persisted = storage.snapshot().unwrap();
+        let state_blob = encode_storage_state_blob(&persisted).unwrap();
+        let reloaded = InMemoryStorage::from_state(decode_storage_state_blob(&state_blob).unwrap());
+        let reloaded_state = reloaded.snapshot().unwrap();
+        assert_eq!(reloaded_state, persisted);
+        let peer = &reloaded_state.linked_peers[&counterparty];
         assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
         assert_eq!(peer.noise_key_authorization.as_ref(), Some(&authorization));
         assert_eq!(

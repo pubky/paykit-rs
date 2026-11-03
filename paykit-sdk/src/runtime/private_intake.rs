@@ -1496,7 +1496,7 @@ where
                         &authorization,
                         marker.as_ref(),
                     ),
-                    self.clock.now(),
+                    &self.clock,
                 )
                 .await;
             self.finish_peer_link_operation(lease, result).await?;

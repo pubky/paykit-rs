@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     domain::outbound_private::{mark_outbound_recovery_required, OutboundPrivateMessageStatus},
+    runtime::Clock,
     storage::{
         require_peer_link_operation_lease, retry_storage_transaction, EncryptedLinkStateRecord,
         LinkedPeerRecord, PeerLinkOperationLease, StorageAdapter, StorageTransaction,
@@ -227,16 +228,40 @@ where
 }
 
 /// Mark a Linked Peer as requiring recovery.
-pub(crate) async fn mark_recovery_required_with_lease<S>(
+pub(crate) async fn mark_recovery_required_with_lease<S, C>(
     storage: &S,
     counterparty: PubkyPublicKey,
     lease: PeerLinkOperationLease,
-    now: DateTime<Utc>,
+    clock: &C,
 ) -> Result<()>
 where
     S: StorageAdapter,
+    C: Clock,
 {
-    mark_recovery_required_inner(storage, counterparty, Some(lease), now).await
+    let clock = clock.clone();
+    retry_storage_transaction(storage, || {
+        let clock = clock.clone();
+        let counterparty = counterparty.clone();
+        let lease = lease.clone();
+        move |tx| {
+            let now = clock.now();
+            require_peer_link_operation_lease(tx, &lease)?;
+            let current_lease = tx
+                .peer_link_operation_lease(&counterparty)
+                .expect("required peer lease must remain present");
+            if current_lease.expires_at <= now {
+                return Err(PaykitSdkError::Policy {
+                    context: format!(
+                        "peer link operation lease {} expired for counterparty {}",
+                        lease.lease_id, counterparty
+                    ),
+                    source: None,
+                });
+            }
+            mark_recovery_required_in_transaction(tx, &counterparty, now)
+        }
+    })
+    .await
 }
 
 pub(crate) fn mark_recovery_required_in_transaction<T>(
@@ -333,6 +358,7 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 async fn mark_recovery_required_inner<S>(
     storage: &S,
     counterparty: PubkyPublicKey,

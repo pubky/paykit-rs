@@ -765,7 +765,7 @@ where
             &self.storage,
             counterparty.clone(),
             lease.clone(),
-            self.clock.now(),
+            &self.clock,
         )
         .await?;
         let _ = self

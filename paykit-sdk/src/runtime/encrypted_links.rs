@@ -1092,7 +1092,7 @@ where
                         &self.storage,
                         counterparty.clone(),
                         lease.clone(),
-                        self.clock.now(),
+                        &self.clock,
                     )
                     .await?;
                     self.publish_local_recovery_marker_if_possible(&counterparty, &lease, None)
@@ -1259,7 +1259,7 @@ where
             &self.storage,
             counterparty.clone(),
             lease.clone(),
-            self.clock.now(),
+            &self.clock,
         )
         .await?;
         self.publish_local_recovery_marker_if_possible(counterparty, &lease, session_access)
@@ -1721,7 +1721,7 @@ where
                             &self.storage,
                             counterparty.clone(),
                             lease.clone(),
-                            self.clock.now(),
+                            &self.clock,
                         )
                         .await?;
                         self.publish_local_recovery_marker_if_possible(
