@@ -981,6 +981,23 @@ async fn test_cancel_pending_handshake_persists_restart_fence_and_allows_fresh_a
     let storage = InMemoryStorage::new();
     let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
     seed_private_capable_identity_and_handshake(&storage, counterparty.clone()).await;
+    storage
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                let mut peer = tx.linked_peer(&counterparty).unwrap();
+                peer.local_recovery_attempt_id =
+                    Some("11111111-1111-4111-8111-111111111111".into());
+                peer.local_recovery_marker_created_at = Some(FixedClock.now());
+                peer.remote_recovery_attempt_id =
+                    Some("22222222-2222-4222-8222-222222222222".into());
+                peer.remote_recovery_marker_observed_at = Some(FixedClock.now());
+                tx.save_linked_peer(peer);
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
     let sdk = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },
@@ -996,6 +1013,11 @@ async fn test_cancel_pending_handshake_persists_restart_fence_and_allows_fresh_a
 
     assert_eq!(cancelled.state, LinkedPeerState::NotLinked);
     assert_eq!(cancelled.generation, 1);
+    let cancelled_peer = storage.snapshot().unwrap().linked_peers[&counterparty].clone();
+    assert!(cancelled_peer.local_recovery_attempt_id.is_none());
+    assert!(cancelled_peer.local_recovery_marker_created_at.is_none());
+    assert!(cancelled_peer.remote_recovery_attempt_id.is_none());
+    assert!(cancelled_peer.remote_recovery_marker_observed_at.is_none());
     let restarted = PaykitSdk::with_clock(
         storage.clone(),
         TestPubkySessionProvider { session: None },

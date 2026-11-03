@@ -646,6 +646,11 @@ where
                     peer.state = LinkedPeerState::NotLinked;
                     peer.last_sync_at = Some(now);
                     peer.failure_count = 0;
+                    peer.local_recovery_attempt_id = None;
+                    peer.local_recovery_marker_created_at = None;
+                    peer.local_recovery_marker_last_error = None;
+                    peer.remote_recovery_attempt_id = None;
+                    peer.remote_recovery_marker_observed_at = None;
                     tx.save_linked_peer(peer.clone());
                     Ok(LinkedPeerHandshakeReport {
                         counterparty: counterparty.clone(),

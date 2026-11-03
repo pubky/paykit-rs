@@ -650,6 +650,14 @@ async fn test_homeserver_move_resets_only_moved_users_cursor() {
             let moved = moved.clone();
             let stable = stable.clone();
             move |tx| {
+                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                    counterparty: moved.clone(),
+                    link_snapshot: None,
+                    handshake_snapshot: None,
+                    handshake_role: None,
+                    generation: 7,
+                    checkpointed_at: timestamp(),
+                });
                 tx.advance_private_intake_cursor(PrivateIntakeCursorRecord {
                     subscribed_user: moved.clone(),
                     homeserver: "homeserver-a".into(),
@@ -660,6 +668,21 @@ async fn test_homeserver_move_resets_only_moved_users_cursor() {
                     homeserver: "homeserver-a".into(),
                     event_id: 20,
                 })?;
+                assert_eq!(
+                    tx.buffer_private_intake_packet(BufferedPrivatePacketRecord {
+                        counterparty: moved.clone(),
+                        link_generation: 7,
+                        receive_counter: 3,
+                        ciphertext: vec![42; PRIVATE_INTAKE_PACKET_BYTES],
+                        source_cursor: Some(PrivateIntakeCursorRecord {
+                            subscribed_user: moved.clone(),
+                            homeserver: "homeserver-a".into(),
+                            event_id: 10,
+                        }),
+                        buffered_at: timestamp(),
+                    })?,
+                    PrivateIntakeBufferOutcome::Inserted
+                );
                 tx.reconcile_private_intake_cursor_homeserver(&moved, "homeserver-b");
                 Ok(())
             }
@@ -670,4 +693,7 @@ async fn test_homeserver_move_resets_only_moved_users_cursor() {
     let state = storage.snapshot().unwrap();
     assert!(!state.private_intake_cursors.contains_key(&moved));
     assert_eq!(state.private_intake_cursors[&stable].event_id, 20);
+    let packet = &state.private_intake_peers[&moved].buffered_packets[0];
+    assert_eq!(packet.ciphertext, vec![42; PRIVATE_INTAKE_PACKET_BYTES]);
+    assert!(packet.source_cursor.is_none());
 }

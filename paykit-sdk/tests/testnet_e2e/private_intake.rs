@@ -355,11 +355,11 @@ async fn test_cancel_then_fresh_handshake_ignores_late_old_packet_from_intake() 
     let fresh_packet_path =
         publish_pending_handshake_packet_from_restarted_intake(&pair.alice, &pair.bob.public_key)
             .await;
-    // Explicit cancellation advances the local generation fence, but it is not
-    // an Encrypted Link recovery attempt. The unchanged recovery context
-    // therefore reuses the stream path and the fresh `/0` publication replaces
-    // the cancelled attempt's packet at that path.
-    assert_eq!(fresh_packet_path, old_packet_path);
+    // Cancellation clears both saved attempt IDs. Each side publishes a new
+    // recovery marker before the fresh handshake, so its stream path differs
+    // even though the cancelled generation's `/0` packet is still present.
+    // Bob has already advanced as responder above without consuming that packet.
+    assert_ne!(fresh_packet_path, old_packet_path);
     let fresh_packet = pair
         .alice
         .access
@@ -373,17 +373,6 @@ async fn test_cancel_then_fresh_handshake_ignores_late_old_packet_from_intake() 
         .unwrap()
         .to_vec();
     assert_ne!(fresh_packet, old_packet);
-
-    // Let Bob consume the fresh generation's required `/0` before replacing
-    // that reused path with the exact packet from the cancelled generation.
-    advance_handshake_from_intake_after_restart(&pair.bob, &pair.alice.public_key).await;
-    pair.alice
-        .access
-        .session
-        .storage()
-        .put(&old_packet_path, old_packet.clone())
-        .await
-        .unwrap();
 
     drive_handshake_from_restarted_intake(&pair.alice, &pair.bob).await;
     for (local, remote) in [(&pair.alice, &pair.bob), (&pair.bob, &pair.alice)] {
@@ -405,7 +394,7 @@ async fn test_cancel_then_fresh_handshake_ignores_late_old_packet_from_intake() 
             .unwrap()
             .as_ref(),
         old_packet.as_slice(),
-        "late cancelled-generation packet must remain published on the reused path"
+        "cancelled-generation packet must remain isolated on the old path"
     );
 }
 

@@ -8,7 +8,7 @@ const PRIVATE_INBOX_PROBE_CONCURRENCY: usize = 16;
 pub(super) struct PrivateReceiveSnapshot {
     pub(super) link: paykit_lib::EncryptedLinkSnapshot,
     pub(super) state: EncryptedLinkStateRecord,
-    authorization: paykit_lib::PaykitNoiseKeyAuthorization,
+    pub(super) authorization: paykit_lib::PaykitNoiseKeyAuthorization,
     has_peer_lease: bool,
 }
 
@@ -21,6 +21,30 @@ enum PrivateInboxProbe {
     Empty(Box<PrivateReceiveSnapshot>),
     Ready(Box<PrivateReceiveSnapshot>),
     Reload,
+}
+
+pub(super) fn private_receive_observation_matches(
+    expected_authorization: &paykit_lib::PaykitNoiseKeyAuthorization,
+    recovery_context: &paykit_lib::EncryptedLinkRecoveryContext,
+    authorization: &paykit_lib::PaykitNoiseKeyAuthorization,
+    marker: Option<&paykit_lib::EncryptedLinkRecoveryMarker>,
+) -> bool {
+    authorization == expected_authorization
+        && marker
+            .is_none_or(|marker| Some(marker.attempt_id()) == recovery_context.remote_attempt_id())
+}
+
+pub(super) fn private_receive_observation_is_current(
+    snapshot: &PrivateReceiveSnapshot,
+    authorization: &paykit_lib::PaykitNoiseKeyAuthorization,
+    marker: Option<&paykit_lib::EncryptedLinkRecoveryMarker>,
+) -> bool {
+    private_receive_observation_matches(
+        &snapshot.authorization,
+        snapshot.link.recovery_context(),
+        authorization,
+        marker,
+    )
 }
 
 pub(super) struct PrivateInboxCheckpoint {
@@ -640,13 +664,9 @@ where
                 &secret_key,
             ),
         );
-        if authorization.map_err(link_observation_error)? != snapshot.authorization {
-            return Ok(PrivateInboxProbe::Reload);
-        }
+        let authorization = authorization.map_err(link_observation_error)?;
         let marker = marker.map_err(|error| link_observation_error(error.into()))?;
-        if marker.is_some_and(|marker| {
-            Some(marker.attempt_id()) != link.recovery_context().remote_attempt_id()
-        }) {
+        if !private_receive_observation_is_current(&snapshot, &authorization, marker.as_ref()) {
             return Ok(PrivateInboxProbe::Reload);
         }
         match pending {

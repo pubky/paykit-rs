@@ -221,6 +221,31 @@ enum PrivatePacketAcquisition {
     PendingHandshake,
 }
 
+struct PrivateIntakePeerAudit {
+    outcome: Result<PrivatePacketAcquisition>,
+    inserted: bool,
+}
+
+fn require_current_private_intake_observation(
+    expected_authorization: &paykit_lib::PaykitNoiseKeyAuthorization,
+    recovery_context: &paykit_lib::EncryptedLinkRecoveryContext,
+    authorization: &paykit_lib::PaykitNoiseKeyAuthorization,
+    marker: Option<&paykit_lib::EncryptedLinkRecoveryMarker>,
+) -> Result<()> {
+    if super::private_stream::private_receive_observation_matches(
+        expected_authorization,
+        recovery_context,
+        authorization,
+        marker,
+    ) {
+        return Ok(());
+    }
+    Err(PaykitSdkError::RecoveryRequired {
+        context: "private intake peer authorization or recovery context changed".into(),
+        source: None,
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrivateIntakePeerPhase {
     PendingHandshake { generation: u64 },
@@ -416,23 +441,41 @@ fn route_private_intake_event(
 async fn audit_private_intake_peer<F, Fut>(
     peer: PubkyPublicKey,
     mut acquire: F,
-) -> Result<PrivatePacketAcquisition>
+) -> PrivateIntakePeerAudit
 where
     F: FnMut(PubkyPublicKey, Option<PrivateIntakeCursorRecord>) -> Fut,
     Fut: Future<Output = Result<PrivatePacketAcquisition>>,
 {
+    let mut inserted = false;
     for _ in 0..MAX_AUDIT_ACQUISITIONS_PER_PEER {
-        let outcome = acquire(peer.clone(), None).await?;
+        let outcome = match acquire(peer.clone(), None).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return PrivateIntakePeerAudit {
+                    outcome: Err(error),
+                    inserted,
+                };
+            }
+        };
         match outcome {
-            PrivatePacketAcquisition::Inserted => continue,
+            PrivatePacketAcquisition::Inserted => inserted = true,
             PrivatePacketAcquisition::Absent
             | PrivatePacketAcquisition::InsertedAtCapacity
             | PrivatePacketAcquisition::AlreadyBuffered
             | PrivatePacketAcquisition::CapacityReached
-            | PrivatePacketAcquisition::PendingHandshake => return Ok(outcome),
+            | PrivatePacketAcquisition::PendingHandshake => {
+                inserted |= matches!(outcome, PrivatePacketAcquisition::InsertedAtCapacity);
+                return PrivateIntakePeerAudit {
+                    outcome: Ok(outcome),
+                    inserted,
+                };
+            }
         }
     }
-    Ok(PrivatePacketAcquisition::Inserted)
+    PrivateIntakePeerAudit {
+        outcome: Ok(PrivatePacketAcquisition::Inserted),
+        inserted,
+    }
 }
 
 #[derive(Debug)]
@@ -1369,11 +1412,14 @@ where
                 .await;
                 continue;
             }
-            match audit_private_intake_peer(peer.clone(), |peer, cursor| {
+            let peer_audit = audit_private_intake_peer(peer.clone(), |peer, cursor| {
                 self.acquire_expected_private_packet(peer, cursor)
             })
-            .await
-            {
+            .await;
+            if peer_audit.inserted {
+                work.notify_waiters();
+            }
+            match peer_audit.outcome {
                 Ok(outcome) => {
                     audit.handshake_pending |=
                         matches!(&outcome, PrivatePacketAcquisition::PendingHandshake);
@@ -1382,12 +1428,7 @@ where
                         PrivatePacketAcquisition::InsertedAtCapacity
                             | PrivatePacketAcquisition::CapacityReached
                     );
-                    if matches!(
-                        &outcome,
-                        PrivatePacketAcquisition::Inserted
-                            | PrivatePacketAcquisition::InsertedAtCapacity
-                            | PrivatePacketAcquisition::PendingHandshake
-                    ) {
+                    if matches!(&outcome, PrivatePacketAcquisition::PendingHandshake) {
                         work.notify_waiters();
                     }
                     set_peer_audit_outcome(health, peer.clone(), outcome, self.clock.now()).await;
@@ -1443,8 +1484,28 @@ where
         let secret = access.paykit_noise_secret_key()?;
         let session_info = access.session.info();
         let local = session_info.public_key();
-        let generation = snapshot.state.generation;
+        let remote = counterparty.to_public_key()?;
         let public_storage = access.outbox_client.public_storage();
+        let (authorization, marker) = tokio::join!(
+            noise_key_authorization::require_authorization(&public_storage, &remote),
+            paykit_lib::fetch_encrypted_link_recovery_marker(
+                &public_storage,
+                &secret,
+                local,
+                &remote,
+                snapshot.link.remote_noise_public_key(),
+            ),
+        );
+        let authorization = authorization.map_err(super::recovery::link_observation_error)?;
+        let marker =
+            marker.map_err(|error| super::recovery::link_observation_error(error.into()))?;
+        require_current_private_intake_observation(
+            &snapshot.authorization,
+            snapshot.link.recovery_context(),
+            &authorization,
+            marker.as_ref(),
+        )?;
+        let generation = snapshot.state.generation;
         acquire_expected_private_packet_with_fetch(
             &self.storage,
             counterparty,
@@ -1972,6 +2033,47 @@ mod tests {
             peers: users(1),
         };
         assert!(audit_jitter(&group) <= MAX_AUDIT_JITTER);
+    }
+
+    #[test]
+    fn test_sse_observation_rejects_rotated_authorization_or_recovery_context() {
+        let identity = pubky::Keypair::random();
+        let current =
+            paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[7; 32], 1).unwrap();
+        let rotated =
+            paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[8; 32], 2).unwrap();
+        let marker = paykit_lib::EncryptedLinkRecoveryMarker::new_v4(
+            Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        )
+        .unwrap();
+        let other_marker = paykit_lib::EncryptedLinkRecoveryMarker::new_v4(
+            Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        )
+        .unwrap();
+        let recovery =
+            paykit_lib::EncryptedLinkRecoveryContext::new(None, Some(marker.attempt_id())).unwrap();
+
+        assert!(require_current_private_intake_observation(
+            &current,
+            &recovery,
+            &current,
+            Some(&marker),
+        )
+        .is_ok());
+        assert!(require_current_private_intake_observation(
+            &current,
+            &recovery,
+            &rotated,
+            Some(&marker),
+        )
+        .is_err());
+        assert!(require_current_private_intake_observation(
+            &current,
+            &recovery,
+            &current,
+            Some(&other_marker),
+        )
+        .is_err());
     }
 
     #[test]
@@ -2856,12 +2958,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_startup_audit_catches_up_contiguous_backlog_to_absent() {
+    async fn test_startup_audit_reports_inserted_work_before_absence_or_failure() {
         let peer = users(1).remove(0);
         let outcomes = Arc::new(StdMutex::new(vec![
-            PrivatePacketAcquisition::Absent,
-            PrivatePacketAcquisition::Inserted,
-            PrivatePacketAcquisition::Inserted,
+            Ok(PrivatePacketAcquisition::Absent),
+            Ok(PrivatePacketAcquisition::Inserted),
+            Ok(PrivatePacketAcquisition::Inserted),
         ]));
         let observed = Arc::new(StdMutex::new(Vec::new()));
 
@@ -2871,19 +2973,41 @@ mod tests {
             move |requested, cursor| {
                 let outcome = outcomes.lock().unwrap().pop().unwrap();
                 observed.lock().unwrap().push((requested, cursor));
-                async move { Ok(outcome) }
+                async move { outcome }
             }
         })
-        .await
-        .unwrap();
+        .await;
 
-        assert!(matches!(result, PrivatePacketAcquisition::Absent));
+        assert!(result.inserted);
+        assert!(matches!(
+            result.outcome,
+            Ok(PrivatePacketAcquisition::Absent)
+        ));
         assert_eq!(observed.lock().unwrap().len(), 3);
         assert!(observed
             .lock()
             .unwrap()
             .iter()
             .all(|(requested, cursor)| requested == &peer && cursor.is_none()));
+
+        let outcomes = Arc::new(StdMutex::new(vec![
+            Err(PaykitSdkError::Transport {
+                context: "later fetch failed".into(),
+                source: None,
+            }),
+            Ok(PrivatePacketAcquisition::Inserted),
+        ]));
+        let result = audit_private_intake_peer(peer, {
+            let outcomes = Arc::clone(&outcomes);
+            move |_, _| {
+                let outcome = outcomes.lock().unwrap().pop().unwrap();
+                async move { outcome }
+            }
+        })
+        .await;
+
+        assert!(result.inserted);
+        assert!(result.outcome.is_err());
     }
 
     #[tokio::test]
@@ -3494,10 +3618,13 @@ mod tests {
                 }
             }
         })
-        .await
-        .unwrap();
+        .await;
 
-        assert!(matches!(outcome, PrivatePacketAcquisition::Absent));
+        assert!(outcome.inserted);
+        assert!(matches!(
+            outcome.outcome,
+            Ok(PrivatePacketAcquisition::Absent)
+        ));
         assert_eq!(*fetched.lock().unwrap(), 3);
         assert_eq!(
             storage.snapshot().unwrap().private_intake_peers[&peer]

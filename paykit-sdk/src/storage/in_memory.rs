@@ -491,6 +491,17 @@ impl StorageTransaction for StorageStateTransaction {
             .is_some_and(|cursor| cursor.homeserver != homeserver)
         {
             self.state.private_intake_cursors.remove(subscribed_user);
+            for peer in self.state.private_intake_peers.values_mut() {
+                for packet in &mut peer.buffered_packets {
+                    if packet
+                        .source_cursor
+                        .as_ref()
+                        .is_some_and(|cursor| &cursor.subscribed_user == subscribed_user)
+                    {
+                        packet.source_cursor = None;
+                    }
+                }
+            }
         }
     }
 
