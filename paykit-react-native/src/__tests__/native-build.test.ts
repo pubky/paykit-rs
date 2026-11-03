@@ -83,6 +83,21 @@ describe('Android TurboModule install', () => {
   });
 });
 
+describe('Package version', () => {
+  test('test_package_version_matches_paykit_ffi_version', () => {
+    // paykit-ffi/build.sh bumps every manifest together, and the npm Package
+    // workflow publishes this version.
+    const cargo = read(repoRoot, 'paykit-ffi/Cargo.toml');
+    const expected = cargo.match(/^version = "([^"]+)"$/m)?.[1];
+    const { version } = JSON.parse(read(packageDir, 'package.json'));
+    const lock = JSON.parse(read(packageDir, 'package-lock.json'));
+    expect(expected).toBeDefined();
+    expect(version).toBe(expected);
+    expect(lock.version).toBe(expected);
+    expect(lock.packages[''].version).toBe(expected);
+  });
+});
+
 describe('iOS build', () => {
   test('test_ios_deployment_target_matches_build_ios_script', () => {
     const buildIos = read(repoRoot, 'paykit-ffi/build_ios.sh');

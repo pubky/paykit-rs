@@ -2501,7 +2501,7 @@ PODS:
     - React-perflogger (= 0.83.10)
     - React-utils (= 0.83.10)
     - SocketRocket
-  - ReactNativePaykit (0.1.0):
+  - ReactNativePaykit (0.1.1-rc5):
     - boost
     - DoubleConversion
     - fast_float
@@ -2862,7 +2862,7 @@ SPEC CHECKSUMS:
   ReactAppDependencyProvider: 5cc0b8b95a5be99ad92aee2d59bc59987df97753
   ReactCodegen: def1d229e98dfa107fa837df57870ee7b9114a63
   ReactCommon: d71e3b6d0134b09c1ec8e656f81daefae6902a97
-  ReactNativePaykit: 923a962eb70cc31ab30447a3b8189988e7297809
+  ReactNativePaykit: 0b659e9fedf693bc9bab2b044297b22ab5e1b5cc
   SocketRocket: d4aabe649be1e368d1318fdf28a022d714d65748
   uniffi-bindgen-react-native: 125eae9e3a0cf34bf8f3d4b0ceed517df7cc0733
   Yoga: d2ed98551adb569fc38be0148666854e1ff60692
