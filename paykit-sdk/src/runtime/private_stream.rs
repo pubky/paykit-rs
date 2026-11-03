@@ -1,7 +1,11 @@
 use super::recovery::link_observation_error;
 use super::*;
-use crate::domain::private_stream::persist_private_stream_batch_in_transaction;
+use crate::{
+    domain::private_stream::persist_private_stream_batch_in_transaction,
+    storage::retry_storage_transaction,
+};
 use futures_util::{stream, StreamExt};
+use paykit_lib::PaykitNoiseKeyAuthorization as NoiseAuthorization;
 
 const PRIVATE_INBOX_PROBE_CONCURRENCY: usize = 16;
 
@@ -36,7 +40,7 @@ pub(super) fn private_receive_observation_matches(
 
 pub(super) fn private_receive_observation_is_current(
     snapshot: &PrivateReceiveSnapshot,
-    authorization: &paykit_lib::PaykitNoiseKeyAuthorization,
+    authorization: &NoiseAuthorization,
     marker: Option<&paykit_lib::EncryptedLinkRecoveryMarker>,
 ) -> bool {
     private_receive_observation_matches(
@@ -45,6 +49,110 @@ pub(super) fn private_receive_observation_is_current(
         authorization,
         marker,
     )
+}
+
+pub(super) struct PrivateReceiveObservation<'a> {
+    expected_authorization: &'a NoiseAuthorization,
+    recovery_context: &'a paykit_lib::EncryptedLinkRecoveryContext,
+    authorization: &'a NoiseAuthorization,
+    marker: Option<&'a paykit_lib::EncryptedLinkRecoveryMarker>,
+}
+
+impl<'a> PrivateReceiveObservation<'a> {
+    pub(super) fn new(
+        expected_authorization: &'a NoiseAuthorization,
+        recovery_context: &'a paykit_lib::EncryptedLinkRecoveryContext,
+        authorization: &'a NoiseAuthorization,
+        marker: Option<&'a paykit_lib::EncryptedLinkRecoveryMarker>,
+    ) -> Self {
+        Self {
+            expected_authorization,
+            recovery_context,
+            authorization,
+            marker,
+        }
+    }
+}
+
+pub(super) async fn require_current_private_receive_observation_with_lease<S>(
+    storage: &S,
+    counterparty: &PubkyPublicKey,
+    lease: &PeerLinkOperationLease,
+    observation: PrivateReceiveObservation<'_>,
+    now: DateTime<Utc>,
+) -> Result<()>
+where
+    S: StorageAdapter,
+{
+    let PrivateReceiveObservation {
+        expected_authorization,
+        recovery_context,
+        authorization,
+        marker,
+    } = observation;
+    let observation_matches = private_receive_observation_matches(
+        expected_authorization,
+        recovery_context,
+        authorization,
+        marker,
+    );
+    let marker_attempt_id = marker.map(|marker| marker.attempt_id().to_owned());
+    // Commit the monotonic authorization pin and recovery transition together
+    // under the peer lease before callers classify this observation as stale.
+    let changed = retry_storage_transaction(storage, || {
+        let counterparty = counterparty.clone();
+        let lease = lease.clone();
+        let expected_authorization = expected_authorization.clone();
+        let authorization = authorization.clone();
+        let marker_attempt_id = marker_attempt_id.clone();
+        move |tx| {
+            crate::storage::require_peer_link_operation_lease(tx, &lease)?;
+            let peer = tx.linked_peer(&counterparty);
+            if observation_matches
+                && peer.as_ref().is_some_and(|peer| {
+                    peer.state == LinkedPeerState::Linked
+                        && peer.noise_key_authorization.as_ref() == Some(&expected_authorization)
+                        && peer.local_recovery_attempt_id.as_deref()
+                            == recovery_context.local_attempt_id()
+                        && peer.remote_recovery_attempt_id.as_deref()
+                            == recovery_context.remote_attempt_id()
+                })
+            {
+                return Ok(false);
+            }
+            noise_key_authorization::pin_authorization_in_transaction(
+                tx,
+                &counterparty,
+                &authorization,
+            )?;
+            let peer = tx.linked_peer(&counterparty);
+            let marker_changed = marker_attempt_id.as_deref().is_some_and(|attempt_id| {
+                peer.as_ref()
+                    .and_then(|peer| peer.remote_recovery_attempt_id.as_deref())
+                    != Some(attempt_id)
+            });
+            if marker_changed
+                || peer.is_none_or(|peer| peer.state != LinkedPeerState::RecoveryRequired)
+            {
+                mark_recovery_required_for_marker_in_transaction(
+                    tx,
+                    &counterparty,
+                    now,
+                    marker_attempt_id.as_deref(),
+                )?;
+            }
+            Ok(true)
+        }
+    })
+    .await?;
+
+    if changed {
+        return Err(PaykitSdkError::RecoveryRequired {
+            context: "private intake peer authorization or recovery context changed".into(),
+            source: None,
+        });
+    }
+    Ok(())
 }
 
 pub(super) struct PrivateInboxCheckpoint {
@@ -752,17 +860,6 @@ where
     ) -> Result<PrivateReceiveLink> {
         self.ensure_peer_allows_private_automation(&counterparty)
             .await?;
-        let authorization = self
-            .counterparty_noise_key_authorization(&counterparty)
-            .await?;
-        let remote_noise_public_key = authorization.noise_public_key().clone();
-        self.observe_remote_recovery_marker_with_lease(
-            &counterparty,
-            session_access,
-            &lease,
-            &remote_noise_public_key,
-        )
-        .await?;
         let (peer, stored_link_state) = self
             .storage
             .transaction(|tx| {
@@ -782,8 +879,49 @@ where
                 ))
             })
             .await?;
+        let expected_authorization = peer.noise_key_authorization.as_ref().ok_or_else(|| {
+            PaykitSdkError::RecoveryRequired {
+                context: format!(
+                    "no pinned Noise key authorization for counterparty {counterparty}"
+                ),
+                source: None,
+            }
+        })?;
         let secret_key = session_access.paykit_noise_secret_key()?;
+        let session_info = session_access.session.info();
+        let local_public_key = session_info.public_key();
         let remote_public_key = counterparty.to_public_key()?;
+        let public_storage = session_access.outbox_client.public_storage();
+        let (authorization, marker) = tokio::join!(
+            noise_key_authorization::require_authorization(&public_storage, &remote_public_key),
+            paykit_lib::fetch_encrypted_link_recovery_marker(
+                &public_storage,
+                &secret_key,
+                local_public_key,
+                &remote_public_key,
+                expected_authorization.noise_public_key(),
+            ),
+        );
+        let authorization = authorization.map_err(link_observation_error)?;
+        let marker = marker.map_err(|error| link_observation_error(error.into()))?;
+        let recovery_context = paykit_lib::EncryptedLinkRecoveryContext::new(
+            peer.local_recovery_attempt_id.as_deref(),
+            peer.remote_recovery_attempt_id.as_deref(),
+        )?;
+        require_current_private_receive_observation_with_lease(
+            &self.storage,
+            &counterparty,
+            &lease,
+            PrivateReceiveObservation::new(
+                expected_authorization,
+                &recovery_context,
+                &authorization,
+                marker.as_ref(),
+            ),
+            self.clock.now(),
+        )
+        .await?;
+        let remote_noise_public_key = authorization.noise_public_key().clone();
         let authorized_apps = self.private_receive_authorized_apps(&counterparty).await;
 
         let stored_link_state =
@@ -1229,4 +1367,139 @@ fn require_private_intake_supervisor_lease(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::InMemoryStorage;
+
+    #[tokio::test]
+    async fn test_changed_authorization_persists_pin_and_rejects_rollback_replay() {
+        let storage = InMemoryStorage::new();
+        let identity = pubky::Keypair::random();
+        let counterparty = PubkyPublicKey::from_public_key(&identity.public_key());
+        let generation_1 =
+            paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[1; 32], 1).unwrap();
+        let generation_2 =
+            paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[2; 32], 2).unwrap();
+        let now = Utc::now();
+        let lease = storage
+            .transaction(|tx| {
+                let mut peer = default_linked_peer(counterparty.clone());
+                peer.state = LinkedPeerState::Linked;
+                peer.noise_key_authorization = Some(generation_1.clone());
+                tx.save_linked_peer(peer);
+                tx.claim_peer_link_operation(&counterparty, now, now + chrono::Duration::minutes(1))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let recovery_context = paykit_lib::EncryptedLinkRecoveryContext::new(None, None).unwrap();
+
+        assert!(matches!(
+            require_current_private_receive_observation_with_lease(
+                &storage,
+                &counterparty,
+                &lease,
+                PrivateReceiveObservation::new(
+                    &generation_1,
+                    &recovery_context,
+                    &generation_2,
+                    None,
+                ),
+                now,
+            )
+            .await,
+            Err(PaykitSdkError::RecoveryRequired { .. })
+        ));
+        let advanced = storage.snapshot().unwrap();
+        assert_eq!(
+            advanced.linked_peers[&counterparty]
+                .noise_key_authorization
+                .as_ref(),
+            Some(&generation_2)
+        );
+        assert_eq!(
+            advanced.linked_peers[&counterparty].state,
+            LinkedPeerState::RecoveryRequired
+        );
+
+        assert!(matches!(
+            require_current_private_receive_observation_with_lease(
+                &storage,
+                &counterparty,
+                &lease,
+                PrivateReceiveObservation::new(
+                    &generation_1,
+                    &recovery_context,
+                    &generation_1,
+                    None,
+                ),
+                now,
+            )
+            .await,
+            Err(PaykitSdkError::LinkObservation { .. })
+        ));
+        assert_eq!(storage.snapshot().unwrap(), advanced);
+    }
+
+    #[tokio::test]
+    async fn test_changed_recovery_marker_persists_recovery_transition() {
+        let storage = InMemoryStorage::new();
+        let identity = pubky::Keypair::random();
+        let counterparty = PubkyPublicKey::from_public_key(&identity.public_key());
+        let authorization =
+            paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[1; 32], 1).unwrap();
+        let old_marker = paykit_lib::EncryptedLinkRecoveryMarker::new_v4(
+            Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        )
+        .unwrap();
+        let new_marker = paykit_lib::EncryptedLinkRecoveryMarker::new_v4(
+            Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        )
+        .unwrap();
+        let now = Utc::now();
+        let lease = storage
+            .transaction(|tx| {
+                let mut peer = default_linked_peer(counterparty.clone());
+                peer.state = LinkedPeerState::Linked;
+                peer.noise_key_authorization = Some(authorization.clone());
+                peer.remote_recovery_attempt_id = Some(old_marker.attempt_id().to_owned());
+                peer.remote_recovery_marker_observed_at = Some(now);
+                tx.save_linked_peer(peer);
+                tx.claim_peer_link_operation(&counterparty, now, now + chrono::Duration::minutes(1))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let recovery_context =
+            paykit_lib::EncryptedLinkRecoveryContext::new(None, Some(old_marker.attempt_id()))
+                .unwrap();
+
+        assert!(matches!(
+            require_current_private_receive_observation_with_lease(
+                &storage,
+                &counterparty,
+                &lease,
+                PrivateReceiveObservation::new(
+                    &authorization,
+                    &recovery_context,
+                    &authorization,
+                    Some(&new_marker),
+                ),
+                now,
+            )
+            .await,
+            Err(PaykitSdkError::RecoveryRequired { .. })
+        ));
+        let peer = &storage.snapshot().unwrap().linked_peers[&counterparty];
+        assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
+        assert_eq!(peer.noise_key_authorization.as_ref(), Some(&authorization));
+        assert_eq!(
+            peer.remote_recovery_attempt_id.as_deref(),
+            Some(new_marker.attempt_id())
+        );
+        assert_eq!(peer.remote_recovery_marker_observed_at, Some(now));
+    }
 }

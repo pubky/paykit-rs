@@ -226,26 +226,6 @@ struct PrivateIntakePeerAudit {
     inserted: bool,
 }
 
-fn require_current_private_intake_observation(
-    expected_authorization: &paykit_lib::PaykitNoiseKeyAuthorization,
-    recovery_context: &paykit_lib::EncryptedLinkRecoveryContext,
-    authorization: &paykit_lib::PaykitNoiseKeyAuthorization,
-    marker: Option<&paykit_lib::EncryptedLinkRecoveryMarker>,
-) -> Result<()> {
-    if super::private_stream::private_receive_observation_matches(
-        expected_authorization,
-        recovery_context,
-        authorization,
-        marker,
-    ) {
-        return Ok(());
-    }
-    Err(PaykitSdkError::RecoveryRequired {
-        context: "private intake peer authorization or recovery context changed".into(),
-        source: None,
-    })
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrivateIntakePeerPhase {
     PendingHandshake { generation: u64 },
@@ -1499,12 +1479,28 @@ where
         let authorization = authorization.map_err(super::recovery::link_observation_error)?;
         let marker =
             marker.map_err(|error| super::recovery::link_observation_error(error.into()))?;
-        require_current_private_intake_observation(
-            &snapshot.authorization,
-            snapshot.link.recovery_context(),
+        if !super::private_stream::private_receive_observation_is_current(
+            &snapshot,
             &authorization,
             marker.as_ref(),
-        )?;
+        ) {
+            let lease = self.claim_peer_link_operation(&counterparty).await?;
+            let result =
+                super::private_stream::require_current_private_receive_observation_with_lease(
+                    &self.storage,
+                    &counterparty,
+                    &lease,
+                    super::private_stream::PrivateReceiveObservation::new(
+                        &snapshot.authorization,
+                        snapshot.link.recovery_context(),
+                        &authorization,
+                        marker.as_ref(),
+                    ),
+                    self.clock.now(),
+                )
+                .await;
+            self.finish_peer_link_operation(lease, result).await?;
+        }
         let generation = snapshot.state.generation;
         acquire_expected_private_packet_with_fetch(
             &self.storage,
@@ -2053,27 +2049,30 @@ mod tests {
         let recovery =
             paykit_lib::EncryptedLinkRecoveryContext::new(None, Some(marker.attempt_id())).unwrap();
 
-        assert!(require_current_private_intake_observation(
-            &current,
-            &recovery,
-            &current,
-            Some(&marker),
-        )
-        .is_ok());
-        assert!(require_current_private_intake_observation(
-            &current,
-            &recovery,
-            &rotated,
-            Some(&marker),
-        )
-        .is_err());
-        assert!(require_current_private_intake_observation(
-            &current,
-            &recovery,
-            &current,
-            Some(&other_marker),
-        )
-        .is_err());
+        assert!(
+            super::super::private_stream::private_receive_observation_matches(
+                &current,
+                &recovery,
+                &current,
+                Some(&marker),
+            )
+        );
+        assert!(
+            !super::super::private_stream::private_receive_observation_matches(
+                &current,
+                &recovery,
+                &rotated,
+                Some(&marker),
+            )
+        );
+        assert!(
+            !super::super::private_stream::private_receive_observation_matches(
+                &current,
+                &recovery,
+                &current,
+                Some(&other_marker),
+            )
+        );
     }
 
     #[test]
