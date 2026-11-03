@@ -5,9 +5,10 @@ React Native Language Bindings for the Paykit SDK.
 The package is generated from the same UniFFI metadata as the Swift and Kotlin
 bindings in [`paykit-ffi`](../paykit-ffi/), using
 [uniffi-bindgen-react-native](https://github.com/jhugman/uniffi-bindgen-react-native)
-(ubrn). There is no hand-written bridge code: every exported object, record,
-enum, error, async method and callback interface comes straight from Rust as
-typed TypeScript and JSI C++.
+(ubrn). Every exported object, record, enum, error, async method and
+callback interface comes straight from Rust as typed TypeScript and JSI C++.
+The only hand-written native code is a few Android files that initialize TLS
+and work around ubrn issues; see [Development](#development).
 
 ## Requirements
 
@@ -176,6 +177,7 @@ or report these types, or any object that contains them:
 `FfiContactRecord`, `FfiContactUpdate`, `FfiConversionRate`,
 `FfiPaymentAmountContext`, `FfiPaymentRequestTerms`,
 `FfiPaymentProofSubmission`, `FfiPaymentTarget`,
+`FfiPendingAllowanceAcceptance`,
 `FfiPreparedPrivateContactPayment`, `FfiPrivateContactPaymentResolution`,
 `FfiPrivatePaymentEndpointCandidate`, `FfiPrivatePaymentEndpointReservation`,
 `FfiPrivatePaymentEndpointReservationCancellation`,
@@ -213,8 +215,16 @@ This list comes from
 [`paykit-ffi/redacted_binding_types.txt`](../paykit-ffi/redacted_binding_types.txt).
 A test fails when the two lists differ.
 
-Secret keys never come back as raw values. `FfiPaykitIdentitySecretKey` and
-the other key types stay opaque object handles.
+### Exported key and backup bytes enter the JS heap
+
+`FfiPubkyLocalSecretKey`, `FfiPaykitIdentitySecretKey` and `FfiSdkBackupBlob`
+are opaque object handles that Rust zeroizes when it drops them. Their
+`exportBytes()` methods return a raw copy as an `ArrayBuffer`, with the same
+exposure as an exported state blob: it cannot be zeroized, stays in the JS
+heap until garbage collection and is visible to JS debuggers. Call
+`exportBytes()` only to write the bytes straight into encrypted storage, or
+to hand them to the delegation flow that needs them. Never log them, and do
+not keep references to them.
 
 ## Development
 
@@ -241,11 +251,21 @@ npm run typecheck && npm run lint && npm test
 
 `npm run build:native` regenerates the same files from the native libraries.
 
-Two files are hand-edited after ubrn rendered them and are listed under
-`noOverwrite` in `ubrn.config.yaml`: `android/build.gradle` and the Kotlin
-TurboModule. ubrn leaves them alone, so review them by hand when you upgrade
-ubrn. `android/src/main/java/com/synonym/paykit/PaykitAndroid.kt` is not
-rendered by ubrn at all.
+Three files are hand-edited after ubrn rendered them and are listed under
+`noOverwrite` in `ubrn.config.yaml`:
+
+- `android/build.gradle`: the rustls-platform-verifier classes, 16 KB page
+  alignment and the 64-bit-only ABI filter;
+- the Kotlin TurboModule, which initializes the Android TLS verifier;
+- `android/cpp-adapter.cpp`, which carries the ubrn 0.30.0-1
+  `CallInvokerHolder` lookup so the module installs on React Native 0.80 and
+  later.
+
+ubrn leaves them alone, so review them by hand when you upgrade ubrn. With
+ubrn 0.30.0-1 or later, take the regenerated `cpp-adapter.cpp`, drop it from
+`noOverwrite`, and add the 32-bit Android ABIs back.
+`android/src/main/java/com/synonym/paykit/PaykitAndroid.kt` is not rendered
+by ubrn at all.
 
 `./build.sh all` in `paykit-ffi` builds Swift and Kotlin only. The
 `React Native` CI workflow regenerates and type-checks this package on every
