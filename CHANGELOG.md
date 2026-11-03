@@ -65,6 +65,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   readiness, so a not-ready link no longer hides the size error, and nothing is
   queued. `propose_payment_request_with_id` refuses oversized terms before it
   checks earlier use of the Payment Request ID.
+- `PaykitSdk.stateRevision` in Swift and Kotlin, and `FfiPaykitSdk.stateRevision`
+  in React Native, no longer wait for other calls on the same handle when the
+  SDK uses callback storage. While another call holds the storage lock (a
+  state transaction, or another `stateRevision` still reading on another
+  thread), they throw the retryable `SharedStateBusy` error with code
+  `state_transaction_in_progress`. Previously they blocked until that call
+  finished, which could deadlock React Native. Retry after the other call
+  finishes.
 
 ### Fixed
 
@@ -80,11 +88,6 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   reached the app as an internal panic error that included the platform error
   text, and a throw from `SdkStateBlobStore` left that SDK handle failing every
   later call with `state_transaction_lock_poisoned`.
-
-### Fixed
-
-- `FfiPaykitSdk.stateRevision` returns `SharedStateBusy` instead of blocking
-  while a state transaction is running.
 
 ### Integration
 

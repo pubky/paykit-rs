@@ -139,9 +139,9 @@ the call runs on the JS thread and the worker waits for the return value. So:
 - Implement every callback synchronously. Do not return Promises.
 - Do not call back into the same `FfiPaykitSdk` handle from a callback.
 - `FfiPaykitSdk.stateRevision()` does not wait for other calls on the same
-  handle. While one of them is in a state transaction, it throws
-  `PaykitFfiError.SharedStateBusy` with code `state_transaction_in_progress`.
-  Retry after that call finishes.
+  handle. While another call holds the storage lock, such as an async SDK
+  call in a state transaction, it throws `PaykitFfiError.SharedStateBusy`
+  with code `state_transaction_in_progress`. Retry after that call finishes.
 
 ## Security
 

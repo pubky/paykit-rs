@@ -178,7 +178,9 @@ impl FfiSdkStorage {
     ///
     /// Transactions hold `transaction_lock` while they call the platform store.
     /// Bindings such as React Native run those callbacks on the thread that also
-    /// makes this synchronous call, so blocking here could deadlock.
+    /// makes this synchronous call, so blocking here could deadlock. This read
+    /// also holds the lock through its own `load_state_blob` callback, so a
+    /// concurrent `state_revision` on another thread gets `SharedStateBusy` too.
     pub(crate) fn state_revision(&self) -> Result<Option<String>, PaykitFfiError> {
         let _guard = self.transaction_lock.try_lock().map_err(|err| match err {
             TryLockError::WouldBlock => PaykitFfiError::SharedStateBusy {
