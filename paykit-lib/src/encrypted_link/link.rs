@@ -230,7 +230,8 @@ impl EncryptedLink {
         // than its write stream. Never write a second packet into a used slot.
         // A retained failed send must be republished first; the send reports it.
         if self.encryptor.snapshot().is_ok() {
-            self.skip_published_write_slots().await?;
+            // Boxed so every send helper's future does not embed the link restore.
+            Box::pin(self.skip_published_write_slots()).await?;
         }
         private_application_message::send_private_application_message(
             &mut self.encryptor,
