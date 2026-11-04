@@ -88,13 +88,20 @@ impl<'a> PrivateReceiveObservation<'a> {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PrivateReceiveObservationStatus {
+    Current,
+    RecoveryRequired,
+    ReloadMarker { link_generation: u64 },
+}
+
 pub(super) async fn require_current_private_receive_observation_with_lease<S, C>(
     storage: &S,
     counterparty: &PubkyPublicKey,
     lease: &PeerLinkOperationLease,
     observation: PrivateReceiveObservation<'_>,
     clock: &C,
-) -> Result<()>
+) -> Result<PrivateReceiveObservationStatus>
 where
     S: StorageAdapter,
     C: Clock,
@@ -131,20 +138,36 @@ where
                 });
             }
             let peer = tx.linked_peer(&counterparty);
-            let link_generation_changed = tx
+            let current_link_generation = tx
                 .encrypted_link_state(&counterparty)
-                .is_some_and(|state| state.generation != expected_link_generation);
-            // A completed link or replacement handshake may have superseded the
-            // pre-read snapshot while public observations were in flight. Current
-            // matching authorization and marker own the newer generation.
+                .map(|state| state.generation);
+            if let Some(link_generation) =
+                current_link_generation.filter(|generation| *generation != expected_link_generation)
+            {
+                // Authorization advances are monotonic, but a marker loaded through
+                // a superseded snapshot key says nothing about the replacement link.
+                noise_key_authorization::pin_authorization_in_transaction(
+                    tx,
+                    &counterparty,
+                    &authorization,
+                )?;
+                return Ok(if marker_was_read {
+                    PrivateReceiveObservationStatus::ReloadMarker { link_generation }
+                } else {
+                    PrivateReceiveObservationStatus::Current
+                });
+            }
+            // A completed link may have superseded the pre-read snapshot while
+            // public observations were in flight. Current matching authorization
+            // and marker own that link.
             if peer.as_ref().is_some_and(|peer| {
-                (peer.state == LinkedPeerState::Linked || link_generation_changed)
+                (peer.state == LinkedPeerState::Linked || peer.state == LinkedPeerState::Linking)
                     && peer.noise_key_authorization.as_ref() == Some(&authorization)
                     && (!marker_was_read
                         || peer.remote_recovery_attempt_id.as_deref()
                             == marker_attempt_id.as_deref())
             }) {
-                return Ok(false);
+                return Ok(PrivateReceiveObservationStatus::Current);
             }
             noise_key_authorization::pin_authorization_in_transaction(
                 tx,
@@ -169,18 +192,21 @@ where
                     marker_attempt_id.as_deref(),
                 )?;
             }
-            Ok(true)
+            Ok(PrivateReceiveObservationStatus::RecoveryRequired)
         }
     })
     .await?;
 
-    if changed {
-        return Err(PaykitSdkError::RecoveryRequired {
-            context: "private intake peer authorization or recovery context changed".into(),
-            source: None,
-        });
+    match changed {
+        PrivateReceiveObservationStatus::RecoveryRequired => {
+            Err(PaykitSdkError::RecoveryRequired {
+                context: "private intake peer authorization or recovery context changed".into(),
+                source: None,
+            })
+        }
+        PrivateReceiveObservationStatus::Current => marker.map(|_| changed),
+        PrivateReceiveObservationStatus::ReloadMarker { .. } => Ok(changed),
     }
-    marker.map(|_| ())
 }
 
 pub(super) struct PrivateInboxCheckpoint {
@@ -253,15 +279,63 @@ where
         observation: PrivateReceiveObservation<'_>,
     ) -> Result<()> {
         let authorization_changed = observation.expected_authorization != observation.authorization;
-        let remote_noise_public_key = observation.authorization.noise_public_key().clone();
-        let result = require_current_private_receive_observation_with_lease(
+        let authorization = observation.authorization.clone();
+        let remote_noise_public_key = authorization.noise_public_key().clone();
+        let result = match require_current_private_receive_observation_with_lease(
             &self.storage,
             counterparty,
             lease,
             observation,
             &self.clock,
         )
-        .await;
+        .await
+        {
+            Ok(PrivateReceiveObservationStatus::Current) => Ok(()),
+            Ok(PrivateReceiveObservationStatus::ReloadMarker { link_generation }) => {
+                let public_storage = session_access.outbox_client.public_storage();
+                let secret = session_access.paykit_noise_secret_key()?;
+                let marker = paykit_lib::fetch_encrypted_link_recovery_marker(
+                    &public_storage,
+                    &secret,
+                    session_access.session.info().public_key(),
+                    &counterparty.to_public_key()?,
+                    authorization.noise_public_key(),
+                )
+                .await
+                .map_err(|error| link_observation_error(error.into()))?;
+                match require_current_private_receive_observation_with_lease(
+                    &self.storage,
+                    counterparty,
+                    lease,
+                    PrivateReceiveObservation::new(
+                        link_generation,
+                        &authorization,
+                        &authorization,
+                        marker.as_ref(),
+                    ),
+                    &self.clock,
+                )
+                .await
+                {
+                    Ok(PrivateReceiveObservationStatus::Current) => Ok(()),
+                    Ok(PrivateReceiveObservationStatus::ReloadMarker { .. }) => {
+                        Err(PaykitSdkError::ConcurrentUpdate {
+                            context: "Encrypted Link generation changed while peer lease was held"
+                                .into(),
+                            source: None,
+                        })
+                    }
+                    Ok(PrivateReceiveObservationStatus::RecoveryRequired) => {
+                        unreachable!("recovery-required observations return an error")
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Ok(PrivateReceiveObservationStatus::RecoveryRequired) => {
+                unreachable!("recovery-required observations return an error")
+            }
+            Err(error) => Err(error),
+        };
         if authorization_changed && matches!(&result, Err(PaykitSdkError::RecoveryRequired { .. }))
         {
             // Recovery is already durable. Marker publication is best-effort
@@ -1846,10 +1920,15 @@ mod tests {
             paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[1; 32], 1).unwrap();
         let generation_2 =
             paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[2; 32], 2).unwrap();
+        let stale_marker = paykit_lib::EncryptedLinkRecoveryMarker::new_v4(
+            Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        )
+        .unwrap();
         let current_marker = paykit_lib::EncryptedLinkRecoveryMarker::new_v4(
             Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         )
         .unwrap();
+        assert_ne!(stale_marker.attempt_id(), current_marker.attempt_id());
         let now = Utc::now();
         storage
             .transaction(|tx| {
@@ -1869,8 +1948,8 @@ mod tests {
             })
             .await
             .unwrap();
-        // SSE captured generation 1, then public reads yielded generation 2's
-        // authorization and marker after another operation started recovery.
+        // SSE captured generation 1, then its old snapshot key yielded the stale
+        // marker while another operation started recovery under generation 2.
         let expected_link_generation =
             storage.snapshot().unwrap().encrypted_link_states[&counterparty].generation;
         let lease = storage
@@ -1896,7 +1975,7 @@ mod tests {
             .unwrap();
         let before = storage.snapshot().unwrap();
 
-        require_current_private_receive_observation_with_lease(
+        let status = require_current_private_receive_observation_with_lease(
             &storage,
             &counterparty,
             &lease,
@@ -1904,12 +1983,28 @@ mod tests {
                 expected_link_generation,
                 &generation_1,
                 &generation_2,
-                Some(&current_marker),
+                Some(&stale_marker),
             ),
             &MutableClock::new(now),
         )
         .await
         .unwrap();
+        assert_eq!(
+            status,
+            PrivateReceiveObservationStatus::ReloadMarker { link_generation: 2 }
+        );
+        assert_eq!(storage.snapshot().unwrap(), before);
+
+        let reloaded_status = require_current_private_receive_observation_with_lease(
+            &storage,
+            &counterparty,
+            &lease,
+            PrivateReceiveObservation::new(2, &generation_2, &generation_2, Some(&current_marker)),
+            &MutableClock::new(now),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reloaded_status, PrivateReceiveObservationStatus::Current);
 
         assert_eq!(storage.snapshot().unwrap(), before);
     }
