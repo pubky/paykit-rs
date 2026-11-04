@@ -1485,18 +1485,16 @@ where
             marker.as_ref(),
         ) {
             let lease = self.claim_peer_link_operation(&counterparty).await?;
-            let result =
-                super::private_stream::require_current_private_receive_observation_with_lease(
-                    &self.storage,
+            let result = self
+                .require_current_private_receive_observation(
                     &counterparty,
                     &lease,
+                    &access,
                     super::private_stream::PrivateReceiveObservation::new(
                         &snapshot.authorization,
-                        snapshot.link.recovery_context(),
                         &authorization,
                         marker.as_ref(),
                     ),
-                    &self.clock,
                 )
                 .await;
             self.finish_peer_link_operation(lease, result).await?;

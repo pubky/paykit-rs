@@ -53,7 +53,6 @@ pub(super) fn private_receive_observation_is_current(
 
 pub(super) struct PrivateReceiveObservation<'a> {
     expected_authorization: &'a NoiseAuthorization,
-    recovery_context: &'a paykit_lib::EncryptedLinkRecoveryContext,
     authorization: &'a NoiseAuthorization,
     marker: Option<&'a paykit_lib::EncryptedLinkRecoveryMarker>,
 }
@@ -61,13 +60,11 @@ pub(super) struct PrivateReceiveObservation<'a> {
 impl<'a> PrivateReceiveObservation<'a> {
     pub(super) fn new(
         expected_authorization: &'a NoiseAuthorization,
-        recovery_context: &'a paykit_lib::EncryptedLinkRecoveryContext,
         authorization: &'a NoiseAuthorization,
         marker: Option<&'a paykit_lib::EncryptedLinkRecoveryMarker>,
     ) -> Self {
         Self {
             expected_authorization,
-            recovery_context,
             authorization,
             marker,
         }
@@ -86,24 +83,16 @@ where
     C: Clock,
 {
     let PrivateReceiveObservation {
-        expected_authorization,
-        recovery_context,
+        expected_authorization: _,
         authorization,
         marker,
     } = observation;
-    let observation_matches = private_receive_observation_matches(
-        expected_authorization,
-        recovery_context,
-        authorization,
-        marker,
-    );
     let marker_attempt_id = marker.map(|marker| marker.attempt_id().to_owned());
     // Commit the monotonic authorization pin and recovery transition together
     // under the peer lease before callers classify this observation as stale.
     let changed = retry_storage_transaction(storage, || {
         let counterparty = counterparty.clone();
         let lease = lease.clone();
-        let expected_authorization = expected_authorization.clone();
         let authorization = authorization.clone();
         let marker_attempt_id = marker_attempt_id.clone();
         move |tx| {
@@ -119,16 +108,14 @@ where
                 });
             }
             let peer = tx.linked_peer(&counterparty);
-            if observation_matches
-                && peer.as_ref().is_some_and(|peer| {
-                    peer.state == LinkedPeerState::Linked
-                        && peer.noise_key_authorization.as_ref() == Some(&expected_authorization)
-                        && peer.local_recovery_attempt_id.as_deref()
-                            == recovery_context.local_attempt_id()
-                        && peer.remote_recovery_attempt_id.as_deref()
-                            == recovery_context.remote_attempt_id()
-                })
-            {
+            // A fresh link may have replaced the pre-lease snapshot while public
+            // observations were in flight. Current stored authorization and remote
+            // attempt own the decision; stale snapshot context cannot tear it down.
+            if peer.as_ref().is_some_and(|peer| {
+                peer.state == LinkedPeerState::Linked
+                    && peer.noise_key_authorization.as_ref() == Some(&authorization)
+                    && peer.remote_recovery_attempt_id.as_deref() == marker_attempt_id.as_deref()
+            }) {
                 return Ok(false);
             }
             noise_key_authorization::pin_authorization_in_transaction(
@@ -228,6 +215,38 @@ where
     P: PaymentAdapter,
     C: Clock,
 {
+    pub(super) async fn require_current_private_receive_observation(
+        &self,
+        counterparty: &PubkyPublicKey,
+        lease: &PeerLinkOperationLease,
+        session_access: &PubkySessionAccess,
+        observation: PrivateReceiveObservation<'_>,
+    ) -> Result<()> {
+        let authorization_changed = observation.expected_authorization != observation.authorization;
+        let remote_noise_public_key = observation.authorization.noise_public_key().clone();
+        let result = require_current_private_receive_observation_with_lease(
+            &self.storage,
+            counterparty,
+            lease,
+            observation,
+            &self.clock,
+        )
+        .await;
+        if authorization_changed && matches!(&result, Err(PaykitSdkError::RecoveryRequired { .. }))
+        {
+            // Recovery is already durable. Marker publication is best-effort
+            // liveness and must not replace the fail-closed observation result.
+            let _ = self
+                .publish_local_recovery_marker_with_key(
+                    counterparty,
+                    session_access,
+                    lease,
+                    &remote_noise_public_key,
+                )
+                .await;
+        }
+        result
+    }
     /// Receive and durably persist available private messages.
     ///
     /// This requires a stored Encrypted Link snapshot for the counterparty.
@@ -914,21 +933,11 @@ where
         );
         let authorization = authorization.map_err(link_observation_error)?;
         let marker = marker.map_err(|error| link_observation_error(error.into()))?;
-        let recovery_context = paykit_lib::EncryptedLinkRecoveryContext::new(
-            peer.local_recovery_attempt_id.as_deref(),
-            peer.remote_recovery_attempt_id.as_deref(),
-        )?;
-        require_current_private_receive_observation_with_lease(
-            &self.storage,
+        self.require_current_private_receive_observation(
             &counterparty,
             &lease,
-            PrivateReceiveObservation::new(
-                expected_authorization,
-                &recovery_context,
-                &authorization,
-                marker.as_ref(),
-            ),
-            &self.clock,
+            session_access,
+            PrivateReceiveObservation::new(expected_authorization, &authorization, marker.as_ref()),
         )
         .await?;
         let remote_noise_public_key = authorization.noise_public_key().clone();
@@ -1486,7 +1495,6 @@ mod tests {
             .await
             .unwrap();
         let before = inner.snapshot().unwrap();
-        let recovery_context = paykit_lib::EncryptedLinkRecoveryContext::new(None, None).unwrap();
         let clock = MutableClock::new(claimed_at);
         let (holder_entered_tx, holder_entered_rx) = tokio::sync::oneshot::channel();
         let (release_holder_tx, release_holder_rx) = std::sync::mpsc::channel();
@@ -1511,7 +1519,6 @@ mod tests {
         let observation_lease = lease.clone();
         let observation_generation_1 = generation_1.clone();
         let observation_generation_2 = generation_2.clone();
-        let observation_recovery_context = recovery_context.clone();
         let observation_clock = clock.clone();
         let observation = tokio::spawn(async move {
             require_current_private_receive_observation_with_lease(
@@ -1520,7 +1527,6 @@ mod tests {
                 &observation_lease,
                 PrivateReceiveObservation::new(
                     &observation_generation_1,
-                    &observation_recovery_context,
                     &observation_generation_2,
                     None,
                 ),
@@ -1559,12 +1565,7 @@ mod tests {
                 &inner,
                 &counterparty,
                 &reclaimed_lease,
-                PrivateReceiveObservation::new(
-                    &generation_1,
-                    &recovery_context,
-                    &generation_2,
-                    None,
-                ),
+                PrivateReceiveObservation::new(&generation_1, &generation_2, None),
                 &clock,
             )
             .await,
@@ -1619,7 +1620,6 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let recovery_context = paykit_lib::EncryptedLinkRecoveryContext::new(None, None).unwrap();
         let clock = MutableClock::new(now);
         let initial = storage.snapshot().unwrap();
         let initial_blob = encode_storage_state_blob(&initial).unwrap();
@@ -1629,7 +1629,7 @@ mod tests {
             &storage,
             &counterparty,
             &lease,
-            PrivateReceiveObservation::new(&generation_1, &recovery_context, &generation_1, None),
+            PrivateReceiveObservation::new(&generation_1, &generation_1, None),
             &clock,
         )
         .await
@@ -1641,12 +1641,7 @@ mod tests {
                 &storage,
                 &counterparty,
                 &lease,
-                PrivateReceiveObservation::new(
-                    &generation_1,
-                    &recovery_context,
-                    &generation_2,
-                    None,
-                ),
+                PrivateReceiveObservation::new(&generation_1, &generation_2, None),
                 &clock,
             )
             .await,
@@ -1673,18 +1668,62 @@ mod tests {
                 &reloaded,
                 &counterparty,
                 &lease,
-                PrivateReceiveObservation::new(
-                    &generation_1,
-                    &recovery_context,
-                    &generation_1,
-                    None,
-                ),
+                PrivateReceiveObservation::new(&generation_1, &generation_1, None),
                 &clock,
             )
             .await,
             Err(PaykitSdkError::LinkObservation { .. })
         ));
         assert_eq!(reloaded.snapshot().unwrap(), advanced);
+    }
+
+    #[tokio::test]
+    async fn test_sse_stale_observation_preserves_concurrently_relinked_peer() {
+        let storage = InMemoryStorage::new();
+        let identity = pubky::Keypair::random();
+        let counterparty = PubkyPublicKey::from_public_key(&identity.public_key());
+        let generation_1 =
+            paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[1; 32], 1).unwrap();
+        let generation_2 =
+            paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[2; 32], 2).unwrap();
+        let current_marker = paykit_lib::EncryptedLinkRecoveryMarker::new_v4(
+            Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        )
+        .unwrap();
+        let now = Utc::now();
+        let lease = storage
+            .transaction(|tx| {
+                let mut peer = default_linked_peer(counterparty.clone());
+                peer.state = LinkedPeerState::Linked;
+                peer.noise_key_authorization = Some(generation_2.clone());
+                peer.local_recovery_attempt_id = Some(current_marker.attempt_id().to_owned());
+                peer.remote_recovery_attempt_id = Some(current_marker.attempt_id().to_owned());
+                tx.save_linked_peer(peer);
+                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                    counterparty: counterparty.clone(),
+                    link_snapshot: Some(vec![4, 5, 6]),
+                    handshake_snapshot: None,
+                    handshake_role: None,
+                    generation: 2,
+                    checkpointed_at: now,
+                });
+                tx.claim_peer_link_operation(&counterparty, now, now + chrono::Duration::minutes(1))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let before = storage.snapshot().unwrap();
+        require_current_private_receive_observation_with_lease(
+            &storage,
+            &counterparty,
+            &lease,
+            PrivateReceiveObservation::new(&generation_1, &generation_2, Some(&current_marker)),
+            &MutableClock::new(now),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(storage.snapshot().unwrap(), before);
     }
 
     #[tokio::test]
@@ -1722,21 +1761,12 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let recovery_context =
-            paykit_lib::EncryptedLinkRecoveryContext::new(None, Some(old_marker.attempt_id()))
-                .unwrap();
-
         assert!(matches!(
             require_current_private_receive_observation_with_lease(
                 &storage,
                 &counterparty,
                 &lease,
-                PrivateReceiveObservation::new(
-                    &authorization,
-                    &recovery_context,
-                    &authorization,
-                    Some(&new_marker),
-                ),
+                PrivateReceiveObservation::new(&authorization, &authorization, Some(&new_marker)),
                 &MutableClock::new(now),
             )
             .await,

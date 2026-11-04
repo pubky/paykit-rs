@@ -1,7 +1,7 @@
-use crate::harness::{build_testnet, session_bootstrap, TestUser};
+use crate::harness::{build_testnet, linked_two_party, session_bootstrap, TestUser};
 use paykit_lib::{
-    get_paykit_noise_key_authorization, PaykitNoiseKeyAuthorization,
-    PAYKIT_NOISE_KEY_AUTHORIZATION_PATH,
+    fetch_encrypted_link_recovery_marker, get_paykit_noise_key_authorization,
+    PaykitNoiseKeyAuthorization, PAYKIT_NOISE_KEY_AUTHORIZATION_PATH,
 };
 use paykit_sdk::{
     LinkedPeerState, PaykitSdk, PaykitSdkConfig, PaykitSdkError, StorageAdapter,
@@ -459,6 +459,61 @@ async fn test_links_require_authorization_and_pin_verified_generations() {
         .await
         .unwrap();
     assert_eq!(after, Some(first));
+}
+
+#[tokio::test]
+async fn test_receive_publishes_recovery_marker_at_rotated_peer_path() {
+    let pair = linked_two_party().await;
+    let alice_authorization = pair.bob.storage.snapshot().unwrap().linked_peers
+        [&pair.alice.public_key]
+        .noise_key_authorization
+        .clone()
+        .unwrap();
+    let replacement = pair
+        .bob
+        .access
+        .local_secret_key
+        .as_ref()
+        .unwrap()
+        .derive_paykit_identity_secret_key(2)
+        .unwrap();
+    pair.bob
+        .sdk
+        .rotate_paykit_identity_key(replacement.clone())
+        .await
+        .unwrap();
+    let bob_noise_secret = paykit_lib::derive_paykit_noise_secret_key(replacement.as_bytes());
+    let public_storage = pair.bob.access.outbox_client.public_storage();
+
+    assert!(fetch_encrypted_link_recovery_marker(
+        &public_storage,
+        &bob_noise_secret,
+        &pair.bob.public_key.to_public_key().unwrap(),
+        &pair.alice.public_key.to_public_key().unwrap(),
+        alice_authorization.noise_public_key(),
+    )
+    .await
+    .unwrap()
+    .is_none());
+
+    assert!(matches!(
+        pair.alice
+            .sdk
+            .receive_private_messages(pair.bob.public_key.clone())
+            .await,
+        Err(PaykitSdkError::RecoveryRequired { .. })
+    ));
+
+    assert!(fetch_encrypted_link_recovery_marker(
+        &public_storage,
+        &bob_noise_secret,
+        &pair.bob.public_key.to_public_key().unwrap(),
+        &pair.alice.public_key.to_public_key().unwrap(),
+        alice_authorization.noise_public_key(),
+    )
+    .await
+    .unwrap()
+    .is_some());
 }
 
 #[tokio::test]
