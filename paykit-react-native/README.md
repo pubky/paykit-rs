@@ -159,15 +159,30 @@ the call runs on the JS thread and the worker waits for the return value. So:
 resulting `ArrayBuffer` cannot be zeroized. It stays in the JS heap until
 garbage collection and is visible to JS debuggers.
 
-`FfiSdkStateBlobStore` is synchronous, so the store must be **synchronous and
-encrypted**:
+`FfiSdkStateBlobStore` is synchronous, so the store must be **synchronous,
+encrypted and atomic**:
 
-- Use synchronous encrypted storage, such as `expo-secure-store`'s sync API or
-  MMKV with an encryption key held in the Keychain or Android Keystore.
+- Use synchronous encrypted storage, such as MMKV with an encryption key.
+  Keep that key in the Keychain or Android Keystore, for example with
+  `expo-secure-store`'s sync API. Do not put the blob itself in
+  `expo-secure-store`: it can reject large values.
 - Asynchronous storage, such as AsyncStorage, cannot implement this interface.
-- Never log, inspect or partially edit the blob.
+- `saveStateBlobAtomically(blob, expectedRevision)` must compare the stored
+  revision with `expectedRevision` and replace the blob and its revision as
+  one atomic operation. If they differ, or a blob is stored when
+  `expectedRevision` is `undefined`, throw `PaykitFfiError.ConcurrentUpdate`
+  and write nothing. A separate read and write is not enough when two
+  runtimes share the blob, such as a second SDK handle, an app extension or
+  another process: one of them can overwrite a newer revision.
+- Store the blob and its revision together, so a failed write leaves the
+  previous pair intact.
 - Return a new, never-reused revision on every successful changed write, as
   described in [the bindings spec](../specs/paykit-sdk-bindings.md).
+- Never log, inspect or partially edit the blob.
+
+[`example/src/mocks/stateBlobStore.ts`](example/src/mocks/stateBlobStore.ts)
+shows the revision check and revision format for a single runtime, in memory
+only.
 
 Apps that do not want SDK state in JavaScript can use the
 `FfiPaykitSdk.withPubkySharedState*` constructors, which keep the state in
