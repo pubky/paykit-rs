@@ -6,7 +6,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use paykit_sdk::{
-    storage::{OutboundPrivateMessageRecord, StorageOperation, StorageTransactionCallback},
+    storage::{
+        OutboundPrivateMessageRecord, PreparedOutboundPrivateSend, StorageOperation, StorageState,
+        StorageTransactionCallback,
+    },
     InMemoryStorage, LinkedPeerState, OutboundPrivateMessageStatus, PaykitSdk, PaykitSdkConfig,
     PaykitSdkError, PrivatePaymentEndpointReservation, PrivatePaymentListReservationUpdate,
     PubkySessionAccess, PubkySessionProvider, Result as PaykitResult, StorageAdapter,
@@ -14,8 +17,9 @@ use paykit_sdk::{
 use tokio::sync::{Notify, Semaphore};
 
 use crate::harness::{
-    build_testnet, drive_link_to_linked, linked_two_party, private_receiving_detail, two_party,
-    TestUser, TestnetPaymentAdapter, TestnetSessionProvider,
+    app_id, build_testnet, build_testnet_with_config, drive_link_to_linked, linked_two_party,
+    private_receiving_detail, two_party, TestUser, TestnetPaymentAdapter, TestnetSessionProvider,
+    TwoParty,
 };
 
 #[tokio::test]
@@ -1666,13 +1670,15 @@ async fn test_private_list_send_from_older_link_state_uses_next_free_slot() {
 const FOREIGN_PACKET: &[u8] = b"packet stored by another writer";
 
 /// Stores a foreign packet in slots prepared for one message, after the SDK
-/// stores each preparation and before it publishes.
+/// stores each preparation and before it publishes. It can also reject the
+/// transaction that queues the message to be prepared again.
 struct SlotTakingStorage {
     inner: InMemoryStorage,
     session: pubky::PubkySession,
     outbound_message_id: u64,
     max_taken: usize,
     taken: std::sync::Mutex<Vec<String>>,
+    reject_requeue: Arc<AtomicBool>,
 }
 
 impl SlotTakingStorage {
@@ -1683,6 +1689,7 @@ impl SlotTakingStorage {
             outbound_message_id,
             max_taken,
             taken: Default::default(),
+            reject_requeue: Default::default(),
         })
     }
 
@@ -1697,7 +1704,37 @@ impl StorageAdapter for SlotTakingStorage {
         &self,
         f: StorageTransactionCallback<'a>,
     ) -> PaykitResult<Box<dyn std::any::Any + Send>> {
-        let result = self.inner.transaction_erased(f).await?;
+        let outbound_message_id = self.outbound_message_id;
+        let reject_requeue = Arc::clone(&self.reject_requeue);
+        let result = self
+            .inner
+            .transaction_erased(Box::new(move |tx| {
+                let send_state = |state: StorageState| {
+                    state
+                        .outbound_private_messages
+                        .into_iter()
+                        .find(|message| message.outbound_message_id == outbound_message_id)
+                        .map(|message| (message.status, message.prepared_send.is_some()))
+                };
+                let before = send_state(tx.export_storage_state());
+                let result = f(tx)?;
+                let after = send_state(tx.export_storage_state());
+                let requeued = matches!(
+                    (before, after),
+                    (
+                        Some((OutboundPrivateMessageStatus::Sending, true)),
+                        Some((OutboundPrivateMessageStatus::Pending, false))
+                    )
+                );
+                if requeued && reject_requeue.swap(false, Ordering::SeqCst) {
+                    return Err(PaykitSdkError::Storage {
+                        context: "requeue transaction rejected by test storage".into(),
+                        source: None,
+                    });
+                }
+                Ok(result)
+            }))
+            .await?;
         let prepared = self
             .inner
             .snapshot()?
@@ -1722,6 +1759,15 @@ impl StorageAdapter for SlotTakingStorage {
     }
 }
 
+#[derive(Clone, Copy)]
+struct FixedClock(chrono::DateTime<chrono::Utc>);
+
+impl paykit_sdk::Clock for FixedClock {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        self.0
+    }
+}
+
 fn sdk_over<S, C>(
     user: &TestUser,
     storage: S,
@@ -1738,6 +1784,42 @@ where
         PaykitSdkConfig::new(user.app_id.clone()).unwrap(),
         clock,
     )
+}
+
+/// Linked pair whose homeserver allows `head_requests` `HEAD` requests an
+/// hour on each identity's Encrypted Link write slots.
+async fn linked_pair_with_write_slot_checks(head_requests: u32) -> TwoParty {
+    use pubky_testnet::pubky_homeserver::{
+        ConfigToml, GlobPattern, HttpMethod, LimitKeyType, PathLimit,
+    };
+
+    let mut config = ConfigToml::minimal_test_config();
+    config.drive.rate_limits = vec![PathLimit {
+        path: GlobPattern::new(&format!("{}/**", paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX)),
+        method: HttpMethod(reqwest::Method::HEAD),
+        quota: format!("{head_requests}r/h").parse().unwrap(),
+        key: LimitKeyType::User,
+        burst: None,
+        whitelist: Vec::new(),
+    }];
+    let testnet = build_testnet_with_config(config).await;
+    let alice = TestUser::sign_up_with_app(&testnet, app_id("bitkit")).await;
+    let bob = TestUser::sign_up_with_app(&testnet, app_id("paykit-server")).await;
+    alice
+        .sdk
+        .initiate_link_with_peer(bob.public_key.clone())
+        .await
+        .unwrap();
+    bob.sdk
+        .accept_link_with_peer(alice.public_key.clone())
+        .await
+        .unwrap();
+    drive_link_to_linked(&alice, &bob).await;
+    TwoParty {
+        _testnet: testnet,
+        alice,
+        bob,
+    }
 }
 
 async fn propose_write_slot_request(payee: &TestUser, payer: &TestUser) -> u64 {
@@ -1782,6 +1864,18 @@ fn outbound_record(user: &TestUser, outbound_message_id: u64) -> OutboundPrivate
         .unwrap()
 }
 
+/// A failed send that keeps its prepared ciphertext for the next run.
+fn retained_prepared_send(
+    user: &TestUser,
+    outbound_message_id: u64,
+) -> PreparedOutboundPrivateSend {
+    let record = outbound_record(user, outbound_message_id);
+    assert_eq!(record.status, OutboundPrivateMessageStatus::Failed);
+    record
+        .prepared_send
+        .expect("a retryable failure keeps the prepared send")
+}
+
 async fn stored_packet(user: &TestUser, path: &str) -> Option<Vec<u8>> {
     match user.access.session.storage().get(path).await {
         Ok(response) => Some(response.bytes().await.unwrap().to_vec()),
@@ -1794,11 +1888,139 @@ async fn stored_packet(user: &TestUser, path: &str) -> Option<Vec<u8>> {
     }
 }
 
+fn next_slot_path(path: &str) -> String {
+    let (write_path, slot) = path.rsplit_once('/').unwrap();
+    format!("{write_path}/{}", slot.parse::<u32>().unwrap() + 1)
+}
+
 fn assert_linked(user: &TestUser, counterparty: &TestUser) {
     assert_eq!(
         user.storage.snapshot().unwrap().linked_peers[&counterparty.public_key].state,
         LinkedPeerState::Linked
     );
+}
+
+#[tokio::test]
+async fn test_private_send_skips_used_slots_after_stored_prepared_send() {
+    /// Records the destination of each prepared send a transaction stores,
+    /// and the whole state stored with the first one.
+    struct PreparedSendRecorder {
+        inner: InMemoryStorage,
+        destinations: std::sync::Mutex<Vec<String>>,
+        first_prepared_state: std::sync::Mutex<Option<StorageState>>,
+    }
+
+    impl PreparedSendRecorder {
+        fn new(inner: InMemoryStorage) -> Arc<Self> {
+            Arc::new(Self {
+                inner,
+                destinations: Default::default(),
+                first_prepared_state: Default::default(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl StorageAdapter for PreparedSendRecorder {
+        async fn transaction_erased<'a>(
+            &self,
+            f: StorageTransactionCallback<'a>,
+        ) -> PaykitResult<Box<dyn std::any::Any + Send>> {
+            let before = self.inner.snapshot()?;
+            let result = self.inner.transaction_erased(f).await?;
+            let after = self.inner.snapshot()?;
+            for message in &after.outbound_private_messages {
+                let Some(prepared) = &message.prepared_send else {
+                    continue;
+                };
+                let stored_before = before.outbound_private_messages.iter().any(|old| {
+                    old.outbound_message_id == message.outbound_message_id
+                        && old.prepared_send.is_some()
+                });
+                if !stored_before {
+                    self.destinations
+                        .lock()
+                        .unwrap()
+                        .push(prepared.destination_path.clone());
+                    self.first_prepared_state
+                        .lock()
+                        .unwrap()
+                        .get_or_insert_with(|| after.clone());
+                }
+            }
+            Ok(result)
+        }
+    }
+
+    let pair = linked_two_party().await;
+    let first = propose_write_slot_request(&pair.alice, &pair.bob).await;
+    let second = propose_write_slot_request(&pair.alice, &pair.bob).await;
+    let recorder = PreparedSendRecorder::new(pair.alice.storage.clone());
+    let report = sdk_over(&pair.alice, recorder.clone(), paykit_sdk::SystemClock)
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(report.sent, vec![first, second]);
+    let used_slots = recorder.destinations.lock().unwrap().clone();
+    assert_eq!(used_slots.len(), 2);
+    let mut used_packets = Vec::new();
+    for path in &used_slots {
+        used_packets.push(stored_packet(&pair.alice, path).await.unwrap());
+    }
+
+    // Restore the state stored with the first prepared send, before it was
+    // published. The second send is queued again on link state that points
+    // at the slot it already used.
+    let older = recorder
+        .first_prepared_state
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap();
+    let restored = PreparedSendRecorder::new(InMemoryStorage::from_state(older));
+    let report = sdk_over(
+        &pair.alice,
+        restored.clone(),
+        FixedClock(chrono::Utc::now() + chrono::Duration::seconds(61)),
+    )
+    .process_outbound_private_messages(pair.bob.public_key.clone())
+    .await
+    .unwrap();
+
+    // The stored prepared send is found already published. The run then skips
+    // the used slot before it prepares the second send again.
+    assert_eq!(report.attempted, vec![first, second]);
+    assert_eq!(report.sent, vec![first, second]);
+    assert!(report.failed.is_empty());
+    let next_slot = next_slot_path(&used_slots[1]);
+    assert_eq!(
+        *restored.destinations.lock().unwrap(),
+        vec![next_slot.clone()]
+    );
+    for (path, packet) in used_slots.iter().zip(&used_packets) {
+        assert_eq!(
+            stored_packet(&pair.alice, path).await.as_ref(),
+            Some(packet)
+        );
+    }
+    assert!(stored_packet(&pair.alice, &next_slot).await.is_some());
+
+    // The peer reads every packet and keeps one copy of each request.
+    pair.bob
+        .sdk
+        .receive_private_messages(pair.alice.public_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        pair.bob
+            .sdk
+            .received_payment_requests_from(&pair.alice.public_key)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_linked(&pair.bob, &pair.alice);
 }
 
 #[tokio::test]
@@ -1836,4 +2058,237 @@ async fn test_private_send_never_overwrites_slots_taken_before_publication() {
             Some(FOREIGN_PACKET)
         );
     }
+
+    // The peer reads the first packet, then cannot decrypt the foreign packet
+    // in the next slot. It pauses the link for recovery rather than skip it.
+    assert!(pair
+        .bob
+        .sdk
+        .receive_private_messages(pair.alice.public_key.clone())
+        .await
+        .is_err());
+    let peer_state = pair.bob.storage.snapshot().unwrap();
+    assert_eq!(
+        peer_state.linked_peers[&pair.alice.public_key].state,
+        LinkedPeerState::RecoveryRequired
+    );
+    assert_eq!(
+        peer_state
+            .private_stream_items
+            .iter()
+            .filter(|item| item.counterparty == pair.alice.public_key)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn test_private_send_keeps_queue_when_write_slot_skip_fails() {
+    let pair = linked_pair_with_write_slot_checks(1).await;
+    // Use up the hour's write slot check before the run.
+    let _ = pair
+        .alice
+        .access
+        .session
+        .storage()
+        .exists(format!("{}/unused/0", paykit_lib::PAYKIT_PRIVATE_PATH_PREFIX).as_str())
+        .await;
+    let message = propose_write_slot_request(&pair.alice, &pair.bob).await;
+    let before = pair.alice.storage.snapshot().unwrap();
+
+    let error = pair
+        .alice
+        .sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&error, PaykitSdkError::Transport { context, .. }
+            if context == "check Encrypted Link write slot"),
+        "unexpected error: {error:?}"
+    );
+    // The skip runs before preparation: nothing was claimed or encrypted.
+    let after = pair.alice.storage.snapshot().unwrap();
+    assert_eq!(
+        outbound_record(&pair.alice, message),
+        before
+            .outbound_private_messages
+            .iter()
+            .find(|record| record.outbound_message_id == message)
+            .unwrap()
+            .clone()
+    );
+    assert_eq!(
+        after.encrypted_link_states[&pair.bob.public_key],
+        before.encrypted_link_states[&pair.bob.public_key]
+    );
+    assert!(!after
+        .peer_link_operation_leases
+        .contains_key(&pair.bob.public_key));
+    assert_linked(&pair.alice, &pair.bob);
+}
+
+#[tokio::test]
+async fn test_private_send_keeps_prepared_send_when_slot_check_fails() {
+    // The skip before the first preparation uses the hour's write slot check.
+    let pair = linked_pair_with_write_slot_checks(1).await;
+    let first = propose_write_slot_request(&pair.alice, &pair.bob).await;
+    let second = propose_write_slot_request(&pair.alice, &pair.bob).await;
+
+    let report = pair
+        .alice
+        .sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+
+    // The first send uses the slot the skip found free. The check before the
+    // second send fails, so the second send keeps its prepared ciphertext.
+    assert_eq!(report.sent, vec![first]);
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(report.failed[0].outbound_message_id, second);
+    assert!(
+        report.failed[0]
+            .error
+            .contains("check Encrypted Link write slot"),
+        "unexpected error: {}",
+        report.failed[0].error
+    );
+    let prepared = retained_prepared_send(&pair.alice, second);
+    assert_eq!(
+        stored_packet(&pair.alice, &prepared.destination_path).await,
+        None
+    );
+    assert_linked(&pair.alice, &pair.bob);
+
+    // After the backoff, the next run checks the same prepared send again.
+    let later = sdk_over(
+        &pair.alice,
+        pair.alice.storage.clone(),
+        FixedClock(chrono::Utc::now() + chrono::Duration::seconds(31)),
+    );
+    let report = later
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(report.attempted, vec![second]);
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(retained_prepared_send(&pair.alice, second), prepared);
+    assert_eq!(
+        stored_packet(&pair.alice, &prepared.destination_path).await,
+        None
+    );
+    assert_linked(&pair.alice, &pair.bob);
+}
+
+#[tokio::test]
+async fn test_private_send_keeps_prepared_send_when_skip_after_taken_slot_fails() {
+    // Two write slot checks an hour: the skip before the first preparation and
+    // the check that finds the second slot taken. The skip after that fails.
+    let pair = linked_pair_with_write_slot_checks(2).await;
+    let first = propose_write_slot_request(&pair.alice, &pair.bob).await;
+    let second = propose_write_slot_request(&pair.alice, &pair.bob).await;
+    let storage = SlotTakingStorage::new(&pair.alice, second, 1);
+    let sdk = sdk_over(&pair.alice, storage.clone(), paykit_sdk::SystemClock);
+
+    let report = sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(report.sent, vec![first]);
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(report.failed[0].outbound_message_id, second);
+    assert!(
+        report.failed[0]
+            .error
+            .contains("check Encrypted Link write slot"),
+        "unexpected error: {}",
+        report.failed[0].error
+    );
+    // The prepared send is kept, so the next run checks the same slot again.
+    let taken = storage.taken();
+    assert_eq!(taken.len(), 1);
+    let prepared = retained_prepared_send(&pair.alice, second);
+    assert_eq!(prepared.destination_path, taken[0]);
+    assert_eq!(
+        stored_packet(&pair.alice, &taken[0]).await.as_deref(),
+        Some(FOREIGN_PACKET)
+    );
+    assert_eq!(
+        stored_packet(&pair.alice, &next_slot_path(&taken[0])).await,
+        None
+    );
+    assert_linked(&pair.alice, &pair.bob);
+}
+
+#[tokio::test]
+async fn test_private_send_keeps_prepared_send_when_requeue_fails() {
+    let pair = linked_two_party().await;
+    // A Private Payment List needs no confirmation, so the later run does not
+    // send it again.
+    let first = enqueue_write_slot_list(&pair.alice, &pair.bob).await;
+    let second = propose_write_slot_request(&pair.alice, &pair.bob).await;
+    let storage = SlotTakingStorage::new(&pair.alice, second, 1);
+    storage.reject_requeue.store(true, Ordering::SeqCst);
+
+    let error = sdk_over(&pair.alice, storage.clone(), paykit_sdk::SystemClock)
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&error, PaykitSdkError::Storage { context, .. }
+            if context == "requeue transaction rejected by test storage"),
+        "unexpected error: {error:?}"
+    );
+    // The taken slot's prepared send stays durable and the lease is released.
+    let taken = storage.taken();
+    assert_eq!(taken.len(), 1);
+    let record = outbound_record(&pair.alice, second);
+    assert_eq!(record.status, OutboundPrivateMessageStatus::Sending);
+    assert_eq!(
+        record
+            .prepared_send
+            .map(|prepared| prepared.destination_path),
+        Some(taken[0].clone())
+    );
+    assert_eq!(
+        outbound_record(&pair.alice, first).status,
+        OutboundPrivateMessageStatus::Sent
+    );
+    assert!(!pair
+        .alice
+        .storage
+        .snapshot()
+        .unwrap()
+        .peer_link_operation_leases
+        .contains_key(&pair.bob.public_key));
+
+    // Once the send lease is stale, the next run finds the slot taken again and
+    // publishes the message on the next free slot.
+    let report = sdk_over(
+        &pair.alice,
+        storage.clone(),
+        FixedClock(chrono::Utc::now() + chrono::Duration::seconds(61)),
+    )
+    .process_outbound_private_messages(pair.bob.public_key.clone())
+    .await
+    .unwrap();
+    assert_eq!(report.attempted, vec![second]);
+    assert_eq!(report.sent, vec![second]);
+    assert!(report.failed.is_empty());
+    assert_eq!(
+        outbound_record(&pair.alice, second).status,
+        OutboundPrivateMessageStatus::Sent
+    );
+    assert_eq!(
+        stored_packet(&pair.alice, &taken[0]).await.as_deref(),
+        Some(FOREIGN_PACKET)
+    );
+    assert!(stored_packet(&pair.alice, &next_slot_path(&taken[0]))
+        .await
+        .is_some());
+    assert_linked(&pair.alice, &pair.bob);
 }
