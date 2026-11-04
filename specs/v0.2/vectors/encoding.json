@@ -1,0 +1,441 @@
+{
+  "amounts": {
+    "invalid": [
+      {
+        "text": "",
+        "why": "empty"
+      },
+      {
+        "text": ".",
+        "why": "no digit"
+      },
+      {
+        "text": "-1",
+        "why": "sign"
+      },
+      {
+        "text": "+1",
+        "why": "sign"
+      },
+      {
+        "text": "1e3",
+        "why": "exponent"
+      },
+      {
+        "text": "1,000",
+        "why": "grouping separator"
+      },
+      {
+        "text": " 1",
+        "why": "whitespace"
+      },
+      {
+        "text": "1.2.3",
+        "why": "two points"
+      },
+      {
+        "text": "0.0000000000000000001",
+        "why": "19 fractional digits"
+      },
+      {
+        "text": "340282366920938463463.374607431768211456",
+        "why": "value x 10^18 does not fit in 128 bits"
+      }
+    ],
+    "valid": [
+      {
+        "normalized": "0",
+        "text": "0"
+      },
+      {
+        "normalized": "25",
+        "text": "25.00"
+      },
+      {
+        "normalized": "0.5",
+        "text": ".5"
+      },
+      {
+        "normalized": "10",
+        "text": "10."
+      },
+      {
+        "normalized": "123.45",
+        "text": "000123.4500"
+      },
+      {
+        "normalized": "0.000000000000000001",
+        "text": "0.000000000000000001"
+      },
+      {
+        "normalized": "340282366920938463463.374607431768211455",
+        "text": "340282366920938463463.374607431768211455"
+      }
+    ]
+  },
+  "base64url": {
+    "invalid": [
+      {
+        "base64url": "AA==",
+        "why": "padding"
+      },
+      {
+        "base64url": "AB",
+        "why": "non-zero trailing bits"
+      },
+      {
+        "base64url": "+w",
+        "why": "standard alphabet '+'"
+      },
+      {
+        "base64url": "/w",
+        "why": "standard alphabet '/'"
+      },
+      {
+        "base64url": "A",
+        "why": "impossible length"
+      },
+      {
+        "base64url": "AA AA",
+        "why": "whitespace"
+      }
+    ],
+    "valid": [
+      {
+        "base64url": "",
+        "hex": ""
+      },
+      {
+        "base64url": "AA",
+        "hex": "00"
+      },
+      {
+        "base64url": "_w",
+        "hex": "ff"
+      },
+      {
+        "base64url": "-_8",
+        "hex": "fbff"
+      },
+      {
+        "base64url": "pPT38gX0Fch3FmrxJFm7Uw",
+        "hex": "a4f4f7f205f415c877166af12459bb53"
+      },
+      {
+        "base64url": "-lKi_JWHgjy6TjTVZGVbF8gyZ5DzBZRpQwgTmQRLdlk",
+        "hex": "fa52a2fc9587823cba4e34d564655b17c8326790f305946943081399044b7659"
+      }
+    ]
+  },
+  "derive": [
+    {
+      "key_material_hex": "",
+      "label": "paykit/v1/test",
+      "output_hex": "8fbce225260cf1f674cac0ef13e4a42c1de8c25f30a285225d948b1a0000814d",
+      "parts_hex": []
+    },
+    {
+      "key_material_hex": "0000000161000000026263",
+      "label": "paykit/v1/test",
+      "output_hex": "9c54a211582bb7f428bcef63e3bf8253317cd38be88892d677ebd88217fd38ad",
+      "parts_hex": [
+        "61",
+        "6263"
+      ]
+    },
+    {
+      "key_material_hex": "0000000261620000000163",
+      "label": "paykit/v1/test",
+      "output_hex": "e11bdee0686f4fd858f662ab9a607cd585446cee16a35bfb79f2708ff0f5d4e4",
+      "parts_hex": [
+        "6162",
+        "63"
+      ]
+    },
+    {
+      "key_material_hex": "0000002085ded45b33a1d5ceb07fc225b0e3de51b45da473b7fa5753d3541d18ad4c5028",
+      "label": "paykit/v1/kid",
+      "output_hex": "fa2b2b335da054044e71c60a8d3f18b796829c8da94ebd2840409451cccc4b2a",
+      "parts_hex": [
+        "85ded45b33a1d5ceb07fc225b0e3de51b45da473b7fa5753d3541d18ad4c5028"
+      ]
+    },
+    {
+      "key_material_hex": "0000002020fcc15627fafa927c17abdafda79e0f9a7132052808ece1957bcc7cdc11994c",
+      "label": "paykit/v1/key-commit",
+      "output_hex": "28d53e139c72fe16c06cc8c58b3e2dfcdbb31d9ba414068235da4cacdc916dd3",
+      "parts_hex": [
+        "20fcc15627fafa927c17abdafda79e0f9a7132052808ece1957bcc7cdc11994c"
+      ]
+    },
+    {
+      "key_material_hex": "0000000e70617965725f616374697669747900000020f149881e9fb5b6c16f5a70fdae005551024ff70895b7fd499d5e368921b52f0c",
+      "label": "paykit/v1/collection",
+      "output_hex": "bc076aedd7b661c8ee2229be6a0e735babe2c5d8b6dce462395f3e2763ff06c1",
+      "parts_hex": [
+        "70617965725f6163746976697479",
+        "f149881e9fb5b6c16f5a70fdae005551024ff70895b7fd499d5e368921b52f0c"
+      ]
+    }
+  ],
+  "description": "Primitive encodings (wire 1): lp(), u64 big-endian, derive(), base64url without padding, z-base-32, strict JSON, RFC 3339 times and decimal amounts. A json case with read_as is read as that document (message or operation), whose opaque members wire 1.1 names by path; the others have none.",
+  "json": [
+    {
+      "json": "{\"a\":1,\"b\":{\"c\":2}}",
+      "valid": true
+    },
+    {
+      "json": "{\"a\":1,\"a\":2}",
+      "valid": false
+    },
+    {
+      "json": "{\"a\":[{\"x\":1,\"x\":1}]}",
+      "valid": false
+    },
+    {
+      "json": "{\"a\":\"A\",\"A\":1}",
+      "valid": true
+    },
+    {
+      "json": "{\"a\":1} {\"b\":2}",
+      "valid": false
+    },
+    {
+      "json": "{\"a\":1,\"\\u0061\":2}",
+      "valid": false
+    },
+    {
+      "json": "{\"a\":\"\\ud800\"}",
+      "valid": false
+    },
+    {
+      "json": "{\"a\":\"\\udc00x\"}",
+      "valid": false
+    },
+    {
+      "json": "{\"a\":\"\\ud83d\\ude00\"}",
+      "valid": true
+    },
+    {
+      "json": "{\"a\":1}\n",
+      "valid": true
+    },
+    {
+      "json": "{\"v\":1,\"kind\":\"paykit.payment_request\",\"body\":{\"metadata\":{\"rate\":1.5e2}}}",
+      "read_as": "message",
+      "valid": true
+    },
+    {
+      "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"body\":{\"proof\":{\"type\":\"x\",\"amount_msat\":1e30}}}",
+      "read_as": "message",
+      "valid": true
+    },
+    {
+      "json": "{\"v\":1,\"kind\":\"paykit.payment_request\",\"body\":{\"proof\":{\"rate\":1.5}}}",
+      "read_as": "message",
+      "valid": false
+    },
+    {
+      "json": "{\"op\":\"invite_code.put\",\"context\":{\"rate\":-2.5}}",
+      "read_as": "operation",
+      "valid": true
+    },
+    {
+      "json_hex": "efbbbf7b7d",
+      "valid": false,
+      "why": "byte order mark"
+    }
+  ],
+  "lp": [
+    {
+      "output_hex": "",
+      "parts_hex": []
+    },
+    {
+      "output_hex": "00000000",
+      "parts_hex": [
+        ""
+      ]
+    },
+    {
+      "output_hex": "00000002616200000000",
+      "parts_hex": [
+        "6162",
+        ""
+      ]
+    },
+    {
+      "output_hex": "0000000161000000026263",
+      "parts_hex": [
+        "61",
+        "6263"
+      ]
+    },
+    {
+      "output_hex": "0000000261620000000163",
+      "parts_hex": [
+        "6162",
+        "63"
+      ]
+    },
+    {
+      "output_hex": "0000000d7061796b69742f76312f6b69640000002085ded45b33a1d5ceb07fc225b0e3de51b45da473b7fa5753d3541d18ad4c5028",
+      "parts_hex": [
+        "7061796b69742f76312f6b6964",
+        "85ded45b33a1d5ceb07fc225b0e3de51b45da473b7fa5753d3541d18ad4c5028"
+      ]
+    }
+  ],
+  "rfc3339": {
+    "format": [
+      {
+        "text": "2026-01-01T00:00:00.000Z",
+        "unix_ms": 1767225600000
+      },
+      {
+        "text": "2026-01-01T00:00:30.123Z",
+        "unix_ms": 1767225630123
+      },
+      {
+        "text": "2028-02-29T23:59:59.999Z",
+        "unix_ms": 1835481599999
+      }
+    ],
+    "invalid": [
+      {
+        "text": "2026-01-01T00:00Z"
+      },
+      {
+        "text": "1969-12-31T23:59:59Z"
+      },
+      {
+        "text": "2026-02-30T00:00:00Z"
+      },
+      {
+        "text": "2026-01-01T00:00:00"
+      },
+      {
+        "text": "2026-01-01T00:00:00.1234567891Z"
+      },
+      {
+        "text": "2026-01-01T00:00:00.Z"
+      },
+      {
+        "text": "2026-01-01T00:00:60Z"
+      }
+    ],
+    "lenient_reader_only": [
+      {
+        "text": "2026-01-01 00:00:00Z",
+        "unix_ms": 1767225600000
+      },
+      {
+        "text": "2026-01-01T01:00:00+01:00",
+        "unix_ms": 1767225600000
+      }
+    ],
+    "parse": [
+      {
+        "text": "2026-01-01T00:00:00Z",
+        "unix_ms": 1767225600000
+      },
+      {
+        "text": "2026-01-01T00:00:00.000Z",
+        "unix_ms": 1767225600000
+      },
+      {
+        "text": "2026-01-01T00:00:00.123Z",
+        "unix_ms": 1767225600123
+      },
+      {
+        "text": "2028-02-29T23:59:59.999Z",
+        "unix_ms": 1835481599999
+      },
+      {
+        "text": "1970-01-01T00:00:00Z",
+        "unix_ms": 0
+      },
+      {
+        "text": "2026-01-01T00:00:00.1234Z",
+        "unix_ms": 1767225600123
+      },
+      {
+        "text": "2026-01-01T00:00:00.9999Z",
+        "unix_ms": 1767225600999
+      },
+      {
+        "text": "2026-01-01T00:00:00.123456789Z",
+        "unix_ms": 1767225600123
+      },
+      {
+        "text": "2026-01-01T00:00:00.5Z",
+        "unix_ms": 1767225600500
+      }
+    ]
+  },
+  "u64_be": [
+    {
+      "hex": "0000000000000000",
+      "value": 0
+    },
+    {
+      "hex": "0000000000000001",
+      "value": 1
+    },
+    {
+      "hex": "00000000000000ff",
+      "value": 255
+    },
+    {
+      "hex": "0000000100000000",
+      "value": 4294967296
+    },
+    {
+      "hex": "000000006955b900",
+      "value": 1767225600
+    },
+    {
+      "hex": "001fffffffffffff",
+      "value": 9007199254740991
+    },
+    {
+      "hex": "ffffffffffffffff",
+      "note": "inside lp only; JSON integers stay at or below 2^53 - 1",
+      "value": "18446744073709551615"
+    }
+  ],
+  "zbase32": {
+    "invalid": [
+      {
+        "why": "51 characters",
+        "zbase32": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhg"
+      },
+      {
+        "why": "'l' is not in the alphabet",
+        "zbase32": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgl"
+      },
+      {
+        "why": "non-zero trailing bit",
+        "zbase32": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgb"
+      },
+      {
+        "why": "upper case",
+        "zbase32": "6FRAO8W9SS5CN544QD64HYNIKRBR97AE1S5941C7MA5E1EPIFHGY"
+      }
+    ],
+    "valid": [
+      {
+        "hex": "f149881e9fb5b6c16f5a70fdae005551024ff70895b7fd499d5e368921b52f0c",
+        "zbase32": "6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy"
+      },
+      {
+        "hex": "eb74516b4e85b8ca18a21df66247a5002f24018e00e6f1b90786cf02c820bc07",
+        "zbase32": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo"
+      },
+      {
+        "hex": "a2125cf446275d5ba139442a91678ed3",
+        "zbase32": "wejf37ngr7qizej3eoijn3hq4c"
+      }
+    ]
+  }
+}

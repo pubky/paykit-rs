@@ -1,0 +1,1048 @@
+{
+  "cases": [
+    {
+      "first": {
+        "ends_at": "2026-02-28T00:00:00.000Z",
+        "k": 0,
+        "start_secs": 1769817600,
+        "starts_at": "2026-01-31T00:00:00.000Z"
+      },
+      "last": null,
+      "lookups": [
+        {
+          "period": {
+            "ends_at": "2026-03-31T00:00:00.000Z",
+            "k": 1,
+            "start_secs": 1772236800,
+            "starts_at": "2026-02-28T00:00:00.000Z"
+          },
+          "t": "2026-02-28T00:00:00.000Z"
+        },
+        {
+          "period": {
+            "ends_at": "2026-03-31T00:00:00.000Z",
+            "k": 1,
+            "start_secs": 1772236800,
+            "starts_at": "2026-02-28T00:00:00.000Z"
+          },
+          "t": "2026-03-30T23:59:59.999Z"
+        },
+        {
+          "period": {
+            "ends_at": "2028-03-31T00:00:00.000Z",
+            "k": 25,
+            "start_secs": 1835395200,
+            "starts_at": "2028-02-29T00:00:00.000Z"
+          },
+          "t": "2028-02-29T12:00:00.000Z"
+        }
+      ],
+      "name": "monthly, anchor January 31",
+      "named": [
+        {
+          "billing_period": {
+            "ends_at": "2026-02-28T00:00:00.000Z",
+            "starts_at": "2026-01-31T00:00:00.000Z"
+          },
+          "valid": true
+        },
+        {
+          "billing_period": {
+            "ends_at": "2026-03-15T12:00:00.000Z",
+            "starts_at": "2026-02-28T00:00:00.000Z"
+          },
+          "valid": false
+        },
+        {
+          "billing_period": {
+            "ends_at": "2026-03-31T00:00:00Z",
+            "starts_at": "2026-02-28T00:00:00Z"
+          },
+          "valid": true
+        }
+      ],
+      "periods": [
+        {
+          "ends_at": "2026-02-28T00:00:00.000Z",
+          "k": 0,
+          "start_secs": 1769817600,
+          "starts_at": "2026-01-31T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-03-31T00:00:00.000Z",
+          "k": 1,
+          "start_secs": 1772236800,
+          "starts_at": "2026-02-28T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-04-30T00:00:00.000Z",
+          "k": 2,
+          "start_secs": 1774915200,
+          "starts_at": "2026-03-31T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-05-31T00:00:00.000Z",
+          "k": 3,
+          "start_secs": 1777507200,
+          "starts_at": "2026-04-30T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-06-30T00:00:00.000Z",
+          "k": 4,
+          "start_secs": 1780185600,
+          "starts_at": "2026-05-31T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-07-31T00:00:00.000Z",
+          "k": 5,
+          "start_secs": 1782777600,
+          "starts_at": "2026-06-30T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-08-31T00:00:00.000Z",
+          "k": 6,
+          "start_secs": 1785456000,
+          "starts_at": "2026-07-31T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-09-30T00:00:00.000Z",
+          "k": 7,
+          "start_secs": 1788134400,
+          "starts_at": "2026-08-31T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-10-31T00:00:00.000Z",
+          "k": 8,
+          "start_secs": 1790726400,
+          "starts_at": "2026-09-30T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-11-30T00:00:00.000Z",
+          "k": 9,
+          "start_secs": 1793404800,
+          "starts_at": "2026-10-31T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-12-31T00:00:00.000Z",
+          "k": 10,
+          "start_secs": 1795996800,
+          "starts_at": "2026-11-30T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2027-01-31T00:00:00.000Z",
+          "k": 11,
+          "start_secs": 1798675200,
+          "starts_at": "2026-12-31T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2027-02-28T00:00:00.000Z",
+          "k": 12,
+          "start_secs": 1801353600,
+          "starts_at": "2027-01-31T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2027-03-31T00:00:00.000Z",
+          "k": 13,
+          "start_secs": 1803772800,
+          "starts_at": "2027-02-28T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2027-04-30T00:00:00.000Z",
+          "k": 14,
+          "start_secs": 1806451200,
+          "starts_at": "2027-03-31T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2027-05-31T00:00:00.000Z",
+          "k": 15,
+          "start_secs": 1809043200,
+          "starts_at": "2027-04-30T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2027-06-30T00:00:00.000Z",
+          "k": 16,
+          "start_secs": 1811721600,
+          "starts_at": "2027-05-31T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2027-07-31T00:00:00.000Z",
+          "k": 17,
+          "start_secs": 1814313600,
+          "starts_at": "2027-06-30T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2027-08-31T00:00:00.000Z",
+          "k": 18,
+          "start_secs": 1816992000,
+          "starts_at": "2027-07-31T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2027-09-30T00:00:00.000Z",
+          "k": 19,
+          "start_secs": 1819670400,
+          "starts_at": "2027-08-31T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2027-10-31T00:00:00.000Z",
+          "k": 20,
+          "start_secs": 1822262400,
+          "starts_at": "2027-09-30T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2027-11-30T00:00:00.000Z",
+          "k": 21,
+          "start_secs": 1824940800,
+          "starts_at": "2027-10-31T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2027-12-31T00:00:00.000Z",
+          "k": 22,
+          "start_secs": 1827532800,
+          "starts_at": "2027-11-30T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2028-01-31T00:00:00.000Z",
+          "k": 23,
+          "start_secs": 1830211200,
+          "starts_at": "2027-12-31T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2028-02-29T00:00:00.000Z",
+          "k": 24,
+          "start_secs": 1832889600,
+          "starts_at": "2028-01-31T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2028-03-31T00:00:00.000Z",
+          "k": 25,
+          "start_secs": 1835395200,
+          "starts_at": "2028-02-29T00:00:00.000Z"
+        }
+      ],
+      "recurrence": {
+        "anchor": "2026-01-31T00:00:00.000Z",
+        "ends_at": null,
+        "every": 1,
+        "starts_at": "2026-01-31T00:00:00.000Z",
+        "unit": "month"
+      }
+    },
+    {
+      "first": {
+        "ends_at": "2025-02-28T12:00:00.000Z",
+        "k": 0,
+        "start_secs": 1709208000,
+        "starts_at": "2024-02-29T12:00:00.000Z"
+      },
+      "last": {
+        "ends_at": "2033-02-28T12:00:00.000Z",
+        "k": 8,
+        "start_secs": 1961668800,
+        "starts_at": "2032-02-29T12:00:00.000Z"
+      },
+      "lookups": [
+        {
+          "period": {
+            "ends_at": "2025-02-28T12:00:00.000Z",
+            "k": 0,
+            "start_secs": 1709208000,
+            "starts_at": "2024-02-29T12:00:00.000Z"
+          },
+          "t": "2025-02-28T11:59:59.999Z"
+        },
+        {
+          "period": {
+            "ends_at": "2026-02-28T12:00:00.000Z",
+            "k": 1,
+            "start_secs": 1740744000,
+            "starts_at": "2025-02-28T12:00:00.000Z"
+          },
+          "t": "2025-02-28T12:00:00.000Z"
+        },
+        {
+          "period": {
+            "ends_at": "2029-02-28T12:00:00.000Z",
+            "k": 4,
+            "start_secs": 1835438400,
+            "starts_at": "2028-02-29T12:00:00.000Z"
+          },
+          "t": "2028-02-29T12:00:00.000Z"
+        }
+      ],
+      "name": "yearly, anchor February 29",
+      "named": [
+        {
+          "billing_period": {
+            "ends_at": "2025-02-28T12:00:00.000Z",
+            "starts_at": "2024-02-29T12:00:00.000Z"
+          },
+          "valid": true
+        },
+        {
+          "billing_period": {
+            "ends_at": "2025-08-30T00:00:00.000Z",
+            "starts_at": "2025-02-28T12:00:00.000Z"
+          },
+          "valid": false
+        },
+        {
+          "billing_period": {
+            "ends_at": "2026-02-28T12:00:00Z",
+            "starts_at": "2025-02-28T12:00:00Z"
+          },
+          "valid": true
+        }
+      ],
+      "periods": [
+        {
+          "ends_at": "2025-02-28T12:00:00.000Z",
+          "k": 0,
+          "start_secs": 1709208000,
+          "starts_at": "2024-02-29T12:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-02-28T12:00:00.000Z",
+          "k": 1,
+          "start_secs": 1740744000,
+          "starts_at": "2025-02-28T12:00:00.000Z"
+        },
+        {
+          "ends_at": "2027-02-28T12:00:00.000Z",
+          "k": 2,
+          "start_secs": 1772280000,
+          "starts_at": "2026-02-28T12:00:00.000Z"
+        },
+        {
+          "ends_at": "2028-02-29T12:00:00.000Z",
+          "k": 3,
+          "start_secs": 1803816000,
+          "starts_at": "2027-02-28T12:00:00.000Z"
+        },
+        {
+          "ends_at": "2029-02-28T12:00:00.000Z",
+          "k": 4,
+          "start_secs": 1835438400,
+          "starts_at": "2028-02-29T12:00:00.000Z"
+        },
+        {
+          "ends_at": "2030-02-28T12:00:00.000Z",
+          "k": 5,
+          "start_secs": 1866974400,
+          "starts_at": "2029-02-28T12:00:00.000Z"
+        },
+        {
+          "ends_at": "2031-02-28T12:00:00.000Z",
+          "k": 6,
+          "start_secs": 1898510400,
+          "starts_at": "2030-02-28T12:00:00.000Z"
+        },
+        {
+          "ends_at": "2032-02-29T12:00:00.000Z",
+          "k": 7,
+          "start_secs": 1930046400,
+          "starts_at": "2031-02-28T12:00:00.000Z"
+        },
+        {
+          "ends_at": "2033-02-28T12:00:00.000Z",
+          "k": 8,
+          "start_secs": 1961668800,
+          "starts_at": "2032-02-29T12:00:00.000Z"
+        }
+      ],
+      "recurrence": {
+        "anchor": "2024-02-29T12:00:00.000Z",
+        "ends_at": "2033-01-01T00:00:00.000Z",
+        "every": 1,
+        "starts_at": "2024-02-29T12:00:00.000Z",
+        "unit": "year"
+      }
+    },
+    {
+      "first": {
+        "ends_at": "2028-02-29T08:00:00.000Z",
+        "k": 0,
+        "start_secs": 1832832000,
+        "starts_at": "2028-01-30T08:00:00.000Z"
+      },
+      "last": {
+        "ends_at": "2028-06-30T08:00:00.000Z",
+        "k": 4,
+        "start_secs": 1843286400,
+        "starts_at": "2028-05-30T08:00:00.000Z"
+      },
+      "lookups": [
+        {
+          "period": {
+            "ends_at": "2028-03-30T08:00:00.000Z",
+            "k": 1,
+            "start_secs": 1835424000,
+            "starts_at": "2028-02-29T08:00:00.000Z"
+          },
+          "t": "2028-02-29T08:00:00.000Z"
+        },
+        {
+          "period": {
+            "ends_at": "2028-03-30T08:00:00.000Z",
+            "k": 1,
+            "start_secs": 1835424000,
+            "starts_at": "2028-02-29T08:00:00.000Z"
+          },
+          "t": "2028-03-01T00:00:00.000Z"
+        }
+      ],
+      "name": "monthly, anchor January 30 in a leap year",
+      "named": [
+        {
+          "billing_period": {
+            "ends_at": "2028-02-29T08:00:00.000Z",
+            "starts_at": "2028-01-30T08:00:00.000Z"
+          },
+          "valid": true
+        },
+        {
+          "billing_period": {
+            "ends_at": "2028-03-15T08:00:00.000Z",
+            "starts_at": "2028-02-29T08:00:00.000Z"
+          },
+          "valid": false
+        },
+        {
+          "billing_period": {
+            "ends_at": "2028-03-30T08:00:00Z",
+            "starts_at": "2028-02-29T08:00:00Z"
+          },
+          "valid": true
+        }
+      ],
+      "periods": [
+        {
+          "ends_at": "2028-02-29T08:00:00.000Z",
+          "k": 0,
+          "start_secs": 1832832000,
+          "starts_at": "2028-01-30T08:00:00.000Z"
+        },
+        {
+          "ends_at": "2028-03-30T08:00:00.000Z",
+          "k": 1,
+          "start_secs": 1835424000,
+          "starts_at": "2028-02-29T08:00:00.000Z"
+        },
+        {
+          "ends_at": "2028-04-30T08:00:00.000Z",
+          "k": 2,
+          "start_secs": 1838016000,
+          "starts_at": "2028-03-30T08:00:00.000Z"
+        },
+        {
+          "ends_at": "2028-05-30T08:00:00.000Z",
+          "k": 3,
+          "start_secs": 1840694400,
+          "starts_at": "2028-04-30T08:00:00.000Z"
+        },
+        {
+          "ends_at": "2028-06-30T08:00:00.000Z",
+          "k": 4,
+          "start_secs": 1843286400,
+          "starts_at": "2028-05-30T08:00:00.000Z"
+        }
+      ],
+      "recurrence": {
+        "anchor": "2028-01-30T08:00:00.000Z",
+        "ends_at": "2028-06-01T00:00:00.000Z",
+        "every": 1,
+        "starts_at": "2028-01-30T08:00:00.000Z",
+        "unit": "month"
+      }
+    },
+    {
+      "first": {
+        "ends_at": "2026-02-28T00:00:00.000Z",
+        "k": 0,
+        "start_secs": 1764460800,
+        "starts_at": "2025-11-30T00:00:00.000Z"
+      },
+      "last": null,
+      "lookups": [
+        {
+          "period": {
+            "ends_at": "2026-05-30T00:00:00.000Z",
+            "k": 1,
+            "start_secs": 1772236800,
+            "starts_at": "2026-02-28T00:00:00.000Z"
+          },
+          "t": "2026-03-01T00:00:00.000Z"
+        }
+      ],
+      "name": "every 3 months, anchor November 30",
+      "named": [
+        {
+          "billing_period": {
+            "ends_at": "2026-02-28T00:00:00.000Z",
+            "starts_at": "2025-11-30T00:00:00.000Z"
+          },
+          "valid": true
+        },
+        {
+          "billing_period": {
+            "ends_at": "2026-04-14T12:00:00.000Z",
+            "starts_at": "2026-02-28T00:00:00.000Z"
+          },
+          "valid": false
+        },
+        {
+          "billing_period": {
+            "ends_at": "2026-05-30T00:00:00Z",
+            "starts_at": "2026-02-28T00:00:00Z"
+          },
+          "valid": true
+        }
+      ],
+      "periods": [
+        {
+          "ends_at": "2026-02-28T00:00:00.000Z",
+          "k": 0,
+          "start_secs": 1764460800,
+          "starts_at": "2025-11-30T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-05-30T00:00:00.000Z",
+          "k": 1,
+          "start_secs": 1772236800,
+          "starts_at": "2026-02-28T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-08-30T00:00:00.000Z",
+          "k": 2,
+          "start_secs": 1780099200,
+          "starts_at": "2026-05-30T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-11-30T00:00:00.000Z",
+          "k": 3,
+          "start_secs": 1788048000,
+          "starts_at": "2026-08-30T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2027-02-28T00:00:00.000Z",
+          "k": 4,
+          "start_secs": 1795996800,
+          "starts_at": "2026-11-30T00:00:00.000Z"
+        }
+      ],
+      "recurrence": {
+        "anchor": "2025-11-30T00:00:00.000Z",
+        "ends_at": null,
+        "every": 3,
+        "starts_at": "2025-11-30T00:00:00.000Z",
+        "unit": "month"
+      }
+    },
+    {
+      "first": {
+        "ends_at": "2026-03-04T09:30:00.000Z",
+        "k": 2,
+        "start_secs": 1772530200,
+        "starts_at": "2026-03-03T09:30:00.000Z"
+      },
+      "last": {
+        "ends_at": "2026-03-06T09:30:00.000Z",
+        "k": 4,
+        "start_secs": 1772703000,
+        "starts_at": "2026-03-05T09:30:00.000Z"
+      },
+      "lookups": [
+        {
+          "period": null,
+          "t": "2026-03-03T09:29:59.999Z"
+        },
+        {
+          "period": null,
+          "t": "2026-03-06T09:30:00.000Z"
+        }
+      ],
+      "name": "daily, starts and ends between boundaries",
+      "named": [
+        {
+          "billing_period": {
+            "ends_at": "2026-03-04T09:30:00.000Z",
+            "starts_at": "2026-03-03T09:30:00.000Z"
+          },
+          "valid": true
+        },
+        {
+          "billing_period": {
+            "ends_at": "2026-03-04T21:30:00.000Z",
+            "starts_at": "2026-03-04T09:30:00.000Z"
+          },
+          "valid": false
+        },
+        {
+          "billing_period": {
+            "ends_at": "2026-03-05T09:30:00Z",
+            "starts_at": "2026-03-04T09:30:00Z"
+          },
+          "valid": true
+        }
+      ],
+      "periods": [
+        {
+          "ends_at": "2026-03-04T09:30:00.000Z",
+          "k": 2,
+          "start_secs": 1772530200,
+          "starts_at": "2026-03-03T09:30:00.000Z"
+        },
+        {
+          "ends_at": "2026-03-05T09:30:00.000Z",
+          "k": 3,
+          "start_secs": 1772616600,
+          "starts_at": "2026-03-04T09:30:00.000Z"
+        },
+        {
+          "ends_at": "2026-03-06T09:30:00.000Z",
+          "k": 4,
+          "start_secs": 1772703000,
+          "starts_at": "2026-03-05T09:30:00.000Z"
+        }
+      ],
+      "recurrence": {
+        "anchor": "2026-03-01T09:30:00.000Z",
+        "ends_at": "2026-03-06T09:30:00.000Z",
+        "every": 1,
+        "starts_at": "2026-03-03T10:00:00.000Z",
+        "unit": "day"
+      }
+    },
+    {
+      "first": {
+        "ends_at": "2028-02-28T00:00:00.000Z",
+        "k": 0,
+        "start_secs": 1835222400,
+        "starts_at": "2028-02-27T00:00:00.000Z"
+      },
+      "last": {
+        "ends_at": "2028-03-02T00:00:00.000Z",
+        "k": 3,
+        "start_secs": 1835481600,
+        "starts_at": "2028-03-01T00:00:00.000Z"
+      },
+      "lookups": [
+        {
+          "period": {
+            "ends_at": "2028-03-01T00:00:00.000Z",
+            "k": 2,
+            "start_secs": 1835395200,
+            "starts_at": "2028-02-29T00:00:00.000Z"
+          },
+          "t": "2028-02-29T23:59:59.999Z"
+        }
+      ],
+      "name": "daily, across a leap day",
+      "named": [
+        {
+          "billing_period": {
+            "ends_at": "2028-02-28T00:00:00.000Z",
+            "starts_at": "2028-02-27T00:00:00.000Z"
+          },
+          "valid": true
+        },
+        {
+          "billing_period": {
+            "ends_at": "2028-02-28T12:00:00.000Z",
+            "starts_at": "2028-02-28T00:00:00.000Z"
+          },
+          "valid": false
+        },
+        {
+          "billing_period": {
+            "ends_at": "2028-02-29T00:00:00Z",
+            "starts_at": "2028-02-28T00:00:00Z"
+          },
+          "valid": true
+        }
+      ],
+      "periods": [
+        {
+          "ends_at": "2028-02-28T00:00:00.000Z",
+          "k": 0,
+          "start_secs": 1835222400,
+          "starts_at": "2028-02-27T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2028-02-29T00:00:00.000Z",
+          "k": 1,
+          "start_secs": 1835308800,
+          "starts_at": "2028-02-28T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2028-03-01T00:00:00.000Z",
+          "k": 2,
+          "start_secs": 1835395200,
+          "starts_at": "2028-02-29T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2028-03-02T00:00:00.000Z",
+          "k": 3,
+          "start_secs": 1835481600,
+          "starts_at": "2028-03-01T00:00:00.000Z"
+        }
+      ],
+      "recurrence": {
+        "anchor": "2028-02-27T00:00:00.000Z",
+        "ends_at": "2028-03-02T00:00:00.000Z",
+        "every": 1,
+        "starts_at": "2028-02-27T00:00:00.000Z",
+        "unit": "day"
+      }
+    },
+    {
+      "first": {
+        "ends_at": "2028-03-04T00:00:00.000Z",
+        "k": 0,
+        "start_secs": 1835136000,
+        "starts_at": "2028-02-26T00:00:00.000Z"
+      },
+      "last": null,
+      "lookups": [
+        {
+          "period": {
+            "ends_at": "2028-03-04T00:00:00.000Z",
+            "k": 0,
+            "start_secs": 1835136000,
+            "starts_at": "2028-02-26T00:00:00.000Z"
+          },
+          "t": "2028-02-29T12:00:00.000Z"
+        }
+      ],
+      "name": "weekly, a period containing a leap day",
+      "named": [
+        {
+          "billing_period": {
+            "ends_at": "2028-03-04T00:00:00.000Z",
+            "starts_at": "2028-02-26T00:00:00.000Z"
+          },
+          "valid": true
+        },
+        {
+          "billing_period": {
+            "ends_at": "2028-03-07T12:00:00.000Z",
+            "starts_at": "2028-03-04T00:00:00.000Z"
+          },
+          "valid": false
+        },
+        {
+          "billing_period": {
+            "ends_at": "2028-03-11T00:00:00Z",
+            "starts_at": "2028-03-04T00:00:00Z"
+          },
+          "valid": true
+        }
+      ],
+      "periods": [
+        {
+          "ends_at": "2028-03-04T00:00:00.000Z",
+          "k": 0,
+          "start_secs": 1835136000,
+          "starts_at": "2028-02-26T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2028-03-11T00:00:00.000Z",
+          "k": 1,
+          "start_secs": 1835740800,
+          "starts_at": "2028-03-04T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2028-03-18T00:00:00.000Z",
+          "k": 2,
+          "start_secs": 1836345600,
+          "starts_at": "2028-03-11T00:00:00.000Z"
+        }
+      ],
+      "recurrence": {
+        "anchor": "2028-02-26T00:00:00.000Z",
+        "ends_at": null,
+        "every": 1,
+        "starts_at": "2028-02-26T00:00:00.000Z",
+        "unit": "week"
+      }
+    },
+    {
+      "first": {
+        "ends_at": "2026-01-05T00:00:00.000Z",
+        "k": -1,
+        "start_secs": 1766361600,
+        "starts_at": "2025-12-22T00:00:00.000Z"
+      },
+      "last": null,
+      "lookups": [
+        {
+          "period": {
+            "ends_at": "2026-01-05T00:00:00.000Z",
+            "k": -1,
+            "start_secs": 1766361600,
+            "starts_at": "2025-12-22T00:00:00.000Z"
+          },
+          "t": "2026-01-04T23:59:59.999Z"
+        }
+      ],
+      "name": "every 2 weeks, starts before the anchor",
+      "named": [
+        {
+          "billing_period": {
+            "ends_at": "2026-01-05T00:00:00.000Z",
+            "starts_at": "2025-12-22T00:00:00.000Z"
+          },
+          "valid": true
+        },
+        {
+          "billing_period": {
+            "ends_at": "2026-01-12T00:00:00.000Z",
+            "starts_at": "2026-01-05T00:00:00.000Z"
+          },
+          "valid": false
+        },
+        {
+          "billing_period": {
+            "ends_at": "2026-01-19T00:00:00Z",
+            "starts_at": "2026-01-05T00:00:00Z"
+          },
+          "valid": true
+        }
+      ],
+      "periods": [
+        {
+          "ends_at": "2026-01-05T00:00:00.000Z",
+          "k": -1,
+          "start_secs": 1766361600,
+          "starts_at": "2025-12-22T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-01-19T00:00:00.000Z",
+          "k": 0,
+          "start_secs": 1767571200,
+          "starts_at": "2026-01-05T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-02-02T00:00:00.000Z",
+          "k": 1,
+          "start_secs": 1768780800,
+          "starts_at": "2026-01-19T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-02-16T00:00:00.000Z",
+          "k": 2,
+          "start_secs": 1769990400,
+          "starts_at": "2026-02-02T00:00:00.000Z"
+        }
+      ],
+      "recurrence": {
+        "anchor": "2026-01-05T00:00:00.000Z",
+        "ends_at": null,
+        "every": 2,
+        "starts_at": "2025-12-29T00:00:00.000Z",
+        "unit": "week"
+      }
+    },
+    {
+      "first": {
+        "ends_at": "2026-01-01T03:00:00.000Z",
+        "k": -1,
+        "start_secs": 1767214800,
+        "starts_at": "2025-12-31T21:00:00.000Z"
+      },
+      "last": {
+        "ends_at": "2026-01-02T03:00:00.000Z",
+        "k": 3,
+        "start_secs": 1767301200,
+        "starts_at": "2026-01-01T21:00:00.000Z"
+      },
+      "lookups": [
+        {
+          "period": {
+            "ends_at": "2026-01-01T03:00:00.000Z",
+            "k": -1,
+            "start_secs": 1767214800,
+            "starts_at": "2025-12-31T21:00:00.000Z"
+          },
+          "t": "2026-01-01T02:59:59.999Z"
+        },
+        {
+          "period": {
+            "ends_at": "2026-01-01T09:00:00.000Z",
+            "k": 0,
+            "start_secs": 1767236400,
+            "starts_at": "2026-01-01T03:00:00.000Z"
+          },
+          "t": "2026-01-01T03:00:00.000Z"
+        }
+      ],
+      "name": "every 6 hours, first period before the anchor",
+      "named": [
+        {
+          "billing_period": {
+            "ends_at": "2026-01-01T03:00:00.000Z",
+            "starts_at": "2025-12-31T21:00:00.000Z"
+          },
+          "valid": true
+        },
+        {
+          "billing_period": {
+            "ends_at": "2026-01-01T06:00:00.000Z",
+            "starts_at": "2026-01-01T03:00:00.000Z"
+          },
+          "valid": false
+        },
+        {
+          "billing_period": {
+            "ends_at": "2026-01-01T09:00:00Z",
+            "starts_at": "2026-01-01T03:00:00Z"
+          },
+          "valid": true
+        }
+      ],
+      "periods": [
+        {
+          "ends_at": "2026-01-01T03:00:00.000Z",
+          "k": -1,
+          "start_secs": 1767214800,
+          "starts_at": "2025-12-31T21:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-01-01T09:00:00.000Z",
+          "k": 0,
+          "start_secs": 1767236400,
+          "starts_at": "2026-01-01T03:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-01-01T15:00:00.000Z",
+          "k": 1,
+          "start_secs": 1767258000,
+          "starts_at": "2026-01-01T09:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-01-01T21:00:00.000Z",
+          "k": 2,
+          "start_secs": 1767279600,
+          "starts_at": "2026-01-01T15:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-01-02T03:00:00.000Z",
+          "k": 3,
+          "start_secs": 1767301200,
+          "starts_at": "2026-01-01T21:00:00.000Z"
+        }
+      ],
+      "recurrence": {
+        "anchor": "2026-01-01T03:00:00.000Z",
+        "ends_at": "2026-01-02T00:00:00.000Z",
+        "every": 6,
+        "starts_at": "2026-01-01T00:00:00.000Z",
+        "unit": "hour"
+      }
+    },
+    {
+      "first": {
+        "ends_at": "2026-01-01T00:15:00.000Z",
+        "k": 0,
+        "start_secs": 1767225600,
+        "starts_at": "2026-01-01T00:00:00.000Z"
+      },
+      "last": {
+        "ends_at": "2026-01-01T01:00:00.000Z",
+        "k": 3,
+        "start_secs": 1767228300,
+        "starts_at": "2026-01-01T00:45:00.000Z"
+      },
+      "lookups": [
+        {
+          "period": {
+            "ends_at": "2026-01-01T00:45:00.000Z",
+            "k": 2,
+            "start_secs": 1767227400,
+            "starts_at": "2026-01-01T00:30:00.000Z"
+          },
+          "t": "2026-01-01T00:44:59.999Z"
+        }
+      ],
+      "name": "every 15 minutes",
+      "named": [
+        {
+          "billing_period": {
+            "ends_at": "2026-01-01T00:15:00.000Z",
+            "starts_at": "2026-01-01T00:00:00.000Z"
+          },
+          "valid": true
+        },
+        {
+          "billing_period": {
+            "ends_at": "2026-01-01T00:22:30.000Z",
+            "starts_at": "2026-01-01T00:15:00.000Z"
+          },
+          "valid": false
+        },
+        {
+          "billing_period": {
+            "ends_at": "2026-01-01T00:30:00Z",
+            "starts_at": "2026-01-01T00:15:00Z"
+          },
+          "valid": true
+        }
+      ],
+      "periods": [
+        {
+          "ends_at": "2026-01-01T00:15:00.000Z",
+          "k": 0,
+          "start_secs": 1767225600,
+          "starts_at": "2026-01-01T00:00:00.000Z"
+        },
+        {
+          "ends_at": "2026-01-01T00:30:00.000Z",
+          "k": 1,
+          "start_secs": 1767226500,
+          "starts_at": "2026-01-01T00:15:00.000Z"
+        },
+        {
+          "ends_at": "2026-01-01T00:45:00.000Z",
+          "k": 2,
+          "start_secs": 1767227400,
+          "starts_at": "2026-01-01T00:30:00.000Z"
+        },
+        {
+          "ends_at": "2026-01-01T01:00:00.000Z",
+          "k": 3,
+          "start_secs": 1767228300,
+          "starts_at": "2026-01-01T00:45:00.000Z"
+        }
+      ],
+      "recurrence": {
+        "anchor": "2026-01-01T00:00:00.000Z",
+        "ends_at": "2026-01-01T01:00:00.000Z",
+        "every": 15,
+        "starts_at": "2026-01-01T00:07:00.000Z",
+        "unit": "minute"
+      }
+    }
+  ],
+  "description": "Billing Periods (wire 5.4, spec 11.2, specs/allowances.md anchored rule): boundary k = anchor + k * every units, fixed seconds for minute, hour, day and week, a calendar step from the original anchor for month and year, clamped to the target month's last day. Period k = [boundary(k), boundary(k+1)). The first period contains starts_at; the last contains the instant just before ends_at. start_secs is the obligation ID's period start. A message's {starts_at, ends_at} must equal a computed period, compared as instants.",
+  "details_rates": {
+    "cases": [
+      {
+        "rates_apply": true,
+        "verified_payment_time": "2026-03-01T00:00:00.500Z"
+      },
+      {
+        "rates_apply": false,
+        "verified_payment_time": "2026-03-01T00:00:00.501Z"
+      },
+      {
+        "rates_apply": true,
+        "verified_payment_time": "2026-03-01T00:00:00.5009Z"
+      },
+      {
+        "rates_apply": true,
+        "verified_payment_time": "2026-03-01T00:00:00Z"
+      }
+    ],
+    "description": "The rates of period details apply to a payment whose independently verified payment time, from the payment method's evidence, is at or before expires_at, both read at millisecond precision with further digits truncated (wire 1.6, 5.9; spec 11.2). An evidence time in whole seconds reads as .000. The payee credits a payment at the rates only then; the payer pays by them only while its device clock and its highest verified service time are both before expires_at.",
+    "expires_at": "2026-03-01T00:00:00.500Z"
+  }
+}
