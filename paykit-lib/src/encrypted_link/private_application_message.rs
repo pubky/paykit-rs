@@ -254,6 +254,9 @@ pub(super) async fn receive_private_application_messages(
 ///
 /// This clears the local write path used by the counterparty as their read path.
 /// Only retire a context after neither peer needs its handshake or messages.
+/// Deletion runs page by page and can stop partway, so stop using link state
+/// that writes to this context first: its write slot search relies on stored
+/// slots having no gaps.
 /// Recovery itself uses a new context and does not require deletion. The
 /// counterparty's outbox is not touched. The local Pubky identity comes from `session`; the remote
 /// identity and Noise key must belong to the intended counterparty. The caller

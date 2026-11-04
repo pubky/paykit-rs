@@ -512,10 +512,15 @@ impl EncryptedLink {
     /// reads the packets already in the skipped slots before this link's next
     /// packet. Returns the number of slots skipped.
     ///
-    /// Stored slots are contiguous from the link's first transport slot: each
-    /// packet is published before the next one is prepared, and an outbox is
-    /// only ever cleared as a whole. The first free slot is therefore found with
-    /// a logarithmic number of `HEAD` requests.
+    /// Each packet is published before the next one is prepared, so stored
+    /// slots are contiguous from the link's first transport slot. This holds
+    /// only while no slot of a write stream that link state can still write to
+    /// has been deleted: a gap would end the search before packets stored after
+    /// it. [`clear_encrypted_link_outbox`](crate::clear_encrypted_link_outbox)
+    /// deletes page by page and can stop partway, so retire the recovery
+    /// context before clearing it, as its docs say. With contiguous slots the
+    /// first free slot is found with a logarithmic number of `HEAD` requests,
+    /// and one `HEAD` request when the next slot is free.
     ///
     /// Fails while a prepared send awaits
     /// [`acknowledge_persisted_private_send`](Self::acknowledge_persisted_private_send)
@@ -716,8 +721,11 @@ impl EncryptedLink {
 /// First slot at or after `start` for which `exists` is false.
 ///
 /// Assumes stored slots are contiguous, so it gallops to a free slot and then
-/// bisects back to the first one. A free result can be [`LAST_WRITE_SLOT`],
-/// which pubky-noise reports as exhausted on the next write.
+/// bisects back to the first one. That holds only while no slot of a stream
+/// that link state can still write to has been deleted; see
+/// [`crate::clear_encrypted_link_outbox`]. A free result can be
+/// [`LAST_WRITE_SLOT`], which pubky-noise reports as exhausted on the next
+/// write.
 async fn first_free_slot<F, Fut>(start: u32, mut exists: F) -> Result<u32>
 where
     F: FnMut(u32) -> Fut,
