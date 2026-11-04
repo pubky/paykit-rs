@@ -85,8 +85,35 @@ XCFramework on macOS and the Android libraries and bindings on Ubuntu with
 provenance. Release candidates get the `next` dist-tag, so `latest` stays on the
 last final release.
 
-The workflow needs the `NPM_TOKEN` repository secret, an npm automation token
-that can publish the package.
+npm no longer issues classic automation tokens. The workflow publishes with a
+granular access token for the first release, then with Trusted Publishing
+(OIDC), which needs no secret.
+
+First release, while the package does not exist on npm yet:
+
+1. Create a granular access token on npmjs.com with read and write access to
+   the `@synonymdev` scope, **Bypass two-factor authentication** enabled, and
+   a short expiry.
+2. Save it as the `NPM_TOKEN` repository secret.
+
+npm plans to remove direct publishing with granular access tokens in January
+2027, so do not rely on this token for later releases.
+
+After the first release:
+
+1. On npmjs.com, open the package settings and add a trusted publisher:
+   GitHub Actions, organization `pubky`, repository `paykit-rs`, workflow
+   `npm-publish.yml`. A new trusted publisher expires unless it publishes
+   within 2 days, so add it shortly before the next release.
+2. Delete the `NPM_TOKEN` secret and revoke the token.
+3. Optionally, set the package's publishing access to require two-factor
+   authentication and disallow tokens. Trusted Publishing still works.
+
+The workflow needs no change for this. The npm CLI uses OIDC before a
+configured token, the publish job already has `id-token: write`, and the Node
+version in `paykit-react-native/.nvmrc` ships npm 11.12.1 (Trusted Publishing
+needs 11.5.1 or later). See
+[npm's Trusted Publishing docs](https://docs.npmjs.com/trusted-publishers).
 
 To check a release without publishing, run it manually from Actions ->
 "npm Package" -> Run workflow with the version. A manual run builds the same tag
