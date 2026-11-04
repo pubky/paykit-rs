@@ -103,8 +103,11 @@ After the first release:
 
 1. On npmjs.com, open the package settings and add a trusted publisher:
    GitHub Actions, organization `pubky`, repository `paykit-rs`, workflow
-   `npm-publish.yml`. A new trusted publisher expires unless it publishes
-   within 2 days, so add it shortly before the next release.
+   `npm-publish.yml`. Under **Allowed actions**, enable `npm publish`: a new
+   trusted publisher can only run `npm stage publish` by default, and this
+   workflow publishes directly, so the release would fail without it. A new
+   trusted publisher expires unless it publishes within 2 days, so add it
+   shortly before the next release.
 2. Delete the `NPM_TOKEN` secret and revoke the token.
 3. Optionally, set the package's publishing access to require two-factor
    authentication and disallow tokens. Trusted Publishing still works.
