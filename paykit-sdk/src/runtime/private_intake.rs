@@ -1481,6 +1481,7 @@ where
             .preserve_authorization_advance_on_marker_failure(
                 &counterparty,
                 &access,
+                snapshot.state.generation,
                 &snapshot.authorization,
                 &authorization,
                 marker.map_err(|error| super::recovery::link_observation_error(error.into())),
@@ -1498,6 +1499,7 @@ where
                     &lease,
                     &access,
                     super::private_stream::PrivateReceiveObservation::new(
+                        snapshot.state.generation,
                         &snapshot.authorization,
                         &authorization,
                         marker.as_ref(),
