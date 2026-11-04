@@ -375,7 +375,10 @@ check the destination with `prepared_private_send_slot`. `Published` means the
 same ciphertext is already stored, so treat the send as complete. `Taken` means
 the slot holds another packet: drop the prepared ciphertext, call
 `skip_published_write_slots`, persist the resulting snapshot, and prepare the
-message again. Never publish into a `Taken` slot. On receive, use
+message again. Never publish into a `Taken` slot. A runtime that restores link
+state can instead call `skip_published_write_slots` before its first
+preparation and persist the resulting snapshot; a send prepared next, at
+`next_write_slot_path`, needs no second check. On receive, use
 `prepare_next_private_application_message`, persist the plaintext application
 result and resulting snapshot together, and only then call
 `acknowledge_persisted_private_receive`. The SDK runtime implements this staged

@@ -454,11 +454,15 @@ impl EncryptedLink {
 
     /// Check what the destination slot of a prepared send already holds.
     ///
-    /// Call before every
+    /// Call before
     /// [`publish_prepared_private_application_message`](Self::publish_prepared_private_application_message),
     /// including for values restored from durable state. Link state restored
     /// from an older copy can point at a slot that a later send already used;
-    /// publishing there would put two packets under one key and nonce.
+    /// publishing there would put two packets under one key and nonce. A send
+    /// prepared right after
+    /// [`skip_published_write_slots`](Self::skip_published_write_slots), at the
+    /// [`next_write_slot_path`](Self::next_write_slot_path) the skip found
+    /// free, needs no second check.
     ///
     /// Costs one `HEAD` request, plus a bounded `GET` when the slot exists. It
     /// reads this identity's own homeserver and relies on it to report stored
@@ -506,7 +510,9 @@ impl EncryptedLink {
 
     /// Move the next write slot past packets already on this link's write stream.
     ///
-    /// Use when [`prepared_private_send_slot`](Self::prepared_private_send_slot)
+    /// Use after restoring link state from storage, before the first
+    /// preparation, or when
+    /// [`prepared_private_send_slot`](Self::prepared_private_send_slot)
     /// reports [`PreparedPrivateSendSlot::Taken`]. The sending nonce moves with
     /// the slot, so no nonce whose slot holds a packet is used again. The peer
     /// reads the packets already in the skipped slots before this link's next
@@ -556,6 +562,20 @@ impl EncryptedLink {
         previous.encryptor.close();
         debug!(skipped, "skipped published Encrypted Link write slots");
         Ok(skipped)
+    }
+
+    /// Destination path of the next packet this link prepares.
+    ///
+    /// Right after [`skip_published_write_slots`](Self::skip_published_write_slots),
+    /// this is the slot the skip found free. Fails while a prepared send awaits
+    /// [`acknowledge_persisted_private_send`](Self::acknowledge_persisted_private_send)
+    /// or a failed convenience send awaits [`retry_pending_send`](Self::retry_pending_send).
+    pub fn next_write_slot_path(&self) -> Result<String> {
+        let state = self.snapshot()?.into_state();
+        Ok(format!(
+            "{}/{}",
+            self.config.write_path, state.write_counter
+        ))
     }
 
     /// First slot at or after `start` that holds no packet.

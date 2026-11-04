@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use paykit_sdk::{
-    storage::{StorageOperation, StorageTransactionCallback},
+    storage::{OutboundPrivateMessageRecord, StorageOperation, StorageTransactionCallback},
     InMemoryStorage, LinkedPeerState, OutboundPrivateMessageStatus, PaykitSdk, PaykitSdkConfig,
     PaykitSdkError, PrivatePaymentEndpointReservation, PrivatePaymentListReservationUpdate,
     PubkySessionAccess, PubkySessionProvider, Result as PaykitResult, StorageAdapter,
@@ -15,7 +15,7 @@ use tokio::sync::{Notify, Semaphore};
 
 use crate::harness::{
     build_testnet, drive_link_to_linked, linked_two_party, private_receiving_detail, two_party,
-    TestUser, TestnetSessionProvider,
+    TestUser, TestnetPaymentAdapter, TestnetSessionProvider,
 };
 
 #[tokio::test]
@@ -1585,7 +1585,7 @@ async fn test_enqueue_private_payment_list_without_link_fails() {
 
 #[tokio::test]
 async fn test_private_list_send_from_older_link_state_uses_next_free_slot() {
-    async fn send_private_list(alice: &TestUser, bob: &TestUser, payload: &str) {
+    async fn send_private_list(alice: &TestUser, bob: &TestUser, payload: &str) -> u64 {
         alice
             .adapter
             .set_private_details(vec![private_receiving_detail(
@@ -1604,6 +1604,7 @@ async fn test_private_list_send_from_older_link_state_uses_next_free_slot() {
             .unwrap();
         assert_eq!(report.sent.len(), 1);
         assert!(report.failed.is_empty());
+        report.sent[0]
     }
 
     let pair = linked_two_party().await;
@@ -1627,7 +1628,9 @@ async fn test_private_list_send_from_older_link_state_uses_next_free_slot() {
         })
         .await
         .unwrap();
-    send_private_list(&pair.alice, &pair.bob, "ln-private-3").await;
+    let third = send_private_list(&pair.alice, &pair.bob, "ln-private-3").await;
+    // Prepared once, on the next free slot: nothing was encrypted for a used slot.
+    assert_eq!(outbound_record(&pair.alice, third).attempt_count, 1);
 
     let receive = pair
         .bob
@@ -1660,68 +1663,153 @@ async fn test_private_list_send_from_older_link_state_uses_next_free_slot() {
     );
 }
 
-#[tokio::test]
-async fn test_private_send_never_overwrites_slots_taken_before_publication() {
-    const STORED: &[u8] = b"packet stored by another writer";
+const FOREIGN_PACKET: &[u8] = b"packet stored by another writer";
 
-    /// Stores a packet in each slot the SDK prepares, before it publishes.
-    struct SlotTakingStorage {
-        inner: InMemoryStorage,
-        session: pubky::PubkySession,
-        taken: std::sync::Mutex<Vec<String>>,
+/// Stores a foreign packet in slots prepared for one message, after the SDK
+/// stores each preparation and before it publishes.
+struct SlotTakingStorage {
+    inner: InMemoryStorage,
+    session: pubky::PubkySession,
+    outbound_message_id: u64,
+    max_taken: usize,
+    taken: std::sync::Mutex<Vec<String>>,
+}
+
+impl SlotTakingStorage {
+    fn new(user: &TestUser, outbound_message_id: u64, max_taken: usize) -> Arc<Self> {
+        Arc::new(Self {
+            inner: user.storage.clone(),
+            session: user.access.session.clone(),
+            outbound_message_id,
+            max_taken,
+            taken: Default::default(),
+        })
     }
 
-    #[async_trait]
-    impl StorageAdapter for SlotTakingStorage {
-        async fn transaction_erased<'a>(
-            &self,
-            f: StorageTransactionCallback<'a>,
-        ) -> PaykitResult<Box<dyn std::any::Any + Send>> {
-            let result = self.inner.transaction_erased(f).await?;
-            let prepared = self
-                .inner
-                .snapshot()?
-                .outbound_private_messages
-                .into_iter()
-                .filter_map(|message| message.prepared_send)
-                .map(|prepared| prepared.destination_path)
-                .find(|path| !self.taken.lock().unwrap().contains(path));
-            if let Some(path) = prepared {
-                self.session
-                    .storage()
-                    .put(path.as_str(), STORED.to_vec())
-                    .await
-                    .unwrap();
-                self.taken.lock().unwrap().push(path);
-            }
-            Ok(result)
+    fn taken(&self) -> Vec<String> {
+        self.taken.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl StorageAdapter for SlotTakingStorage {
+    async fn transaction_erased<'a>(
+        &self,
+        f: StorageTransactionCallback<'a>,
+    ) -> PaykitResult<Box<dyn std::any::Any + Send>> {
+        let result = self.inner.transaction_erased(f).await?;
+        let prepared = self
+            .inner
+            .snapshot()?
+            .outbound_private_messages
+            .into_iter()
+            .find(|message| message.outbound_message_id == self.outbound_message_id)
+            .and_then(|message| message.prepared_send)
+            .map(|prepared| prepared.destination_path)
+            .filter(|path| {
+                let taken = self.taken.lock().unwrap();
+                taken.len() < self.max_taken && !taken.contains(path)
+            });
+        if let Some(path) = prepared {
+            self.session
+                .storage()
+                .put(path.as_str(), FOREIGN_PACKET.to_vec())
+                .await
+                .unwrap();
+            self.taken.lock().unwrap().push(path);
         }
+        Ok(result)
     }
+}
 
-    let pair = linked_two_party().await;
-    pair.alice
+fn sdk_over<S, C>(
+    user: &TestUser,
+    storage: S,
+    clock: C,
+) -> PaykitSdk<S, TestnetSessionProvider, TestnetPaymentAdapter, C>
+where
+    S: StorageAdapter,
+    C: paykit_sdk::Clock,
+{
+    PaykitSdk::with_clock(
+        storage,
+        TestnetSessionProvider::new(user.access.clone()),
+        user.adapter.clone(),
+        PaykitSdkConfig::new(user.app_id.clone()).unwrap(),
+        clock,
+    )
+}
+
+async fn propose_write_slot_request(payee: &TestUser, payer: &TestUser) -> u64 {
+    let terms = paykit_lib::PaymentRequestTerms::builder(
+        paykit_lib::PaymentAmount::new("0.001", "btc").unwrap(),
+        paykit_lib::PaymentReference::new("write-slot-check").unwrap(),
+        vec![paykit_lib::PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap()],
+    )
+    .build()
+    .unwrap();
+    payee
+        .sdk
+        .propose_payment_request(payer.public_key.clone(), terms)
+        .await
+        .unwrap()
+        .proposal_outbound_message_id
+        .unwrap()
+}
+
+async fn enqueue_write_slot_list(sender: &TestUser, recipient: &TestUser) -> u64 {
+    sender
         .adapter
         .set_private_details(vec![private_receiving_detail(
             "btc-lightning-bolt11",
             "ln-private",
         )]);
-    let message = pair
-        .alice
+    sender
         .sdk
-        .enqueue_private_payment_list(pair.bob.public_key.clone())
+        .enqueue_private_payment_list(recipient.public_key.clone())
         .await
-        .unwrap();
-    let storage = Arc::new(SlotTakingStorage {
-        inner: pair.alice.storage.clone(),
-        session: pair.alice.access.session.clone(),
-        taken: Default::default(),
-    });
-    let sdk = PaykitSdk::new(
-        storage.clone(),
-        TestnetSessionProvider::new(pair.alice.access.clone()),
-        pair.alice.adapter.clone(),
-        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+        .unwrap()
+        .outbound_message_id
+}
+
+fn outbound_record(user: &TestUser, outbound_message_id: u64) -> OutboundPrivateMessageRecord {
+    user.storage
+        .snapshot()
+        .unwrap()
+        .outbound_private_messages
+        .into_iter()
+        .find(|record| record.outbound_message_id == outbound_message_id)
+        .unwrap()
+}
+
+async fn stored_packet(user: &TestUser, path: &str) -> Option<Vec<u8>> {
+    match user.access.session.storage().get(path).await {
+        Ok(response) => Some(response.bytes().await.unwrap().to_vec()),
+        Err(pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }))
+            if status == pubky::StatusCode::NOT_FOUND =>
+        {
+            None
+        }
+        Err(error) => panic!("unexpected write slot read error: {error}"),
+    }
+}
+
+fn assert_linked(user: &TestUser, counterparty: &TestUser) {
+    assert_eq!(
+        user.storage.snapshot().unwrap().linked_peers[&counterparty.public_key].state,
+        LinkedPeerState::Linked
     );
+}
+
+#[tokio::test]
+async fn test_private_send_never_overwrites_slots_taken_before_publication() {
+    let pair = linked_two_party().await;
+    let first = propose_write_slot_request(&pair.alice, &pair.bob).await;
+    let message = enqueue_write_slot_list(&pair.alice, &pair.bob).await;
+    // The run's first send is published on the slot its skip found free, so
+    // the slots are taken from the next preparation on.
+    let storage = SlotTakingStorage::new(&pair.alice, message, usize::MAX);
+    let sdk = sdk_over(&pair.alice, storage.clone(), paykit_sdk::SystemClock);
 
     let report = sdk
         .process_outbound_private_messages(pair.bob.public_key.clone())
@@ -1729,42 +1817,23 @@ async fn test_private_send_never_overwrites_slots_taken_before_publication() {
         .unwrap();
 
     // The message is prepared again once, then waits for the retry backoff.
-    assert_eq!(report.attempted, vec![message.outbound_message_id]);
-    assert!(report.sent.is_empty());
+    assert_eq!(report.attempted, vec![first, message]);
+    assert_eq!(report.sent, vec![first]);
     assert_eq!(report.failed.len(), 1);
-    assert_eq!(
-        report.failed[0].outbound_message_id,
-        message.outbound_message_id
-    );
+    assert_eq!(report.failed[0].outbound_message_id, message);
     assert!(report.failed[0]
         .error
         .contains("already holds another packet"));
-    let state = pair.alice.storage.snapshot().unwrap();
-    let failed = state
-        .outbound_private_messages
-        .iter()
-        .find(|record| record.outbound_message_id == message.outbound_message_id)
-        .unwrap();
+    let failed = outbound_record(&pair.alice, message);
     assert_eq!(failed.status, OutboundPrivateMessageStatus::Failed);
     assert!(failed.prepared_send.is_none());
-    assert_eq!(
-        state.linked_peers[&pair.bob.public_key].state,
-        LinkedPeerState::Linked
-    );
-    let taken = storage.taken.lock().unwrap().clone();
+    assert_linked(&pair.alice, &pair.bob);
+    let taken = storage.taken();
     assert_eq!(taken.len(), 2);
-    for path in taken {
-        let stored = pair
-            .alice
-            .access
-            .session
-            .storage()
-            .get(path.as_str())
-            .await
-            .unwrap()
-            .bytes()
-            .await
-            .unwrap();
-        assert_eq!(stored.as_ref(), STORED);
+    for path in &taken {
+        assert_eq!(
+            stored_packet(&pair.alice, path).await.as_deref(),
+            Some(FOREIGN_PACKET)
+        );
     }
 }
