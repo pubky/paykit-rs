@@ -1477,8 +1477,15 @@ where
             ),
         );
         let authorization = authorization.map_err(super::recovery::link_observation_error)?;
-        let marker =
-            marker.map_err(|error| super::recovery::link_observation_error(error.into()))?;
+        let marker = self
+            .preserve_authorization_advance_on_marker_failure(
+                &counterparty,
+                &access,
+                &snapshot.authorization,
+                &authorization,
+                marker.map_err(|error| super::recovery::link_observation_error(error.into())),
+            )
+            .await?;
         if !super::private_stream::private_receive_observation_is_current(
             &snapshot,
             &authorization,

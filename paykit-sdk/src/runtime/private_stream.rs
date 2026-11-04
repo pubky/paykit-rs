@@ -54,7 +54,7 @@ pub(super) fn private_receive_observation_is_current(
 pub(super) struct PrivateReceiveObservation<'a> {
     expected_authorization: &'a NoiseAuthorization,
     authorization: &'a NoiseAuthorization,
-    marker: Option<&'a paykit_lib::EncryptedLinkRecoveryMarker>,
+    marker: Result<Option<&'a paykit_lib::EncryptedLinkRecoveryMarker>>,
 }
 
 impl<'a> PrivateReceiveObservation<'a> {
@@ -62,6 +62,18 @@ impl<'a> PrivateReceiveObservation<'a> {
         expected_authorization: &'a NoiseAuthorization,
         authorization: &'a NoiseAuthorization,
         marker: Option<&'a paykit_lib::EncryptedLinkRecoveryMarker>,
+    ) -> Self {
+        Self {
+            expected_authorization,
+            authorization,
+            marker: Ok(marker),
+        }
+    }
+
+    pub(super) fn with_marker_result(
+        expected_authorization: &'a NoiseAuthorization,
+        authorization: &'a NoiseAuthorization,
+        marker: Result<Option<&'a paykit_lib::EncryptedLinkRecoveryMarker>>,
     ) -> Self {
         Self {
             expected_authorization,
@@ -83,11 +95,16 @@ where
     C: Clock,
 {
     let PrivateReceiveObservation {
-        expected_authorization: _,
+        expected_authorization,
         authorization,
         marker,
     } = observation;
-    let marker_attempt_id = marker.map(|marker| marker.attempt_id().to_owned());
+    let marker_was_read = marker.is_ok();
+    let marker_attempt_id = marker
+        .as_ref()
+        .ok()
+        .and_then(|marker| marker.as_ref())
+        .map(|marker| marker.attempt_id().to_owned());
     // Commit the monotonic authorization pin and recovery transition together
     // under the peer lease before callers classify this observation as stale.
     let changed = retry_storage_transaction(storage, || {
@@ -114,7 +131,9 @@ where
             if peer.as_ref().is_some_and(|peer| {
                 peer.state == LinkedPeerState::Linked
                     && peer.noise_key_authorization.as_ref() == Some(&authorization)
-                    && peer.remote_recovery_attempt_id.as_deref() == marker_attempt_id.as_deref()
+                    && (!marker_was_read
+                        || peer.remote_recovery_attempt_id.as_deref()
+                            == marker_attempt_id.as_deref())
             }) {
                 return Ok(false);
             }
@@ -124,12 +143,14 @@ where
                 &authorization,
             )?;
             let peer = tx.linked_peer(&counterparty);
-            let marker_changed = marker_attempt_id.as_deref().is_some_and(|attempt_id| {
-                peer.as_ref()
-                    .and_then(|peer| peer.remote_recovery_attempt_id.as_deref())
-                    != Some(attempt_id)
-            });
-            if marker_changed
+            let marker_changed = marker_was_read
+                && marker_attempt_id.as_deref().is_some_and(|attempt_id| {
+                    peer.as_ref()
+                        .and_then(|peer| peer.remote_recovery_attempt_id.as_deref())
+                        != Some(attempt_id)
+                });
+            if expected_authorization != &authorization
+                || marker_changed
                 || peer.is_none_or(|peer| peer.state != LinkedPeerState::RecoveryRequired)
             {
                 mark_recovery_required_for_marker_in_transaction(
@@ -150,7 +171,7 @@ where
             source: None,
         });
     }
-    Ok(())
+    marker.map(|_| ())
 }
 
 pub(super) struct PrivateInboxCheckpoint {
@@ -247,6 +268,41 @@ where
         }
         result
     }
+
+    pub(super) async fn preserve_authorization_advance_on_marker_failure(
+        &self,
+        counterparty: &PubkyPublicKey,
+        session_access: &PubkySessionAccess,
+        expected_authorization: &NoiseAuthorization,
+        authorization: &NoiseAuthorization,
+        marker: Result<Option<paykit_lib::EncryptedLinkRecoveryMarker>>,
+    ) -> Result<Option<paykit_lib::EncryptedLinkRecoveryMarker>> {
+        let Err(error) = marker else {
+            return marker;
+        };
+        if expected_authorization == authorization {
+            return Err(error);
+        }
+
+        let lease = self.claim_peer_link_operation(counterparty).await?;
+        let result = self
+            .require_current_private_receive_observation(
+                counterparty,
+                &lease,
+                session_access,
+                PrivateReceiveObservation::with_marker_result(
+                    expected_authorization,
+                    authorization,
+                    Err(error),
+                ),
+            )
+            .await;
+        self.finish_peer_link_operation(lease, result).await?;
+        Err(PaykitSdkError::LinkObservation {
+            context: "recovery marker lookup failed during authorization advance".into(),
+        })
+    }
+
     /// Receive and durably persist available private messages.
     ///
     /// This requires a stored Encrypted Link snapshot for the counterparty.
@@ -802,7 +858,15 @@ where
             ),
         );
         let authorization = authorization.map_err(link_observation_error)?;
-        let marker = marker.map_err(|error| link_observation_error(error.into()))?;
+        let marker = self
+            .preserve_authorization_advance_on_marker_failure(
+                counterparty,
+                session_access,
+                &snapshot.authorization,
+                &authorization,
+                marker.map_err(|error| link_observation_error(error.into())),
+            )
+            .await?;
         if !private_receive_observation_is_current(&snapshot, &authorization, marker.as_ref()) {
             return Ok(PrivateInboxProbe::Reload);
         }
@@ -932,14 +996,35 @@ where
             ),
         );
         let authorization = authorization.map_err(link_observation_error)?;
-        let marker = marker.map_err(|error| link_observation_error(error.into()))?;
-        self.require_current_private_receive_observation(
-            &counterparty,
-            &lease,
-            session_access,
-            PrivateReceiveObservation::new(expected_authorization, &authorization, marker.as_ref()),
-        )
-        .await?;
+        let marker = marker.map_err(|error| link_observation_error(error.into()));
+        match marker {
+            Ok(marker) => {
+                self.require_current_private_receive_observation(
+                    &counterparty,
+                    &lease,
+                    session_access,
+                    PrivateReceiveObservation::new(
+                        expected_authorization,
+                        &authorization,
+                        marker.as_ref(),
+                    ),
+                )
+                .await?;
+            }
+            Err(error) => {
+                self.require_current_private_receive_observation(
+                    &counterparty,
+                    &lease,
+                    session_access,
+                    PrivateReceiveObservation::with_marker_result(
+                        expected_authorization,
+                        &authorization,
+                        Err(error),
+                    ),
+                )
+                .await?;
+            }
+        }
         let remote_noise_public_key = authorization.noise_public_key().clone();
         let authorized_apps = self.private_receive_authorized_apps(&counterparty).await;
 
@@ -1594,7 +1679,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_changed_authorization_persists_pin_and_rejects_rollback_replay() {
+    async fn test_marker_failure_persists_authorization_and_rejects_rollback_replay() {
         let storage = InMemoryStorage::new();
         let identity = pubky::Keypair::random();
         let counterparty = PubkyPublicKey::from_public_key(&identity.public_key());
@@ -1641,7 +1726,13 @@ mod tests {
                 &storage,
                 &counterparty,
                 &lease,
-                PrivateReceiveObservation::new(&generation_1, &generation_2, None),
+                PrivateReceiveObservation::with_marker_result(
+                    &generation_1,
+                    &generation_2,
+                    Err(PaykitSdkError::LinkObservation {
+                        context: "forced marker read failure".into(),
+                    }),
+                ),
                 &clock,
             )
             .await,
