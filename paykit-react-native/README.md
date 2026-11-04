@@ -57,10 +57,16 @@ Expo Go cannot load this package because it contains native code. Use a
 
 ## Installation
 
+Release candidates are published under the npm `next` tag, and final releases
+under `latest`. Until the first final release, install the release candidate:
+
 ```sh
-npm install @synonymdev/react-native-paykit
+npm install @synonymdev/react-native-paykit@next
 cd ios && pod install
 ```
+
+After a final release, `npm install @synonymdev/react-native-paykit` installs
+it.
 
 ### React Native 0.78 with Xcode 26
 
