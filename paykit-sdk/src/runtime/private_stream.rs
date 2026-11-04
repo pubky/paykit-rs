@@ -144,18 +144,31 @@ where
             if let Some(link_generation) =
                 current_link_generation.filter(|generation| *generation != expected_link_generation)
             {
-                // Authorization advances are monotonic, but a marker loaded through
-                // a superseded snapshot key says nothing about the replacement link.
+                // A marker loaded through a superseded snapshot key says nothing
+                // about the replacement link. Only defer to a marker reload when
+                // that replacement checkpoint already uses the observed key.
+                if private_receive_checkpoint_uses_authorization(tx, &counterparty, &authorization)
+                {
+                    return Ok(if marker_was_read {
+                        PrivateReceiveObservationStatus::ReloadMarker { link_generation }
+                    } else {
+                        PrivateReceiveObservationStatus::Current
+                    });
+                }
+                // Otherwise commit the monotonic pin and fail-closed recovery
+                // transition atomically; never leave an old-key checkpoint Linked.
                 noise_key_authorization::pin_authorization_in_transaction(
                     tx,
                     &counterparty,
                     &authorization,
                 )?;
-                return Ok(if marker_was_read {
-                    PrivateReceiveObservationStatus::ReloadMarker { link_generation }
-                } else {
-                    PrivateReceiveObservationStatus::Current
-                });
+                mark_recovery_required_for_marker_in_transaction(
+                    tx,
+                    &counterparty,
+                    now,
+                    marker_attempt_id.as_deref(),
+                )?;
+                return Ok(PrivateReceiveObservationStatus::RecoveryRequired);
             }
             // A completed link may have superseded the pre-read snapshot while
             // public observations were in flight. Current matching authorization
@@ -1481,6 +1494,27 @@ pub(super) fn private_receive_snapshot(
     })
 }
 
+fn private_receive_checkpoint_uses_authorization(
+    tx: &dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    authorization: &paykit_lib::PaykitNoiseKeyAuthorization,
+) -> bool {
+    let Some(peer) = tx.linked_peer(counterparty) else {
+        return false;
+    };
+    match peer.state {
+        LinkedPeerState::Linked => private_receive_snapshot(tx, counterparty)
+            .is_some_and(|snapshot| snapshot.authorization == *authorization),
+        LinkedPeerState::Linking => {
+            peer.noise_key_authorization.as_ref() == Some(authorization)
+                && tx
+                    .encrypted_link_state(counterparty)
+                    .is_some_and(|state| state.handshake_snapshot.is_some())
+        }
+        _ => false,
+    }
+}
+
 fn require_private_receive_checkpoint(
     tx: &dyn StorageTransaction,
     state: &EncryptedLinkStateRecord,
@@ -1610,6 +1644,40 @@ mod tests {
         fn now(&self) -> DateTime<Utc> {
             *self.0.lock().unwrap()
         }
+    }
+
+    fn private_receive_test_snapshot(
+        counterparty: &PubkyPublicKey,
+        remote_noise_public_key: &pubky::PublicKey,
+        recovery_attempt_id: Option<&str>,
+    ) -> paykit_lib::EncryptedLinkSnapshot {
+        use pubky_noise::snow_crypto::{HandshakePattern, NoisePhase, NoiseStep};
+
+        let state = pubky_noise::serializer::PubkyNoiseSessionState {
+            version: pubky_noise::serializer::SESSION_STATE_VERSION,
+            phase: NoisePhase::Transport,
+            pattern: HandshakePattern::PatternXX,
+            initiator: true,
+            ephemeral_secret: [1; 32],
+            static_secret: Some([2; 32]),
+            counter: 3,
+            noise_step: NoiseStep::Final,
+            sub_step_index: 0,
+            handshake_hash: Some([3; 32]),
+            link_id: Some([4; 32]),
+            sending_nonce: 0,
+            receiving_nonce: 0,
+            write_counter: 3,
+            read_counter: 3,
+            endpoint_pubkey: counterparty.to_public_key().unwrap().to_bytes(),
+            handshake_messages: vec![vec![5; 96]],
+        };
+        let mut bytes = state.serialize();
+        bytes.extend_from_slice(&remote_noise_public_key.to_bytes());
+        for attempt_id in [recovery_attempt_id, recovery_attempt_id] {
+            bytes.extend_from_slice(attempt_id.map(str::as_bytes).unwrap_or(&[0; 36]));
+        }
+        paykit_lib::EncryptedLinkSnapshot::deserialize(&bytes).unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1863,6 +1931,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_buffered_receive_generation_change_with_empty_rotated_key_marker_recovers() {
+        let storage = InMemoryStorage::new();
+        let identity = pubky::Keypair::random();
+        let counterparty = PubkyPublicKey::from_public_key(&identity.public_key());
+        let generation_1 =
+            paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[1; 32], 1).unwrap();
+        let generation_2 =
+            paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[2; 32], 2).unwrap();
+        let old_snapshot =
+            private_receive_test_snapshot(&counterparty, generation_1.noise_public_key(), None);
+        let local_identity =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let now = Utc::now();
+        let lease = storage
+            .transaction(|tx| {
+                tx.save_identity_state(IdentityState {
+                    public_key: Some(local_identity),
+                    initialized_at: now,
+                });
+                let mut peer = default_linked_peer(counterparty.clone());
+                peer.state = LinkedPeerState::Linked;
+                peer.noise_key_authorization = Some(generation_1.clone());
+                tx.save_linked_peer(peer);
+                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                    counterparty: counterparty.clone(),
+                    link_snapshot: Some(old_snapshot.serialize()),
+                    handshake_snapshot: None,
+                    handshake_role: None,
+                    // A normal buffered receive advanced this after SSE captured 1.
+                    generation: 2,
+                    checkpointed_at: now,
+                });
+                tx.claim_peer_link_operation(&counterparty, now, now + chrono::Duration::minutes(1))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(matches!(
+            require_current_private_receive_observation_with_lease(
+                &storage,
+                &counterparty,
+                &lease,
+                PrivateReceiveObservation::new(1, &generation_1, &generation_2, None),
+                &MutableClock::new(now),
+            )
+            .await,
+            Err(PaykitSdkError::RecoveryRequired { .. })
+        ));
+
+        let persisted = storage.snapshot().unwrap();
+        let peer = &persisted.linked_peers[&counterparty];
+        assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
+        assert_eq!(peer.noise_key_authorization.as_ref(), Some(&generation_2));
+        assert!(persisted.encrypted_link_states[&counterparty]
+            .link_snapshot
+            .is_none());
+        crate::validate_storage_state(&persisted).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_buffered_receive_generation_change_with_failed_rotated_key_marker_recovers() {
+        let storage = InMemoryStorage::new();
+        let identity = pubky::Keypair::random();
+        let counterparty = PubkyPublicKey::from_public_key(&identity.public_key());
+        let generation_1 =
+            paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[1; 32], 1).unwrap();
+        let generation_2 =
+            paykit_lib::PaykitNoiseKeyAuthorization::sign(&identity, &[2; 32], 2).unwrap();
+        let old_snapshot =
+            private_receive_test_snapshot(&counterparty, generation_1.noise_public_key(), None);
+        let local_identity =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let now = Utc::now();
+        let lease = storage
+            .transaction(|tx| {
+                tx.save_identity_state(IdentityState {
+                    public_key: Some(local_identity),
+                    initialized_at: now,
+                });
+                let mut peer = default_linked_peer(counterparty.clone());
+                peer.state = LinkedPeerState::Linked;
+                peer.noise_key_authorization = Some(generation_1.clone());
+                tx.save_linked_peer(peer);
+                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                    counterparty: counterparty.clone(),
+                    link_snapshot: Some(old_snapshot.serialize()),
+                    handshake_snapshot: None,
+                    handshake_role: None,
+                    // A normal buffered receive advanced this after SSE captured 1.
+                    generation: 2,
+                    checkpointed_at: now,
+                });
+                tx.claim_peer_link_operation(&counterparty, now, now + chrono::Duration::minutes(1))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(matches!(
+            require_current_private_receive_observation_with_lease(
+                &storage,
+                &counterparty,
+                &lease,
+                PrivateReceiveObservation::with_marker_result(
+                    1,
+                    &generation_1,
+                    &generation_2,
+                    Err(PaykitSdkError::LinkObservation {
+                        context: "forced marker read failure".into(),
+                    }),
+                ),
+                &MutableClock::new(now),
+            )
+            .await,
+            Err(PaykitSdkError::RecoveryRequired { .. })
+        ));
+
+        let persisted = storage.snapshot().unwrap();
+        let peer = &persisted.linked_peers[&counterparty];
+        assert_eq!(peer.state, LinkedPeerState::RecoveryRequired);
+        assert_eq!(peer.noise_key_authorization.as_ref(), Some(&generation_2));
+        assert!(persisted.encrypted_link_states[&counterparty]
+            .link_snapshot
+            .is_none());
+        crate::validate_storage_state(&persisted).unwrap();
+    }
+
+    #[tokio::test]
     async fn test_sse_stale_observation_preserves_concurrently_relinked_peer() {
         let storage = InMemoryStorage::new();
         let identity = pubky::Keypair::random();
@@ -1875,6 +2072,11 @@ mod tests {
             Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         )
         .unwrap();
+        let current_snapshot = private_receive_test_snapshot(
+            &counterparty,
+            generation_2.noise_public_key(),
+            Some(current_marker.attempt_id()),
+        );
         let now = Utc::now();
         let lease = storage
             .transaction(|tx| {
@@ -1886,7 +2088,7 @@ mod tests {
                 tx.save_linked_peer(peer);
                 tx.save_encrypted_link_state(EncryptedLinkStateRecord {
                     counterparty: counterparty.clone(),
-                    link_snapshot: Some(vec![4, 5, 6]),
+                    link_snapshot: Some(current_snapshot.serialize()),
                     handshake_snapshot: None,
                     handshake_role: None,
                     generation: 2,
