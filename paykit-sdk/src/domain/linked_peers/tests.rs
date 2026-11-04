@@ -3,8 +3,55 @@ use chrono::{TimeZone, Utc};
 use super::*;
 use crate::{
     domain::outbound_private::OutboundPrivateMessageStatus,
-    storage::{InMemoryStorage, NewOutboundPrivateMessage, PreparedOutboundPrivateSend},
+    storage::{
+        BufferedPrivatePacketRecord, InMemoryStorage, NewOutboundPrivateMessage,
+        PreparedOutboundPrivateSend, PrivateIntakeCursorRecord, StorageTransactionCallback,
+        PRIVATE_INTAKE_PACKET_BYTES,
+    },
 };
+use std::sync::{Arc, Mutex as StdMutex};
+
+#[derive(Clone)]
+struct TransactionObservedStorage {
+    inner: InMemoryStorage,
+    transaction_started: Arc<StdMutex<Option<std::sync::mpsc::Sender<()>>>>,
+}
+
+#[async_trait::async_trait]
+impl StorageAdapter for TransactionObservedStorage {
+    async fn load_local_identity_state(&self) -> Result<Option<crate::IdentityState>> {
+        self.inner.load_local_identity_state().await
+    }
+
+    async fn transaction_erased<'a>(
+        &self,
+        callback: StorageTransactionCallback<'a>,
+    ) -> Result<Box<dyn std::any::Any + Send>> {
+        if let Some(started) = self.transaction_started.lock().unwrap().take() {
+            started.send(()).unwrap();
+        }
+        self.inner.transaction_erased(callback).await
+    }
+}
+
+#[derive(Clone)]
+struct MutableClock(Arc<StdMutex<DateTime<Utc>>>);
+
+impl MutableClock {
+    fn new(now: DateTime<Utc>) -> Self {
+        Self(Arc::new(StdMutex::new(now)))
+    }
+
+    fn set(&self, now: DateTime<Utc>) {
+        *self.0.lock().unwrap() = now;
+    }
+}
+
+impl crate::runtime::Clock for MutableClock {
+    fn now(&self) -> DateTime<Utc> {
+        *self.0.lock().unwrap()
+    }
+}
 
 fn timestamp() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 6, 4, 12, 0, 0).unwrap()
@@ -613,7 +660,7 @@ async fn test_lease_checked_recovery_preserves_current_lease_for_caller() {
         &storage,
         counterparty.clone(),
         lease,
-        timestamp() + chrono::Duration::seconds(1),
+        &MutableClock::new(timestamp() + chrono::Duration::seconds(1)),
     )
     .await
     .unwrap();
@@ -626,6 +673,180 @@ async fn test_lease_checked_recovery_preserves_current_lease_for_caller() {
         .await
         .unwrap()
         .is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_lease_checked_recovery_expiry_after_storage_fence_is_atomic_and_reclaimable() {
+    let inner = InMemoryStorage::new();
+    let counterparty = counterparty();
+    let claimed_at = timestamp();
+    let expires_at = claimed_at + chrono::Duration::seconds(1);
+    let authorization =
+        paykit_lib::PaykitNoiseKeyAuthorization::sign(&pubky::Keypair::random(), &[1; 32], 1)
+            .unwrap();
+    let lease = inner
+        .transaction({
+            let counterparty = counterparty.clone();
+            let authorization = authorization.clone();
+            move |tx| {
+                let mut peer = default_linked_peer(counterparty.clone());
+                peer.state = LinkedPeerState::Linked;
+                peer.last_sync_at = Some(claimed_at);
+                peer.noise_key_authorization = Some(authorization);
+                tx.save_linked_peer(peer);
+                tx.save_encrypted_link_state(EncryptedLinkStateRecord {
+                    counterparty: counterparty.clone(),
+                    link_snapshot: Some(vec![1, 2, 3]),
+                    handshake_snapshot: None,
+                    handshake_role: None,
+                    generation: 7,
+                    checkpointed_at: claimed_at,
+                });
+                let cursor = PrivateIntakeCursorRecord {
+                    subscribed_user: counterparty.clone(),
+                    homeserver: "https://homeserver.example".into(),
+                    event_id: 9,
+                };
+                tx.advance_private_intake_cursor(cursor.clone())?;
+                tx.buffer_private_intake_packet(BufferedPrivatePacketRecord {
+                    counterparty: counterparty.clone(),
+                    link_generation: 7,
+                    receive_counter: 8,
+                    ciphertext: vec![7; PRIVATE_INTAKE_PACKET_BYTES],
+                    source_cursor: Some(cursor),
+                    buffered_at: claimed_at,
+                })?;
+                let app_id = paykit_lib::PaykitAppId::new("bitkit").unwrap();
+                tx.save_paykit_app_capabilities(
+                    &app_id,
+                    paykit_lib::PaykitAppCapabilities {
+                        private_payments: true,
+                        payment_requests: true,
+                        receipts: true,
+                        outgoing_payments: true,
+                    },
+                );
+                tx.activate_paykit_app(&app_id);
+                tx.insert_outbound_private_message(NewOutboundPrivateMessage::new(
+                    counterparty.clone(),
+                    app_id,
+                    paykit_lib::PrivateMessageKind::PaymentRequest
+                        .as_str()
+                        .into(),
+                    "{}".into(),
+                    claimed_at,
+                ))?;
+                tx.claim_peer_link_operation(&counterparty, claimed_at, expires_at)?
+                    .ok_or_else(|| PaykitSdkError::ConcurrentUpdate {
+                        context: "test peer lease unavailable".into(),
+                        source: None,
+                    })
+            }
+        })
+        .await
+        .unwrap();
+    let before = inner.snapshot().unwrap();
+    let (holder_entered_tx, holder_entered_rx) = tokio::sync::oneshot::channel();
+    let (release_holder_tx, release_holder_rx) = std::sync::mpsc::channel();
+    let holder_storage = inner.clone();
+    let holder = tokio::spawn(async move {
+        holder_storage
+            .transaction(move |_tx| {
+                holder_entered_tx.send(()).unwrap();
+                release_holder_rx.recv().unwrap();
+                Ok(())
+            })
+            .await
+    });
+    holder_entered_rx.await.unwrap();
+
+    let (recovery_started_tx, recovery_started_rx) = std::sync::mpsc::channel();
+    let storage = TransactionObservedStorage {
+        inner: inner.clone(),
+        transaction_started: Arc::new(StdMutex::new(Some(recovery_started_tx))),
+    };
+    let recovery_counterparty = counterparty.clone();
+    let recovery_lease = lease.clone();
+    let clock = MutableClock::new(claimed_at);
+    let recovery_clock = clock.clone();
+    let recovery = tokio::spawn(async move {
+        mark_recovery_required_with_lease(
+            &storage,
+            recovery_counterparty,
+            recovery_lease,
+            &recovery_clock,
+        )
+        .await
+    });
+    recovery_started_rx.recv().unwrap();
+    clock.set(expires_at);
+    release_holder_tx.send(()).unwrap();
+    holder.await.unwrap().unwrap();
+
+    assert!(matches!(
+        recovery.await.unwrap(),
+        Err(PaykitSdkError::Policy { .. })
+    ));
+    assert_eq!(inner.snapshot().unwrap(), before);
+
+    let reclaimed_lease = inner
+        .transaction({
+            let counterparty = counterparty.clone();
+            move |tx| {
+                tx.claim_peer_link_operation(
+                    &counterparty,
+                    expires_at,
+                    expires_at + chrono::Duration::minutes(1),
+                )?
+                .ok_or_else(|| PaykitSdkError::ConcurrentUpdate {
+                    context: "test peer lease was not reclaimable at expiry boundary".into(),
+                    source: None,
+                })
+            }
+        })
+        .await
+        .unwrap();
+    assert_ne!(reclaimed_lease.lease_id, lease.lease_id);
+    mark_recovery_required_with_lease(&inner, counterparty.clone(), reclaimed_lease, &clock)
+        .await
+        .unwrap();
+    let recovered = inner.snapshot().unwrap();
+    assert_eq!(
+        recovered.linked_peers[&counterparty].state,
+        LinkedPeerState::RecoveryRequired
+    );
+    assert_eq!(
+        recovered.linked_peers[&counterparty].last_sync_at,
+        Some(expires_at)
+    );
+    assert_eq!(
+        recovered.linked_peers[&counterparty]
+            .noise_key_authorization
+            .as_ref(),
+        Some(&authorization)
+    );
+    assert!(recovered.encrypted_link_states[&counterparty]
+        .link_snapshot
+        .is_none());
+    assert_eq!(
+        recovered.encrypted_link_states[&counterparty].checkpointed_at,
+        expires_at
+    );
+    assert_eq!(
+        recovered.private_intake_cursors,
+        before.private_intake_cursors
+    );
+    let intake = &recovered.private_intake_peers[&counterparty];
+    assert_eq!(intake.link_generation, 8);
+    assert!(intake.buffered_packets.is_empty());
+    assert_eq!(
+        recovered.outbound_private_messages[0].status,
+        OutboundPrivateMessageStatus::RecoveryRequired
+    );
+    assert_eq!(
+        recovered.outbound_private_messages[0].updated_at,
+        expires_at
+    );
 }
 
 #[tokio::test]
@@ -790,6 +1011,7 @@ async fn test_lease_checked_handshake_save_rejects_stale_lease() {
         vec![1, 2, 3],
         first_lease,
         timestamp() + chrono::Duration::seconds(12),
+        None,
     )
     .await;
 
@@ -856,7 +1078,7 @@ async fn test_lease_checked_recovery_rejects_stale_lease() {
         &storage,
         counterparty.clone(),
         first_lease,
-        timestamp() + chrono::Duration::seconds(12),
+        &MutableClock::new(timestamp() + chrono::Duration::seconds(12)),
     )
     .await;
 

@@ -119,6 +119,79 @@ async fn test_export_backup_state_redacts_debug() {
 }
 
 #[tokio::test]
+async fn test_backup_round_trips_in_flight_private_intake_state() {
+    let local = public_key();
+    let peer = public_key();
+    let cursor = crate::storage::PrivateIntakeCursorRecord {
+        subscribed_user: local.clone(),
+        homeserver: "https://homeserver.example".into(),
+        event_id: 31,
+    };
+    let packet = crate::storage::BufferedPrivatePacketRecord {
+        counterparty: peer.clone(),
+        link_generation: 6,
+        receive_counter: 14,
+        ciphertext: vec![17; crate::storage::PRIVATE_INTAKE_PACKET_BYTES],
+        source_cursor: Some(cursor.clone()),
+        buffered_at: timestamp(),
+    };
+    let state = StorageState {
+        identity_state: Some(identity(local.clone())),
+        linked_peers: HashMap::from([(
+            peer.clone(),
+            LinkedPeerRecord {
+                counterparty: peer.clone(),
+                state: LinkedPeerState::RecoveryRequired,
+                last_sync_at: Some(timestamp()),
+                last_private_receive_at: None,
+                failure_count: 0,
+                local_recovery_attempt_id: None,
+                local_recovery_marker_created_at: None,
+                local_recovery_marker_last_error: None,
+                remote_recovery_attempt_id: None,
+                remote_recovery_marker_observed_at: None,
+                noise_key_authorization: None,
+            },
+        )]),
+        private_intake_cursors: HashMap::from([(local, cursor.clone())]),
+        private_intake_peers: HashMap::from([(
+            peer.clone(),
+            crate::storage::PrivateIntakePeerRecord {
+                counterparty: peer.clone(),
+                link_generation: 6,
+                buffered_packets: vec![packet.clone()],
+                cancelled_handshake_through_generation: Some(5),
+            },
+        )]),
+        ..StorageState::default()
+    };
+    let backup = export_backup_state(&InMemoryStorage::from_state(state))
+        .await
+        .unwrap();
+
+    assert_eq!(backup.version, 2);
+    assert_eq!(backup.private_intake_cursors, vec![cursor]);
+    assert_eq!(
+        backup.private_intake_peers[0].buffered_packets,
+        vec![packet]
+    );
+
+    let restored = InMemoryStorage::new();
+    restore_backup_state(&restored, backup).await.unwrap();
+    let restored = restored.snapshot().unwrap();
+    assert_eq!(restored.private_intake_cursors.len(), 1);
+    assert_eq!(
+        restored.private_intake_peers[&peer].buffered_packets.len(),
+        1
+    );
+    assert_eq!(restored.private_intake_peers[&peer].link_generation, 6);
+    assert_eq!(
+        restored.private_intake_peers[&peer].cancelled_handshake_through_generation,
+        Some(5)
+    );
+}
+
+#[tokio::test]
 async fn test_backup_round_trips_retired_apps() {
     let storage = InMemoryStorage::new();
     let retired_app = paykit_lib::PaykitAppId::new("removed-app").unwrap();
@@ -286,6 +359,8 @@ async fn test_restore_backup_state_marks_missing_link_checkpoint_recovery_requir
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let report = restore_backup_state(&storage, backup).await.unwrap();
@@ -442,6 +517,8 @@ async fn test_restore_backup_state_rejects_inconsistent_contact_marker_state() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -481,6 +558,8 @@ async fn test_restore_backup_state_rejects_dual_contact_marker_timestamps() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -517,6 +596,8 @@ async fn test_restore_backup_state_accepts_pending_contact_marker_removal() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let report = restore_backup_state(&storage, backup).await.unwrap();
@@ -589,6 +670,8 @@ async fn test_restore_backup_state_rejects_active_peer_work() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let err = restore_backup_state(&storage, backup.clone())
@@ -642,6 +725,8 @@ async fn test_failed_restore_does_not_bind_empty_storage_to_identity() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state_with_identity(
@@ -697,6 +782,8 @@ async fn test_restore_backup_state_rejects_overwriting_existing_shared_state() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;

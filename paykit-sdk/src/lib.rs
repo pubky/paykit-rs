@@ -1,4 +1,5 @@
 #![doc = "Stateful runtime layer for Paykit integrations."]
+#![recursion_limit = "256"]
 #![deny(rustdoc::broken_intra_doc_links)]
 
 mod backup;
@@ -17,7 +18,7 @@ mod test_utils;
 #[doc(inline)]
 pub use backup::{
     export_backup_state, validation::validate_storage_state, RestoreReport, RestoredLinkPolicy,
-    SdkBackupState, SDK_BACKUP_VERSION,
+    SdkBackupState, SdkBackupStateV1, SDK_BACKUP_VERSION,
 };
 #[doc(inline)]
 pub use config::{EndpointManagementScope, PaykitSdkConfig, PublicContactSharingPolicy};
@@ -115,7 +116,9 @@ pub use pubky_session::{
 pub use pubky_session::{PubkyGrantLogout, PubkyGrantLogoutAttempt, PubkyGrantLogoutReceipt};
 #[doc(inline)]
 pub use runtime::{
-    Clock, PaykitAppRemovalBlockers, PaykitSdk, PaykitStateObservation, PaymentRequestRead,
+    BufferedPrivateStreamIntakeReport, Clock, PaykitAppRemovalBlockers, PaykitSdk,
+    PaykitStateObservation, PaymentRequestRead, PrivateIntakeConfig, PrivateIntakeHealth,
+    PrivateIntakePeerFreshness, PrivateIntakeSupervisor, PrivateIntakeTransportState,
     PrivateMessageSchedulingSnapshot, SystemClock,
 };
 #[doc(inline)]

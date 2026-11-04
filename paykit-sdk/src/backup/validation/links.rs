@@ -176,6 +176,7 @@ fn restored_peer_record(
 
 pub(in crate::backup) fn clear_recovery_required_link_snapshots(
     encrypted_link_states: &mut HashMap<PubkyPublicKey, EncryptedLinkStateRecord>,
+    private_intake_peers: &mut HashMap<PubkyPublicKey, PrivateIntakePeerRecord>,
     recovery_required_peers: &[PubkyPublicKey],
 ) {
     for counterparty in recovery_required_peers {
@@ -190,6 +191,10 @@ pub(in crate::backup) fn clear_recovery_required_link_snapshots(
         record.handshake_role = None;
         if had_snapshot {
             record.generation = record.generation.saturating_add(1);
+            if let Some(intake) = private_intake_peers.get_mut(counterparty) {
+                intake.link_generation = record.generation;
+                intake.buffered_packets.clear();
+            }
         }
     }
 }

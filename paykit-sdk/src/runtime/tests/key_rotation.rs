@@ -256,6 +256,40 @@ async fn test_key_rotation_preserves_history_and_resets_private_link_state() {
 }
 
 #[tokio::test]
+async fn test_key_rotation_clears_private_intake_after_cancelled_handshake() {
+    let storage = InMemoryStorage::new();
+    let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    seed_private_capable_identity_and_handshake(&storage, counterparty.clone()).await;
+    let owner = storage
+        .snapshot()
+        .unwrap()
+        .identity_state
+        .unwrap()
+        .public_key
+        .unwrap();
+    let sdk = PaykitSdk::with_clock(
+        storage.clone(),
+        TestPubkySessionProvider { session: None },
+        TestPaymentAdapter,
+        PaykitSdkConfig::new("test-app").unwrap(),
+        FixedClock,
+    );
+    sdk.cancel_pending_handshake(counterparty).await.unwrap();
+
+    storage
+        .rotate_paykit_identity_key(key(7, 1), key(8, 2), |tx, _| {
+            rotate_private_state(tx, &owner, FixedClock.now())
+        })
+        .await
+        .unwrap();
+
+    let state = storage.snapshot().unwrap();
+    assert!(state.encrypted_link_states.is_empty());
+    assert!(state.private_intake_peers.is_empty());
+    assert!(state.private_intake_cursors.is_empty());
+}
+
+#[tokio::test]
 async fn test_key_rotation_waits_for_active_session_operations() {
     use std::{
         future::Future,

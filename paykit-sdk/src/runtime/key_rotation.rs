@@ -196,6 +196,8 @@ pub(super) fn rotate_private_state(
         crate::domain::allowance_accounting::invalidate_accounting(accounting);
     }
     state.encrypted_link_states.clear();
+    state.private_intake_peers.clear();
+    state.private_intake_cursors.clear();
     state.peer_link_operation_leases.clear();
     for peer in state.linked_peers.values_mut() {
         if !matches!(

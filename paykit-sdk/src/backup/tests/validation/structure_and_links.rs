@@ -27,6 +27,8 @@ async fn test_restore_backup_state_rejects_duplicate_retired_apps() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -64,6 +66,8 @@ async fn test_restore_backup_state_rejects_deliverable_retired_app_message() {
         next_outbound_private_message_id: 2,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -103,6 +107,8 @@ async fn test_restore_backup_state_rejects_malformed_link_snapshot() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -125,8 +131,10 @@ fn test_recovery_required_restore_state_drops_link_snapshots() {
         },
     )]);
 
+    let mut private_intake_peers = HashMap::new();
     clear_recovery_required_link_snapshots(
         &mut states,
+        &mut private_intake_peers,
         std::slice::from_ref(&counterparty.clone()),
     );
 
@@ -349,6 +357,166 @@ async fn test_restore_backup_state_require_recovery_discards_authorized_checkpoi
             }
         }
     }
+}
+
+#[tokio::test]
+async fn test_require_recovery_discards_buffered_ciphertext_and_allows_relink() {
+    let counterparty = public_key();
+    let noise_keypair = pubky::Keypair::random();
+    let checkpoint = link_checkpoint(
+        &counterparty,
+        &noise_keypair.public_key(),
+        &LinkedPeerState::Linked,
+    );
+    let packet = crate::storage::BufferedPrivatePacketRecord {
+        counterparty: counterparty.clone(),
+        link_generation: checkpoint.generation,
+        receive_counter: 3,
+        ciphertext: vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES],
+        source_cursor: None,
+        buffered_at: timestamp(),
+    };
+    let mut backup = empty_backup(identity(public_key()));
+    backup.encrypted_link_states.push(checkpoint.clone());
+    backup.linked_peers.push(LinkedPeerRecord {
+        counterparty: counterparty.clone(),
+        state: LinkedPeerState::Linked,
+        last_sync_at: Some(timestamp()),
+        last_private_receive_at: None,
+        failure_count: 0,
+        local_recovery_attempt_id: None,
+        local_recovery_marker_created_at: None,
+        local_recovery_marker_last_error: None,
+        remote_recovery_attempt_id: None,
+        remote_recovery_marker_observed_at: None,
+        noise_key_authorization: None,
+    });
+    backup
+        .private_intake_peers
+        .push(crate::storage::PrivateIntakePeerRecord {
+            counterparty: counterparty.clone(),
+            link_generation: checkpoint.generation,
+            buffered_packets: vec![packet],
+            cancelled_handshake_through_generation: None,
+        });
+    let storage = InMemoryStorage::new();
+
+    restore_backup_state_with_identity(
+        &storage,
+        backup,
+        None,
+        None,
+        DateTime::<Utc>::MIN_UTC,
+        RestoredLinkPolicy::RequireRecovery,
+    )
+    .await
+    .unwrap();
+
+    let restored = storage.snapshot().unwrap();
+    assert_eq!(
+        restored.linked_peers[&counterparty].state,
+        LinkedPeerState::RecoveryRequired
+    );
+    let recovery_generation = checkpoint.generation + 1;
+    assert_eq!(
+        restored.encrypted_link_states[&counterparty].generation,
+        recovery_generation
+    );
+    let intake = &restored.private_intake_peers[&counterparty];
+    assert_eq!(intake.link_generation, recovery_generation);
+    assert!(intake.buffered_packets.is_empty());
+
+    let replacement = link_checkpoint(
+        &counterparty,
+        &noise_keypair.public_key(),
+        &LinkedPeerState::Linking,
+    );
+    let report = crate::domain::linked_peers::save_link_handshake_state(
+        &storage,
+        counterparty.clone(),
+        EncryptedLinkHandshakeRole::Initiator,
+        replacement.handshake_snapshot.unwrap(),
+        timestamp(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.state, LinkedPeerState::Linking);
+    assert_eq!(report.generation, recovery_generation + 1);
+    let relinking = storage.snapshot().unwrap();
+    assert_eq!(
+        relinking.private_intake_peers[&counterparty].link_generation,
+        report.generation
+    );
+    assert!(relinking.private_intake_peers[&counterparty]
+        .buffered_packets
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_changed_noise_key_restore_clears_private_intake_state() {
+    let counterparty = public_key();
+    let backup_noise_key = public_key();
+    let current_noise_key = public_key();
+    let checkpoint = link_checkpoint(
+        &counterparty,
+        &pubky::Keypair::random().public_key(),
+        &LinkedPeerState::Linked,
+    );
+    let cursor = crate::storage::PrivateIntakeCursorRecord {
+        subscribed_user: counterparty.clone(),
+        homeserver: "https://homeserver.example".into(),
+        event_id: 9,
+    };
+    let mut backup = empty_backup(identity(public_key()));
+    backup.paykit_noise_public_key = Some(backup_noise_key);
+    backup.encrypted_link_states.push(checkpoint.clone());
+    backup.linked_peers.push(LinkedPeerRecord {
+        counterparty: counterparty.clone(),
+        state: LinkedPeerState::Linked,
+        last_sync_at: Some(timestamp()),
+        last_private_receive_at: None,
+        failure_count: 0,
+        local_recovery_attempt_id: None,
+        local_recovery_marker_created_at: None,
+        local_recovery_marker_last_error: None,
+        remote_recovery_attempt_id: None,
+        remote_recovery_marker_observed_at: None,
+        noise_key_authorization: None,
+    });
+    backup.private_intake_cursors.push(cursor.clone());
+    backup
+        .private_intake_peers
+        .push(crate::storage::PrivateIntakePeerRecord {
+            counterparty: counterparty.clone(),
+            link_generation: checkpoint.generation,
+            buffered_packets: vec![crate::storage::BufferedPrivatePacketRecord {
+                counterparty,
+                link_generation: checkpoint.generation,
+                receive_counter: 3,
+                ciphertext: vec![9; crate::storage::PRIVATE_INTAKE_PACKET_BYTES],
+                source_cursor: Some(cursor),
+                buffered_at: timestamp(),
+            }],
+            cancelled_handshake_through_generation: None,
+        });
+    let storage = InMemoryStorage::new();
+
+    restore_backup_state_with_identity(
+        &storage,
+        backup,
+        None,
+        Some(current_noise_key),
+        DateTime::<Utc>::MIN_UTC,
+        RestoredLinkPolicy::Resume,
+    )
+    .await
+    .unwrap();
+
+    let restored = storage.snapshot().unwrap();
+    assert!(restored.encrypted_link_states.is_empty());
+    assert!(restored.private_intake_peers.is_empty());
+    assert!(restored.private_intake_cursors.is_empty());
 }
 
 fn link_checkpoint(
@@ -621,6 +789,8 @@ async fn test_restore_backup_state_rejects_local_recovery_marker_without_created
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -665,6 +835,8 @@ async fn test_restore_backup_state_rejects_invalid_remote_recovery_attempt_id() 
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;
@@ -703,6 +875,8 @@ async fn test_restore_backup_state_rejects_records_without_identity() {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;

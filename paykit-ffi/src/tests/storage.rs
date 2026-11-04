@@ -993,6 +993,30 @@ async fn test_storage_and_backup_blobs_round_trip_private_sync_records() {
 }
 
 #[test]
+fn test_backup_blob_upgrades_real_v1_fixture() {
+    let backup = decode_backup_state(include_bytes!("fixtures/sdk-backup-v1.postcard")).unwrap();
+
+    assert_eq!(backup.version, paykit_sdk::SDK_BACKUP_VERSION);
+    assert_eq!(
+        backup
+            .identity_state
+            .as_ref()
+            .and_then(|state| state.public_key.as_ref())
+            .map(paykit_sdk::PubkyPublicKey::as_str),
+        Some("7jfgaa9nutjyixzikb7tgmsf9gkwq7iqz498zr1nd5ig1fng4esy")
+    );
+    assert_eq!(
+        backup
+            .paykit_noise_public_key
+            .as_ref()
+            .map(paykit_sdk::PubkyPublicKey::as_str),
+        Some("9wm1eqn4wddis385xdgsym7b5ge9549zpcjhmdszymicopxj6acy")
+    );
+    assert!(backup.private_intake_cursors.is_empty());
+    assert!(backup.private_intake_peers.is_empty());
+}
+
+#[test]
 fn test_pubky_public_key_helpers_accept_raw_or_app_key() {
     let raw = "8jsf5bm1ck3r7sn6pfx4q9mgqq5xn8fi6sizw6pxgjc8zs1bt4io";
     let app_key = format!("pubky{raw}");
@@ -1081,12 +1105,58 @@ fn test_state_blob_snapshot_encoding_round_trips() {
     };
 
     let mut encoded = encode_sdk_state_blob_snapshot(snapshot.clone()).unwrap();
+    let (version, _): (u32, _) = postcard::take_from_bytes(&encoded).unwrap();
+    assert_eq!(version, 2);
     let decoded = decode_sdk_state_blob_snapshot(encoded.clone()).unwrap();
 
     assert_eq!(decoded.revision, snapshot.revision);
     assert_eq!(decoded.blob.export_bytes(), snapshot.blob.export_bytes());
+
+    let mut unsupported = encoded.clone();
+    unsupported[0] = 3;
+    assert!(matches!(
+        decode_sdk_state_blob_snapshot(unsupported),
+        Err(PaykitFfiError::Storage { code, .. })
+            if code == "unsupported_state_snapshot_blob_version"
+    ));
+
     encoded.push(0);
     assert!(decode_sdk_state_blob_snapshot(encoded).is_err());
+}
+
+#[test]
+fn test_state_blob_snapshot_decodes_real_v1_envelope_and_state() {
+    #[derive(serde::Serialize)]
+    struct StateBlobSnapshotEnvelopeV1<'a> {
+        version: u32,
+        revision: &'a str,
+        blob: &'a [u8],
+    }
+
+    let inner_v1 = include_bytes!("fixtures/sdk-state-v1.postcard");
+    let encoded = postcard::to_allocvec(&StateBlobSnapshotEnvelopeV1 {
+        version: 1,
+        revision: "revision-from-v1",
+        blob: inner_v1,
+    })
+    .unwrap();
+
+    let decoded = decode_sdk_state_blob_snapshot(encoded).unwrap();
+    assert_eq!(decoded.revision, "revision-from-v1");
+    assert_eq!(decoded.blob.export_bytes(), inner_v1);
+
+    let migrated = decode_storage_state(&decoded.blob.export_bytes()).unwrap();
+    assert_eq!(
+        migrated
+            .identity_state
+            .unwrap()
+            .public_key
+            .unwrap()
+            .as_str(),
+        "7jfgaa9nutjyixzikb7tgmsf9gkwq7iqz498zr1nd5ig1fng4esy"
+    );
+    assert!(migrated.private_intake_cursors.is_empty());
+    assert!(migrated.private_intake_peers.is_empty());
 }
 
 #[test]

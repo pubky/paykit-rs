@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     domain::outbound_private::{mark_outbound_recovery_required, OutboundPrivateMessageStatus},
+    runtime::Clock,
     storage::{
         require_peer_link_operation_lease, retry_storage_transaction, EncryptedLinkStateRecord,
         LinkedPeerRecord, PeerLinkOperationLease, StorageAdapter, StorageTransaction,
@@ -227,16 +228,40 @@ where
 }
 
 /// Mark a Linked Peer as requiring recovery.
-pub(crate) async fn mark_recovery_required_with_lease<S>(
+pub(crate) async fn mark_recovery_required_with_lease<S, C>(
     storage: &S,
     counterparty: PubkyPublicKey,
     lease: PeerLinkOperationLease,
-    now: DateTime<Utc>,
+    clock: &C,
 ) -> Result<()>
 where
     S: StorageAdapter,
+    C: Clock,
 {
-    mark_recovery_required_inner(storage, counterparty, Some(lease), now).await
+    let clock = clock.clone();
+    retry_storage_transaction(storage, || {
+        let clock = clock.clone();
+        let counterparty = counterparty.clone();
+        let lease = lease.clone();
+        move |tx| {
+            let now = clock.now();
+            require_peer_link_operation_lease(tx, &lease)?;
+            let current_lease = tx
+                .peer_link_operation_lease(&counterparty)
+                .expect("required peer lease must remain present");
+            if current_lease.expires_at <= now {
+                return Err(PaykitSdkError::Policy {
+                    context: format!(
+                        "peer link operation lease {} expired for counterparty {}",
+                        lease.lease_id, counterparty
+                    ),
+                    source: None,
+                });
+            }
+            mark_recovery_required_in_transaction(tx, &counterparty, now)
+        }
+    })
+    .await
 }
 
 pub(crate) fn mark_recovery_required_in_transaction<T>(
@@ -298,12 +323,18 @@ where
     }
     tx.save_linked_peer(record);
     if let Some(link_state) = tx.encrypted_link_state(counterparty) {
+        let resulting_generation = link_state.generation.saturating_add(1);
+        tx.invalidate_buffered_private_intake_generation(
+            counterparty,
+            link_state.generation,
+            resulting_generation,
+        )?;
         tx.save_encrypted_link_state(EncryptedLinkStateRecord {
             counterparty: counterparty.clone(),
             link_snapshot: None,
             handshake_snapshot: None,
             handshake_role: None,
-            generation: link_state.generation.saturating_add(1),
+            generation: resulting_generation,
             checkpointed_at: now,
         });
     }
@@ -327,6 +358,7 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 async fn mark_recovery_required_inner<S>(
     storage: &S,
     counterparty: PubkyPublicKey,
@@ -375,6 +407,7 @@ where
         handshake_snapshot,
         None,
         now,
+        None,
     )
     .await
 }
@@ -387,6 +420,7 @@ pub(crate) async fn save_link_handshake_state_with_lease<S>(
     handshake_snapshot: Vec<u8>,
     lease: PeerLinkOperationLease,
     now: DateTime<Utc>,
+    private_intake_homeserver: Option<String>,
 ) -> Result<LinkedPeerHandshakeReport>
 where
     S: StorageAdapter,
@@ -398,6 +432,7 @@ where
         handshake_snapshot,
         Some(lease),
         now,
+        private_intake_homeserver,
     )
     .await
 }
@@ -409,6 +444,7 @@ async fn save_link_handshake_state_inner<S>(
     handshake_snapshot: Vec<u8>,
     lease: Option<PeerLinkOperationLease>,
     now: DateTime<Utc>,
+    private_intake_homeserver: Option<String>,
 ) -> Result<LinkedPeerHandshakeReport>
 where
     S: StorageAdapter,
@@ -417,6 +453,7 @@ where
         let counterparty = counterparty.clone();
         let handshake_snapshot = handshake_snapshot.clone();
         let lease = lease.clone();
+        let private_intake_homeserver = private_intake_homeserver.clone();
         move |tx| {
             if let Some(lease) = lease.as_ref() {
                 require_peer_link_operation_lease(tx, lease)?;
@@ -429,6 +466,9 @@ where
                 let snapshot =
                     paykit_lib::EncryptedLinkHandshakeSnapshot::deserialize(&handshake_snapshot)?;
                 require_recovery_context(&peer, snapshot.recovery_context())?;
+            }
+            if let Some(homeserver) = private_intake_homeserver {
+                tx.reserve_private_intake_admission(counterparty.clone(), homeserver, now)?;
             }
             peer.state = LinkedPeerState::Linking;
             peer.last_sync_at = Some(now);
@@ -448,6 +488,13 @@ where
                 checkpointed_at: now,
             };
 
+            if let Some(existing) = existing {
+                tx.rebase_buffered_private_intake_generation(
+                    &counterparty,
+                    existing.generation,
+                    generation,
+                )?;
+            }
             tx.save_linked_peer(peer.clone());
             tx.save_encrypted_link_state(link_state.clone());
             Ok(LinkedPeerHandshakeReport {
@@ -602,6 +649,11 @@ pub(crate) fn save_handshake_checkpoint_in_transaction(
         generation: state.generation,
         handshake_role: state.handshake_role,
     };
+    tx.rebase_buffered_private_intake_generation(
+        counterparty,
+        expected_state.generation,
+        state.generation,
+    )?;
     tx.save_encrypted_link_state(state);
     tx.save_linked_peer(peer);
     Ok(HandshakeCheckpointSave::Applied(report))

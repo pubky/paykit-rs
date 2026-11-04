@@ -287,9 +287,9 @@ fn test_accounting_state_blob_round_trip_and_version_truncation_rejection() {
     };
     let bytes = encode_storage_state(&state).unwrap();
     assert_eq!(decode_storage_state(&bytes).unwrap(), state);
-    assert_eq!(bytes[0], 1);
+    assert_eq!(bytes[0], paykit_sdk::storage::SDK_STATE_BLOB_VERSION as u8);
     let mut unsupported = bytes.clone();
-    unsupported[0] = 2;
+    unsupported[0] = (paykit_sdk::storage::SDK_STATE_BLOB_VERSION + 1) as u8;
     assert!(decode_storage_state(&unsupported).is_err());
     for end in [0, 1, bytes.len() / 2, bytes.len() - 1] {
         assert!(decode_storage_state(&bytes[..end]).is_err());
@@ -319,13 +319,18 @@ fn test_accounting_backup_blob_round_trip_and_version_truncation_rejection() {
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
         allowance_accounting: Some(ledger()),
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
-    assert_eq!(backup.version, 1);
+    assert_eq!(backup.version, sdk::SDK_BACKUP_VERSION);
     let bytes = encode_backup_state(&backup).unwrap();
     assert_eq!(decode_backup_state(&bytes).unwrap(), backup);
-    assert_eq!(bytes[0], 1);
+    assert_eq!(bytes[0], crate::SDK_BACKUP_BLOB_VERSION as u8);
+    let mut mismatched_payload = backup.clone();
+    mismatched_payload.version = 1;
+    assert!(decode_backup_state(&encode_backup_state(&mismatched_payload).unwrap()).is_err());
     let mut unsupported = bytes.clone();
-    unsupported[0] = 2;
+    unsupported[0] = 3;
     assert!(decode_backup_state(&unsupported).is_err());
     for end in [0, 1, bytes.len() / 2, bytes.len() - 1] {
         assert!(decode_backup_state(&bytes[..end]).is_err());

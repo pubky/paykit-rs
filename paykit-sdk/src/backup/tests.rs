@@ -64,6 +64,8 @@ fn empty_backup(identity_state: IdentityState) -> SdkBackupState {
         next_outbound_private_message_id: 0,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     }
 }
 
@@ -130,6 +132,8 @@ async fn assert_restore_rejects_outbound_record(record: OutboundPrivateMessageRe
         next_outbound_private_message_id: next_id,
         next_receive_batch_id: 0,
         next_private_stream_item_id: 0,
+        private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     let result = restore_backup_state(&storage, backup).await;

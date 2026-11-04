@@ -54,6 +54,8 @@ async fn test_restore_backup_state_advances_counters() {
         next_outbound_private_message_id: 1,
         next_receive_batch_id: 1,
         next_private_stream_item_id: 1,
+            private_intake_cursors: Vec::new(),
+        private_intake_peers: Vec::new(),
     };
 
     restore_backup_state(&storage, backup).await.unwrap();
