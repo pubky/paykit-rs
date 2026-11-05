@@ -7,7 +7,7 @@ description = "UniFFI bindings for Paykit SDK targeting iOS and Android"
 license = "MIT"
 
 [lib]
-crate-type = ["cdylib", "staticlib", "rlib"]
+crate-type = ["cdylib", "staticlib", "lib"]
 name = "paykit"
 path = "src/lib.rs"
 

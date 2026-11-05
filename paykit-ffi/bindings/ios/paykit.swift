@@ -2722,6 +2722,13 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
 
     /**
      * Return the latest observed SDK state revision, when one exists.
+     *
+     * This call never blocks waiting for in-flight SDK work. With callback
+     * storage, it returns `SharedStateBusy` with code
+     * `state_transaction_in_progress` while another call on this handle holds
+     * the storage lock: a state transaction, or another `state_revision` call
+     * still reading the store on another thread. Retry after that call
+     * finishes.
      */
     func stateRevision() throws  -> String?
 
@@ -5798,6 +5805,13 @@ open func signOut()async throws  -> IdentityStatus  {
 
     /**
      * Return the latest observed SDK state revision, when one exists.
+     *
+     * This call never blocks waiting for in-flight SDK work. With callback
+     * storage, it returns `SharedStateBusy` with code
+     * `state_transaction_in_progress` while another call on this handle holds
+     * the storage lock: a state transaction, or another `state_revision` call
+     * still reading the store on another thread. Retry after that call
+     * finishes.
      */
 open func stateRevision()throws  -> String?  {
     return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypePaykitError_lift) {
@@ -28090,7 +28104,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_paykit_checksum_method_ffipaykitsdk_sign_out() != 9653) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_paykit_checksum_method_ffipaykitsdk_state_revision() != 17936) {
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_state_revision() != 64679) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_submit_payment_proof() != 58760) {

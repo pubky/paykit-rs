@@ -1,0 +1,32 @@
+// Versions from React Native 0.78.2
+// (node_modules/@react-native/gradle-plugin/gradle/libs.versions.toml).
+buildscript {
+  repositories {
+    google()
+    mavenCentral()
+  }
+  dependencies {
+    classpath("com.android.tools.build:gradle:8.8.0")
+    classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.0.21")
+    classpath("com.facebook.react:react-native-gradle-plugin")
+  }
+}
+
+// An app's React Native plugin maps the library's `react-native:+` dependency
+// to react-android. Without an app, do the same here.
+def reactNativeVersion = new groovy.json.JsonSlurper()
+  .parse(file("../node_modules/react-native/package.json"))
+  .version
+
+allprojects {
+  repositories {
+    google()
+    mavenCentral()
+  }
+  configurations.configureEach {
+    resolutionStrategy.dependencySubstitution {
+      substitute(module("com.facebook.react:react-native"))
+        .using(module("com.facebook.react:react-android:${reactNativeVersion}"))
+    }
+  }
+}

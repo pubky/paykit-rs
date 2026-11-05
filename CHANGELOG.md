@@ -9,6 +9,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Added
 
+- React Native package `@synonymdev/react-native-paykit` in
+  `paykit-react-native/`, generated from the `paykit-ffi` UniFFI metadata with
+  uniffi-bindgen-react-native. It exposes the same SDK surface as Swift and
+  Kotlin, but TypeScript names keep the `Ffi` prefix (`FfiPaykitSdk`,
+  `FfiSdkStateBlobStore`, and so on). It requires the React Native New
+  Architecture, supports React Native 0.78 and later (including 0.80 and
+  later, Expo SDK 54 and later) and 64-bit Android only (`arm64-v8a` and
+  `x86_64`), and is published to npm by the `npm Package` workflow.
 - `SignupCodeRejected`, `PaykitSdkError::is_signup_code_rejected` in Rust and
   the `identity/signup_code_rejected` error code in Swift and Kotlin report a
   signup code that the homeserver refused as missing, malformed, unknown or
@@ -57,6 +65,14 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   readiness, so a not-ready link no longer hides the size error, and nothing is
   queued. `propose_payment_request_with_id` refuses oversized terms before it
   checks earlier use of the Payment Request ID.
+- `PaykitSdk.stateRevision` in Swift and Kotlin, and `FfiPaykitSdk.stateRevision`
+  in React Native, no longer wait for other calls on the same handle when the
+  SDK uses callback storage. While another call holds the storage lock (a
+  state transaction, or another `stateRevision` still reading on another
+  thread), they throw the retryable `SharedStateBusy` error with code
+  `state_transaction_in_progress`. Previously they blocked until that call
+  finished, which could deadlock React Native. Retry after the other call
+  finishes.
 
 ### Fixed
 

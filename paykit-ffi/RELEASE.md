@@ -28,8 +28,10 @@ From `paykit-ffi/`:
 
 This bumps the version consistently in `paykit-ffi/Cargo.toml`,
 `paykit-lib/Cargo.toml`, `paykit-sdk/Cargo.toml`, the SDK's `paykit-lib`
-dependency, the root `Package.swift`, and `gradle.properties`, then builds both
-platforms and updates the `Package.swift` checksum.
+dependency, the root `Package.swift`, `gradle.properties`, and the React Native
+`paykit-react-native/package.json` and `package-lock.json` (with `npm version`,
+so npm must be installed), then builds both platforms and updates the `Package.swift` checksum. It does not build the React
+Native package; CI does that when publishing.
 
 The iOS release zip is generated at:
 
@@ -71,3 +73,52 @@ https://github.com/synonymdev/vss-rust-client-ffi/pull/22#issuecomment-533022607
 The `Gradle Package` workflow triggers automatically on release publish. If it didn't, run it manually from Actions → "Gradle Package" → Run workflow with the version.
 
 The workflow publishes with the job's built-in `GITHUB_TOKEN`, which its `permissions` block grants `packages: write`, so it needs no repository secret.
+
+## 5. Publish React Native
+
+The `npm Package` workflow (`.github/workflows/npm-publish.yml`) triggers
+automatically on release publish. It checks out the release tag, builds the iOS
+XCFramework on macOS and the Android libraries and bindings on Ubuntu with
+`ubrn build`, and checks that
+`paykit-react-native/package.json` has the tag's version. It then runs
+`npm run pack:check` and publishes `@synonymdev/react-native-paykit` with npm
+provenance. Release candidates get the `next` dist-tag, so `latest` stays on the
+last final release.
+
+npm no longer issues classic automation tokens. The workflow publishes with a
+granular access token for the first release, then with Trusted Publishing
+(OIDC), which needs no secret.
+
+First release, while the package does not exist on npm yet:
+
+1. Create a granular access token on npmjs.com with read and write access to
+   the `@synonymdev` scope, **Bypass two-factor authentication** enabled, and
+   a short expiry.
+2. Save it as the `NPM_TOKEN` repository secret.
+
+npm plans to remove direct publishing with granular access tokens in January
+2027, so do not rely on this token for later releases.
+
+After the first release:
+
+1. On npmjs.com, open the package settings and add a trusted publisher:
+   GitHub Actions, organization `pubky`, repository `paykit-rs`, workflow
+   `npm-publish.yml`. Under **Allowed actions**, enable `npm publish`: a new
+   trusted publisher can only run `npm stage publish` by default, and this
+   workflow publishes directly, so the release would fail without it. A new
+   trusted publisher expires unless it publishes within 2 days, so add it
+   shortly before the next release.
+2. Delete the `NPM_TOKEN` secret and revoke the token.
+3. Optionally, set the package's publishing access to require two-factor
+   authentication and disallow tokens. Trusted Publishing still works.
+
+The workflow needs no change for this. The npm CLI uses OIDC before a
+configured token, the publish job already has `id-token: write`, and the Node
+version in `paykit-react-native/.nvmrc` ships npm 11.12.1 (Trusted Publishing
+needs 11.5.1 or later). See
+[npm's Trusted Publishing docs](https://docs.npmjs.com/trusted-publishers).
+
+To check a release without publishing, run it manually from Actions ->
+"npm Package" -> Run workflow with the version. A manual run builds the same tag
+but only runs `npm publish --dry-run`; it never publishes. If a release run
+fails, re-run its failed jobs.

@@ -1,7 +1,10 @@
 # Paykit FFI
 
 UniFFI bindings for [paykit-sdk](../paykit-sdk/), targeting iOS (Swift) and
-Android (Kotlin).
+Android (Kotlin). The React Native package in
+[`paykit-react-native`](../paykit-react-native/) is generated from the same
+UniFFI metadata; its TypeScript names keep the `Ffi` prefix (for example
+`FfiPaykitSdk`).
 
 The generated bindings expose the SDK runtime foundation: configuration, Pubky
 session bootstrap helpers, opaque SDK state storage callbacks, payment adapter
@@ -42,7 +45,11 @@ on low-level `paykit-lib` protocol bindings.
   acknowledgements and uncertain mutations still require reconciliation;
   remaining cleanup requires fresh confirmation.
 - `PaykitSdk.stateRevision` — return the latest observed SDK state revision so
-  apps can detect when SDK-managed state changed.
+  apps can detect when SDK-managed state changed. With callback storage it
+  does not wait: while another call on the same handle holds the storage
+  lock (a state transaction, or another `stateRevision` still reading on
+  another thread), it throws `SharedStateBusy` with code
+  `state_transaction_in_progress`. Retry after that call finishes.
 - `PaykitSdk.observeState` - read a coherent `PaykitStateObservation` for display
   through one storage transaction. Refresh asynchronously and retain the last
   validated view in the app's protected identity/key-generation-scoped cache;
