@@ -369,11 +369,11 @@ impl EncryptedLink {
             })
     }
 
-    /// Publish an exact prepared ciphertext, retrying without re-encryption.
+    /// Validate a retained packet's destination and length against this link.
     ///
-    /// This accepts values restored from durable SDK state after a crash. The
-    /// destination must belong to this link's local write stream.
-    pub async fn publish_prepared_private_application_message(
+    /// Does not publish, advance Noise, or acknowledge persistence. A caller
+    /// retaining a packet while retiring a link must validate before retirement.
+    pub fn validate_prepared_private_application_message(
         &self,
         destination_path: &str,
         ciphertext: &[u8],
@@ -394,6 +394,20 @@ impl EncryptedLink {
                 source: None,
             });
         }
+
+        Ok(())
+    }
+
+    /// Publish an exact prepared ciphertext, retrying without re-encryption.
+    ///
+    /// This accepts values restored from durable SDK state after a crash. The
+    /// destination must belong to this link's local write stream.
+    pub async fn publish_prepared_private_application_message(
+        &self,
+        destination_path: &str,
+        ciphertext: &[u8],
+    ) -> Result<()> {
+        self.validate_prepared_private_application_message(destination_path, ciphertext)?;
 
         let max_attempts = self.max_send_retries.saturating_add(1);
         let mut last_error = None;

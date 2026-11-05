@@ -26,9 +26,10 @@ pub use records::{
     PaykitAppOperationLease, PaymentEndpointReservationRecord, PaymentRequestExecutionClaim,
     PeerLinkOperationLease, PreparedOutboundPrivateSend, PrivateIntakeBufferOutcome,
     PrivateIntakeCursorRecord, PrivateIntakePeerRecord, PrivateIntakeSupervisorLease,
-    PrivateStreamItemRecord, PublicEndpointRecord, StorageState, PRIVATE_INTAKE_MAX_BYTES_GLOBAL,
-    PRIVATE_INTAKE_MAX_BYTES_PER_PEER, PRIVATE_INTAKE_MAX_PACKETS_GLOBAL,
-    PRIVATE_INTAKE_MAX_PACKETS_PER_PEER, PRIVATE_INTAKE_PACKET_BYTES,
+    PrivatePaymentListWithdrawalRecord, PrivateStreamItemRecord, PublicEndpointRecord,
+    StorageState, PRIVATE_INTAKE_MAX_BYTES_GLOBAL, PRIVATE_INTAKE_MAX_BYTES_PER_PEER,
+    PRIVATE_INTAKE_MAX_PACKETS_GLOBAL, PRIVATE_INTAKE_MAX_PACKETS_PER_PEER,
+    PRIVATE_INTAKE_PACKET_BYTES,
 };
 pub use state_blob::{
     decode_storage_state_blob, encode_storage_state_blob, SDK_STATE_BLOB_VERSION,

@@ -635,7 +635,7 @@ where
         }
     }
 
-    async fn restore_link_for_outbound_send(
+    pub(super) async fn restore_link_for_outbound_send(
         &self,
         counterparty: &PubkyPublicKey,
         lease: &PeerLinkOperationLease,

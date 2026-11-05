@@ -1959,6 +1959,18 @@ pub(super) fn block_peer_in_transaction(
     let Some(lease) = tx.claim_peer_link_operation(counterparty, now, now + lease_timeout)? else {
         return Ok(None);
     };
+    let record = block_peer_with_lease_in_transaction(tx, counterparty, now, &lease)?;
+    tx.release_peer_link_operation(counterparty, lease.lease_id);
+    Ok(Some(record))
+}
+
+pub(super) fn block_peer_with_lease_in_transaction(
+    tx: &mut dyn StorageTransaction,
+    counterparty: &PubkyPublicKey,
+    now: DateTime<Utc>,
+    lease: &PeerLinkOperationLease,
+) -> Result<LinkedPeerRecord> {
+    crate::storage::require_peer_link_operation_lease(tx, lease)?;
     for message in tx.outbound_private_messages(counterparty) {
         if matches!(
             message.status,
@@ -1982,8 +1994,7 @@ pub(super) fn block_peer_in_transaction(
     record.failure_count = 0;
     tx.save_linked_peer(record.clone());
     clear_encrypted_link_state(tx, counterparty, now)?;
-    tx.release_peer_link_operation(counterparty, lease.lease_id);
-    Ok(Some(record))
+    Ok(record)
 }
 
 pub(super) fn unblock_peer_in_transaction(
@@ -2169,6 +2180,12 @@ fn clear_encrypted_link_state(
     counterparty: &PubkyPublicKey,
     now: DateTime<Utc>,
 ) -> Result<()> {
+    let mut state = tx.export_storage_state();
+    if let Some(withdrawal) = state.private_payment_list_withdrawals.get_mut(counterparty) {
+        withdrawal.invalidated = true;
+        crate::validate_storage_state(&state)?;
+        tx.replace_storage_state(crate::storage::ValidatedStorageState::new(state));
+    }
     if let Some(link_state) = tx.encrypted_link_state(counterparty) {
         let resulting_generation = link_state.generation.saturating_add(1);
         tx.invalidate_buffered_private_intake_generation(

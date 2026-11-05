@@ -144,6 +144,7 @@ mod payment_request_read;
 mod payment_requests;
 mod payment_resolution;
 mod private_intake;
+mod private_list_withdrawal;
 mod private_lists;
 mod private_stream;
 mod profiles;

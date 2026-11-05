@@ -144,6 +144,32 @@ pub struct PaymentEndpointReservationRecord {
     pub created_at: DateTime<Utc>,
 }
 
+/// One explicitly prepared empty Private Payment List retained across blocking.
+///
+/// This is not an Encrypted Link: it contains only one immutable packet and no
+/// transport key. It never grants normal outbound or private-intake admission.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivatePaymentListWithdrawalRecord {
+    pub(crate) owner: PubkyPublicKey,
+    pub(crate) app_id: paykit_lib::PaykitAppId,
+    pub(crate) counterparty: PubkyPublicKey,
+    pub(crate) outbound_message_id: u64,
+    pub(crate) homeserver: PubkyPublicKey,
+    pub(crate) grant_id: String,
+    pub(crate) client_id: String,
+    pub(crate) noise_public_key: PubkyPublicKey,
+    pub(crate) blocked_generation: u64,
+    pub(crate) prepared: PreparedOutboundPrivateSend,
+    pub(crate) confirmed_at: Option<DateTime<Utc>>,
+    pub(crate) invalidated: bool,
+}
+
+impl fmt::Debug for PrivatePaymentListWithdrawalRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PrivatePaymentListWithdrawalRecord(<redacted>)")
+    }
+}
+
 /// Durable Encrypted Link snapshot state.
 ///
 /// Snapshot bytes contain Noise key and counter material. Store them encrypted
@@ -846,6 +872,12 @@ pub struct StorageState {
     /// Homeserver admission owned by active supervisor for each covered peer.
     #[serde(default)]
     pub private_intake_admitted_homeservers: HashMap<PubkyPublicKey, String>,
+    /// Explicit empty-list packets retained across a local peer block.
+    ///
+    /// Version 5 state blobs preserve these separately from active link state.
+    #[serde(deserialize_with = "deserialize_withdrawals")]
+    pub private_payment_list_withdrawals:
+        HashMap<PubkyPublicKey, PrivatePaymentListWithdrawalRecord>,
     /// Derived per-link record counts. Never stored, so the encoded state is
     /// unchanged; the SDK rebuilds it whenever it no longer matches the
     /// records.
@@ -967,4 +999,34 @@ impl fmt::Debug for StorageState {
             )
             .finish()
     }
+}
+
+fn deserialize_withdrawals<'de, D>(
+    deserializer: D,
+) -> std::result::Result<HashMap<PubkyPublicKey, PrivatePaymentListWithdrawalRecord>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Withdrawals;
+    impl<'de> serde::de::Visitor<'de> for Withdrawals {
+        type Value = HashMap<PubkyPublicKey, PrivatePaymentListWithdrawalRecord>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("unique private list withdrawal keys")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut records = HashMap::new();
+            while let Some((key, value)) = map.next_entry()? {
+                if records.insert(key, value).is_some() {
+                    return Err(serde::de::Error::custom(
+                        "duplicate private list withdrawal key",
+                    ));
+                }
+            }
+            Ok(records)
+        }
+    }
+    deserializer.deserialize_map(Withdrawals)
 }

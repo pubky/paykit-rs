@@ -1462,6 +1462,33 @@ the same for saved contacts and removes their Contact Records.
 
 Blocking parks queued work instead of deleting it. Outbound messages that are
 pending, sending, failed, or recovery required become recovery required.
+An app that explicitly confirms withdrawal before blocking may call
+`prepare_private_payment_list_withdrawal_and_block`. It durably retains one
+already-encrypted empty Private Payment List and blocks the peer atomically,
+without retaining a usable Noise session. The returned
+`PrivatePaymentListWithdrawal` binds the original owner, app, peer, history row,
+grant, client, signer, block generation and packet. Persist the complete handle
+with the original cleanup operation. An occupied nonempty or Event Message
+slot, a newer competing list, or already-lost link state refuses this operation.
+Ordinary block APIs do not create withdrawal authority.
+
+After fresh confirmation, `retry_private_payment_list_withdrawal` can publish
+only those original packet bytes. Same-original-grant bearer refresh is allowed;
+replacement identities, grants, keys and block generations refuse. A lost
+response or local acknowledgement commit keeps the outcome uncertain. A bound
+`PrivatePaymentListWithdrawalAcknowledgement` is returned only after witnessed
+publication and durable local acknowledgement. It proves neither peer receipt
+nor cancellation of reservations or completion of wallet cleanup. No relink,
+queue drain, arbitrary send or credential erasure occurs.
+
+Live SDK state blob version 5 preserves this journal, while versions 1 through 4
+migrate with no withdrawal authority. Backup export refuses while a journal
+exists. Once the caller durably accepts a matching acknowledgement,
+`finish_private_payment_list_withdrawal` removes only the completed journal;
+outbound history remains. Pending or invalidated unknown work cannot be
+finished. Apps must retain the original operation and drain cancellation before
+conditionally erasing their own credentials.
+
 `unblock_peer` returns the peer to `NotLinked`, and the next completed
 Encrypted Link Handshake requeues parked messages unchanged as pending, except
 messages whose Paykit App is then unregistered or retired, which stay recovery

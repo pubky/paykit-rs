@@ -195,6 +195,9 @@ pub(super) fn rotate_private_state(
     if let Some(accounting) = state.allowance_accounting.as_mut() {
         crate::domain::allowance_accounting::invalidate_accounting(accounting);
     }
+    for withdrawal in state.private_payment_list_withdrawals.values_mut() {
+        withdrawal.invalidated = true;
+    }
     state.encrypted_link_states.clear();
     state.private_intake_peers.clear();
     state.private_intake_cursors.clear();
