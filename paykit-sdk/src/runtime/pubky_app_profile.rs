@@ -101,6 +101,27 @@ where
         })
     }
 
+    /// Delete this identity's Pubky app profile at the revision it was read at.
+    ///
+    /// An absent profile is already deleted. A profile that changed since
+    /// `expected_revision` returns [`PaykitSdkError::ConcurrentUpdate`]. The
+    /// session must hold `/pub/pubky.app/profile.json:rw`.
+    pub async fn delete_pubky_profile(&self, expected_revision: String) -> Result<()> {
+        let (session_access, _) = self.load_session_access_and_refresh_identity().await?;
+        let session_access = session_access.ok_or_else(|| PaykitSdkError::Identity {
+            context: "no Pubky session available for Pubky profile deletion".into(),
+            source: None,
+        })?;
+        paykit_lib::delete_resource_if_revision(
+            &session_access.session,
+            PUBKY_PROFILE_PATH,
+            &expected_revision,
+            MAX_PUBKY_PROFILE_BYTES,
+        )
+        .await
+        .map_err(scope_error)
+    }
+
     /// Upload avatar bytes as a Pubky app blob and file, and return the file URI.
     ///
     /// The blob id is the content hash and the file id the upload time, as

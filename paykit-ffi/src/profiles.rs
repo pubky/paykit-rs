@@ -438,6 +438,20 @@ impl FfiPaykitSdk {
             .map_err(Into::into)
     }
 
+    /// Delete this identity's Pubky app profile at the revision it was read at.
+    ///
+    /// An absent profile is already deleted; a changed one returns a
+    /// concurrent-update error.
+    pub async fn delete_pubky_profile(
+        &self,
+        expected_revision: String,
+    ) -> Result<(), PaykitFfiError> {
+        self.runtime
+            .delete_pubky_profile(expected_revision)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Upload avatar bytes as a Pubky app blob and file and return the file URI.
     pub async fn upload_pubky_app_avatar(
         &self,

@@ -470,6 +470,7 @@ async fn test_pubky_profile_publish_merges_and_rejects_stale_revisions() {
         .await
         .unwrap()
         .unwrap();
+    let current_revision_before_publish = current.revision.clone();
     let published = sdk
         .publish_pubky_profile(update("Alicia"), Some(current.revision))
         .await
@@ -488,6 +489,18 @@ async fn test_pubky_profile_publish_merges_and_rejects_stale_revisions() {
         .unwrap();
     let raw: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(raw["theme"], "dark");
+
+    let stale = sdk
+        .delete_pubky_profile(current_revision_before_publish)
+        .await
+        .unwrap_err();
+    assert!(stale.is_concurrent_update(), "{stale:?}");
+    sdk.delete_pubky_profile(published.revision).await.unwrap();
+    assert!(sdk
+        .fetch_pubky_profile_with_revision(user.public_key.clone())
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
