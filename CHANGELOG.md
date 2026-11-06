@@ -9,6 +9,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Added
 
+- Pubky app profile writes: `fetch_pubky_profile_with_revision`, `publish_pubky_profile`, `upload_pubky_app_avatar` and `pubky_app_profile_session_capabilities` let an app edit the shared `/pub/pubky.app/profile.json` and its avatar.
 - React Native package `@synonymdev/react-native-paykit` in
   `paykit-react-native/`, generated from the `paykit-ffi` UniFFI metadata with
   uniffi-bindgen-react-native. It exposes the same SDK surface as Swift and

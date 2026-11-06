@@ -39,9 +39,11 @@ pub use domain::allowances::{
 };
 #[doc(inline)]
 pub use domain::contacts::{
-    ContactRecord, ContactUpdate, PaykitBlobRecord, PaykitProfile, PaykitProfileRecord,
-    ProfileResolution, ProfileSource, PubkyProfile, PubkyProfileLink, PubkyProfileRecord,
-    PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
+    validate_pubky_app_profile, ContactRecord, ContactUpdate, PaykitBlobRecord, PaykitProfile,
+    PaykitProfileRecord, ProfileResolution, ProfileSource, PubkyProfile, PubkyProfileLink,
+    PubkyProfileRecord, PubkyProfileSnapshot, PubkyProfileUpdate, PUBKY_APP_BLOB_PATH_PREFIX,
+    PUBKY_APP_FILE_PATH_PREFIX, PUBKY_APP_PROFILE_SESSION_CAPABILITIES, PUBKY_FOLLOWS_PATH_PREFIX,
+    PUBKY_PROFILE_PATH,
 };
 #[doc(inline)]
 pub use domain::endpoints::{load_public_endpoint_records, EndpointSyncChange, EndpointSyncReport};

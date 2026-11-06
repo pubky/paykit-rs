@@ -3,7 +3,7 @@ use std::fmt;
 use paykit_sdk::{
     ContactRecord, ContactUpdate, PaykitBlobRecord, PaykitProfile, PaykitProfileRecord,
     ProfileResolution, ProfileSource, PubkyProfile, PubkyProfileLink, PubkyProfileRecord,
-    PublicationStatus,
+    PubkyProfileSnapshot, PubkyProfileUpdate, PublicationStatus,
 };
 
 use crate::{
@@ -104,6 +104,44 @@ pub struct FfiPubkyProfileRecord {
     pub path: String,
     /// Local observation time as RFC3339 text.
     pub fetched_at: String,
+}
+
+/// Pubky app profile with the revision of the exact bytes it was read from.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct FfiPubkyProfileSnapshot {
+    /// Profile owner.
+    pub public_key: String,
+    /// Public profile metadata.
+    pub profile: FfiPubkyProfile,
+    /// Content fingerprint to pass back when publishing an update.
+    pub revision: String,
+    /// Local observation or publication time as RFC3339 text.
+    pub fetched_at: String,
+}
+
+/// Changes to apply to the identity's Pubky app profile.
+///
+/// `None` keeps the stored value. An empty `bio` or `image`, or empty `links`,
+/// removes that field. `status` and keys added by other apps are always kept.
+#[derive(uniffi::Record, Clone, Debug, Default, PartialEq, Eq)]
+pub struct FfiPubkyProfileUpdate {
+    /// New display name.
+    pub name: Option<String>,
+    /// New bio.
+    pub bio: Option<String>,
+    /// New image URI, normally one returned by `upload_pubky_app_avatar`.
+    pub image: Option<String>,
+    /// New links, replacing the stored list.
+    pub links: Option<Vec<FfiPubkyProfileLink>>,
+}
+
+/// Session capabilities needed to write the Pubky app profile and its avatar.
+///
+/// Apps that edit the shared Pubky app profile add these to their own session
+/// scope.
+#[uniffi::export]
+pub fn pubky_app_profile_session_capabilities() -> String {
+    paykit_sdk::PUBKY_APP_PROFILE_SESSION_CAPABILITIES.into()
 }
 
 /// Public profile resolved by trying Paykit Profile first.
@@ -366,6 +404,49 @@ impl FfiPaykitSdk {
             .fetch_pubky_profile(parse_public_key(public_key)?)
             .await
             .map(|record| record.map(Into::into))
+            .map_err(Into::into)
+    }
+
+    /// Fetch a Pubky app profile with the revision of the exact bytes read.
+    pub async fn fetch_pubky_profile_with_revision(
+        &self,
+        public_key: String,
+    ) -> Result<Option<FfiPubkyProfileSnapshot>, PaykitFfiError> {
+        self.runtime
+            .fetch_pubky_profile_with_revision(parse_public_key(public_key)?)
+            .await
+            .map(|snapshot| snapshot.map(Into::into))
+            .map_err(Into::into)
+    }
+
+    /// Apply `update` to this identity's Pubky app profile.
+    ///
+    /// Only the named fields change; other stored keys are kept. Pass `None`
+    /// to create the first profile, or the revision from
+    /// `fetch_pubky_profile_with_revision`. A changed profile returns a
+    /// concurrent-update error. The session must hold
+    /// `pubky_app_profile_session_capabilities()`.
+    pub async fn publish_pubky_profile(
+        &self,
+        update: FfiPubkyProfileUpdate,
+        expected_revision: Option<String>,
+    ) -> Result<FfiPubkyProfileSnapshot, PaykitFfiError> {
+        self.runtime
+            .publish_pubky_profile(update.into(), expected_revision)
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    /// Upload avatar bytes as a Pubky app blob and file and return the file URI.
+    pub async fn upload_pubky_app_avatar(
+        &self,
+        bytes: Vec<u8>,
+        content_type: String,
+    ) -> Result<String, PaykitFfiError> {
+        self.runtime
+            .upload_pubky_app_avatar(bytes, &content_type)
+            .await
             .map_err(Into::into)
     }
 
@@ -724,6 +805,36 @@ impl From<PubkyProfileRecord> for FfiPubkyProfileRecord {
             profile: value.profile.into(),
             path: value.path,
             fetched_at: value.fetched_at.to_rfc3339(),
+        }
+    }
+}
+
+impl From<PubkyProfileSnapshot> for FfiPubkyProfileSnapshot {
+    fn from(value: PubkyProfileSnapshot) -> Self {
+        Self {
+            public_key: app_public_key(&value.public_key),
+            profile: value.profile.into(),
+            revision: value.revision,
+            fetched_at: value.fetched_at.to_rfc3339(),
+        }
+    }
+}
+
+impl From<FfiPubkyProfileUpdate> for PubkyProfileUpdate {
+    fn from(value: FfiPubkyProfileUpdate) -> Self {
+        Self {
+            name: value.name,
+            bio: value.bio,
+            image: value.image,
+            links: value.links.map(|links| {
+                links
+                    .into_iter()
+                    .map(|link| PubkyProfileLink {
+                        title: link.title,
+                        url: link.url,
+                    })
+                    .collect()
+            }),
         }
     }
 }

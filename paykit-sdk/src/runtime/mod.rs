@@ -147,6 +147,7 @@ mod private_intake;
 mod private_lists;
 mod private_stream;
 mod profiles;
+mod pubky_app_profile;
 mod public_endpoints;
 mod receipts;
 mod recovery;
