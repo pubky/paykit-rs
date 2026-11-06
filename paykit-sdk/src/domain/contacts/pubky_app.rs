@@ -110,7 +110,10 @@ fn set_or_remove(document: &mut JsonMap<String, JsonValue>, key: &str, value: Op
 /// Validate a profile against the `pubky-app-specs` user rules.
 pub fn validate_pubky_app_profile(profile: &PubkyProfile) -> Result<()> {
     let name_chars = profile.name.chars().count();
-    if !(NAME_MIN_CHARS..=NAME_MAX_CHARS).contains(&name_chars) || profile.name == DELETED_NAME {
+    if !(NAME_MIN_CHARS..=NAME_MAX_CHARS).contains(&name_chars)
+        || profile.name == DELETED_NAME
+        || profile.name.chars().any(char::is_control)
+    {
         return Err(protocol(format!(
             "Pubky profile name must be {NAME_MIN_CHARS} to {NAME_MAX_CHARS} characters"
         )));
@@ -144,6 +147,11 @@ pub fn validate_pubky_app_profile(profile: &PubkyProfile) -> Result<()> {
 }
 
 fn max_chars(value: &str, max: usize, field: &str) -> Result<()> {
+    if value.chars().any(char::is_control) {
+        return Err(protocol(format!(
+            "Pubky profile {field} must not contain control characters"
+        )));
+    }
     if value.chars().count() > max {
         return Err(protocol(format!(
             "Pubky profile {field} must not exceed {max} characters"
@@ -276,6 +284,21 @@ mod tests {
             ..update()
         };
         assert!(merge_pubky_profile_json(None, &many_links).is_err());
+    }
+
+    #[test]
+    fn test_pubky_profile_merge_rejects_control_characters() {
+        let bio = PubkyProfileUpdate {
+            name: Some("Alice".into()),
+            bio: Some("Builder\nMaker".into()),
+            ..update()
+        };
+        assert!(merge_pubky_profile_json(None, &bio).is_err());
+        let name = PubkyProfileUpdate {
+            name: Some("Al\nice".into()),
+            ..update()
+        };
+        assert!(merge_pubky_profile_json(None, &name).is_err());
     }
 
     #[test]
