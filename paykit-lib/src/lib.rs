@@ -1,132 +1,20 @@
-#![doc = include_str!("../README.md")]
-#![deny(rustdoc::broken_intra_doc_links)]
+//! # paykit-lib
+//!
+//! Paykit's formats and rules, for Paykit v0.2.
+//!
+//! Paykit v0.2 is a payment protocol on the Pubky Switch. This crate holds
+//! what Paykit adds on top of the Switch's formats: its scopes and the switch
+//! permissions each one needs, its labels and derivations, its message kinds
+//! and their bodies, its collections and their policies, and the payment
+//! rules, Allowances and amounts included. It does no I/O and reads no clock:
+//! every function that depends on time takes it as an argument.
+//!
+//! It builds on `pubky-switch-core`, which holds the Switch's own formats and
+//! checks; Paykit never redefines them. The Paykit protocol is defined by the
+//! Paykit spec and wire format in `specs/v0.2/`, and its vectors in
+//! `specs/v0.2/vectors/` are normative.
+//!
+//! State, flows and network calls belong in `paykit-sdk`.
 
-mod allowance;
-mod app;
-mod app_registry;
-mod delivery_confirmation;
-mod encrypted_link;
-mod encrypted_link_recovery;
-mod error;
-mod event;
-mod noise_key;
-mod noise_key_authorization;
-mod payment_amount;
-mod payment_endpoint;
-mod payment_reference;
-mod payment_request;
-mod private_payment_list;
-mod pubky_routing;
-mod receipt;
-mod shared_wire;
-mod validation;
-
-#[doc(inline)]
-pub use allowance::{
-    add_decimal_amounts, allowance_period_window, check_allowance_time, compare_decimal_amounts,
-    evaluate_allowance, match_allowance_request, parse_allowance_event_message,
-    send_allowance_acceptance, send_allowance_end, send_allowance_proposal,
-    send_allowance_rejection, serialize_allowance_event, AllowanceAcceptance, AllowanceAmountRange,
-    AllowanceEnd, AllowanceEvaluation, AllowanceEvaluationBlock, AllowanceEvaluationInput,
-    AllowanceEvent, AllowanceEventMessage, AllowanceId, AllowancePeriod, AllowancePeriodKind,
-    AllowancePeriodLimit, AllowancePeriodUnit, AllowancePeriodWindow, AllowanceProposal,
-    AllowanceRejection, AllowanceRole, AllowanceTerms, AllowanceTermsBuilder, AllowanceUsageEntry,
-};
-#[doc(inline)]
-pub use app::PaykitAppId;
-#[doc(inline)]
-pub use app_registry::{
-    create_paykit_app_registry, get_paykit_app_registry, get_paykit_app_registry_with_revision,
-    parse_paykit_app_registry_json, serialize_paykit_app_registry, update_paykit_app_registry,
-    PaykitApp, PaykitAppCapabilities, PaykitAppRegistry, INITIAL_PAYKIT_KEY_GENERATION,
-    PAYKIT_APP_REGISTRY_MAX_APPS, PAYKIT_APP_REGISTRY_MAX_BYTES,
-    PAYKIT_APP_REGISTRY_MAX_ENDPOINT_DEFAULTS,
-};
-#[doc(inline)]
-pub use delivery_confirmation::{
-    parse_delivery_confirmation_json, serialize_delivery_confirmation, DeliveryConfirmation,
-};
-#[doc(inline)]
-pub use encrypted_link::{
-    accept_encrypted_link, advance_handshake, clear_encrypted_link_outbox, close_encrypted_link,
-    initiate_encrypted_link, restore_encrypted_link, restore_encrypted_link_from_config,
-    restore_encrypted_link_handshake, restore_encrypted_link_handshake_from_config, EncryptedLink,
-    EncryptedLinkHandshake, EncryptedLinkHandshakeSnapshot, EncryptedLinkRecoveryContext,
-    EncryptedLinkSnapshot, HandshakeAdvanceError, HandshakeProgress,
-    PreparedEncryptedLinkHandshakeStep, PreparedPrivateApplicationMessageReceive,
-    PreparedPrivateApplicationMessageSend, PreparedPrivateSendSlot, PrivateApplicationMessage,
-    PrivateMessageKind, DEFAULT_MAX_RECOVERY_ATTEMPTS, DEFAULT_MAX_SEND_RETRIES,
-    PRIVATE_APPLICATION_MESSAGE_RECEIVE_LIMIT,
-};
-#[doc(inline)]
-pub use encrypted_link_recovery::{
-    encrypted_link_recovery_marker_paths, fetch_encrypted_link_recovery_marker,
-    parse_encrypted_link_recovery_marker_json, publish_encrypted_link_recovery_marker,
-    remove_encrypted_link_recovery_marker, serialize_encrypted_link_recovery_marker,
-    EncryptedLinkRecoveryMarker,
-};
-#[doc(inline)]
-pub use error::PaykitError;
-#[doc(inline)]
-pub use event::EventId;
-#[doc(inline)]
-pub use noise_key::{derive_paykit_noise_public_key, derive_paykit_noise_secret_key};
-#[doc(inline)]
-pub use noise_key_authorization::{
-    get_paykit_noise_key_authorization, publish_paykit_noise_key_authorization,
-    PaykitNoiseKeyAuthorization,
-};
-#[doc(inline)]
-pub use payment_amount::PaymentAmount;
-#[doc(inline)]
-pub use payment_endpoint::{
-    create_payment_endpoint, get_payment_endpoint, get_payment_endpoint_with_revision,
-    get_payment_list, get_payment_list_with_budget, get_payment_list_with_limits,
-    is_payment_list_limit_exceeded, remove_payment_endpoint, remove_payment_endpoint_if_revision,
-    set_payment_endpoint, update_payment_endpoint, PaymentEndpointIdentifier,
-    PaymentEndpointPayload, PaymentList, PAYMENT_ENDPOINT_PAYLOAD_MAX_BYTES,
-    PAYMENT_LIST_MAX_ENDPOINTS,
-};
-#[doc(inline)]
-pub use payment_reference::{PaymentReference, PAYMENT_REFERENCE_MAX_LEN};
-#[doc(inline)]
-pub use payment_request::{
-    parse_payment_request_event_message, send_payment_conversion_quote, send_payment_proof,
-    send_payment_request, send_payment_request_acceptance, send_payment_request_cancellation,
-    send_payment_request_rejection, serialize_payment_request_event, BillingPeriod, ConversionRate,
-    PaymentConversion, PaymentConversionQuote, PaymentDeadline, PaymentProof, PaymentRequest,
-    PaymentRequestAcceptance, PaymentRequestCancellation, PaymentRequestEvent,
-    PaymentRequestEventMessage, PaymentRequestId, PaymentRequestRejection, PaymentRequestTerms,
-    PaymentRequestTermsBuilder, Recurrence, RecurrenceConfig, RecurrenceUnit,
-};
-#[doc(inline)]
-pub use private_payment_list::{
-    parse_private_payment_list_json, serialize_private_payment_list_json, set_private_payment_list,
-    PrivatePaymentList,
-};
-#[doc(inline)]
-pub use pubky::PublicKey;
-pub use pubky_noise;
-#[doc(inline)]
-pub use pubky_routing::{
-    content_revision, delete_resource_if_revision, fetch_payment_endpoint_revision,
-    fetch_resource_revision, is_write_conflict, list_payment_endpoint_identifiers,
-    put_resource_if_revision, with_write_lock, PAYKIT_APP_REGISTRY_PATH,
-    PAYKIT_ENCRYPTED_LINK_RECOVERY_PATH_PREFIX, PAYKIT_NOISE_KEY_AUTHORIZATION_PATH,
-    PAYKIT_PATH_PREFIX, PAYKIT_PRIVATE_PATH_PREFIX, PAYKIT_SHARED_STATE_PATH,
-    PAYKIT_SHARED_STATE_WRITE_PATH_PREFIX,
-};
-#[doc(inline)]
-pub use receipt::{
-    decrypt_receipt, parse_receipt_access_event_message, parse_receipt_access_json,
-    prepare_receipt, prepare_receipt_for_recipient, send_receipt_access,
-    serialize_receipt_access_json, store_prepared_receipt, PreparedReceipt, Receipt, ReceiptAccess,
-    ReceiptAccessEventMessage, ReceiptDecryptionKey, ReceiptDraft, ReceiptId,
-    ENCRYPTED_RECEIPT_MAX_BYTES,
-};
-
-/// Common result alias for Paykit operations.
-pub type Result<T> = std::result::Result<T, PaykitError>;
-
-#[cfg(test)]
-mod tests;
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
