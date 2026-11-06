@@ -1,0 +1,17 @@
+[package]
+name = "paykit-signer"
+description = "Paykit v0.2 signer core: manages an identity's apps, keys and provider moves"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["paykit", "payments", "pubky", "signer"]
+categories = ["finance", "cryptography"]
+# Unpublished until the v0.2 spec is frozen (specs/v0.2/README.md).
+publish = false
+
+[dependencies]
+paykit-lib.workspace = true
+

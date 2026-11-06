@@ -1,128 +1,14 @@
-#![doc = "Stateful runtime layer for Paykit integrations."]
-#![recursion_limit = "256"]
-#![deny(rustdoc::broken_intra_doc_links)]
+//! # paykit-sdk
+//!
+//! The Paykit v0.2 app SDK, for wallets and seller apps.
+//!
+//! This crate holds an app's state, its flows and its network I/O: the Pubky
+//! Switch client, the Homeserver reads and writes, the app's state store,
+//! receiving and sending messages, and the payment flows. It builds on the
+//! stateless core in `paykit-lib`.
+//!
+//! The protocol is defined by `specs/v0.2/spec.md` and
+//! `specs/v0.2/wire-format.md`.
 
-mod backup;
-mod config;
-mod domain;
-mod error;
-mod identity;
-mod json_serde;
-mod pubky_session;
-mod runtime;
-/// Durable storage traits plus in-memory and encrypted Pubky-backed storage.
-pub mod storage;
-#[cfg(test)]
-mod test_utils;
-
-#[doc(inline)]
-pub use backup::{
-    export_backup_state, validation::validate_storage_state, RestoreReport, RestoredLinkPolicy,
-    SdkBackupState, SdkBackupStateV1, SDK_BACKUP_VERSION,
-};
-#[doc(inline)]
-pub use config::{EndpointManagementScope, PaykitSdkConfig, PublicContactSharingPolicy};
-#[doc(inline)]
-pub use domain::adapters::{
-    PaymentAdapter, PaymentAmountContext, PaymentTarget, PrivatePaymentEndpointCandidate,
-    PrivatePaymentEndpointReservation, PrivatePaymentEndpointReservationCancellation,
-    PrivatePaymentEndpointSelectionRequest, PrivateReceivingDetail, PubkySessionProvider,
-    PublicPaymentEndpointCandidate, PublicPaymentEndpointSelectionRequest, PublicReceivingDetail,
-};
-#[doc(inline)]
-pub use domain::allowance_accounting::*;
-#[doc(inline)]
-pub use domain::allowances::{
-    AllowanceAmountRangeRecord, AllowanceFilter, AllowanceHistoryStatus, AllowanceLifecycleState,
-    AllowanceLocalRole, AllowancePeriodLimitRecord, AllowancePeriodRecord, AllowanceRecord,
-    AllowanceTermsRecord, PendingAllowanceAcceptance, MAX_PENDING_ALLOWANCE_LINK_RECORDS,
-};
-#[doc(inline)]
-pub use domain::contacts::{
-    ContactRecord, ContactUpdate, PaykitBlobRecord, PaykitProfile, PaykitProfileRecord,
-    ProfileResolution, ProfileSource, PubkyProfile, PubkyProfileLink, PubkyProfileRecord,
-    PUBKY_FOLLOWS_PATH_PREFIX, PUBKY_PROFILE_PATH,
-};
-#[doc(inline)]
-pub use domain::endpoints::{load_public_endpoint_records, EndpointSyncChange, EndpointSyncReport};
-#[doc(inline)]
-pub use domain::linked_peers::{
-    load_encrypted_link_state, load_linked_peer, EncryptedLinkHandshakeRole,
-    LinkedPeerHandshakeReport, LinkedPeerState,
-};
-#[doc(inline)]
-pub use domain::outbound_private::{
-    OutboundPrivateCounterpartySendReport, OutboundPrivateMessageStatus,
-    OutboundPrivateSendFailure, OutboundPrivateSendReport, RecoveryMarkerPublishFailure,
-    ReservationCleanupFailure,
-};
-#[doc(inline)]
-pub use domain::payment_requests::{
-    payment_proof_event_len, PaymentConversionQuoteRecord, PaymentProofRecord,
-    PaymentProofSubmission, PaymentRequestFilter, PaymentRequestLifecycleState,
-    PaymentRequestLocalRole, PaymentRequestRecord, PaymentRequestRecurrenceRecord,
-    PaymentRequestTermsRecord,
-};
-#[doc(inline)]
-pub use domain::payment_resolution::{
-    PreparedPrivateContactPayment, PrivateContactPaymentResolution, PrivatePaymentResolutionState,
-    PrivatePaymentResolutionStatus, PublicContactPaymentResolution,
-    PublicPaymentEndpointLoadFailure, PublicPaymentEndpointLoadFailureKind,
-    PublicPaymentResolutionStatus, ResolvedPrivatePaymentEndpoint, ResolvedPublicPaymentEndpoint,
-};
-#[doc(inline)]
-pub use domain::private_lists::{
-    PrivatePaymentListAcknowledgement, PrivatePaymentListDeliveryFailure,
-    PrivatePaymentListDeliveryReport, PrivatePaymentListReservationUpdate,
-    PrivatePaymentListSyncChange, PrivatePaymentListSyncReport, PrivatePaymentListView,
-};
-#[doc(inline)]
-pub use domain::private_stream::{
-    EventIdConflict, PrivateStreamCounterpartyIntakeReport, PrivateStreamIntakeReport,
-    PrivateStreamParseStatus,
-};
-#[doc(inline)]
-pub use domain::publication::PublicationStatus;
-#[doc(inline)]
-pub use domain::receipts::{
-    ReceiptAccessView, ReceiptDraftBuilder, ReceiptIssuanceStatus, ReceiptIssuanceView,
-    ReceiptRecord, ReceiptRetrievalStatus,
-};
-#[doc(inline)]
-pub use domain::records::{AmountRecord, BillingPeriodRecord};
-#[doc(inline)]
-pub use domain::recovery::EncryptedLinkRecoveryMarkerReport;
-#[doc(inline)]
-pub use error::{MessageTooLarge, PaykitSdkError, RetentionLimitReached, SignupCodeRejected};
-#[doc(inline)]
-pub use identity::{
-    IdentityState, IdentityStatus, PaykitIdentitySecretKey, PubkyIdentityCapability,
-    PubkyLocalSecretKey, PubkyPublicKey, PubkySessionAccess,
-};
-pub use paykit_lib::INITIAL_PAYKIT_KEY_GENERATION;
-#[doc(inline)]
-pub use paykit_lib::{
-    PaykitApp, PaykitAppCapabilities, PaykitAppId, PaykitAppRegistry, PaykitNoiseKeyAuthorization,
-};
-pub use pubky_session::{
-    parse_pubky_auth_url, parse_pubky_resource, resolve_pubky_url, PubkyAuthCompanionClaim,
-    PubkyAuthCompanionClaimApprovalError, PubkyAuthDetails, PubkyAuthRequest, PubkyAuthRequestKind,
-    PubkyAuthRequestState, PubkyGrantObservation, PubkyGrantObserver, PubkyResourceRef,
-    PubkySessionBootstrap, PubkySessionBootstrapResult, PubkySessionSecret,
-    PAYKIT_AUTHORIZER_SESSION_CAPABILITIES, PAYKIT_SESSION_CAPABILITIES,
-};
-#[doc(inline)]
-#[cfg(not(target_arch = "wasm32"))]
-pub use pubky_session::{PubkyGrantLogout, PubkyGrantLogoutAttempt, PubkyGrantLogoutReceipt};
-#[doc(inline)]
-pub use runtime::{
-    BufferedPrivateStreamIntakeReport, Clock, PaykitAppRemovalBlockers, PaykitSdk,
-    PaykitStateObservation, PaymentRequestRead, PrivateIntakeConfig, PrivateIntakeHealth,
-    PrivateIntakePeerFreshness, PrivateIntakeSupervisor, PrivateIntakeTransportState,
-    PrivateMessageSchedulingSnapshot, SystemClock,
-};
-#[doc(inline)]
-pub use storage::{InMemoryStorage, PubkySharedStateStorage, StorageAdapter, StorageTransaction};
-
-/// Common result alias for Paykit SDK operations.
-pub type Result<T> = std::result::Result<T, PaykitSdkError>;
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]

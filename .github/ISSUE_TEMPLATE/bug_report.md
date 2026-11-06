@@ -27,7 +27,7 @@ assignees: ''
 ## Environment
 
 - Paykit version / commit:
-- Crate(s) affected (`paykit-lib`, `paykit-sdk`, `paykit-ffi`, bindings):
+- Crate(s) affected (`paykit-lib`, `paykit-sdk`, `paykit-signer`):
 - Rust version (`rustc --version`):
 - OS / platform:
 
