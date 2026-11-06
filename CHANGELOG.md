@@ -134,10 +134,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   documentation on `proposePaymentRequest`, `submitPaymentProof`,
   `PaymentRequestTerms` and `PaymentProofSubmission`. Protocol errors have a new
   code value, `message_too_large`; apps that branch on codes should handle it.
+- The Pubky HTTP client verifies HTTPS hosts only against the `webpki-roots`
+  list, not the operating system trust store. If you use your own HTTPS
+  homeserver or auth relay, confirm its certificate chain ends in a root that
+  `webpki-roots` 1.0.11 still includes. A chain that ends only in a removed root
+  now fails TLS verification.
 
 ### Security
 
-- Update `webpki-roots`, `webpki-root-certs` and `rustls-webpki` to drop trust in the distrusted emSign G3 certificate paths (RUSTSEC-2026-0381, RUSTSEC-2026-0382, RUSTSEC-2026-0383).
+- Update `webpki-roots`, `webpki-root-certs` and `rustls-webpki` to drop trust in
+  the distrusted emSign G3 certificate paths (RUSTSEC-2026-0381,
+  RUSTSEC-2026-0382, RUSTSEC-2026-0383). The `webpki-roots` update also brings
+  upstream root store changes. It removes 22 roots in total, including
+  `DigiCert Global Root CA`, `COMODO Certification Authority`, `GTS Root R2`,
+  `QuoVadis Root CA 2` and `QuoVadis Root CA 3`, and adds SECOM TLS 2024 and
+  Telia TLS v3 roots.
 
 ## [0.1.1-rc1] - 2026-10-20
 
