@@ -142,13 +142,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ### Security
 
-- Update `webpki-roots`, `webpki-root-certs` and `rustls-webpki` to drop trust in
-  the distrusted emSign G3 certificate paths (RUSTSEC-2026-0381,
-  RUSTSEC-2026-0382, RUSTSEC-2026-0383). The `webpki-roots` update also brings
-  upstream root store changes. It removes 22 roots in total, including
-  `DigiCert Global Root CA`, `COMODO Certification Authority`, `GTS Root R2`,
-  `QuoVadis Root CA 2` and `QuoVadis Root CA 3`, and adds SECOM TLS 2024 and
-  Telia TLS v3 roots.
+- Update `webpki-roots`, `webpki-root-certs` and `rustls-webpki` so the Pubky HTTP
+  client no longer trusts the distrusted emSign G3 certificate paths
+  (RUSTSEC-2026-0381, RUSTSEC-2026-0382, RUSTSEC-2026-0383). Requests that use
+  the platform verifier, such as pkarr relay lookups and grant logout over ICANN
+  HTTPS, keep following the operating system trust store on iOS and Android. The
+  `webpki-roots` update also brings upstream root store changes. It removes 22
+  roots in total, including `DigiCert Global Root CA`,
+  `COMODO Certification Authority`, `GTS Root R2`, `QuoVadis Root CA 2` and
+  `QuoVadis Root CA 3`, and adds SECOM TLS 2024 and Telia TLS v3 roots.
 
 ## [0.1.1-rc1] - 2026-10-20
 
