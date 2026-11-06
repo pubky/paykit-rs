@@ -474,7 +474,7 @@ fn test_pubky_follow_keys_from_follow_entries_keeps_direct_valid_keys_only() {
 }
 
 #[test]
-fn test_pubky_paths_are_read_only_pubky_app_namespace() {
+fn test_pubky_paths_use_pubky_app_namespace() {
     assert_eq!(PUBKY_PROFILE_PATH, "/pub/pubky.app/profile.json");
     assert_eq!(PUBKY_FOLLOWS_PATH_PREFIX, "/pub/pubky.app/follows/");
 }

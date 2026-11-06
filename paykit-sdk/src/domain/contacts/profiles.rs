@@ -4,7 +4,7 @@ use std::fmt;
 use super::{validate_optional_text, validate_text};
 use crate::{PaykitSdkError, PubkyPublicKey, Result};
 
-/// Pubky app profile path used by read-only fallback/helper APIs.
+/// Pubky app profile path, read by profile fallback and written by the Pubky app profile APIs.
 pub const PUBKY_PROFILE_PATH: &str = "/pub/pubky.app/profile.json";
 /// Pubky app follows path used by read-only helper APIs.
 pub const PUBKY_FOLLOWS_PATH_PREFIX: &str = "/pub/pubky.app/follows/";

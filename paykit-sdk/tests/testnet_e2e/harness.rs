@@ -328,6 +328,15 @@ impl TestUser {
     }
 
     pub async fn sign_up_with_app(testnet: &EphemeralTestnet, app_id: PaykitAppId) -> TestUser {
+        Self::sign_up_with_capabilities(testnet, app_id, PAYKIT_AUTHORIZER_SESSION_CAPABILITIES)
+            .await
+    }
+
+    pub async fn sign_up_with_capabilities(
+        testnet: &EphemeralTestnet,
+        app_id: PaykitAppId,
+        capabilities: &str,
+    ) -> TestUser {
         let keypair = Keypair::random();
         let secret_key = PubkyLocalSecretKey::new(keypair.secret_key());
         let homeserver_public_key =
@@ -335,12 +344,7 @@ impl TestUser {
         let bootstrap = session_bootstrap(testnet, TEST_CLIENT_ID);
         let config = PaykitSdkConfig::new(app_id.clone()).unwrap();
         let result = bootstrap
-            .sign_up(
-                &secret_key,
-                &homeserver_public_key,
-                None,
-                PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
-            )
+            .sign_up(&secret_key, &homeserver_public_key, None, capabilities)
             .await
             .expect("testnet sign-up should succeed");
         let session_secret = result
