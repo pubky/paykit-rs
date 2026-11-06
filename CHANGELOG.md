@@ -139,6 +139,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   homeserver or auth relay, confirm its certificate chain ends in a root that
   `webpki-roots` 1.0.11 still includes. A chain that ends only in a removed root
   now fails TLS verification.
+- Rust integrators must update their own `Cargo.lock`, because Cargo ignores the
+  lockfile of a dependency. Confirm `webpki-roots` and `webpki-root-certs` resolve
+  to 1.0.10 or later and `rustls-webpki` to 0.103.16 or later. Swift, Kotlin and
+  React Native apps get these versions by updating to a release built from this
+  repository's lockfile.
 
 ### Security
 
