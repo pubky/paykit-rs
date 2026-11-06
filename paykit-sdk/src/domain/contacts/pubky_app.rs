@@ -91,7 +91,7 @@ pub(crate) fn merge_pubky_profile_json(
 
     let profile = serde_json::from_value::<PubkyProfile>(JsonValue::Object(document.clone()))
         .map_err(|err| protocol(format!("invalid Pubky profile: {err}")))?;
-    validate_pubky_app_profile(&profile)?;
+    validate_pubky_profile_update(&profile, update, current.is_none())?;
     serde_json::to_vec(&document).map_err(|err| protocol(format!("encode Pubky profile: {err}")))
 }
 
@@ -109,39 +109,76 @@ fn set_or_remove(document: &mut JsonMap<String, JsonValue>, key: &str, value: Op
 
 /// Validate a profile against the `pubky-app-specs` user rules.
 pub fn validate_pubky_app_profile(profile: &PubkyProfile) -> Result<()> {
-    let name_chars = profile.name.chars().count();
+    validate_name(&profile.name)?;
+    validate_bio(profile.bio.as_deref())?;
+    validate_image(profile.image.as_deref())?;
+    validate_links(profile.links.as_deref())?;
+    if let Some(status) = &profile.status {
+        max_chars(status, STATUS_MAX_CHARS, "status")?;
+    }
+    Ok(())
+}
+
+/// Validate only what `update` writes, plus the name of a profile it creates, so a
+/// stored field this app does not edit never blocks its save.
+fn validate_pubky_profile_update(
+    profile: &PubkyProfile,
+    update: &PubkyProfileUpdate,
+    creating: bool,
+) -> Result<()> {
+    if creating || update.name.is_some() {
+        validate_name(&profile.name)?;
+    }
+    if update.bio.is_some() {
+        validate_bio(profile.bio.as_deref())?;
+    }
+    if update.image.is_some() {
+        validate_image(profile.image.as_deref())?;
+    }
+    if update.links.is_some() {
+        validate_links(profile.links.as_deref())?;
+    }
+    Ok(())
+}
+
+fn validate_name(name: &str) -> Result<()> {
+    let name_chars = name.chars().count();
     if !(NAME_MIN_CHARS..=NAME_MAX_CHARS).contains(&name_chars)
-        || profile.name == DELETED_NAME
-        || profile.name.chars().any(char::is_control)
+        || name == DELETED_NAME
+        || name.chars().any(char::is_control)
     {
         return Err(protocol(format!(
             "Pubky profile name must be {NAME_MIN_CHARS} to {NAME_MAX_CHARS} characters"
         )));
     }
-    if let Some(bio) = &profile.bio {
-        max_chars(bio, BIO_MAX_CHARS, "bio")?;
+    Ok(())
+}
+
+fn validate_bio(bio: Option<&str>) -> Result<()> {
+    bio.map_or(Ok(()), |bio| max_chars(bio, BIO_MAX_CHARS, "bio"))
+}
+
+fn validate_image(image: Option<&str>) -> Result<()> {
+    image.map_or(Ok(()), |image| uri(image, IMAGE_MAX_CHARS, "image"))
+}
+
+fn validate_links(links: Option<&[PubkyProfileLink]>) -> Result<()> {
+    let Some(links) = links else {
+        return Ok(());
+    };
+    if links.len() > LINKS_MAX_COUNT {
+        return Err(protocol(format!(
+            "Pubky profile must not have more than {LINKS_MAX_COUNT} links"
+        )));
     }
-    if let Some(image) = &profile.image {
-        uri(image, IMAGE_MAX_CHARS, "image")?;
-    }
-    if let Some(links) = &profile.links {
-        if links.len() > LINKS_MAX_COUNT {
-            return Err(protocol(format!(
-                "Pubky profile must not have more than {LINKS_MAX_COUNT} links"
-            )));
+    for link in links {
+        if link.title.trim().is_empty() {
+            return Err(protocol(
+                "Pubky profile link title must not be empty".into(),
+            ));
         }
-        for link in links {
-            if link.title.trim().is_empty() {
-                return Err(protocol(
-                    "Pubky profile link title must not be empty".into(),
-                ));
-            }
-            max_chars(&link.title, LINK_TITLE_MAX_CHARS, "link title")?;
-            uri(&link.url, LINK_URL_MAX_CHARS, "link URL")?;
-        }
-    }
-    if let Some(status) = &profile.status {
-        max_chars(status, STATUS_MAX_CHARS, "status")?;
+        max_chars(&link.title, LINK_TITLE_MAX_CHARS, "link title")?;
+        uri(&link.url, LINK_URL_MAX_CHARS, "link URL")?;
     }
     Ok(())
 }
@@ -299,6 +336,20 @@ mod tests {
             ..update()
         };
         assert!(merge_pubky_profile_json(None, &name).is_err());
+    }
+
+    #[test]
+    fn test_pubky_profile_merge_ignores_stored_fields_it_does_not_write() {
+        let current = r#"{"name":"Alice","bio":"Builder\nMaker","status":"a status longer than the fifty characters pubky.app allows"}"#;
+        let result = merged(
+            current,
+            PubkyProfileUpdate {
+                name: Some("Alicia".into()),
+                ..update()
+            },
+        );
+        assert_eq!(result["name"], "Alicia");
+        assert_eq!(result["bio"], "Builder\nMaker");
     }
 
     #[test]
