@@ -71,6 +71,42 @@ pub enum PreparedPrivateSendSlot {
     Taken,
 }
 
+impl PreparedPrivateSendSlot {
+    /// Read a previously validated packet destination with the original session.
+    /// This bounded comparison can also be used after the link has been retired.
+    /// A missing packet returns `Free`; the observation does not reserve the slot.
+    pub async fn read(
+        session: &pubky::PubkySession,
+        destination_path: &str,
+        ciphertext: &[u8],
+    ) -> Result<Self> {
+        let response = match session.storage().get(destination_path).await {
+            Ok(response) => response,
+            Err(err) if private_application_message::is_not_found(&err) => {
+                return Ok(PreparedPrivateSendSlot::Free)
+            }
+            Err(err) => {
+                return Err(PaykitError::Transport {
+                    context: "read prepared private send slot".into(),
+                    source: err.into(),
+                })
+            }
+        };
+        match crate::pubky_routing::read_bounded_body(
+            response,
+            pubky_noise::snow_crypto::PUBKY_NOISE_TRANSPORT_PACKET_LEN,
+            "read prepared private send slot",
+        )
+        .await
+        {
+            Ok(stored) if stored == ciphertext => Ok(PreparedPrivateSendSlot::Published),
+            // An oversized body is not a packet this link wrote, but it still occupies the slot.
+            Ok(_) | Err(PaykitError::InvalidData { .. }) => Ok(PreparedPrivateSendSlot::Taken),
+            Err(err) => Err(err),
+        }
+    }
+}
+
 /// Inbound private message prepared for atomic application-state persistence.
 pub struct PreparedPrivateApplicationMessageReceive {
     prepared: pubky_noise::PreparedReceive,
@@ -416,7 +452,7 @@ impl EncryptedLink {
         destination_path: &str,
         ciphertext: &[u8],
     ) -> Result<()> {
-        self.validate_prepared_send(destination_path, ciphertext)?;
+        self.validate_prepared_private_application_message(destination_path, ciphertext)?;
 
         let max_attempts = self.max_send_retries.saturating_add(1);
         let mut last_error = None;
@@ -472,40 +508,12 @@ impl EncryptedLink {
         destination_path: &str,
         ciphertext: &[u8],
     ) -> Result<PreparedPrivateSendSlot> {
-        self.validate_prepared_send(destination_path, ciphertext)?;
+        self.validate_prepared_private_application_message(destination_path, ciphertext)?;
         if !self.write_path_exists(destination_path).await? {
             return Ok(PreparedPrivateSendSlot::Free);
         }
-        let response = match self
-            .config
-            .local_session
-            .storage()
-            .get(destination_path)
+        PreparedPrivateSendSlot::read(&self.config.local_session, destination_path, ciphertext)
             .await
-        {
-            Ok(response) => response,
-            Err(err) if private_application_message::is_not_found(&err) => {
-                return Ok(PreparedPrivateSendSlot::Free)
-            }
-            Err(err) => {
-                return Err(PaykitError::Transport {
-                    context: "read prepared private send slot".into(),
-                    source: err.into(),
-                })
-            }
-        };
-        match crate::pubky_routing::read_bounded_body(
-            response,
-            pubky_noise::snow_crypto::PUBKY_NOISE_TRANSPORT_PACKET_LEN,
-            "read prepared private send slot",
-        )
-        .await
-        {
-            Ok(stored) if stored == ciphertext => Ok(PreparedPrivateSendSlot::Published),
-            // An oversized body is not a packet this link wrote, but it still occupies the slot.
-            Ok(_) | Err(PaykitError::InvalidData { .. }) => Ok(PreparedPrivateSendSlot::Taken),
-            Err(err) => Err(err),
-        }
     }
 
     /// Move the next write slot past packets already on this link's write stream.
@@ -600,7 +608,13 @@ impl EncryptedLink {
             })
     }
 
-    fn validate_prepared_send(&self, destination_path: &str, ciphertext: &[u8]) -> Result<()> {
+    /// Check the packet length and its destination in this link's write stream.
+    /// This validates retained bytes locally without reading or publishing a slot.
+    pub fn validate_prepared_private_application_message(
+        &self,
+        destination_path: &str,
+        ciphertext: &[u8],
+    ) -> Result<()> {
         let expected_prefix = format!("{}/", self.config.write_path);
         if !destination_path.starts_with(&expected_prefix)
             || destination_path[expected_prefix.len()..]

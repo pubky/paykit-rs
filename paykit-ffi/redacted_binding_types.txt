@@ -68,3 +68,5 @@ PaykitBlobRecord
 SdkStateBlobSnapshot
 PaykitStateObservation
 PrivateMessageSchedulingSnapshot
+PrivatePaymentListWithdrawal
+PrivatePaymentListWithdrawalAcknowledgement

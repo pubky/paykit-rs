@@ -331,9 +331,18 @@ where
 {
     storage
         .transaction(|tx| {
-            Ok(SdkBackupState::from_storage_state(
-                tx.export_storage_state(),
-            ))
+            let state = tx.export_storage_state();
+            // Backup v2 cannot carry the explicit original-grant withdrawal
+            // journal. Never silently omit unresolved work or re-enable it
+            // through a potentially stale backup.
+            if !state.private_payment_list_withdrawals.is_empty() {
+                return Err(PaykitSdkError::Policy {
+                    context: "cannot export backup while retained private list withdrawals exist"
+                        .into(),
+                    source: None,
+                });
+            }
+            Ok(SdkBackupState::from_storage_state(state))
         })
         .await
 }
@@ -426,6 +435,15 @@ where
                 link_policy,
             )?;
             let mut state = state.into_storage_state();
+            // A stale portable backup cannot reopen a grant that this backing
+            // closed before sign-out. Preserve even another owner's denial-only
+            // tuple; it confers no rights and cannot affect the restored owner.
+            state.closed_private_payment_list_withdrawal_grants.extend(
+                current_state
+                    .closed_private_payment_list_withdrawal_grants
+                    .iter()
+                    .cloned(),
+            );
             let current_accounting = if stored_identity.as_ref().and_then(|i| i.public_key.as_ref())
                 == state
                     .identity_state
@@ -488,6 +506,9 @@ fn restore_blockers(state: &StorageState) -> Vec<&'static str> {
         // A cache of the record lists below, never stored.
         link_record_index: _,
         allowance_accounting,
+        private_payment_list_withdrawals,
+        // Denial-only history is preserved below, not a nonempty restore blocker.
+        closed_private_payment_list_withdrawal_grants: _,
         linked_peers,
         contact_records,
         registered_paykit_apps,
@@ -511,6 +532,10 @@ fn restore_blockers(state: &StorageState) -> Vec<&'static str> {
     } = state;
     [
         ("Allowance accounting", is_set(allowance_accounting)),
+        (
+            "retained private list withdrawals",
+            is_set(private_payment_list_withdrawals),
+        ),
         ("Linked Peers", is_set(linked_peers)),
         ("Contact Records", is_set(contact_records)),
         (
@@ -919,6 +944,8 @@ impl SdkBackupState {
             receipt_issuance_records,
             private_intake_cursors,
             private_intake_peers,
+            private_payment_list_withdrawals: Default::default(),
+            closed_private_payment_list_withdrawal_grants: Default::default(),
             link_record_index: Default::default(),
         };
 

@@ -26,7 +26,8 @@ pub use records::{
     PaykitAppOperationLease, PaymentEndpointReservationRecord, PaymentRequestExecutionClaim,
     PeerLinkOperationLease, PreparedOutboundPrivateSend, PrivateIntakeBufferOutcome,
     PrivateIntakeCursorRecord, PrivateIntakePeerRecord, PrivateIntakeSupervisorLease,
-    PrivateStreamItemRecord, PublicEndpointRecord, StorageState, PRIVATE_INTAKE_MAX_BYTES_GLOBAL,
+    PrivatePaymentListWithdrawalGrant, PrivatePaymentListWithdrawalRecord, PrivateStreamItemRecord,
+    PublicEndpointRecord, StorageState, PRIVATE_INTAKE_MAX_BYTES_GLOBAL,
     PRIVATE_INTAKE_MAX_BYTES_PER_PEER, PRIVATE_INTAKE_MAX_PACKETS_GLOBAL,
     PRIVATE_INTAKE_MAX_PACKETS_PER_PEER, PRIVATE_INTAKE_PACKET_BYTES,
 };
@@ -57,7 +58,7 @@ const CONCURRENT_UPDATE_MAX_ATTEMPTS: usize = 8;
 use crate::{
     domain::contacts::ContactRecord,
     domain::receipts::{ReceiptAccessRecord, ReceiptIssuanceRecord, ReceiptRecord},
-    identity::{IdentityState, PaykitIdentitySecretKey, PubkyPublicKey},
+    identity::{IdentityState, PaykitIdentitySecretKey, PubkyLocalSecretKey, PubkyPublicKey},
     PaykitSdkError, Result,
 };
 
@@ -142,6 +143,31 @@ pub trait StorageAdapter: Send + Sync {
         &self,
         f: StorageTransactionCallback<'a>,
     ) -> Result<Box<dyn Any + Send>>;
+
+    /// Atomically close withdrawal preparation for the captured original grant.
+    ///
+    /// Refuse while any of its withdrawal journals remain, including confirmed
+    /// receipts awaiting completion. Return only after the denial is committed
+    /// and the storage lock scope and release attempt have completed, before the
+    /// caller revokes that grant. An unconfirmed release leaves the bounded lease
+    /// to expire; it does not require repeating a committed denial.
+    /// A matching identity secret may authenticate the current encrypted backing
+    /// after key rotation; this does not change ordinary storage key access.
+    async fn close_private_payment_list_withdrawal_admission(
+        &self,
+        original_grant: &PrivatePaymentListWithdrawalGrant,
+        original_secret: Option<&PubkyLocalSecretKey>,
+    ) -> Result<()> {
+        validate_withdrawal_admission_secret(original_grant, original_secret)?;
+        self.transaction_erased(Box::new(|tx| {
+            let mut state = tx.export_storage_state();
+            close_withdrawal_admission(&mut state, original_grant)?;
+            tx.replace_storage_state(ValidatedStorageState::new(state));
+            Ok(Box::new(()))
+        }))
+        .await?;
+        Ok(())
+    }
 
     /// Atomically transform state while rotating identity-wide Paykit key material.
     ///
@@ -310,6 +336,16 @@ impl<T> StorageAdapter for Box<T>
 where
     T: StorageAdapter + ?Sized,
 {
+    async fn close_private_payment_list_withdrawal_admission(
+        &self,
+        original_grant: &PrivatePaymentListWithdrawalGrant,
+        original_secret: Option<&PubkyLocalSecretKey>,
+    ) -> Result<()> {
+        (**self)
+            .close_private_payment_list_withdrawal_admission(original_grant, original_secret)
+            .await
+    }
+
     async fn run_operation_erased<'a>(
         &self,
         operation: StorageOperation<'a>,
@@ -356,6 +392,16 @@ impl<T> StorageAdapter for Arc<T>
 where
     T: StorageAdapter + ?Sized,
 {
+    async fn close_private_payment_list_withdrawal_admission(
+        &self,
+        original_grant: &PrivatePaymentListWithdrawalGrant,
+        original_secret: Option<&PubkyLocalSecretKey>,
+    ) -> Result<()> {
+        (**self)
+            .close_private_payment_list_withdrawal_admission(original_grant, original_secret)
+            .await
+    }
+
     async fn run_operation_erased<'a>(
         &self,
         operation: StorageOperation<'a>,
@@ -395,6 +441,56 @@ where
             .rotate_paykit_identity_key_erased(current_key, replacement_key, f)
             .await
     }
+}
+
+pub(super) fn validate_withdrawal_admission_secret(
+    grant: &PrivatePaymentListWithdrawalGrant,
+    secret: Option<&PubkyLocalSecretKey>,
+) -> Result<()> {
+    if secret.is_some_and(|secret| secret.public_key() != grant.owner) {
+        return Err(PaykitSdkError::Identity {
+            context: "withdrawal admission secret does not match the original grant owner".into(),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn close_withdrawal_admission(
+    state: &mut StorageState,
+    grant: &PrivatePaymentListWithdrawalGrant,
+) -> Result<()> {
+    if state
+        .identity_state
+        .as_ref()
+        .and_then(|identity| identity.public_key.as_ref())
+        .is_some_and(|owner| owner != &grant.owner)
+    {
+        return Err(PaykitSdkError::Identity {
+            context: "withdrawal admission state does not match the original grant owner".into(),
+            source: None,
+        });
+    }
+    if state
+        .private_payment_list_withdrawals
+        .values()
+        .any(|record| {
+            record.owner == grant.owner
+                && record.homeserver == grant.homeserver
+                && record.grant_id == grant.grant_id
+                && record.client_id == grant.client_id
+        })
+    {
+        return Err(PaykitSdkError::Policy {
+            context: "cannot sign out before finishing this grant's private list withdrawals"
+                .into(),
+            source: None,
+        });
+    }
+    state
+        .closed_private_payment_list_withdrawal_grants
+        .insert(grant.clone());
+    crate::validate_storage_state(state)
 }
 
 /// Mutable operations available inside one storage transaction.

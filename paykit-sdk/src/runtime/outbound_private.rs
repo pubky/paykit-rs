@@ -60,9 +60,9 @@ struct PrivateSendDrainResult {
 }
 
 /// Encrypted Link restored for one outbound run.
-struct OutboundRunLink {
-    link: paykit_lib::EncryptedLink,
-    state: EncryptedLinkStateRecord,
+pub(super) struct OutboundRunLink {
+    pub(super) link: paykit_lib::EncryptedLink,
+    pub(super) state: EncryptedLinkStateRecord,
     write_slots: WriteSlotCheck,
 }
 
@@ -750,7 +750,7 @@ where
         }
     }
 
-    async fn restore_link_for_outbound_send(
+    pub(super) async fn restore_link_for_outbound_send(
         &self,
         counterparty: &PubkyPublicKey,
         lease: &PeerLinkOperationLease,

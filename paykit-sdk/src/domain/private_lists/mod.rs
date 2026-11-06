@@ -1,5 +1,8 @@
 //! Private Payment List latest-state records.
 
+mod withdrawal;
+pub use withdrawal::{PrivatePaymentListWithdrawal, PrivatePaymentListWithdrawalAcknowledgement};
+
 use std::{
     collections::{HashMap, HashSet},
     fmt,
