@@ -260,6 +260,32 @@ pub(crate) fn mark_outbound_failed(
     record
 }
 
+/// Drop a prepared send whose slot already holds another packet.
+///
+/// An event the peer already confirmed needs no new packet. Any other message
+/// is prepared again now, or after the failed-send backoff without `retry_now`.
+pub(crate) fn mark_outbound_slot_taken(
+    mut record: OutboundPrivateMessageRecord,
+    retry_now: bool,
+    now: DateTime<Utc>,
+) -> OutboundPrivateMessageRecord {
+    record.prepared_send = None;
+    if record.confirmed_at.is_some() {
+        return mark_outbound_sent(record, now);
+    }
+    if !retry_now {
+        return mark_outbound_failed(
+            record,
+            "Encrypted Link write slot already holds another packet".to_owned(),
+            now,
+        );
+    }
+    record.status = OutboundPrivateMessageStatus::Pending;
+    record.updated_at = now;
+    record.last_error = None;
+    record
+}
+
 pub(crate) fn mark_outbound_invalid(
     mut record: OutboundPrivateMessageRecord,
     error: String,

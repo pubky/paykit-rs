@@ -40,9 +40,30 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `acceptPendingAllowanceProposals` in Swift and Kotlin accept up to a limit of
   one counterparty's pending Allowance proposals in one transaction, with work
   bounded by a per-link record cap instead of the link's whole history.
+- `EncryptedLink::prepared_private_send_slot` and `PreparedPrivateSendSlot`
+  report whether the destination slot of a prepared send is free, already holds
+  that exact ciphertext, or holds another packet.
+  `EncryptedLink::skip_published_write_slots` moves the next write slot and
+  sending nonce past packets already stored on the link's write stream, and
+  `EncryptedLink::next_write_slot_path` reports the slot the next packet uses.
 
 ### Changed
 
+- Before a send run first encrypts on an Encrypted Link, the SDK moves the
+  link past write slots that already hold packets and stores the advance, so
+  it never prepares a ciphertext for a used slot. That first send is published
+  on the slot found free. Other prepared sends, including ones restored from
+  storage, check their destination slot first. A slot that already holds the
+  same ciphertext counts as sent without a second write. A slot that holds
+  another packet is never overwritten: the SDK moves the link past the stored
+  packets and prepares the message again on the next free slot. A message that
+  meets a second taken slot in the same run waits for the normal retry backoff.
+  Each send costs one extra `HEAD` request to the sender's own homeserver when
+  the next slot is free.
+- `EncryptedLink::send_private_application_message_json` and the `paykit-lib`
+  send helpers built on the same path, such as `set_private_payment_list`,
+  move the link past write slots that already hold packets before they
+  encrypt. This also costs one `HEAD` request per send.
 - A payee no longer marks a Payment Request invalid when it stores an
   otherwise-valid Acceptance after its local proposal expiry, such as an
   in-time Acceptance fetched late. Later Payment Proofs are recorded and the

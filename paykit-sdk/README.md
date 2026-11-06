@@ -588,7 +588,13 @@ does not write those paths.
 Before publication, an outbound private send stores the exact prepared
 ciphertext and advanced Encrypted Link snapshot in one transaction. A retry
 publishes that same ciphertext, including after a crash or an uncertain write,
-before later messages can advance the link. Outbound status is local checkpoint
+before later messages can advance the link. Before a send run first encrypts,
+it moves the link past write slots that already hold packets and stores the
+advanced snapshot, so the first send is prepared and published on a free slot.
+Every other publication first checks the destination slot: a slot that
+already holds the same ciphertext counts as sent,
+and a slot that holds another packet is never overwritten. The message is then
+prepared again on the next free slot. Outbound status is local checkpoint
 state; `confirmed_at` separately records the counterparty's durable receipt of
 an Event Message, not business acceptance or payment execution. The SDK retries
 unconfirmed events with the same Event ID and payload, including after relinking,

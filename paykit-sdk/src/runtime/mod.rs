@@ -61,7 +61,7 @@ use crate::{
     },
     domain::outbound_private::{
         mark_outbound_failed, mark_outbound_invalid, mark_outbound_recovery_required,
-        mark_outbound_sent, validate_queued_outbound_private_message,
+        mark_outbound_sent, mark_outbound_slot_taken, validate_queued_outbound_private_message,
         OutboundPrivateCounterpartySendReport, OutboundPrivateMessageStatus,
         OutboundPrivateSendFailure, OutboundPrivateSendReport, RecoveryMarkerPublishFailure,
         ReservationCleanupFailure,

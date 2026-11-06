@@ -4023,6 +4023,175 @@ async fn test_private_sends_survive_restart_at_checkpoint_and_publish_boundaries
 }
 
 #[tokio::test]
+async fn test_private_send_after_older_shared_state_copy_uses_next_free_slot() {
+    /// Records the destination of each prepared send a transaction stores.
+    struct PreparedSendRecorder {
+        inner: PubkySharedStateStorage,
+        destinations: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl StorageAdapter for PreparedSendRecorder {
+        async fn run_operation_erased<'a>(
+            &self,
+            operation: StorageOperation<'a>,
+        ) -> PaykitResult<Box<dyn Any + Send>> {
+            self.inner.run_operation_erased(operation).await
+        }
+
+        async fn transaction_erased<'a>(
+            &self,
+            transaction: StorageTransactionCallback<'a>,
+        ) -> PaykitResult<Box<dyn Any + Send>> {
+            let destinations = Arc::clone(&self.destinations);
+            self.inner
+                .transaction_erased(Box::new(move |tx| {
+                    let before = tx.export_storage_state();
+                    let result = transaction(tx)?;
+                    for message in tx.export_storage_state().outbound_private_messages {
+                        let Some(prepared) = message.prepared_send else {
+                            continue;
+                        };
+                        let stored_before = before.outbound_private_messages.iter().any(|old| {
+                            old.outbound_message_id == message.outbound_message_id
+                                && old.prepared_send.is_some()
+                        });
+                        if !stored_before {
+                            destinations.lock().unwrap().push(prepared.destination_path);
+                        }
+                    }
+                    Ok(result)
+                }))
+                .await
+        }
+    }
+
+    let pair = linked_homeserver_shared_pair().await;
+    let remote = pair.bitkit.access.session.storage();
+    let destinations = Arc::new(Mutex::new(Vec::new()));
+    let provider = TestnetSessionProvider::new(pair.bitkit.access.clone());
+    let sdk = PaykitSdk::new(
+        PreparedSendRecorder {
+            inner: PubkySharedStateStorage::new(provider.clone()),
+            destinations: Arc::clone(&destinations),
+        },
+        provider,
+        TestnetPaymentAdapter::default(),
+        PaykitSdkConfig::new(pair.bitkit.app_id.clone()).unwrap(),
+    );
+    let older = remote
+        .get(paykit_lib::PAYKIT_SHARED_STATE_PATH)
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let first = pair
+        .bitkit
+        .sdk
+        .propose_payment_request(pair.bob.public_key.clone(), recurring_request_terms())
+        .await
+        .unwrap();
+    let first_id = first.proposal_outbound_message_id.unwrap();
+    let report = sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(report.sent, vec![first_id]);
+    let used_slot = destinations.lock().unwrap().clone();
+    assert_eq!(used_slot.len(), 1);
+    let used_slot = used_slot[0].clone();
+    let used_packet = remote
+        .get(used_slot.as_str())
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+
+    // Write back the earlier copy of the whole state, so outbound records,
+    // receive positions and link state go back together.
+    remote
+        .put(paykit_lib::PAYKIT_SHARED_STATE_PATH, older)
+        .await
+        .unwrap();
+    let restored = pair.bitkit.storage_state().await;
+    assert!(!restored
+        .outbound_private_messages
+        .iter()
+        .any(|message| message.outbound_message_id == first_id));
+
+    let second = pair
+        .bitkit
+        .sdk
+        .propose_payment_request(pair.bob.public_key.clone(), recurring_request_terms())
+        .await
+        .unwrap();
+    let second_id = second.proposal_outbound_message_id.unwrap();
+    let report = sdk
+        .process_outbound_private_messages(pair.bob.public_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(report.attempted, vec![second_id]);
+    assert_eq!(report.sent, vec![second_id]);
+    assert!(report.failed.is_empty());
+
+    // The run moved past the used slot before it encrypted, so the only
+    // ciphertext it stored targets the next free slot.
+    let (write_path, slot) = used_slot.rsplit_once('/').unwrap();
+    let next_slot = format!("{write_path}/{}", slot.parse::<u32>().unwrap() + 1);
+    assert_eq!(
+        *destinations.lock().unwrap(),
+        vec![used_slot.clone(), next_slot.clone()]
+    );
+    let sent = pair
+        .bitkit
+        .storage_state()
+        .await
+        .outbound_private_messages
+        .into_iter()
+        .find(|message| message.outbound_message_id == second_id)
+        .unwrap();
+    assert_eq!(sent.status, OutboundPrivateMessageStatus::Sent);
+    assert_eq!(sent.attempt_count, 1);
+    assert_eq!(
+        remote
+            .get(used_slot.as_str())
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap(),
+        used_packet
+    );
+    assert!(remote.exists(next_slot.as_str()).await.unwrap());
+
+    // The peer reads both packets in order and stays linked.
+    let received = pair
+        .bob
+        .sdk
+        .receive_private_messages(pair.bitkit.public_key.clone())
+        .await
+        .unwrap();
+    assert_eq!(received.stream_item_ids.len(), 2);
+    let requests = pair
+        .bob
+        .sdk
+        .received_payment_requests_from(&pair.bitkit.public_key)
+        .await
+        .unwrap();
+    for request in [&first, &second] {
+        assert!(requests
+            .iter()
+            .any(|record| record.payment_request_id == request.payment_request_id));
+    }
+    assert_eq!(
+        pair.bob.storage.snapshot().unwrap().linked_peers[&pair.bitkit.public_key].state,
+        LinkedPeerState::Linked
+    );
+}
+
+#[tokio::test]
 async fn test_private_send_retains_lease_for_pending_reservation_cleanup() {
     let pair = linked_homeserver_shared_pair().await;
     let obsolete = pair
