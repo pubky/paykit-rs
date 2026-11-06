@@ -50,12 +50,47 @@ enum PrivateSendStep {
     Skipped(Option<u64>),
     Sent { has_more: bool },
     Complete,
+    SlotTaken(Box<OutboundPrivateMessageRecord>),
     Failed(Box<OutboundPrivateMessageRecord>, paykit_lib::PaykitError),
 }
 
 struct PrivateSendDrainResult {
     report: OutboundPrivateSendReport,
     lease_released: bool,
+}
+
+/// Encrypted Link restored for one outbound run.
+pub(super) struct OutboundRunLink {
+    pub(super) link: paykit_lib::EncryptedLink,
+    pub(super) state: EncryptedLinkStateRecord,
+    write_slots: WriteSlotCheck,
+}
+
+/// Write slot skip before the first fresh preparation of one outbound run.
+pub(super) enum WriteSlotCheck {
+    /// Skip before the next preparation.
+    Due,
+    /// A prepared send restored from storage is checked or republished first.
+    /// The skip is due once it is sent and more messages are ready.
+    AfterStoredSend,
+    /// The skip found this next slot free. No prepared send was stored, so the
+    /// next send to reach publication was prepared in this run.
+    Free(String),
+    /// Used this run. Later prepared sends check their own slot.
+    Checked,
+}
+
+impl WriteSlotCheck {
+    /// Whether the send at `destination_path` targets the slot the check found
+    /// free. Only the first send published after the check can use it.
+    pub(super) fn take_free_slot(&mut self, destination_path: &str) -> bool {
+        let Self::Free(free) = self else {
+            return false;
+        };
+        let known_free = free == destination_path;
+        *self = Self::Checked;
+        known_free
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -373,10 +408,10 @@ where
         mut report: OutboundPrivateSendReport,
         lease: PeerLinkOperationLease,
     ) -> Result<PrivateSendDrainResult> {
-        let (session_access, mut link, mut link_state, retry_times, mut outcome) = self
+        let (session_access, mut run, retry_times, mut outcome) = self
             .with_storage_operation(Box::pin(async {
                 let (session_access, _) = self.private_link_session_access().await?;
-                let (mut link, mut state) = self
+                let mut run = self
                     .restore_link_for_outbound_send(&counterparty, &lease, &session_access)
                     .await?;
                 // Freeze retry eligibility so each event is attempted at most once per run.
@@ -388,16 +423,17 @@ where
                     .process_private_send_step(
                         &lease,
                         &session_access,
-                        &mut link,
-                        &mut state,
+                        &mut run,
                         &mut report,
                         retry_times,
                     )
                     .await?;
-                Ok((session_access, link, state, retry_times, outcome))
+                Ok((session_access, run, retry_times, outcome))
             }))
             .await?;
 
+        // Requeue at most once per run so a misreporting homeserver cannot spin the drain.
+        let mut requeued_after_taken_slot = false;
         loop {
             let (step, cancellations) = outcome;
             // Wallet callbacks run without the identity-wide lock.
@@ -433,8 +469,56 @@ where
                     .await?;
                     break;
                 }
+                PrivateSendStep::SlotTaken(sending) => {
+                    let skipped = match run.link.skip_published_write_slots().await {
+                        Ok(skipped) => skipped,
+                        Err(error) => {
+                            // A retryable error keeps the prepared send, so the
+                            // next run checks the same slot before publishing.
+                            self.record_private_send_error(
+                                &counterparty,
+                                *sending,
+                                error,
+                                &lease,
+                                &session_access,
+                                &mut report,
+                            )
+                            .await?;
+                            break;
+                        }
+                    };
+                    let requeued = self
+                        .requeue_private_send_after_taken_slot(
+                            &run.link,
+                            &mut run.state,
+                            *sending,
+                            skipped,
+                            &lease,
+                            !requeued_after_taken_slot,
+                        )
+                        .await?;
+                    if let Some(error) = requeued.last_error {
+                        report.failed.push(OutboundPrivateSendFailure {
+                            outbound_message_id: requeued.outbound_message_id,
+                            error,
+                        });
+                        break;
+                    }
+                    // The message prepared again checks its slot before publication.
+                    run.write_slots = WriteSlotCheck::Checked;
+                    if requeued.status == OutboundPrivateMessageStatus::Sent {
+                        report.sent.push(requeued.outbound_message_id);
+                    } else {
+                        requeued_after_taken_slot = true;
+                    }
+                }
                 PrivateSendStep::Sent { has_more: false } => break,
-                PrivateSendStep::Sent { has_more: true } => {}
+                PrivateSendStep::Sent { has_more: true } => {
+                    // The stored prepared send is sent; skip before the next preparation.
+                    if matches!(run.write_slots, WriteSlotCheck::AfterStoredSend) {
+                        run.write_slots = WriteSlotCheck::Due;
+                    }
+                }
                 PrivateSendStep::Complete => {
                     return Ok(PrivateSendDrainResult {
                         report,
@@ -448,8 +532,7 @@ where
                     Box::pin(self.process_private_send_step(
                         &lease,
                         &session_access,
-                        &mut link,
-                        &mut link_state,
+                        &mut run,
                         &mut report,
                         retry_times,
                     )),
@@ -467,8 +550,7 @@ where
         &self,
         lease: &PeerLinkOperationLease,
         session_access: &PubkySessionAccess,
-        link: &mut paykit_lib::EncryptedLink,
-        link_state: &mut EncryptedLinkStateRecord,
+        run: &mut OutboundRunLink,
         report: &mut OutboundPrivateSendReport,
         (started_at, stale_before, failed_retry_after): (
             DateTime<Utc>,
@@ -480,6 +562,8 @@ where
         Vec<PaymentEndpointReservationCancellationRecord>,
     )> {
         let counterparty = &lease.counterparty;
+        self.skip_used_write_slots_before_preparation(lease, session_access, run)
+            .await?;
         let now = self.clock.now().max(started_at);
         let (preparation, mut cancellations) = self
             .storage
@@ -493,7 +577,12 @@ where
                 );
                 let preparation = match sending {
                     Some(sending) => self.prepare_claimed_private_message(
-                        tx, lease, link, link_state, report, sending,
+                        tx,
+                        lease,
+                        &mut run.link,
+                        &mut run.state,
+                        report,
+                        sending,
                     )?,
                     None => PrivateSendPreparation::Idle,
                 };
@@ -508,11 +597,11 @@ where
             PrivateSendPreparation::Ready(sending, prepared) => {
                 // A failed or uncertain commit must never advance or publish Noise.
                 if let Some(prepared) = prepared {
-                    link.acknowledge_persisted_private_send(*prepared)?;
+                    run.link.acknowledge_persisted_private_send(*prepared)?;
                 }
                 self.send_prepared_private_message(
                     lease,
-                    link,
+                    run,
                     report,
                     *sending,
                     session_access,
@@ -551,7 +640,10 @@ where
         report: &mut OutboundPrivateSendReport,
         sending: OutboundPrivateMessageRecord,
     ) -> Result<PrivateSendPreparation> {
-        report.attempted.push(sending.outbound_message_id);
+        // A message requeued after a taken slot is prepared again in the same run.
+        if !report.attempted.contains(&sending.outbound_message_id) {
+            report.attempted.push(sending.outbound_message_id);
+        }
 
         let prepared_message_id = sending
             .prepared_send
@@ -598,7 +690,7 @@ where
     async fn send_prepared_private_message(
         &self,
         lease: &PeerLinkOperationLease,
-        link: &paykit_lib::EncryptedLink,
+        run: &mut OutboundRunLink,
         report: &mut OutboundPrivateSendReport,
         sending: OutboundPrivateMessageRecord,
         session_access: &PubkySessionAccess,
@@ -620,7 +712,30 @@ where
             .prepared_send
             .as_ref()
             .expect("prepared send must be durable before publication");
-        match link
+        // Link state restored from an older copy can point at a slot that a
+        // later send already used. Never write a second packet into it. A
+        // send prepared on the slot this run's skip found free needs no
+        // second check.
+        if !run.write_slots.take_free_slot(&prepared.destination_path) {
+            match run
+                .link
+                .prepared_private_send_slot(&prepared.destination_path, &prepared.ciphertext)
+                .await
+            {
+                Ok(paykit_lib::PreparedPrivateSendSlot::Free) => {}
+                Ok(paykit_lib::PreparedPrivateSendSlot::Published) => {
+                    return self
+                        .record_private_send_success(sending, lease, report, retry_thresholds)
+                        .await;
+                }
+                Ok(paykit_lib::PreparedPrivateSendSlot::Taken) => {
+                    return Ok(PrivateSendStep::SlotTaken(Box::new(sending)));
+                }
+                Err(error) => return Ok(PrivateSendStep::Failed(Box::new(sending), error)),
+            }
+        }
+        match run
+            .link
             .publish_prepared_private_application_message(
                 &prepared.destination_path,
                 &prepared.ciphertext,
@@ -640,7 +755,7 @@ where
         counterparty: &PubkyPublicKey,
         lease: &PeerLinkOperationLease,
         session_access: &PubkySessionAccess,
-    ) -> Result<(paykit_lib::EncryptedLink, EncryptedLinkStateRecord)> {
+    ) -> Result<OutboundRunLink> {
         let authorization = self
             .counterparty_noise_key_authorization(counterparty)
             .await?;
@@ -652,13 +767,16 @@ where
             &remote_noise_public_key,
         )
         .await?;
-        let (peer, stored_link_state) = self
+        let (peer, stored_link_state, stored_prepared_send) = self
             .storage
             .transaction(|tx| {
                 crate::storage::require_peer_link_operation_lease(tx, lease)?;
                 Ok((
                     tx.linked_peer(counterparty),
                     tx.encrypted_link_state(counterparty),
+                    tx.outbound_private_messages(counterparty)
+                        .iter()
+                        .any(|message| message.prepared_send.is_some()),
                 ))
             })
             .await?;
@@ -751,7 +869,15 @@ where
                 return Err(err);
             }
         };
-        Ok((link, stored_link_state))
+        Ok(OutboundRunLink {
+            link,
+            state: stored_link_state,
+            write_slots: if stored_prepared_send {
+                WriteSlotCheck::AfterStoredSend
+            } else {
+                WriteSlotCheck::Due
+            },
+        })
     }
 
     async fn mark_outbound_link_recovery_required(
@@ -776,6 +902,72 @@ where
                 remote_noise_public_key,
             )
             .await;
+        Ok(())
+    }
+
+    /// Move restored link state past write slots that already hold packets
+    /// before this run first encrypts on it.
+    ///
+    /// Link state restored from an older copy can point at a slot that a
+    /// later send already used. Skipping first means no ciphertext is ever
+    /// prepared for such a slot. Runs once per run, when a step is about to
+    /// claim: at the start, or after a prepared send restored from storage is
+    /// sent and more messages are ready. A run starts only with a message
+    /// ready to claim, so idle runs make no request. Any advance is persisted
+    /// under the peer link operation lease before preparation. A failed skip
+    /// returns its error before any message is claimed.
+    async fn skip_used_write_slots_before_preparation(
+        &self,
+        lease: &PeerLinkOperationLease,
+        session_access: &PubkySessionAccess,
+        run: &mut OutboundRunLink,
+    ) -> Result<()> {
+        if !matches!(run.write_slots, WriteSlotCheck::Due) {
+            return Ok(());
+        }
+        let counterparty = &lease.counterparty;
+        // Boxed so the drain future does not embed the link restore.
+        let skipped = match Box::pin(run.link.skip_published_write_slots()).await {
+            Ok(skipped) => skipped,
+            Err(error) => {
+                if private_send_error_requires_recovery(&error) {
+                    // A link that cannot move past its used slots cannot send.
+                    let remote_noise_public_key =
+                        run.link.snapshot()?.remote_noise_public_key().clone();
+                    self.mark_outbound_link_recovery_required(
+                        counterparty,
+                        lease,
+                        session_access,
+                        &remote_noise_public_key,
+                    )
+                    .await?;
+                }
+                return Err(error.into());
+            }
+        };
+        let free_slot = run.link.next_write_slot_path()?;
+        if skipped > 0 {
+            let mut advanced_state = run.state.clone();
+            advanced_state.link_snapshot = Some(run.link.serialize()?);
+            advanced_state.generation = advanced_state.generation.saturating_add(1);
+            advanced_state.checkpointed_at = self.clock.now();
+            self.retry_storage_transaction(|| {
+                let advanced_state = advanced_state.clone();
+                let lease = lease.clone();
+                move |tx| {
+                    crate::storage::require_peer_link_operation_lease(tx, &lease)?;
+                    tx.save_encrypted_link_state(advanced_state);
+                    Ok(())
+                }
+            })
+            .await?;
+            run.state = advanced_state;
+            tracing::warn!(
+                skipped,
+                "restored Encrypted Link state skipped write slots that already hold packets"
+            );
+        }
+        run.write_slots = WriteSlotCheck::Free(free_slot);
         Ok(())
     }
 
@@ -1014,6 +1206,51 @@ where
                 .await,
         );
         Ok(())
+    }
+
+    /// Queue a message whose prepared slot holds another packet to be prepared
+    /// again, persisting the link after it skipped `skipped` stored slots.
+    ///
+    /// The unpublished ciphertext is dropped: its slot and sending nonce belong
+    /// to the packet already stored there, which the peer reads first.
+    async fn requeue_private_send_after_taken_slot(
+        &self,
+        link: &paykit_lib::EncryptedLink,
+        link_state: &mut EncryptedLinkStateRecord,
+        sending: OutboundPrivateMessageRecord,
+        skipped: u32,
+        lease: &PeerLinkOperationLease,
+        retry_now: bool,
+    ) -> Result<OutboundPrivateMessageRecord> {
+        let now = self.clock.now();
+        let mut advanced_state = link_state.clone();
+        if skipped > 0 {
+            advanced_state.link_snapshot = Some(link.serialize()?);
+            advanced_state.generation = advanced_state.generation.saturating_add(1);
+            advanced_state.checkpointed_at = now;
+        }
+        let requeued = mark_outbound_slot_taken(sending, retry_now, now);
+        self.retry_storage_transaction(|| {
+            let requeued = requeued.clone();
+            let advanced_state = advanced_state.clone();
+            let lease = lease.clone();
+            move |tx| {
+                crate::storage::require_peer_link_operation_lease(tx, &lease)?;
+                tx.save_outbound_private_message(requeued)?;
+                if skipped > 0 {
+                    tx.save_encrypted_link_state(advanced_state);
+                }
+                Ok(())
+            }
+        })
+        .await?;
+        *link_state = advanced_state;
+        tracing::warn!(
+            outbound_message_id = requeued.outbound_message_id,
+            skipped,
+            "prepared Encrypted Link write slot already holds another packet"
+        );
+        Ok(requeued)
     }
 
     async fn save_outbound_with_lease(

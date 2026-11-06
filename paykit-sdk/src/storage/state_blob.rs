@@ -9,11 +9,12 @@ use std::collections::{HashMap, HashSet};
 use crate::{PaykitSdkError, Result};
 
 /// Current encoded SDK state-blob version.
-pub const SDK_STATE_BLOB_VERSION: u32 = 5;
+pub const SDK_STATE_BLOB_VERSION: u32 = 6;
 const SDK_STATE_BLOB_VERSION_V1: u32 = 1;
 const SDK_STATE_BLOB_VERSION_V2: u32 = 2;
 const SDK_STATE_BLOB_VERSION_V3: u32 = 3;
 const SDK_STATE_BLOB_VERSION_V4: u32 = 4;
+const SDK_STATE_BLOB_VERSION_V5: u32 = 5;
 
 #[derive(Serialize, Deserialize)]
 struct StorageStateEnvelope<T> {
@@ -110,6 +111,26 @@ impl From<StorageStateV4> for StorageState {
             private_intake_admitted_homeservers: state.private_intake_admitted_homeservers,
             link_record_index: state.link_record_index,
             private_payment_list_withdrawals: HashMap::new(),
+            closed_private_payment_list_withdrawal_grants: HashSet::new(),
+        }
+    }
+}
+
+// Postcard structs have no length prefix: the frozen v4 fields followed by
+// the withdrawal map are exactly the v5 positional wire layout. Do not add
+// live fields to either prefix; old bytes must be consumed in full first.
+#[derive(Deserialize)]
+struct StorageStateV5 {
+    previous: StorageStateV4,
+    #[serde(deserialize_with = "super::records::deserialize_withdrawals")]
+    private_payment_list_withdrawals: HashMap<PubkyPublicKey, PrivatePaymentListWithdrawalRecord>,
+}
+
+impl From<StorageStateV5> for StorageState {
+    fn from(state: StorageStateV5) -> Self {
+        Self {
+            private_payment_list_withdrawals: state.private_payment_list_withdrawals,
+            ..state.previous.into()
         }
     }
 }
@@ -208,6 +229,7 @@ impl From<StorageStateV1> for StorageState {
             private_intake_cursors: std::collections::HashMap::new(),
             private_intake_peers: std::collections::HashMap::new(),
             private_payment_list_withdrawals: Default::default(),
+            closed_private_payment_list_withdrawal_grants: HashSet::new(),
             link_record_index: Default::default(),
         }
     }
@@ -291,9 +313,17 @@ pub fn decode_storage_state_blob(bytes: &[u8]) -> Result<StorageState> {
                 })?;
             (state.into(), remainder)
         }
+        SDK_STATE_BLOB_VERSION_V5 => {
+            let (state, remainder): (StorageStateV5, _) = postcard::take_from_bytes(state_bytes)
+                .map_err(|err| PaykitSdkError::Storage {
+                    context: "decode SDK state blob version 5".into(),
+                    source: Some(err.into()),
+                })?;
+            (state.into(), remainder)
+        }
         SDK_STATE_BLOB_VERSION => {
             postcard::take_from_bytes(state_bytes).map_err(|err| PaykitSdkError::Storage {
-                context: "decode SDK state blob version 5".into(),
+                context: "decode SDK state blob version 6".into(),
                 source: Some(err.into()),
             })?
         }
@@ -424,53 +454,75 @@ mod tests {
         assert_eq!(decode_storage_state_blob(&encoded).unwrap(), state);
     }
 
-    #[test]
-    fn test_storage_state_blob_v4_cannot_create_withdrawal_authority() {
-        let mut encoded = encode_storage_state_blob(&StorageState::default()).unwrap();
-        encoded[0] = SDK_STATE_BLOB_VERSION_V4 as u8;
-        assert_eq!(encoded.pop(), Some(0));
-        let state = decode_storage_state_blob(&encoded).unwrap();
-        assert!(state.private_payment_list_withdrawals.is_empty());
-        encoded.push(0);
-        assert!(decode_storage_state_blob(&encoded).is_err());
+    // These populated blobs were written by the original encoders: v2 at
+    // 59b66f92, v3 at 57667af7 and v4 at 310a0d58. All three share this
+    // identity, cursor and set of nonzero counters.
+    fn historical_fixture_state() -> (PubkyPublicKey, StorageState) {
+        let owner =
+            PubkyPublicKey::new("7jfgaa9nutjyixzikb7tgmsf9gkwq7iqz498zr1nd5ig1fng4esy").unwrap();
+        let cursor = PrivateIntakeCursorRecord {
+            subscribed_user: owner.clone(),
+            homeserver: "https://fixture.invalid".into(),
+            event_id: 1025,
+        };
+        let state = StorageState {
+            identity_state: Some(IdentityState {
+                public_key: Some(owner.clone()),
+                initialized_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            }),
+            paykit_noise_public_key: Some(
+                PubkyPublicKey::new("9wm1eqn4wddis385xdgsym7b5ge9549zpcjhmdszymicopxj6acy")
+                    .unwrap(),
+            ),
+            private_intake_cursors: HashMap::from([(owner.clone(), cursor)]),
+            next_peer_link_operation_lease_id: 131,
+            next_outbound_private_message_id: 257,
+            next_private_stream_item_id: 513,
+            ..StorageState::default()
+        };
+        (owner, state)
     }
 
     #[test]
     fn test_storage_state_blob_decodes_v2_before_supervisor_lease_fields() {
-        let mut encoded = encode_storage_state_blob(&StorageState::default()).unwrap();
-        encoded[0] = SDK_STATE_BLOB_VERSION_V2 as u8;
-        for _ in 0..5 {
-            assert_eq!(encoded.pop(), Some(0));
-        }
-
-        let decoded = decode_storage_state_blob(&encoded).unwrap();
-        assert!(decoded.private_intake_supervisor_lease.is_none());
-        assert_eq!(decoded.next_private_intake_supervisor_lease_id, 0);
+        let encoded = include_bytes!("tests/fixtures/sdk-state-v2.postcard");
+        let (_, expected) = historical_fixture_state();
+        let decoded = decode_storage_state_blob(encoded).unwrap();
+        assert_eq!(decoded, expected);
+        assert!(decoded.private_payment_list_withdrawals.is_empty());
     }
 
     #[test]
     fn test_storage_state_blob_decodes_v3_before_capacity_admission_fields() {
-        let now = chrono::Utc::now();
-        let state = StorageState {
-            private_intake_supervisor_lease: Some(crate::storage::PrivateIntakeSupervisorLease {
-                lease_id: 7,
-                claimed_at: now,
-                expires_at: now + chrono::Duration::minutes(1),
-            }),
-            next_private_intake_supervisor_lease_id: 8,
-            ..StorageState::default()
-        };
-        let mut encoded = encode_storage_state_blob(&state).unwrap();
-        encoded[0] = SDK_STATE_BLOB_VERSION_V3 as u8;
-        assert_eq!(encoded.pop(), Some(0));
-        assert_eq!(encoded.pop(), Some(0));
-        assert_eq!(encoded.pop(), Some(0));
+        let encoded = include_bytes!("tests/fixtures/sdk-state-v3.postcard");
+        let (_, mut expected) = historical_fixture_state();
+        // Discard the process-local lease (id 9), preserving the next lease id.
+        expected.next_private_intake_supervisor_lease_id = 10;
+        let decoded = decode_storage_state_blob(encoded).unwrap();
+        assert_eq!(decoded, expected);
+        assert!(decoded.private_payment_list_withdrawals.is_empty());
+    }
 
-        let decoded = decode_storage_state_blob(&encoded).unwrap();
-        assert!(decoded.private_intake_supervisor_lease.is_none());
-        assert_eq!(decoded.next_private_intake_supervisor_lease_id, 8);
-        assert!(decoded.private_intake_stream_capacity.is_none());
-        assert!(decoded.private_intake_admitted_homeservers.is_empty());
+    #[test]
+    fn test_storage_state_blob_v4_cannot_create_withdrawal_authority() {
+        let encoded = include_bytes!("tests/fixtures/sdk-state-v4.postcard");
+        let (owner, mut expected) = historical_fixture_state();
+        expected.private_intake_supervisor_lease = Some(PrivateIntakeSupervisorLease {
+            lease_id: 9,
+            claimed_at: chrono::DateTime::from_timestamp(1_700_000_001, 0).unwrap(),
+            expires_at: chrono::DateTime::from_timestamp(1_700_000_061, 0).unwrap(),
+        });
+        expected.next_private_intake_supervisor_lease_id = 10;
+        expected.private_intake_stream_capacity = Some(2);
+        expected
+            .private_intake_admitted_homeservers
+            .insert(owner, "https://fixture.invalid".into());
+        let decoded = decode_storage_state_blob(encoded).unwrap();
+        assert_eq!(decoded, expected);
+        assert!(decoded.private_payment_list_withdrawals.is_empty());
+        let mut trailing = encoded.to_vec();
+        trailing.push(0);
+        assert!(decode_storage_state_blob(&trailing).is_err());
     }
 
     #[test]
@@ -478,7 +530,7 @@ mod tests {
         let encoded = include_bytes!("tests/fixtures/sdk-state-v1.postcard");
         let state = decode_storage_state_blob(encoded).unwrap();
 
-        assert_eq!(SDK_STATE_BLOB_VERSION, 5);
+        assert_eq!(SDK_STATE_BLOB_VERSION, 6);
         assert_eq!(
             state.identity_state.unwrap().public_key.unwrap().as_str(),
             "7jfgaa9nutjyixzikb7tgmsf9gkwq7iqz498zr1nd5ig1fng4esy"
@@ -490,7 +542,7 @@ mod tests {
 
         let current = encode_storage_state_blob(&StorageState::default()).unwrap();
         let (version, _): (u32, _) = postcard::take_from_bytes(&current).unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
     }
 
     #[test]

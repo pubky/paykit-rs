@@ -3,7 +3,9 @@
 //! The packet is prepared before blocking. Retained ciphertext never restores
 //! a Noise session and cannot become general send or receive authority.
 use super::*;
-use crate::storage::{PrivatePaymentListWithdrawalRecord, ValidatedStorageState};
+use crate::storage::{
+    PrivatePaymentListWithdrawalGrant, PrivatePaymentListWithdrawalRecord, ValidatedStorageState,
+};
 use crate::{PrivatePaymentListWithdrawal, PrivatePaymentListWithdrawalAcknowledgement};
 
 fn refused() -> PaykitSdkError {
@@ -40,6 +42,15 @@ impl WithdrawalGrant {
             client_id: info.client_id.to_string(),
             noise_public_key: crate::storage::paykit_noise_public_key(&key),
         })
+    }
+
+    fn original_grant(&self) -> PrivatePaymentListWithdrawalGrant {
+        PrivatePaymentListWithdrawalGrant {
+            owner: self.owner.clone(),
+            homeserver: self.homeserver.clone(),
+            grant_id: self.grant_id.clone(),
+            client_id: self.client_id.clone(),
+        }
     }
 
     fn matches(&self, record: &PrivatePaymentListWithdrawalRecord) -> bool {
@@ -115,7 +126,7 @@ where
         app_lease: &PaykitAppOperationLease,
         lease: &PeerLinkOperationLease,
     ) -> Result<PrivatePaymentListWithdrawal> {
-        let retained = self
+        let (retained, reservation) = self
             .storage
             .transaction(|tx| {
                 self.require_withdrawal_leases(tx, binding, access, app_lease, lease)?;
@@ -127,24 +138,42 @@ where
                         binding,
                         record.outbound_message_id,
                     )?;
-                    return Ok(Some(withdrawal_handle(record)?));
+                    return Ok((Some(withdrawal_handle(record)?), None));
                 }
-                Ok(None)
+                Ok((
+                    None,
+                    reserved_empty_withdrawal(tx, peer, &self.config.app_id)?,
+                ))
             })
             .await?;
         if let Some(id) = retained {
             return Ok(id);
         }
-        let (mut link, original_state) = self
+        let mut run = self
             .restore_link_for_outbound_send(peer, lease, access)
             .await?;
+        if let Some(message) = &reservation {
+            let packet = message.prepared_send.as_ref().ok_or_else(refused)?;
+            if run
+                .link
+                .prepared_private_send_slot(&packet.destination_path, &packet.ciphertext)
+                .await?
+                == paykit_lib::PreparedPrivateSendSlot::Taken
+            {
+                return Err(refused());
+            }
+        } else {
+            // A restored cursor may point at an already published packet. Advance
+            // only this in-memory link before preparing the first fresh ciphertext.
+            run.link.skip_published_write_slots().await?;
+        }
         if WithdrawalGrant::capture(access).await? != *binding {
             return Err(refused());
         }
         self.storage
             .transaction(|tx| {
                 self.require_withdrawal_leases(tx, binding, access, app_lease, lease)?;
-                if tx.encrypted_link_state(peer).as_ref() != Some(&original_state)
+                if tx.encrypted_link_state(peer).as_ref() != Some(&run.state)
                     || tx
                         .linked_peer(peer)
                         .is_none_or(|p| p.state != LinkedPeerState::Linked)
@@ -156,40 +185,21 @@ where
                     return Err(refused());
                 }
                 let now = self.clock.now();
-                let messages = tx.outbound_private_messages(peer);
-                let reserved = messages
-                    .iter()
-                    .filter(|m| m.prepared_send.is_some())
-                    .collect::<Vec<_>>();
-                if reserved.len() > 1 {
+                let current = reserved_empty_withdrawal(tx, peer, &self.config.app_id)?;
+                if current != reservation {
                     return Err(refused());
                 }
-                let (message, prepared) = if let Some(message) = reserved.first() {
-                    require_empty_message(message, &self.config.app_id)?;
-                    if messages.iter().any(|other| {
-                        other.app_id == self.config.app_id
-                            && other.kind == PrivateMessageKind::PrivatePaymentList.as_str()
-                            && other.outbound_message_id > message.outbound_message_id
-                    }) {
-                        return Err(refused());
-                    }
+                let (message, prepared) = if let Some(message) = current {
                     let prepared = message.prepared_send.clone().ok_or_else(refused)?;
-                    link.validate_prepared_private_application_message(
-                        &prepared.destination_path,
-                        &prepared.ciphertext,
-                    )?;
-                    ((*message).clone(), prepared)
+                    (message, prepared)
                 } else {
-                    // No allocated slot may be skipped. This fresh packet is never
-                    // published or acknowledged to the live Noise object before the
-                    // packet and the irreversible local block commit together.
                     let raw = paykit_lib::serialize_private_payment_list_json(
                         &paykit_lib::PrivatePaymentList::new(
                             self.config.app_id.clone(),
                             HashMap::new(),
                         ),
                     )?;
-                    let packet = link.prepare_private_application_message_json(&raw)?;
+                    let packet = run.link.prepare_private_application_message_json(&raw)?;
                     let message = tx.insert_outbound_private_message(
                         crate::storage::NewOutboundPrivateMessage::new(
                             peer.clone(),
@@ -242,8 +252,8 @@ where
 
     /// Explicitly retry only the retained original empty-list packet.
     ///
-    /// This performs one logical Pubky PUT, with the configured client's transport
-    /// policy, and then commits a bound receipt. It never encrypts, drains queued
+    /// This checks the original slot under a Pubky write lock, publishes once if it
+    /// is empty, and requires an exact byte readback before recording a receipt. It never encrypts, drains queued
     /// work, restores a link, or unblocks the peer. Reconfirm uncertain outcomes
     /// before calling again. A receipt means publication, not counterparty receipt
     /// or completed wallet cleanup. Same-original-grant bearer refresh is allowed;
@@ -302,49 +312,10 @@ where
                             })
                             .await?;
                         if record.confirmed_at.is_none() {
-                            if WithdrawalGrant::capture(&access).await? != binding {
-                                return Err(refused());
-                            }
-                            // Session inspection above awaits. Recheck the durable
-                            // admission after it; neither an earlier lease nor an
-                            // unchanged grant authorizes a stale queued request.
-                            self.storage
-                                .transaction(|tx| {
-                                    self.require_withdrawal_leases(
-                                        tx, &binding, &access, &app_lease, &lease,
-                                    )?;
-                                    let state = tx.export_storage_state();
-                                    let current = state
-                                        .private_payment_list_withdrawals
-                                        .get(&counterparty)
-                                        .ok_or_else(refused)?;
-                                    if current != &record {
-                                        return Err(refused());
-                                    }
-                                    self.require_retained_withdrawal(
-                                        &state,
-                                        current,
-                                        &binding,
-                                        original_message_id,
-                                    )
-                                })
-                                .await?;
-                            // Only SDK-created, validated immutable packet bytes reach
-                            // this write. No caller payload or destination is accepted.
-                            access
-                                .session
-                                .storage()
-                                .put(
-                                    &record.prepared.destination_path,
-                                    record.prepared.ciphertext.clone(),
-                                )
-                                .await
-                                .map_err(|_| PaykitSdkError::Policy {
-                                    context:
-                                        "private list withdrawal publication outcome is unknown"
-                                            .into(),
-                                    source: None,
-                                })?;
+                            self.publish_retained_withdrawal(
+                                &record, &binding, &access, &app_lease, &lease,
+                            )
+                            .await?;
                         }
                         if WithdrawalGrant::capture(&access).await? != binding {
                             return Err(refused());
@@ -468,6 +439,95 @@ where
         .await
     }
 
+    pub(super) async fn close_grant_withdrawal_admission(
+        &self,
+        access: &PubkySessionAccess,
+    ) -> Result<()> {
+        let Some(grant) = access.session.as_grant() else {
+            return Ok(());
+        };
+        let info = grant.session_info().await;
+        let owner = access.public_key()?;
+        let homeserver = PubkyPublicKey::from_public_key(&info.homeserver);
+        let closed = PrivatePaymentListWithdrawalGrant {
+            owner,
+            homeserver,
+            grant_id: info.grant_id.to_string(),
+            client_id: info.client_id.to_string(),
+        };
+        self.storage
+            .close_private_payment_list_withdrawal_admission(
+                &closed,
+                access.local_secret_key.as_ref(),
+            )
+            .await
+    }
+
+    async fn publish_retained_withdrawal(
+        &self,
+        record: &PrivatePaymentListWithdrawalRecord,
+        binding: &WithdrawalGrant,
+        access: &PubkySessionAccess,
+        app_lease: &PaykitAppOperationLease,
+        lease: &PeerLinkOperationLease,
+    ) -> Result<()> {
+        use paykit_lib::PreparedPrivateSendSlot;
+        let check_admission = || async {
+            if WithdrawalGrant::capture(access).await? != *binding {
+                return Err(refused());
+            }
+            self.storage
+                .transaction(|tx| {
+                    self.require_withdrawal_leases(tx, binding, access, app_lease, lease)?;
+                    let state = tx.export_storage_state();
+                    if state
+                        .private_payment_list_withdrawals
+                        .get(&record.counterparty)
+                        != Some(record)
+                    {
+                        return Err(refused());
+                    }
+                    self.require_retained_withdrawal(
+                        &state,
+                        record,
+                        binding,
+                        record.outbound_message_id,
+                    )
+                })
+                .await
+        };
+        let path = &record.prepared.destination_path;
+        let bytes = &record.prepared.ciphertext;
+        let session = &access.session;
+        check_admission().await?;
+        paykit_lib::with_write_lock(session, path, |lock| async move {
+            let slot = PreparedPrivateSendSlot::read(session, path, bytes).await?;
+            match slot {
+                PreparedPrivateSendSlot::Taken => return Err(refused()),
+                PreparedPrivateSendSlot::Published => return Ok(()),
+                PreparedPrivateSendSlot::Free => {}
+            }
+            // Lock acquisition and the slot read can outlive a storage lease.
+            // Keep this future inline in the original guarded storage operation.
+            check_admission().await?;
+            session
+                .storage()
+                .put_locked(&lock, bytes.clone())
+                .await
+                .map_err(|_| PaykitSdkError::Policy {
+                    context: "private list withdrawal publication outcome is unknown".into(),
+                    source: None,
+                })?;
+            if PreparedPrivateSendSlot::read(session, path, bytes).await?
+                != PreparedPrivateSendSlot::Published
+            {
+                return Err(refused());
+            }
+            Ok(())
+        })
+        .await
+    }
+
     fn require_withdrawal_leases(
         &self,
         tx: &mut dyn StorageTransaction,
@@ -483,6 +543,10 @@ where
             || tx.paykit_app_is_retired(&self.config.app_id)
             || initialized_identity_in_transaction(tx, "private list withdrawal")? != binding.owner
             || tx.paykit_noise_public_key().as_ref() != Some(&binding.noise_public_key)
+            || tx
+                .export_storage_state()
+                .closed_private_payment_list_withdrawal_grants
+                .contains(&binding.original_grant())
         {
             return Err(refused());
         }
@@ -517,6 +581,29 @@ where
         }
         crate::validate_storage_state(state)
     }
+}
+
+fn reserved_empty_withdrawal(
+    tx: &mut dyn StorageTransaction,
+    peer: &PubkyPublicKey,
+    app: &paykit_lib::PaykitAppId,
+) -> Result<Option<OutboundPrivateMessageRecord>> {
+    let messages = tx.outbound_private_messages(peer);
+    let mut reserved = messages.iter().filter(|m| m.prepared_send.is_some());
+    let Some(message) = reserved.next() else {
+        return Ok(None);
+    };
+    require_empty_message(message, app)?;
+    if reserved.next().is_some()
+        || messages.iter().any(|other| {
+            &other.app_id == app
+                && other.kind == PrivateMessageKind::PrivatePaymentList.as_str()
+                && other.outbound_message_id > message.outbound_message_id
+        })
+    {
+        return Err(refused());
+    }
+    Ok(Some(message.clone()))
 }
 
 fn require_empty_message(

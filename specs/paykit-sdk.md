@@ -509,6 +509,17 @@ complete. Any previously shared Private Payment Lists must be cleared first.
 Unanswered identity-addressed requests are not owned by an app and remain
 available to other apps.
 
+Before revocation, sign-out atomically closes withdrawal admission for the
+captured owner, homeserver, grant and client, refusing every unfinished journal
+for that tuple, including a confirmed receipt awaiting completion. Pubky shared
+storage can authenticate the current encrypted state with a matching local
+Pubky identity secret solely for this denial operation after key rotation. It
+preserves the authenticated key generation and all other state; it does not
+upgrade the provider key or ordinary storage access. A distinct same-owner,
+same-homeserver storage authorizer is supported without adopting its grant.
+An obsolete delegated key without a matching root, unreadable state or missing
+initialized backing cannot establish journal absence and must refuse sign-out.
+
 `load_public_storage` lets contact resolution fetch public Payment Endpoints
 without requiring authenticated session access. Implementations can reuse the
 Pubky client from `PubkySessionAccess` when they have one, or provide a separate
@@ -1470,10 +1481,21 @@ without retaining a usable Noise session. The returned
 grant, client, signer, block generation and packet. Persist the complete handle
 with the original cleanup operation. An occupied nonempty or Event Message
 slot, a newer competing list, or already-lost link state refuses this operation.
-Ordinary block APIs do not create withdrawal authority.
+Ordinary block APIs do not create withdrawal authority. Repeating a block,
+including when removing a saved contact, keeps a retained withdrawal on its
+original blocked generation. An intervening unblock still invalidates it.
 
 After fresh confirmation, `retry_private_payment_list_withdrawal` can publish
-only those original packet bytes. Same-original-grant bearer refresh is allowed;
+only those original packet bytes. Fresh preparation skips published slots on the
+original stream before encryption. A retained packet keeps its destination.
+Retry reads that destination under a Pubky write lock. A different packet refuses
+the retry. An exact match can settle a lost acknowledgement without another PUT.
+For an empty slot, the SDK writes with the lock token and reads back the exact
+bytes before committing the receipt. Lock or read failure leaves the journal
+available for explicit reconciliation. The receipt witnesses the bytes at the
+time of the read. An independent tokenless writer can still change the slot.
+
+Same-original-grant bearer refresh is allowed;
 replacement identities, grants, keys and block generations refuse. A lost
 response or local acknowledgement commit keeps the outcome uncertain. A bound
 `PrivatePaymentListWithdrawalAcknowledgement` is returned only after witnessed
@@ -1481,13 +1503,35 @@ publication and durable local acknowledgement. It proves neither peer receipt
 nor cancellation of reservations or completion of wallet cleanup. No relink,
 queue drain, arbitrary send or credential erasure occurs.
 
-Live SDK state blob version 5 preserves this journal, while versions 1 through 4
+Live SDK state blob versions 5 and 6 preserve this journal, while versions 1 through 4
 migrate with no withdrawal authority. Backup export refuses while a journal
 exists. Once the caller durably accepts a matching acknowledgement,
 `finish_private_payment_list_withdrawal` removes only the completed journal;
 outbound history remains. Pending or invalidated unknown work cannot be
 finished. Apps must retain the original operation and drain cancellation before
 conditionally erasing their own credentials.
+
+App removal and identity-key rotation refuse while an affected withdrawal is
+unconfirmed. Rotation may preserve an already confirmed receipt for its original
+grant to finish. Sign-out refuses before remote revocation while that grant owns
+any retained withdrawal, including a confirmed receipt not yet finished. Other
+grants do not acquire or consume that operation's authority. Before attempting
+revocation, sign-out atomically closes new withdrawal admission for the exact
+owner, homeserver, grant and client. That denial survives cancellation, an unknown
+revocation result, SDK recreation and identity-key rotation in the same storage
+backing. It does not expire or prevent a fresh grant from preparing its own work.
+Explicit original-grant sign-out retry is allowed; no revocation acknowledgement
+is inferred. The storage operation completes before remote revocation, so it does
+not require a remote unlock after revoking its own credentials.
+
+Live state blob version 6 retains these denial-only records; versions 1 through 5
+are decoded completely before adding an empty denial set. Same-backing backup
+restore preserves existing denials. Portable backup v2 omits them and is still
+exportable after withdrawal completion. A new, missing, corrupt or rolled-back
+backing cannot reconstruct post-backup denials: this is not cross-backing or
+rollback-proof revocation evidence. A restored backup or rotated key never proves
+that an original grant was revoked; callers must retain original access/outcome
+state and treat already-lost or uncertain work as unavailable.
 
 `unblock_peer` returns the peer to `NotLinked`, and the next completed
 Encrypted Link Handshake requeues parked messages unchanged as pending, except

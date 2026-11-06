@@ -789,6 +789,29 @@ pub struct EventDedupRecord {
     pub conflicting_stream_item_ids: Vec<u64>,
 }
 
+/// Original Pubky grant whose private list withdrawal admission is closed.
+///
+/// A denial-only record, committed before sign-out attempts remote revocation.
+/// It carries no bearer, signer or send authority and never expires locally.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PrivatePaymentListWithdrawalGrant {
+    /// Original identity owning the grant.
+    pub owner: PubkyPublicKey,
+    /// Original grant's homeserver.
+    pub homeserver: PubkyPublicKey,
+    /// Original Pubky grant identifier.
+    pub grant_id: String,
+    /// Original Pubky client identifier.
+    pub client_id: String,
+}
+
+impl fmt::Debug for PrivatePaymentListWithdrawalGrant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PrivatePaymentListWithdrawalGrant")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Logical SDK storage state used by snapshots, tests, and backup/restore.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageState {
@@ -878,6 +901,11 @@ pub struct StorageState {
     #[serde(deserialize_with = "deserialize_withdrawals")]
     pub private_payment_list_withdrawals:
         HashMap<PubkyPublicKey, PrivatePaymentListWithdrawalRecord>,
+    /// Grants permanently closed to new withdrawals before remote sign-out.
+    ///
+    /// Denial-only records may exist before identity initialization. Live state
+    /// blobs and same-backing restores preserve them; portable backups do not.
+    pub closed_private_payment_list_withdrawal_grants: HashSet<PrivatePaymentListWithdrawalGrant>,
     /// Derived per-link record counts. Never stored, so the encoded state is
     /// unchanged; the SDK rebuilds it whenever it no longer matches the
     /// records.
@@ -1001,7 +1029,7 @@ impl fmt::Debug for StorageState {
     }
 }
 
-fn deserialize_withdrawals<'de, D>(
+pub(super) fn deserialize_withdrawals<'de, D>(
     deserializer: D,
 ) -> std::result::Result<HashMap<PubkyPublicKey, PrivatePaymentListWithdrawalRecord>, D::Error>
 where

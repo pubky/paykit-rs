@@ -435,6 +435,15 @@ where
                 link_policy,
             )?;
             let mut state = state.into_storage_state();
+            // A stale portable backup cannot reopen a grant that this backing
+            // closed before sign-out. Preserve even another owner's denial-only
+            // tuple; it confers no rights and cannot affect the restored owner.
+            state.closed_private_payment_list_withdrawal_grants.extend(
+                current_state
+                    .closed_private_payment_list_withdrawal_grants
+                    .iter()
+                    .cloned(),
+            );
             let current_accounting = if stored_identity.as_ref().and_then(|i| i.public_key.as_ref())
                 == state
                     .identity_state
@@ -498,6 +507,8 @@ fn restore_blockers(state: &StorageState) -> Vec<&'static str> {
         link_record_index: _,
         allowance_accounting,
         private_payment_list_withdrawals,
+        // Denial-only history is preserved below, not a nonempty restore blocker.
+        closed_private_payment_list_withdrawal_grants: _,
         linked_peers,
         contact_records,
         registered_paykit_apps,
@@ -934,6 +945,7 @@ impl SdkBackupState {
             private_intake_cursors,
             private_intake_peers,
             private_payment_list_withdrawals: Default::default(),
+            closed_private_payment_list_withdrawal_grants: Default::default(),
             link_record_index: Default::default(),
         };
 

@@ -629,6 +629,18 @@ fn invalid_live_state(context: &'static str) -> PaykitSdkError {
 }
 
 fn validate_private_list_withdrawals(state: &StorageState) -> Result<()> {
+    for grant in &state.closed_private_payment_list_withdrawal_grants {
+        // These are denials, not initialized identity or session authority.
+        if grant.grant_id.is_empty()
+            || grant.client_id.is_empty()
+            || grant.grant_id.len() > 256
+            || grant.client_id.len() > 256
+        {
+            return Err(invalid_live_state(
+                "invalid closed private list withdrawal grant",
+            ));
+        }
+    }
     for (peer, record) in &state.private_payment_list_withdrawals {
         let fail = || invalid_live_state("invalid retained private list withdrawal");
         if peer != &record.counterparty
@@ -642,6 +654,15 @@ fn validate_private_list_withdrawals(state: &StorageState) -> Result<()> {
             || record.client_id.is_empty()
             || record.grant_id.len() > 256
             || record.client_id.len() > 256
+            || state
+                .closed_private_payment_list_withdrawal_grants
+                .iter()
+                .any(|closed| {
+                    closed.owner == record.owner
+                        && closed.homeserver == record.homeserver
+                        && closed.grant_id == record.grant_id
+                        && closed.client_id == record.client_id
+                })
         {
             return Err(fail());
         }

@@ -61,7 +61,7 @@ use crate::{
     },
     domain::outbound_private::{
         mark_outbound_failed, mark_outbound_invalid, mark_outbound_recovery_required,
-        mark_outbound_sent, validate_queued_outbound_private_message,
+        mark_outbound_sent, mark_outbound_slot_taken, validate_queued_outbound_private_message,
         OutboundPrivateCounterpartySendReport, OutboundPrivateMessageStatus,
         OutboundPrivateSendFailure, OutboundPrivateSendReport, RecoveryMarkerPublishFailure,
         ReservationCleanupFailure,
@@ -445,8 +445,17 @@ where
     /// Revoke the current Pubky grant and clear this application's session access.
     ///
     /// Identity-wide Paykit state remains intact for other applications and a
-    /// later session. Missing access and identity mismatches fail before remote
-    /// revocation or local cleanup. Use [`Self::forget_session_access`] only
+    /// later session. Missing access, identity mismatches, and retained private
+    /// list withdrawals bound to this grant fail before remote revocation or
+    /// local cleanup. Finish their confirmed receipts first. A durable denial
+    /// closes new withdrawals by this original grant before revocation starts,
+    /// including across SDK instances sharing the same logical storage backing.
+    /// Cancellation and unknown outcomes retain it; explicit sign-out retry is
+    /// allowed, but the same grant cannot prepare another withdrawal.
+    /// Pubky shared storage may use a matching local identity secret to inspect
+    /// rotated state only for this denial. Ordinary stale-key reads still fail;
+    /// without usable current key material, sign-out refuses before revocation.
+    /// Use [`Self::forget_session_access`] only
     /// when local-only cleanup is explicitly intended.
     pub async fn sign_out(&self) -> Result<IdentityStatus> {
         let _identity_guard = self.claim_identity_operation("sign out")?;
@@ -479,6 +488,7 @@ where
                     });
                 }
             }
+            self.close_grant_withdrawal_admission(&access).await?;
             self.pubky.revoke_session_access(&access).await?;
         }
         self.pubky.clear_session_access().await?;

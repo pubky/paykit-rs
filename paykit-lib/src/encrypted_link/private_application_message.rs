@@ -254,6 +254,9 @@ pub(super) async fn receive_private_application_messages(
 ///
 /// This clears the local write path used by the counterparty as their read path.
 /// Only retire a context after neither peer needs its handshake or messages.
+/// Deletion runs page by page and can stop partway, so stop using link state
+/// that writes to this context first: its write slot search relies on stored
+/// slots having no gaps.
 /// Recovery itself uses a new context and does not require deletion. The
 /// counterparty's outbox is not touched. The local Pubky identity comes from `session`; the remote
 /// identity and Noise key must belong to the intended counterparty. The caller
@@ -341,7 +344,7 @@ fn is_retryable_private_receive_error(err: &pubky_noise::PubkyNoiseError) -> boo
     )
 }
 
-fn is_not_found(err: &PubkyError) -> bool {
+pub(super) fn is_not_found(err: &PubkyError) -> bool {
     matches!(
         err,
         PubkyError::Request(RequestError::Server { status, .. })
@@ -373,8 +376,6 @@ pub(super) async fn send_private_application_message(
     plaintext: &[u8],
     context: &'static str,
 ) -> Result<()> {
-    validate_private_application_message_size(plaintext, context)?;
-
     let max_attempts = send_attempts_from_retries(max_send_retries);
     let mut last_error: Option<String> = None;
     // A failed outbox write leaves the prepared packet unacknowledged.
