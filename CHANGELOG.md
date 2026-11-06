@@ -135,6 +135,10 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   `PaymentRequestTerms` and `PaymentProofSubmission`. Protocol errors have a new
   code value, `message_too_large`; apps that branch on codes should handle it.
 
+### Security
+
+- Update `webpki-roots`, `webpki-root-certs` and `rustls-webpki` to drop trust in the distrusted emSign G3 certificate paths (RUSTSEC-2026-0381, RUSTSEC-2026-0382, RUSTSEC-2026-0383).
+
 ## [0.1.1-rc1] - 2026-10-20
 
 ### Added
