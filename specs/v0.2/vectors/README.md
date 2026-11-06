@@ -4,7 +4,7 @@ Test vectors for Paykit's own wire format in `specs/v0.2/wire-format.md`: its am
 grant, messages and shared record values. Every file is computed by the reference prototype's own code
 from fixed keys, shared separately, and fixed randomness, so any implementation can check them byte for byte.
 
-**This set depends on [the Switch's](https://github.com/pubky/pubky-switch/tree/main/spec/vectors)**: its fixed keys (`keys.json`), the certificates and documents of its `documents.json`, its envelopes and its encodings. The seeds, encodings and times follow that set's conventions.
+**This set depends on [the Switch's set](https://github.com/pubky/pubky-switch/tree/07d7d9b326561d8df27dde19898bb71db8f8f9ce/spec/vectors), at pubky-switch commit `07d7d9b326561d8df27dde19898bb71db8f8f9ce`, the commit Paykit's spec builds on**: its fixed keys (`keys.json`), the certificates and documents of its `documents.json`, its envelopes and its encodings. The seeds, encodings and times follow that set's conventions.
 
 ## Files
 
