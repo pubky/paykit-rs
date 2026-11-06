@@ -1992,6 +1992,14 @@ public protocol PaykitSdkProtocol: AnyObject, Sendable {
     func deletePaykitProfile(expectedRevision: String) async throws
 
     /**
+     * Delete this identity's Pubky app profile at the revision it was read at.
+     *
+     * An absent profile is already deleted; a changed one returns a
+     * concurrent-update error.
+     */
+    func deletePubkyProfile(expectedRevision: String) async throws
+
+    /**
      * Return tracked Encrypted Link recovery marker state for a counterparty.
      */
     func encryptedLinkRecoveryMarkerStatus(counterparty: String) async throws  -> EncryptedLinkRecoveryMarkerReport?
@@ -3668,6 +3676,29 @@ open func deletePaykitProfile(expectedRevision: String)async throws   {
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_paykit_fn_method_ffipaykitsdk_delete_paykit_profile(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(expectedRevision)
+                )
+            },
+            pollFunc: ffi_paykit_rust_future_poll_void,
+            completeFunc: ffi_paykit_rust_future_complete_void,
+            freeFunc: ffi_paykit_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypePaykitError_lift
+        )
+}
+
+    /**
+     * Delete this identity's Pubky app profile at the revision it was read at.
+     *
+     * An absent profile is already deleted; a changed one returns a
+     * concurrent-update error.
+     */
+open func deletePubkyProfile(expectedRevision: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_paykit_fn_method_ffipaykitsdk_delete_pubky_profile(
                     self.uniffiClonePointer(),
                     FfiConverterString.lower(expectedRevision)
                 )
@@ -28200,6 +28231,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_delete_paykit_profile() != 39915) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_paykit_checksum_method_ffipaykitsdk_delete_pubky_profile() != 47720) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_paykit_checksum_method_ffipaykitsdk_encrypted_link_recovery_marker_status() != 21009) {
