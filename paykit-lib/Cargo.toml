@@ -1,6 +1,6 @@
 [package]
 name = "paykit-lib"
-description = "Paykit v0.2 protocol core: stateless, pure encodings, keys, envelopes, documents and checks"
+description = "Paykit v0.2 formats and rules on the Pubky Switch: scopes, message kinds, collections and payment rules"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

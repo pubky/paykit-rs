@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["paykit-lib", "paykit-sdk", "paykit-signer"]
+members = ["paykit-lib", "paykit-sdk"]
 
 [workspace.package]
 version = "0.2.0-alpha.0"

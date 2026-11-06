@@ -13,13 +13,6 @@ dependencies = [
  "paykit-lib",
 ]
 
-[[package]]
-name = "paykit-signer"
-version = "0.2.0-alpha.0"
-dependencies = [
- "paykit-lib",
-]
-
 [[patch.unused]]
 name = "rustls-platform-verifier-android"
 version = "0.1.1"

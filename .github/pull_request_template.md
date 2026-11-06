@@ -32,6 +32,6 @@ Write "None" if not applicable.
 - [ ] `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` builds
 - [ ] Added tests for new behaviour (at least one positive and one failure-path test for new protocol features)
 - [ ] Public API changes include `///` docs and use THESAURUS.md vocabulary
-- [ ] All vector tests in `specs/v0.2/vectors/` still pass
+- [ ] All Paykit vector tests in `specs/v0.2/vectors/` still pass
 - [ ] No internal review IDs, process words or private reference code (see AGENTS.md)
 - [ ] I reviewed this PR myself and asked an LLM to review it and check whether it can be simplified

@@ -1,6 +1,6 @@
 [package]
 name = "paykit-sdk"
-description = "Paykit v0.2 app SDK: state, flows and network I/O for wallets and seller apps"
+description = "Paykit v0.2 app SDK: payment flows and their state for wallets and seller apps, on the Pubky Switch client"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
