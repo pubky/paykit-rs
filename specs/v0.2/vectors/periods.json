@@ -1022,7 +1022,7 @@
       }
     }
   ],
-  "description": "Billing Periods (wire 5.4, spec 11.2, specs/allowances.md anchored rule): boundary k = anchor + k * every units, fixed seconds for minute, hour, day and week, a calendar step from the original anchor for month and year, clamped to the target month's last day. Period k = [boundary(k), boundary(k+1)). The first period contains starts_at; the last contains the instant just before ends_at. start_secs is the obligation ID's period start. A message's {starts_at, ends_at} must equal a computed period, compared as instants.",
+  "description": "Billing Periods (wire 4.4, spec 8.2, specs/allowances.md anchored rule): boundary k = anchor + k * every units, fixed seconds for minute, hour, day and week, a calendar step from the original anchor for month and year, clamped to the target month's last day. Period k = [boundary(k), boundary(k+1)). The first period contains starts_at; the last contains the instant just before ends_at. start_secs is the obligation ID's period start. A message's {starts_at, ends_at} must equal a computed period, compared as instants.",
   "details_rates": {
     "cases": [
       {
@@ -1042,7 +1042,7 @@
         "verified_payment_time": "2026-03-01T00:00:00Z"
       }
     ],
-    "description": "The rates of period details apply to a payment whose independently verified payment time, from the payment method's evidence, is at or before expires_at, both read at millisecond precision with further digits truncated (wire 1.6, 5.9; spec 11.2). An evidence time in whole seconds reads as .000. The payee credits a payment at the rates only then; the payer pays by them only while its device clock and its highest verified service time are both before expires_at.",
+    "description": "The rates of period details apply to a payment whose independently verified payment time, from the payment method's evidence, is at or before expires_at, both read at millisecond precision with further digits truncated (Switch wire 1.6, wire 4.9; spec 8.2). An evidence time in whole seconds reads as .000. The payee credits a payment at the rates only then; the payer pays by them only while its device clock and its highest verified service time are both before expires_at.",
     "expires_at": "2026-03-01T00:00:00.500Z"
   }
 }
