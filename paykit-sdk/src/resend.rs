@@ -1,6 +1,7 @@
 //! Re-sends (Paykit spec 9, Paykit wire 4.12).
 //!
-//! - **Answering** a `resend_request`: the sender re-sends, from the messages it keeps (the
+//! - **Answering** a `resend_request`, kept by the receive step with the cursor move and
+//!   answered by [`crate::Paykit::receive`]: the sender re-sends, from the messages it keeps (the
 //!   client keeps each for 30 days from its first acceptance, Switch spec 11), those the
 //!   request selects, of kinds the requesting app's certificate receives, and a payer's
 //!   replies only to an app that takes them under their label (Paykit spec 3.4). It re-sends
@@ -23,7 +24,7 @@ use crate::activity::SideTag;
 use crate::error::Result;
 use crate::paykit::Paykit;
 use crate::protocol::{body_label, holds_role, QueuedAsk};
-use crate::state::{self, key, Tx};
+use crate::state::{key, Tx};
 
 /// One message is re-sent to one requester identity at most once an hour (Paykit wire 4.12).
 pub const RESEND_COOLDOWN_MS: u64 = 3_600_000;
@@ -63,10 +64,9 @@ impl Paykit {
         }
         .to_body();
         ResendRequest::from_body(&body).map_err(paykit_lib::Error::into_validation)?;
-        let msg_id = self
-            .queue_message(counterparty, Kind::ResendRequest, Vec::new(), body, None)
-            .await?;
-        Box::pin(self.app.flush_outbox()).await?;
+        let signed = self.sign(counterparty, Kind::ResendRequest, Vec::new(), body)?;
+        let msg_id = self.app.queue_signed(signed).await?;
+        self.app.flush_message(&msg_id).await?;
         Ok(msg_id)
     }
 
@@ -75,7 +75,7 @@ impl Paykit {
     /// activity. Returns how many requests went out.
     pub(crate) async fn send_asks(&mut self) -> Result<u64> {
         let mut sent = 0u64;
-        for (rest, ask) in self.local.scan::<QueuedAsk>(key::ASKS).await? {
+        for (rest, ask) in self.local_scan::<QueuedAsk>(key::ASKS).await? {
             self.request_resend(
                 ask.sender,
                 ResendSelection {
@@ -85,17 +85,16 @@ impl Paykit {
                 },
             )
             .await?;
-            self.local.delete(&format!("{}{rest}", key::ASKS)).await?;
+            self.local_delete(&format!("{}{rest}", key::ASKS)).await?;
             sent = sent.saturating_add(1);
         }
-        let missed = self.local.scan::<u64>(key::MISSED).await?;
+        let missed = self.local_scan::<u64>(key::MISSED).await?;
         if missed.is_empty() {
             return Ok(sent);
         }
         let from = missed.iter().map(|(_, from)| *from).min().unwrap_or(0);
         let peers: Vec<[u8; 32]> = self
-            .local
-            .scan::<u64>(key::PEERS)
+            .local_scan::<u64>(key::PEERS)
             .await?
             .into_iter()
             .filter_map(|(rest, _)| unb64_array::<32>(&rest).ok())
@@ -115,7 +114,7 @@ impl Paykit {
         for (rest, _) in missed {
             tx.delete(&format!("{}{rest}", key::MISSED));
         }
-        self.local.commit(tx).await?;
+        self.local_commit(tx).await?;
         Ok(sent)
     }
 
@@ -134,8 +133,7 @@ impl Paykit {
         let since = now.saturating_sub(SENT_RETENTION_MS);
         let day = now / DAY_MS;
         let mut count: u64 = self
-            .local
-            .get(&key::resent_day(requester, day))
+            .local_get(&key::resent_day(requester, day))
             .await?
             .unwrap_or(0);
         let mut resent = 0u64;
@@ -157,17 +155,16 @@ impl Paykit {
             if !request.selects(&message, &sent.plaintext.hash(), &[first], period.as_ref()) {
                 continue;
             }
-            if !self.requester_takes(&message, cert.scopes()) {
+            if !self.requester_takes(&message, cert.scopes()).await? {
                 continue;
             }
             let last: Option<u64> = self
-                .local
-                .get(&key::resent(requester, &sent.msg_id))
+                .local_get(&key::resent(requester, &sent.msg_id))
                 .await?;
             if last.is_some_and(|at| now < at.saturating_add(RESEND_COOLDOWN_MS)) {
                 continue;
             }
-            if Box::pin(self.app.resend(&sent.msg_id)).await.is_err() {
+            if self.app.resend(&sent.msg_id).await.is_err() {
                 continue;
             }
             count = count.saturating_add(1);
@@ -175,35 +172,39 @@ impl Paykit {
             let mut tx = Tx::default();
             tx.put(&key::resent(requester, &sent.msg_id), &now)?;
             tx.put(&key::resent_day(requester, day), &count)?;
-            self.local.commit(tx).await?;
+            self.local_commit(tx).await?;
         }
         Ok(resent)
     }
 
     /// Whether the requesting app takes `message` (Paykit wire 4.12): its kind is one its
     /// certificate receives, and a payer's reply only under the label rule of Paykit spec 3.4.
-    fn requester_takes(&self, message: &Message, scopes: &[String]) -> bool {
+    async fn requester_takes(&self, message: &Message, scopes: &[String]) -> Result<bool> {
         let Some(kind) = Kind::from_kind(&message.kind) else {
-            return false;
+            return Ok(false);
         };
         if !holds_role(scopes, kind.recipients()) {
-            return false;
+            return Ok(false);
         }
         if !kind.is_payer_reply() {
-            return true;
+            return Ok(true);
         }
         let side = if kind == Kind::PaymentRequestCancellation {
-            match state::get_sync::<SideTag>(
-                self.local.store().store().as_ref(),
-                self.local.ns(),
-                &key::side(&message.msg_id),
-            ) {
+            match self
+                .local_get::<SideTag>(&key::side(&message.msg_id))
+                .await?
+            {
                 Some(SideTag::Payee) => Side::Payee,
                 _ => Side::Payer,
             }
         } else {
             Side::Payer
         };
-        targets_app(kind, side, body_label(message).as_ref(), scopes)
+        Ok(targets_app(
+            kind,
+            side,
+            body_label(message).as_ref(),
+            scopes,
+        ))
     }
 }

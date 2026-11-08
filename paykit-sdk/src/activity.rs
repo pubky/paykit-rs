@@ -118,11 +118,18 @@ pub(crate) fn switch_collection(collection: Collection, label: Option<&Label>) -
     SwitchCollection::new(collection.name(), collection.policy(label))
 }
 
-/// The record job tag of a sent message (`RecordJob::tag`): its target and role.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct JobTag {
-    pub(crate) side: SideTag,
-    pub(crate) role: Role,
+/// The client's collection of one of Paykit's collections with every policy it allows
+/// (Paykit spec 6, Paykit wire 5.1): `payee_activity` is a sub-scope family, the fixed
+/// `request` policy and one per label, so an app holding `request` lists and takes every
+/// label's records, and one holding only `request:<label>` its label's; the others have
+/// their fixed policy alone.
+pub(crate) fn family(collection: Collection) -> SwitchCollection {
+    match collection {
+        Collection::PayeeActivity => {
+            SwitchCollection::with_sub_scopes(collection.name(), collection.fixed_policy())
+        }
+        _ => SwitchCollection::new(collection.name(), collection.fixed_policy()),
+    }
 }
 
 /// An empty activity record of `side` with `counterparty`.
@@ -235,6 +242,21 @@ mod tests {
         assert_eq!(fixed.collection.policy.read_scope, "request");
         let payer = ActivityTarget::payer(natural_key::request_record(&[1; 32], &[2; 32]));
         assert_eq!(payer.record_target().collection.name, "payer_activity");
+    }
+
+    #[test]
+    fn test_activity_payee_family_admits_each_label_policy() {
+        let family = family(Collection::PayeeActivity);
+        let label = Label::parse("shop1").unwrap();
+        assert!(family.admits(&Collection::PayeeActivity.policy(Some(&label))));
+        assert!(family.admits(&Collection::PayeeActivity.fixed_policy()));
+        assert_eq!(
+            family.sub_scope_policy("shop1").unwrap(),
+            Collection::PayeeActivity.policy(Some(&label))
+        );
+        // The payer's records have their fixed policy alone.
+        let payer = super::family(Collection::PayerActivity);
+        assert!(!payer.admits(&Collection::PayeeActivity.policy(Some(&label))));
     }
 
     #[test]

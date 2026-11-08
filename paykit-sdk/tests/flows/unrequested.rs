@@ -22,7 +22,8 @@ async fn test_unrequested_payment_paid_proven_and_receipted() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice("shop", &[wallet.app_id()], w.clock.now_ms());
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
     assert_eq!(wallet.receive(None).await.unwrap().applied.len(), 1);
 
     let outcome = wallet
@@ -65,8 +66,13 @@ async fn test_unrequested_single_use_endpoint_used_once() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut phone = w.wallet("phone").await;
-    let _shop = w.shop().await;
-    w.list_to_alice("shop", &[wallet.app_id(), phone.app_id()], w.clock.now_ms());
+    let mut shop = w.shop().await;
+    w.list_to_alice(
+        &mut shop,
+        &[wallet.app_id(), phone.app_id()],
+        w.clock.now_ms(),
+    )
+    .await;
     wallet.receive(None).await.unwrap();
     phone.receive(None).await.unwrap();
 
@@ -109,7 +115,8 @@ async fn test_unrequested_single_use_endpoint_used_once() {
 
     // A newer list carries a fresh single-use endpoint.
     w.clock.advance_ms(1000);
-    w.list_to_alice("shop", &[wallet.app_id()], w.clock.now_ms());
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
     wallet.receive(None).await.unwrap();
     let fresh = wallet
         .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
@@ -149,8 +156,9 @@ async fn test_unrequested_without_a_list_refused() {
 async fn test_unrequested_expired_list_refused() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
-    let _shop = w.shop().await;
-    w.list_to_alice("shop", &[wallet.app_id()], w.clock.now_ms());
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
     wallet.receive(None).await.unwrap();
     w.clock.advance_ms(31 * 24 * crate::common::HOUR_MS);
     let refused = wallet

@@ -1,5 +1,5 @@
-//! Paykit's flows on the client's scripted switches: two identities, each with Paykit apps
-//! joined from approvals, a fake rail, and a bridge between the switches.
+//! Paykit's flows on the client's scripted switches: two identities, each on its own switch,
+//! with Paykit apps joined from approvals and a fake rail.
 
 // The helpers set up fixed test state, where a failure is a test failure.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

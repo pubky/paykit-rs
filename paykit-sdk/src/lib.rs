@@ -11,8 +11,9 @@
 //! Paykit's formats and rules. The protocol is defined by the Paykit spec and wire format in
 //! `specs/v0.2/`.
 //!
-//! - [`PaykitProtocol`]: Paykit as the client's `Protocol`: scopes and kind rules, receiving,
-//!   collections and their policies, record marks and sent messages' records.
+//! - [`PaykitProtocol`]: Paykit as the client's `Protocol`: scopes and kind rules, receiving
+//!   (each message's record write committed with the cursor move), collections and their
+//!   policies, and record marks.
 //! - [`Paykit`]: one Paykit App, on the client's `App`, with Paykit's API: requests
 //!   ([`Paykit::send_request`], [`Paykit::reject_request`], [`Paykit::confirm_payment`]),
 //!   paying ([`Paykit::pay_request`], [`Paykit::pay_without_request`],

@@ -6,15 +6,14 @@
 //! - **Kinds an app takes:** its record's `accepts` lists the kinds its scopes receive that
 //!   this SDK handles; a sender wraps a kind to any app whose scopes receive it, by Paykit's
 //!   table (Paykit spec 3.3), and narrows a payer's replies by label (Paykit spec 3.4).
-//! - **Receiving:** check 10, then the message's effect. The client's protocol callback
-//!   can't build a shared record write (it has no access to the app's keys or the record it
-//!   holds), so the effect is queued in the protocol's local state, committed with the
-//!   processed pair and the cursor, and written by [`crate::Paykit::receive`] right after,
-//!   in the batch that carries the deferred cursor move (Switch spec 8.2).
-//! - **Collections** with their fixed policies, and the marks that stop a record write from
-//!   dropping a message in a role an app has seen (Paykit spec 6, Paykit wire 5.3, 5.4).
-//! - **Sent messages' records** ([`Protocol::sent_record`]): a reply's stored copy goes into
-//!   the request's record (Paykit wire 5.3).
+//! - **Receiving** ([`Protocol::receive_with`]): check 10, then the message's effect, built
+//!   through the client's receive context so the record write it causes, any claim entry and
+//!   local write go in the batch that moves the cursor (Switch spec 8.2; `crate::receive`).
+//!   After `409 conflict` the client reads the records again and calls it once more, and the
+//!   effect is built again from them.
+//! - **Collections** with their fixed policies, `payee_activity` with one policy per label,
+//!   and the marks that stop a record write from dropping a message in a role an app has
+//!   seen (Paykit spec 6, Paykit wire 5.1, 5.3, 5.4).
 //! - **Re-sends:** entries the app can't read, `missed` items and a provider loss queue
 //!   `resend_request`s (Paykit spec 9).
 //!
@@ -32,18 +31,19 @@ use paykit_lib::scopes::{acts_as_payee, PaykitScope, ScopeName};
 use paykit_lib::{Label, PaykitKindRules};
 use pubky_switch_client::app::{
     Collection as SwitchCollection, Effect, LocalWrite, LossActions, MissedEntries, OpaqueRule,
-    Outcome, Protocol, ProviderLoss, ReceivedMessage, RecordJob, ResendNeeded, SentMessage,
+    Outcome, Protocol, ProviderLoss, ReceiveContext, ReceivedMessage, ResendNeeded,
 };
 use pubky_switch_client::store::StateStore;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
+use pubky_switch_core::ident::NamingKey;
 use pubky_switch_core::message::Message;
 use pubky_switch_core::receive::KindRules;
 use pubky_switch_core::records::{AppCert, AppRecord};
 use pubky_switch_core::scopes as switch_scopes;
-use pubky_switch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 
-use crate::activity::{self, JobTag, SideTag};
+use crate::activity::{self, SideTag};
+use crate::receive::{self, Fail};
 use crate::state::{self, key};
 
 /// The kinds this SDK handles (Paykit wire 4.3): the one-time request flow, payments without
@@ -59,24 +59,6 @@ pub const HANDLED_KINDS: [Kind; 8] = [
     Kind::ResendRequest,
     Kind::PrivatePaymentList,
 ];
-
-/// A received message whose effect is still to be written (`p/fx/`). Its `Debug` shows no
-/// content.
-#[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct QueuedMessage {
-    #[serde(with = "serde_b64")]
-    pub(crate) sender: [u8; 32],
-    pub(crate) cert: SignedDoc,
-    pub(crate) plaintext: String,
-    pub(crate) accepted_at_ms: u64,
-    pub(crate) seq: u64,
-}
-
-impl std::fmt::Debug for QueuedMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "QueuedMessage(seq {})", self.seq)
-    }
-}
 
 /// A re-send to ask of a sender (`p/ask/`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,7 +85,10 @@ pub struct PaykitProtocol {
     store: Arc<dyn StateStore>,
     ns: String,
     own: RwLock<Option<Own>>,
-    known_labels: Vec<Label>,
+    /// The identity's naming key, for the claim keys of received receipts' obligations
+    /// (Paykit spec 10): the receive context derives record keys but not a protocol's claim
+    /// keys. Sensitive; zeroized when dropped.
+    naming: RwLock<Option<NamingKey>>,
 }
 
 impl std::fmt::Debug for PaykitProtocol {
@@ -113,15 +98,13 @@ impl std::fmt::Debug for PaykitProtocol {
 }
 
 impl PaykitProtocol {
-    /// The protocol of the app whose state is in `ns` of `store`. `known_labels` are labels
-    /// of the identity's labelled selling scopes whose `payee_activity` records an app
-    /// holding plain `request` follows, besides the labels its own certificate holds.
-    pub fn new(store: Arc<dyn StateStore>, ns: String, known_labels: Vec<Label>) -> Self {
+    /// The protocol of the app whose state is in `ns` of `store`.
+    pub fn new(store: Arc<dyn StateStore>, ns: String) -> Self {
         Self {
             store,
             ns,
             own: RwLock::new(None),
-            known_labels,
+            naming: RwLock::new(None),
         }
     }
 
@@ -131,37 +114,38 @@ impl PaykitProtocol {
         *own = Some(Own { identity, cert });
     }
 
+    /// Set the identity's naming key, after a join or a load.
+    pub(crate) fn set_naming_key(&self, naming: NamingKey) {
+        let mut held = self.naming.write().unwrap_or_else(PoisonError::into_inner);
+        *held = Some(naming);
+    }
+
     fn own(&self) -> Option<Own> {
         self.own
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
+}
 
-    /// The labels whose `payee_activity` records this app reads and writes: those its own
-    /// certificate holds, and, for an app holding `request`, the known labels (Paykit spec
-    /// 3.1, 6).
-    pub fn labels(&self) -> Vec<Label> {
-        let Some(own) = self.own() else {
-            return Vec::new();
-        };
-        let scopes = own.cert.scopes();
-        let mut labels: Vec<Label> = scopes
-            .iter()
-            .filter_map(|s| match PaykitScope::classify(s) {
-                ScopeName::Paykit(PaykitScope::RequestLabel(label)) => Some(label),
-                _ => None,
-            })
-            .collect();
-        if scopes.iter().any(|s| s == "request") {
-            for label in &self.known_labels {
-                if !labels.contains(label) {
-                    labels.push(label.clone());
-                }
-            }
-        }
-        labels
+/// Check 10 of a message that passed checks 1 to 9 (Paykit wire 4.1): a kind this SDK
+/// handles, a body that parses for it, and a verifiable stored copy (Switch spec 8.2), the
+/// copy its records hold. `Err` names the rule that drops it.
+pub(crate) fn check(message: &ReceivedMessage, own: &[u8; 32]) -> Result<StoredMessage, String> {
+    let handled =
+        Kind::from_kind(&message.message.kind).is_some_and(|kind| HANDLED_KINDS.contains(&kind));
+    if !handled {
+        return Err("Paykit wire 4.1 check 10: a kind this app doesn't handle".into());
     }
+    check_body(&message.message, message.plaintext.json()).map_err(|error| error.to_string())?;
+    StoredMessage::new(
+        message.sender,
+        message.cert.signed(),
+        message.plaintext.clone(),
+        Some(message.accepted_at_ms),
+        own,
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// Whether a certificate's scopes hold one of `roles` (Paykit spec 3.3).
@@ -272,36 +256,23 @@ impl Protocol for PaykitProtocol {
         targets_app(kind, side, label.as_ref(), recipient.cert().scopes())
     }
 
-    /// Check 10 (Paykit wire 4.1) and the message's effect, queued for
-    /// [`crate::Paykit::receive`] with the cursor move.
-    fn receive(&self, message: &ReceivedMessage) -> Outcome {
-        let handled = Kind::from_kind(&message.message.kind)
-            .is_some_and(|kind| HANDLED_KINDS.contains(&kind));
-        if !handled {
-            return Outcome::Drop {
-                reason: "Paykit wire 4.1 check 10: a kind this app doesn't handle".into(),
-            };
-        }
-        if let Err(error) = check_body(&message.message, message.plaintext.json()) {
-            return Outcome::Drop {
-                reason: error.to_string(),
-            };
-        }
-        let queued = QueuedMessage {
-            sender: message.sender,
-            cert: message.cert.signed().clone(),
-            plaintext: pubky_switch_core::enc::b64(&message.plaintext.encode()),
-            accepted_at_ms: message.accepted_at_ms,
-            seq: message.seq,
+    /// Check 10 (Paykit wire 4.1) and the message's effect, added to the batch that moves
+    /// the cursor (Switch spec 8.2; `crate::receive`). Called again after `409 conflict`,
+    /// with the records read again: the effect is built anew from them.
+    fn receive_with(&self, message: &ReceivedMessage, cx: &mut ReceiveContext<'_>) -> Outcome {
+        let stored = match check(message, &cx.identity()) {
+            Ok(stored) => stored,
+            Err(reason) => return Outcome::Drop { reason },
         };
-        match state::local_put(&key::effect(message.seq, &message.message.msg_id), &queued) {
-            Ok(write) => Outcome::Apply(Effect {
-                ops: Vec::new(),
-                local: vec![write],
-            }),
-            Err(_) => Outcome::Drop {
-                reason: "the message's effect can't be kept".into(),
-            },
+        let naming = self
+            .naming
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        match receive::effect(cx, &stored, message.seq, naming.as_ref()) {
+            // A write that can't be built now leaves the entry waiting, whatever is returned.
+            Ok(()) | Err(Fail::NotNow) => Outcome::Apply(Effect::default()),
+            Err(Fail::Drop(reason)) => Outcome::Drop { reason },
         }
     }
 
@@ -349,21 +320,15 @@ impl Protocol for PaykitProtocol {
         kind != Kind::ResendRequest.as_str()
     }
 
-    /// Paykit's collections with their fixed policies (Paykit spec 6, Paykit wire 5.1), and
-    /// the labelled policies of `payee_activity` for the labels this app follows.
+    /// Paykit's collections with their fixed policies (Paykit spec 6, Paykit wire 5.1):
+    /// `payee_activity` with one policy per label, so an app holding `request` lists and
+    /// takes every label's records, and one holding `request:<label>` its label's.
     fn collections(&self) -> Vec<SwitchCollection> {
-        let mut out = vec![
-            activity::switch_collection(Collection::PayerActivity, None),
-            activity::switch_collection(Collection::PayeeActivity, None),
-            activity::switch_collection(Collection::PaymentLists, None),
-        ];
-        for label in self.labels() {
-            out.push(activity::switch_collection(
-                Collection::PayeeActivity,
-                Some(&label),
-            ));
-        }
-        out
+        vec![
+            activity::family(Collection::PayerActivity),
+            activity::family(Collection::PayeeActivity),
+            activity::family(Collection::PaymentLists),
+        ]
     }
 
     /// The mark of what the app has seen in a record: the newest value it took that reads
@@ -431,33 +396,6 @@ impl Protocol for PaykitProtocol {
             _ => None,
         }
     }
-
-    /// A sent message's stored copy, in its role of the record its job names (Paykit wire
-    /// 5.3); `None` when the record already reflects it.
-    fn sent_record(
-        &self,
-        job: &RecordJob,
-        sent: &SentMessage,
-        current: Option<&[u8]>,
-    ) -> Option<Vec<u8>> {
-        let own = self.own()?;
-        let tag: JobTag = serde_json::from_slice(&job.tag).ok()?;
-        let stored = StoredMessage::new(
-            own.identity,
-            own.cert.signed(),
-            sent.plaintext.clone(),
-            sent.accepted_at_ms,
-            &sent.to,
-        )
-        .ok()?;
-        let side = tag.side.side();
-        let mut record = activity::read(current, &own.identity, side)
-            .unwrap_or_else(|| activity::empty(side, sent.to));
-        if !activity::place(&mut record, tag.role, stored) {
-            return None;
-        }
-        record.to_json().ok()
-    }
 }
 
 /// A later `payment_lists` write that goes back on one seen (Paykit wire 5.4, Switch spec
@@ -501,7 +439,7 @@ mod tests {
     use super::*;
 
     fn protocol() -> PaykitProtocol {
-        PaykitProtocol::new(Arc::new(MemoryStore::new()), "client/x".into(), Vec::new())
+        PaykitProtocol::new(Arc::new(MemoryStore::new()), "client/x".into())
     }
 
     #[test]
@@ -548,7 +486,6 @@ mod tests {
             p.record_regression("payer_activity", b"{}", Some(b"{}")),
             None
         );
-        assert!(p.labels().is_empty());
     }
 }
 
@@ -578,7 +515,7 @@ mod receive_tests {
     }
 
     fn protocol_of(own: &Party) -> PaykitProtocol {
-        let p = PaykitProtocol::new(Arc::new(MemoryStore::new()), "client/x".into(), Vec::new());
+        let p = PaykitProtocol::new(Arc::new(MemoryStore::new()), "client/x".into());
         p.set_own(own.id(), own.cert.clone());
         p
     }
@@ -592,35 +529,28 @@ mod receive_tests {
     }
 
     #[test]
-    fn test_protocol_receive_queues_a_valid_message() {
+    fn test_protocol_check_keeps_a_valid_message_as_stored() {
         let alice = Party::new("alice", "wallet", &["pay"]);
         let bob = Party::new("bob", "shop", &["request"]);
         let stored = bob.message(&alice, "paykit.payment_request", vec![], request_body());
-        let Outcome::Apply(effect) = protocol_of(&alice).receive(&received(&stored)) else {
-            panic!("applied");
-        };
-        assert!(effect.ops.is_empty());
-        assert_eq!(effect.local.len(), 1);
+        let checked = check(&received(&stored), &alice.id()).unwrap();
+        assert_eq!(checked.hash(), stored.hash());
+        assert_eq!(checked.accepted_at(), Some(NOW));
     }
 
     #[test]
-    fn test_protocol_receive_drops_an_unhandled_kind_and_a_bad_body() {
+    fn test_protocol_check_drops_an_unhandled_kind_a_bad_body_and_another_recipient() {
         let alice = Party::new("alice", "wallet", &["pay", "allowance"]);
         let bob = Party::new("bob", "shop", &["request", "allowance"]);
-        let mut stored = bob.message(&alice, "paykit.payment_request", vec![], request_body());
+        let stored = bob.message(&alice, "paykit.payment_request", vec![], request_body());
         let mut message = received(&stored);
         message.message.kind = "paykit.allowance_end".into();
-        assert!(matches!(
-            protocol_of(&alice).receive(&message),
-            Outcome::Drop { .. }
-        ));
-        stored = bob.message(&alice, "paykit.payment_request", vec![], request_body());
+        assert!(check(&message, &alice.id()).is_err());
         let mut message = received(&stored);
         message.message.body.remove("amount");
-        assert!(matches!(
-            protocol_of(&alice).receive(&message),
-            Outcome::Drop { .. }
-        ));
+        assert!(check(&message, &alice.id()).is_err());
+        // A copy addressed to another identity doesn't verify as alice's.
+        assert!(check(&received(&stored), &bob.id()).is_err());
     }
 
     #[test]
@@ -711,44 +641,5 @@ mod receive_tests {
             p.record_seen("payer_activity", Some(&seen), Some(b"{}")),
             Some(seen)
         );
-    }
-
-    #[test]
-    fn test_protocol_sent_record_places_the_reply() {
-        let alice = Party::new("alice", "wallet", &["pay"]);
-        let bob = Party::new("bob", "shop", &["request"]);
-        let p = protocol_of(&alice);
-        let request = bob.message(&alice, "paykit.payment_request", vec![], request_body());
-        let mut record = activity::empty(ActivitySide::Payer, bob.id());
-        activity::place(&mut record, activity::Role::Request, request.clone());
-        let current = record.to_json().unwrap();
-        let reply = alice.message(
-            &bob,
-            "paykit.payment_request_rejection",
-            vec![request.hash()],
-            object(json!({})),
-        );
-        let target = activity::ActivityTarget::payer(vec![1]);
-        let job = RecordJob {
-            target: target.record_target(),
-            tag: serde_json::to_vec(&JobTag {
-                side: SideTag::Payer,
-                role: activity::Role::Response,
-            })
-            .unwrap(),
-        };
-        let sent = SentMessage {
-            to: bob.id(),
-            kind: "paykit.payment_request_rejection".into(),
-            msg_id: reply.message().msg_id.clone(),
-            plaintext: reply.plaintext().clone(),
-            accepted_at_ms: Some(NOW),
-        };
-        let next = p.sent_record(&job, &sent, Some(&current)).unwrap();
-        let read = ActivityRecord::read(&next, &alice.id(), ActivitySide::Payer).unwrap();
-        assert!(read.response.is_some());
-        assert_eq!(read.status.as_deref(), Some("rejected"));
-        // Written once: the record reflects it now.
-        assert_eq!(p.sent_record(&job, &sent, Some(&next)), None);
     }
 }

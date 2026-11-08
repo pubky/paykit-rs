@@ -184,7 +184,10 @@ async fn test_one_time_expired_request_refused() {
     let request = request_from(&mut shop, w.alice_id(), short).await;
     wallet.receive(None).await.unwrap();
 
+    // Deadlines are read on the service's clock (Paykit spec 7.1): the wallet learns its
+    // time from the next answer it verifies.
     w.clock.advance_ms(2 * HOUR_MS);
+    wallet.receive(None).await.unwrap();
     assert_eq!(
         wallet.request(&request).await.unwrap().status,
         RequestStatus::Expired

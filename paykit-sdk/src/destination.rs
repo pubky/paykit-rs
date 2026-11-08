@@ -2,8 +2,10 @@
 //!
 //! Destinations come only from the payee (Paykit spec 6): an app pays only to endpoints in a
 //! verified message from the payee's current app, or to the payee's public endpoints. Before
-//! money moves, the payer checks, against the payee's `identity.json` read within the last
-//! 10 minutes (Switch spec 4.3):
+//! money moves, the payer checks, against the payee's `identity.json` looked up within the
+//! last 10 minutes at its Homeserver and its switch, the higher version taken, through the
+//! client's version floor and equivocation check ([`pubky_switch_client::app::App::identity_of`],
+//! Switch spec 4.3):
 //!
 //! - the message carrying the destination is from the payee, from the app that owns the
 //!   destination, and names the obligation paid by its signed fields (a request is the one
@@ -18,78 +20,41 @@
 //! 4). Public endpoints, from app records, aren't read yet ([`crate::app_records`]).
 //!
 //! Security: this is the check that stops a payment to a destination an attacker planted. It
-//! fails closed: a payee `identity.json` that can't be read refuses the payment.
+//! fails closed: a lookup of the payee's `identity.json` that fails, or doesn't complete at
+//! its switch, refuses the payment (Paykit spec 7.2: no lookup, no automatic payment).
 
 use paykit_lib::bodies::RequestDestination;
 use paykit_lib::records::{DestinationSource, StoredMessage};
 use paykit_lib::scopes::acts_as_payee;
 use paykit_lib::Body;
-use pubky_switch_client::app::DOC_CACHE_MS;
-use pubky_switch_core::records::{IdentityDoc, Standing, IDENTITY_PATH};
-use pubky_switch_core::sig::SignedDoc;
-use serde::{Deserialize, Serialize};
+use pubky_switch_client::app::SwitchCopy;
+use pubky_switch_core::records::{IdentityDoc, Standing};
 
 use crate::error::{PaykitError, Result};
 use crate::journal::Destination;
 use crate::paykit::Paykit;
-use crate::state::key;
-
-/// A counterparty's `identity.json` as kept (`p/ident/<pubky>`), and when it was read.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct KeptIdentity {
-    doc: SignedDoc,
-    read_ms: u64,
-}
 
 impl Paykit {
-    /// The payee's `identity.json`, read within the last 10 minutes (Switch spec 4.3): the
-    /// kept copy while fresh, otherwise read from the Homeserver, keeping the higher version.
-    /// `Err` names why it can't be had.
+    /// The payee's `identity.json`, looked up within the last 10 minutes (Switch spec 4.3):
+    /// the client's copy while fresh, otherwise read again from the Homeserver and the
+    /// payee's switch, the higher version taken. `Err` names why it can't be had: a lookup
+    /// that failed, or one whose switch read didn't complete, for the lookup can't tell
+    /// then whether the copy it returns was read now.
     pub(crate) async fn payee_identity(
         &mut self,
         payee: &[u8; 32],
-    ) -> Result<std::result::Result<IdentityDoc, String>> {
-        let now = self.now();
-        let kept: Option<KeptIdentity> = self.local.get(&key::identity(payee)).await?;
-        let kept_doc = kept
-            .as_ref()
-            .and_then(|k| IdentityDoc::verify(&k.doc, payee).ok());
-        if let (Some(kept), Some(doc)) = (&kept, &kept_doc) {
-            if now.saturating_sub(kept.read_ms) < DOC_CACHE_MS {
-                return Ok(Ok(doc.clone()));
-            }
+    ) -> std::result::Result<IdentityDoc, String> {
+        match self.app.identity_of(payee, false).await {
+            Ok(found) if found.switch_copy == SwitchCopy::Read => Ok(found.doc),
+            Ok(_) => Err(
+                "Switch spec 4.3: the lookup of the payee's identity.json didn't \
+                 complete at its switch"
+                    .into(),
+            ),
+            Err(error) => Err(format!(
+                "Switch spec 4.3: the payee's identity.json can't be read now: {error}"
+            )),
         }
-        let fetched = match self.homeserver.get(*payee, IDENTITY_PATH.to_owned()).await {
-            Ok(Some(bytes)) => serde_json::from_slice::<SignedDoc>(&bytes)
-                .ok()
-                .and_then(|signed| IdentityDoc::verify(&signed, payee).ok()),
-            Ok(None) => None,
-            Err(_) => {
-                return Ok(Err(
-                    "Switch spec 4.3: the payee's identity.json can't be read now".into(),
-                ))
-            }
-        };
-        let Some(fetched) = fetched else {
-            return Ok(Err(
-                "Switch spec 4.3: the payee has no identity.json that verifies".into(),
-            ));
-        };
-        // Readers use the higher version (Switch spec 4.3).
-        let doc = match kept_doc {
-            Some(kept) if kept.version() > fetched.version() => kept,
-            _ => fetched,
-        };
-        self.local
-            .put(
-                &key::identity(payee),
-                &KeptIdentity {
-                    doc: doc.signed().clone(),
-                    read_ms: now,
-                },
-            )
-            .await?;
-        Ok(Ok(doc))
     }
 
     /// The checks of a destination before money moves (Paykit spec 4, 7.2): `Err` names the
@@ -104,7 +69,7 @@ impl Paykit {
         if let Err(why) = carries(payee, destination, carrier, request_hash, self.now()) {
             return Ok(Err(why));
         }
-        let doc = match self.payee_identity(payee).await? {
+        let doc = match self.payee_identity(payee).await {
             Ok(doc) => doc,
             Err(why) => return Ok(Err(why)),
         };

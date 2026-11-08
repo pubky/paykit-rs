@@ -3,20 +3,18 @@
 //! sees the request and accepts it by paying, or rejects or cancels it; either side may
 //! cancel.
 //!
-//! - **The payee's record** of a request is written once the payer's inbox has accepted it,
-//!   from the signed copy the client keeps: the record's key derives from the request's hash,
-//!   which exists only once the request is signed.
-//! - **A payer's rejection or cancellation** is recorded first, in a batch conditioned on the
-//!   request's claim having no open or paid attempt (`claim_step`), and sent only after that
-//!   batch succeeds (Paykit spec 8.1). The batch writes the request record, so an attempt
-//!   conditioned on the version read fails; the stored copy joins the record when the
-//!   message is delivered.
+//! - **The payee's record** of a request is written in the batch that queues the request
+//!   (Paykit spec 8.1 step 1): the request is signed first, and the record's key derives from
+//!   its hash. The payee's receipt and cancellation go into the record the same way.
+//! - **A payer's rejection or cancellation** is recorded in the request record, in the batch
+//!   that queues it, conditioned on the request's claim having no open or paid attempt
+//!   (`claim_step`); it goes out only once that batch is applied (Paykit spec 8.1). The batch
+//!   writes the request record, so an attempt conditioned on the version read fails.
 //! - **Labels:** a labelled selling app sends every request under its label, and the payer's
 //!   replies copy it (Paykit spec 3.1, 3.3).
 
 use paykit_lib::bodies::{
-    PaymentDeadline, PaymentReceipt, PaymentRequest, PaymentRequestAcceptance, RequestDestination,
-    RequestReply,
+    PaymentDeadline, PaymentReceipt, PaymentRequest, RequestDestination, RequestReply,
 };
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::{natural_key, request_obligation};
@@ -26,17 +24,20 @@ use paykit_lib::scopes::{PaykitScope, ScopeName};
 use paykit_lib::{
     AttemptId, Body, Label, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
 };
-use pubky_switch_client::app::{claim_conflict, Delivery};
+use pubky_switch_client::app::{claim_conflict, Delivery, OpBatch};
 use pubky_switch_core::claims::{ClaimStatus, Outcome};
-use pubky_switch_core::enc::serde_b64;
-use serde::{Deserialize, Serialize};
+use pubky_switch_core::http::ErrorCode;
 use serde_json::{Map, Value};
 
-use crate::activity::{ActivityTarget, Role, SideTag};
+use crate::activity::{self, ActivityTarget, Role, SideTag};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::rail::ProofCheck;
+use crate::records::conflict;
 use crate::state::{key, Tx};
+
+/// How many times a payee's write is built again after its record changed meanwhile.
+const WRITE_TRIES: usize = 3;
 
 /// A request, by its payee and its request hash (Paykit wire 1.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -73,7 +74,8 @@ pub struct SentRequest {
     pub msg_id: String,
     /// Where the message is.
     pub delivery: Delivery,
-    /// The request, once the payer's inbox accepted it and its record is written.
+    /// The request: its record is written in the batch that queues it, so it is known once
+    /// the call returns.
     pub request: Option<RequestRef>,
 }
 
@@ -156,26 +158,6 @@ pub struct PayeeActivity {
     pub status: PayeeStatus,
 }
 
-/// A request sent whose record is still to be written (`p/req/<msg_id>`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct PendingRequest {
-    #[serde(with = "serde_b64")]
-    to: [u8; 32],
-    label: Option<String>,
-}
-
-/// A payer's rejection or cancellation recorded and still to be sent (`p/reply/<record>`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct OwedReply {
-    #[serde(with = "serde_b64")]
-    payee: [u8; 32],
-    #[serde(with = "serde_b64")]
-    request_hash: [u8; 32],
-    cancel: bool,
-    reason: Option<String>,
-    label: Option<String>,
-}
-
 /// The request in a record, with its body.
 pub(crate) fn request_of(record: &ActivityRecord) -> Option<(&StoredMessage, &PaymentRequest)> {
     let stored = record.request.as_ref()?;
@@ -185,15 +167,18 @@ pub(crate) fn request_of(record: &ActivityRecord) -> Option<(&StoredMessage, &Pa
     }
 }
 
-fn rejected(record: &ActivityRecord) -> bool {
+/// The record holds this identity's rejection (Paykit spec 8.1). Status comes from the
+/// messages held, never from `status` (Paykit wire 5.3).
+pub(crate) fn rejected(record: &ActivityRecord) -> bool {
     matches!(
         record.response.as_ref().map(StoredMessage::body),
         Some(Body::PaymentRequestRejection(_))
-    ) || record.status.as_deref() == Some("rejected")
+    )
 }
 
-fn cancelled(record: &ActivityRecord) -> bool {
-    record.cancellation.is_some() || record.status.as_deref() == Some("cancelled")
+/// The record holds a cancellation from either side (Paykit spec 8.1).
+pub(crate) fn cancelled(record: &ActivityRecord) -> bool {
+    record.cancellation.is_some()
 }
 
 impl Paykit {
@@ -234,7 +219,8 @@ impl Paykit {
 
     /// Send a one-time request to `to` (Paykit spec 8.1 step 1, Paykit wire 4.5), under this
     /// app's selling label. The payer must admit this identity, for example after an invite
-    /// (Paykit spec 1). The record is written once the payer's inbox accepts the request.
+    /// (Paykit spec 1). The request is signed, and its record written in the batch that
+    /// queues it, then it is sent.
     ///
     /// # Errors
     ///
@@ -259,81 +245,41 @@ impl Paykit {
         };
         let body = request.to_body();
         PaymentRequest::from_body(&body).map_err(paykit_lib::Error::into_validation)?;
-        let msg_id = self
-            .queue_message(to, Kind::PaymentRequest, Vec::new(), body, None)
+        let signed = self.sign(to, Kind::PaymentRequest, Vec::new(), body)?;
+        let msg_id = signed.msg_id().to_owned();
+        let hash = signed.hash();
+        // The payee's request record, from the signed request, in the batch that queues it
+        // (Paykit spec 8.1 step 1): its key derives from the request's hash.
+        let own = self.identity();
+        let target =
+            ActivityTarget::payee(natural_key::request_record(&own, &hash), label.as_ref());
+        let mut record = activity::empty(ActivitySide::Payee, to);
+        activity::place(&mut record, Role::Request, self.own_copy(&signed)?);
+        let value = record.to_json()?;
+        let write = self
+            .app
+            .record_op(&target.record_target(), Some(&value), Vec::new())
             .await?;
         let mut tx = Tx::default();
-        tx.put(
-            &key::request(&msg_id),
-            &PendingRequest {
-                to,
-                label: label.map(|l| l.as_str().to_owned()),
-            },
-        )?;
         self.note_peer(&mut tx, &to)?;
-        self.local.commit(tx).await?;
-        Box::pin(self.app.flush_outbox()).await?;
-        let written = self.write_request_records().await?;
+        let batch = OpBatch::new()
+            .entry(write)
+            .queue(signed)
+            .locals(tx.into_writes());
+        self.app.submit_batch(batch).await?;
         let delivery = self
             .app
-            .delivery(&msg_id)
+            .flush_message(&msg_id)
             .await?
             .ok_or_else(PaykitError::corrupt)?;
-        let request = written
-            .into_iter()
-            .find(|(id, _)| *id == msg_id)
-            .map(|(_, hash)| RequestRef {
-                payee: self.identity(),
-                request_hash: hash,
-            });
         Ok(SentRequest {
             msg_id,
             delivery,
-            request,
+            request: Some(RequestRef {
+                payee: own,
+                request_hash: hash,
+            }),
         })
-    }
-
-    /// Write the payee's record of each request the payer's inbox accepted since (Paykit
-    /// spec 8.1 step 1). Returns the `msg_id`s written, with their request hashes.
-    pub(crate) async fn write_request_records(&mut self) -> Result<Vec<(String, [u8; 32])>> {
-        let own = self.identity();
-        let mut written = Vec::new();
-        for (msg_id, pending) in self.local.scan::<PendingRequest>(key::REQUESTS).await? {
-            match self.app.delivery(&msg_id).await? {
-                Some(Delivery::Accepted { accepted_at_ms }) => {
-                    let sent = self
-                        .app
-                        .sent_to(&pending.to, accepted_at_ms, accepted_at_ms)
-                        .await?
-                        .into_iter()
-                        .find(|s| s.msg_id == msg_id);
-                    if let Some(sent) = sent {
-                        let stored = StoredMessage::new(
-                            own,
-                            self.app.cert().signed(),
-                            sent.plaintext,
-                            Some(accepted_at_ms),
-                            &pending.to,
-                        )?;
-                        let hash = stored.hash();
-                        let label = pending.label.as_deref().and_then(|l| Label::parse(l).ok());
-                        let target = ActivityTarget::payee(
-                            natural_key::request_record(&own, &hash),
-                            label.as_ref(),
-                        );
-                        self.place(&target, pending.to, Role::Request, stored, Vec::new())
-                            .await?;
-                        written.push((msg_id.clone(), hash));
-                    }
-                    self.local.delete(&key::request(&msg_id)).await?;
-                }
-                Some(Delivery::Queued { .. }) => {}
-                Some(Delivery::Failed { .. }) | None => {
-                    self.local.delete(&key::request(&msg_id)).await?;
-                }
-            }
-        }
-        Ok(written)
     }
 
     /// The payee's record at `record`, bound under its policy, with its target.
@@ -426,33 +372,42 @@ impl Paykit {
         if self.verify_payment(record).await?.is_none() {
             return Ok(None);
         }
-        let (target, bound) = self.payee_record(record).await?;
-        if let Some(receipt) = &bound.receipt {
-            return Ok(Some(receipt.message().msg_id.clone()));
-        }
-        let proof_stored = bound.proof.as_ref().ok_or(Refusal::NotFound)?;
-        let Body::PaymentProof(proof) = proof_stored.body() else {
-            return Err(Refusal::NotFound.into());
+        let mut tries = 0;
+        let msg_id = loop {
+            let (target, bound) = self.payee_record(record).await?;
+            if let Some(receipt) = &bound.receipt {
+                return Ok(Some(receipt.message().msg_id.clone()));
+            }
+            let proof_stored = bound.proof.as_ref().ok_or(Refusal::NotFound)?;
+            let Body::PaymentProof(proof) = proof_stored.body() else {
+                return Err(Refusal::NotFound.into());
+            };
+            let mut refs = vec![proof_stored.hash()];
+            if let Some((request, _)) = request_of(&bound) {
+                refs.push(request.hash());
+            }
+            let body = PaymentReceipt {
+                attempt_id: proof.attempt_id,
+                billing_period: proof.billing_period,
+            }
+            .to_body();
+            // The receipt goes into the payee's record in the batch that queues it.
+            let signed = self.sign(bound.counterparty, Kind::PaymentReceipt, refs, body)?;
+            match self
+                .send_with_record(signed, &target, Role::Receipt, Vec::new(), Vec::new())
+                .await
+            {
+                Ok(msg_id) => break msg_id,
+                Err(error) if error.code() == Some(ErrorCode::Conflict) => {
+                    tries += 1;
+                    if tries >= WRITE_TRIES {
+                        return Err(conflict(error));
+                    }
+                }
+                Err(error) => return Err(error),
+            }
         };
-        let mut refs = vec![proof_stored.hash()];
-        if let Some((request, _)) = request_of(&bound) {
-            refs.push(request.hash());
-        }
-        let body = PaymentReceipt {
-            attempt_id: proof.attempt_id,
-            billing_period: proof.billing_period,
-        }
-        .to_body();
-        let msg_id = self
-            .queue_message(
-                bound.counterparty,
-                Kind::PaymentReceipt,
-                refs,
-                body,
-                Some((&target, Role::Receipt)),
-            )
-            .await?;
-        Box::pin(self.app.flush_outbox()).await?;
+        self.app.flush_message(&msg_id).await?;
         Ok(Some(msg_id))
     }
 
@@ -469,27 +424,49 @@ impl Paykit {
         reason: Option<String>,
     ) -> Result<String> {
         self.require_payee()?;
-        let (target, bound) = self.payee_record(record).await?;
-        let (request, _) = request_of(&bound).ok_or(Refusal::NotFound)?;
-        if bound.cancellation.is_some() {
-            return Err(Refusal::Cancelled.into());
-        }
-        let body = RequestReply {
-            reason,
-            label: None,
-        }
-        .to_body();
-        let msg_id = self
-            .queue_message(
+        let mut tries = 0;
+        let msg_id = loop {
+            let (target, bound) = self.payee_record(record).await?;
+            let (request, _) = request_of(&bound).ok_or(Refusal::NotFound)?;
+            if bound.cancellation.is_some() {
+                return Err(Refusal::Cancelled.into());
+            }
+            let body = RequestReply {
+                reason: reason.clone(),
+                label: None,
+            }
+            .to_body();
+            let signed = self.sign(
                 bound.counterparty,
                 Kind::PaymentRequestCancellation,
                 vec![request.hash()],
                 body,
-                Some((&target, Role::Cancellation)),
-            )
-            .await?;
-        self.local.put(&key::side(&msg_id), &SideTag::Payee).await?;
-        Box::pin(self.app.flush_outbox()).await?;
+            )?;
+            // The side it is sent from goes with it, for the label rule of senders (Paykit
+            // spec 3.4).
+            let mut tx = Tx::default();
+            tx.put(&key::side(signed.msg_id()), &SideTag::Payee)?;
+            match self
+                .send_with_record(
+                    signed,
+                    &target,
+                    Role::Cancellation,
+                    Vec::new(),
+                    tx.into_writes(),
+                )
+                .await
+            {
+                Ok(msg_id) => break msg_id,
+                Err(error) if error.code() == Some(ErrorCode::Conflict) => {
+                    tries += 1;
+                    if tries >= WRITE_TRIES {
+                        return Err(conflict(error));
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        self.app.flush_message(&msg_id).await?;
         Ok(msg_id)
     }
 
@@ -633,11 +610,13 @@ impl Paykit {
         if cancelled(record) {
             return Ok(RequestStatus::Cancelled);
         }
+        // Expired once the deadline is at or before the highest service time verified (Paykit
+        // spec 7.1).
         if request
             .attempt_deadline(None)
             .ok()
             .flatten()
-            .is_some_and(|deadline| deadline <= self.now())
+            .is_some_and(|deadline| self.service_time().is_some_and(|t| deadline <= t))
         {
             return Ok(RequestStatus::Expired);
         }
@@ -698,112 +677,45 @@ impl Paykit {
         }
         let obligation =
             request_obligation(self.naming(), &request.payee, &request.request_hash, 0);
-        if let Some(read) = Box::pin(self.app.read_claim(&obligation)).await? {
+        if let Some(read) = self.app.read_claim(&obligation).await? {
             refuse_on_claim(&read.view)?;
         }
-        let record_key = self.activity_key(&target)?;
-        self.local
-            .put(
-                &key::reply(&record_key),
-                &OwedReply {
-                    payee: request.payee,
-                    request_hash: request.request_hash,
-                    cancel,
-                    reason,
-                    label: label.as_ref().map(|l| l.as_str().to_owned()),
-                },
-            )
-            .await?;
-        // The record write that fences attempts: conditioned on the claim at the step read.
-        let mut fenced = record.clone();
-        fenced.status = Some(if cancel { "cancelled" } else { "rejected" }.into());
-        let condition = self.app.claim_condition(&obligation).await?;
-        let value = fenced.to_json()?;
-        if let Err(error) = Box::pin(self.app.put_record(
-            &target.record_target(),
-            &value,
-            vec![condition],
-        ))
-        .await
-        {
-            self.local.delete(&key::reply(&record_key)).await?;
-            if let Some(view) = claim_conflict(&error) {
-                refuse_on_claim(&view)?;
-            }
-            return Err(crate::records::conflict(error));
-        }
-        self.send_reply(&record_key).await
-    }
-
-    /// Send the rejections and cancellations recorded but not yet sent.
-    pub(crate) async fn send_owed_replies(&mut self) -> Result<()> {
-        for (rest, _) in self.local.scan::<OwedReply>(key::REPLIES).await? {
-            let Ok(record_key) = pubky_switch_core::enc::unb64_array::<32>(&rest) else {
-                self.local
-                    .delete(&format!("{}{rest}", key::REPLIES))
-                    .await?;
-                continue;
-            };
-            self.send_reply(&record_key).await?;
-        }
-        Ok(())
-    }
-
-    async fn send_reply(&mut self, record_key: &[u8; 32]) -> Result<String> {
-        let owed: OwedReply = self
-            .local
-            .get(&key::reply(record_key))
-            .await?
-            .ok_or_else(PaykitError::corrupt)?;
-        let target =
-            ActivityTarget::payer(natural_key::request_record(&owed.payee, &owed.request_hash));
-        let label = owed.label.as_deref().and_then(|l| Label::parse(l).ok());
-        let reply = RequestReply {
-            reason: owed.reason.clone(),
-            label,
-        };
-        let (kind, role) = if owed.cancel {
+        let reply = RequestReply { reason, label };
+        let (kind, role) = if cancel {
             (Kind::PaymentRequestCancellation, Role::Cancellation)
         } else {
             (Kind::PaymentRequestRejection, Role::Response)
         };
-        let msg_id = self
-            .queue_message(
-                owed.payee,
-                kind,
-                vec![owed.request_hash],
-                reply.to_body(),
-                Some((&target, role)),
-            )
-            .await?;
+        let signed = self.sign(
+            request.payee,
+            kind,
+            vec![request.request_hash],
+            reply.to_body(),
+        )?;
         let mut tx = Tx::default();
-        if owed.cancel {
-            tx.put(&key::side(&msg_id), &SideTag::Payer)?;
+        if cancel {
+            tx.put(&key::side(signed.msg_id()), &SideTag::Payer)?;
         }
-        tx.delete(&key::reply(record_key));
-        self.local.commit(tx).await?;
-        Box::pin(self.app.flush_outbox()).await?;
+        // Recorded in the request record in the batch that queues it, conditioned on the
+        // claim at the step read: an attempt meanwhile fails the batch, and the reply goes
+        // nowhere (Paykit spec 8.1).
+        let condition = self.app.claim_condition(&obligation).await?;
+        let msg_id = match self
+            .send_with_record(signed, &target, role, vec![condition], tx.into_writes())
+            .await
+        {
+            Ok(msg_id) => msg_id,
+            Err(error) => {
+                if let PaykitError::Client(client) = &error {
+                    if let Some(view) = claim_conflict(client) {
+                        refuse_on_claim(&view)?;
+                    }
+                }
+                return Err(conflict(error));
+            }
+        };
+        self.app.flush_message(&msg_id).await?;
         Ok(msg_id)
-    }
-
-    /// The acceptance of a one-time request, sent with its payment (Paykit spec 7.2 step 2,
-    /// Paykit wire 4.6).
-    pub(crate) async fn queue_acceptance(
-        &mut self,
-        payee: [u8; 32],
-        request_hash: [u8; 32],
-        label: Option<Label>,
-    ) -> Result<String> {
-        let target = ActivityTarget::payer(natural_key::request_record(&payee, &request_hash));
-        let body = PaymentRequestAcceptance { label }.to_body();
-        self.queue_message(
-            payee,
-            Kind::PaymentRequestAcceptance,
-            vec![request_hash],
-            body,
-            Some((&target, Role::Response)),
-        )
-        .await
     }
 }
 

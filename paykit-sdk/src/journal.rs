@@ -9,8 +9,8 @@
 //! - **Paying**: the payment may have been submitted. It is resolved from the payment
 //!   method's history, never carried out again unless the method is idempotent on the
 //!   attempt ID; otherwise it stays open, "may be paid".
-//! - **After paying** (`RailPaid`, `RailFailed`): the outcome is written, then the proof is
-//!   sent.
+//! - **After paying** (`RailPaid`, `RailFailed`): the outcome, the activity record and the
+//!   proof go in one batch, which also moves the entry to `Finished` once applied.
 //! - **A restored journal** may predate a payment made after its backup, so its open attempts
 //!   are resolved from a history that survives a restore, or left "may be paid" (Pubky Switch
 //!   spec, Section 12.4).
@@ -27,6 +27,30 @@ use serde_json::{Map, Value};
 
 use crate::error::{PaykitError, Result};
 
+/// An optional byte string as base64url, or null.
+mod serde_b64_opt {
+    use pubky_switch_core::enc::{b64, unb64};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(crate) fn serialize<S: Serializer>(
+        value: &Option<Vec<u8>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(bytes) => serializer.serialize_some(&b64(bytes)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Vec<u8>>, D::Error> {
+        Option::<String>::deserialize(deserializer)?
+            .map(|text| unb64(&text).map_err(serde::de::Error::custom))
+            .transpose()
+    }
+}
+
 /// Where a payment stands in the paying order (Paykit spec 7.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,9 +65,8 @@ pub enum Stage {
     RailPaid,
     /// The method reports a definitive failure.
     RailFailed,
-    /// The outcome is written on the claim; for a payment, the proof is still to be sent.
-    Reported,
-    /// Finished: the proof is queued, or the failure written.
+    /// Finished: the outcome, the activity record and, for a payment, the proof were written
+    /// in one batch; or the failure was written before money could move.
     Finished,
     /// Given up before any money could move: the attempt wasn't written.
     Abandoned,
@@ -157,6 +180,10 @@ pub(crate) struct JournalEntry {
     /// The acceptance is owed with the payment (Paykit spec 7.2 step 2).
     pub(crate) acceptance_owed: bool,
     pub(crate) acceptance_msg_id: Option<String>,
+    /// The acceptance's signed plaintext, for its stored copy in the request record, which
+    /// the outcome's batch writes (Paykit spec 7.2 step 3).
+    #[serde(default, with = "serde_b64_opt")]
+    pub(crate) acceptance_plaintext: Option<Vec<u8>>,
     /// The rail's proof, once paid.
     pub(crate) rail_proof: Option<Map<String, Value>>,
     pub(crate) paid_at_ms: Option<u64>,

@@ -14,17 +14,10 @@ async fn test_labels_reply_reaches_only_the_labelled_app_and_request() {
     let mut wallet = w.wallet("wallet").await;
     let mut shop1 = w.labelled_shop("shop1", "shop1").await;
     let mut shop2 = w.labelled_shop("shop2", "shop2").await;
+    // The identity's own app holding `request` reads every label's records, with no list of
+    // labels to follow.
     let mut owner = w
-        .join_with(
-            &w.bob,
-            "owner",
-            AppScopes::new().request().build().unwrap(),
-            PaykitConfig {
-                known_labels: vec![Label::parse("shop1").unwrap()],
-                ..PaykitConfig::default()
-            },
-            store(),
-        )
+        .join(&w.bob, "owner", AppScopes::new().request().build().unwrap())
         .await;
     let request = request_from(&mut shop1, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();

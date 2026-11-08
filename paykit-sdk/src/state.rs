@@ -1,31 +1,39 @@
 //! Paykit's own local state, in the protocol key space (`p/`) of the client's namespace
 //! (`STATE.md` of `pubky-switch-client`).
 //!
-//! The client commits the protocol's local writes with a received message's processed pair
-//! and cursor ([`pubky_switch_client::app::LocalWrite`]); everything else Paykit keeps is
-//! committed here, one write batch per step, under keys that never meet the client's own.
+//! Paykit never writes the host store itself: every write is a client
+//! [`LocalWrite`], committed by the client in one of three ways, so it lands with what it
+//! belongs to:
+//!
+//! - with a received message's effect, its processed pair and its cursor move
+//!   ([`pubky_switch_client::app::ReceiveContext::local`]);
+//! - with the answer of a batch of operations, never if the batch is refused
+//!   ([`pubky_switch_client::app::OpBatch::local`]);
+//! - on its own, in one store commit ([`pubky_switch_client::app::App::protocol_commit`]).
+//!
+//! Reads go through the client too ([`pubky_switch_client::app::App::protocol_get`],
+//! [`pubky_switch_client::app::App::protocol_scan`] and the receive context's), except in
+//! the protocol callbacks that get no context, which read the store synchronously.
 //! Every value is `{"v":1,"d":<record>}`; a reader refuses another `v` as corrupt.
 //!
 //! | Key (after `p/`) | Holds | Sensitive |
 //! |---|---|---|
-//! | `fx/<seq>/<msg_id>` | a received message whose effect is still to be written | yes |
 //! | `ask/<sender>/<from>` | a re-send to ask of a sender | |
+//! | `ans/<seq>/<msg_id>` | a `resend_request` received and still to be answered | |
 //! | `missed/<from>` | entries missed while lagging, or before a provider loss | |
 //! | `j/<attempt_id>` | the payment journal: one payment, from before its `attempt` | yes |
-//! | `side/<msg_id>` | the side a queued cancellation is sent from | |
+//! | `side/<msg_id>` | the side a cancellation is sent from, kept with the batch that queues it | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
-//! | `reply/<record>` | a rejection or cancellation recorded and still to be sent | |
-//! | `req/<msg_id>` | a request sent whose record is still to be written | |
 //! | `rs/<pubky>/<msg_id>` | when a message was last re-sent to a requester | |
 //! | `rsd/<pubky>/<day>` | how many messages were re-sent to a requester that day | |
-//! | `ident/<pubky>` | a counterparty's `identity.json`, and when it was read | |
 
 use pubky_switch_client::app::{LocalWrite, PROTOCOL_PREFIX};
-use pubky_switch_client::store::{StateStore, StoreHandle, WriteBatch};
+use pubky_switch_client::store::StateStore;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PaykitError, Result};
+use crate::paykit::Paykit;
 
 /// The schema version of Paykit's local records.
 pub(crate) const LOCAL_VERSION: u32 = 1;
@@ -118,117 +126,75 @@ fn rest_of(key: &[u8], prefix: &[u8]) -> Option<String> {
     std::str::from_utf8(rest).ok().map(str::to_owned)
 }
 
-/// Paykit's local state of one app, as the SDK's calls read and write it.
-#[derive(Clone)]
-pub(crate) struct Local {
-    store: StoreHandle,
-    ns: String,
-}
-
-impl std::fmt::Debug for Local {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Local({})", self.ns)
-    }
-}
-
-/// A batch of local writes, committed at once.
+/// Local writes to commit together.
 #[derive(Default)]
 pub(crate) struct Tx {
-    writes: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    writes: Vec<LocalWrite>,
 }
 
 impl Tx {
     /// Put `value` at `key`.
     pub(crate) fn put<T: Serialize>(&mut self, key: &str, value: &T) -> Result<&mut Self> {
-        self.writes.push((full(key), Some(encode(value)?)));
+        self.writes.push(local_put(key, value)?);
         Ok(self)
     }
 
     /// Delete `key`.
     pub(crate) fn delete(&mut self, key: &str) -> &mut Self {
-        self.writes.push((full(key), None));
+        self.writes.push(LocalWrite::Delete {
+            key: key.as_bytes().to_vec(),
+        });
         self
+    }
+
+    /// The writes, for a batch or a receive context.
+    pub(crate) fn into_writes(self) -> Vec<LocalWrite> {
+        self.writes
     }
 }
 
-impl Local {
-    /// The local state in `ns`, the client's namespace of the app.
-    pub(crate) fn new(store: StoreHandle, ns: String) -> Self {
-        Self { store, ns }
-    }
-
-    /// The host store, for the protocol's synchronous reads.
-    pub(crate) fn store(&self) -> &StoreHandle {
-        &self.store
-    }
-
-    /// The namespace.
-    pub(crate) fn ns(&self) -> &str {
-        &self.ns
-    }
-
-    /// The record at `key`.
-    pub(crate) async fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
-        match self.store.get(&self.ns, &full(key)).await? {
+impl Paykit {
+    /// The record at protocol key `key`.
+    pub(crate) async fn local_get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
+        match self.app.protocol_get(key.as_bytes()).await? {
             None => Ok(None),
             Some(bytes) => decode(&bytes).map(Some),
         }
     }
 
-    /// Every record under `prefix`, with the key's rest after the prefix.
-    pub(crate) async fn scan<T: DeserializeOwned>(&self, prefix: &str) -> Result<Vec<(String, T)>> {
-        let prefix_bytes = full(prefix);
+    /// Every record under protocol prefix `prefix`, with the key's rest after the prefix.
+    pub(crate) async fn local_scan<T: DeserializeOwned>(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<(String, T)>> {
         let mut out = Vec::new();
-        let mut after: Option<Vec<u8>> = None;
-        loop {
-            let page = self
-                .store
-                .scan(&self.ns, &prefix_bytes, after.as_deref(), SCAN_PAGE)
-                .await?;
-            let full_page = page.len() >= SCAN_PAGE as usize;
-            for (key, value) in page {
-                let rest = rest_of(&key, &prefix_bytes).ok_or_else(PaykitError::corrupt)?;
-                out.push((rest, decode(&value)?));
-                after = Some(key);
-            }
-            if !full_page {
-                return Ok(out);
-            }
+        for (key, value) in self.app.protocol_scan(prefix.as_bytes()).await? {
+            let rest = rest_of(&key, prefix.as_bytes()).ok_or_else(PaykitError::corrupt)?;
+            out.push((rest, decode(&value)?));
         }
+        Ok(out)
     }
 
-    /// Commit `tx` in one write batch.
-    pub(crate) async fn commit(&self, tx: Tx) -> Result<()> {
+    /// Commit `tx` on its own, in one store commit.
+    pub(crate) async fn local_commit(&mut self, tx: Tx) -> Result<()> {
         if tx.writes.is_empty() {
             return Ok(());
         }
-        let mut batch = WriteBatch::new();
-        for (key, value) in tx.writes {
-            let added = match value {
-                Some(value) => batch.put(&self.ns, key, value).map(|_| ()),
-                None => batch.delete(&self.ns, key).map(|_| ()),
-            };
-            added.map_err(|error| {
-                PaykitError::from(pubky_switch_client::error::StoreError::Other(
-                    error.to_string(),
-                ))
-            })?;
-        }
-        Ok(self.store.commit(batch).await?)
+        Ok(self.app.protocol_commit(&tx.writes).await?)
     }
 
     /// Put one record and commit it.
-    pub(crate) async fn put<T: Serialize>(&self, key: &str, value: &T) -> Result<()> {
+    pub(crate) async fn local_put(&mut self, key: &str, value: &impl Serialize) -> Result<()> {
         let mut tx = Tx::default();
         tx.put(key, value)?;
-        self.commit(tx).await
+        self.local_commit(tx).await
     }
 
     /// Delete one record and commit it.
-    pub(crate) async fn delete(&self, key: &str) -> Result<()> {
+    pub(crate) async fn local_delete(&mut self, key: &str) -> Result<()> {
         let mut tx = Tx::default();
         tx.delete(key);
-        self.commit(tx).await
+        self.local_commit(tx).await
     }
 }
 
@@ -244,20 +210,18 @@ pub(crate) mod key {
 
     use super::num;
 
-    pub(crate) const EFFECTS: &str = "fx/";
     pub(crate) const ASKS: &str = "ask/";
+    pub(crate) const ANSWERS: &str = "ans/";
     pub(crate) const MISSED: &str = "missed/";
     pub(crate) const JOURNAL: &str = "j/";
     pub(crate) const PEERS: &str = "peer/";
-    pub(crate) const REPLIES: &str = "reply/";
-    pub(crate) const REQUESTS: &str = "req/";
-
-    pub(crate) fn effect(seq: u64, msg_id: &str) -> String {
-        format!("{EFFECTS}{}/{msg_id}", num(seq))
-    }
 
     pub(crate) fn ask(sender: &[u8; 32], from: u64) -> String {
         format!("{ASKS}{}/{}", b64(sender), num(from))
+    }
+
+    pub(crate) fn answer(seq: u64, msg_id: &str) -> String {
+        format!("{ANSWERS}{}/{msg_id}", num(seq))
     }
 
     pub(crate) fn missed(from: u64) -> String {
@@ -276,24 +240,12 @@ pub(crate) mod key {
         format!("{PEERS}{}", b64(pubky))
     }
 
-    pub(crate) fn reply(record: &[u8; 32]) -> String {
-        format!("{REPLIES}{}", b64(record))
-    }
-
-    pub(crate) fn request(msg_id: &str) -> String {
-        format!("{REQUESTS}{msg_id}")
-    }
-
     pub(crate) fn resent(requester: &[u8; 32], msg_id: &str) -> String {
         format!("rs/{}/{msg_id}", b64(requester))
     }
 
     pub(crate) fn resent_day(requester: &[u8; 32], day: u64) -> String {
         format!("rsd/{}/{}", b64(requester), num(day))
-    }
-
-    pub(crate) fn identity(pubky: &[u8; 32]) -> String {
-        format!("ident/{}", b64(pubky))
     }
 }
 
@@ -313,30 +265,40 @@ mod tests {
         assert!(decode::<u64>(b"not json").is_err());
     }
 
-    #[tokio::test]
-    async fn test_state_writes_only_under_the_protocol_prefix() {
+    #[test]
+    fn test_state_writes_are_local_writes_read_under_the_protocol_prefix() {
+        let mut tx = Tx::default();
+        tx.put("peer/a", &1u64).unwrap();
+        tx.put("peer/b", &2u64).unwrap();
+        tx.delete("peer/c");
+        let writes = tx.into_writes();
+        assert_eq!(writes.len(), 3);
+        // The client prefixes the protocol's keys with `p/`: the readers find them there.
         let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new());
-        let local = Local::new(StoreHandle::inline(Arc::clone(&store)), "client/x".into());
-        local.put("peer/a", &1u64).await.unwrap();
-        local.put("peer/b", &2u64).await.unwrap();
+        let mut batch = pubky_switch_client::store::WriteBatch::new();
+        for write in &writes {
+            if let LocalWrite::Put { key, value } = write {
+                batch
+                    .put("client/x", [PROTOCOL_PREFIX, key].concat(), value.clone())
+                    .unwrap();
+            }
+        }
+        store.commit(batch).unwrap();
         assert!(store.get("client/x", b"p/peer/a").unwrap().is_some());
-        let scanned: Vec<(String, u64)> = local.scan("peer/").await.unwrap();
-        assert_eq!(scanned, vec![("a".into(), 1), ("b".into(), 2)]);
         assert_eq!(
-            scan_sync::<u64>(store.as_ref(), "client/x", "peer/").len(),
-            2
+            scan_sync::<u64>(store.as_ref(), "client/x", "peer/"),
+            vec![("a".into(), 1), ("b".into(), 2)]
         );
         assert_eq!(
             get_sync::<u64>(store.as_ref(), "client/x", "peer/b"),
             Some(2)
         );
-        local.delete("peer/a").await.unwrap();
-        assert_eq!(local.get::<u64>("peer/a").await.unwrap(), None);
+        assert!(matches!(&writes[2], LocalWrite::Delete { key } if key == b"peer/c"));
     }
 
     #[test]
     fn test_state_numbered_keys_sort() {
-        assert!(key::effect(9, "m") < key::effect(10, "m"));
+        assert!(key::answer(9, "m") < key::answer(10, "m"));
         assert!(key::missed(2) < key::missed(11));
     }
 }

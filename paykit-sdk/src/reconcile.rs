@@ -127,7 +127,7 @@ impl Paykit {
     ///
     /// The client's errors; the rail's errors.
     pub async fn reconcile(&mut self) -> Result<ReconcileReport> {
-        Box::pin(self.app.list_collections()).await?;
+        self.app.list_collections().await?;
         let mut report = ReconcileReport {
             resolved: self.resume_payments().await?,
             doubtful: Vec::new(),
@@ -142,7 +142,7 @@ impl Paykit {
         let records = self.payer_records().await?;
         let me = self.app_id();
         for obligation in self.obligations(&records) {
-            let Some(read) = Box::pin(self.app.read_claim(&obligation.claim_key)).await? else {
+            let Some(read) = self.app.read_claim(&obligation.claim_key).await? else {
                 continue;
             };
             let mut doubtful = Vec::new();
@@ -205,7 +205,7 @@ impl Paykit {
         attempt: AttemptId,
         paid: bool,
     ) -> Result<()> {
-        let Some(read) = Box::pin(self.app.read_claim(claim_key)).await? else {
+        let Some(read) = self.app.read_claim(claim_key).await? else {
             return Ok(());
         };
         let op = if paid {
@@ -219,11 +219,9 @@ impl Paykit {
         } else {
             ClaimOp::failed(*claim_key, read.view.step, attempt.to_bytes())
         };
-        Box::pin(
-            self.app
-                .write_claim(op, Vec::new(), ObligationDeadline::NotKnown),
-        )
-        .await?;
+        self.app
+            .write_claim(op, Vec::new(), ObligationDeadline::NotKnown)
+            .await?;
         Ok(())
     }
 
@@ -244,7 +242,9 @@ impl Paykit {
         resolution: Resolution,
         _confirmed: UserConfirmed,
     ) -> Result<()> {
-        let read = Box::pin(self.app.read_claim(obligation))
+        let read = self
+            .app
+            .read_claim(obligation)
             .await?
             .ok_or(Refusal::NotFound)?;
         let Some(held) = read.view.attempt(&attempt.to_bytes()) else {
@@ -261,11 +261,9 @@ impl Paykit {
             Resolution::Unknown => ClaimOp::unknown(*obligation, step, attempt.to_bytes()),
             Resolution::Failed => ClaimOp::failed(*obligation, step, attempt.to_bytes()),
         };
-        Box::pin(
-            self.app
-                .write_claim(op, Vec::new(), ObligationDeadline::NotKnown),
-        )
-        .await?;
+        self.app
+            .write_claim(op, Vec::new(), ObligationDeadline::NotKnown)
+            .await?;
         Ok(())
     }
 
@@ -276,7 +274,7 @@ impl Paykit {
     ///
     /// The client's errors, such as the restore question still open.
     pub async fn end_reconcile(&mut self, confirmed: UserConfirmed) -> Result<()> {
-        Box::pin(self.app.end_reconcile(confirmed)).await?;
+        self.app.end_reconcile(confirmed).await?;
         Ok(())
     }
 }

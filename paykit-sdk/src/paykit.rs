@@ -16,7 +16,7 @@ use std::sync::Arc;
 use paykit_lib::scopes::{acts_as_payee, check_certificate};
 use paykit_lib::{Decimal, Label};
 use pubky_switch_client::app::{
-    App, AppBackup, AppConfig, AppEnv, HomeserverReader, JoinRequest, ReceiveReport,
+    App, AppBackup, AppConfig, AppEnv, AppEvent, JoinRequest, ReceiveReport,
 };
 use pubky_switch_client::clock::Clock;
 use pubky_switch_client::store::client_namespace;
@@ -27,7 +27,7 @@ use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::JournalEntry;
 use crate::protocol::PaykitProtocol;
 use crate::rail::Rail;
-use crate::state::{key, Local, Tx};
+use crate::state::{key, Tx};
 
 /// The default `orphan_after` of an attempt: a day, the longest a payment method is expected
 /// to take (Switch spec 10.2).
@@ -50,9 +50,6 @@ pub struct PaykitConfig {
     /// The label a payee app sends its requests under (Paykit spec 3.1, 8.1). An app holding
     /// only labelled selling scopes needs one unless it holds exactly one label.
     pub selling_label: Option<Label>,
-    /// Labels of the identity's labelled selling scopes whose records an app holding plain
-    /// `request` follows (Paykit spec 3.1).
-    pub known_labels: Vec<Label>,
     /// How many messages the app re-sends to one requester identity a day (Paykit spec 9).
     pub resend_budget: u64,
 }
@@ -64,7 +61,6 @@ impl Default for PaykitConfig {
             orphan_after_s: DEFAULT_ORPHAN_AFTER_S,
             fee_cap: None,
             selling_label: None,
-            known_labels: Vec::new(),
             resend_budget: DEFAULT_RESEND_BUDGET,
         }
     }
@@ -115,7 +111,8 @@ impl PaykitBackup {
 pub struct ReceiveSummary {
     /// The client's report of the feed read.
     pub report: ReceiveReport,
-    /// The `msg_id`s whose effects were written.
+    /// The `msg_id`s of the messages received, each with its effect committed with the
+    /// cursor move (Switch spec 8.2).
     pub applied: Vec<String>,
     /// The `resend_request`s answered and asked.
     pub resends: u64,
@@ -126,9 +123,7 @@ pub struct Paykit {
     pub(crate) app: App,
     pub(crate) protocol: Arc<PaykitProtocol>,
     pub(crate) rail: Arc<dyn Rail>,
-    pub(crate) local: Local,
     pub(crate) clock: Arc<dyn Clock>,
-    pub(crate) homeserver: Arc<dyn HomeserverReader>,
     pub(crate) config: PaykitConfig,
 }
 
@@ -139,25 +134,17 @@ impl std::fmt::Debug for Paykit {
 }
 
 impl Paykit {
-    fn parts(
-        env: &AppEnv,
-        config: &PaykitConfig,
-        app_id: &[u8; 16],
-    ) -> (Arc<PaykitProtocol>, Local) {
-        let ns = client_namespace(app_id);
-        let protocol = Arc::new(PaykitProtocol::new(
+    fn new_protocol(env: &AppEnv, app_id: &[u8; 16]) -> Arc<PaykitProtocol> {
+        Arc::new(PaykitProtocol::new(
             Arc::clone(env.store.store()),
-            ns.clone(),
-            config.known_labels.clone(),
-        ));
-        (protocol, Local::new(env.store.clone(), ns))
+            client_namespace(app_id),
+        ))
     }
 
     fn assemble(
         app: App,
         env: AppEnv,
         protocol: Arc<PaykitProtocol>,
-        local: Local,
         config: PaykitConfig,
         rail: Arc<dyn Rail>,
     ) -> Result<Self> {
@@ -165,13 +152,12 @@ impl Paykit {
         // wire 3.1): its scope rules, and permissions exactly as its scopes derive them.
         check_certificate(app.cert())?;
         protocol.set_own(app.identity(), app.cert().clone());
+        protocol.set_naming_key(app.naming_key().clone());
         Ok(Self {
             app,
             protocol,
             rail,
-            local,
             clock: env.clock,
-            homeserver: env.homeserver,
             config,
         })
     }
@@ -190,15 +176,9 @@ impl Paykit {
         rail: Arc<dyn Rail>,
     ) -> Result<Self> {
         let app_id = request.keys.app_id_bytes();
-        let (protocol, local) = Self::parts(&env, &config, &app_id);
-        let app = Box::pin(App::join(
-            env.clone(),
-            protocol.clone(),
-            config.app.clone(),
-            request,
-        ))
-        .await?;
-        Self::assemble(app, env, protocol, local, config, rail)
+        let protocol = Self::new_protocol(&env, &app_id);
+        let app = App::join(env.clone(), protocol.clone(), config.app.clone(), request).await?;
+        Self::assemble(app, env, protocol, config, rail)
     }
 
     /// Load a Paykit App from the store alone: nothing is sent. Payments a crash left in the
@@ -213,9 +193,9 @@ impl Paykit {
         app_id: [u8; 16],
         rail: Arc<dyn Rail>,
     ) -> Result<Self> {
-        let (protocol, local) = Self::parts(&env, &config, &app_id);
+        let protocol = Self::new_protocol(&env, &app_id);
         let app = App::load(env.clone(), protocol.clone(), config.app.clone(), app_id).await?;
-        Self::assemble(app, env, protocol, local, config, rail)
+        Self::assemble(app, env, protocol, config, rail)
     }
 
     /// Restore from a backup (Switch spec 12.4): the client's restore, then the journal, its
@@ -237,7 +217,6 @@ impl Paykit {
             Arc::new(PaykitProtocol::new(
                 Arc::clone(env.store.store()),
                 String::new(),
-                Vec::new(),
             )),
             config.app.clone(),
             &backup.app,
@@ -245,16 +224,16 @@ impl Paykit {
         .await?;
         let app_id = app.app_id();
         drop(app);
-        let (protocol, local) = Self::parts(&env, &config, &app_id);
-        let app = App::load(env.clone(), protocol.clone(), config.app.clone(), app_id).await?;
+        let protocol = Self::new_protocol(&env, &app_id);
+        let mut app = App::load(env.clone(), protocol.clone(), config.app.clone(), app_id).await?;
         let mut tx = Tx::default();
         for entry in &backup.journal {
             let mut entry = entry.clone();
             entry.restored = true;
             tx.put(&key::journal(&entry.attempt()?), &entry)?;
         }
-        local.commit(tx).await?;
-        Self::assemble(app, env, protocol, local, config, rail)
+        app.protocol_commit(&tx.into_writes()).await?;
+        Self::assemble(app, env, protocol, config, rail)
     }
 
     /// The app's backup: the client's and the journal (Paykit spec 7.2).
@@ -264,8 +243,7 @@ impl Paykit {
     /// The client's errors; a store failure.
     pub async fn backup(&self) -> Result<PaykitBackup> {
         let journal = self
-            .local
-            .scan::<JournalEntry>(key::JOURNAL)
+            .local_scan::<JournalEntry>(key::JOURNAL)
             .await?
             .into_iter()
             .map(|(_, entry)| entry)
@@ -305,8 +283,15 @@ impl Paykit {
         self.app.app_id()
     }
 
+    /// The device clock, for what the spec reads on the reader's clock.
     pub(crate) fn now(&self) -> u64 {
         self.clock.now_ms()
+    }
+
+    /// The highest service time the app verified (Switch spec 10.1), for the deadlines the
+    /// spec reads on the service's clock; `None` before any verified answer.
+    pub(crate) fn service_time(&self) -> Option<u64> {
+        self.app.highest_service_time()
     }
 
     pub(crate) fn naming(&self) -> &NamingKey {
@@ -353,38 +338,42 @@ impl Paykit {
     // ---------------------------------------------------------------------------------
     // Receiving and flushing (Paykit spec 9)
 
-    /// Read the feed (Switch spec 8.2) and write the effects of the Paykit messages it
-    /// received, then answer and ask for re-sends and write the records of requests this
-    /// app sent (Paykit spec 6, 9). `wait` is the long-poll wait in seconds.
+    /// Read the feed (Switch spec 8.2): each Paykit message's effect is committed with the
+    /// cursor move, in the batch that carries it ([`crate::PaykitProtocol`]). Then the
+    /// `resend_request`s received are answered and the re-sends the app needs are asked for
+    /// (Paykit spec 9). `wait` is the long-poll wait in seconds.
     ///
     /// # Errors
     ///
-    /// The client's errors. A message whose effect couldn't be written stays queued, and the
-    /// next call writes it.
+    /// The client's errors. A message whose effect couldn't be written yet stays before the
+    /// cursor, and the next call hands it over again.
     pub async fn receive(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
-        let report = Box::pin(self.app.receive(wait)).await?;
+        let report = self.app.receive(wait).await?;
         self.refresh_own();
-        let applied = Box::pin(self.apply_effects()).await?;
-        let resends = self.send_asks().await?;
-        self.write_request_records().await?;
-        self.send_owed_replies().await?;
+        let applied = report
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                AppEvent::MessageReceived { msg_id, .. } => Some(msg_id.clone()),
+                _ => None,
+            })
+            .collect();
+        let answered = self.answer_kept_resends().await?;
+        let asked = self.send_asks().await?;
         Ok(ReceiveSummary {
             report,
             applied,
-            resends,
+            resends: answered.saturating_add(asked),
         })
     }
 
-    /// Try every queued message once, and write the records of requests this app sent that
-    /// were accepted since (Switch spec 11).
+    /// Try every queued message once (Switch spec 11).
     ///
     /// # Errors
     ///
     /// The client's errors.
     pub async fn flush(&mut self) -> Result<()> {
-        Box::pin(self.app.flush_outbox()).await?;
-        self.write_request_records().await?;
-        self.send_owed_replies().await?;
+        self.app.flush_outbox().await?;
         Ok(())
     }
 }

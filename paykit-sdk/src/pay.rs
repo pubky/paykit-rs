@@ -4,20 +4,22 @@
 //!    is written on the obligation's claim, conditioned on the version of the request record
 //!    the app read and carrying the request's deadline. A payment without a request writes
 //!    its `payer_activity` record in the same batch, and a single-use endpoint its
-//!    `payment_lists` mark. Only a verified answer showing this app's own open attempt lets
-//!    money move.
+//!    `payment_lists` mark. The client checks the attempt's proof: only a verified answer
+//!    showing this app's own open attempt lets money move.
 //! 2. **Check, then pay.** The own `identity.json` is revalidated and the destination checked
 //!    ([`crate::destination`]); a failure writes `failed` instead of paying. The start of the
 //!    payment is journaled, then the rail pays with the attempt ID as its idempotency key,
 //!    and a one-time request's acceptance goes out at the same time.
-//! 3. **Outcome.** `done` (basis `owner`) or `failed` on the claim.
-//! 4. **Proof**, to the payee, stored in the payer's record as it is delivered.
+//! 3. **Outcome.** `done` (basis `owner`) or `failed` on the claim and the payer's activity
+//!    record, with the acceptance and the proof, in one batch, which also queues the proof
+//!    and finishes the journal entry once applied.
+//! 4. **Proof**, to the payee, sent once that batch is applied.
 //!
 //! Every step commits before the next acts, so [`Paykit::resume_payments`] finishes a
 //! payment a crash interrupted without paying twice (Paykit spec 7.2, "Starting to pay", "No
 //! second execution").
 
-use paykit_lib::bodies::{PaymentProof, RequestDestination};
+use paykit_lib::bodies::{PaymentProof, PaymentRequestAcceptance, RequestDestination};
 use paykit_lib::derive::{natural_key, payment_obligation, request_obligation};
 use paykit_lib::kinds::Kind;
 use paykit_lib::records::{
@@ -26,11 +28,12 @@ use paykit_lib::records::{
 use paykit_lib::{AttemptId, Body, Label, PaymentAmount, PaymentEndpointIdentifier};
 use pubky_switch_client::app::{
     claim_conflict, AppError, ClaimOp, ObligationDeadline, OpBatch, Refusal as ClientRefusal,
-    UserConfirmed,
+    SignedMessage, UserConfirmed,
 };
-use pubky_switch_core::chain::check_attempt_proof;
 use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome};
 use pubky_switch_core::http::ErrorCode;
+use pubky_switch_core::message::MessagePlaintext;
+use pubky_switch_core::ops::{Condition, OpKind};
 
 use crate::activity::{self, ActivityTarget, Role};
 use crate::destination::refused;
@@ -39,8 +42,8 @@ use crate::journal::{Destination, JournalEntry, KeptAmount, PaymentView, Stage};
 use crate::paykit::Paykit;
 use crate::rail::{RailOutcome, RailPayment};
 use crate::records::list_target;
-use crate::requests::{request_of, RequestRef};
-use crate::state::key;
+use crate::requests::{cancelled, rejected, request_of, RequestRef};
+use crate::state::{self, key};
 
 /// How long after the latest time it has seen a payment without a request's attempt pins its
 /// deadline: 10 minutes (Paykit spec 8.4).
@@ -140,7 +143,12 @@ fn not_now(refusal: ClientRefusal) -> PaykitError {
     Refusal::NotNow(refusal.to_string()).into()
 }
 
-fn own_deadline(deadline: Option<u64>) -> ObligationDeadline {
+/// How many times the outcome's batch is built again after `409 conflict`.
+const OUTCOME_TRIES: usize = 3;
+
+/// The deadline the app computes itself for an obligation (Switch wire 6.8): the attempt's,
+/// or none.
+pub(crate) fn own_deadline(deadline: Option<u64>) -> ObligationDeadline {
     match deadline {
         Some(at) => ObligationDeadline::At(at),
         None => ObligationDeadline::NoDeadline,
@@ -174,21 +182,19 @@ impl Paykit {
         if record.shows_paid() {
             return Err(Refusal::AlreadyPaid.into());
         }
-        if matches!(
-            record.response.as_ref().map(StoredMessage::body),
-            Some(Body::PaymentRequestRejection(_))
-        ) || record.status.as_deref() == Some("rejected")
-        {
+        if rejected(&record) {
             return Err(Refusal::Rejected.into());
         }
         // A payer that has recorded a cancellation makes no new attempt (Paykit spec 8.1).
-        if record.cancellation.is_some() || record.status.as_deref() == Some("cancelled") {
+        if cancelled(&record) {
             return Err(Refusal::Cancelled.into());
         }
         let obligation =
             request_obligation(self.naming(), &request.payee, &request.request_hash, 0);
         let deadline = body.attempt_deadline(None)?;
-        if deadline.is_some_and(|d| d <= self.now()) {
+        // No attempt once the deadline is at or before the highest service time verified
+        // (Paykit spec 7.1); the service refuses one from its own clock anyway.
+        if self.deadline_passed(deadline) {
             return Err(Refusal::DeadlinePassed.into());
         }
         self.refuse_open_entry(&obligation, &options).await?;
@@ -245,13 +251,14 @@ impl Paykit {
             payment_reference: Some(body.payment_reference.as_str().to_owned()),
             acceptance_owed: record.response.is_none(),
             acceptance_msg_id: None,
+            acceptance_plaintext: None,
             rail_proof: None,
             paid_at_ms: None,
             proof_msg_id: None,
             restored: false,
             journaled_at_ms: self.now(),
         };
-        Box::pin(self.execute(Plan {
+        self.execute(Plan {
             entry,
             record: target,
             carrier,
@@ -259,7 +266,7 @@ impl Paykit {
             reserve,
             create: None,
             on_record: true,
-        }))
+        })
         .await
     }
 
@@ -295,20 +302,26 @@ impl Paykit {
             natural_key: natural.clone(),
             amount: KeptAmount::of(&payment.amount),
             destination,
-            deadline: Some(self.now().saturating_add(UNREQUESTED_DEADLINE_MS)),
+            // 10 minutes after the latest service time the app has seen (Paykit spec 8.4).
+            deadline: Some(
+                self.service_time()
+                    .unwrap_or_else(|| self.now())
+                    .saturating_add(UNREQUESTED_DEADLINE_MS),
+            ),
             stage: Stage::Recorded,
             step: None,
             label: None,
             payment_reference: None,
             acceptance_owed: false,
             acceptance_msg_id: None,
+            acceptance_plaintext: None,
             rail_proof: None,
             paid_at_ms: None,
             proof_msg_id: None,
             restored: false,
             journaled_at_ms: self.now(),
         };
-        Box::pin(self.execute(Plan {
+        self.execute(Plan {
             entry,
             record: ActivityTarget::payer(natural),
             carrier,
@@ -316,7 +329,7 @@ impl Paykit {
             reserve,
             create: Some(record),
             on_record: false,
-        }))
+        })
         .await
     }
 
@@ -335,21 +348,19 @@ impl Paykit {
 
     pub(crate) async fn journal(&self) -> Result<Vec<JournalEntry>> {
         Ok(self
-            .local
-            .scan::<JournalEntry>(key::JOURNAL)
+            .local_scan::<JournalEntry>(key::JOURNAL)
             .await?
             .into_iter()
             .map(|(_, entry)| entry)
             .collect())
     }
 
-    async fn save(&self, entry: &JournalEntry) -> Result<()> {
-        self.local
-            .put(&key::journal(&entry.attempt()?), entry)
+    async fn save(&mut self, entry: &JournalEntry) -> Result<()> {
+        self.local_put(&key::journal(&entry.attempt()?), entry)
             .await
     }
 
-    async fn set_stage(&self, entry: &mut JournalEntry, stage: Stage) -> Result<()> {
+    async fn set_stage(&mut self, entry: &mut JournalEntry, stage: Stage) -> Result<()> {
         entry.stage = stage;
         self.save(entry).await
     }
@@ -384,7 +395,7 @@ impl Paykit {
         deadline: Option<u64>,
         options: &PayOptions,
     ) -> Result<u64> {
-        let Some(read) = Box::pin(self.app.read_claim(obligation)).await? else {
+        let Some(read) = self.app.read_claim(obligation).await? else {
             return Ok(0);
         };
         let view = read.view;
@@ -506,7 +517,7 @@ impl Paykit {
         Ok(())
     }
 
-    /// Steps 1 to 4 of the paying order for a planned attempt.
+    /// Steps 1 to 4 of the paying order for a planned attempt (Paykit spec 7.2).
     async fn execute(&mut self, plan: Plan) -> Result<PayOutcome> {
         let Plan {
             mut entry,
@@ -532,7 +543,9 @@ impl Paykit {
             let key = self.activity_key(&record)?;
             conditions.push(self.app.record_condition(&key).await?);
         }
-        let mut extra = Vec::new();
+        let mut batch = OpBatch::new()
+            .op_if(op.kind(), conditions)
+            .obligation_deadline(entry.obligation, own_deadline(entry.deadline));
         if let Some(mut list) = reserve {
             // A single-use endpoint is marked used in the attempt's batch (Paykit spec 7.2
             // step 1, 8.4).
@@ -542,7 +555,7 @@ impl Paykit {
                 attempt_id,
             });
             let value = list.to_json()?;
-            extra.push(
+            batch = batch.entry(
                 self.app
                     .record_op(
                         &list_target(&list.payee, &list.app_id),
@@ -553,36 +566,28 @@ impl Paykit {
             );
         }
         if let Some(created) = &create {
+            // A payment without a request: its activity record (Paykit spec 8.4).
             let value = created.to_json()?;
-            extra.push(
+            batch = batch.entry(
                 self.app
                     .record_op(&record.record_target(), Some(&value), Vec::new())
                     .await?,
             );
         }
-        let written = if extra.is_empty() {
-            Box::pin(
-                self.app
-                    .write_claim(op, conditions, own_deadline(entry.deadline)),
-            )
-            .await
-            .map(|w| w.view)
-        } else {
-            let mut batch = OpBatch::new()
-                .op_if(op.kind(), conditions)
-                .obligation_deadline(entry.obligation, own_deadline(entry.deadline));
-            for e in extra {
-                batch = batch.entry(e);
-            }
-            match Box::pin(self.app.submit_batch(batch)).await {
-                Ok(submitted) => self.check_own_attempt(&op, submitted.proofs.first()).await,
-                Err(error) => Err(error),
-            }
-        };
-        let view = match written {
-            Ok(view) => view,
+        // The journal moves to `Attempted` with the batch's answer, never before.
+        let mut attempted = entry.clone();
+        attempted.stage = Stage::Attempted;
+        batch = batch.local(state::local_put(&key::journal(&attempt_id), &attempted)?);
+        // The client checks the attempt's proof: only one that shows this app's own open
+        // attempt lets money move (Paykit spec 7.2; Switch wire 6.5 "Binding").
+        let submitted = match self.app.submit_batch(batch).await {
+            Ok(submitted) => submitted,
             Err(error) if error.code() == Some(ErrorCode::Conflict) => {
                 self.set_stage(&mut entry, Stage::Abandoned).await?;
+                // The answer's service time may show the deadline passed (Paykit spec 7.1).
+                if self.deadline_passed(entry.deadline) {
+                    return Err(Refusal::DeadlinePassed.into());
+                }
                 if let Some(view) = claim_conflict(&error) {
                     self.refuse_claim(&view)?;
                 }
@@ -603,11 +608,11 @@ impl Paykit {
             // moved, so a resume reads the claim and writes `failed` if the attempt is ours.
             Err(error) => return Err(error.into()),
         };
-        entry.step = Some(view.step);
+        entry.step = submitted.proofs.first().and_then(|proof| proof.body().step);
         self.set_stage(&mut entry, Stage::Attempted).await?;
         // Before any money moves: the own identity.json, then the destination (Paykit spec 4,
         // 7.2). Either failing writes `failed` instead of paying.
-        if Box::pin(self.app.refresh_identity()).await.is_err() {
+        if self.app.refresh_identity().await.is_err() {
             return self
                 .fail_attempt(
                     &mut entry,
@@ -632,62 +637,49 @@ impl Paykit {
         // Starting to pay is journaled before the payment begins (Paykit spec 7.2).
         self.set_stage(&mut entry, Stage::Paying).await?;
         self.queue_owed_acceptance(&mut entry).await?;
-        Box::pin(self.dispatch(entry)).await
+        self.dispatch(entry).await
     }
 
-    /// The checks of an own attempt's proof from a batch of several operations (Switch wire
-    /// 6.5 "Binding", 6.8 "Deadline"): one that shows another state is written `failed`.
-    async fn check_own_attempt(
-        &mut self,
-        op: &ClaimOp,
-        proof: Option<&pubky_switch_core::chain::TransitionProof>,
-    ) -> std::result::Result<ClaimView, AppError> {
-        let proof = proof.ok_or_else(|| {
-            AppError::InvalidData("Switch wire 6.5: an attempt answered without its proof".into())
-        })?;
-        let me = self.app_id();
-        let generation = self.app.own_identity().generation();
-        match check_attempt_proof(proof, op.entry(), &me, generation) {
-            Ok(view) => Ok(view),
-            Err(error) => {
-                let step = proof.body().step.unwrap_or_default();
-                let failed = ClaimOp::failed(op.entry().claim_key, step, op.entry().attempt_id);
-                // Best effort: the attempt is refused either way, and an open attempt nobody
-                // carries out ends orphaned (Switch spec 10.2).
-                let _ = Box::pin(self.app.write_claim(
-                    failed,
-                    Vec::new(),
-                    ObligationDeadline::NotKnown,
-                ))
-                .await;
-                Err(AppError::InvalidData(format!(
-                    "the attempt's proof shows another state; written failed: {error}"
-                )))
-            }
-        }
+    /// Whether `deadline` is at or before the highest service time the app verified: no
+    /// attempt is made then (Paykit spec 7.1).
+    pub(crate) fn deadline_passed(&self, deadline: Option<u64>) -> bool {
+        deadline.is_some_and(|d| self.service_time().is_some_and(|t| d <= t))
     }
 
     /// A check failed after the attempt and before any money moved: `failed` instead of
     /// paying (Paykit spec 7.2 step 1).
     async fn fail_attempt(&mut self, entry: &mut JournalEntry, why: Refusal) -> Result<PayOutcome> {
         self.write_outcome(entry, false).await?;
-        self.set_stage(entry, Stage::Finished).await?;
         Err(why.into())
     }
 
+    /// The acceptance of a one-time request, sent with its payment (Paykit spec 7.2 step 2,
+    /// Paykit wire 4.6): signed and journaled, then queued, so a crash between the two signs
+    /// it again and never queues two.
     async fn queue_owed_acceptance(&mut self, entry: &mut JournalEntry) -> Result<()> {
-        if !entry.acceptance_owed || entry.acceptance_msg_id.is_some() {
+        if !entry.acceptance_owed {
             return Ok(());
+        }
+        if let Some(msg_id) = &entry.acceptance_msg_id {
+            if self.app.delivery(msg_id).await?.is_some() {
+                return Ok(());
+            }
         }
         let Some(request_hash) = entry.request_hash()? else {
             return Ok(());
         };
         let label = entry.label.as_deref().and_then(|l| Label::parse(l).ok());
-        let msg_id = self
-            .queue_acceptance(entry.payee, request_hash, label)
-            .await?;
-        entry.acceptance_msg_id = Some(msg_id);
-        self.save(entry).await
+        let signed = self.sign(
+            entry.payee,
+            Kind::PaymentRequestAcceptance,
+            vec![request_hash],
+            PaymentRequestAcceptance { label }.to_body(),
+        )?;
+        entry.acceptance_msg_id = Some(signed.msg_id().to_owned());
+        entry.acceptance_plaintext = Some(signed.plaintext().encode());
+        self.save(entry).await?;
+        self.app.queue_signed(signed).await?;
+        Ok(())
     }
 
     /// Step 2: pay through the rail with the attempt ID as the idempotency key.
@@ -703,7 +695,9 @@ impl Paykit {
         let outcome = self.rail.pay(payment).await;
         // The acceptance goes out while the payment runs, not awaited (Paykit spec 7.2 step
         // 2); a delivery failure leaves it queued.
-        let _ = Box::pin(self.app.flush_outbox()).await;
+        if let Some(msg_id) = entry.acceptance_msg_id.clone() {
+            let _ = self.app.flush_message(&msg_id).await;
+        }
         match outcome {
             Ok(outcome) => self.take_outcome(&mut entry, outcome).await,
             // Once a payment may have been submitted, an error is nothing yet: the attempt
@@ -727,94 +721,178 @@ impl Paykit {
             RailOutcome::Failed => self.set_stage(entry, Stage::RailFailed).await?,
             RailOutcome::Pending => return Ok(PayOutcome::Pending { attempt_id }),
         }
-        Box::pin(self.report(entry)).await
+        self.report(entry).await
     }
 
-    /// Steps 3 and 4: the outcome on the claim, then the proof.
+    /// Steps 3 and 4: the outcome, the activity record and the proof, in one batch, then
+    /// the proof is sent.
     async fn report(&mut self, entry: &mut JournalEntry) -> Result<PayOutcome> {
         let attempt_id = entry.attempt()?;
         let paid = entry.rail_proof.is_some();
-        if matches!(entry.stage, Stage::RailPaid | Stage::RailFailed) {
-            match self.write_outcome(entry, paid).await {
-                Ok(()) => {}
-                Err(error) if error.code() == Some(ErrorCode::NotCurrent) => {
-                    // An app that isn't current can write nothing (Paykit spec 7.3).
-                    self.set_stage(entry, Stage::Finished).await?;
-                    return Ok(if paid {
-                        PayOutcome::PaidUnreported { attempt_id }
-                    } else {
-                        PayOutcome::Failed {
-                            attempt_id,
-                            reason: "the app isn't current".into(),
-                        }
-                    });
-                }
-                Err(error) => return Err(error),
+        match self.write_outcome(entry, paid).await {
+            Ok(()) => {}
+            Err(error) if error.code() == Some(ErrorCode::NotCurrent) => {
+                // An app that isn't current can write nothing (Paykit spec 7.3).
+                self.set_stage(entry, Stage::Finished).await?;
+                return Ok(if paid {
+                    PayOutcome::PaidUnreported { attempt_id }
+                } else {
+                    PayOutcome::Failed {
+                        attempt_id,
+                        reason: "the app isn't current".into(),
+                    }
+                });
             }
-            self.set_stage(entry, Stage::Reported).await?;
+            Err(error) => return Err(error),
         }
         if !paid {
-            self.set_stage(entry, Stage::Finished).await?;
             return Ok(PayOutcome::Failed {
                 attempt_id,
                 reason: "the payment method reported a failure".into(),
             });
         }
-        if entry.proof_msg_id.is_none() {
-            let msg_id = self.queue_proof(entry).await?;
-            entry.proof_msg_id = Some(msg_id);
+        if let Some(msg_id) = entry.proof_msg_id.clone() {
+            let _ = self.app.flush_message(&msg_id).await;
         }
-        self.set_stage(entry, Stage::Finished).await?;
-        let _ = Box::pin(self.app.flush_outbox()).await;
         Ok(PayOutcome::Paid {
             attempt_id,
             proof_msg_id: entry.proof_msg_id.clone(),
         })
     }
 
-    /// `done` (basis `owner`) or `failed` on the attempt (Paykit spec 7.2 step 3). An attempt
-    /// already resolved, by a receipt or another app, needs nothing more.
+    /// Step 3 (Paykit spec 7.2): `done` (basis `owner`) or `failed` on the attempt, and the
+    /// payer's activity record with the acceptance sent with the payment and the proof, in
+    /// one batch, which queues the proof (step 4) and moves the journal to `Finished` once
+    /// applied. An attempt already resolved, by a receipt or another app, needs no claim
+    /// entry. After `409 conflict` the claim and the record are read again and the batch is
+    /// built again on them, unless the journal shows an earlier batch applied meanwhile.
     async fn write_outcome(&mut self, entry: &mut JournalEntry, paid: bool) -> Result<()> {
-        let attempt = entry.attempt()?.to_bytes();
-        for _ in 0..2 {
+        let attempt_id = entry.attempt()?;
+        let attempt = attempt_id.to_bytes();
+        let target = ActivityTarget::payer(entry.natural_key.clone());
+        for _ in 0..OUTCOME_TRIES {
+            // A batch kept from before may have been applied since: it finished the entry.
+            if let Some(kept) = self
+                .local_get::<JournalEntry>(&key::journal(&attempt_id))
+                .await?
+            {
+                if kept.stage == Stage::Finished {
+                    *entry = kept;
+                    return Ok(());
+                }
+            }
             let step = match entry.step {
-                Some(step) => step,
+                Some(step) => Some(step),
                 None => match self.attempt_state(entry).await? {
-                    Some((step, Outcome::Open | Outcome::Unknown)) => step,
-                    _ => return Ok(()),
+                    Some((step, Outcome::Open | Outcome::Unknown)) => Some(step),
+                    _ => None,
                 },
             };
-            let op = if paid {
-                ClaimOp::done(entry.obligation, step, attempt, Basis::Owner, None)?
+            let mut batch = OpBatch::new();
+            if let Some(step) = step {
+                let op = if paid {
+                    ClaimOp::done(entry.obligation, step, attempt, Basis::Owner, None)?
+                } else {
+                    ClaimOp::failed(entry.obligation, step, attempt)
+                };
+                batch = batch
+                    .op(op.kind())
+                    .obligation_deadline(entry.obligation, own_deadline(entry.deadline));
+            }
+            let proof = if paid {
+                Some(self.sign_proof(entry)?)
             } else {
-                ClaimOp::failed(entry.obligation, step, attempt)
+                None
             };
-            match Box::pin(
-                self.app
-                    .write_claim(op, Vec::new(), own_deadline(entry.deadline)),
-            )
-            .await
+            if let Some(write) = self
+                .outcome_record(entry, &target, paid, proof.as_ref())
+                .await?
             {
-                Ok(_) => return Ok(()),
+                batch = batch.entry(write);
+            }
+            let mut finished = entry.clone();
+            finished.stage = Stage::Finished;
+            finished.proof_msg_id = proof.as_ref().map(|p| p.msg_id().to_owned());
+            batch = batch.local(state::local_put(&key::journal(&attempt_id), &finished)?);
+            if batch.is_empty() {
+                // Nothing to write at the switch: the proof is queued alone.
+                if let Some(proof) = proof {
+                    self.app.queue_signed(proof).await?;
+                }
+                self.save(&finished).await?;
+                *entry = finished;
+                return Ok(());
+            }
+            if let Some(proof) = proof {
+                batch = batch.queue(proof);
+            }
+            match self.app.submit_batch(batch).await {
+                Ok(_) => {
+                    *entry = finished;
+                    return Ok(());
+                }
                 Err(error) if error.code() == Some(ErrorCode::Conflict) => {
                     entry.step = None;
+                    self.app.read_record(&target.record_target()).await?;
                 }
                 Err(error) => return Err(error.into()),
             }
         }
-        match self.attempt_state(entry).await? {
-            Some((_, Outcome::Open | Outcome::Unknown)) => {
-                Err(PaykitError::Conflict("the claim kept changing".into()))
-            }
-            _ => Ok(()),
+        Err(PaykitError::Conflict(
+            "the claim or the activity record kept changing".into(),
+        ))
+    }
+
+    /// The payer's activity record after the payment (Paykit spec 7.2 step 3): the
+    /// acceptance sent with it and the proof, each in its role; a payment without a request
+    /// that failed is marked so. `None` when nothing changes.
+    async fn outcome_record(
+        &mut self,
+        entry: &JournalEntry,
+        target: &ActivityTarget,
+        paid: bool,
+        proof: Option<&SignedMessage>,
+    ) -> Result<Option<(Vec<Condition>, OpKind)>> {
+        let own = self.identity();
+        let key = self.activity_key(target)?;
+        let held = self.app.shared_record(&key).await?;
+        let Some(mut record) = activity::read(
+            held.as_ref().and_then(|r| r.content.value()),
+            &own,
+            ActivitySide::Payer,
+        ) else {
+            return Ok(None);
+        };
+        let mut changed = false;
+        if let Some(bytes) = &entry.acceptance_plaintext {
+            let plaintext = MessagePlaintext::decode(bytes).map_err(|_| PaykitError::corrupt())?;
+            let stored =
+                StoredMessage::new(own, self.app.cert().signed(), plaintext, None, &entry.payee)?;
+            changed |= activity::place(&mut record, Role::Response, stored);
         }
+        if let Some(proof) = proof {
+            changed |= activity::place(&mut record, Role::Proof, self.own_copy(proof)?);
+        }
+        if !paid && record.unrequested.is_some() && record.status.as_deref() != Some("failed") {
+            record.status = Some("failed".into());
+            changed = true;
+        }
+        if !changed {
+            return Ok(None);
+        }
+        let value = record.to_json()?;
+        Ok(Some(
+            self.app
+                .record_op(&target.record_target(), Some(&value), Vec::new())
+                .await?,
+        ))
     }
 
     /// The claim's step and this attempt's outcome, read from the switch; `None` when the
     /// claim doesn't hold the attempt.
     async fn attempt_state(&mut self, entry: &JournalEntry) -> Result<Option<(u64, Outcome)>> {
         let attempt = entry.attempt()?.to_bytes();
-        let Some(read) = Box::pin(self.app.read_claim(&entry.obligation)).await? else {
+        let Some(read) = self.app.read_claim(&entry.obligation).await? else {
             return Ok(None);
         };
         Ok(read
@@ -824,9 +902,8 @@ impl Paykit {
             .map(|a| (read.view.step, a.outcome)))
     }
 
-    /// The proof (Paykit spec 7.2 step 4, Paykit wire 4.10), signed once and stored in the
-    /// payer's record as it is delivered.
-    async fn queue_proof(&mut self, entry: &JournalEntry) -> Result<String> {
+    /// The proof (Paykit spec 7.2 step 4, Paykit wire 4.10), signed for the outcome's batch.
+    fn sign_proof(&self, entry: &JournalEntry) -> Result<SignedMessage> {
         let request_hash = entry.request_hash()?;
         let proof = PaymentProof {
             attempt_id: entry.attempt()?,
@@ -843,15 +920,12 @@ impl Paykit {
             payment_reference: None,
             proof: entry.rail_proof.clone().unwrap_or_default(),
         };
-        let target = ActivityTarget::payer(entry.natural_key.clone());
-        self.queue_message(
+        self.sign(
             entry.payee,
             Kind::PaymentProof,
             request_hash.into_iter().collect(),
             proof.to_body(),
-            Some((&target, Role::Proof)),
         )
-        .await
     }
 
     /// Finish the payments a crash, a lost answer or a pending payment method left in the
@@ -864,8 +938,9 @@ impl Paykit {
     ///
     /// The client's errors; the rail's errors.
     pub async fn resume_payments(&mut self) -> Result<Vec<PayOutcome>> {
-        // Batches kept from before go first, so the claim read below shows them.
-        Box::pin(self.app.flush_outbox()).await?;
+        // Batches kept from before go first, so the claim read below shows them and the
+        // journal holds what their answers settled.
+        self.app.flush_outbox().await?;
         let mut out = Vec::new();
         for mut entry in self.journal().await? {
             if !entry.open() {
@@ -878,7 +953,7 @@ impl Paykit {
                         Some((step, Outcome::Open | Outcome::Unknown)) => {
                             entry.step = Some(step);
                             entry.stage = Stage::Paying;
-                            out.push(Box::pin(self.resolve_dispatched(entry)).await?);
+                            out.push(self.resolve_dispatched(entry).await?);
                         }
                         Some(_) => self.set_stage(&mut entry, Stage::Finished).await?,
                         None => self.set_stage(&mut entry, Stage::Abandoned).await?,
@@ -889,7 +964,6 @@ impl Paykit {
                     Some((step, Outcome::Open | Outcome::Unknown)) => {
                         entry.step = Some(step);
                         self.write_outcome(&mut entry, false).await?;
-                        self.set_stage(&mut entry, Stage::Finished).await?;
                         out.push(PayOutcome::Failed {
                             attempt_id,
                             reason: "Paykit spec 7.2: no payment started".into(),
@@ -900,15 +974,15 @@ impl Paykit {
                 },
                 Stage::Paying => {
                     self.queue_owed_acceptance(&mut entry).await?;
-                    out.push(Box::pin(self.resolve_dispatched(entry)).await?);
+                    out.push(self.resolve_dispatched(entry).await?);
                 }
-                Stage::RailPaid | Stage::RailFailed | Stage::Reported => {
-                    out.push(Box::pin(self.report(&mut entry)).await?);
+                Stage::RailPaid | Stage::RailFailed => {
+                    out.push(self.report(&mut entry).await?);
                 }
                 Stage::Finished | Stage::Abandoned => {}
             }
         }
-        let _ = Box::pin(self.app.flush_outbox()).await;
+        let _ = self.app.flush_outbox().await;
         Ok(out)
     }
 
@@ -937,7 +1011,7 @@ impl Paykit {
         }
         if !entry.restored && declaration.idempotent && within(declaration.idempotency_retention_ms)
         {
-            return Box::pin(self.dispatch(entry)).await;
+            return self.dispatch(entry).await;
         }
         Ok(PayOutcome::Uncertain { attempt_id })
     }

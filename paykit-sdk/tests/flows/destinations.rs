@@ -80,9 +80,11 @@ async fn test_destinations_payee_identity_unreadable_refused() {
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    // The payee's identity.json can't be read before money moves: the payment fails closed.
+    // The payee's identity.json can't be read before money moves, neither from its
+    // Homeserver nor from its switch: the payment fails closed.
     w.homeserver
         .remove(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH);
+    w.router.remove(crate::common::BOB_ORIGIN);
     let refused = wallet
         .pay_request(&request, PayOptions::default())
         .await
