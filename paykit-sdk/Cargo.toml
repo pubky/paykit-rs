@@ -14,4 +14,10 @@ publish = false
 
 [dependencies]
 paykit-lib.workspace = true
+pubky-switch-client.workspace = true
+pubky-switch-core.workspace = true
+
+[dev-dependencies]
+pubky-switch-client = { workspace = true, features = ["test-support"] }
+pubky-switch-core = { workspace = true, features = ["test-vectors"] }
 
