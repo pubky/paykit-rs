@@ -12,3 +12,8 @@ categories = ["finance", "cryptography"]
 # Unpublished until the v0.2 spec is frozen (specs/v0.2/README.md).
 publish = false
 
+[dependencies]
+pubky-switch-core.workspace = true
+
+[dev-dependencies]
+pubky-switch-core = { workspace = true, features = ["test-vectors"] }
