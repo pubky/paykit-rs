@@ -1,0 +1,209 @@
+//! Re-sends (Paykit spec 9, Paykit wire 4.12).
+//!
+//! - **Answering** a `resend_request`: the sender re-sends, from the messages it keeps (the
+//!   client keeps each for 30 days from its first acceptance, Switch spec 11), those the
+//!   request selects, of kinds the requesting app's certificate receives, and a payer's
+//!   replies only to an app that takes them under their label (Paykit spec 3.4). It re-sends
+//!   one message to one requester identity at most once an hour, and at most a daily number
+//!   of messages per requester identity.
+//! - **Asking**: entries the app can't read, `missed` items and a provider loss queue
+//!   `resend_request`s, which [`crate::Paykit::receive`] sends; the client bounds their times
+//!   (Paykit spec 9, "What an app asks for"). A `resend_request` adds no conversation entry.
+
+use paykit_lib::bodies::ResendRequest;
+use paykit_lib::kinds::{targets_app, Kind, Side, OPAQUE_MEMBERS};
+use paykit_lib::scopes::verify_certificate;
+use pubky_switch_client::app::SENT_RETENTION_MS;
+use pubky_switch_core::enc::unb64_array;
+use pubky_switch_core::message::Message;
+use pubky_switch_core::records::DAY_MS;
+use pubky_switch_core::sig::SignedDoc;
+
+use crate::activity::SideTag;
+use crate::error::Result;
+use crate::paykit::Paykit;
+use crate::protocol::{body_label, holds_role, QueuedAsk};
+use crate::state::{self, key, Tx};
+
+/// One message is re-sent to one requester identity at most once an hour (Paykit wire 4.12).
+pub const RESEND_COOLDOWN_MS: u64 = 3_600_000;
+
+/// What to ask a counterparty to re-send (Paykit wire 4.12).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ResendSelection {
+    /// Messages by `msg_id`.
+    pub msg_ids: Vec<String>,
+    /// Messages the counterparty's inbox accepted at or after this time.
+    pub accepted_from_ms: Option<u64>,
+    /// ... and at or before this time.
+    pub accepted_until_ms: Option<u64>,
+    /// Requests by hash, with every message that names one.
+    pub request_hashes: Vec<[u8; 32]>,
+}
+
+impl Paykit {
+    /// Ask `counterparty` to re-send messages (Paykit spec 9, Paykit wire 4.12). Best effort:
+    /// the counterparty can't be made to answer. Returns the request's `msg_id`.
+    ///
+    /// # Errors
+    ///
+    /// [`paykit_lib::Error::Validation`] for a selection that selects nothing; the client's
+    /// errors.
+    pub async fn request_resend(
+        &mut self,
+        counterparty: [u8; 32],
+        selection: ResendSelection,
+    ) -> Result<String> {
+        let body = ResendRequest {
+            msg_ids: selection.msg_ids,
+            accepted_from: selection.accepted_from_ms,
+            accepted_until: selection.accepted_until_ms,
+            request_hashes: selection.request_hashes,
+            billing_period: None,
+        }
+        .to_body();
+        ResendRequest::from_body(&body).map_err(paykit_lib::Error::into_validation)?;
+        let msg_id = self
+            .queue_message(counterparty, Kind::ResendRequest, Vec::new(), body, None)
+            .await?;
+        Box::pin(self.app.flush_outbox()).await?;
+        Ok(msg_id)
+    }
+
+    /// Send the re-sends the protocol queued: for entries the app couldn't read, to their
+    /// sender; for `missed` items and a provider loss, to every counterparty with Paykit
+    /// activity. Returns how many requests went out.
+    pub(crate) async fn send_asks(&mut self) -> Result<u64> {
+        let mut sent = 0u64;
+        for (rest, ask) in self.local.scan::<QueuedAsk>(key::ASKS).await? {
+            self.request_resend(
+                ask.sender,
+                ResendSelection {
+                    accepted_from_ms: Some(ask.from_ms),
+                    accepted_until_ms: ask.until_ms,
+                    ..ResendSelection::default()
+                },
+            )
+            .await?;
+            self.local.delete(&format!("{}{rest}", key::ASKS)).await?;
+            sent = sent.saturating_add(1);
+        }
+        let missed = self.local.scan::<u64>(key::MISSED).await?;
+        if missed.is_empty() {
+            return Ok(sent);
+        }
+        let from = missed.iter().map(|(_, from)| *from).min().unwrap_or(0);
+        let peers: Vec<[u8; 32]> = self
+            .local
+            .scan::<u64>(key::PEERS)
+            .await?
+            .into_iter()
+            .filter_map(|(rest, _)| unb64_array::<32>(&rest).ok())
+            .collect();
+        for peer in peers {
+            self.request_resend(
+                peer,
+                ResendSelection {
+                    accepted_from_ms: Some(from),
+                    ..ResendSelection::default()
+                },
+            )
+            .await?;
+            sent = sent.saturating_add(1);
+        }
+        let mut tx = Tx::default();
+        for (rest, _) in missed {
+            tx.delete(&format!("{}{rest}", key::MISSED));
+        }
+        self.local.commit(tx).await?;
+        Ok(sent)
+    }
+
+    /// Answer a `resend_request` from `requester`, whose app presented `cert` (Paykit spec 9,
+    /// Paykit wire 4.12). Returns how many messages were re-sent.
+    pub(crate) async fn answer_resend(
+        &mut self,
+        requester: &[u8; 32],
+        cert: &SignedDoc,
+        request: &ResendRequest,
+    ) -> Result<u64> {
+        let Ok(cert) = verify_certificate(cert, requester) else {
+            return Ok(0);
+        };
+        let now = self.now();
+        let since = now.saturating_sub(SENT_RETENTION_MS);
+        let day = now / DAY_MS;
+        let mut count: u64 = self
+            .local
+            .get(&key::resent_day(requester, day))
+            .await?
+            .unwrap_or(0);
+        let mut resent = 0u64;
+        for sent in self.app.sent_to(requester, since, u64::MAX).await? {
+            if count >= self.config.resend_budget {
+                break;
+            }
+            let Ok(message) = Message::parse(sent.plaintext.json(), OPAQUE_MEMBERS) else {
+                continue;
+            };
+            let first = sent.accepted_at_ms.unwrap_or(0);
+            // Only messages first accepted in the last 30 days (Paykit spec 9).
+            if first < since {
+                continue;
+            }
+            let period = paykit_lib::Body::parse(&message)
+                .ok()
+                .and_then(|b| b.billing_period().copied());
+            if !request.selects(&message, &sent.plaintext.hash(), &[first], period.as_ref()) {
+                continue;
+            }
+            if !self.requester_takes(&message, cert.scopes()) {
+                continue;
+            }
+            let last: Option<u64> = self
+                .local
+                .get(&key::resent(requester, &sent.msg_id))
+                .await?;
+            if last.is_some_and(|at| now < at.saturating_add(RESEND_COOLDOWN_MS)) {
+                continue;
+            }
+            if Box::pin(self.app.resend(&sent.msg_id)).await.is_err() {
+                continue;
+            }
+            count = count.saturating_add(1);
+            resent = resent.saturating_add(1);
+            let mut tx = Tx::default();
+            tx.put(&key::resent(requester, &sent.msg_id), &now)?;
+            tx.put(&key::resent_day(requester, day), &count)?;
+            self.local.commit(tx).await?;
+        }
+        Ok(resent)
+    }
+
+    /// Whether the requesting app takes `message` (Paykit wire 4.12): its kind is one its
+    /// certificate receives, and a payer's reply only under the label rule of Paykit spec 3.4.
+    fn requester_takes(&self, message: &Message, scopes: &[String]) -> bool {
+        let Some(kind) = Kind::from_kind(&message.kind) else {
+            return false;
+        };
+        if !holds_role(scopes, kind.recipients()) {
+            return false;
+        }
+        if !kind.is_payer_reply() {
+            return true;
+        }
+        let side = if kind == Kind::PaymentRequestCancellation {
+            match state::get_sync::<SideTag>(
+                self.local.store().store().as_ref(),
+                self.local.ns(),
+                &key::side(&message.msg_id),
+            ) {
+                Some(SideTag::Payee) => Side::Payee,
+                _ => Side::Payer,
+            }
+        } else {
+            Side::Payer
+        };
+        targets_app(kind, side, body_label(message).as_ref(), scopes)
+    }
+}
