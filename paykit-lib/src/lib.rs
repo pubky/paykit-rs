@@ -18,3 +18,32 @@
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
+
+pub mod allowances;
+pub mod amount;
+pub mod bodies;
+pub mod collections;
+pub mod derive;
+pub mod error;
+pub mod grant;
+pub mod identifiers;
+mod json;
+pub mod kinds;
+pub mod periods;
+pub mod records;
+pub mod scopes;
+
+pub use amount::{Asset, Decimal, PaymentAmount, Rate};
+pub use bodies::Body;
+pub use collections::Collection;
+pub use error::{Error, Result};
+pub use grant::ExecutorGrant;
+pub use identifiers::{
+    AllowanceId, AttemptId, PaymentEndpointIdentifier, PaymentEndpointPayload, PaymentReference,
+};
+pub use kinds::{Kind, PaykitKindRules};
+pub use scopes::{Label, PaykitScope};
