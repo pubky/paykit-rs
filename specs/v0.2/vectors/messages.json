@@ -196,7 +196,7 @@
       }
     ]
   },
-  "description": "Every message kind as sent in v0.2 (Switch wire 4.5, wire 4): the exact JSON bytes, their BLAKE3 hash (refs, request hash), the sender app's signature over lp(\"pubky-switch/v1/msg\", recipient identity, JSON), and the signed plaintext layout sender app ID (16) | signature (64) | u32_be(JSON length) | JSON, before zero padding. payment_request_labelled is sent by bob's hosted app under its label, and alice's acceptance of it copies the label; label_rejections holds requests a payer drops for their label; multi_protocol_senders holds messages from apps whose certificates hold another protocol's scopes; cancellation_roles holds a cancellation between certificates of each pair of roles; conversion_terms holds the shop's period details and requests with their conversion terms changed, which a payer takes or drops.",
+  "description": "Every message kind as sent in v0.2 (Switch wire 4.5, wire 4): the exact JSON bytes, their BLAKE3 hash (refs, request hash), the sender app's signature over lp(\"pubky-switch/v1/msg\", recipient identity, JSON), and the signed plaintext layout sender app ID (16) | signature (64) | u32_be(JSON length) | JSON, before zero padding. payment_request_labelled is sent by bob's hosted app under its label, and alice's acceptance of it copies the label; label_rejections holds requests a payer drops for their label; multi_protocol_senders holds messages from apps whose certificates hold another protocol's scopes; cancellation_roles holds a cancellation between certificates of each pair of roles; conversion_terms holds the shop's period details and requests with their conversion terms changed, which a payer takes or drops; proof_members holds alice's proofs with a member outside the payment it proves, which a payee drops.",
   "label_rejections": {
     "cases": [
       {
@@ -580,6 +580,51 @@
           "sig": "cMQqTli8E2TIrAhJJjEQ2yYKlfDfNIY3obiQLAIiJqCeWOuezLlliF_Bqd-1hmr-nYUhRqGJY_yuFOvg3udECg"
         },
         "signature": "q_cbwc-j0Cf2jYlzasI-B1M-3rLK_ElvjVILaUNmeUXXsQy1YbeFmNcal__a6uAT3shMtAd6TPjWMxWrDmHhBw"
+      }
+    ]
+  },
+  "proof_members": {
+    "description": "Wire 4.10: alice's proofs, payment_proof of the one-time request and payment_proof_unrequested of a payment without one, with one member added and signed again by her wallet. amount is only in a proof of a payment without a request, whose refs are empty; billing_period, label, payment_reference and allowance_id are only in a proof of a request. A payee drops each at check 10. reason is paykit-lib's wording.",
+    "refused": [
+      {
+        "base": "payment_proof",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"c8fc5427-bee0-47fc-87bd-9c948c32e152\",\"created_at\":\"2026-01-01T00:05:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[\"pukrdI5C7SfN7mlLheLGWRk2qzt8RTKXlXv4E1rRGKg\"],\"body\":{\"amount\":{\"asset\":\"btc\",\"value\":\"0.00025\"},\"attempt_id\":\"DgCVYQKL1eyDacZvG6YhZg\",\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-lightning-bolt11\",\"proof\":{\"data\":\"8f2a5c6e0b1d4f3a9c7e2b6d0a4f8c1e3b5d7f9a2c4e6b8d0f1a3c5e7b9d2f4a\",\"type\":\"bitcoin-bolt11-preimage\"}}}",
+        "name": "a request's proof carrying amount",
+        "reason": "invalid: payment_proof: amount: only in a proof of a payment without a request; a request's comes from the request",
+        "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
+        "signature": "QULd6VKG1DQQ_4JSjpJSWVuH44h_v2QrB-NWAG9LymwTlPCxkjHsNzCc0x7LrDfLRnjeZrJ_WmKHanEs4KwZDQ"
+      },
+      {
+        "base": "payment_proof_unrequested",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"53918dc4-8213-4422-8951-6b02f05883bc\",\"created_at\":\"2026-01-01T00:07:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[],\"body\":{\"amount\":{\"asset\":\"btc\",\"value\":\"0.0015\"},\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\",\"billing_period\":{\"ends_at\":\"2026-03-31T00:00:00.000Z\",\"starts_at\":\"2026-02-28T00:00:00.000Z\"},\"list_version\":1767225960000,\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-bitcoin-p2wpkh\",\"proof\":{\"txid\":\"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b\",\"type\":\"bitcoin-txid\"}}}",
+        "name": "a proof without a request carrying billing_period",
+        "reason": "invalid: payment_proof: billing_period: only in a proof of a request, not of a payment without one",
+        "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
+        "signature": "YIKYx15Kl0HThdMog4D_xhpfAyfhtYw3PdMVDp8Nx5evKoWBNs-BaTD_C5MgWC_NlrdP-M4lu33QeQMzQEagAQ"
+      },
+      {
+        "base": "payment_proof_unrequested",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"53918dc4-8213-4422-8951-6b02f05883bc\",\"created_at\":\"2026-01-01T00:07:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[],\"body\":{\"amount\":{\"asset\":\"btc\",\"value\":\"0.0015\"},\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\",\"label\":\"shop1\",\"list_version\":1767225960000,\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-bitcoin-p2wpkh\",\"proof\":{\"txid\":\"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b\",\"type\":\"bitcoin-txid\"}}}",
+        "name": "a proof without a request carrying label",
+        "reason": "invalid: payment_proof: label: only in a proof of a request, not of a payment without one",
+        "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
+        "signature": "At1UCYQSDzwshze1hnFDEiyFZ8YNDNd2VsMEfDpg6uiImsbSIjpQziQfGk42PPg8S4B-yi3luM5t3N0LSBGcBA"
+      },
+      {
+        "base": "payment_proof_unrequested",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"53918dc4-8213-4422-8951-6b02f05883bc\",\"created_at\":\"2026-01-01T00:07:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[],\"body\":{\"amount\":{\"asset\":\"btc\",\"value\":\"0.0015\"},\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\",\"list_version\":1767225960000,\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-bitcoin-p2wpkh\",\"payment_reference\":\"order-1042\",\"proof\":{\"txid\":\"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b\",\"type\":\"bitcoin-txid\"}}}",
+        "name": "a proof without a request carrying payment_reference",
+        "reason": "invalid: payment_proof: payment_reference: only in a proof of a request, not of a payment without one",
+        "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
+        "signature": "0JLkiCkqKzklaoIk2Tb2ig-yLpsqro1pZQEzcfX-LjD0YX8VdzbvOxM0PAnfcGU-tKT51Ls9OZpF-FxvkOKlCQ"
+      },
+      {
+        "base": "payment_proof_unrequested",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_proof\",\"msg_id\":\"53918dc4-8213-4422-8951-6b02f05883bc\",\"created_at\":\"2026-01-01T00:07:00.000Z\",\"from\":{\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\"},\"to\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"refs\":[],\"body\":{\"allowance_id\":\"d0efffb7-191b-4709-b6c7-e343af5500b4\",\"amount\":{\"asset\":\"btc\",\"value\":\"0.0015\"},\"attempt_id\":\"mAFdg5_0tVNjmrgiTUZW4g\",\"list_version\":1767225960000,\"payment_app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"payment_endpoint_identifier\":\"btc-bitcoin-p2wpkh\",\"proof\":{\"txid\":\"4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b\",\"type\":\"bitcoin-txid\"}}}",
+        "name": "a proof without a request carrying allowance_id",
+        "reason": "invalid: payment_proof: allowance_id: only in a proof of a request, not of a payment without one",
+        "sender_app": "wejf37ngr7qizej3eoijn3hq4c",
+        "signature": "0anoV94HPYPQlu7CQ88Onk3ONJqOiTtsyA9ysNxmGwsPsAM04a1yt58axDOjdvFEFqZDfvDtosYuS0TWhcFkCQ"
       }
     ]
   }
