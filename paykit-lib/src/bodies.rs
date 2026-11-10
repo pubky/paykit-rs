@@ -875,6 +875,13 @@ impl PaymentProof {
                 "only in a proof of a payment without a request; a request's comes from the request",
             ));
         }
+        if refs == 2 && obj.opt("billing_period").is_none() {
+            return Err(bad(
+                PROOF,
+                "billing_period",
+                "missing; a proof that used period details names their Billing Period",
+            ));
+        }
         if refs == 0 {
             // Paykit wire 4.10: these members name a request's context, a Billing Period, a
             // label, a reference or the Allowance an automatic payment of a request is made
@@ -1015,20 +1022,29 @@ pub struct PaymentReceipt {
 const RECEIPT: &str = "Paykit wire 4.11: payment_receipt";
 
 impl PaymentReceipt {
-    /// Read the body (Paykit wire 4.11).
+    /// Read the body of a receipt with `refs` references (Paykit wire 4.11): with the proof
+    /// hash alone, it confirms a payment without a request, so it names no Billing Period.
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] naming the member.
-    pub fn from_body(body: &Map<String, Value>) -> Result<Self> {
+    /// [`Error::Invalid`] naming the member or rule.
+    pub fn from_body(body: &Map<String, Value>, refs: usize) -> Result<Self> {
         let obj = Obj::new(body, RECEIPT);
-        Ok(Self {
+        let receipt = Self {
             attempt_id: AttemptId::from_bytes(obj.req_b64::<16>("attempt_id")?),
             billing_period: obj
                 .opt("billing_period")
                 .map(|p| PeriodRef::from_json(p, RECEIPT))
                 .transpose()?,
-        })
+        };
+        if refs < 2 && receipt.billing_period.is_some() {
+            return Err(bad(
+                RECEIPT,
+                "billing_period",
+                "only in a receipt of a recurring request, whose refs name it",
+            ));
+        }
+        Ok(receipt)
     }
 
     /// Write the body.
@@ -1038,8 +1054,8 @@ impl PaymentReceipt {
     /// [`Error::Validation`] for a value a recipient drops at check 10: the writer reads
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
-    pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, Self::body_unchecked, Self::from_body)
+    pub fn to_body(&self, refs: usize) -> Result<Map<String, Value>> {
+        written(self, Self::body_unchecked, |b| Self::from_body(b, refs))
     }
 
     /// The body as written, before the reader checks it.
@@ -1607,7 +1623,9 @@ impl Body {
             Kind::PaymentProof => {
                 Self::PaymentProof(PaymentProof::from_body(body, message.refs.len())?)
             }
-            Kind::PaymentReceipt => Self::PaymentReceipt(PaymentReceipt::from_body(body)?),
+            Kind::PaymentReceipt => {
+                Self::PaymentReceipt(PaymentReceipt::from_body(body, message.refs.len())?)
+            }
             Kind::ResendRequest => Self::ResendRequest(ResendRequest::from_body(body)?),
             Kind::PrivatePaymentList => {
                 Self::PrivatePaymentList(PrivatePaymentList::from_body(body)?)
@@ -1668,7 +1686,7 @@ impl Body {
             Self::PaymentRequestRejection(b) | Self::PaymentRequestCancellation(b) => b.to_body(),
             Self::PaymentPeriodDetails(b) => b.to_body(),
             Self::PaymentProof(b) => b.to_body(refs),
-            Self::PaymentReceipt(b) => b.to_body(),
+            Self::PaymentReceipt(b) => b.to_body(refs),
             Self::ResendRequest(b) => b.to_body(),
             Self::PrivatePaymentList(b) => b.to_body(),
             Self::PrivatePaymentListRequest(b) => b.to_body(),
@@ -2231,6 +2249,23 @@ mod tests {
         let mut listed = with_amount;
         listed["list_version"] = json!(7);
         PaymentProof::from_body(&body(listed), 0).unwrap();
+    }
+
+    #[test]
+    fn test_proof_and_receipt_refs_fix_their_billing_period() {
+        let p = json!({ "attempt_id": "mAFdg5_0tVNjmrgiTUZW4g", "payment_app_id": "brrz3m6g5rci6iqnzke44q4djc",
+            "payment_endpoint_identifier": "btc-bitcoin-p2wpkh", "proof": { "type": "x" } });
+        let period = json!({ "starts_at": "2026-02-28T00:00:00.000Z",
+            "ends_at": "2026-03-31T00:00:00.000Z" });
+        // A proof that used period details names their period.
+        assert!(PaymentProof::from_body(&body(p.clone()), 2).is_err());
+        let mut with = p;
+        with["billing_period"] = period.clone();
+        PaymentProof::from_body(&body(with), 2).unwrap();
+        // A receipt of a payment without a request names no period.
+        let r = json!({ "attempt_id": "mAFdg5_0tVNjmrgiTUZW4g", "billing_period": period });
+        assert!(PaymentReceipt::from_body(&body(r.clone()), 1).is_err());
+        PaymentReceipt::from_body(&body(r), 2).unwrap();
     }
 
     #[test]

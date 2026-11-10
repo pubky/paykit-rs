@@ -1582,3 +1582,21 @@ fn check_allowance_records(keys: &Keys, v: &Value) {
         }
     }
 }
+
+#[test]
+fn test_activity_record_proof_names_the_list_it_paid() {
+    use paykit_lib::records::DestinationSource;
+    let keys = Keys::load();
+    let b = bases(&keys);
+    // The proof paid a list version; a destination that isn't that list doesn't match it.
+    let mut public = b.unrequested.clone();
+    if let Some(u) = public.unrequested.as_mut() {
+        u.source = DestinationSource::Public;
+        u.list_version = None;
+    }
+    let error = public.to_json().unwrap_err().to_string();
+    assert!(error.contains("list_version"), "{error}");
+    let json = public.to_json_unchecked().unwrap();
+    assert!(ActivityRecord::read(&json, &pubky(ALICE), ActivitySide::Payer).is_err());
+    b.unrequested.to_json().unwrap();
+}

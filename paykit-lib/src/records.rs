@@ -509,11 +509,11 @@ fn read_unrequested(value: &Value) -> Result<UnrequestedDestination> {
         }
     };
     let list_version = u.opt_int("list_version")?;
-    if source == DestinationSource::List && list_version.is_none() {
+    if (source == DestinationSource::List) != list_version.is_some() {
         return Err(bad(
             ACTIVITY,
             "unrequested.list_version",
-            "missing for a list",
+            "for a list, and only for a list",
         ));
     }
     Ok(UnrequestedDestination {
@@ -725,8 +725,8 @@ impl ActivityRecord {
         }
         if let Some(u) = &self.unrequested {
             ensure(
-                u.source != DestinationSource::List || u.list_version.is_some(),
-                "Paykit wire 5.3: unrequested.list_version: missing for a list",
+                (u.source == DestinationSource::List) == u.list_version.is_some(),
+                "Paykit wire 5.3: unrequested.list_version: for a list, and only for a list",
             )?;
         }
         check_attempted_periods(&self.attempted_periods)?;
@@ -741,6 +741,18 @@ impl ActivityRecord {
             ensure(
                 p.attempt_id == a,
                 "Paykit wire 5.3: attempt_id isn't the stored proof's",
+            )?;
+        }
+        // Paykit wire 4.10: in the record of a payment without a request, the proof names the
+        // list version exactly when it paid a list.
+        if let (RecordBinding::Unrequested, Some(u), Some(Body::PaymentProof(p))) = (
+            binding,
+            &self.unrequested,
+            self.proof.as_ref().map(StoredMessage::body),
+        ) {
+            ensure(
+                p.list_version == u.list_version,
+                "Paykit wire 4.10: the proof's list_version isn't the destination's",
             )?;
         }
         // Paykit wire 4.11: a receipt confirms the proof's attempt, of the proof's Billing
@@ -1917,6 +1929,24 @@ mod tests {
         assert_eq!(read(kept.clone()).unwrap(), kept);
         // An ID that isn't a lower-case UUID v4 is still refused.
         assert!(read(vec!["not-a-uuid".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn test_unrequested_list_version_only_for_a_list() {
+        let destination = |source: &str, version: Option<u64>| {
+            let mut v = serde_json::json!({ "app_id": "brrz3m6g5rci6iqnzke44q4djc",
+                "endpoint_id": "btc-bitcoin-p2wpkh", "payload": "bc1q", "source": source,
+                "single_use": false });
+            if let Some(n) = version {
+                v["list_version"] = serde_json::json!(n);
+            }
+            v
+        };
+        read_unrequested(&destination("list", Some(7))).unwrap();
+        read_unrequested(&destination("public", None)).unwrap();
+        assert!(read_unrequested(&destination("list", None)).is_err());
+        assert!(read_unrequested(&destination("public", Some(7))).is_err());
+        assert!(read_unrequested(&destination("request", Some(7))).is_err());
     }
 
     #[test]
