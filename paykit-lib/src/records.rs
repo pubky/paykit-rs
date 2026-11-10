@@ -35,7 +35,7 @@ use crate::identifiers::{
     AllowanceId, AttemptId, PaymentEndpointIdentifier, PaymentEndpointPayload,
 };
 use crate::json::{bad, check_v1, parse_object, Obj};
-use crate::kinds::{Kind, OPAQUE_MEMBERS};
+use crate::kinds::{check_sender_scopes, Kind, OPAQUE_MEMBERS};
 use crate::periods::PeriodRef;
 use crate::scopes::{self, Label};
 
@@ -134,6 +134,10 @@ impl StoredMessage {
             message.is_from_own_app() == own_kind,
             "Paykit wire 4.3: executor_notice goes between own apps, every other kind between identities",
         )?;
+        // Check 8's sender side, as at the inbox: the kind and its label are the sender's
+        // to send (Paykit spec 3.3, 3.4). Which own app received it isn't recorded, so the
+        // recipient side stays the inbox's.
+        check_sender_scopes(&message, cert.scopes())?;
         let body = check_body(&message, plaintext.json())?;
         Ok(Self {
             sender,
@@ -173,7 +177,8 @@ impl StoredMessage {
 
     /// Read a stored message addressed to `recipient` (Paykit wire 5.2), with the recipient
     /// checks that need no `identity.json` (Switch wire 5.1 checks 2 to 6), Paykit's
-    /// certificate checks (Paykit wire 3.1) and the body (check 10). The sender's standing,
+    /// certificate checks (Paykit wire 3.1), the sender's side of check 8
+    /// ([`check_sender_scopes`]) and the body (check 10). The sender's standing,
     /// check 7, was checked once when the message was recorded (Switch spec 8.2).
     ///
     /// # Errors

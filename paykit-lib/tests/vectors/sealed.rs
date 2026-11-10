@@ -716,8 +716,13 @@ alice's for payer_activity, bob's for payee_activity. Some members only some rec
 request_hash and billing_period only a period record, attempt_id and unrequested only the \
 record of a payment without a request, and allowance_id only a payer's request record. \
 accepted are records their reader binds at their keys; refused are the same records with a \
-member where their binding and side don't allow it, which their reader refuses. reason is \
-paykit-lib's wording, of the first check that refuses it.";
+member where their binding and side don't allow it, which their reader refuses, and, last, \
+alice's request records storing a request whose sender's certificate doesn't allow it \
+(wire 5.2, the sender's side of check 8): messages.json label_rejections' request labelled \
+shop2 from bob's hosted app, which holds only request:shop1, and messages.json's \
+payment_request presented with documents.json's chat-only certificate of the shop's keys, at \
+the keys their requests name. reason is paykit-lib's wording, of the first check that \
+refuses it.";
 
 /// The cases paykit-lib generates in `sealed.json` (README "How the files were generated"),
 /// compared with the file, and written into it with `PAYKIT_WRITE_VECTORS`.
@@ -740,10 +745,24 @@ fn generate(keys: &Keys) {
         }
         out
     };
+    let mut refused: Vec<Value> = refused.iter().map(|c| write(c, false)).collect();
+    for (name, m, cert) in unauthorized_stored(keys) {
+        let (value, key) = record_with_request(keys, stored_value(&m, &cert), st(&m, "json"));
+        let error = bind_activity(keys, &value, ActivitySide::Payer, &key)
+            .expect_err(name)
+            .to_string();
+        refused.push(serde_json::json!({
+            "collection": "payer_activity",
+            "name": name,
+            "reason": quoted(&error),
+            "record_key": b64(&key),
+            "value": String::from_utf8(value).unwrap(),
+        }));
+    }
     let member = serde_json::json!({
         "accepted": accepted.iter().map(|c| write(c, true)).collect::<Vec<_>>(),
         "description": ACTIVITY_DESCRIPTION,
-        "refused": refused.iter().map(|c| write(c, false)).collect::<Vec<_>>(),
+        "refused": refused,
     });
     generated(
         "sealed.json",
@@ -764,7 +783,10 @@ fn check_activity_records(keys: &Keys, v: &Value) {
     let m = &v["activity_records"];
     let (accepted, refused) = activity_cases(keys);
     assert_eq!(arr(m, "accepted").len(), accepted.len());
-    assert_eq!(arr(m, "refused").len(), refused.len());
+    assert_eq!(
+        arr(m, "refused").len(),
+        refused.len() + unauthorized_stored(keys).len()
+    );
     for (list, taken) in [("accepted", true), ("refused", false)] {
         for case in arr(m, list) {
             let name = st(case, "name");
@@ -974,4 +996,99 @@ fn test_activity_record_writes_canonical_msg_ids() {
     let read = ActivityRecord::read(&written, &pubky(ALICE), ActivitySide::Payer).unwrap();
     assert_eq!(read.msg_ids, want);
     assert_eq!(read.to_json().unwrap(), written);
+}
+
+/// A stored message as a record holds it (Paykit wire 5.2), from a message case signed by
+/// `sender_app`, with the certificate `cert`; built by hand, since a reader refuses it.
+fn stored_value(m: &Value, cert: &pubky_switch_core::sig::SignedDoc) -> Value {
+    let json = st(m, "json");
+    let message = pubky_switch_core::message::Message::parse(
+        json.as_bytes(),
+        paykit_lib::kinds::OPAQUE_MEMBERS,
+    )
+    .unwrap();
+    serde_json::json!({
+        "accepted_at": null,
+        "cert": { "body": cert.body, "sig": cert.sig },
+        "plaintext": {
+            "json": b64(json.as_bytes()),
+            "sender_app": b64(&message.from.app_id),
+            "signature": st(m, "signature"),
+        },
+        "sender": pubky_switch_core::enc::pubky_id(&message.from.identity),
+    })
+}
+
+/// Messages a reader refuses from shared state for check 8's sender side (Paykit wire 5.2):
+/// names, the message case and the sender certificate presented with it.
+fn unauthorized_stored(
+    keys: &Keys,
+) -> Vec<(&'static str, Value, pubky_switch_core::sig::SignedDoc)> {
+    let labels = paykit("messages.json");
+    let shop2 = arr(&labels["label_rejections"], "cases")
+        .iter()
+        .find(|c| st(c, "name") == "another label than the sender's certificate holds")
+        .unwrap()
+        .clone();
+    let chat = arr(
+        &paykit("documents.json")["multi_protocol_certificates"],
+        "accepted",
+    )
+    .iter()
+    .find(|c| st(c, "name") == "chat only, with lists.read")
+    .unwrap()["signed"]
+        .clone();
+    vec![
+        (
+            "a stored request labelled shop2 from the hosted app, which holds only request:shop1",
+            shop2,
+            crate::common::cert_doc("hosted"),
+        ),
+        (
+            "a stored payment_request from the shop with a certificate holding only chat",
+            crate::common::message("payment_request"),
+            crate::common::signed(&chat),
+        ),
+    ]
+    .into_iter()
+    .inspect(|(_, m, _)| assert_eq!(keys.app_by_id(st(m, "sender_app")).identity, pubky(BOB)))
+    .collect()
+}
+
+/// Alice's payer request record holding `request`, as JSON, and the key it would sit at.
+fn record_with_request(keys: &Keys, request: Value, json: &str) -> (Vec<u8>, [u8; 32]) {
+    let alice = pubky(ALICE);
+    let base = activity(ActivitySide::Payer, pubky(BOB));
+    let mut record: Value = serde_json::from_slice(&base.to_json().unwrap()).unwrap();
+    record["request"] = request;
+    let natural = natural_key::request_record(&pubky(BOB), &request_hash(json.as_bytes()));
+    let key = Collection::PayerActivity
+        .record_key(&keys.identity(&alice).naming_key(), &natural, None)
+        .unwrap();
+    (serde_json::to_vec(&record).unwrap(), key)
+}
+
+#[test]
+fn test_stored_message_refuses_a_label_its_sender_does_not_hold() {
+    use paykit_lib::records::StoredMessage;
+    let keys = Keys::load();
+    let alice = pubky(ALICE);
+    for (name, m, cert) in unauthorized_stored(&keys) {
+        let error = StoredMessage::read(&stored_value(&m, &cert), &alice)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("sender's certificate"), "{name}: {error}");
+        let (record, key) = record_with_request(&keys, stored_value(&m, &cert), st(&m, "json"));
+        assert!(
+            bind_activity(&keys, &record, ActivitySide::Payer, &key).is_err(),
+            "{name}: in a record"
+        );
+    }
+    // The same request under the label the hosted app holds is stored.
+    let labelled = crate::common::message("payment_request_labelled");
+    StoredMessage::read(
+        &stored_value(&labelled, &crate::common::cert_doc("hosted")),
+        &alice,
+    )
+    .unwrap();
 }
