@@ -264,34 +264,55 @@ impl Paykit {
                 (destination, Carrier::Message(Box::new(stored.clone())))
             }
             RequestDestination::RequiredApp(_) | RequestDestination::Any => {
-                let mut found = None;
+                let required = match &body.destination {
+                    RequestDestination::RequiredApp(app) => Some(*app),
+                    _ => None,
+                };
+                // Every single-use mark that names the attempt, in a list the request allows:
+                // of its required app, if any, at the version held, for an endpoint the list
+                // carries and the request accepts (Paykit wire 4.5, 5.4). Kept once each, by
+                // app, endpoint and version; the destination is known only when one is left.
+                let mut found: std::collections::BTreeMap<_, (Destination, Carrier)> =
+                    std::collections::BTreeMap::new();
                 for list in self.lists_of(&obligation.payee).await? {
-                    let Some(mark) = list.used.iter().find(|u| u.attempt_id == attempt) else {
+                    if required.is_some_and(|app| app != list.app_id) {
+                        continue;
+                    }
+                    let Body::PrivatePaymentList(listed) = list.list.body() else {
                         continue;
                     };
-                    let Body::PrivatePaymentList(body) = list.list.body() else {
-                        continue;
-                    };
-                    let Some(endpoint) = body
-                        .payment_endpoints
-                        .get(&mark.endpoint)
-                        .filter(|_| body.version == mark.version)
-                    else {
-                        continue;
-                    };
-                    found = Some((
-                        Destination::new(
-                            list.app_id,
-                            &mark.endpoint,
-                            &endpoint.payload,
-                            DestinationSource::List,
-                            Some(mark.version),
-                            true,
-                        ),
-                        Carrier::Message(Box::new(list.list.clone())),
-                    ));
+                    for mark in list.used.iter().filter(|u| u.attempt_id == attempt) {
+                        let accepted = body
+                            .accepted_payment_endpoint_identifiers
+                            .as_ref()
+                            .is_none_or(|ids| ids.contains(&mark.endpoint));
+                        let Some(endpoint) = listed
+                            .payment_endpoints
+                            .get(&mark.endpoint)
+                            .filter(|e| accepted && e.single_use && listed.version == mark.version)
+                        else {
+                            continue;
+                        };
+                        found.insert(
+                            (list.app_id, mark.endpoint.as_str().to_owned(), mark.version),
+                            (
+                                Destination::new(
+                                    list.app_id,
+                                    &mark.endpoint,
+                                    &endpoint.payload,
+                                    DestinationSource::List,
+                                    Some(mark.version),
+                                    true,
+                                ),
+                                Carrier::Message(Box::new(list.list.clone())),
+                            ),
+                        );
+                    }
                 }
-                let Some(found) = found else {
+                if found.len() != 1 {
+                    return Ok(None);
+                }
+                let Some((_, found)) = found.pop_first() else {
                     return Ok(None);
                 };
                 found

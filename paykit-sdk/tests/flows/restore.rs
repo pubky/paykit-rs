@@ -613,3 +613,205 @@ async fn test_restore_journal_entry_naming_another_obligation_refused() {
         assert!(app.payments().await.is_err());
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// Rebuilding a list destination from its single-use marks
+
+/// Bob's app `app` sends alice's wallet a list with a single-use on-chain endpoint and a
+/// reusable Lightning offer.
+fn list_from(w: &World, app: &str, wallet: [u8; 16], version: u64) {
+    let mut endpoints = std::collections::BTreeMap::new();
+    endpoints.insert(
+        crate::common::endpoint("btc-bitcoin-p2wpkh"),
+        paykit_lib::bodies::ListEndpoint {
+            payload: paykit_lib::PaymentEndpointPayload::new(&format!("bc1q{app}")).unwrap(),
+            single_use: true,
+        },
+    );
+    endpoints.insert(
+        crate::common::endpoint("btc-lightning-bolt12"),
+        paykit_lib::bodies::ListEndpoint {
+            payload: paykit_lib::PaymentEndpointPayload::new(&format!("lno1{app}")).unwrap(),
+            single_use: false,
+        },
+    );
+    let body = paykit_lib::bodies::PrivatePaymentList {
+        version,
+        payment_endpoints: endpoints,
+        expires_at: w.clock.now_ms() + 30 * 24 * crate::common::HOUR_MS,
+    }
+    .to_body()
+    .unwrap();
+    w.inject(
+        &w.bob,
+        app,
+        &w.alice,
+        &[wallet],
+        "paykit.private_payment_list",
+        Vec::new(),
+        body,
+    );
+}
+
+/// Rewrite, through `wallet`, its `payment_lists` record of bob's app `app_id`, its
+/// single-use marks replaced by `used`: what a restore finds there.
+async fn rewrite_marks(wallet: &mut Paykit, w: &World, app_id: [u8; 16], used: serde_json::Value) {
+    use paykit_lib::collections::Collection;
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            Collection::PaymentLists.name(),
+            Collection::PaymentLists.policy(None),
+        ),
+        &paykit_lib::derive::natural_key::payment_list(&w.bob_id(), &app_id),
+    );
+    let key = wallet.app().record_key(&target).unwrap();
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    value["used"] = used;
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let entry = wallet
+        .app_mut()
+        .record_op(&target, Some(&bytes), Vec::new())
+        .await
+        .unwrap();
+    wallet
+        .app_mut()
+        .submit_batch(pubky_switch_client::app::OpBatch::new().entry(entry))
+        .await
+        .unwrap();
+}
+
+fn mark(version: u64, endpoint: &str, attempt_id: paykit_lib::AttemptId) -> serde_json::Value {
+    serde_json::json!({ "version": version, "endpoint": endpoint, "attempt_id": attempt_id.to_text() })
+}
+
+/// A wallet with lists from bob's `shop` and `other`, a backup taken before paying
+/// `destination`'s request, which is paid after it through the shop's list endpoint `paid`,
+/// and the marks then rewritten by `marks`. Returns the restored app's report and the
+/// request.
+async fn reconcile_with_marks(
+    destination: impl Fn([u8; 16]) -> paykit_lib::bodies::RequestDestination,
+    accepted: Option<Vec<&str>>,
+    paid: &str,
+    marks: impl Fn([u8; 16], [u8; 16], u64, paykit_lib::AttemptId) -> Vec<([u8; 16], serde_json::Value)>,
+) -> (World, paykit_sdk::ReconcileReport, paykit_sdk::RequestRef) {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let other = w.labelled_shop("other", "other").await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let version = w.clock.now_ms();
+    list_from(&w, "shop", wallet.app_id(), version);
+    list_from(&w, "other", wallet.app_id(), version);
+    let mut any = draft("1", w.clock.now_ms());
+    any.destination = destination(shop.app_id());
+    any.accepted_endpoint_identifiers =
+        accepted.map(|ids| ids.into_iter().map(crate::common::endpoint).collect());
+    let request = request_from(&mut shop, w.alice_id(), any).await;
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id } = wallet
+        .pay_request(
+            &request,
+            PayOptions {
+                endpoint: Some(crate::common::endpoint(paid)),
+                list_app: Some(shop.app_id()),
+                ..PayOptions::default()
+            },
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    w.rail.settle(&attempt_id, true);
+    for (app_id, used) in marks(shop.app_id(), other.app_id(), version, attempt_id) {
+        rewrite_marks(&mut wallet, &w, app_id, used).await;
+    }
+    drop(wallet);
+    let mut app = restored(&w, &backup).await;
+    let report = app.reconcile().await.unwrap();
+    (w, report, request)
+}
+
+fn stayed_doubtful(report: &paykit_sdk::ReconcileReport) {
+    assert_eq!(report.doubtful.len(), 1, "{report:?}");
+    assert!(report.resolved.is_empty(), "{report:?}");
+}
+
+#[tokio::test]
+async fn test_restore_mark_in_another_app_than_the_required_one_stays_doubtful() {
+    // The request requires the shop's list; the only mark naming the attempt is in another
+    // app's: the destination can't be told (Paykit wire 4.5).
+    let (_w, report, _) = reconcile_with_marks(
+        paykit_lib::bodies::RequestDestination::RequiredApp,
+        None,
+        "btc-bitcoin-p2wpkh",
+        |shop, other, version, attempt| {
+            vec![
+                (shop, serde_json::json!([])),
+                (
+                    other,
+                    serde_json::json!([mark(version, "btc-bitcoin-p2wpkh", attempt)]),
+                ),
+            ]
+        },
+    )
+    .await;
+    stayed_doubtful(&report);
+}
+
+#[tokio::test]
+async fn test_restore_mark_of_an_identifier_the_request_refuses_stays_doubtful() {
+    // The request accepts Lightning only, and is paid through the reusable offer, which
+    // leaves no mark; a mark naming the attempt names an on-chain endpoint it refuses.
+    let (_w, report, _) = reconcile_with_marks(
+        |_| paykit_lib::bodies::RequestDestination::Any,
+        Some(vec!["btc-lightning-bolt12"]),
+        "btc-lightning-bolt12",
+        |shop, _, version, attempt| {
+            vec![(
+                shop,
+                serde_json::json!([mark(version, "btc-bitcoin-p2wpkh", attempt)]),
+            )]
+        },
+    )
+    .await;
+    stayed_doubtful(&report);
+}
+
+#[tokio::test]
+async fn test_restore_several_marks_for_one_attempt_stay_doubtful() {
+    // Two lists both mark an endpoint used by the attempt: which was paid can't be told.
+    let (_w, report, _) = reconcile_with_marks(
+        |_| paykit_lib::bodies::RequestDestination::Any,
+        None,
+        "btc-bitcoin-p2wpkh",
+        |_, other, version, attempt| {
+            vec![(
+                other,
+                serde_json::json!([mark(version, "btc-bitcoin-p2wpkh", attempt)]),
+            )]
+        },
+    )
+    .await;
+    stayed_doubtful(&report);
+}
+
+#[tokio::test]
+async fn test_restore_one_allowed_mark_rebuilds_the_payment() {
+    let (_w, report, _) = reconcile_with_marks(
+        paykit_lib::bodies::RequestDestination::RequiredApp,
+        Some(vec!["btc-bitcoin-p2wpkh"]),
+        "btc-bitcoin-p2wpkh",
+        |_, _, _, _| Vec::new(),
+    )
+    .await;
+    assert!(report.doubtful.is_empty(), "{report:?}");
+    assert!(
+        matches!(report.resolved.as_slice(), [PayOutcome::Paid { .. }]),
+        "{report:?}"
+    );
+}
