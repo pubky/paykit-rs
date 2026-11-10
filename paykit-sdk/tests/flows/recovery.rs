@@ -357,3 +357,46 @@ async fn test_recovery_repeat_to_a_revoked_payee_app_held() {
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
     assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Paying);
 }
+
+#[tokio::test]
+async fn test_recovery_slow_failed_own_identity_read_refuses_the_repeat() {
+    let w = World::new();
+    w.rail.set_declaration(idempotent_without_history());
+    let base = store();
+    let (attempt_id, app_id) = in_flight(&w, &base).await;
+    let homeserver = Arc::new(crate::common::SlowFailingIdentityRead {
+        inner: Arc::clone(&w.homeserver),
+        clock: Arc::clone(&w.clock),
+        identity: w.alice_id(),
+        delay_ms: 61_000,
+        armed: std::sync::atomic::AtomicBool::new(false),
+    });
+    let mut wallet = w
+        .load_with_homeserver(
+            &w.alice,
+            Arc::clone(&base),
+            app_id,
+            Arc::clone(&homeserver) as Arc<dyn pubky_switch_client::app::HomeserverReader>,
+        )
+        .await;
+    // Confirmed now; then the refresh before the repeat takes 61 s and fails. The 60 s are
+    // judged on the clock after the read: the confirmation is too old, and nothing is paid
+    // (Paykit spec 4).
+    assert!(wallet
+        .app_mut()
+        .refresh_identity()
+        .await
+        .unwrap()
+        .confirmed_at()
+        .is_some());
+    homeserver.arm();
+    let refused = wallet.resume_payments().await.unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::IdentityUnavailable(_))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}

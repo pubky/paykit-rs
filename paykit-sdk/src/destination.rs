@@ -126,7 +126,12 @@ impl Paykit {
             Ok(doc) => doc,
             Err(refusal) => return Ok(Err(refusal)),
         };
-        Ok(current(&doc, &destination.app_id, carrier, self.now()).map_err(Refusal::Destination))
+        // The lookup awaited the network: the expiry is judged again on the clock now.
+        let now = self.now();
+        if let Err(why) = carries(payee, destination, carrier, request_hash, now) {
+            return Ok(Err(Refusal::Destination(why)));
+        }
+        Ok(current(&doc, &destination.app_id, carrier, now).map_err(Refusal::Destination))
     }
 }
 

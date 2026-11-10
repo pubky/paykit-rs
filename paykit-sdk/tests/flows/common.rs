@@ -445,3 +445,66 @@ impl World {
             .count()
     }
 }
+
+/// A Homeserver whose next read of one identity's `identity.json` takes `delay_ms` on the
+/// clock and then fails, once armed; every other read goes to the world's Homeserver.
+pub struct SlowFailingIdentityRead {
+    pub inner: Arc<TestHomeserver>,
+    pub clock: Arc<TestClock>,
+    pub identity: [u8; 32],
+    pub delay_ms: u64,
+    pub armed: std::sync::atomic::AtomicBool,
+}
+
+impl SlowFailingIdentityRead {
+    /// Make the next read of the identity's `identity.json` slow and failing.
+    pub fn arm(&self) {
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl pubky_switch_client::app::HomeserverReader for SlowFailingIdentityRead {
+    fn get(
+        &self,
+        identity: [u8; 32],
+        path: String,
+    ) -> pubky_switch_client::transport::BoxFuture<
+        '_,
+        Result<Option<Vec<u8>>, pubky_switch_client::error::TransportError>,
+    > {
+        let hit = identity == self.identity
+            && path == pubky_switch_core::records::IDENTITY_PATH
+            && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst);
+        if hit {
+            self.clock.advance_ms(self.delay_ms);
+            return Box::pin(async {
+                Err(pubky_switch_client::error::TransportError::Connect(
+                    "slow, then failed".into(),
+                ))
+            });
+        }
+        self.inner.get(identity, path)
+    }
+}
+
+impl World {
+    /// Load app `app_id` of `signer` from `store`, reading Homeservers through `homeserver`.
+    pub async fn load_with_homeserver(
+        &self,
+        signer: &TestSigner,
+        store: Arc<dyn StateStore>,
+        app_id: [u8; 16],
+        homeserver: Arc<dyn pubky_switch_client::app::HomeserverReader>,
+    ) -> Paykit {
+        let mut env = self.env(signer, store);
+        env.homeserver = homeserver;
+        Paykit::load(
+            env,
+            PaykitConfig::default(),
+            app_id,
+            Arc::clone(&self.rail) as Arc<dyn paykit_sdk::Rail>,
+        )
+        .await
+        .unwrap()
+    }
+}

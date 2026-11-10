@@ -178,6 +178,9 @@ impl Paykit {
             let last: Option<u64> = self
                 .local_get(&key::resent(requester, &sent.msg_id))
                 .await?;
+            // The cooldown is judged, and stamped, on the clock now: the loop awaits the store
+            // and the network between messages.
+            let now = self.now();
             if last.is_some_and(|at| now < at.saturating_add(RESEND_COOLDOWN_MS)) {
                 continue;
             }

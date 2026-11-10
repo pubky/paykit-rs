@@ -735,26 +735,30 @@ impl Paykit {
         &mut self,
         refresh: bool,
     ) -> std::result::Result<(), Refusal> {
-        let now = self.now();
-        // A confirmation the device clock now puts in the future is no evidence of a recent
-        // one: the clock went back, and the copy is read again.
-        let recent = |at: Option<u64>| {
-            at.and_then(|at| now.checked_sub(at))
-                .is_some_and(|age| age < REVALIDATION_MS)
-        };
-        if !refresh && recent(self.app.identity_confirmed_at()) {
-            return Ok(());
+        if refresh || !self.own_identity_fresh() {
+            // A read that fails confirms nothing; the confirmation held still counts if it is
+            // fresh once the read is over.
+            let _ = self.app.refresh_identity().await;
         }
-        let refreshed = match self.app.refresh_identity().await {
-            Ok(refreshed) => refreshed.confirmed_at().is_some(),
-            Err(_) => false,
-        };
-        if refreshed || recent(self.app.identity_confirmed_at()) {
+        // Freshness is judged on the clock after the read, never on a time read before it: a
+        // slow read that fails can't stretch the 60 s (Paykit spec 4).
+        if self.own_identity_fresh() {
             return Ok(());
         }
         Err(Refusal::IdentityUnavailable(
             "Paykit spec 4: the own identity.json wasn't confirmed in the last 60 s".into(),
         ))
+    }
+
+    /// Whether the own `identity.json` was confirmed less than [`REVALIDATION_MS`] before the
+    /// device clock now. A confirmation the clock puts in the future is no evidence of a
+    /// recent one: the clock went back.
+    fn own_identity_fresh(&self) -> bool {
+        let now = self.now();
+        self.app
+            .identity_confirmed_at()
+            .and_then(|at| now.checked_sub(at))
+            .is_some_and(|age| age < REVALIDATION_MS)
     }
 
     /// Whether `deadline` is at or before the highest service time the app verified: no
@@ -809,6 +813,12 @@ impl Paykit {
             idempotency_key: attempt_id,
             payment_reference: entry.payment_reference.clone(),
         };
+        // The last check, on the clock of the call itself: every await before it may have
+        // aged the own identity.json's confirmation past 60 s (Paykit spec 4). Nothing was
+        // submitted, so the attempt stays open for a resume to decide.
+        if !self.own_identity_fresh() {
+            return Ok(PayOutcome::Pending { attempt_id });
+        }
         let outcome = self.rail.pay(payment).await;
         // The acceptance goes out while the payment runs, not awaited (Paykit spec 7.2 step
         // 2); a delivery failure leaves it queued.
@@ -1155,6 +1165,12 @@ impl Paykit {
             }
             if let Some(held) = self.repeat_held(&entry).await? {
                 return Ok(Some(held));
+            }
+            // The checks awaited the network: the retention is judged again on the clock now.
+            let age = self.now().checked_sub(entry.journaled_at_ms);
+            let retention = declaration.idempotency_retention_ms;
+            if !retention.is_none_or(|r| age.is_some_and(|age| age <= r)) {
+                return Ok(Some(PayOutcome::Uncertain { attempt_id }));
             }
             return self.dispatch(entry).await.map(Some);
         }
