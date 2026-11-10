@@ -21,11 +21,9 @@ use pubky_switch_client::app::{
     App, AppBackup, AppConfig, AppEnv, AppEvent, HomeserverReader, JoinRequest, ReceiveReport,
 };
 use pubky_switch_client::clock::Clock;
-use serde::{Deserialize, Serialize};
 
 use crate::destination::KeptLookup;
-use crate::error::{PaykitError, Refusal, Result};
-use crate::journal::JournalEntry;
+use crate::error::{Refusal, Result};
 use crate::protocol::PaykitProtocol;
 use crate::rail::Rail;
 use crate::state::{key, Tx};
@@ -68,23 +66,18 @@ impl Default for PaykitConfig {
     }
 }
 
-/// A Paykit App's backup: the client's [`AppBackup`] and the payment journal (Paykit spec 2,
-/// 7.2). It holds the app's signing key: keep it as [`AppBackup`] says. Its `Debug` shows no
-/// key.
-#[derive(Clone, Serialize, Deserialize)]
+/// A Paykit App's backup: the client's [`AppBackup`] with Paykit's layer, its local state
+/// and in it the payment journal, which a restore installs with the client's state in one
+/// commit (Paykit spec 2, 7.2; Switch spec 12.4). It holds the app's signing key: keep it as
+/// [`AppBackup`] says. Its `Debug` shows no key.
+#[derive(Clone)]
 pub struct PaykitBackup {
     app: AppBackup,
-    journal: Vec<JournalEntry>,
 }
 
 impl std::fmt::Debug for PaykitBackup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "PaykitBackup({:?}, {} payments)",
-            self.app,
-            self.journal.len()
-        )
+        write!(f, "PaykitBackup({:?})", self.app)
     }
 }
 
@@ -93,35 +86,20 @@ impl PaykitBackup {
     ///
     /// # Errors
     ///
-    /// A store failure if it can't be written.
+    /// The client's error if it can't be written.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        serde_json::to_vec(self).map_err(|_| PaykitError::corrupt())
-    }
-
-    /// The backup's journal, checked as one (Paykit spec 7.2): every entry as
-    /// [`JournalEntry::check`] checks it, each attempt once, and at most one open entry for
-    /// one obligation, since a payment in progress blocks any other.
-    fn check_journal(&self) -> Result<()> {
-        let mut attempts = std::collections::BTreeSet::new();
-        let mut open = std::collections::BTreeSet::new();
-        for entry in &self.journal {
-            entry.check()?;
-            if !attempts.insert(entry.attempt_id.clone())
-                || (entry.open() && !open.insert(entry.obligation))
-            {
-                return Err(PaykitError::corrupt());
-            }
-        }
-        Ok(())
+        Ok(self.app.to_bytes()?)
     }
 
     /// Read a backup's bytes.
     ///
     /// # Errors
     ///
-    /// A store failure for bytes that don't read as a backup.
+    /// The client's error for bytes that don't read as a backup.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        serde_json::from_slice(bytes).map_err(|_| PaykitError::corrupt())
+        Ok(Self {
+            app: AppBackup::from_bytes(bytes)?,
+        })
     }
 }
 
@@ -194,7 +172,7 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// The client's errors; [`PaykitError::Lib`] for a certificate Paykit refuses.
+    /// The client's errors; [`crate::PaykitError::Lib`] for a certificate Paykit refuses.
     pub async fn join(
         env: AppEnv,
         config: PaykitConfig,
@@ -225,15 +203,18 @@ impl Paykit {
         Self::assemble(app, env, protocol, config, rail, timer)
     }
 
-    /// Restore from a backup (Switch spec 12.4): the journal checked whole first, then the
-    /// client's restore, then the journal, its entries marked restored, so their open attempts are resolved as a restore requires
-    /// (Paykit spec 7.2). The app is in reconcile mode until [`Paykit::reconcile`] and
-    /// [`Paykit::end_reconcile`].
+    /// Restore from a backup (Switch spec 12.4): the client's restore, which installs
+    /// Paykit's layer, its local state with the journal, in the commit of its own state.
+    /// The journal is checked whole before anything is written, and its entries are marked
+    /// restored, so their open attempts are resolved as a restore requires (Paykit spec
+    /// 7.2). On an error, neither layer is in the store. The app is in reconcile mode until
+    /// [`Paykit::reconcile`] and [`Paykit::end_reconcile`].
     ///
     /// # Errors
     ///
-    /// A store failure (`Corrupt`) for a journal with a malformed or repeated entry, before
-    /// anything is restored; the client's errors.
+    /// The client's errors: `InvalidData` for a backup without Paykit's layer, one another
+    /// protocol made, or a journal with a malformed entry or two open entries for one
+    /// obligation; a store failure.
     pub async fn restore(
         env: AppEnv,
         config: PaykitConfig,
@@ -241,45 +222,31 @@ impl Paykit {
         rail: Arc<dyn Rail>,
         timer: Arc<dyn Timer>,
     ) -> Result<Self> {
-        // The journal is checked whole before anything is restored: a backup with a damaged
-        // or repeated entry is refused, never taken in part.
-        backup.check_journal()?;
+        // The client checks its state, then Paykit's layer checks the whole journal
+        // (`PaykitProtocol::restore_layer`), before anything is written; then both go in
+        // one commit: on an error, neither is in the store.
+        let protocol = Self::new_protocol();
         let app = App::restore(
             env.clone(),
-            Self::new_protocol(),
+            protocol.clone(),
             config.app.clone(),
             &backup.app,
         )
         .await?;
-        let app_id = app.app_id();
-        drop(app);
-        let protocol = Self::new_protocol();
-        let mut app = App::load(env.clone(), protocol.clone(), config.app.clone(), app_id).await?;
-        let mut tx = Tx::default();
-        for entry in &backup.journal {
-            let mut entry = entry.clone();
-            entry.restored = true;
-            tx.put(&key::journal(&entry.attempt()?), &entry)?;
-        }
-        app.protocol_commit(&tx.into_writes()).await?;
         Self::assemble(app, env, protocol, config, rail, timer)
     }
 
-    /// The app's backup: the client's and the journal (Paykit spec 7.2).
+    /// The app's backup: the client's state and Paykit's, the payment journal in it, read in
+    /// one call (Paykit spec 7.2; Switch spec 12.4). A backup that couldn't be restored is
+    /// refused now, as the client checks it.
     ///
     /// # Errors
     ///
-    /// The client's errors; a store failure.
-    pub async fn backup(&self) -> Result<PaykitBackup> {
-        let journal = self
-            .local_scan::<JournalEntry>(key::JOURNAL)
-            .await?
-            .into_iter()
-            .map(|(_, entry)| entry)
-            .collect();
+    /// The client's errors, such as a backup over the store's sizes
+    /// (`AppEvent::BackupRefused`) or a journal Paykit's layer refuses; a store failure.
+    pub async fn backup(&mut self) -> Result<PaykitBackup> {
         Ok(PaykitBackup {
-            app: self.app.backup()?,
-            journal,
+            app: self.app.backup_layered().await?,
         })
     }
 

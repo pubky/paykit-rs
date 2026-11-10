@@ -16,6 +16,10 @@
 //! protocol's other callbacks, a [`pubky_switch_client::app::LocalView`].
 //! Every value is `{"v":1,"d":<record>}`; a reader refuses another `v` as corrupt.
 //!
+//! The whole of it is Paykit's layer in the app's backups ([`crate::PaykitBackup`]), which a
+//! restore installs, the journal checked and marked restored, in the commit of the
+//! client's own state (Switch spec 12.4).
+//!
 //! | Key (after `p/`) | Holds | Sensitive |
 //! |---|---|---|
 //! | `ask/<sender>/<from>` | a re-send to ask of a sender | |

@@ -291,12 +291,12 @@ async fn test_restore_paid_attempt_to_an_unknown_destination_stays_doubtful() {
     );
 }
 
-/// A backup of a wallet with one payment in flight, as JSON, to damage.
-async fn backup_with_a_payment(w: &World) -> serde_json::Value {
+/// A backup of a wallet with one payment in flight, as JSON, to damage, and the wallet's
+/// App ID.
+async fn backup_with_a_payment(w: &World) -> (serde_json::Value, [u8; 16]) {
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.labelled_shop("shop1", "shop1").await;
-    let labelled = draft("1", w.clock.now_ms());
-    let request = request_from(&mut shop, w.alice_id(), labelled).await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     w.rail.next(Behaviour::Hang);
     wallet
@@ -304,14 +304,45 @@ async fn backup_with_a_payment(w: &World) -> serde_json::Value {
         .await
         .unwrap();
     let bytes = wallet.backup().await.unwrap().to_bytes().unwrap();
-    serde_json::from_slice(&bytes).unwrap()
+    (serde_json::from_slice(&bytes).unwrap(), wallet.app_id())
 }
 
-/// Restore from `backup`, damaged: the error, or a panic if it was taken.
-async fn refused_restore(w: &World, backup: serde_json::Value) -> paykit_sdk::PaykitError {
+/// Paykit's layer of a backup: its local state, each value as Paykit keeps it.
+fn layer_of(backup: &serde_json::Value) -> Vec<(Vec<u8>, serde_json::Value)> {
+    let data = backup["protocol"]["data"].as_str().unwrap();
+    let bytes = pubky_switch_core::enc::unb64(data).unwrap();
+    pubky_switch_client::app::decode_local_state(&bytes)
+        .unwrap()
+        .into_iter()
+        .map(|(k, v)| (k, serde_json::from_slice(&v).unwrap()))
+        .collect()
+}
+
+/// `backup` with Paykit's layer replaced by `state`.
+fn with_layer(
+    backup: &serde_json::Value,
+    state: Vec<(Vec<u8>, serde_json::Value)>,
+) -> serde_json::Value {
+    let state: Vec<(Vec<u8>, Vec<u8>)> = state
+        .into_iter()
+        .map(|(k, v)| (k, serde_json::to_vec(&v).unwrap()))
+        .collect();
+    let mut out = backup.clone();
+    out["protocol"]["data"] = serde_json::Value::String(pubky_switch_core::enc::b64(
+        &pubky_switch_client::app::encode_local_state(&state),
+    ));
+    out
+}
+
+/// Restore from `backup` on `store`: the error, or a panic if it was taken.
+async fn refused_restore(
+    w: &World,
+    backup: serde_json::Value,
+    store: Arc<dyn pubky_switch_client::store::StateStore>,
+) -> paykit_sdk::PaykitError {
     let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&backup).unwrap()).unwrap();
     let restored = Paykit::restore(
-        w.env(&w.alice, store()),
+        w.env(&w.alice, store),
         PaykitConfig::default(),
         &backup,
         Arc::clone(&w.rail) as Arc<dyn Rail>,
@@ -319,25 +350,45 @@ async fn refused_restore(w: &World, backup: serde_json::Value) -> paykit_sdk::Pa
     )
     .await;
     match restored {
-        Ok(_) => panic!("a damaged journal was restored"),
+        Ok(_) => panic!("a refused backup was restored"),
         Err(error) => error,
     }
 }
 
-fn is_corrupt(error: &paykit_sdk::PaykitError) -> bool {
+/// Nothing of the app is in `store`: it doesn't load.
+async fn nothing_restored(
+    w: &World,
+    store: Arc<dyn pubky_switch_client::store::StateStore>,
+    app_id: [u8; 16],
+) {
+    let loaded = Paykit::load(
+        w.env(&w.alice, store),
+        PaykitConfig::default(),
+        app_id,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await;
+    assert!(loaded.is_err(), "the app's state was written");
+}
+
+fn is_refused(error: &paykit_sdk::PaykitError) -> bool {
     matches!(
         error,
-        paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Store(
-            pubky_switch_client::error::StoreError::Corrupt
-        ))
+        paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::InvalidData(_))
     )
 }
 
 #[tokio::test]
-async fn test_restore_corrupt_journal_refused() {
+async fn test_restore_corrupt_journal_refused_and_nothing_written() {
     let w = World::new();
-    let good = backup_with_a_payment(&w).await;
-    assert_eq!(good["journal"][0]["label"], "shop1");
+    let (good, app_id) = backup_with_a_payment(&w).await;
+    let layer = layer_of(&good);
+    let journal = layer
+        .iter()
+        .position(|(k, _)| k.starts_with(b"j/"))
+        .expect("the layer holds the journal");
+    assert_eq!(layer[journal].1["d"]["label"], "shop1");
     // Each damage reads as JSON of the right shape, and is refused for its meaning: a label
     // that isn't one, a destination source that isn't one of the three, a list version on a
     // request's own endpoint, and a payment reference dropped from a request's payment.
@@ -348,25 +399,124 @@ async fn test_restore_corrupt_journal_refused() {
         ("payment_reference", serde_json::Value::Null),
     ];
     for (member, value) in damages {
-        let mut damaged = good.clone();
-        let entry = &mut damaged["journal"][0];
+        let mut state = layer.clone();
+        let entry = &mut state[journal].1["d"];
         match member {
             "source" | "list_version" => entry["destination"][member] = value,
             _ => entry[member] = value,
         }
-        let error = refused_restore(&w, damaged).await;
-        assert!(is_corrupt(&error), "{member}: {error:?}");
+        let target = store();
+        let error = refused_restore(&w, with_layer(&good, state), Arc::clone(&target)).await;
+        assert!(is_refused(&error), "{member}: {error:?}");
+        // The journal is checked before anything is written: neither layer is.
+        nothing_restored(&w, target, app_id).await;
     }
 }
 
 #[tokio::test]
-async fn test_restore_duplicate_journal_entry_refused() {
+async fn test_restore_two_open_entries_for_one_obligation_refused() {
     let w = World::new();
-    let mut backup = backup_with_a_payment(&w).await;
-    let entry = backup["journal"][0].clone();
-    backup["journal"].as_array_mut().unwrap().push(entry);
-    let error = refused_restore(&w, backup).await;
-    assert!(is_corrupt(&error), "{error:?}");
+    let (good, app_id) = backup_with_a_payment(&w).await;
+    let mut state = layer_of(&good);
+    let (_, entry) = state
+        .iter()
+        .find(|(k, _)| k.starts_with(b"j/"))
+        .cloned()
+        .unwrap();
+    let other = paykit_lib::AttemptId::generate().unwrap().to_text();
+    let mut copy = entry;
+    copy["d"]["attempt_id"] = serde_json::Value::String(other.clone());
+    state.push((format!("j/{other}").into_bytes(), copy));
+    let target = store();
+    let error = refused_restore(&w, with_layer(&good, state), Arc::clone(&target)).await;
+    assert!(is_refused(&error), "{error:?}");
+    nothing_restored(&w, target, app_id).await;
+}
+
+#[tokio::test]
+async fn test_restore_another_protocols_layer_refused() {
+    let w = World::new();
+    let (mut backup, app_id) = backup_with_a_payment(&w).await;
+    backup["protocol"]["name"] = serde_json::Value::String("chat".into());
+    let target = store();
+    let error = refused_restore(&w, backup, Arc::clone(&target)).await;
+    assert!(is_refused(&error), "{error:?}");
+    nothing_restored(&w, target, app_id).await;
+}
+
+#[tokio::test]
+async fn test_restore_failed_commit_leaves_neither_layer() {
+    use pubky_switch_client::store::{Fault, FaultStore};
+    let w = World::new();
+    let (backup, app_id) = backup_with_a_payment(&w).await;
+    let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&backup).unwrap()).unwrap();
+    // A commit fails at each point of the restore in turn: either the restore fails and
+    // neither layer is in the store, or it succeeds with both, never the client's state
+    // without the journal.
+    for n in 1..=4 {
+        let base = store();
+        let faulty = Arc::new(FaultStore::new(Arc::clone(&base), Fault::FailBefore(n)));
+        let restored = Paykit::restore(
+            w.env(
+                &w.alice,
+                faulty as Arc<dyn pubky_switch_client::store::StateStore>,
+            ),
+            PaykitConfig::default(),
+            &backup,
+            Arc::clone(&w.rail) as Arc<dyn Rail>,
+            w.timer(),
+        )
+        .await;
+        let failed = restored.is_err();
+        drop(restored);
+        let loaded = Paykit::load(
+            w.env(&w.alice, base),
+            PaykitConfig::default(),
+            app_id,
+            Arc::clone(&w.rail) as Arc<dyn Rail>,
+            w.timer(),
+        )
+        .await;
+        match loaded {
+            Err(_) => assert!(failed, "commit {n}: a restore that succeeded didn't load"),
+            Ok(app) => assert_eq!(
+                app.payments().await.unwrap().len(),
+                1,
+                "commit {n}: the app's state was written without its journal"
+            ),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_restore_installs_both_layers_loadable() {
+    let w = World::new();
+    let (backup, app_id) = backup_with_a_payment(&w).await;
+    let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&backup).unwrap()).unwrap();
+    let base = store();
+    let app = Paykit::restore(
+        w.env(&w.alice, Arc::clone(&base)),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    drop(app);
+    // Both layers are in the store: the app loads, with its journal, marked restored.
+    let loaded = Paykit::load(
+        w.env(&w.alice, base),
+        PaykitConfig::default(),
+        app_id,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    let payments = loaded.payments().await.unwrap();
+    assert_eq!(payments.len(), 1);
+    assert!(payments[0].restored);
 }
 
 #[tokio::test]

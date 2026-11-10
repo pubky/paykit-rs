@@ -32,8 +32,9 @@ use paykit_lib::records::{ActivitySide, PaymentListRecord, StoredMessage};
 use paykit_lib::scopes::{acts_as_payee, PaykitScope, ScopeName};
 use paykit_lib::{Label, PaykitKindRules};
 use pubky_switch_client::app::{
-    Collection as SwitchCollection, Effect, LocalView, LocalWrite, LossActions, MissedEntries,
-    OpaqueRule, Outcome, Protocol, ProviderLoss, ReceiveContext, ReceivedMessage, ResendNeeded,
+    decode_local_state, Collection as SwitchCollection, Effect, LocalView, LocalWrite, LossActions,
+    MissedEntries, OpaqueRule, Outcome, Protocol, ProtocolLayer, ProviderLoss, ReceiveContext,
+    ReceivedMessage, ResendNeeded,
 };
 use pubky_switch_core::enc::{serde_b64, unb64_array};
 use pubky_switch_core::message::Message;
@@ -43,6 +44,7 @@ use pubky_switch_core::scopes as switch_scopes;
 use serde::{Deserialize, Serialize};
 
 use crate::activity::{self, SideTag};
+use crate::journal::JournalEntry;
 use crate::receive::{self, Fail};
 use crate::state::{self, key};
 
@@ -217,7 +219,57 @@ pub(crate) fn body_label(message: &Message) -> Option<Label> {
         .and_then(|l| Label::parse(l).ok())
 }
 
+/// The name of Paykit's layer in app backups (Switch spec 12.4).
+pub const BACKUP_NAME: &str = "paykit";
+
+/// The writes that install Paykit's backup layer (Switch spec 12.4): every key of its local
+/// state, as the default layer holds it, with the payment journal checked whole first and
+/// its entries marked restored (Paykit spec 7.2). The journal's checks are
+/// [`JournalEntry::check`]'s, each entry at its own attempt's key, and at most one open entry
+/// for one obligation, since a payment in progress blocks any other. `Err` names the rule,
+/// without content: nothing is written. Pure: it is called at backup time too.
+pub(crate) fn restore_paykit_layer(
+    layer: Option<&ProtocolLayer>,
+) -> Result<Vec<LocalWrite>, String> {
+    let Some(layer) = layer else {
+        return Err("a Paykit App's backup carries Paykit's layer, with its journal".into());
+    };
+    let state = decode_local_state(&layer.data)
+        .ok_or_else(|| String::from("Paykit's layer doesn't read as local state"))?;
+    let mut open = std::collections::BTreeSet::new();
+    let mut writes = Vec::with_capacity(state.len());
+    for (key, value) in state {
+        let Some(rest) = key.strip_prefix(key::JOURNAL.as_bytes()) else {
+            writes.push(LocalWrite::Put { key, value });
+            continue;
+        };
+        let bad = || String::from("Paykit spec 7.2: a journal entry in the backup doesn't read");
+        let mut entry = state::decode::<JournalEntry>(&value).map_err(|_| bad())?;
+        entry.check().map_err(|_| bad())?;
+        if rest != entry.attempt_id.as_bytes() {
+            return Err(bad());
+        }
+        if entry.open() && !open.insert(entry.obligation) {
+            return Err("Paykit spec 7.2: two open journal entries for one obligation".into());
+        }
+        entry.restored = true;
+        let value = state::encode(&entry).map_err(|_| bad())?;
+        writes.push(LocalWrite::Put { key, value });
+    }
+    Ok(writes)
+}
+
 impl Protocol for PaykitProtocol {
+    fn backup_name(&self) -> Option<String> {
+        Some(BACKUP_NAME.to_owned())
+    }
+
+    /// Paykit's layer is its whole local state, as the client's default writes it; a
+    /// restore checks and marks the journal in it, before anything is written.
+    fn restore_layer(&self, layer: Option<&ProtocolLayer>) -> Result<Vec<LocalWrite>, String> {
+        restore_paykit_layer(layer)
+    }
+
     fn opaque_members(&self) -> Vec<OpaqueRule> {
         OPAQUE_MEMBERS
             .iter()
