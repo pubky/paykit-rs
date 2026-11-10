@@ -183,15 +183,17 @@ impl Paykit {
             if last.is_some_and(|at| now < at.saturating_add(RESEND_COOLDOWN_MS)) {
                 continue;
             }
-            if self.app.resend(&sent.msg_id).await.is_err() {
-                continue;
-            }
+            // The limits are counted before the re-send goes out (Paykit spec 9): a crash
+            // after it can't let the message out again within the hour, or past the day's
+            // budget. A re-send that then fails counts all the same.
             count = count.saturating_add(1);
-            resent = resent.saturating_add(1);
             let mut tx = Tx::default();
             tx.put(&key::resent(requester, &sent.msg_id), &now)?;
             tx.put(&key::resent_day(requester, day), &count)?;
             self.local_commit(tx).await?;
+            if self.app.resend(&sent.msg_id).await.is_ok() {
+                resent = resent.saturating_add(1);
+            }
         }
         Ok(resent)
     }
