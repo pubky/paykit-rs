@@ -31,9 +31,11 @@ use crate::scopes::Label;
 /// days (Paykit spec 5, Paykit wire 4.13).
 pub const PRIVATE_LIST_MAX_AGE_MS: u64 = 30 * 86_400_000;
 
-/// The writers' check: `map`, the body `value` writes, read back by `read`, the reader's
-/// own rules (check 10 of Paykit wire 4.1), must give `value` again. So a writer never emits
-/// a body a recipient drops, and the rules live once, in the reader.
+/// The writers' check: the body `write` gives for `value`, read back by `read`, the reader's
+/// own rules (check 10 of Paykit wire 4.1), must give `value` again, and that value must
+/// write the same body, member for member and spelling for spelling. So a writer never emits
+/// a body a recipient drops, nor one whose text differs from what its value writes, and the
+/// rules live once, in the reader.
 ///
 /// # Errors
 ///
@@ -41,11 +43,12 @@ pub const PRIVATE_LIST_MAX_AGE_MS: u64 = 30 * 86_400_000;
 /// itself, such as a member the writer leaves out.
 pub(crate) fn written<T: PartialEq>(
     value: &T,
-    map: Map<String, Value>,
+    write: impl Fn(&T) -> Map<String, Value>,
     read: impl FnOnce(&Map<String, Value>) -> Result<T>,
 ) -> Result<Map<String, Value>> {
+    let map = write(value);
     let back = read(&map).map_err(Error::into_validation)?;
-    if &back != value {
+    if &back != value || write(&back) != map {
         return Err(Error::Validation(
             "Paykit wire 4.1 check 10: the value doesn't write as itself".into(),
         ));
@@ -452,7 +455,7 @@ impl PaymentRequest {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.
@@ -628,7 +631,7 @@ impl PaymentRequestAcceptance {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.
@@ -673,7 +676,7 @@ impl RequestReply {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.
@@ -740,7 +743,7 @@ impl PeriodDetails {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.
@@ -865,6 +868,39 @@ impl PaymentProof {
                 "a proof of a payment without a request carries it",
             ));
         }
+        if refs > 0 && amount.is_some() {
+            return Err(bad(
+                PROOF,
+                "amount",
+                "only in a proof of a payment without a request; a request's comes from the request",
+            ));
+        }
+        if refs == 2 && obj.opt("billing_period").is_none() {
+            return Err(bad(
+                PROOF,
+                "billing_period",
+                "missing; a proof that used period details names their Billing Period",
+            ));
+        }
+        if refs == 0 {
+            // Paykit wire 4.10: these members name a request's context, a Billing Period, a
+            // label, a reference or the Allowance an automatic payment of a request is made
+            // under, so a proof of a payment without a request carries none.
+            for member in [
+                "billing_period",
+                "label",
+                "payment_reference",
+                "allowance_id",
+            ] {
+                if obj.opt(member).is_some() {
+                    return Err(bad(
+                        PROOF,
+                        member,
+                        "only in a proof of a request, not of a payment without one",
+                    ));
+                }
+            }
+        }
         Ok(Self {
             attempt_id: AttemptId::from_bytes(obj.req_b64::<16>("attempt_id")?),
             billing_period: obj
@@ -902,7 +938,7 @@ impl PaymentProof {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self, refs: usize) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), |b| Self::from_body(b, refs))
+        written(self, Self::body_unchecked, |b| Self::from_body(b, refs))
     }
 
     /// The body as written, before the reader checks it.
@@ -986,20 +1022,29 @@ pub struct PaymentReceipt {
 const RECEIPT: &str = "Paykit wire 4.11: payment_receipt";
 
 impl PaymentReceipt {
-    /// Read the body (Paykit wire 4.11).
+    /// Read the body of a receipt with `refs` references (Paykit wire 4.11): with the proof
+    /// hash alone, it confirms a payment without a request, so it names no Billing Period.
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] naming the member.
-    pub fn from_body(body: &Map<String, Value>) -> Result<Self> {
+    /// [`Error::Invalid`] naming the member or rule.
+    pub fn from_body(body: &Map<String, Value>, refs: usize) -> Result<Self> {
         let obj = Obj::new(body, RECEIPT);
-        Ok(Self {
+        let receipt = Self {
             attempt_id: AttemptId::from_bytes(obj.req_b64::<16>("attempt_id")?),
             billing_period: obj
                 .opt("billing_period")
                 .map(|p| PeriodRef::from_json(p, RECEIPT))
                 .transpose()?,
-        })
+        };
+        if refs < 2 && receipt.billing_period.is_some() {
+            return Err(bad(
+                RECEIPT,
+                "billing_period",
+                "only in a receipt of a recurring request, whose refs name it",
+            ));
+        }
+        Ok(receipt)
     }
 
     /// Write the body.
@@ -1009,8 +1054,8 @@ impl PaymentReceipt {
     /// [`Error::Validation`] for a value a recipient drops at check 10: the writer reads
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
-    pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+    pub fn to_body(&self, refs: usize) -> Result<Map<String, Value>> {
+        written(self, Self::body_unchecked, |b| Self::from_body(b, refs))
     }
 
     /// The body as written, before the reader checks it.
@@ -1097,7 +1142,7 @@ impl ResendRequest {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.
@@ -1232,7 +1277,7 @@ impl PrivatePaymentList {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.
@@ -1295,7 +1340,7 @@ impl PrivatePaymentListRequest {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.
@@ -1363,7 +1408,7 @@ impl AllowanceProposal {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.
@@ -1394,28 +1439,42 @@ pub struct AllowanceReply {
 }
 
 impl AllowanceReply {
-    /// Read the body (Paykit wire 4.16).
+    /// Read the body of `kind`, an acceptance, a rejection or an end (Paykit wire 4.16):
+    /// `executor_app_id` only in an acceptance. That it comes from the allower is the
+    /// Allowance record's check, which holds the proposal's role.
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] naming the member.
-    pub fn from_body(body: &Map<String, Value>) -> Result<Self> {
+    /// [`Error::Invalid`] naming the member or rule.
+    pub fn from_body(body: &Map<String, Value>, kind: Kind) -> Result<Self> {
+        ensure(
+            matches!(
+                kind,
+                Kind::AllowanceAcceptance | Kind::AllowanceRejection | Kind::AllowanceEnd
+            ),
+            "Paykit wire 4.16: an acceptance, a rejection or an end",
+        )?;
         let obj = Obj::new(body, "Paykit wire 4.16");
+        let executor_app_id = obj.opt_app_id("executor_app_id")?;
+        ensure(
+            executor_app_id.is_none() || kind == Kind::AllowanceAcceptance,
+            "Paykit wire 4.16: executor_app_id only in an acceptance",
+        )?;
         Ok(Self {
             allowance_id: AllowanceId::parse(obj.req_str("allowance_id")?)?,
-            executor_app_id: obj.opt_app_id("executor_app_id")?,
+            executor_app_id,
         })
     }
 
-    /// Write the body.
+    /// Write the body of `kind`.
     ///
     /// # Errors
     ///
     /// [`Error::Validation`] for a value a recipient drops at check 10: the writer reads
     /// back what it writes by the reader's rules, and refuses a value that fails them or
-    /// doesn't read back as itself.
-    pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+    /// doesn't read back as itself, such as `executor_app_id` in a rejection or an end.
+    pub fn to_body(&self, kind: Kind) -> Result<Map<String, Value>> {
+        written(self, Self::body_unchecked, |b| Self::from_body(b, kind))
     }
 
     /// The body as written, before the reader checks it.
@@ -1477,7 +1536,7 @@ impl ExecutorNotice {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.
@@ -1564,7 +1623,9 @@ impl Body {
             Kind::PaymentProof => {
                 Self::PaymentProof(PaymentProof::from_body(body, message.refs.len())?)
             }
-            Kind::PaymentReceipt => Self::PaymentReceipt(PaymentReceipt::from_body(body)?),
+            Kind::PaymentReceipt => {
+                Self::PaymentReceipt(PaymentReceipt::from_body(body, message.refs.len())?)
+            }
             Kind::ResendRequest => Self::ResendRequest(ResendRequest::from_body(body)?),
             Kind::PrivatePaymentList => {
                 Self::PrivatePaymentList(PrivatePaymentList::from_body(body)?)
@@ -1574,10 +1635,12 @@ impl Body {
             }
             Kind::AllowanceProposal => Self::AllowanceProposal(AllowanceProposal::from_body(body)?),
             Kind::AllowanceAcceptance => {
-                Self::AllowanceAcceptance(AllowanceReply::from_body(body)?)
+                Self::AllowanceAcceptance(AllowanceReply::from_body(body, kind)?)
             }
-            Kind::AllowanceRejection => Self::AllowanceRejection(AllowanceReply::from_body(body)?),
-            Kind::AllowanceEnd => Self::AllowanceEnd(AllowanceReply::from_body(body)?),
+            Kind::AllowanceRejection => {
+                Self::AllowanceRejection(AllowanceReply::from_body(body, kind)?)
+            }
+            Kind::AllowanceEnd => Self::AllowanceEnd(AllowanceReply::from_body(body, kind)?),
             Kind::ExecutorNotice => Self::ExecutorNotice(ExecutorNotice::from_body(body)?),
         })
     }
@@ -1623,13 +1686,13 @@ impl Body {
             Self::PaymentRequestRejection(b) | Self::PaymentRequestCancellation(b) => b.to_body(),
             Self::PaymentPeriodDetails(b) => b.to_body(),
             Self::PaymentProof(b) => b.to_body(refs),
-            Self::PaymentReceipt(b) => b.to_body(),
+            Self::PaymentReceipt(b) => b.to_body(refs),
             Self::ResendRequest(b) => b.to_body(),
             Self::PrivatePaymentList(b) => b.to_body(),
             Self::PrivatePaymentListRequest(b) => b.to_body(),
             Self::AllowanceProposal(b) => b.to_body(),
             Self::AllowanceAcceptance(b) | Self::AllowanceRejection(b) | Self::AllowanceEnd(b) => {
-                b.to_body()
+                b.to_body(self.kind())
             }
             Self::ExecutorNotice(b) => b.to_body(),
         }
@@ -1919,6 +1982,29 @@ mod tests {
     }
 
     #[test]
+    fn test_allowance_reply_executor_app_id_only_in_an_acceptance() {
+        let with = body(
+            json!({ "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "executor_app_id": "cw5ahtdkixcafna9zh1y5y5o1w" }),
+        );
+        let reply = AllowanceReply::from_body(&with, Kind::AllowanceAcceptance).unwrap();
+        assert_eq!(reply.to_body(Kind::AllowanceAcceptance).unwrap(), with);
+        for kind in [Kind::AllowanceRejection, Kind::AllowanceEnd] {
+            let error = AllowanceReply::from_body(&with, kind)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("only in an acceptance"), "{kind:?}: {error}");
+            assert!(reply.to_body(kind).is_err(), "{kind:?}");
+            let without = AllowanceReply {
+                executor_app_id: None,
+                ..reply.clone()
+            };
+            without.to_body(kind).unwrap();
+        }
+        assert!(AllowanceReply::from_body(&with, Kind::PaymentReceipt).is_err());
+    }
+
+    #[test]
     fn test_writers_refuse_what_their_readers_drop() {
         // A resend_request that selects nothing, or names a Billing Period without a
         // request, or a msg_id that isn't a UUID.
@@ -2124,6 +2210,62 @@ mod tests {
                 "{unmatched}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn test_proof_members_follow_its_request() {
+        let p = json!({ "attempt_id": "mAFdg5_0tVNjmrgiTUZW4g", "payment_app_id": "brrz3m6g5rci6iqnzke44q4djc",
+            "payment_endpoint_identifier": "btc-bitcoin-p2wpkh", "proof": { "type": "x" } });
+        // A request's proof carries no amount.
+        let mut with_amount = p.clone();
+        with_amount["amount"] = json!({ "asset": "btc", "value": "0.1" });
+        let error = PaymentProof::from_body(&body(with_amount.clone()), 1).unwrap_err();
+        assert!(error.to_string().contains("amount"), "{error}");
+        let unrequested = PaymentProof::from_body(&body(with_amount.clone()), 0).unwrap();
+        assert!(unrequested.to_body(1).is_err(), "the writer refuses it too");
+        // A proof without a request carries none of a request's members.
+        for (member, value) in [
+            (
+                "billing_period",
+                json!({ "starts_at": "2026-02-28T00:00:00.000Z",
+                "ends_at": "2026-03-31T00:00:00.000Z" }),
+            ),
+            ("label", json!("shop1")),
+            ("payment_reference", json!("order-1")),
+            (
+                "allowance_id",
+                json!("d0efffb7-191b-4709-b6c7-e343af5500b4"),
+            ),
+        ] {
+            let mut b = with_amount.clone();
+            b[member] = value.clone();
+            let error = PaymentProof::from_body(&body(b), 0).unwrap_err();
+            assert!(error.to_string().contains(member), "{member}: {error}");
+            let mut b = p.clone();
+            b[member] = value;
+            PaymentProof::from_body(&body(b), 1).unwrap();
+        }
+        // list_version goes with either.
+        let mut listed = with_amount;
+        listed["list_version"] = json!(7);
+        PaymentProof::from_body(&body(listed), 0).unwrap();
+    }
+
+    #[test]
+    fn test_proof_and_receipt_refs_fix_their_billing_period() {
+        let p = json!({ "attempt_id": "mAFdg5_0tVNjmrgiTUZW4g", "payment_app_id": "brrz3m6g5rci6iqnzke44q4djc",
+            "payment_endpoint_identifier": "btc-bitcoin-p2wpkh", "proof": { "type": "x" } });
+        let period = json!({ "starts_at": "2026-02-28T00:00:00.000Z",
+            "ends_at": "2026-03-31T00:00:00.000Z" });
+        // A proof that used period details names their period.
+        assert!(PaymentProof::from_body(&body(p.clone()), 2).is_err());
+        let mut with = p;
+        with["billing_period"] = period.clone();
+        PaymentProof::from_body(&body(with), 2).unwrap();
+        // A receipt of a payment without a request names no period.
+        let r = json!({ "attempt_id": "mAFdg5_0tVNjmrgiTUZW4g", "billing_period": period });
+        assert!(PaymentReceipt::from_body(&body(r.clone()), 1).is_err());
+        PaymentReceipt::from_body(&body(r), 2).unwrap();
     }
 
     #[test]

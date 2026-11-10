@@ -28,6 +28,7 @@ fn test_vectors_sealed() {
     check_activity_rules(&keys);
     check_activity_records(&keys, &v);
     check_msg_ids_bounds(&keys, &v);
+    check_allowance_records(&keys, &v);
 }
 
 /// Own cases on activity records (Paykit wire 5.3), built from the vectors' messages: the
@@ -725,7 +726,8 @@ payee isn't the identity that sent its list (bob's list, filed under payee alice
 key of alice and the shop's App ID) and an acceptance naming another Allowance, each of \
 which a reader refuses. labelled is a payee record of a labelled request. activity_records \
 holds activity records a reader binds, and the same records with a member their binding \
-and side don't allow, which it refuses.";
+and side don't allow, which it refuses. allowance_records holds allowances records a reader \
+binds or refuses by their messages' lifecycle.";
 
 const ACTIVITY_DESCRIPTION: &str =
     "Wire 5.3: activity record values, built from messages.json's messages, and \
@@ -739,7 +741,10 @@ alice's request records storing a request whose sender's certificate doesn't all
 (wire 5.2, the sender's side of check 8): messages.json label_rejections' request labelled \
 shop2 from bob's hosted app, which holds only request:shop1, and messages.json's \
 payment_request presented with documents.json's chat-only certificate of the shop's keys, at \
-the keys their requests name. reason is paykit-lib's wording, of the first check that \
+the keys their requests name. Appended after \
+them, on payment evidence (wire 4.11): accepted, records whose receipt is of the stored \
+proof's attempt, or of the record's attempt_id; refused, the same with a receipt of another \
+attempt. reason is paykit-lib's wording, of the first check that \
 refuses it.";
 
 /// The cases paykit-lib generates in `sealed.json` (README "How the files were generated"),
@@ -765,6 +770,8 @@ fn generate(keys: &Keys) {
         }
         out
     };
+    let (evidence_accepted, evidence_refused) = evidence_cases(keys);
+    let accepted: Vec<ActivityCase> = accepted.into_iter().chain(evidence_accepted).collect();
     let mut refused: Vec<Value> = refused.iter().map(|c| write(c, false)).collect();
     for (name, m, cert) in unauthorized_stored(keys) {
         let (value, key) = record_with_request(keys, stored_value(&m, &cert), st(&m, "json"));
@@ -779,6 +786,7 @@ fn generate(keys: &Keys) {
             "value": String::from_utf8(value).unwrap(),
         }));
     }
+    refused.extend(evidence_refused.iter().map(|c| write(c, false)));
     let member = serde_json::json!({
         "accepted": accepted.iter().map(|c| write(c, true)).collect::<Vec<_>>(),
         "description": ACTIVITY_DESCRIPTION,
@@ -793,6 +801,7 @@ fn generate(keys: &Keys) {
             ),
             (Place::Member("/activity_records"), member),
             (Place::Member("/msg_ids_bounds"), msg_ids_bounds(keys)),
+            (Place::Member("/allowance_records"), allowance_records(keys)),
         ],
     );
 }
@@ -802,10 +811,13 @@ fn generate(keys: &Keys) {
 fn check_activity_records(keys: &Keys, v: &Value) {
     let m = &v["activity_records"];
     let (accepted, refused) = activity_cases(keys);
-    assert_eq!(arr(m, "accepted").len(), accepted.len());
+    assert_eq!(
+        arr(m, "accepted").len(),
+        accepted.len() + evidence_cases(keys).0.len()
+    );
     assert_eq!(
         arr(m, "refused").len(),
-        refused.len() + unauthorized_stored(keys).len()
+        refused.len() + unauthorized_stored(keys).len() + evidence_cases(keys).1.len()
     );
     for (list, taken) in [("accepted", true), ("refused", false)] {
         for case in arr(m, list) {
@@ -1226,4 +1238,365 @@ fn test_record_writers_refuse_msg_ids_that_are_not_uuids() {
     list.msg_ids = vec!["6d7d1f0e-6c4e-4c47-9d2b-000000000001".to_owned()];
     let back = PaymentListRecord::read(&list.to_json().unwrap(), &alice).unwrap();
     assert_eq!(back.msg_ids.len(), 2);
+}
+
+/// A message of `messages.json` changed and signed again by its sender: `base` with its
+/// `refs` and body replaced, stored as its recipient stores it.
+fn resigned(
+    keys: &Keys,
+    base: &str,
+    refs: Option<Vec<[u8; 32]>>,
+    body: impl FnOnce(&mut serde_json::Map<String, Value>),
+) -> paykit_lib::records::StoredMessage {
+    resign_with(keys, base, |m| {
+        if let Some(refs) = refs {
+            m.refs = refs;
+        }
+        body(&mut m.body);
+    })
+}
+
+/// A message of `messages.json` changed by `change` and signed by the sender app it then
+/// names, stored as its recipient stores it.
+fn resign_with(
+    keys: &Keys,
+    base: &str,
+    change: impl FnOnce(&mut pubky_switch_core::message::Message),
+) -> paykit_lib::records::StoredMessage {
+    use pubky_switch_core::message::MessagePlaintext;
+    let mut m = pubky_switch_core::message::Message::parse(
+        &message_json(base),
+        paykit_lib::kinds::OPAQUE_MEMBERS,
+    )
+    .unwrap();
+    change(&mut m);
+    let json = m.to_json().unwrap();
+    let sender = keys.app_by_id(&m.from.app_id_text());
+    let plaintext = MessagePlaintext::sign_json(
+        &sender.keys,
+        json.clone(),
+        paykit_lib::kinds::OPAQUE_MEMBERS,
+    )
+    .unwrap();
+    stored_json(
+        keys,
+        &serde_json::json!({
+            "json": String::from_utf8(json).unwrap(),
+            "sender_app": m.from.app_id_text(),
+            "signature": b64(&plaintext.signature()),
+        }),
+    )
+}
+
+/// The cases of `activity_records` on payment evidence, appended after the others: a
+/// receipt binds its proof's attempt (Paykit wire 4.11).
+fn evidence_cases(keys: &Keys) -> (Vec<ActivityCase>, Vec<ActivityCase>) {
+    let bob = pubky(BOB);
+    let paid = ActivityRecord {
+        request: Some(stored_message(keys, "payment_request")),
+        proof: Some(stored_message(keys, "payment_proof")),
+        receipt: Some(stored_message(keys, "payment_receipt")),
+        ..activity(ActivitySide::Payer, bob)
+    };
+    let other_attempt = resigned(keys, "payment_receipt", None, |b| {
+        b.insert(
+            "attempt_id".into(),
+            serde_json::json!("AAAAAAAAAAAAAAAAAAAAAA"),
+        );
+    });
+    let b = bases(keys);
+    let proof_hash = b.unrequested.proof.as_ref().unwrap().hash();
+    let unrequested_receipt = |attempt: &str| {
+        resigned(keys, "payment_receipt", Some(vec![proof_hash]), |b| {
+            b.insert("attempt_id".into(), serde_json::json!(attempt));
+        })
+    };
+    let attempt = b.unrequested.attempt_id.unwrap().to_text();
+    let with_receipt = ActivityRecord {
+        receipt: Some(unrequested_receipt(&attempt)),
+        ..b.unrequested.clone()
+    };
+    let receipt_only = ActivityRecord {
+        proof: None,
+        receipt: Some(unrequested_receipt("AAAAAAAAAAAAAAAAAAAAAA")),
+        ..b.unrequested.clone()
+    };
+    let key = |r: &ActivityRecord| base_key(keys, r);
+    let accepted = vec![
+        (
+            "a payer's request record with the proof and the receipt of its attempt",
+            paid.clone(),
+            key(&paid),
+        ),
+        (
+            "the record of a payment without a request with the receipt of its attempt",
+            with_receipt.clone(),
+            key(&with_receipt),
+        ),
+    ];
+    let refused = vec![
+        (
+            "a receipt of another attempt than the stored proof's",
+            ActivityRecord {
+                receipt: Some(other_attempt),
+                ..paid.clone()
+            },
+            key(&paid),
+        ),
+        (
+            "the record of a payment without a request with a receipt of another attempt than its attempt_id",
+            receipt_only,
+            key(&b.unrequested),
+        ),
+    ];
+    (accepted, refused)
+}
+
+const ALLOWANCE_RECORDS_DESCRIPTION: &str = "Wire 4.16, 5.4: allowances record values of \
+alice's, built from binding_accepted's record and messages.json's Allowance messages, some \
+signed again by their sender with refs or sides changed, at the record key binding_accepted \
+gives. A response refers to the proposal; an end refers to the proposal and the stored \
+acceptance; an end referring to the proposal alone is its sender's withdrawal, before any \
+response; a rejected Allowance has no end; executor_app_id comes only in an acceptance, from \
+the allower. accepted are records a reader binds; refused are those it refuses, the last a \
+record whose rejection carries executor_app_id, which check 10 drops. reason is \
+paykit-lib's wording.";
+
+/// A case of `allowance_records`: its name and the record.
+type AllowanceCase = (&'static str, AllowanceRecord);
+
+/// The cases of `allowance_records`, accepted then refused.
+fn allowance_cases(keys: &Keys) -> (Vec<AllowanceCase>, Vec<AllowanceCase>) {
+    let alice = pubky(ALICE);
+    let s = paykit("sealed.json");
+    let base = AllowanceRecord::read(value(&arr(&s, "binding_accepted")[1]), &alice).unwrap();
+    let proposal = base.proposal.hash();
+    let acceptance = base.response.as_ref().unwrap().hash();
+    let end = stored_message(keys, "allowance_end");
+    let end_with = |refs: Vec<[u8; 32]>| resigned(keys, "allowance_end", Some(refs), |_| {});
+    let withdrawal = resign_with(keys, "allowance_end", |m| {
+        m.from = pubky_switch_core::message::Sender {
+            identity: pubky(BOB),
+            app_id: keys.app("shop").keys.app_id_bytes(),
+        };
+        m.to = alice;
+        m.refs = vec![proposal];
+    });
+    // messages.json's rejection answers another proposal: this one answers the record's.
+    let rejection = resigned(keys, "allowance_rejection", Some(vec![proposal]), |b| {
+        b.insert("allowance_id".into(), serde_json::json!(ALLOWANCE_ID));
+    });
+    let accepted = vec![
+        (
+            "the accepted Allowance with its end",
+            AllowanceRecord {
+                end: Some(end),
+                ..base.clone()
+            },
+        ),
+        (
+            "a proposal withdrawn by its sender",
+            AllowanceRecord {
+                response: None,
+                end: Some(withdrawal),
+                ..base.clone()
+            },
+        ),
+    ];
+    let refused = vec![
+        (
+            "an end referring to the proposal alone after the acceptance",
+            AllowanceRecord {
+                end: Some(end_with(vec![proposal])),
+                ..base.clone()
+            },
+        ),
+        (
+            "an end referring to another acceptance",
+            AllowanceRecord {
+                end: Some(end_with(vec![proposal, [7; 32]])),
+                ..base.clone()
+            },
+        ),
+        (
+            "an end after a rejection",
+            AllowanceRecord {
+                response: Some(rejection.clone()),
+                end: Some(end_with(vec![proposal, rejection.hash()])),
+                ..base.clone()
+            },
+        ),
+        (
+            "an end referring to an acceptance the record doesn't hold",
+            AllowanceRecord {
+                response: None,
+                end: Some(end_with(vec![proposal, acceptance])),
+                ..base.clone()
+            },
+        ),
+        (
+            "a withdrawal by the proposal's recipient",
+            AllowanceRecord {
+                response: None,
+                end: Some(end_with(vec![proposal])),
+                ..base.clone()
+            },
+        ),
+    ];
+    let mut refused = refused;
+    // executor_app_id only in an acceptance from the allower (Paykit wire 4.16).
+    let allower_proposal = resigned(keys, "allowance_proposal", None, |b| {
+        b.insert("proposer_role".into(), serde_json::json!("allower"));
+    });
+    let from_allowee = resigned(
+        keys,
+        "allowance_acceptance",
+        Some(vec![allower_proposal.hash()]),
+        |_| {},
+    );
+    refused.push((
+        "an acceptance from the allowee carrying executor_app_id",
+        AllowanceRecord {
+            proposal: allower_proposal,
+            response: Some(from_allowee),
+            ..base.clone()
+        },
+    ));
+    (accepted, refused)
+}
+
+/// A record whose rejection carries `executor_app_id`, which check 10 drops (Paykit wire
+/// 4.16): the stored message can't be built, so the case is the record's JSON with the
+/// rejection signed as its sender signs it.
+fn rejection_with_executor(keys: &Keys) -> (Vec<u8>, [u8; 32]) {
+    use pubky_switch_core::message::MessagePlaintext;
+    let alice = pubky(ALICE);
+    let s = paykit("sealed.json");
+    let accepted = &arr(&s, "binding_accepted")[1];
+    let base = AllowanceRecord::read(value(accepted), &alice).unwrap();
+    let mut m = pubky_switch_core::message::Message::parse(
+        &message_json("allowance_rejection"),
+        paykit_lib::kinds::OPAQUE_MEMBERS,
+    )
+    .unwrap();
+    m.refs = vec![base.proposal.hash()];
+    m.body
+        .insert("allowance_id".into(), serde_json::json!(ALLOWANCE_ID));
+    m.body.insert(
+        "executor_app_id".into(),
+        serde_json::json!(keys.app("executor").app_id),
+    );
+    let json = m.to_json().unwrap();
+    let sender = keys.app_by_id(&m.from.app_id_text());
+    let plaintext = MessagePlaintext::sign_json(
+        &sender.keys,
+        json.clone(),
+        paykit_lib::kinds::OPAQUE_MEMBERS,
+    )
+    .unwrap();
+    let response = serde_json::json!({
+        "accepted_at": null,
+        "cert": signed_json_doc(&crate::common::cert_doc(&sender.name)),
+        "plaintext": {
+            "json": b64(&json),
+            "sender_app": b64(&m.from.app_id),
+            "signature": b64(&plaintext.signature()),
+        },
+        "sender": pubky_switch_core::enc::pubky_id(&alice),
+    });
+    let mut record: Value = serde_json::from_slice(value(accepted)).unwrap();
+    record["response"] = response;
+    (serde_json::to_vec(&record).unwrap(), key(accepted))
+}
+
+fn signed_json_doc(doc: &pubky_switch_core::sig::SignedDoc) -> Value {
+    serde_json::json!({ "body": doc.body, "sig": doc.sig })
+}
+
+/// `allowance_records`, as paykit-lib generates it.
+fn allowance_records(keys: &Keys) -> Value {
+    let alice = pubky(ALICE);
+    let nk = keys.identity(&alice).naming_key();
+    let (accepted, refused) = allowance_cases(keys);
+    let write = |(name, record): &AllowanceCase, taken: bool| -> Value {
+        assert_eq!(record.to_json().is_ok(), taken, "{name}: the writer");
+        let value = record.to_json_unchecked().unwrap();
+        let key = record.record_key(&nk).unwrap();
+        let mut out = serde_json::json!({
+            "name": name,
+            "record_key": b64(&key),
+            "value": String::from_utf8(value.clone()).unwrap(),
+        });
+        match AllowanceRecord::bind(&value, &alice, &nk, &key) {
+            Ok(_) => assert!(taken, "{name}: taken"),
+            Err(error) => {
+                assert!(!taken, "{name}: {error}");
+                out["reason"] = serde_json::json!(quoted(&error.to_string()));
+            }
+        }
+        out
+    };
+    let mut refused: Vec<Value> = refused.iter().map(|c| write(c, false)).collect();
+    let (value, key) = rejection_with_executor(keys);
+    let name = "a rejection carrying executor_app_id";
+    let error = AllowanceRecord::bind(&value, &alice, &nk, &key).expect_err(name);
+    refused.push(serde_json::json!({
+        "name": name,
+        "reason": quoted(&error.to_string()),
+        "record_key": b64(&key),
+        "value": String::from_utf8(value).unwrap(),
+    }));
+    serde_json::json!({
+        "accepted": accepted.iter().map(|c| write(c, true)).collect::<Vec<_>>(),
+        "description": ALLOWANCE_RECORDS_DESCRIPTION,
+        "refused": refused,
+    })
+}
+
+/// `allowance_records` (Paykit wire 4.16, 5.4): each record binds at its key, or is refused,
+/// as its list says.
+fn check_allowance_records(keys: &Keys, v: &Value) {
+    let alice = pubky(ALICE);
+    let nk = keys.identity(&alice).naming_key();
+    let m = &v["allowance_records"];
+    let (accepted, refused) = allowance_cases(keys);
+    assert_eq!(arr(m, "accepted").len(), accepted.len());
+    assert_eq!(arr(m, "refused").len(), refused.len() + 1);
+    for (list, taken) in [("accepted", true), ("refused", false)] {
+        for case in arr(m, list) {
+            let name = st(case, "name");
+            match AllowanceRecord::bind(value(case), &alice, &nk, &key(case)) {
+                Ok(record) => {
+                    assert!(taken, "{name}: taken");
+                    assert_eq!(
+                        record.to_json().unwrap(),
+                        value(case),
+                        "{name}: writes back"
+                    );
+                }
+                Err(error) => {
+                    assert!(!taken, "{name}: {error}");
+                    assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_activity_record_proof_names_the_list_it_paid() {
+    use paykit_lib::records::DestinationSource;
+    let keys = Keys::load();
+    let b = bases(&keys);
+    // The proof paid a list version; a destination that isn't that list doesn't match it.
+    let mut public = b.unrequested.clone();
+    if let Some(u) = public.unrequested.as_mut() {
+        u.source = DestinationSource::Public;
+        u.list_version = None;
+    }
+    let error = public.to_json().unwrap_err().to_string();
+    assert!(error.contains("list_version"), "{error}");
+    let json = public.to_json_unchecked().unwrap();
+    assert!(ActivityRecord::read(&json, &pubky(ALICE), ActivitySide::Payer).is_err());
+    b.unrequested.to_json().unwrap();
 }

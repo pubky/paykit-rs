@@ -427,7 +427,7 @@ The payee's details for one Billing Period of a recurring request (spec 8.2).
 | `payment_reference` | string | no | equals the request's | v0.1 required it; the request hash in `refs` now identifies the request |
 | `proof` | object | yes | opaque, method-specific: an object whose members the payment method defines (`specs/payment-requests.md`); by convention `{ "type": string, ... }`, such as `{ "type": "bitcoin-bolt11-preimage", "data": "<hex>" }` in the vectors | |
 
-`refs`: the request hash, then the hash of the period details the payment used, if any. A proof of a payment without a request has no `refs`; the payee records it by its settlement (Switch wire 1.5), so the same evidence sent again under a new `msg_id` is a replay.
+`refs`: the request hash, then the hash of the period details the payment used, if any. A proof of a payment without a request has no `refs`; the payee records it by its settlement (Switch wire 1.5), so the same evidence sent again under a new `msg_id` is a replay. A proof with `refs` carries no `amount`; one without carries no `billing_period`, `label`, `payment_reference` or `allowance_id`, which name a request's context (an automatic payment under an Allowance pays a request, spec 8.3); and one that names the period details it used carries their `billing_period`. Recipients drop a proof that breaks this (vectors: `messages.json` `proof_members`).
 
 ```json
 {
@@ -486,7 +486,7 @@ Without a request:
 | `attempt_id` | `b64(16)` | yes | the attempt of the proof it confirms |
 | `billing_period` | Billing Period | for a recurring request | the proof's |
 
-`refs`: the proof hash, then the request hash when there is a request. The payer's apps find the obligation and the record from the request hash, and may hold the receipt without the proof (Switch spec 10.2 row 3).
+`refs`: the proof hash, then the request hash when there is a request. The payer's apps find the obligation and the record from the request hash, and may hold the receipt without the proof (Switch spec 10.2 row 3). A receipt with the proof hash alone names no Billing Period. A record that holds a receipt and its proof is invalid when their `attempt_id` or `billing_period` differ, and the record of a payment without a request when its receipt's `attempt_id` isn't the record's (5.3; vectors: `sealed.json` `activity_records`).
 
 ```json
 {
@@ -680,6 +680,7 @@ A period is `{ "kind": "anchored", "every": int, "unit": unit, "anchor": time }`
 - Acceptance and rejection: `refs` is the proposal hash. Only the proposal's recipient answers.
 - End: `refs` is the proposal hash and the acceptance hash. A proposal withdrawal by its sender has only the proposal hash.
 - The terms hash is `hash(lp(proposal JSON bytes, acceptance JSON bytes))` (Switch wire 1.5).
+- In an Allowance record (5.4), an end after the acceptance names exactly the proposal hash and that acceptance's hash; an end naming the proposal hash alone comes from the proposal's sender before any response; a rejected Allowance has no end; and `executor_app_id` appears only in an acceptance, and only when the proposal's recipient is the allower (its proposer the allowee). Recipients drop a rejection or an end that carries `executor_app_id`, and a record that breaks the rest is invalid (vectors: `sealed.json` `allowance_records`).
 
 ```json
 {
@@ -771,7 +772,7 @@ One message per role (spec 6).
 | `allowance_id` | uuid | no | a payer's request record: the Allowance its first automatic payment was made under, written in that attempt's batch; later automatic payments of the request and its periods use only that one (spec 8.3) |
 | `attempted_periods` | `array<int>` | no | a payer's request record of a recurring request: the start, in Unix seconds as in the obligation ID (Switch wire 1.5), of every Billing Period that may have an open attempt; at most 16, ascending, each once (spec 8.2). Anywhere else, or with more, a repeat or another order, the record is invalid |
 
-`unrequested`: `{ "app_id": app-id, "endpoint_id": string, "payload": string, "source": "request" | "list" | "public", "list_version": int (for a list), "single_use": bool }`.
+`unrequested`: `{ "app_id": app-id, "endpoint_id": string, "payload": string, "source": "request" | "list" | "public", "list_version": int (for a list), "single_use": bool }`. `list_version` is present for a list and absent otherwise, and the stored proof's `list_version` is the same (4.10).
 
 `request_hash` and `billing_period` appear only in a period record, `attempt_id` and `unrequested` only in that of a payment without a request, and `allowance_id` only in a payer's request record, each by the record's binding (below); a record that carries one anywhere else is invalid (vectors: `sealed.json` `activity_records`).
 

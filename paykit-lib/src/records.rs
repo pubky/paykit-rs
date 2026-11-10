@@ -26,7 +26,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::allowances::Ledger;
-use crate::bodies::{check_body, Body};
+use crate::bodies::{check_body, Body, ProposerRole};
 use crate::collections::Collection;
 use crate::derive::{natural_key, request_obligation, terms_hash};
 use crate::error::{ensure, invalid, Error, Result};
@@ -509,11 +509,11 @@ fn read_unrequested(value: &Value) -> Result<UnrequestedDestination> {
         }
     };
     let list_version = u.opt_int("list_version")?;
-    if source == DestinationSource::List && list_version.is_none() {
+    if (source == DestinationSource::List) != list_version.is_some() {
         return Err(bad(
             ACTIVITY,
             "unrequested.list_version",
-            "missing for a list",
+            "for a list, and only for a list",
         ));
     }
     Ok(UnrequestedDestination {
@@ -725,8 +725,8 @@ impl ActivityRecord {
         }
         if let Some(u) = &self.unrequested {
             ensure(
-                u.source != DestinationSource::List || u.list_version.is_some(),
-                "Paykit wire 5.3: unrequested.list_version: missing for a list",
+                (u.source == DestinationSource::List) == u.list_version.is_some(),
+                "Paykit wire 5.3: unrequested.list_version: for a list, and only for a list",
             )?;
         }
         check_attempted_periods(&self.attempted_periods)?;
@@ -741,6 +741,39 @@ impl ActivityRecord {
             ensure(
                 p.attempt_id == a,
                 "Paykit wire 5.3: attempt_id isn't the stored proof's",
+            )?;
+        }
+        // Paykit wire 4.10: in the record of a payment without a request, the proof names the
+        // list version exactly when it paid a list.
+        if let (RecordBinding::Unrequested, Some(u), Some(Body::PaymentProof(p))) = (
+            binding,
+            &self.unrequested,
+            self.proof.as_ref().map(StoredMessage::body),
+        ) {
+            ensure(
+                p.list_version == u.list_version,
+                "Paykit wire 4.10: the proof's list_version isn't the destination's",
+            )?;
+        }
+        // Paykit wire 4.11: a receipt confirms the proof's attempt, of the proof's Billing
+        // Period; in the record of a payment without a request, the record's attempt.
+        let receipt = match self.receipt.as_ref().map(StoredMessage::body) {
+            Some(Body::PaymentReceipt(r)) => Some(r),
+            _ => None,
+        };
+        if let (Some(r), Some(Body::PaymentProof(p))) =
+            (receipt, self.proof.as_ref().map(StoredMessage::body))
+        {
+            ensure(
+                r.attempt_id == p.attempt_id && r.billing_period == p.billing_period,
+                "Paykit wire 4.11: the receipt isn't of the stored proof's attempt and Billing Period",
+            )?;
+        }
+        if let (RecordBinding::Unrequested, Some(a), Some(r)) = (binding, self.attempt_id, receipt)
+        {
+            ensure(
+                r.attempt_id == a,
+                "Paykit wire 4.11: the receipt isn't of the record's attempt_id",
             )?;
         }
         if !self.attempted_periods.is_empty() {
@@ -1567,12 +1600,41 @@ impl AllowanceRecord {
                 response.sender == self.proposal.message.to,
                 "Paykit wire 5.4: a stored message isn't from the side its kind requires",
             )?;
+            // Paykit wire 4.16: executor_app_id comes in an acceptance from the allower, the
+            // proposal's recipient when the proposer is the allowee.
+            if let (Body::AllowanceAcceptance(r), Body::AllowanceProposal(p)) =
+                (&response.body, &self.proposal.body)
+            {
+                ensure(
+                    r.executor_app_id.is_none() || p.proposer_role == ProposerRole::Allowee,
+                    "Paykit wire 4.16: executor_app_id only in an acceptance from the allower",
+                )?;
+            }
         }
-        for stored in self.response.iter().chain(self.end.iter()) {
+        let proposal = self.proposal.hash();
+        if let Some(response) = &self.response {
             ensure(
-                stored.message.refs.first() == Some(&self.proposal.hash()),
+                response.message.refs == [proposal],
                 "Paykit wire 4.16: a response or an end refers to the proposal in refs",
             )?;
+        }
+        if let Some(end) = &self.end {
+            // Paykit wire 4.16: an end refers to the proposal and the acceptance; one that
+            // refers to the proposal alone is its sender's withdrawal, before any response.
+            let refs = &end.message.refs;
+            match self.response.as_ref() {
+                Some(acceptance) if acceptance.body.kind() == Kind::AllowanceAcceptance => ensure(
+                    *refs == [proposal, acceptance.hash()],
+                    "Paykit wire 4.16: an end refers to the proposal and the stored acceptance",
+                )?,
+                Some(_) => {
+                    return invalid("Paykit wire 4.16: a rejected Allowance has no end");
+                }
+                None => ensure(
+                    *refs == [proposal] && end.sender == self.proposal.sender,
+                    "Paykit wire 4.16: an end before any response is the proposal's withdrawal by its sender",
+                )?,
+            }
         }
         Ok(())
     }
@@ -1719,6 +1781,18 @@ impl AllowanceRecord {
     /// [`Error::Invalid`] if the value can't be written.
     pub fn to_json(&self) -> Result<Vec<u8>> {
         self.check().map_err(Error::into_validation)?;
+        self.json_unchecked()
+    }
+
+    /// Write the record value without its rules, for the vector tests' rejection cases, which
+    /// readers must refuse (Paykit wire 5.4). Test-only: no production build has it.
+    #[cfg(feature = "test-vectors")]
+    #[doc(hidden)]
+    pub fn to_json_unchecked(&self) -> Result<Vec<u8>> {
+        self.json_unchecked()
+    }
+
+    fn json_unchecked(&self) -> Result<Vec<u8>> {
         let stored = std::iter::once(&self.proposal)
             .chain(&self.response)
             .chain(&self.end);
@@ -1855,6 +1929,24 @@ mod tests {
         assert_eq!(read(kept.clone()).unwrap(), kept);
         // An ID that isn't a lower-case UUID v4 is still refused.
         assert!(read(vec!["not-a-uuid".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn test_unrequested_list_version_only_for_a_list() {
+        let destination = |source: &str, version: Option<u64>| {
+            let mut v = serde_json::json!({ "app_id": "brrz3m6g5rci6iqnzke44q4djc",
+                "endpoint_id": "btc-bitcoin-p2wpkh", "payload": "bc1q", "source": source,
+                "single_use": false });
+            if let Some(n) = version {
+                v["list_version"] = serde_json::json!(n);
+            }
+            v
+        };
+        read_unrequested(&destination("list", Some(7))).unwrap();
+        read_unrequested(&destination("public", None)).unwrap();
+        assert!(read_unrequested(&destination("list", None)).is_err());
+        assert!(read_unrequested(&destination("public", Some(7))).is_err());
+        assert!(read_unrequested(&destination("request", Some(7))).is_err());
     }
 
     #[test]
