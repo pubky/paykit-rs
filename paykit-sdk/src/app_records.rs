@@ -43,7 +43,11 @@
 
 use paykit_lib::app_record::PaykitMember;
 use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
+use std::sync::Arc;
+
 use pubky_switch_client::app::{Initiator, UserConfirmed};
+use pubky_switch_client::error::TransportError;
+use pubky_switch_client::transport::BoxFuture;
 use pubky_switch_core::records::{
     app_record_path, AppRecord, IdentityDoc, RecordOrder, RecordView,
 };
@@ -121,6 +125,12 @@ pub(crate) fn usable(
     })
 }
 
+/// The Homeserver's answers for each app's record path.
+type RecordReads = Vec<(
+    [u8; 16],
+    std::result::Result<Option<Vec<u8>>, TransportError>,
+)>;
+
 /// How many records of one payee app are kept for its comparison state. Each kept record is
 /// strictly later than the one before it, or conflicts with it once: at a renewal a fortnight,
 /// that is years of records. Past it the oldest is dropped, which can only lose an earlier
@@ -173,20 +183,47 @@ impl Paykit {
         by: Initiator,
         confirmed: Option<UserConfirmed>,
     ) -> Result<std::result::Result<Vec<UsableRecord>, Refusal>> {
-        let doc = match self.payee_identity(payee, by, confirmed).await? {
+        // The current apps' records are read from the Homeserver beside the payee's switch
+        // lookup, from the copy of identity.json taken first (Paykit spec 4, 14).
+        let homeserver = Arc::clone(&self.homeserver);
+        let owner = *payee;
+        let start = move |doc: &IdentityDoc| -> Option<BoxFuture<'static, RecordReads>> {
+            let apps: Vec<[u8; 16]> = doc
+                .body()
+                .apps
+                .iter()
+                .map(|a| a.app_id)
+                .filter(|id| app.is_none_or(|a| a == *id))
+                .collect();
+            Some(Box::pin(async move {
+                let mut out = Vec::with_capacity(apps.len());
+                for app_id in apps {
+                    out.push((
+                        app_id,
+                        homeserver.get(owner, app_record_path(&app_id)).await,
+                    ));
+                }
+                out
+            }))
+        };
+        let (doc, reads) = self
+            .payee_identity_with(payee, by, confirmed, start)
+            .await?;
+        let doc = match doc {
             Ok(doc) => doc,
             Err(refusal) => return Ok(Err(refusal)),
         };
+        // The reads start with the first copy taken, so they ran.
+        let Some(reads) = reads else {
+            return Ok(Ok(Vec::new()));
+        };
         let mut out = Vec::new();
-        for listed in &doc.body().apps {
-            if app.is_some_and(|a| a != listed.app_id) {
+        for (app_id, bytes) in reads {
+            // Only the apps the copy acted on lists.
+            let Some(listed) = doc.body().apps.iter().find(|a| a.app_id == app_id) else {
                 continue;
-            }
-            let bytes = self
-                .homeserver
-                .get(*payee, app_record_path(&listed.app_id))
-                .await
-                .map_err(PaykitError::Homeserver)?;
+            };
+            let bytes = bytes.map_err(PaykitError::Homeserver)?;
             let read = bytes.and_then(|b| read_record(payee, &listed.app_id, &b));
             let now = self.now();
             // The record served is compared with those seen before (Switch spec 4.2): an older

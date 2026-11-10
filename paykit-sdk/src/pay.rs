@@ -131,6 +131,22 @@ pub struct UnrequestedPayment {
     pub options: PayOptions,
 }
 
+/// What held a payment back at [`Paykit::pay_gate`].
+pub(crate) enum Held {
+    /// The own `identity.json` isn't confirmed in the last 60 s (check 4).
+    OwnIdentity(Refusal),
+    /// Any other check.
+    Check(Refusal),
+}
+
+impl Held {
+    fn refusal(self) -> Refusal {
+        match self {
+            Self::OwnIdentity(refusal) | Self::Check(refusal) => refusal,
+        }
+    }
+}
+
 /// What one attempt needs beyond its journal entry.
 struct Plan {
     entry: JournalEntry,
@@ -731,6 +747,7 @@ impl Paykit {
         match self
             .pay_gate(&entry, &carrier, &claim, by, unconfirmed, false)
             .await?
+            .map_err(Held::refusal)
         {
             Ok(()) => {}
             Err(refusal @ Refusal::NotCurrent(_)) => return Err(refusal.into()),
@@ -1275,14 +1292,16 @@ impl Paykit {
             .await?;
         Ok(match gate {
             Ok(()) => None,
-            Err(refusal @ Refusal::IdentityUnavailable(_)) => return Err(refusal.into()),
-            // What may pass later.
-            Err(Refusal::NotNow(_) | Refusal::IdentityUnconfirmed) => {
-                Some(PayOutcome::Pending { attempt_id })
-            }
+            // No payment of this app goes on without its own identity.json confirmed.
+            Err(Held::OwnIdentity(refusal)) => return Err(refusal.into()),
+            // What may pass later: the app held back, or the payee's identity.json not
+            // confirmed yet.
+            Err(Held::Check(
+                Refusal::NotNow(_) | Refusal::IdentityUnavailable(_) | Refusal::IdentityUnconfirmed,
+            )) => Some(PayOutcome::Pending { attempt_id }),
             // A destination refused, an attempt the claim or the identity no longer backs:
             // "may be paid", for a receipt or the user.
-            Err(_) => Some(PayOutcome::Uncertain { attempt_id }),
+            Err(Held::Check(_)) => Some(PayOutcome::Uncertain { attempt_id }),
         })
     }
 
@@ -1304,7 +1323,8 @@ impl Paykit {
     ///    key signed the attempt's transition proof (Paykit spec 4, "Fresh before paying";
     ///    Switch spec 12.5, 12.6).
     ///
-    /// `Err` inside holds the first refusal; [`Refusal::NotCurrent`] for 5 and 6.
+    /// `Err` inside holds the first refusal, as [`Held::OwnIdentity`] for 4, and
+    /// [`Refusal::NotCurrent`] for 5 and 6.
     pub(crate) async fn pay_gate(
         &mut self,
         entry: &JournalEntry,
@@ -1313,9 +1333,9 @@ impl Paykit {
         by: Initiator,
         unconfirmed: Option<UserConfirmed>,
         refresh: bool,
-    ) -> Result<std::result::Result<(), Refusal>> {
+    ) -> Result<std::result::Result<(), Held>> {
         if let Err(refusal) = self.app.may_attempt(by == Initiator::Automatic) {
-            return Ok(Err(Refusal::NotNow(refusal.to_string())));
+            return Ok(Err(Held::Check(Refusal::NotNow(refusal.to_string()))));
         }
         let attempt = entry.attempt()?.to_bytes();
         let me = self.app_id();
@@ -1326,9 +1346,9 @@ impl Paykit {
                 .attempt(&attempt)
                 .is_some_and(|a| a.owner == me && a.outcome == Outcome::Open);
         if !open {
-            return Ok(Err(Refusal::MayBePaid(
+            return Ok(Err(Held::Check(Refusal::MayBePaid(
                 "Paykit spec 7.2: the claim doesn't show this app's attempt open".into(),
-            )));
+            ))));
         }
         let checked = self
             .check_destination(
@@ -1341,14 +1361,14 @@ impl Paykit {
             )
             .await?;
         if let Err(refusal) = checked {
-            return Ok(Err(refusal));
+            return Ok(Err(Held::Check(refusal)));
         }
         if let Err(refusal) = self.own_identity_confirmed(refresh).await {
-            return Ok(Err(refusal));
+            return Ok(Err(Held::OwnIdentity(refusal)));
         }
         Ok(self
             .own_identity_authorizes(entry)
-            .map_err(Refusal::NotCurrent))
+            .map_err(|why| Held::Check(Refusal::NotCurrent(why))))
     }
 
     /// Checks 5 and 6 of [`Paykit::pay_gate`], on the own `identity.json` held.

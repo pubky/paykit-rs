@@ -11,6 +11,7 @@
 //! Recurring requests, Allowances and publishing Private Payment Lists add their own modules
 //! the same way.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use paykit_lib::derive::request_obligation_blinded;
@@ -22,11 +23,13 @@ use pubky_switch_client::app::{
 use pubky_switch_client::clock::Clock;
 use serde::{Deserialize, Serialize};
 
+use crate::destination::KeptLookup;
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::JournalEntry;
 use crate::protocol::PaykitProtocol;
 use crate::rail::Rail;
 use crate::state::{key, Tx};
+use crate::timer::Timer;
 
 /// The default `orphan_after` of an attempt: a day, the longest a payment method is expected
 /// to take (Switch spec 10.2).
@@ -142,6 +145,11 @@ pub struct Paykit {
     pub(crate) clock: Arc<dyn Clock>,
     /// The Homeserver reader, for the payees' app records (Paykit spec 4).
     pub(crate) homeserver: Arc<dyn HomeserverReader>,
+    /// The host's timer, which bounds the wait for a payee's switch (Switch spec 4.3).
+    pub(crate) timer: Arc<dyn Timer>,
+    /// The payees' switch lookups still running after their grace: an answer that arrives
+    /// before money moves is still used (Paykit spec 4).
+    pub(crate) lookups: HashMap<[u8; 32], KeptLookup>,
     pub(crate) config: PaykitConfig,
 }
 
@@ -162,6 +170,7 @@ impl Paykit {
         protocol: Arc<PaykitProtocol>,
         config: PaykitConfig,
         rail: Arc<dyn Rail>,
+        timer: Arc<dyn Timer>,
     ) -> Result<Self> {
         // Paykit's verifiers check the own certificate as they check every other (Paykit
         // wire 3.1): its scope rules, and permissions exactly as its scopes derive them.
@@ -173,6 +182,8 @@ impl Paykit {
             rail,
             clock: env.clock,
             homeserver: env.homeserver,
+            timer,
+            lookups: HashMap::new(),
             config,
         })
     }
@@ -189,10 +200,11 @@ impl Paykit {
         config: PaykitConfig,
         request: JoinRequest,
         rail: Arc<dyn Rail>,
+        timer: Arc<dyn Timer>,
     ) -> Result<Self> {
         let protocol = Self::new_protocol();
         let app = App::join(env.clone(), protocol.clone(), config.app.clone(), request).await?;
-        Self::assemble(app, env, protocol, config, rail)
+        Self::assemble(app, env, protocol, config, rail, timer)
     }
 
     /// Load a Paykit App from the store alone: nothing is sent. Payments a crash left in the
@@ -206,10 +218,11 @@ impl Paykit {
         config: PaykitConfig,
         app_id: [u8; 16],
         rail: Arc<dyn Rail>,
+        timer: Arc<dyn Timer>,
     ) -> Result<Self> {
         let protocol = Self::new_protocol();
         let app = App::load(env.clone(), protocol.clone(), config.app.clone(), app_id).await?;
-        Self::assemble(app, env, protocol, config, rail)
+        Self::assemble(app, env, protocol, config, rail, timer)
     }
 
     /// Restore from a backup (Switch spec 12.4): the journal checked whole first, then the
@@ -226,6 +239,7 @@ impl Paykit {
         config: PaykitConfig,
         backup: &PaykitBackup,
         rail: Arc<dyn Rail>,
+        timer: Arc<dyn Timer>,
     ) -> Result<Self> {
         // The journal is checked whole before anything is restored: a backup with a damaged
         // or repeated entry is refused, never taken in part.
@@ -248,7 +262,7 @@ impl Paykit {
             tx.put(&key::journal(&entry.attempt()?), &entry)?;
         }
         app.protocol_commit(&tx.into_writes()).await?;
-        Self::assemble(app, env, protocol, config, rail)
+        Self::assemble(app, env, protocol, config, rail, timer)
     }
 
     /// The app's backup: the client's and the journal (Paykit spec 7.2).

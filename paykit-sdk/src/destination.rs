@@ -25,6 +25,10 @@
 //! A removed app's destinations are ignored, even if its messages or its record are still
 //! held (Paykit spec 4).
 //!
+//! The payee's switch is asked beside the Homeserver's reads, and waited on for at most
+//! [`IDENTITY_GRACE_MS`] after them, on the host's [`crate::Timer`]; a lookup still running
+//! is kept, and its answer taken at the next check before money moves (Paykit spec 4, 14).
+//!
 //! The payee's `identity.json` is acted on as Switch spec 4.3 allows ([`PeerIdentity::may_act`]):
 //! once its switch confirmed the copy; otherwise a payment the user started goes on only on
 //! the user's explicit confirmation, and an automatic one (an executor) never does.
@@ -40,7 +44,10 @@ use paykit_lib::bodies::RequestDestination;
 use paykit_lib::records::{DestinationSource, StoredMessage};
 use paykit_lib::scopes::acts_as_payee;
 use paykit_lib::Body;
-use pubky_switch_client::app::{Initiator, MayAct, UserConfirmed};
+use pubky_switch_client::app::{
+    Initiator, MayAct, PeerIdentity, SwitchAnswer, SwitchLookup, UserConfirmed,
+};
+use pubky_switch_client::transport::BoxFuture;
 use pubky_switch_core::records::{AppCert, AppRecord, IdentityDoc, Standing};
 
 use crate::error::{Refusal, Result};
@@ -54,55 +61,128 @@ pub const IDENTITY_GRACE_MS: u64 = 2_000;
 
 impl Paykit {
     /// The payee's `identity.json` for acting on its destinations (Paykit spec 4, 7.2; Switch
-    /// spec 4.3, "The switch's copy"): the copy held while it and its last switch lookup are
-    /// fresh, else the Homeserver's copy and then the payee's switch's, through the client's
-    /// version floor and equivocation check. A copy the switch confirmed is acted on. One it
-    /// couldn't confirm is acted on only for a payment the user started and confirmed
-    /// (`confirmed`); an automatic payment looks it up once more and otherwise isn't made.
-    /// `Err` holds the refusal.
+    /// spec 4.3, "The switch's copy"), as [`Paykit::payee_identity_with`] takes it, with no
+    /// other reads beside the switch's lookup.
     pub(crate) async fn payee_identity(
         &mut self,
         payee: &[u8; 32],
         by: Initiator,
         confirmed: Option<UserConfirmed>,
     ) -> Result<std::result::Result<IdentityDoc, Refusal>> {
+        let (doc, _) = self
+            .payee_identity_with::<()>(payee, by, confirmed, |_| None)
+            .await?;
+        Ok(doc)
+    }
+
+    /// The payee's `identity.json` for acting on its destinations (Paykit spec 4, 7.2; Switch
+    /// spec 4.3, "The switch's copy"): the copy held while it and its last switch lookup are
+    /// fresh, else the Homeserver's copy and then the payee's switch's, through the client's
+    /// version floor and equivocation check.
+    ///
+    /// The switch's lookup runs beside `reads`, the Homeserver reads the caller starts from
+    /// the copy taken, and is waited on for at most [`IDENTITY_GRACE_MS`] after them, on the
+    /// host's timer (Paykit spec 4, 14; Switch spec 4.3, "No added latency"). One still
+    /// running then is kept: its answer is taken whenever it arrives before money moves, at
+    /// the next check of this payee. A copy the switch confirmed is acted on. One it couldn't
+    /// confirm, or hasn't yet, is acted on only for a payment the user started and confirmed
+    /// (`confirmed`); an automatic payment looks it up once more and otherwise isn't made.
+    /// `Err` inside holds the refusal; the reads' result comes with it.
+    pub(crate) async fn payee_identity_with<R: Send + 'static>(
+        &mut self,
+        payee: &[u8; 32],
+        by: Initiator,
+        confirmed: Option<UserConfirmed>,
+        reads: impl FnOnce(&IdentityDoc) -> Option<BoxFuture<'static, R>>,
+    ) -> Result<(std::result::Result<IdentityDoc, Refusal>, Option<R>)> {
+        let mut reads = Some(reads);
+        let mut read: Option<R> = None;
         let mut refresh = false;
         loop {
-            let lookup = match self.app.begin_identity_lookup(payee, refresh).await {
-                Ok(lookup) => lookup,
-                Err(error) => {
-                    return Ok(Err(Refusal::IdentityUnavailable(format!(
-                        "Switch spec 4.3: the payee's identity.json can't be read now: {error}"
-                    ))))
+            // A lookup still running from an earlier check goes on: its copy and its answer,
+            // while the copy is fresh.
+            let kept = self
+                .lookups
+                .remove(payee)
+                .filter(|kept| self.now() < kept.identity.fresh_until_ms());
+            let (identity, switch) = match kept {
+                Some(kept) => (kept.identity, Some(kept.switch)),
+                None => match self.app.begin_identity_lookup(payee, refresh).await {
+                    Ok(lookup) => (lookup.identity, lookup.switch),
+                    Err(error) => {
+                        return Ok((
+                            Err(Refusal::IdentityUnavailable(format!(
+                                "Switch spec 4.3: the payee's identity.json can't be read now: \
+                                 {error}"
+                            ))),
+                            read,
+                        ))
+                    }
+                },
+            };
+            let started = reads.take().and_then(|start| start(&identity.doc));
+            let identity = match switch {
+                None => {
+                    if let Some(started) = started {
+                        read = Some(started.await);
+                    }
+                    identity
+                }
+                Some(switch) => {
+                    let sleep = self.timer.sleep(IDENTITY_GRACE_MS);
+                    let (lookup, done) = race(switch, started, sleep).await;
+                    if done.is_some() {
+                        read = done;
+                    }
+                    match lookup {
+                        Lookup::Answered(answer) => {
+                            match self.app.finish_identity_lookup(answer).await {
+                                Ok(identity) => identity,
+                                Err(error) => {
+                                    return Ok((
+                                        Err(Refusal::IdentityUnavailable(format!(
+                                            "Switch spec 4.3: the payee's identity.json can't \
+                                             be taken: {error}"
+                                        ))),
+                                        read,
+                                    ))
+                                }
+                            }
+                        }
+                        Lookup::Running(switch) => {
+                            self.lookups.insert(
+                                *payee,
+                                KeptLookup {
+                                    identity: identity.clone(),
+                                    switch,
+                                },
+                            );
+                            identity
+                        }
+                    }
                 }
             };
-            let mut identity = lookup.identity;
-            // The switch's half runs to its answer: the SDK keeps no timer of its own, so it
-            // never acts on the Homeserver's copy while the switch may still answer.
-            if let Some(switch) = lookup.switch {
-                identity = match self.app.finish_identity_lookup(switch.await).await {
-                    Ok(identity) => identity,
-                    Err(error) => {
-                        return Ok(Err(Refusal::IdentityUnavailable(format!(
-                            "Switch spec 4.3: the payee's identity.json can't be taken: {error}"
-                        ))))
-                    }
-                };
-            }
             match identity.may_act(self.now(), by, IDENTITY_GRACE_MS) {
-                MayAct::Now => return Ok(Ok(identity.doc)),
-                MayAct::IfUserConfirms if confirmed.is_some() => return Ok(Ok(identity.doc)),
-                MayAct::IfUserConfirms => return Ok(Err(Refusal::IdentityUnconfirmed)),
-                MayAct::No | MayAct::LookUpAgain | MayAct::WaitForLookup if !refresh => {
+                MayAct::Now => return Ok((Ok(identity.doc), read)),
+                MayAct::IfUserConfirms if confirmed.is_some() => {
+                    return Ok((Ok(identity.doc), read))
+                }
+                MayAct::IfUserConfirms => return Ok((Err(Refusal::IdentityUnconfirmed), read)),
+                MayAct::No | MayAct::LookUpAgain | MayAct::WaitForLookup | MayAct::WaitUntil(_)
+                    if !refresh =>
+                {
                     refresh = true;
                 }
                 _ => {
-                    return Ok(Err(Refusal::IdentityUnavailable(
-                        "Switch spec 4.3: no fresh copy of the payee's identity.json that its \
-                         switch confirmed; an automatic payment never acts on the Homeserver's \
-                         copy alone"
-                            .into(),
-                    )))
+                    return Ok((
+                        Err(Refusal::IdentityUnavailable(
+                            "Switch spec 4.3: no fresh copy of the payee's identity.json that \
+                             its switch confirmed; an automatic payment never acts on the \
+                             Homeserver's copy alone"
+                                .into(),
+                        )),
+                        read,
+                    ))
                 }
             }
         }
@@ -132,6 +212,64 @@ impl Paykit {
             return Ok(Err(Refusal::Destination(why)));
         }
         Ok(current(&doc, &destination.app_id, carrier, now).map_err(Refusal::Destination))
+    }
+}
+
+/// A payee's switch lookup still running after its grace, with the copy it began from.
+pub(crate) struct KeptLookup {
+    pub(crate) identity: PeerIdentity,
+    pub(crate) switch: SwitchLookup,
+}
+
+/// Where a switch lookup stands after [`race`].
+enum Lookup {
+    Answered(SwitchAnswer),
+    Running(SwitchLookup),
+}
+
+/// Run the switch's lookup beside `reads` until they finish, then wait on it at most until
+/// `grace` resolves (Switch spec 4.3, "No added latency"). Both are polled in turn on the
+/// caller's task: nothing is spawned, and a lookup not answered is handed back to be kept.
+async fn race<R>(
+    mut switch: SwitchLookup,
+    reads: Option<BoxFuture<'static, R>>,
+    mut grace: BoxFuture<'static, ()>,
+) -> (Lookup, Option<R>) {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::Poll;
+    let mut answer = None;
+    let mut done = None;
+    if let Some(mut reads) = reads {
+        std::future::poll_fn(|cx| {
+            if answer.is_none() {
+                if let Poll::Ready(a) = Pin::new(&mut switch).poll(cx) {
+                    answer = Some(a);
+                }
+            }
+            match reads.as_mut().poll(cx) {
+                Poll::Ready(value) => {
+                    done = Some(value);
+                    Poll::Ready(())
+                }
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await;
+    }
+    if let Some(answer) = answer {
+        return (Lookup::Answered(answer), done);
+    }
+    let answered = std::future::poll_fn(|cx| {
+        if let Poll::Ready(a) = Pin::new(&mut switch).poll(cx) {
+            return Poll::Ready(Some(a));
+        }
+        grace.as_mut().poll(cx).map(|()| None)
+    })
+    .await;
+    match answered {
+        Some(answer) => (Lookup::Answered(answer), done),
+        None => (Lookup::Running(switch), done),
     }
 }
 

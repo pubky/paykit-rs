@@ -19,6 +19,7 @@ async fn restored(w: &World, backup: &paykit_sdk::PaykitBackup) -> Paykit {
         PaykitConfig::default(),
         backup,
         Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
     )
     .await
     .unwrap();
@@ -314,6 +315,7 @@ async fn refused_restore(w: &World, backup: serde_json::Value) -> paykit_sdk::Pa
         PaykitConfig::default(),
         &backup,
         Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
     )
     .await;
     match restored {

@@ -29,4 +29,4 @@ thiserror.workspace = true
 paykit-sdk = { path = ".", features = ["test-support"] }
 pubky-switch-client = { workspace = true, features = ["test-support"] }
 pubky-switch-core = { workspace = true, features = ["test-vectors"] }
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }

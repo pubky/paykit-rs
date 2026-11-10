@@ -63,7 +63,26 @@ pub struct World {
     pub rail: Arc<FakeRail>,
 }
 
+/// The host's timer in the tests: its sleep moves the test clock on and resolves at once.
+pub struct TestTimer {
+    pub clock: Arc<TestClock>,
+}
+
+impl paykit_sdk::Timer for TestTimer {
+    fn sleep(&self, ms: u64) -> pubky_switch_client::transport::BoxFuture<'static, ()> {
+        self.clock.advance_ms(ms);
+        Box::pin(async {})
+    }
+}
+
 impl World {
+    /// The host's timer, on the world's clock.
+    pub fn timer(&self) -> Arc<dyn paykit_sdk::Timer> {
+        Arc::new(TestTimer {
+            clock: Arc::clone(&self.clock),
+        })
+    }
+
     pub fn new() -> Self {
         let seeds = Seeds::default();
         let clock = Arc::new(TestClock::new(START_MS));
@@ -139,6 +158,7 @@ impl World {
             config,
             request,
             Arc::clone(&self.rail) as Arc<dyn paykit_sdk::Rail>,
+            self.timer(),
         )
         .await
         .unwrap();
@@ -162,6 +182,7 @@ impl World {
             PaykitConfig::default(),
             app_id,
             Arc::clone(&self.rail) as Arc<dyn paykit_sdk::Rail>,
+            self.timer(),
         )
         .await
         .unwrap()
@@ -522,6 +543,89 @@ impl World {
             PaykitConfig::default(),
             app_id,
             Arc::clone(&self.rail) as Arc<dyn paykit_sdk::Rail>,
+            self.timer(),
+        )
+        .await
+        .unwrap()
+    }
+}
+
+/// A transport whose public reads of one switch's `identity.json` hang while held: a slow
+/// switch. Every other request goes through the world's router.
+pub struct SlowSwitch {
+    pub inner: Arc<Router>,
+    pub origin: String,
+    held: std::sync::atomic::AtomicBool,
+    wakers: std::sync::Mutex<Vec<std::task::Waker>>,
+}
+
+impl SlowSwitch {
+    pub fn new(inner: Arc<Router>, origin: &str) -> Self {
+        Self {
+            inner,
+            origin: origin.to_owned(),
+            held: std::sync::atomic::AtomicBool::new(true),
+            wakers: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The switch answers from now on, the reads held included.
+    pub fn release(&self) {
+        self.held.store(false, std::sync::atomic::Ordering::SeqCst);
+        for waker in self.wakers.lock().unwrap().drain(..) {
+            waker.wake();
+        }
+    }
+}
+
+impl Transport for SlowSwitch {
+    fn send(
+        &self,
+        request: pubky_switch_client::transport::Request,
+    ) -> pubky_switch_client::transport::BoxFuture<
+        '_,
+        Result<
+            pubky_switch_client::transport::Response,
+            pubky_switch_client::error::TransportError,
+        >,
+    > {
+        let slow = request.origin == self.origin
+            && request.method == "GET"
+            && request.path_and_query.ends_with("/identity");
+        Box::pin(async move {
+            if slow {
+                std::future::poll_fn(|cx| {
+                    if self.held.load(std::sync::atomic::Ordering::SeqCst) {
+                        self.wakers.lock().unwrap().push(cx.waker().clone());
+                        std::task::Poll::Pending
+                    } else {
+                        std::task::Poll::Ready(())
+                    }
+                })
+                .await;
+            }
+            self.inner.send(request).await
+        })
+    }
+}
+
+impl World {
+    /// Load app `app_id` of `signer` from `store`, its requests going through `transport`.
+    pub async fn load_with_transport(
+        &self,
+        signer: &TestSigner,
+        store: Arc<dyn StateStore>,
+        app_id: [u8; 16],
+        transport: Arc<dyn Transport>,
+    ) -> Paykit {
+        let mut env = self.env(signer, store);
+        env.transport = transport;
+        Paykit::load(
+            env,
+            PaykitConfig::default(),
+            app_id,
+            Arc::clone(&self.rail) as Arc<dyn paykit_sdk::Rail>,
+            self.timer(),
         )
         .await
         .unwrap()

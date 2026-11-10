@@ -37,6 +37,7 @@ async fn load(
         PaykitConfig::default(),
         app_id,
         Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
     )
     .await
     .unwrap()

@@ -21,6 +21,7 @@
 //!   ([`Paykit::reconcile`]).
 //! - [`Rail`]: the payment method's interface; `rail::FakeRail` for tests (feature
 //!   `test-support`).
+//! - [`Timer`]: the host's timer, which bounds the wait for a payee's switch.
 //! - [`AppScopes`]: Paykit's side of approval.
 //! - [`app_records`]: Paykit's member of app records, and reading a payee's public
 //!   endpoints from them ([`Paykit::public_endpoints`]).
@@ -53,9 +54,11 @@ mod resend;
 mod state;
 #[cfg(test)]
 mod testkit;
+mod timer;
 
 pub use activity::Role;
 pub use approval::{AppScopes, RequestedScopes};
+pub use destination::IDENTITY_GRACE_MS;
 pub use error::{PaykitError, Refusal, Result};
 pub use journal::{PaymentView, Stage};
 pub use pay::{PayOptions, PayOutcome, PaymentMode, UnrequestedPayment, UNREQUESTED_DEADLINE_MS};
@@ -70,3 +73,4 @@ pub use requests::{
     PayeeActivity, PayeeStatus, RequestDraft, RequestRef, RequestStatus, RequestView, SentRequest,
 };
 pub use resend::{ResendSelection, RESEND_COOLDOWN_MS};
+pub use timer::Timer;
