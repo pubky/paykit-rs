@@ -657,7 +657,9 @@ conversion terms the requested asset is lower-case letters and digits, each rate
 names one, of an accepted endpoint. Period details name \
 payment_request_recurring (request), a usd request with per_period conversion: their rates \
 are cross-asset only, so a bare or rail-qualified rate for the requested asset (usd, \
-usd-polygon) makes them invalid against the request. accepted are messages alice takes, \
+usd-polygon) makes them invalid against the request; each rate's asset is <asset> or \
+<asset>-<rail> of lower-case letters and digits, and matches an endpoint the details or \
+the request name (here btc-lightning-bolt11). accepted are messages alice takes, \
 at check 10 and, for period details, against their request; refused are those she drops. \
 reason is paykit-lib's wording, of the first check that refuses it.";
 
@@ -742,6 +744,26 @@ fn conversion_cases() -> (Vec<ConversionCase>, Vec<ConversionCase>) {
         details(
             "period details with a rail-qualified rate for the requested asset",
             json!([{ "asset": "btc", "value": "0.00001234" }, { "asset": "usd-polygon", "value": "1.008" }]),
+        ),
+        details(
+            "period details with a rate selector in upper case",
+            json!([{ "asset": "BTC", "value": "0.00001234" }]),
+        ),
+        details(
+            "period details with a rate selector with an empty rail",
+            json!([{ "asset": "btc-", "value": "0.00001234" }]),
+        ),
+        details(
+            "period details with a rate selector of three segments",
+            json!([{ "asset": "btc-lightning-bolt11", "value": "0.00001234" }]),
+        ),
+        details(
+            "period details with a rate whose asset matches no endpoint",
+            json!([{ "asset": "eth", "value": "0.0004" }]),
+        ),
+        details(
+            "period details with a rate whose rail matches no endpoint",
+            json!([{ "asset": "btc-bitcoin", "value": "0.00001234" }]),
         ),
     ];
     (accepted, refused)

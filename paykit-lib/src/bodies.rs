@@ -169,6 +169,18 @@ fn check_conversion_terms(
     let Conversion::Fixed(rates) = conversion else {
         return Ok(());
     };
+    check_rate_selectors(rates, accepted)
+}
+
+/// The rate selectors of conversion terms or period details (Paykit wire 4.4, 4.9,
+/// `specs/payment-conversion.md`): each rate's asset is `<asset>` or `<asset>-<rail>`, each
+/// segment lower-case letters and digits, and, when `visible` names endpoints, it matches
+/// the asset, and the rail when it names one, of at least one of them.
+///
+/// # Errors
+///
+/// [`Error::Invalid`] naming the rule.
+fn check_rate_selectors(rates: &[Rate], visible: &[&PaymentEndpointIdentifier]) -> Result<()> {
     for rate in rates {
         let selector: Vec<&str> = rate.asset().as_str().split('-').collect();
         ensure(
@@ -180,7 +192,7 @@ fn check_conversion_terms(
             segments.get(..selector.len()) == Some(&selector[..])
         };
         ensure(
-            accepted.is_empty() || accepted.iter().any(matches),
+            visible.is_empty() || visible.iter().any(matches),
             "Paykit wire 4.4: a rate's asset matches no accepted endpoint",
         )?;
     }
@@ -715,6 +727,8 @@ impl PeriodDetails {
             details.payment_endpoints.is_some() || details.rates.is_some(),
             "Paykit wire 4.9: period details carry payment_endpoints, rates or both",
         )?;
+        // Paykit wire 4.9: the rates are quotes, of the conversion convention's selectors.
+        check_rate_selectors(details.rates.as_deref().unwrap_or_default(), &[])?;
         Ok(details)
     }
 
@@ -756,15 +770,32 @@ impl PeriodDetails {
     }
 
     /// The checks that need the request (Paykit wire 4.9): the period is one of the
-    /// request's, and the rates are cross-asset only, with no rate for the requested asset,
-    /// bare (`usdt`) or rail-qualified (`usdt-polygon`), so a same-asset payment of a period
-    /// stays 1:1 whatever its details say (`specs/payment-conversion.md`).
+    /// request's; the rates are cross-asset only, with no rate for the requested asset, bare
+    /// (`usdt`) or rail-qualified (`usdt-polygon`), so a same-asset payment of a period stays
+    /// 1:1 whatever its details say (`specs/payment-conversion.md`); and each rate matches an
+    /// endpoint the details or the request name, when they name any: the details'
+    /// `payment_endpoints`, the request's `accepted_payment_endpoint_identifiers` and its
+    /// `payment_endpoints`.
     ///
     /// # Errors
     ///
     /// [`Error::Invalid`] naming the rule.
     pub fn check_against(&self, request: &PaymentRequest) -> Result<BillingPeriod> {
         let period = request.named_period(&self.billing_period)?;
+        let mut visible: Vec<&PaymentEndpointIdentifier> = self
+            .payment_endpoints
+            .iter()
+            .flat_map(|e| e.keys())
+            .collect();
+        visible.extend(
+            request
+                .accepted_payment_endpoint_identifiers
+                .iter()
+                .flatten(),
+        );
+        if let RequestDestination::Endpoints(e) = &request.destination {
+            visible.extend(e.keys());
+        }
         let requested = request.amount.asset.as_str();
         if self.rates.iter().flatten().any(|r| {
             let selector = r.asset().as_str();
@@ -774,6 +805,7 @@ impl PeriodDetails {
                 "Paykit wire 4.9: period details' rates are cross-asset only, with no bare or rail-qualified rate for the requested asset",
             );
         }
+        check_rate_selectors(self.rates.as_deref().unwrap_or_default(), &visible)?;
         Ok(period)
     }
 }
@@ -2037,8 +2069,8 @@ mod tests {
         recurring["payment_deadline"] = json!({ "type": "period_start", "seconds": 86400 });
         recurring["recurrence"] = json!({ "anchor": "2026-01-31T00:00:00.000Z", "every": 1,
             "unit": "month", "starts_at": "2026-01-31T00:00:00.000Z", "ends_at": null });
-        recurring["payment_endpoints"] =
-            json!({ "btc-lightning-bolt11": "lnbc1", "usdt-polygon-address": "0x1" });
+        recurring["payment_endpoints"] = json!({ "btc-lightning-bolt11": "lnbc1", "usdt-polygon-address": "0x1",
+                "usdtx-polygon-address": "0x2" });
         recurring["conversion"] = json!({ "type": "per_period" });
         let request = PaymentRequest::from_body(&body(recurring)).unwrap();
         let details = |selector: &str| {
@@ -2054,6 +2086,43 @@ mod tests {
         for same in ["usdt", "usdt-polygon", "usdt-ethereum"] {
             let error = details(same).check_against(&request).unwrap_err();
             assert!(error.to_string().contains("cross-asset only"), "{same}");
+        }
+    }
+
+    #[test]
+    fn test_period_details_rates_follow_the_selector_grammar() {
+        let details = |selector: &str| {
+            PeriodDetails::from_body(&body(json!({ "billing_period": {
+                "starts_at": "2026-01-31T00:00:00.000Z", "ends_at": "2026-02-28T00:00:00.000Z" },
+                "expires_at": "2026-02-01T00:00:00.000Z",
+                "payment_endpoints": { "eth-ethereum-address": "0x3" },
+                "rates": [{ "asset": selector, "value": "0.0004" }] })))
+        };
+        for bad in ["BTC", "btc-", "-btc", "btc-lightning-bolt11", "btc_x"] {
+            let error = details(bad).unwrap_err().to_string();
+            assert!(error.contains("<asset>-<rail>"), "{bad}: {error}");
+        }
+        // Against the request: a selector matches an endpoint the details or the request name.
+        let mut recurring = request();
+        recurring["amount"] = json!({ "asset": "usd", "value": "10" });
+        recurring["payment_deadline"] = json!({ "type": "period_start", "seconds": 86400 });
+        recurring["recurrence"] = json!({ "anchor": "2026-01-31T00:00:00.000Z", "every": 1,
+            "unit": "month", "starts_at": "2026-01-31T00:00:00.000Z", "ends_at": null });
+        recurring["conversion"] = json!({ "type": "per_period" });
+        let request = PaymentRequest::from_body(&body(recurring)).unwrap();
+        for good in ["btc", "btc-lightning", "eth", "eth-ethereum"] {
+            details(good).unwrap().check_against(&request).unwrap();
+        }
+        for unmatched in ["usdt", "btc-bitcoin", "eth-polygon"] {
+            let error = details(unmatched)
+                .unwrap()
+                .check_against(&request)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("matches no accepted endpoint"),
+                "{unmatched}: {error}"
+            );
         }
     }
 
