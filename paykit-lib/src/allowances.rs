@@ -1237,6 +1237,10 @@ pub fn check_successor(
     held.check_valid(terms)?;
     newer.check_valid(terms)?;
     let refuse = |why: &str| invalid(format!("Paykit wire 5.5: a newer ledger version {why}"));
+    // One ledger, two versions: the same Allowance with the same counterparty.
+    if newer.counterparty != held.counterparty || newer.allowance_id != held.allowance_id {
+        return refuse("is another Allowance's ledger");
+    }
     let longest = terms.longest_period(newer_time)?;
     let (mut into_spent, mut into_count) = (0u128, 0u64);
     for entry in &held.entries {
@@ -1808,6 +1812,33 @@ mod tests {
         assert!(compact(&terms, &twice, now).is_err());
         let error = check_successor(&terms, &held, &twice, now).unwrap_err();
         assert!(error.to_string().contains("listed twice"), "{error}");
+    }
+
+    #[test]
+    fn test_successor_is_the_same_allowances_ledger() {
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let now = t("2026-03-10T00:00:00.000Z");
+        let empty = ledger(Vec::new());
+        check_successor(&terms, &empty, &empty, now).unwrap();
+        let other_counterparty = Ledger {
+            counterparty: [6; 32],
+            ..empty.clone()
+        };
+        let other_allowance = Ledger {
+            allowance_id: AllowanceId::parse("55de1f16-1a9e-4504-bc9c-57efc3a2b38c").unwrap(),
+            ..empty.clone()
+        };
+        for newer in [other_counterparty, other_allowance] {
+            let error = check_successor(&terms, &empty, &newer, now).unwrap_err();
+            assert!(error.to_string().contains("another Allowance"), "{error}");
+        }
+        // Non-empty too.
+        let held = ledger(vec![entry(1, "0.01", "2026-03-01T00:00:00.000Z", None)]);
+        let moved = Ledger {
+            counterparty: [6; 32],
+            ..held.clone()
+        };
+        assert!(check_successor(&terms, &held, &moved, now).is_err());
     }
 
     #[test]
