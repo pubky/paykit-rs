@@ -170,6 +170,11 @@ fn not_now(refusal: ClientRefusal) -> PaykitError {
     Refusal::NotNow(refusal.to_string()).into()
 }
 
+/// How old, on the device clock, the highest service time verified may be and still be
+/// taken as the latest seen for a payment's deadline (Paykit spec 8.4): older, the switch is
+/// read first.
+const SERVICE_TIME_RECENT_MS: u64 = 60_000;
+
 /// How many times the outcome's batch is built again after `409 conflict`.
 const OUTCOME_TRIES: usize = 3;
 
@@ -337,6 +342,11 @@ impl Paykit {
             .await?;
         self.check_transfer(&destination, &payment.amount, &options)?;
         let attempt_id = AttemptId::generate()?;
+        // 10 minutes after the latest service time the app has seen (Paykit spec 8.4),
+        // which a recent read makes current (Switch spec 10.1).
+        let seen = self
+            .recent_service_time(&payment_obligation(&attempt_id))
+            .await?;
         let own = self.identity();
         let natural = natural_key::payer_payment_record(&own, &attempt_id);
         let mut record = activity::empty(ActivitySide::Payer, payment.payee);
@@ -351,12 +361,7 @@ impl Paykit {
             natural_key: natural.clone(),
             amount: KeptAmount::of(&payment.amount),
             destination,
-            // 10 minutes after the latest service time the app has seen (Paykit spec 8.4).
-            deadline: Some(
-                self.service_time()
-                    .unwrap_or_else(|| self.now())
-                    .saturating_add(UNREQUESTED_DEADLINE_MS),
-            ),
+            deadline: Some(seen.saturating_add(UNREQUESTED_DEADLINE_MS)),
             stage: Stage::Recorded,
             step: None,
             label: None,
@@ -793,6 +798,33 @@ impl Paykit {
             .identity_confirmed_at()
             .and_then(|at| now.checked_sub(at))
             .is_some_and(|age| age < REVALIDATION_MS)
+    }
+
+    /// The latest service time the app has seen (Switch spec 10.1), for the deadline of a
+    /// payment without a request (Paykit spec 8.4): the highest it verified when that is
+    /// recent on the device clock, else the one a read of the payment's own claim, which a
+    /// new attempt ID leaves empty, answers with. Deadlines run on the service's clock,
+    /// never the device's: an old time would set a deadline that has passed already, and the
+    /// device's could be off by the clock tolerance.
+    ///
+    /// # Errors
+    ///
+    /// The client's errors when the switch can't be read now: no attempt could be written
+    /// then either.
+    async fn recent_service_time(&mut self, obligation: &[u8; 32]) -> Result<u64> {
+        let recent = |seen: Option<u64>, now: u64| {
+            seen.filter(|t| {
+                now.checked_sub(*t)
+                    .is_none_or(|age| age < SERVICE_TIME_RECENT_MS)
+            })
+        };
+        if let Some(seen) = recent(self.service_time(), self.now()) {
+            return Ok(seen);
+        }
+        self.app.read_claim(obligation).await?;
+        self.service_time().ok_or_else(|| {
+            Refusal::NotNow("Switch spec 10.1: no service time verified".into()).into()
+        })
     }
 
     /// Whether `deadline` is at or before the highest service time the app verified: no

@@ -175,3 +175,22 @@ async fn test_unrequested_expired_list_refused() {
         "{refused:?}"
     );
 }
+
+#[tokio::test]
+async fn test_unrequested_after_an_idle_spell_not_refused_for_its_deadline() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    // The wallet hears nothing from its switch for 11 minutes: the highest service time it
+    // verified is older than the deadline's 10 minutes. The deadline is set from the latest
+    // service time, read first, never from that old one (Paykit spec 8.4, Switch spec 10.1).
+    w.clock.advance_ms(11 * 60_000);
+    let outcome = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-lightning-bolt12"))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+}

@@ -347,7 +347,7 @@ async fn beside_a_slow_switch(
         std::sync::Arc::clone(&w.router),
         crate::common::BOB_ORIGIN,
     ));
-    let mut wallet = w
+    let wallet = w
         .load_with_transport(
             &w.alice,
             base,
@@ -356,9 +356,6 @@ async fn beside_a_slow_switch(
                 as std::sync::Arc<dyn pubky_switch_client::transport::Transport>,
         )
         .await;
-    // A fresh service time, from the own switch, for the deadline of a payment without a
-    // request (Paykit spec 8.4).
-    wallet.receive(None).await.unwrap();
     (wallet, slow, request)
 }
 
@@ -423,7 +420,6 @@ async fn test_public_unconfirmed_payee_paid_only_once_the_user_confirms() {
     // user's (Switch spec 4.3).
     w.router.remove(crate::common::BOB_ORIGIN);
     w.clock.advance_ms(11 * 60_000);
-    wallet.receive(None).await.unwrap();
     let refused = wallet
         .pay_without_request(public_to_bob(&w))
         .await
