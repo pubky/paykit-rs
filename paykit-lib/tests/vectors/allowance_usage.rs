@@ -1,5 +1,6 @@
-//! `allowance_usage.json`: Allowance usage for every limit kind, the outcome table, and
-//! compaction (Paykit spec 8.3, Paykit wire 5.5).
+//! `allowance_usage.json`: Allowance usage for every limit kind, the outcome table,
+//! compaction (Paykit spec 8.3, Paykit wire 5.5), and the period limits terms take or refuse
+//! as duplicates (Paykit wire 4.15).
 
 use std::collections::HashMap;
 
@@ -10,7 +11,7 @@ use paykit_lib::amount::Decimal;
 use paykit_lib::identifiers::AttemptId;
 use serde_json::{json, Value};
 
-use crate::common::{arr, paykit, pubky, st, time, BOB};
+use crate::common::{arr, generated, paykit, pubky, quoted, st, time, Place, BOB};
 
 fn usage_json(u: &Usage) -> Value {
     json!({
@@ -48,6 +49,7 @@ fn ledger(v: &Value) -> Ledger {
 
 #[test]
 fn test_vectors_allowance_usage() {
+    generate();
     let v = paykit("allowance_usage.json");
     let cases = arr(&v, "cases");
     assert_eq!(cases.len(), 9);
@@ -111,4 +113,136 @@ fn test_vectors_allowance_usage() {
     let other = ledger(&other);
     assert!(usage(&terms, &other, &claim_map, now).is_err());
     assert!(compact(&terms, &other, now).is_err());
+    check_spellings(&v);
+}
+
+/// The top-level description, which names every member.
+const DESCRIPTION: &str =
+    "Allowance usage (wire 5.5, spec 8.3 with specs/allowances.md): for every period limit the \
+amount and count of counted entries in the period containing t (anchored) or with t < at + \
+60 s + L (rolling), the lifetime amount including the ledger's compacted totals, and how \
+many entries are reserved, spent and released. An entry's own done spends, and its own \
+failed releases unless its attempt's claim is now done (which spends); an entry without an \
+outcome counts by its attempt's claim state (claims): open and unknown reserve, done \
+spends, failed releases only when the attempt's owner wrote it (resolved_by_owner true), a \
+failed another app wrote stays reserved until the user releases it, and an entry whose \
+claim is gone spends. Candidates are checked against every limit; refused_by names the \
+first limit that refuses. A totals.failed item counts like an entry's own failed, in the \
+lifetime amount only: it adds its value while its attempt's claim is done, until the \
+executor moves it into spent and count. Compaction keeps each compacted failed entry's \
+attempt, obligation and value in totals.failed. period_limit_spellings holds terms whose \
+period limits are, or aren't, duplicates by their wire spelling (wire 4.15).";
+
+const SPELLINGS_DESCRIPTION: &str = "Wire 4.15, specs/allowances.md: the terms of the first \
+case with period_limits replaced. Two period limits are duplicates when every member is \
+equal as spelled on the wire: amount_limit and anchor compare as strings, so numerically \
+equal amounts (1, 1.0) or one instant spelled two ways are distinct entries; \
+payment_count_limit and every compare as integers; kind and unit exactly. accepted are terms \
+every reader takes, with each of their period limits; refused are terms with an entry \
+twice, which every reader refuses. reason is paykit-lib's wording.";
+
+/// A case of `period_limit_spellings`: its name and its period limits.
+type SpellingCase = (&'static str, Value);
+
+/// The period limits of `period_limit_spellings`, accepted then refused.
+fn spelling_cases() -> (Vec<SpellingCase>, Vec<SpellingCase>) {
+    let rolling = |amount: &str| {
+        json!({ "amount_limit": amount, "payment_count_limit": null,
+            "period": { "every": 1, "kind": "rolling", "unit": "day" } })
+    };
+    let anchored = |anchor: &str| {
+        json!({ "amount_limit": "0.03", "payment_count_limit": 3,
+            "period": { "anchor": anchor, "every": 1, "kind": "anchored", "unit": "month" } })
+    };
+    let accepted = vec![
+        (
+            "amount limits 0.03 and 0.030, numerically equal",
+            json!([rolling("0.03"), rolling("0.030")]),
+        ),
+        (
+            "anchors naming one instant, spelled with and without a fraction",
+            json!([
+                anchored("2026-01-31T00:00:00Z"),
+                anchored("2026-01-31T00:00:00.000Z")
+            ]),
+        ),
+    ];
+    let refused = vec![
+        (
+            "an amount limit entry twice",
+            json!([rolling("0.030"), rolling("0.030")]),
+        ),
+        (
+            "an anchored entry twice",
+            json!([
+                anchored("2026-01-31T00:00:00Z"),
+                anchored("2026-01-31T00:00:00Z")
+            ]),
+        ),
+    ];
+    (accepted, refused)
+}
+
+/// The terms of a case of `period_limit_spellings`.
+fn spelling_terms(limits: &Value) -> Value {
+    let mut terms = paykit("allowance_usage.json")["cases"][0]["terms"].clone();
+    terms["period_limits"] = limits.clone();
+    terms
+}
+
+/// The cases paykit-lib generates in `allowance_usage.json` (README "How the files were
+/// generated"), compared with the file, and written into it with `PAYKIT_WRITE_VECTORS`.
+fn generate() {
+    let (accepted, refused) = spelling_cases();
+    let accepted: Vec<Value> = accepted
+        .iter()
+        .map(|(name, limits)| {
+            let terms = spelling_terms(limits);
+            let read = AllowanceTerms::from_json(&terms).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(read.period_limits.len(), 2, "{name}");
+            json!({ "name": name, "terms": terms })
+        })
+        .collect();
+    let refused: Vec<Value> = refused
+        .iter()
+        .map(|(name, limits)| {
+            let terms = spelling_terms(limits);
+            let error = AllowanceTerms::from_json(&terms).expect_err(name);
+            json!({ "name": name, "reason": quoted(&error.to_string()), "terms": terms })
+        })
+        .collect();
+    generated(
+        "allowance_usage.json",
+        &[
+            (Place::Member("/description"), json!(DESCRIPTION)),
+            (
+                Place::Member("/period_limit_spellings"),
+                json!({ "accepted": accepted, "description": SPELLINGS_DESCRIPTION, "refused": refused }),
+            ),
+        ],
+    );
+}
+
+/// `period_limit_spellings` (Paykit wire 4.15): readers take the accepted terms with every
+/// period limit, and refuse the others.
+fn check_spellings(v: &Value) {
+    let m = &v["period_limit_spellings"];
+    let (accepted, refused) = spelling_cases();
+    assert_eq!(arr(m, "accepted").len(), accepted.len());
+    assert_eq!(arr(m, "refused").len(), refused.len());
+    for case in arr(m, "accepted") {
+        let name = st(case, "name");
+        let terms =
+            AllowanceTerms::from_json(&case["terms"]).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            terms.period_limits.len(),
+            arr(&case["terms"], "period_limits").len(),
+            "{name}"
+        );
+    }
+    for case in arr(m, "refused") {
+        let name = st(case, "name");
+        let error = AllowanceTerms::from_json(&case["terms"]).expect_err(name);
+        assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
+    }
 }

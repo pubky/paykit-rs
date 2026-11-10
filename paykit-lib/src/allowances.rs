@@ -136,11 +136,13 @@ impl AllowanceTerms {
             })
             .transpose()?;
         let mut period_limits: Vec<PeriodLimit> = Vec::new();
+        let mut spellings: Vec<LimitSpelling<'_>> = Vec::new();
         for item in obj.req_arr("period_limits")? {
-            let limit = read_period_limit(item)?;
-            if period_limits.contains(&limit) {
+            let (limit, spelling) = read_period_limit(item)?;
+            if spellings.contains(&spelling) {
                 return Err(bad(TERMS, "period_limits", "an entry twice"));
             }
+            spellings.push(spelling);
             period_limits.push(limit);
         }
         let active_from = obj.opt_time("active_from")?;
@@ -316,13 +318,34 @@ fn decimal_or_null(d: Option<&Decimal>) -> Value {
     d.map_or(Value::Null, |d| Value::String(d.as_str().into()))
 }
 
-fn read_period_limit(item: &Value) -> Result<PeriodLimit> {
+/// A period limit as spelled on the wire, which decides whether two entries are duplicates
+/// (Paykit wire 4.15, `specs/allowances.md`): `amount_limit` and `anchor` compare as strings,
+/// so `"1"` and `"1.0"`, or two spellings of one instant, are distinct entries;
+/// `payment_count_limit` and `every` compare as integers, `kind` and `unit` exactly.
+/// Members readers ignore don't count.
+#[derive(PartialEq, Eq)]
+struct LimitSpelling<'a> {
+    amount_limit: Option<&'a str>,
+    payment_count_limit: Option<u64>,
+    kind: &'a str,
+    every: u64,
+    unit: &'a str,
+    anchor: Option<&'a str>,
+}
+
+/// Read a period limit, with its wire spelling.
+fn read_period_limit(item: &Value) -> Result<(PeriodLimit, LimitSpelling<'_>)> {
     let limit = Obj::of(item, TERMS, "period_limits")?;
     let period = limit.req_obj("period")?;
     let every = period.req_int("every")?;
-    let unit = Unit::parse(period.req_str("unit")?)?;
-    let period = match period.req_str("kind")? {
+    let unit_text = period.req_str("unit")?;
+    let unit = Unit::parse(unit_text)?;
+    let kind = period.req_str("kind")?;
+    let mut anchor = None;
+    let period = match kind {
         "anchored" => {
+            let text = period.req_str("anchor")?;
+            anchor = Some(text);
             LimitPeriod::Anchored(AnchoredRule::new(period.req_time("anchor")?, every, unit)?)
         }
         "rolling" => {
@@ -332,11 +355,9 @@ fn read_period_limit(item: &Value) -> Result<PeriodLimit> {
         }
         _ => return Err(bad(TERMS, "period", "kind is anchored or rolling")),
     };
+    let amount_text = limit.opt_str("amount_limit")?;
     let out = PeriodLimit {
-        amount_limit: limit
-            .opt_str("amount_limit")?
-            .map(Decimal::parse)
-            .transpose()?,
+        amount_limit: amount_text.map(Decimal::parse).transpose()?,
         payment_count_limit: limit.opt_int("payment_count_limit")?,
         period,
     };
@@ -344,7 +365,15 @@ fn read_period_limit(item: &Value) -> Result<PeriodLimit> {
         out.amount_limit.is_some() || out.payment_count_limit.is_some(),
         "Paykit wire 4.15: a period limit has an amount limit, a count limit or both",
     )?;
-    Ok(out)
+    let spelling = LimitSpelling {
+        amount_limit: amount_text,
+        payment_count_limit: out.payment_count_limit,
+        kind,
+        every,
+        unit: unit_text,
+        anchor,
+    };
+    Ok((out, spelling))
 }
 
 fn period_limit_json(limit: &PeriodLimit) -> Value {
@@ -1031,6 +1060,55 @@ mod tests {
                 AllowanceId::parse("d0efffb7-191b-4709-b6c7-e343af5500b4").unwrap(),
             )
         }
+    }
+
+    /// Terms with the period limits `limits`.
+    fn with_limits(limits: Value) -> Value {
+        let mut v = terms();
+        v["period_limits"] = limits;
+        v
+    }
+
+    #[test]
+    fn test_terms_period_limit_amounts_differently_spelled_are_distinct() {
+        let limit = |amount: &str| {
+            json!({ "amount_limit": amount, "payment_count_limit": null,
+                "period": { "kind": "rolling", "every": 1, "unit": "day" } })
+        };
+        let terms =
+            AllowanceTerms::from_json(&with_limits(json!([limit("1"), limit("1.0")]))).unwrap();
+        assert_eq!(terms.period_limits.len(), 2);
+        let error = AllowanceTerms::from_json(&with_limits(json!([limit("1.0"), limit("1.0")])))
+            .unwrap_err();
+        assert!(error.to_string().contains("an entry twice"), "{error}");
+    }
+
+    #[test]
+    fn test_terms_period_limit_anchors_differently_spelled_are_distinct() {
+        let limit = |anchor: &str| {
+            json!({ "amount_limit": "1", "payment_count_limit": 2,
+                "period": { "anchor": anchor, "every": 1, "kind": "anchored", "unit": "month" } })
+        };
+        let terms = AllowanceTerms::from_json(&with_limits(json!([
+            limit("2026-01-31T00:00:00Z"),
+            limit("2026-01-31T00:00:00.000Z")
+        ])))
+        .unwrap();
+        assert_eq!(terms.period_limits.len(), 2);
+        let error = AllowanceTerms::from_json(&with_limits(json!([
+            limit("2026-01-31T00:00:00Z"),
+            limit("2026-01-31T00:00:00Z")
+        ])))
+        .unwrap_err();
+        assert!(error.to_string().contains("an entry twice"), "{error}");
+        // A member readers ignore doesn't tell two entries apart.
+        let mut other = limit("2026-01-31T00:00:00Z");
+        other["note"] = json!("x");
+        assert!(AllowanceTerms::from_json(&with_limits(json!([
+            limit("2026-01-31T00:00:00Z"),
+            other
+        ])))
+        .is_err());
     }
 
     #[test]
