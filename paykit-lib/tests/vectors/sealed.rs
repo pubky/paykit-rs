@@ -1784,3 +1784,43 @@ fn test_payment_list_record_later_write_keeps_used_entries() {
     };
     assert!(held.check_later_write(&newer_dropped).is_err());
 }
+
+#[test]
+fn test_record_transitions_hold_records_built_in_code() {
+    let keys = Keys::load();
+    let b = bases(&keys);
+    // A later write no reader takes: request_hash in a request record.
+    let later = ActivityRecord {
+        request_hash: b.period.request_hash,
+        ..b.payer_request.clone()
+    };
+    b.payer_request.check_later_write(&b.payer_request).unwrap();
+    assert!(b.payer_request.check_later_write(&later).is_err());
+    assert!(b
+        .payer_request
+        .check_dropped_periods(
+            &later,
+            &[],
+            &pubky(ALICE),
+            &keys.identity(&pubky(ALICE)).naming_key()
+        )
+        .is_err());
+    // A payment_lists record whose list is another identity's.
+    let (held, _) = list_case(&keys, 0);
+    let other_payee = PaymentListRecord {
+        payee: pubky(ALICE),
+        ..held.clone()
+    };
+    assert!(held.check_later_write(&other_payee).is_err());
+    // An allowances record that names another Allowance.
+    let (accepted, _) = allowance_cases(&keys);
+    let ended = accepted[0].1.clone();
+    let renamed = AllowanceRecord {
+        allowance_id: paykit_lib::identifiers::AllowanceId::parse(
+            "55de1f16-1a9e-4504-bc9c-57efc3a2b38c",
+        )
+        .unwrap(),
+        ..ended.clone()
+    };
+    assert!(ended.check_later_write(&renamed).is_err());
+}

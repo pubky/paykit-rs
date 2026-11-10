@@ -407,6 +407,8 @@ impl AllowanceTerms {
         if at > MAX_TIME_MS {
             return Err(beyond());
         }
+        // Saturating is safe: an end past the time grammar is refused just below, and
+        // u64::MAX is past it.
         let mut end = at.saturating_add(ENTRY_WINDOW_MS);
         for limit in &self.period_limits {
             if let LimitPeriod::Anchored(anchored) = &limit.period {
@@ -815,18 +817,27 @@ impl Ledger {
         serde_json::to_vec(&out).map_err(|_| Error::Invalid(format!("{LEDGER}: can't be written")))
     }
 
-    /// "A valid ledger" against the terms (Paykit wire 5.5): every entry's asset is the
-    /// terms' asset, and each attempt appears once among the entries and `totals.failed`.
+    /// "A valid ledger" against the terms (Paykit wire 5.5): the terms are valid (Paykit wire
+    /// 4.15), every entry's asset is the terms' asset and its `at` a time the grammar writes,
+    /// and each attempt appears once among the entries and `totals.failed`.
     /// Usage, compaction and the check of a newer version refuse a ledger that isn't valid,
     /// a typed one included, so they never count an attempt twice.
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] for an entry of another asset or an attempt listed twice.
+    /// [`Error::Validation`] for terms that aren't valid; [`Error::Invalid`] for an entry of
+    /// another asset or time, or an attempt listed twice.
     pub fn check_valid(&self, terms: &AllowanceTerms) -> Result<()> {
+        // Terms built in code are held to the reader's rules too, such as `every` at least 1
+        // (Paykit wire 4.15): a limit no reader takes never weakens an evaluation.
+        terms.to_json()?;
         ensure(
             self.entries.iter().all(|e| e.asset == terms.asset),
             "Paykit wire 5.5: a ledger entry in another asset than the terms'",
+        )?;
+        ensure(
+            self.entries.iter().all(|e| e.at <= MAX_TIME_MS),
+            "Paykit wire 5.5: a ledger entry's at past the last time Switch wire 1.6 writes",
         )?;
         self.check_attempts_once()
     }
@@ -884,26 +895,62 @@ pub fn counts(entry: &LedgerEntry, claim: Option<ClaimState>) -> Counting {
 /// One period limit's usage: the amount and count of the entries it counts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeriodUsage {
-    /// The amount counted.
-    pub amount: Decimal,
-    /// The payments counted.
-    pub count: u64,
+    amount: Decimal,
+    count: u64,
 }
 
-/// Usage of an Allowance at one time (Paykit spec 8.3, Paykit wire 5.5).
+impl PeriodUsage {
+    /// The amount counted.
+    pub fn amount(&self) -> &Decimal {
+        &self.amount
+    }
+
+    /// The payments counted.
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+}
+
+/// Usage of an Allowance at one time (Paykit spec 8.3, Paykit wire 5.5), as [`usage`]
+/// computes it for one set of terms. Only [`usage`] builds one, and it holds the period
+/// limits it was computed for, so [`check_limits`] never takes usage of other terms, nor one
+/// that leaves a limit out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Usage {
+    lifetime: Decimal,
+    periods: Vec<PeriodUsage>,
+    reserved: u64,
+    spent: u64,
+    released: u64,
+    limits: Vec<PeriodLimit>,
+}
+
+impl Usage {
     /// The lifetime amount: compacted totals, reserved and spent entries, and compacted
     /// failed attempts whose claim now shows `done`.
-    pub lifetime: Decimal,
+    pub fn lifetime(&self) -> &Decimal {
+        &self.lifetime
+    }
+
     /// Each period limit's usage, in the order of `period_limits`.
-    pub periods: Vec<PeriodUsage>,
+    pub fn periods(&self) -> &[PeriodUsage] {
+        &self.periods
+    }
+
     /// Entries reserved.
-    pub reserved: u64,
+    pub fn reserved(&self) -> u64 {
+        self.reserved
+    }
+
     /// Entries spent.
-    pub spent: u64,
+    pub fn spent(&self) -> u64 {
+        self.spent
+    }
+
     /// Entries released.
-    pub released: u64,
+    pub fn released(&self) -> u64 {
+        self.released
+    }
 }
 
 fn overflow() -> Error {
@@ -919,11 +966,17 @@ fn in_limit(period: &LimitPeriod, entry_at: u64, t: u64) -> Result<bool> {
         LimitPeriod::Anchored(anchored) => anchored.rule().containing(t)?.contains(entry_at),
         LimitPeriod::Rolling { every, unit } => {
             let len = LimitPeriod::rolling_len(*every, *unit)?;
-            // An entry counts while `t < at + 60 s + L`, with no lower bound.
-            entry_at
+            // An entry counts while `t < at + 60 s + L`, with no lower bound. A bound that
+            // can't be represented makes the evaluation ineligible (`specs/allowances.md`).
+            let until = entry_at
                 .checked_add(ENTRY_WINDOW_MS)
                 .and_then(|x| x.checked_add(len))
-                .is_none_or(|until| t < until)
+                .ok_or_else(|| {
+                    Error::Invalid(format!(
+                        "{TERMS}: a rolling window's end can't be represented; usage fails closed"
+                    ))
+                })?;
+            t < until
         }
     })
 }
@@ -952,8 +1005,9 @@ pub fn usage(
             LimitPeriod::Anchored(anchored) => {
                 anchored.rule().containing(t)?;
             }
-            LimitPeriod::Rolling { every, unit } => {
-                LimitPeriod::rolling_len(*every, *unit)?;
+            LimitPeriod::Rolling { .. } => {
+                // The candidate, at t, counts by the same bound as an entry.
+                in_limit(&limit.period, t, t)?;
             }
         }
     }
@@ -967,6 +1021,8 @@ pub fn usage(
     }
     for entry in &ledger.entries {
         match counts(entry, claims.get(&entry.attempt_id).copied()) {
+            // Counts of the ledger's entries, informational: a ledger holds fewer entries than
+            // a u64 counts, so these never saturate; the limits use the checked sums below.
             Counting::Reserved => reserved = reserved.saturating_add(1),
             Counting::Spent => spent = spent.saturating_add(1),
             Counting::Released => {
@@ -994,6 +1050,7 @@ pub fn usage(
         reserved,
         spent,
         released,
+        limits: terms.period_limits.clone(),
     })
 }
 
@@ -1008,6 +1065,9 @@ pub enum LimitKind {
     PeriodCount,
     /// The lifetime amount limit: `lifetime`.
     Lifetime,
+    /// Usage that isn't of these terms' period limits, one for each in order:
+    /// `inconsistent_usage`. Every candidate is refused against it.
+    InconsistentUsage,
 }
 
 impl LimitKind {
@@ -1018,6 +1078,7 @@ impl LimitKind {
             Self::PeriodAmount => "period_amount",
             Self::PeriodCount => "period_count",
             Self::Lifetime => "lifetime",
+            Self::InconsistentUsage => "inconsistent_usage",
         }
     }
 }
@@ -1041,6 +1102,11 @@ pub fn check_limits(
         .is_some_and(|range| value < &range.minimum || value > &range.maximum)
     {
         return Err(LimitKind::PerPayment);
+    }
+    // Every limit, each with its own usage: usage of other terms, or one that leaves a limit
+    // out or adds one, refuses rather than skip a limit.
+    if usage.limits != terms.period_limits || usage.periods.len() != terms.period_limits.len() {
+        return Err(LimitKind::InconsistentUsage);
     }
     for (limit, used) in terms.period_limits.iter().zip(&usage.periods) {
         if limit.amount_limit.as_ref().is_some_and(|cap| {
@@ -1071,10 +1137,21 @@ pub fn check_limits(
 }
 
 /// Whether an entry is old enough to compact at `now`: `at + longest period + 60 s < now`.
-fn old_enough(at: u64, longest: u64, now: u64) -> bool {
+///
+/// # Errors
+///
+/// [`Error::Invalid`] for a bound that can't be represented, which makes the compaction or
+/// the check of a newer version ineligible (`specs/allowances.md`), never an entry read as
+/// too young or old enough.
+fn old_enough(at: u64, longest: u64, now: u64) -> Result<bool> {
     at.checked_add(longest)
         .and_then(|x| x.checked_add(ENTRY_WINDOW_MS))
-        .is_some_and(|x| x < now)
+        .map(|x| x < now)
+        .ok_or_else(|| {
+            Error::Invalid(format!(
+                "{LEDGER}: an entry's compaction bound can't be represented; it fails closed"
+            ))
+        })
 }
 
 /// Compact a ledger at `now` (Paykit spec 8.3, Paykit wire 5.5): drop entries whose own
@@ -1096,8 +1173,12 @@ pub fn compact(terms: &AllowanceTerms, ledger: &Ledger, now: u64) -> Result<Opti
     let mut failed = ledger.failed.clone();
     let mut kept = Vec::with_capacity(ledger.entries.len());
     for entry in &ledger.entries {
-        match entry.outcome {
-            Some(outcome) if old_enough(entry.at, longest, now) => match outcome {
+        let outcome = match entry.outcome {
+            Some(outcome) if old_enough(entry.at, longest, now)? => Some(outcome),
+            _ => None,
+        };
+        match outcome {
+            Some(outcome) => match outcome {
                 EntryOutcome::Done => {
                     spent = add(spent, entry.value.scaled())?;
                     count = count.checked_add(1).ok_or_else(overflow)?;
@@ -1170,7 +1251,7 @@ pub fn check_successor(
             }
             continue;
         }
-        if !old_enough(entry.at, longest, newer_time) {
+        if !old_enough(entry.at, longest, newer_time)? {
             return refuse("drops an entry before it could be compacted");
         }
         match (
@@ -1530,8 +1611,8 @@ mod tests {
             ),
         ]);
         let u = usage(&terms, &l, &HashMap::new(), t("2026-03-01T00:00:00.000Z")).unwrap();
-        assert_eq!(u.periods[0].count, 1);
-        assert_eq!(u.lifetime.as_str(), "0.02");
+        assert_eq!(u.periods()[0].count(), 1);
+        assert_eq!(u.lifetime().as_str(), "0.02");
         let d = |s: &str| Decimal::parse(s).unwrap();
         assert_eq!(check_limits(&terms, &u, &d("0.01")), Ok(()));
         assert_eq!(
@@ -1567,6 +1648,47 @@ mod tests {
         assert_eq!(
             check_limits(&terms, &spent, &d("0.01")),
             Err(LimitKind::Lifetime)
+        );
+    }
+
+    #[test]
+    fn test_check_limits_refuses_usage_of_other_limits() {
+        // One zero amount ceiling.
+        let terms = AllowanceTerms::from_json(&with_limits(json!([{ "amount_limit": "0",
+            "payment_count_limit": null,
+            "period": { "every": 1, "kind": "rolling", "unit": "day" } }])))
+        .unwrap();
+        let now = t("2026-02-10T00:00:00.000Z");
+        let u = usage(&terms, &ledger(Vec::new()), &HashMap::new(), now).unwrap();
+        // Within the per-payment range, so only the period limit decides.
+        let one = Decimal::parse("0.005").unwrap();
+        assert_eq!(check_limits(&terms, &u, &one), Err(LimitKind::PeriodAmount));
+        // Shorter: the zero ceiling left out isn't skipped.
+        let short = Usage {
+            periods: Vec::new(),
+            ..u.clone()
+        };
+        assert_eq!(
+            check_limits(&terms, &short, &one),
+            Err(LimitKind::InconsistentUsage)
+        );
+        // Longer, and usage of other terms with as many limits.
+        let long = Usage {
+            periods: vec![u.periods[0].clone(), u.periods[0].clone()],
+            ..u.clone()
+        };
+        assert_eq!(
+            check_limits(&terms, &long, &one),
+            Err(LimitKind::InconsistentUsage)
+        );
+        let other = AllowanceTerms::from_json(&with_limits(json!([{ "amount_limit": "5",
+            "payment_count_limit": null,
+            "period": { "every": 1, "kind": "rolling", "unit": "day" } }])))
+        .unwrap();
+        let other_usage = usage(&other, &ledger(Vec::new()), &HashMap::new(), now).unwrap();
+        assert_eq!(
+            check_limits(&terms, &other_usage, &one),
+            Err(LimitKind::InconsistentUsage)
         );
     }
 
@@ -1831,6 +1953,82 @@ mod tests {
         let month = with_limits(json!([{ "amount_limit": "1", "payment_count_limit": null,
             "period": { "every": 1, "kind": "rolling", "unit": "month" } }]));
         assert!(AllowanceTerms::from_json(&month).is_err());
+    }
+
+    #[test]
+    fn test_usage_fails_closed_when_a_rolling_window_end_overflows() {
+        // L fits in 64 bits, but an entry's at + 60 s + L doesn't.
+        let every = 30_500_568_904u64;
+        assert!(Unit::Week
+            .fixed_ms()
+            .and_then(|w| w.checked_mul(every))
+            .is_some());
+        let terms = AllowanceTerms::from_json(&with_limits(json!([{ "amount_limit": "1",
+            "payment_count_limit": null,
+            "period": { "every": every, "kind": "rolling", "unit": "week" } }])))
+        .unwrap();
+        let now = t("2026-02-10T00:00:00.000Z");
+        let l = ledger(vec![entry(1, "0.01", "2026-02-10T00:00:00.000Z", None)]);
+        let error = usage(&terms, &l, &HashMap::new(), now).unwrap_err();
+        assert!(
+            error.to_string().contains("can't be represented"),
+            "{error}"
+        );
+        // Without entries, the candidate's own window at t ends past what can be represented
+        // too, so the evaluation is still ineligible.
+        assert!(usage(&terms, &ledger(Vec::new()), &HashMap::new(), now).is_err());
+    }
+
+    #[test]
+    fn test_compaction_fails_closed_when_an_entry_bound_overflows() {
+        // L fits, but at + L + 60 s doesn't: the entry can't be judged old enough or not.
+        let terms = AllowanceTerms::from_json(&with_limits(json!([{ "amount_limit": "1",
+            "payment_count_limit": null,
+            "period": { "every": 30_500_568_904u64, "kind": "rolling", "unit": "week" } }])))
+        .unwrap();
+        let now = t("2026-03-10T00:00:00.000Z");
+        let held = ledger(vec![entry(
+            1,
+            "0.01",
+            "2026-01-05T00:00:00.000Z",
+            Some(EntryOutcome::Done),
+        )]);
+        let error = compact(&terms, &held, now).unwrap_err();
+        assert!(
+            error.to_string().contains("can't be represented"),
+            "{error}"
+        );
+        let compacted = Ledger {
+            spent: Some(Decimal::parse("0.01").unwrap()),
+            count: 1,
+            ..ledger(Vec::new())
+        };
+        assert!(check_successor(&terms, &held, &compacted, now).is_err());
+    }
+
+    #[test]
+    fn test_evaluation_refuses_terms_and_ledgers_no_reader_takes() {
+        let now = t("2026-02-10T00:00:00.000Z");
+        let terms = AllowanceTerms::from_json(&with_limits(json!([{ "amount_limit": "0.01",
+            "payment_count_limit": null,
+            "period": { "every": 1, "kind": "rolling", "unit": "day" } }])))
+        .unwrap();
+        // A rolling every of 0, which no reader takes, would make L zero.
+        let mut zero = terms.clone();
+        zero.period_limits[0].period = LimitPeriod::Rolling {
+            every: 0,
+            unit: Unit::Day,
+        };
+        let l = ledger(vec![entry(1, "0.01", "2026-02-09T23:00:00.000Z", None)]);
+        usage(&terms, &l, &HashMap::new(), now).unwrap();
+        assert!(matches!(
+            usage(&zero, &l, &HashMap::new(), now),
+            Err(Error::Validation(_))
+        ));
+        // An entry dated past the time grammar.
+        let mut late = l.clone();
+        late.entries[0].at = u64::MAX;
+        assert!(usage(&terms, &late, &HashMap::new(), now).is_err());
     }
 
     #[test]

@@ -15,11 +15,11 @@ use crate::common::{arr, generated, paykit, pubky, quoted, st, time, Place, BOB}
 
 fn usage_json(u: &Usage) -> Value {
     json!({
-        "lifetime": u.lifetime.as_str(),
-        "periods": u.periods.iter().map(|p| json!({ "amount": p.amount.as_str(), "count": p.count })).collect::<Vec<_>>(),
-        "reserved": u.reserved,
-        "spent": u.spent,
-        "released": u.released,
+        "lifetime": u.lifetime().as_str(),
+        "periods": u.periods().iter().map(|p| json!({ "amount": p.amount().as_str(), "count": p.count() })).collect::<Vec<_>>(),
+        "reserved": u.reserved(),
+        "spent": u.spent(),
+        "released": u.released(),
     })
 }
 
@@ -105,7 +105,7 @@ fn test_vectors_allowance_usage() {
     let claim_map = claims(c);
     for (l, key) in [(&before, "lifetime_before"), (&after, "lifetime_after")] {
         let u = usage(&terms, l, &claim_map, now).unwrap();
-        assert_eq!(u.lifetime.as_str(), st(c, key), "{key}");
+        assert_eq!(u.lifetime().as_str(), st(c, key), "{key}");
     }
     // Compacting again changes nothing, and the step from before to after is accepted.
     assert!(compact(&terms, &after, now).unwrap().is_none());

@@ -550,11 +550,16 @@ impl PaymentRequest {
     /// payment deadline's `timestamp`, and for a Billing Period of a recurring request the
     /// period's start plus the payment deadline's `seconds`. `None` when there is no `d`.
     ///
+    /// A `d + 1 ms` past the last time the grammar writes, 9999-12-31T23:59:59.999Z, is that
+    /// last time, which means "never": a sum past the last time Switch wire 1.6 can write
+    /// means "never" (Switch wire 1.1), and the Switch's `attempt_deadline` saturates there.
+    ///
     /// # Errors
     ///
     /// [`Error::Invalid`] for a period with a one-time request, none with a recurring one, a
-    /// period that isn't one of this request's (Paykit wire 4.4), or a deadline past the last
-    /// time the grammar writes.
+    /// period that isn't one of this request's (Paykit wire 4.4), or a `seconds` so large the
+    /// sum overflows 64 bits, which no request read from the wire carries (Switch wire 1.1
+    /// integers are at most 2^53 - 1).
     pub fn attempt_deadline(&self, period: Option<&BillingPeriod>) -> Result<Option<u64>> {
         let d = match (self.is_recurring(), period) {
             (false, None) => {
@@ -577,9 +582,7 @@ impl PaymentRequest {
                             .checked_mul(1000)
                             .and_then(|s| period.starts_at.checked_add(s))
                             .ok_or_else(|| {
-                                Error::Invalid(
-                                    "Paykit wire 4.5: a deadline past the grammar's times".into(),
-                                )
+                                Error::Invalid("Paykit wire 4.5: a deadline past 64 bits".into())
                             })?,
                     ),
                     _ => None,
@@ -790,6 +793,8 @@ impl PeriodDetails {
     ///
     /// [`Error::Invalid`] naming the rule.
     pub fn check_against(&self, request: &PaymentRequest) -> Result<BillingPeriod> {
+        // Details built in code are held to check 10's rules first (Paykit wire 4.9).
+        self.to_body()?;
         let period = request.named_period(&self.billing_period)?;
         let mut visible: Vec<&PaymentEndpointIdentifier> = self
             .payment_endpoints
@@ -1313,6 +1318,8 @@ impl PrivatePaymentList {
     /// 4.13): the earlier of `expires_at` and 30 days after its inbox accepted it.
     pub fn usable_until(&self, accepted_at: u64) -> u64 {
         self.expires_at
+            // Saturating is safe: an acceptance time is one the grammar writes, far below
+            // u64::MAX, and the earlier of the two is what counts (Paykit wire 4.13).
             .min(accepted_at.saturating_add(PRIVATE_LIST_MAX_AGE_MS))
     }
 }
@@ -2084,6 +2091,40 @@ mod tests {
     }
 
     #[test]
+    fn test_request_deadline_past_the_grammar_means_never() {
+        use pubky_switch_core::time::MAX_TIME_MS;
+        let mut b = request();
+        b["payment_deadline"] = json!({ "type": "period_start", "seconds": 1 });
+        b["recurrence"] = json!({ "anchor": "2026-01-31T00:00:00.000Z", "every": 1, "unit": "month",
+            "starts_at": "2026-01-31T00:00:00.000Z", "ends_at": null });
+        let base = PaymentRequest::from_body(&body(b.clone())).unwrap();
+        let period = base.recurrence.unwrap().first().unwrap();
+        let with = |seconds: u64| PaymentRequest {
+            payment_deadline: Some(PaymentDeadline::PeriodStart { seconds }),
+            ..base.clone()
+        };
+        // The last whole second whose d + 1 ms the grammar writes: written as it is.
+        let last = (MAX_TIME_MS - period.starts_at) / 1000;
+        let d = period.starts_at + last * 1000;
+        assert_eq!(
+            with(last).attempt_deadline(Some(&period)).unwrap(),
+            Some(d + 1)
+        );
+        // At and past the last time: the last time, "never".
+        for seconds in [last + 1, (1u64 << 53) - 1] {
+            assert_eq!(
+                with(seconds).attempt_deadline(Some(&period)).unwrap(),
+                Some(MAX_TIME_MS),
+                "{seconds}"
+            );
+        }
+        // Past 64 bits, only from a caller's own value: refused.
+        assert!(with(u64::MAX / 1000 + 1)
+            .attempt_deadline(Some(&period))
+            .is_err());
+    }
+
+    #[test]
     fn test_request_deadline_only_for_its_own_periods() {
         let mut b = request();
         b["payment_deadline"] = json!({ "type": "period_start", "seconds": 86400 });
@@ -2207,6 +2248,24 @@ mod tests {
             let error = details(same).check_against(&request).unwrap_err();
             assert!(error.to_string().contains("cross-asset only"), "{same}");
         }
+    }
+
+    #[test]
+    fn test_period_details_check_against_holds_details_built_in_code() {
+        let mut recurring = request();
+        recurring["payment_deadline"] = json!({ "type": "period_start", "seconds": 86400 });
+        recurring["recurrence"] = json!({ "anchor": "2026-01-31T00:00:00.000Z", "every": 1,
+            "unit": "month", "starts_at": "2026-01-31T00:00:00.000Z", "ends_at": null });
+        let request = PaymentRequest::from_body(&body(recurring)).unwrap();
+        let period = request.recurrence.unwrap().first().unwrap();
+        // Details with neither endpoints nor rates, which check 10 drops.
+        let empty = PeriodDetails {
+            billing_period: period.into(),
+            payment_endpoints: None,
+            rates: None,
+            expires_at: period.starts_at,
+        };
+        assert!(empty.check_against(&request).is_err());
     }
 
     #[test]
