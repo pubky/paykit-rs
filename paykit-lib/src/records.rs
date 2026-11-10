@@ -1589,11 +1589,30 @@ impl AllowanceRecord {
                 "Paykit wire 5.4: a stored message isn't from the side its kind requires",
             )?;
         }
-        for stored in self.response.iter().chain(self.end.iter()) {
+        let proposal = self.proposal.hash();
+        if let Some(response) = &self.response {
             ensure(
-                stored.message.refs.first() == Some(&self.proposal.hash()),
+                response.message.refs == [proposal],
                 "Paykit wire 4.16: a response or an end refers to the proposal in refs",
             )?;
+        }
+        if let Some(end) = &self.end {
+            // Paykit wire 4.16: an end refers to the proposal and the acceptance; one that
+            // refers to the proposal alone is its sender's withdrawal, before any response.
+            let refs = &end.message.refs;
+            match self.response.as_ref() {
+                Some(acceptance) if acceptance.body.kind() == Kind::AllowanceAcceptance => ensure(
+                    *refs == [proposal, acceptance.hash()],
+                    "Paykit wire 4.16: an end refers to the proposal and the stored acceptance",
+                )?,
+                Some(_) => {
+                    return invalid("Paykit wire 4.16: a rejected Allowance has no end");
+                }
+                None => ensure(
+                    *refs == [proposal] && end.sender == self.proposal.sender,
+                    "Paykit wire 4.16: an end before any response is the proposal's withdrawal by its sender",
+                )?,
+            }
         }
         Ok(())
     }
@@ -1740,6 +1759,18 @@ impl AllowanceRecord {
     /// [`Error::Invalid`] if the value can't be written.
     pub fn to_json(&self) -> Result<Vec<u8>> {
         self.check().map_err(Error::into_validation)?;
+        self.json_unchecked()
+    }
+
+    /// Write the record value without its rules, for the vector tests' rejection cases, which
+    /// readers must refuse (Paykit wire 5.4). Test-only: no production build has it.
+    #[cfg(feature = "test-vectors")]
+    #[doc(hidden)]
+    pub fn to_json_unchecked(&self) -> Result<Vec<u8>> {
+        self.json_unchecked()
+    }
+
+    fn json_unchecked(&self) -> Result<Vec<u8>> {
         let stored = std::iter::once(&self.proposal)
             .chain(&self.response)
             .chain(&self.end);

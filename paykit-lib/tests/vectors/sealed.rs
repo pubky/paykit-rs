@@ -28,6 +28,7 @@ fn test_vectors_sealed() {
     check_activity_rules(&keys);
     check_activity_records(&keys, &v);
     check_msg_ids_bounds(&keys, &v);
+    check_allowance_records(&keys, &v);
 }
 
 /// Own cases on activity records (Paykit wire 5.3), built from the vectors' messages: the
@@ -725,7 +726,8 @@ payee isn't the identity that sent its list (bob's list, filed under payee alice
 key of alice and the shop's App ID) and an acceptance naming another Allowance, each of \
 which a reader refuses. labelled is a payee record of a labelled request. activity_records \
 holds activity records a reader binds, and the same records with a member their binding \
-and side don't allow, which it refuses.";
+and side don't allow, which it refuses. allowance_records holds allowances records a reader \
+binds or refuses by their messages' lifecycle.";
 
 const ACTIVITY_DESCRIPTION: &str =
     "Wire 5.3: activity record values, built from messages.json's messages, and \
@@ -799,6 +801,7 @@ fn generate(keys: &Keys) {
             ),
             (Place::Member("/activity_records"), member),
             (Place::Member("/msg_ids_bounds"), msg_ids_bounds(keys)),
+            (Place::Member("/allowance_records"), allowance_records(keys)),
         ],
     );
 }
@@ -1245,16 +1248,28 @@ fn resigned(
     refs: Option<Vec<[u8; 32]>>,
     body: impl FnOnce(&mut serde_json::Map<String, Value>),
 ) -> paykit_lib::records::StoredMessage {
+    resign_with(keys, base, |m| {
+        if let Some(refs) = refs {
+            m.refs = refs;
+        }
+        body(&mut m.body);
+    })
+}
+
+/// A message of `messages.json` changed by `change` and signed by the sender app it then
+/// names, stored as its recipient stores it.
+fn resign_with(
+    keys: &Keys,
+    base: &str,
+    change: impl FnOnce(&mut pubky_switch_core::message::Message),
+) -> paykit_lib::records::StoredMessage {
     use pubky_switch_core::message::MessagePlaintext;
     let mut m = pubky_switch_core::message::Message::parse(
         &message_json(base),
         paykit_lib::kinds::OPAQUE_MEMBERS,
     )
     .unwrap();
-    if let Some(refs) = refs {
-        m.refs = refs;
-    }
-    body(&mut m.body);
+    change(&mut m);
     let json = m.to_json().unwrap();
     let sender = keys.app_by_id(&m.from.app_id_text());
     let plaintext = MessagePlaintext::sign_json(
@@ -1335,4 +1350,156 @@ fn evidence_cases(keys: &Keys) -> (Vec<ActivityCase>, Vec<ActivityCase>) {
         ),
     ];
     (accepted, refused)
+}
+
+const ALLOWANCE_RECORDS_DESCRIPTION: &str = "Wire 4.16, 5.4: allowances record values of \
+alice's, built from binding_accepted's record and messages.json's Allowance messages, some \
+signed again by their sender with refs or sides changed, at the record key binding_accepted \
+gives. A response refers to the proposal; an end refers to the proposal and the stored \
+acceptance; an end referring to the proposal alone is its sender's withdrawal, before any \
+response; a rejected Allowance has no end. accepted are records a reader binds; refused are \
+those it refuses. reason is paykit-lib's wording.";
+
+/// A case of `allowance_records`: its name and the record.
+type AllowanceCase = (&'static str, AllowanceRecord);
+
+/// The cases of `allowance_records`, accepted then refused.
+fn allowance_cases(keys: &Keys) -> (Vec<AllowanceCase>, Vec<AllowanceCase>) {
+    let alice = pubky(ALICE);
+    let s = paykit("sealed.json");
+    let base = AllowanceRecord::read(value(&arr(&s, "binding_accepted")[1]), &alice).unwrap();
+    let proposal = base.proposal.hash();
+    let acceptance = base.response.as_ref().unwrap().hash();
+    let end = stored_message(keys, "allowance_end");
+    let end_with = |refs: Vec<[u8; 32]>| resigned(keys, "allowance_end", Some(refs), |_| {});
+    let withdrawal = resign_with(keys, "allowance_end", |m| {
+        m.from = pubky_switch_core::message::Sender {
+            identity: pubky(BOB),
+            app_id: keys.app("shop").keys.app_id_bytes(),
+        };
+        m.to = alice;
+        m.refs = vec![proposal];
+    });
+    // messages.json's rejection answers another proposal: this one answers the record's.
+    let rejection = resigned(keys, "allowance_rejection", Some(vec![proposal]), |b| {
+        b.insert("allowance_id".into(), serde_json::json!(ALLOWANCE_ID));
+    });
+    let accepted = vec![
+        (
+            "the accepted Allowance with its end",
+            AllowanceRecord {
+                end: Some(end),
+                ..base.clone()
+            },
+        ),
+        (
+            "a proposal withdrawn by its sender",
+            AllowanceRecord {
+                response: None,
+                end: Some(withdrawal),
+                ..base.clone()
+            },
+        ),
+    ];
+    let refused = vec![
+        (
+            "an end referring to the proposal alone after the acceptance",
+            AllowanceRecord {
+                end: Some(end_with(vec![proposal])),
+                ..base.clone()
+            },
+        ),
+        (
+            "an end referring to another acceptance",
+            AllowanceRecord {
+                end: Some(end_with(vec![proposal, [7; 32]])),
+                ..base.clone()
+            },
+        ),
+        (
+            "an end after a rejection",
+            AllowanceRecord {
+                response: Some(rejection.clone()),
+                end: Some(end_with(vec![proposal, rejection.hash()])),
+                ..base.clone()
+            },
+        ),
+        (
+            "an end referring to an acceptance the record doesn't hold",
+            AllowanceRecord {
+                response: None,
+                end: Some(end_with(vec![proposal, acceptance])),
+                ..base.clone()
+            },
+        ),
+        (
+            "a withdrawal by the proposal's recipient",
+            AllowanceRecord {
+                response: None,
+                end: Some(end_with(vec![proposal])),
+                ..base
+            },
+        ),
+    ];
+    (accepted, refused)
+}
+
+/// `allowance_records`, as paykit-lib generates it.
+fn allowance_records(keys: &Keys) -> Value {
+    let alice = pubky(ALICE);
+    let nk = keys.identity(&alice).naming_key();
+    let (accepted, refused) = allowance_cases(keys);
+    let write = |(name, record): &AllowanceCase, taken: bool| -> Value {
+        assert_eq!(record.to_json().is_ok(), taken, "{name}: the writer");
+        let value = record.to_json_unchecked().unwrap();
+        let key = record.record_key(&nk).unwrap();
+        let mut out = serde_json::json!({
+            "name": name,
+            "record_key": b64(&key),
+            "value": String::from_utf8(value.clone()).unwrap(),
+        });
+        match AllowanceRecord::bind(&value, &alice, &nk, &key) {
+            Ok(_) => assert!(taken, "{name}: taken"),
+            Err(error) => {
+                assert!(!taken, "{name}: {error}");
+                out["reason"] = serde_json::json!(quoted(&error.to_string()));
+            }
+        }
+        out
+    };
+    serde_json::json!({
+        "accepted": accepted.iter().map(|c| write(c, true)).collect::<Vec<_>>(),
+        "description": ALLOWANCE_RECORDS_DESCRIPTION,
+        "refused": refused.iter().map(|c| write(c, false)).collect::<Vec<_>>(),
+    })
+}
+
+/// `allowance_records` (Paykit wire 4.16, 5.4): each record binds at its key, or is refused,
+/// as its list says.
+fn check_allowance_records(keys: &Keys, v: &Value) {
+    let alice = pubky(ALICE);
+    let nk = keys.identity(&alice).naming_key();
+    let m = &v["allowance_records"];
+    let (accepted, refused) = allowance_cases(keys);
+    assert_eq!(arr(m, "accepted").len(), accepted.len());
+    assert_eq!(arr(m, "refused").len(), refused.len());
+    for (list, taken) in [("accepted", true), ("refused", false)] {
+        for case in arr(m, list) {
+            let name = st(case, "name");
+            match AllowanceRecord::bind(value(case), &alice, &nk, &key(case)) {
+                Ok(record) => {
+                    assert!(taken, "{name}: taken");
+                    assert_eq!(
+                        record.to_json().unwrap(),
+                        value(case),
+                        "{name}: writes back"
+                    );
+                }
+                Err(error) => {
+                    assert!(!taken, "{name}: {error}");
+                    assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
+                }
+            }
+        }
+    }
 }
