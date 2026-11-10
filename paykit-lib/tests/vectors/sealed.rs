@@ -739,7 +739,10 @@ alice's request records storing a request whose sender's certificate doesn't all
 (wire 5.2, the sender's side of check 8): messages.json label_rejections' request labelled \
 shop2 from bob's hosted app, which holds only request:shop1, and messages.json's \
 payment_request presented with documents.json's chat-only certificate of the shop's keys, at \
-the keys their requests name. reason is paykit-lib's wording, of the first check that \
+the keys their requests name. Appended after \
+them, on payment evidence (wire 4.11): accepted, records whose receipt is of the stored \
+proof's attempt, or of the record's attempt_id; refused, the same with a receipt of another \
+attempt. reason is paykit-lib's wording, of the first check that \
 refuses it.";
 
 /// The cases paykit-lib generates in `sealed.json` (README "How the files were generated"),
@@ -765,6 +768,8 @@ fn generate(keys: &Keys) {
         }
         out
     };
+    let (evidence_accepted, evidence_refused) = evidence_cases(keys);
+    let accepted: Vec<ActivityCase> = accepted.into_iter().chain(evidence_accepted).collect();
     let mut refused: Vec<Value> = refused.iter().map(|c| write(c, false)).collect();
     for (name, m, cert) in unauthorized_stored(keys) {
         let (value, key) = record_with_request(keys, stored_value(&m, &cert), st(&m, "json"));
@@ -779,6 +784,7 @@ fn generate(keys: &Keys) {
             "value": String::from_utf8(value).unwrap(),
         }));
     }
+    refused.extend(evidence_refused.iter().map(|c| write(c, false)));
     let member = serde_json::json!({
         "accepted": accepted.iter().map(|c| write(c, true)).collect::<Vec<_>>(),
         "description": ACTIVITY_DESCRIPTION,
@@ -802,10 +808,13 @@ fn generate(keys: &Keys) {
 fn check_activity_records(keys: &Keys, v: &Value) {
     let m = &v["activity_records"];
     let (accepted, refused) = activity_cases(keys);
-    assert_eq!(arr(m, "accepted").len(), accepted.len());
+    assert_eq!(
+        arr(m, "accepted").len(),
+        accepted.len() + evidence_cases(keys).0.len()
+    );
     assert_eq!(
         arr(m, "refused").len(),
-        refused.len() + unauthorized_stored(keys).len()
+        refused.len() + unauthorized_stored(keys).len() + evidence_cases(keys).1.len()
     );
     for (list, taken) in [("accepted", true), ("refused", false)] {
         for case in arr(m, list) {
@@ -1226,4 +1235,104 @@ fn test_record_writers_refuse_msg_ids_that_are_not_uuids() {
     list.msg_ids = vec!["6d7d1f0e-6c4e-4c47-9d2b-000000000001".to_owned()];
     let back = PaymentListRecord::read(&list.to_json().unwrap(), &alice).unwrap();
     assert_eq!(back.msg_ids.len(), 2);
+}
+
+/// A message of `messages.json` changed and signed again by its sender: `base` with its
+/// `refs` and body replaced, stored as its recipient stores it.
+fn resigned(
+    keys: &Keys,
+    base: &str,
+    refs: Option<Vec<[u8; 32]>>,
+    body: impl FnOnce(&mut serde_json::Map<String, Value>),
+) -> paykit_lib::records::StoredMessage {
+    use pubky_switch_core::message::MessagePlaintext;
+    let mut m = pubky_switch_core::message::Message::parse(
+        &message_json(base),
+        paykit_lib::kinds::OPAQUE_MEMBERS,
+    )
+    .unwrap();
+    if let Some(refs) = refs {
+        m.refs = refs;
+    }
+    body(&mut m.body);
+    let json = m.to_json().unwrap();
+    let sender = keys.app_by_id(&m.from.app_id_text());
+    let plaintext = MessagePlaintext::sign_json(
+        &sender.keys,
+        json.clone(),
+        paykit_lib::kinds::OPAQUE_MEMBERS,
+    )
+    .unwrap();
+    stored_json(
+        keys,
+        &serde_json::json!({
+            "json": String::from_utf8(json).unwrap(),
+            "sender_app": m.from.app_id_text(),
+            "signature": b64(&plaintext.signature()),
+        }),
+    )
+}
+
+/// The cases of `activity_records` on payment evidence, appended after the others: a
+/// receipt binds its proof's attempt (Paykit wire 4.11).
+fn evidence_cases(keys: &Keys) -> (Vec<ActivityCase>, Vec<ActivityCase>) {
+    let bob = pubky(BOB);
+    let paid = ActivityRecord {
+        request: Some(stored_message(keys, "payment_request")),
+        proof: Some(stored_message(keys, "payment_proof")),
+        receipt: Some(stored_message(keys, "payment_receipt")),
+        ..activity(ActivitySide::Payer, bob)
+    };
+    let other_attempt = resigned(keys, "payment_receipt", None, |b| {
+        b.insert(
+            "attempt_id".into(),
+            serde_json::json!("AAAAAAAAAAAAAAAAAAAAAA"),
+        );
+    });
+    let b = bases(keys);
+    let proof_hash = b.unrequested.proof.as_ref().unwrap().hash();
+    let unrequested_receipt = |attempt: &str| {
+        resigned(keys, "payment_receipt", Some(vec![proof_hash]), |b| {
+            b.insert("attempt_id".into(), serde_json::json!(attempt));
+        })
+    };
+    let attempt = b.unrequested.attempt_id.unwrap().to_text();
+    let with_receipt = ActivityRecord {
+        receipt: Some(unrequested_receipt(&attempt)),
+        ..b.unrequested.clone()
+    };
+    let receipt_only = ActivityRecord {
+        proof: None,
+        receipt: Some(unrequested_receipt("AAAAAAAAAAAAAAAAAAAAAA")),
+        ..b.unrequested.clone()
+    };
+    let key = |r: &ActivityRecord| base_key(keys, r);
+    let accepted = vec![
+        (
+            "a payer's request record with the proof and the receipt of its attempt",
+            paid.clone(),
+            key(&paid),
+        ),
+        (
+            "the record of a payment without a request with the receipt of its attempt",
+            with_receipt.clone(),
+            key(&with_receipt),
+        ),
+    ];
+    let refused = vec![
+        (
+            "a receipt of another attempt than the stored proof's",
+            ActivityRecord {
+                receipt: Some(other_attempt),
+                ..paid.clone()
+            },
+            key(&paid),
+        ),
+        (
+            "the record of a payment without a request with a receipt of another attempt than its attempt_id",
+            receipt_only,
+            key(&b.unrequested),
+        ),
+    ];
+    (accepted, refused)
 }

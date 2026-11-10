@@ -743,6 +743,27 @@ impl ActivityRecord {
                 "Paykit wire 5.3: attempt_id isn't the stored proof's",
             )?;
         }
+        // Paykit wire 4.11: a receipt confirms the proof's attempt, of the proof's Billing
+        // Period; in the record of a payment without a request, the record's attempt.
+        let receipt = match self.receipt.as_ref().map(StoredMessage::body) {
+            Some(Body::PaymentReceipt(r)) => Some(r),
+            _ => None,
+        };
+        if let (Some(r), Some(Body::PaymentProof(p))) =
+            (receipt, self.proof.as_ref().map(StoredMessage::body))
+        {
+            ensure(
+                r.attempt_id == p.attempt_id && r.billing_period == p.billing_period,
+                "Paykit wire 4.11: the receipt isn't of the stored proof's attempt and Billing Period",
+            )?;
+        }
+        if let (RecordBinding::Unrequested, Some(a), Some(r)) = (binding, self.attempt_id, receipt)
+        {
+            ensure(
+                r.attempt_id == a,
+                "Paykit wire 4.11: the receipt isn't of the record's attempt_id",
+            )?;
+        }
         if !self.attempted_periods.is_empty() {
             let recurring_request = matches!(
                 self.request.as_ref().map(StoredMessage::body),
