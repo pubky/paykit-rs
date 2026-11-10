@@ -730,6 +730,22 @@ impl ActivityRecord {
             )?;
         }
         check_attempted_periods(&self.attempted_periods)?;
+        // Paykit wire 4.11: a receipt confirms the proof's attempt, of the proof's Billing
+        // Period; in the record of a payment without a request, the record's attempt. Checked
+        // before the binding, which would refuse a receipt of another period only as a
+        // message of another period than the record's.
+        let receipt = match self.receipt.as_ref().map(StoredMessage::body) {
+            Some(Body::PaymentReceipt(r)) => Some(r),
+            _ => None,
+        };
+        if let (Some(r), Some(Body::PaymentProof(p))) =
+            (receipt, self.proof.as_ref().map(StoredMessage::body))
+        {
+            ensure(
+                r.attempt_id == p.attempt_id && r.billing_period == p.billing_period,
+                "Paykit wire 4.11: the receipt isn't of the stored proof's attempt and Billing Period",
+            )?;
+        }
         let binding = self.binding()?;
         self.check_members(&binding)?;
         self.check_refs(&binding)?;
@@ -753,20 +769,6 @@ impl ActivityRecord {
             ensure(
                 p.list_version == u.list_version,
                 "Paykit wire 4.10: the proof's list_version isn't the destination's",
-            )?;
-        }
-        // Paykit wire 4.11: a receipt confirms the proof's attempt, of the proof's Billing
-        // Period; in the record of a payment without a request, the record's attempt.
-        let receipt = match self.receipt.as_ref().map(StoredMessage::body) {
-            Some(Body::PaymentReceipt(r)) => Some(r),
-            _ => None,
-        };
-        if let (Some(r), Some(Body::PaymentProof(p))) =
-            (receipt, self.proof.as_ref().map(StoredMessage::body))
-        {
-            ensure(
-                r.attempt_id == p.attempt_id && r.billing_period == p.billing_period,
-                "Paykit wire 4.11: the receipt isn't of the stored proof's attempt and Billing Period",
             )?;
         }
         if let (RecordBinding::Unrequested, Some(a), Some(r)) = (binding, self.attempt_id, receipt)
