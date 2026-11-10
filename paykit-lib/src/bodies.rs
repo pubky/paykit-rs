@@ -552,8 +552,9 @@ impl PaymentRequest {
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] for a period with a one-time request, none with a recurring one, or
-    /// a deadline past the last time the grammar writes.
+    /// [`Error::Invalid`] for a period with a one-time request, none with a recurring one, a
+    /// period that isn't one of this request's (Paykit wire 4.4), or a deadline past the last
+    /// time the grammar writes.
     pub fn attempt_deadline(&self, period: Option<&BillingPeriod>) -> Result<Option<u64>> {
         let d = match (self.is_recurring(), period) {
             (false, None) => {
@@ -566,19 +567,24 @@ impl PaymentRequest {
                     (a, b) => a.or(b),
                 }
             }
-            (true, Some(period)) => match self.payment_deadline {
-                Some(PaymentDeadline::PeriodStart { seconds }) => Some(
-                    seconds
-                        .checked_mul(1000)
-                        .and_then(|s| period.starts_at.checked_add(s))
-                        .ok_or_else(|| {
-                            Error::Invalid(
-                                "Paykit wire 4.5: a deadline past the grammar's times".into(),
-                            )
-                        })?,
-                ),
-                _ => None,
-            },
+            (true, Some(period)) => {
+                // Paykit wire 4.4: the period is one of this request's, as its recurrence
+                // computes it; a period of another request gives no deadline here.
+                let period = self.named_period(&PeriodRef::from(*period))?;
+                match self.payment_deadline {
+                    Some(PaymentDeadline::PeriodStart { seconds }) => Some(
+                        seconds
+                            .checked_mul(1000)
+                            .and_then(|s| period.starts_at.checked_add(s))
+                            .ok_or_else(|| {
+                                Error::Invalid(
+                                    "Paykit wire 4.5: a deadline past the grammar's times".into(),
+                                )
+                            })?,
+                    ),
+                    _ => None,
+                }
+            }
             (true, None) => {
                 return invalid(
                     "Paykit wire 4.5: an attempt on a recurring request names a Billing Period",
@@ -2075,6 +2081,32 @@ mod tests {
         );
         assert!(r.attempt_deadline(None).is_err());
         assert_eq!(r.acceptance_end(), r.proposal_expires_at.map(|e| e + 1));
+    }
+
+    #[test]
+    fn test_request_deadline_only_for_its_own_periods() {
+        let mut b = request();
+        b["payment_deadline"] = json!({ "type": "period_start", "seconds": 86400 });
+        b["recurrence"] = json!({ "anchor": "2026-01-31T00:00:00.000Z", "every": 1, "unit": "month",
+            "starts_at": "2026-01-31T00:00:00.000Z", "ends_at": null });
+        let r = PaymentRequest::from_body(&body(b.clone())).unwrap();
+        // A period of another request, weekly from another anchor, and a made-up one.
+        b["recurrence"] = json!({ "anchor": "2026-01-05T00:00:00.000Z", "every": 1, "unit": "week",
+            "starts_at": "2026-01-05T00:00:00.000Z", "ends_at": null });
+        let other = PaymentRequest::from_body(&body(b)).unwrap();
+        let foreign = other.recurrence.unwrap().first().unwrap();
+        let first = r.recurrence.unwrap().first().unwrap();
+        let made_up = BillingPeriod {
+            ends_at: first.ends_at - 1,
+            ..first
+        };
+        for period in [foreign, made_up] {
+            let error = r.attempt_deadline(Some(&period)).unwrap_err().to_string();
+            assert!(
+                error.contains("not a Billing Period of the request"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

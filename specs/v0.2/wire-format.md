@@ -623,7 +623,7 @@ Terms, as v0.1, all members required:
 | `expires_at` | `time \| null` | first ineligible instant, after `active_from` |
 | `allowed_payment_endpoint_identifiers` | `array<string> \| null` | non-empty, unique |
 
-A period is `{ "kind": "anchored", "every": int, "unit": unit, "anchor": time }` or `{ "kind": "rolling", "every": int, "unit": "minute" | "hour" | "day" | "week" }`, with `every` at least 1. Terms configure at least one monetary ceiling or an expiry (`specs/allowances.md`). Two period limits are duplicates only when every member is equal as spelled: `amount_limit` and `anchor` compare as strings, so `1` and `1.0`, or one instant spelled two ways, are distinct entries; `payment_count_limit` and `every` compare as integers, and `kind` and `unit` exactly (vectors: `allowance_usage.json` `period_limit_spellings`). A period limit carries both `amount_limit` and `payment_count_limit`, each possibly `null`; one that leaves either out is invalid (vectors: `allowance_usage.json` `period_limit_members`).
+A period is `{ "kind": "anchored", "every": int, "unit": unit, "anchor": time }` or `{ "kind": "rolling", "every": int, "unit": "minute" | "hour" | "day" | "week" }`, with `every` at least 1. Any such `every` is valid: a period whose length or boundary can't be represented makes every evaluation that needs it ineligible, never the terms invalid (`specs/allowances.md`). Terms configure at least one monetary ceiling or an expiry (`specs/allowances.md`). Two period limits are duplicates only when every member is equal as spelled: `amount_limit` and `anchor` compare as strings, so `1` and `1.0`, or one instant spelled two ways, are distinct entries; `payment_count_limit` and `every` compare as integers, and `kind` and `unit` exactly (vectors: `allowance_usage.json` `period_limit_spellings`). A period limit carries both `amount_limit` and `payment_count_limit`, each possibly `null`; one that leaves either out is invalid (vectors: `allowance_usage.json` `period_limit_members`).
 
 **Checking the terms:** apps check the whole table, amounts by 1.2 and times by Switch wire 1.6, when a proposal arrives, dropping one whose terms fail; when they verify an Allowance record, which is invalid with such terms (Switch spec 8.2); and before each automatic payment. A time that doesn't parse makes the terms invalid: it is never read as no limit. Senders don't propose invalid terms.
 
@@ -855,6 +855,8 @@ Example (alice's `payer_activity` record of bob's request, certificate and plain
 - the key is the one derived from `payee` and `app_id`;
 - the stored list verifies, addressed to this identity, its sender identity is `payee` and its sender app is `app_id`.
 
+**Seen lists** (Switch spec 8.2, 4.13): a reader that holds a `payment_lists` record ignores, and shows with its writer, a later write whose list has a lower `version`, or the same `version` and another hash, and one that drops a `used` entry it saw, whatever the newer list's `version`: a newer list doesn't reset `used`.
+
 **`allowances`**, one per Allowance, on either side:
 
 | Field | Type | Req | Notes |
@@ -878,6 +880,8 @@ Example (alice's `payer_activity` record of bob's request, certificate and plain
 
 A grant doesn't affect whether the record is valid. Grants are checked against the terms hash of the record's own proposal and acceptance (Switch wire 1.5); without an acceptance no grant is valid. `grant` is the current grant only if it is the last entry of a usable history and verifies for this identity, `counterparty` and the Allowance at that entry's version (3.3); otherwise the record has no current grant. A history entry that doesn't verify means "no valid grant from this version on" (Valid entries, below), and a history that isn't usable makes every ledger check against it fail closed.
 
+**Seen roles** (Switch spec 8.2, spec 6): an `allowances` record holds one proposal, one response and one end, so a reader that has seen one of them ignores, and shows with its writer, a later write that drops or replaces it, by hash.
+
 **Grant history** (spec 8.3 "Who wrote it"). `grants` holds every executor grant the record has held, oldest first, each with the record version the write adding it built on:
 
 | Field | Type | Req | Notes |
@@ -890,7 +894,6 @@ A grant doesn't affect whether the record is valid. Grants are checked against t
 - **A usable history** has versions that strictly increase, ordered by (generation, `seq`), and ends with an entry whose grant equals `grant`. Otherwise every ledger check against it fails closed.
 - **Valid entries.** In a usable history an entry names an executor only if its grant verifies at the entry's version for this identity, counterparty and Allowance, and names the current terms hash (3.3). Any other entry means "no valid grant from this version on".
 - **The executor at a version** v is the one named by the last entry whose version is older than v: the adding write built on that version, so the grant holds from the write's own version, which is newer. A ledger write (5.5) counts only if it carries `record_version` on the Allowance record at some v no newer than the Allowance record the app holds, and its writer is the executor at v. This holds for versions the app never saw: a version that is now a stub, an app added later, or a new executor checking its predecessor's writes.
-- **Seen roles** (Switch spec 8.2, spec 6): an `allowances` record holds one proposal, one response and one end, so a reader that has seen one of them ignores, and shows with its writer, a later write that drops or replaces it, by hash.
 - **Rewrites.** An app that has seen a history ignores and flags a write whose `grants` doesn't start with it (Switch spec 8.2). An app that never saw it relies on the signed versions: a moved grant doesn't verify (3.3). Dropping an entry is still possible.
 - **Records without a history** have no current grant, until the executor writes its grant again.
 - **Size.** An entry with its certificate takes about 1 KiB, so a record within the 256 KiB cap holds about 200 grants.

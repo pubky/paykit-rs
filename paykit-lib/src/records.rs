@@ -1306,6 +1306,35 @@ impl PaymentListRecord {
         )
     }
 
+    /// The held-to-later rule of a `payment_lists` record (Paykit wire 4.13, 5.4, Switch spec
+    /// 8.2): a reader that holds `self` ignores, and shows with its writer, a later write of
+    /// the record whose list is older than the one it holds, or of the same `version` but
+    /// another message, by hash; and one that drops a single-use endpoint it saw used, at any
+    /// version, which could then be paid twice. A later write holding the same list, its
+    /// `used` grown, or a list of a greater `version`, is taken.
+    ///
+    /// Security: a publishing app's versions only grow (Paykit wire 4.13), so two lists of one
+    /// version with other content are an equivocation; neither replaces the one held.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] naming the rule `later` breaks.
+    pub fn check_later_write(&self, later: &PaymentListRecord) -> Result<()> {
+        let version = |r: &PaymentListRecord| match r.list.body() {
+            Body::PrivatePaymentList(l) => Ok(l.version),
+            _ => invalid("Paykit wire 5.4: list holds another kind than private_payment_list"),
+        };
+        let (held, now) = (version(self)?, version(later)?);
+        ensure(
+            now > held || (now == held && later.list.hash() == self.list.hash()),
+            "Paykit wire 4.13: a later write holds an older list, or another list of the same version",
+        )?;
+        ensure(
+            self.used.iter().all(|u| later.used.contains(u)),
+            "Paykit wire 5.4: a later write drops a single-use endpoint seen used",
+        )
+    }
+
     /// The record key, with the reader's own naming key (Paykit wire 1.5): `lp(payee,
     /// app ID)` in `payment_lists`.
     ///

@@ -507,7 +507,9 @@ The reference prototype is shared separately, with its history (phase 1, the mec
 - an Allowance end names the stored acceptance, or is the proposal's withdrawal by its sender before any response; a rejected Allowance has no end; `executor_app_id` only in an acceptance from the allower (wire 4.16; `sealed.json` `allowance_records`);
 - an unrequested destination's `list_version` is present exactly for a list, and is the proof's (wire 5.3);
 - a newer Allowance ledger version holds an attempt that left into its totals in neither its entries nor its `totals.failed` (wire 5.5);
-- period details as late as those held but with another hash replace nothing (wire 4.9, 5.3), and a later write of an `allowances` record keeps the proposal, response and end seen (wire 5.4).
+- period details as late as those held but with another hash replace nothing (wire 4.9, 5.3), and a later write of an `allowances` record keeps the proposal, response and end seen (wire 5.4);
+- a later write of a `payment_lists` record holds no older list, no other list of the same `version`, and every `used` entry seen, whatever its list's `version` (wire 4.13, 5.4);
+- Allowance terms take any positive `every`, and a period too long to evaluate makes the evaluation ineligible, not the terms invalid (wire 4.15).
 
 Appendix A of the wire format marks the rows where the prototype differs from a choice there: A2, A3, A5, A10 and A14.
 
