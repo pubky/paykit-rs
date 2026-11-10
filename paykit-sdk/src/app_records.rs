@@ -54,7 +54,7 @@ use pubky_switch_core::records::{
 use pubky_switch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 
-use crate::destination::{current, Carrier};
+use crate::destination::{current, Carrier, Need};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::Destination;
 use crate::paykit::Paykit;
@@ -207,7 +207,7 @@ impl Paykit {
             }))
         };
         let (doc, reads) = self
-            .payee_identity_with(payee, by, confirmed, start)
+            .payee_identity_with(payee, Need::SwitchCopy, by, confirmed, start)
             .await?;
         let doc = match doc {
             Ok(doc) => doc,

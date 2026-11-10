@@ -73,49 +73,41 @@ async fn test_destinations_payee_identity_unreadable_refused() {
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     // The payee's identity.json can be read neither from its Homeserver nor from its
-    // switch: the copy held stands, and a payment the user started goes on only once the
-    // user confirms it although the switch couldn't confirm the payee's apps (Switch spec
-    // 4.3). Nothing is written before that.
+    // switch, and the copy held is more than 10 minutes old: the request's destination isn't
+    // acted on, not even on the user's confirmation, and nothing is written (Paykit spec 7.2).
     w.homeserver
         .remove(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH);
     w.router.remove(crate::common::BOB_ORIGIN);
-    let refused = wallet
-        .pay_request(&request, PayOptions::default())
-        .await
-        .unwrap_err();
-    assert_eq!(refused.refusal(), Some(&Refusal::IdentityUnconfirmed));
-    assert!(w.rail.all_executions().is_empty());
-    assert!(wallet.payments().await.unwrap().is_empty());
-    let confirmed = || PayOptions {
+    w.clock.advance_ms(11 * 60_000);
+    let confirmed = PayOptions {
         unconfirmed_identity_confirmed: Some(UserConfirmed::new()),
         ..PayOptions::default()
     };
-    // Once the copy held is more than 10 minutes old and nothing can be read, not even the
-    // user's confirmation lets it be acted on.
-    w.clock.advance_ms(11 * 60_000);
-    let stale = wallet.pay_request(&request, confirmed()).await.unwrap_err();
+    let stale = wallet.pay_request(&request, confirmed).await.unwrap_err();
     assert!(
         matches!(stale.refusal(), Some(Refusal::IdentityUnavailable(_))),
         "{stale:?}"
     );
+    assert!(w.rail.all_executions().is_empty());
     assert!(wallet.payments().await.unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn test_destinations_unconfirmed_payee_paid_once_the_user_confirms() {
+async fn test_destinations_request_endpoint_paid_without_the_switch_confirmation() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    w.homeserver
-        .remove(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH);
+    // The payee's switch can't be reached, but its Homeserver gives a fresh identity.json
+    // listing the shop: the request's own endpoint is paid without the switch's
+    // confirmation, which only public endpoints need (Switch spec 4.3, Paykit spec 7.2).
     w.router.remove(crate::common::BOB_ORIGIN);
-    let confirmed = PayOptions {
-        unconfirmed_identity_confirmed: Some(UserConfirmed::new()),
-        ..PayOptions::default()
-    };
-    let outcome = wallet.pay_request(&request, confirmed).await.unwrap();
+    w.clock.advance_ms(11 * 60_000);
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
         "{outcome:?}"
@@ -313,85 +305,4 @@ async fn test_destinations_check_after_the_attempt_writes_failed_and_says_so() {
         claim.view.attempts[0].outcome,
         pubky_switch_core::claims::Outcome::Failed
     );
-}
-
-/// Alice's wallet paying bob's request while bob's switch doesn't answer its public read of
-/// his identity.json: the wallet, its request, and the slow switch.
-async fn paying_beside_a_slow_switch(
-    w: &World,
-) -> (
-    paykit_sdk::Paykit,
-    paykit_sdk::RequestRef,
-    std::sync::Arc<crate::common::SlowSwitch>,
-) {
-    let base = crate::common::store();
-    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&base)).await;
-    let app_id = wallet.app_id();
-    let mut shop = w.shop().await;
-    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
-    wallet.receive(None).await.unwrap();
-    drop(wallet);
-    // The wallet's copy of bob's identity.json is old: paying looks it up again.
-    w.clock.advance_ms(11 * 60_000);
-    let slow = std::sync::Arc::new(crate::common::SlowSwitch::new(
-        std::sync::Arc::clone(&w.router),
-        crate::common::BOB_ORIGIN,
-    ));
-    let wallet = w
-        .load_with_transport(
-            &w.alice,
-            base,
-            app_id,
-            std::sync::Arc::clone(&slow)
-                as std::sync::Arc<dyn pubky_switch_client::transport::Transport>,
-        )
-        .await;
-    (wallet, request, slow)
-}
-
-/// `call`, which must finish in real time whatever the slow switch does.
-async fn bounded<T>(call: impl std::future::Future<Output = T>) -> T {
-    tokio::time::timeout(std::time::Duration::from_secs(10), call)
-        .await
-        .expect("the payment waited on the payee's switch past its grace")
-}
-
-#[tokio::test]
-async fn test_destinations_slow_switch_waited_on_only_through_its_grace() {
-    let w = World::new();
-    let (mut wallet, request, slow) = paying_beside_a_slow_switch(&w).await;
-    // The switch doesn't answer within the grace after the Homeserver's read: the user is
-    // asked to confirm, and nothing is written (Paykit spec 4, 14; Switch spec 4.3).
-    let refused = bounded(wallet.pay_request(&request, PayOptions::default()))
-        .await
-        .unwrap_err();
-    assert_eq!(refused.refusal(), Some(&Refusal::IdentityUnconfirmed));
-    assert!(wallet.payments().await.unwrap().is_empty());
-    // Its answer, arriving later, is still taken: the next payment goes on without asking.
-    slow.release();
-    let outcome = bounded(wallet.pay_request(&request, PayOptions::default()))
-        .await
-        .unwrap();
-    assert!(
-        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
-        "{outcome:?}"
-    );
-}
-
-#[tokio::test]
-async fn test_destinations_slow_switch_paid_once_the_user_confirms() {
-    let w = World::new();
-    let (mut wallet, request, _slow) = paying_beside_a_slow_switch(&w).await;
-    let options = PayOptions {
-        unconfirmed_identity_confirmed: Some(UserConfirmed::new()),
-        ..PayOptions::default()
-    };
-    let outcome = bounded(wallet.pay_request(&request, options))
-        .await
-        .unwrap();
-    assert!(
-        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
-        "{outcome:?}"
-    );
-    assert_eq!(w.rail.all_executions().len(), 1);
 }
