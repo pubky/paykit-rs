@@ -100,6 +100,7 @@ impl BillingPeriod {
 
     /// The period's length in milliseconds.
     pub fn len_ms(&self) -> u64 {
+        // Saturating is safe: a computed period ends after it starts (Paykit wire 4.4).
         self.ends_at.saturating_sub(self.starts_at)
     }
 
@@ -400,6 +401,7 @@ impl Recurrence {
     /// As [`AnchoredRule::containing`].
     pub fn last(&self) -> Result<Option<BillingPeriod>> {
         self.ends_at
+            // Saturating is safe: ends_at is after starts_at, so at least 1.
             .map(|e| self.rule.containing(e.saturating_sub(1)))
             .transpose()
     }

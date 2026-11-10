@@ -407,6 +407,8 @@ impl AllowanceTerms {
         if at > MAX_TIME_MS {
             return Err(beyond());
         }
+        // Saturating is safe: an end past the time grammar is refused just below, and
+        // u64::MAX is past it.
         let mut end = at.saturating_add(ENTRY_WINDOW_MS);
         for limit in &self.period_limits {
             if let LimitPeriod::Anchored(anchored) = &limit.period {
@@ -1010,6 +1012,8 @@ pub fn usage(
     }
     for entry in &ledger.entries {
         match counts(entry, claims.get(&entry.attempt_id).copied()) {
+            // Counts of the ledger's entries, informational: a ledger holds fewer entries than
+            // a u64 counts, so these never saturate; the limits use the checked sums below.
             Counting::Reserved => reserved = reserved.saturating_add(1),
             Counting::Spent => spent = spent.saturating_add(1),
             Counting::Released => {
@@ -1124,10 +1128,21 @@ pub fn check_limits(
 }
 
 /// Whether an entry is old enough to compact at `now`: `at + longest period + 60 s < now`.
-fn old_enough(at: u64, longest: u64, now: u64) -> bool {
+///
+/// # Errors
+///
+/// [`Error::Invalid`] for a bound that can't be represented, which makes the compaction or
+/// the check of a newer version ineligible (`specs/allowances.md`), never an entry read as
+/// too young or old enough.
+fn old_enough(at: u64, longest: u64, now: u64) -> Result<bool> {
     at.checked_add(longest)
         .and_then(|x| x.checked_add(ENTRY_WINDOW_MS))
-        .is_some_and(|x| x < now)
+        .map(|x| x < now)
+        .ok_or_else(|| {
+            Error::Invalid(format!(
+                "{LEDGER}: an entry's compaction bound can't be represented; it fails closed"
+            ))
+        })
 }
 
 /// Compact a ledger at `now` (Paykit spec 8.3, Paykit wire 5.5): drop entries whose own
@@ -1149,8 +1164,12 @@ pub fn compact(terms: &AllowanceTerms, ledger: &Ledger, now: u64) -> Result<Opti
     let mut failed = ledger.failed.clone();
     let mut kept = Vec::with_capacity(ledger.entries.len());
     for entry in &ledger.entries {
-        match entry.outcome {
-            Some(outcome) if old_enough(entry.at, longest, now) => match outcome {
+        let outcome = match entry.outcome {
+            Some(outcome) if old_enough(entry.at, longest, now)? => Some(outcome),
+            _ => None,
+        };
+        match outcome {
+            Some(outcome) => match outcome {
                 EntryOutcome::Done => {
                     spent = add(spent, entry.value.scaled())?;
                     count = count.checked_add(1).ok_or_else(overflow)?;
@@ -1223,7 +1242,7 @@ pub fn check_successor(
             }
             continue;
         }
-        if !old_enough(entry.at, longest, newer_time) {
+        if !old_enough(entry.at, longest, newer_time)? {
             return refuse("drops an entry before it could be compacted");
         }
         match (
@@ -1949,6 +1968,33 @@ mod tests {
         // Without entries, the candidate's own window at t ends past what can be represented
         // too, so the evaluation is still ineligible.
         assert!(usage(&terms, &ledger(Vec::new()), &HashMap::new(), now).is_err());
+    }
+
+    #[test]
+    fn test_compaction_fails_closed_when_an_entry_bound_overflows() {
+        // L fits, but at + L + 60 s doesn't: the entry can't be judged old enough or not.
+        let terms = AllowanceTerms::from_json(&with_limits(json!([{ "amount_limit": "1",
+            "payment_count_limit": null,
+            "period": { "every": 30_500_568_904u64, "kind": "rolling", "unit": "week" } }])))
+        .unwrap();
+        let now = t("2026-03-10T00:00:00.000Z");
+        let held = ledger(vec![entry(
+            1,
+            "0.01",
+            "2026-01-05T00:00:00.000Z",
+            Some(EntryOutcome::Done),
+        )]);
+        let error = compact(&terms, &held, now).unwrap_err();
+        assert!(
+            error.to_string().contains("can't be represented"),
+            "{error}"
+        );
+        let compacted = Ledger {
+            spent: Some(Decimal::parse("0.01").unwrap()),
+            count: 1,
+            ..ledger(Vec::new())
+        };
+        assert!(check_successor(&terms, &held, &compacted, now).is_err());
     }
 
     #[test]

@@ -1316,6 +1316,8 @@ impl PrivatePaymentList {
     /// 4.13): the earlier of `expires_at` and 30 days after its inbox accepted it.
     pub fn usable_until(&self, accepted_at: u64) -> u64 {
         self.expires_at
+            // Saturating is safe: an acceptance time is one the grammar writes, far below
+            // u64::MAX, and the earlier of the two is what counts (Paykit wire 4.13).
             .min(accepted_at.saturating_add(PRIVATE_LIST_MAX_AGE_MS))
     }
 }
