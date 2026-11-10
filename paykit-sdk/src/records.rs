@@ -14,13 +14,63 @@ use paykit_lib::kinds::Kind;
 use paykit_lib::records::{ActivityRecord, ActivitySide, PaymentListRecord, StoredMessage};
 use paykit_lib::Label;
 use pubky_switch_client::app::{LocalWrite, OpBatch, OutgoingMessage, RecordTarget, SignedMessage};
+use pubky_switch_core::enc::{serde_b64, serde_b64_vec};
 use pubky_switch_core::http::ErrorCode;
+use pubky_switch_core::message::MessagePlaintext;
 use pubky_switch_core::ops::{Condition, OpKind};
+use pubky_switch_core::sig::SignedDoc;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::activity::{self, ActivityTarget, Role};
 use crate::error::{PaykitError, Result};
 use crate::paykit::Paykit;
+
+/// A verified message kept in Paykit's local state, to be stored in a record later: its
+/// sender, the certificate it was received with, its signed plaintext and its acceptance
+/// time. It is verified again when it is taken back ([`KeptMessage::stored`]).
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct KeptMessage {
+    #[serde(with = "serde_b64")]
+    sender: [u8; 32],
+    cert: SignedDoc,
+    #[serde(with = "serde_b64_vec")]
+    plaintext: Vec<u8>,
+    accepted_at: Option<u64>,
+}
+
+impl std::fmt::Debug for KeptMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("KeptMessage(..)")
+    }
+}
+
+impl KeptMessage {
+    /// Keep `stored`.
+    pub(crate) fn of(stored: &StoredMessage) -> Self {
+        Self {
+            sender: stored.sender(),
+            cert: stored.cert().signed().clone(),
+            plaintext: stored.plaintext().encode(),
+            accepted_at: stored.accepted_at(),
+        }
+    }
+
+    /// The stored message again, verified for `recipient` as a record's copy is (Paykit wire
+    /// 5.2). A kept message that no longer reads is a corrupt store.
+    pub(crate) fn stored(&self, recipient: &[u8; 32]) -> Result<StoredMessage> {
+        let plaintext =
+            MessagePlaintext::decode(&self.plaintext).map_err(|_| PaykitError::corrupt())?;
+        StoredMessage::new(
+            self.sender,
+            &self.cert,
+            plaintext,
+            self.accepted_at,
+            recipient,
+        )
+        .map_err(|_| PaykitError::corrupt())
+    }
+}
 
 impl Paykit {
     /// The record key of an activity target.

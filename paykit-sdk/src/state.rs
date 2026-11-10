@@ -23,6 +23,7 @@
 //! | `missed/<from>` | entries missed while lagging, or before a provider loss | |
 //! | `j/<attempt_id>` | the payment journal: one payment, from before its `attempt` | yes |
 //! | `side/<msg_id>` | the side a cancellation is sent from, kept with the batch that queues it | |
+//! | `kc/<record key>` | a payee's cancellation received before its request, for the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
 //! | `rs/<pubky>/<msg_id>` | when a message was last re-sent to a requester | |
 //! | `rsd/<pubky>/<day>` | how many messages were re-sent to a requester that day | |
@@ -169,6 +170,7 @@ pub(crate) mod key {
     pub(crate) const MISSED: &str = "missed/";
     pub(crate) const JOURNAL: &str = "j/";
     pub(crate) const PEERS: &str = "peer/";
+    pub(crate) const KEPT_CANCELLATIONS: &str = "kc/";
 
     pub(crate) fn ask(sender: &[u8; 32], from: u64) -> String {
         format!("{ASKS}{}/{}", b64(sender), num(from))
@@ -188,6 +190,10 @@ pub(crate) mod key {
 
     pub(crate) fn side(msg_id: &str) -> String {
         format!("side/{msg_id}")
+    }
+
+    pub(crate) fn kept_cancellation(record_key: &[u8; 32]) -> String {
+        format!("{KEPT_CANCELLATIONS}{}", b64(record_key))
     }
 
     pub(crate) fn peer(pubky: &[u8; 32]) -> String {

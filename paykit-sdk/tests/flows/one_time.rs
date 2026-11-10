@@ -297,3 +297,112 @@ async fn test_one_time_payee_activity_store_failure_is_an_error() {
         "{error:?}"
     );
 }
+
+/// A one-time request from bob's `shop` to alice, signed and not delivered, with its hash.
+fn unsent_request(w: &World) -> (pubky_switch_core::message::MessagePlaintext, [u8; 32]) {
+    let body = serde_json::json!({
+        "amount": { "asset": "btc", "value": "1" },
+        "payment_reference": "order-1",
+        "proposal_expires_at": null,
+        "payment_endpoints": { "btc-lightning-bolt11": "lnbc1invoice" }
+    });
+    let serde_json::Value::Object(body) = body else {
+        unreachable!()
+    };
+    let plaintext = w.sign_as(
+        &w.bob,
+        "shop",
+        &w.alice,
+        "paykit.payment_request",
+        vec![],
+        body,
+    );
+    let hash = plaintext.hash();
+    (plaintext, hash)
+}
+
+/// Bob's cancellation of the request `hash`, entered for alice's apps `targets`.
+fn cancel_to(w: &World, targets: &[[u8; 16]], hash: [u8; 32]) -> String {
+    let body = paykit_lib::bodies::RequestReply {
+        reason: None,
+        label: None,
+    }
+    .to_body();
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        targets,
+        "paykit.payment_request_cancellation",
+        vec![hash],
+        body,
+    )
+}
+
+#[tokio::test]
+async fn test_one_time_cancellation_before_its_request_keeps_it_cancelled() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    // The request reaches the wallet unopenable, so it holds no record of it; then bob's
+    // cancellation of it arrives, and the cursor moves past it.
+    let (request, hash) = unsent_request(&w);
+    let cancellation = cancel_to(&w, &[wallet.app_id()], hash);
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.applied.contains(&cancellation), "{got:?}");
+    // The request is re-sent and opened: it is cancelled, and never payable (Paykit spec
+    // 8.1).
+    w.deliver(&w.bob, "shop", &w.alice, &[wallet.app_id()], &request);
+    let got = wallet.receive(None).await.unwrap();
+    assert_eq!(got.applied.len(), 1, "{got:?}");
+    let request = paykit_sdk::RequestRef {
+        payee: w.bob_id(),
+        request_hash: hash,
+    };
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_one_time_cancellation_kept_applies_to_another_wallets_record() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let _shop = w.shop().await;
+    // The wallet gets bob's cancellation before the request; the phone gets only the
+    // request, and writes its record without the cancellation.
+    let (request, hash) = unsent_request(&w);
+    cancel_to(&w, &[wallet.app_id()], hash);
+    wallet.receive(None).await.unwrap();
+    w.deliver(&w.bob, "shop", &w.alice, &[phone.app_id()], &request);
+    phone.receive(None).await.unwrap();
+    let request = paykit_sdk::RequestRef {
+        payee: w.bob_id(),
+        request_hash: hash,
+    };
+    assert_eq!(
+        phone.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+    // The wallet pays from the phone's record: the cancellation it kept goes into the record
+    // first, and the payment is refused.
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
+    assert!(w.rail.all_executions().is_empty());
+    phone.receive(None).await.unwrap();
+    assert_eq!(
+        phone.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+}

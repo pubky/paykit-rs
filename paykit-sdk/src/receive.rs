@@ -8,7 +8,9 @@
 //! [`ReceiveContext`], the writes the message causes:
 //!
 //! - **payer side** (`pay`): a request opens its request record; a payee's cancellation, a
-//!   receipt and a Private Payment List go into theirs. A receipt also settles the attempt
+//!   receipt and a Private Payment List go into theirs. A cancellation of a request the app
+//!   holds no record of yet is kept, and placed in the batch that opens the record. A
+//!   receipt also settles the attempt
 //!   it names, by evidence (Switch spec 10.2 row 3), in the same batch: only the payee's yes
 //!   counts (Paykit spec 7.3).
 //! - **payee side** (`request` or a label): the payer's acceptance, rejection, cancellation
@@ -26,7 +28,7 @@
 
 use paykit_lib::bodies::ResendRequest;
 use paykit_lib::derive::{natural_key, request_obligation_blinded};
-use paykit_lib::records::{PaymentListRecord, StoredMessage, UnrequestedDestination};
+use paykit_lib::records::{ActivitySide, PaymentListRecord, StoredMessage, UnrequestedDestination};
 use paykit_lib::{AttemptId, Body};
 use pubky_switch_client::app::{
     AppError, ClaimFetch, ClaimOp, LocalWrite, Need, ObligationDeadline, ReceiveContext,
@@ -43,7 +45,7 @@ use crate::activity::{self, ActivityTarget, Role};
 use crate::journal::JournalEntry;
 use crate::paykit::Paykit;
 use crate::protocol::writes_payee_label;
-use crate::records::list_target;
+use crate::records::{list_target, KeptMessage};
 use crate::state::{self, key, Tx};
 
 /// Why an effect wasn't built.
@@ -102,7 +104,7 @@ pub(crate) fn effect(
         Body::PaymentRequest(_) if pay => {
             let target =
                 ActivityTarget::payer(natural_key::request_record(&sender, &stored.hash()));
-            place(cx, &target, sender, Role::Request, stored)?;
+            place_request(cx, &target, sender, stored)?;
             note_peer(cx, &sender, stored)?;
         }
         Body::PaymentRequestAcceptance(_)
@@ -120,8 +122,10 @@ pub(crate) fn effect(
                 ActivityTarget::payer(natural_key::request_record(&sender, &request));
             if pay && held_value(cx, &payer_target)?.is_some() {
                 place(cx, &payer_target, sender, Role::Cancellation, stored)?;
-            } else if payee {
-                payer_reply(cx, stored, &scopes)?;
+            } else if payee && payer_reply(cx, stored, &scopes)? {
+                // A payer's cancellation of a request this app sent.
+            } else if pay {
+                keep_cancellation(cx, &payer_target, stored)?;
             }
         }
         Body::PaymentReceipt(receipt) if pay => {
@@ -192,20 +196,79 @@ fn place(
     Ok(())
 }
 
+/// A payee's cancellation of a request the payer holds no record of yet, kept with the
+/// cursor move until the request comes (Paykit spec 8.1): a request first unopenable and
+/// re-sent later (Paykit spec 9) then opens its record already cancelled, in the batch that
+/// writes it ([`place_request`]), and is never payable. A later cancellation of the same
+/// request adds nothing; one record holds one per role (Paykit spec 6).
+///
+/// Security: the cancellation passed every recipient check and check 10 before it was kept,
+/// and is verified again when it is placed. It is keyed by the payer's record of the request
+/// it names first in `refs`, which derives from the sender and that hash, so it can only
+/// cancel that sender's request. It is kept until its request comes: a request record can
+/// still come from another own app after the sender stops re-sending, and a cancelled
+/// request must never become payable. Admission bounds what a sender can make the app keep
+/// (Switch spec 7).
+fn keep_cancellation(
+    cx: &mut ReceiveContext<'_>,
+    target: &ActivityTarget,
+    stored: &StoredMessage,
+) -> Result<(), Fail> {
+    let kept = key::kept_cancellation(&cx.record_key(&target.record_target())?);
+    if cx.local_get(kept.as_bytes())?.is_some() {
+        return Ok(());
+    }
+    cx.local(local(&kept, &KeptMessage::of(stored))?);
+    Ok(())
+}
+
+/// A request: placed in the payer's request record with the cancellation kept for it, if
+/// any, in the effect's batch, which also drops the kept copy (Paykit spec 8.1).
+fn place_request(
+    cx: &mut ReceiveContext<'_>,
+    target: &ActivityTarget,
+    payee: [u8; 32],
+    stored: &StoredMessage,
+) -> Result<(), Fail> {
+    let own = cx.identity();
+    let kept_key = key::kept_cancellation(&cx.record_key(&target.record_target())?);
+    let Some(bytes) = cx.local_get(kept_key.as_bytes())? else {
+        return place(cx, target, payee, Role::Request, stored);
+    };
+    // A kept cancellation that no longer reads leaves the request unopened rather than
+    // payable.
+    let cancellation = state::decode::<KeptMessage>(&bytes)
+        .and_then(|kept| kept.stored(&own))
+        .map_err(|_| Fail::Drop("a kept cancellation doesn't read".into()))?;
+    let current = held_value(cx, target)?;
+    let mut record = activity::read(current.as_deref(), &own, ActivitySide::Payer)
+        .unwrap_or_else(|| activity::empty(ActivitySide::Payer, payee));
+    let placed = activity::place(&mut record, Role::Request, stored.clone());
+    let cancelled = activity::place(&mut record, Role::Cancellation, cancellation);
+    if placed || cancelled {
+        cx.put_record(&target.record_target(), &record.to_json()?, Vec::new())?;
+    }
+    cx.local(LocalWrite::Delete {
+        key: kept_key.into_bytes(),
+    });
+    Ok(())
+}
+
 /// A payer's acceptance, rejection, cancellation or proof, at the payee (Paykit spec 3.4,
-/// 6, 8.4).
+/// 6, 8.4). Returns whether it is about a record of this app's: a request it holds, or a
+/// payment without a request.
 fn payer_reply(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
     scopes: &[String],
-) -> Result<(), Fail> {
+) -> Result<bool, Fail> {
     let sender = stored.sender();
     let own = cx.identity();
     let label = stored.body().label().cloned();
     // An app writes only records its scopes cover: a labelled selling app its own label's
     // (Paykit spec 3.1, 6).
     if !writes_payee_label(scopes, label.as_ref()) {
-        return Ok(());
+        return Ok(false);
     }
     let role = match stored.body() {
         Body::PaymentProof(_) => Role::Proof,
@@ -220,25 +283,27 @@ fn payer_reply(
             // before any reply in the feed: a reply to a request this app holds no record of
             // isn't about one of its scopes' requests.
             if held_value(cx, &target)?.is_none() {
-                return Ok(());
+                return Ok(false);
             }
-            place(cx, &target, sender, role, stored)
+            place(cx, &target, sender, role, stored)?;
+            Ok(true)
         }
         None => {
             // A payment without a request: keyed by its settlement, so every proof of one
             // settlement names one record and is credited once (Paykit spec 8.4). A proof
             // whose method gives no settlement ID isn't credited.
             let Body::PaymentProof(proof) = stored.body() else {
-                return Ok(());
+                return Ok(false);
             };
             let Some(settlement) = proof.settlement_id() else {
-                return Ok(());
+                return Ok(false);
             };
             let target = ActivityTarget::payee(
                 natural_key::payee_payment_record(&proof.payment_endpoint_identifier, &settlement),
                 None,
             );
-            place(cx, &target, sender, role, stored)
+            place(cx, &target, sender, role, stored)?;
+            Ok(true)
         }
     }
 }

@@ -336,6 +336,47 @@ impl World {
         message.msg_id
     }
 
+    /// A message of `kind` with `body` and `refs`, signed by `signer`'s app `app` for `to`,
+    /// and not delivered: [`World::deliver`] enters it later, as a re-send would.
+    pub fn sign_as(
+        &self,
+        signer: &TestSigner,
+        app: &str,
+        to: &TestSigner,
+        kind: &str,
+        refs: Vec<[u8; 32]>,
+        body: serde_json::Map<String, Value>,
+    ) -> pubky_switch_core::message::MessagePlaintext {
+        let keys = signer.identity().app_keys(app);
+        let message = pubky_switch_core::message::Message::new(
+            kind,
+            pubky_switch_core::message::Sender::of_app(signer.identity().public(), &keys),
+            to.identity().public(),
+            self.clock.now_ms(),
+            refs,
+            body,
+        )
+        .unwrap();
+        message.sign(&keys).unwrap()
+    }
+
+    /// Enter `plaintext`, signed by `signer`'s app `app`, into the switch of `to` for its apps
+    /// `targets`, as if its inbox had accepted it now.
+    pub fn deliver(
+        &self,
+        signer: &TestSigner,
+        app: &str,
+        to: &TestSigner,
+        targets: &[[u8; 16]],
+        plaintext: &pubky_switch_core::message::MessagePlaintext,
+    ) {
+        let keys = signer.identity().app_keys(app);
+        let cert = signer.switch().app(&keys.app_id_bytes()).cert.unwrap();
+        to.switch()
+            .send_plaintext(signer.identity().public(), &cert, plaintext, targets)
+            .unwrap();
+    }
+
     /// Bob's `shop` sends alice's apps `targets` a Private Payment List of `version`, with a
     /// single-use on-chain endpoint and a reusable Lightning offer, for 30 days. Bob shares
     /// his list with alice, a conversation he starts: his switch admits her proofs.

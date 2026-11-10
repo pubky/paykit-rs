@@ -33,7 +33,7 @@ use crate::activity::{self, ActivityTarget, Role, SideTag};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::rail::ProofCheck;
-use crate::records::conflict;
+use crate::records::{conflict, KeptMessage};
 use crate::state::{key, Tx};
 
 /// How many times a payee's write is built again after its record changed meanwhile.
@@ -477,7 +477,10 @@ impl Paykit {
     // ---------------------------------------------------------------------------------
     // The payer
 
-    /// The payer's request record of `request`, read from the switch when not held.
+    /// The payer's request record of `request`, read from the switch when not held. A
+    /// cancellation this app kept for it, received before the request (`receive.rs`), is
+    /// placed in the record first: another own app may have written the record from a copy
+    /// of the request it got without the cancellation (Paykit spec 8.1).
     pub(crate) async fn payer_request(
         &mut self,
         request: &RequestRef,
@@ -490,7 +493,45 @@ impl Paykit {
         if request_of(&record).is_none() {
             return Err(Refusal::NotFound.into());
         }
+        if self.place_kept_cancellation(&target).await? {
+            let record = self.activity(&target).await?.ok_or(Refusal::NotFound)?;
+            return Ok((target, record));
+        }
         Ok((target, record))
+    }
+
+    /// Place the cancellation kept for the request record at `target`, if any, and drop the
+    /// kept copy, in one batch. Returns whether there was one.
+    async fn place_kept_cancellation(&mut self, target: &ActivityTarget) -> Result<bool> {
+        let kept_key = key::kept_cancellation(&self.activity_key(target)?);
+        let Some(kept) = self.local_get::<KeptMessage>(&kept_key).await? else {
+            return Ok(false);
+        };
+        let cancellation = kept.stored(&self.identity())?;
+        let write = self
+            .placed_write(
+                target,
+                cancellation.sender(),
+                Role::Cancellation,
+                cancellation,
+                Vec::new(),
+            )
+            .await?;
+        let mut tx = Tx::default();
+        tx.delete(&kept_key);
+        match write {
+            Some(entry) => {
+                let batch = OpBatch::new().entry(entry).locals(tx.into_writes());
+                if let Err(error) = self.app.submit_batch(batch).await {
+                    if error.code() == Some(ErrorCode::Conflict) {
+                        self.app.read_record(&target.record_target()).await?;
+                    }
+                    return Err(conflict(error.into()));
+                }
+            }
+            None => self.local_commit(tx).await?,
+        }
+        Ok(true)
     }
 
     /// Every request the payer's apps received, from the `payer_activity` records this app
@@ -557,7 +598,17 @@ impl Paykit {
         };
         let payee = record.counterparty;
         let hash = stored.hash();
-        let status = self.request_status(record, request, &payee, &hash).await?;
+        let mut status = self.request_status(record, request, &payee, &hash).await?;
+        // A cancellation kept for the request and not placed yet is a cancellation all the
+        // same (Paykit spec 8.1).
+        if status == RequestStatus::Open
+            && self
+                .local_get::<KeptMessage>(&key::kept_cancellation(&record_key))
+                .await?
+                .is_some()
+        {
+            status = RequestStatus::Cancelled;
+        }
         Ok(Some(RequestView {
             request: RequestRef {
                 payee,
