@@ -34,8 +34,9 @@ use paykit_lib::{Label, PaykitKindRules};
 use pubky_switch_client::app::{
     decode_local_state, Collection as SwitchCollection, Effect, LocalView, LocalWrite, LossActions,
     MissedEntries, OpaqueRule, Outcome, Protocol, ProtocolLayer, ProviderLoss, ReceiveContext,
-    ReceivedMessage, ResendNeeded,
+    ReceivedMessage, ResendNeeded, RestoreContext, StoreFailure,
 };
+use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
 use pubky_switch_core::message::Message;
 use pubky_switch_core::receive::KindRules;
@@ -219,6 +220,20 @@ pub(crate) fn body_label(message: &Message) -> Option<Label> {
         .and_then(|l| Label::parse(l).ok())
 }
 
+/// A local write of Paykit's own state, for a protocol call that commits it; one that can't
+/// be encoded is the store failing for the entry.
+fn local_write<T: serde::Serialize>(key: &str, value: &T) -> Result<LocalWrite, StoreFailure> {
+    state::local_put(key, value).map_err(|_| StoreFailure::of_entry(StoreError::Corrupt))
+}
+
+/// A failure of the client's store as a protocol call's failure.
+fn store_failure(error: pubky_switch_client::app::AppError) -> StoreFailure {
+    match error {
+        pubky_switch_client::app::AppError::Store(error) => StoreFailure::from(error),
+        _ => StoreFailure::unavailable(StoreError::Unavailable),
+    }
+}
+
 /// The name of Paykit's layer in app backups (Switch spec 12.4).
 pub const BACKUP_NAME: &str = "paykit";
 
@@ -266,7 +281,12 @@ impl Protocol for PaykitProtocol {
 
     /// Paykit's layer is its whole local state, as the client's default writes it; a
     /// restore checks and marks the journal in it, before anything is written.
-    fn restore_layer(&self, layer: Option<&ProtocolLayer>) -> Result<Vec<LocalWrite>, String> {
+    fn restore_layer(
+        &self,
+        layer: Option<&ProtocolLayer>,
+        restoring: &RestoreContext<'_>,
+    ) -> Result<Vec<LocalWrite>, String> {
+        let _ = restoring;
         restore_paykit_layer(layer)
     }
 
@@ -369,54 +389,63 @@ impl Protocol for PaykitProtocol {
     }
 
     /// Entries the app can't read: ask the sender to send again (Paykit spec 9).
-    fn resend_needed(&self, needed: &ResendNeeded) -> Vec<LocalWrite> {
+    fn resend_needed(&self, needed: &ResendNeeded) -> Result<Vec<LocalWrite>, StoreFailure> {
         let ask = QueuedAsk {
             sender: needed.sender,
             from_ms: needed.accepted_from_ms,
             until_ms: Some(needed.accepted_until_ms),
         };
-        state::local_put(&key::ask(&needed.sender, needed.accepted_from_ms), &ask)
-            .map(|w| vec![w])
-            .unwrap_or_default()
+        Ok(vec![local_write(
+            &key::ask(&needed.sender, needed.accepted_from_ms),
+            &ask,
+        )?])
     }
 
     /// Entries missed while lagging: ask the counterparties of unfinished activity to send
     /// again from the item's time (Paykit spec 9).
-    fn missed(&self, missed: &MissedEntries) -> Vec<LocalWrite> {
-        state::local_put(
+    fn missed(&self, missed: &MissedEntries) -> Result<Vec<LocalWrite>, StoreFailure> {
+        Ok(vec![local_write(
             &key::missed(missed.accepted_from_ms),
             &missed.accepted_from_ms,
-        )
-        .map(|w| vec![w])
-        .unwrap_or_default()
+        )?])
     }
 
     /// A provider loss, without the protocol's state at hand: only the re-sends are queued.
-    fn provider_lost(&self, loss: &ProviderLoss) -> LossActions {
-        LossActions {
+    fn provider_lost(&self, loss: &ProviderLoss) -> Result<LossActions, StoreFailure> {
+        Ok(LossActions {
             conversations: Vec::new(),
-            local: state::local_put(&key::missed(loss.accepted_from_ms), &loss.accepted_from_ms)
-                .map(|w| vec![w])
-                .unwrap_or_default(),
-        }
+            local: vec![local_write(
+                &key::missed(loss.accepted_from_ms),
+                &loss.accepted_from_ms,
+            )?],
+        })
     }
 
     /// A provider loss (Switch spec 12.6 steps 2 and 4): ask every counterparty with Paykit
     /// activity to send again from the old cursor's time, and add their conversation entries
     /// back.
-    fn provider_lost_with(&self, loss: &ProviderLoss, view: &LocalView<'_>) -> LossActions {
-        let conversations = view
+    fn provider_lost_with(
+        &self,
+        loss: &ProviderLoss,
+        view: &LocalView<'_>,
+    ) -> Result<LossActions, StoreFailure> {
+        // A store that fails, or a peer key that doesn't read, is the step's failure, never
+        // an empty list of counterparties: the recovery asks again.
+        let peers = view
             .local_scan(key::PEERS.as_bytes())
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|(k, _)| {
-                let rest = k.get(key::PEERS.len()..)?;
-                unb64_array::<32>(std::str::from_utf8(rest).ok()?).ok()
-            })
-            .collect();
-        let mut actions = self.provider_lost(loss);
+            .map_err(store_failure)?;
+        let mut conversations = Vec::with_capacity(peers.len());
+        for (k, _) in peers {
+            let peer = k
+                .get(key::PEERS.len()..)
+                .and_then(|rest| std::str::from_utf8(rest).ok())
+                .and_then(|rest| unb64_array::<32>(rest).ok())
+                .ok_or_else(|| StoreFailure::of_entry(StoreError::Corrupt))?;
+            conversations.push(peer);
+        }
+        let mut actions = self.provider_lost(loss)?;
         actions.conversations = conversations;
-        actions
+        Ok(actions)
     }
 
     fn adds_conversation(&self, kind: &str) -> bool {
