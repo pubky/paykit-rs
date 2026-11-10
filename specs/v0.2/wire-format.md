@@ -431,6 +431,8 @@ The payee's details for one Billing Period of a recurring request (spec 8.2).
 
 `refs`: the request hash, then the hash of the period details the payment used, if any. A proof of a payment without a request has no `refs`; the payee records it by its settlement (Switch wire 1.5), so the same evidence sent again under a new `msg_id` is a replay. A proof with `refs` carries no `amount`; one without carries no `billing_period`, `label`, `payment_reference` or `allowance_id`, which name a request's context (an automatic payment under an Allowance pays a request, spec 8.3); and one that names the period details it used carries their `billing_period`. Recipients drop a proof that breaks this (vectors: `messages.json` `proof_members`).
 
+The `amount` of a proof without a request is the asset and amount paid, which the payment method transferred exactly (spec 7.2 step 1). The payer's record of the payment and the payee's keep it as the stored proof gives it (5.3); a receipt carries none and confirms the proof whose hash it names (4.11); and the payee checks the payment by its own method (spec 8.1). Until the payer writes `done` with the proof, its record of the payment holds the destination (`unrequested`, 5.3) but no amount.
+
 ```json
 {
   "v": 1,
