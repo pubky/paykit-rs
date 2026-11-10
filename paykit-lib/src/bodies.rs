@@ -1397,28 +1397,42 @@ pub struct AllowanceReply {
 }
 
 impl AllowanceReply {
-    /// Read the body (Paykit wire 4.16).
+    /// Read the body of `kind`, an acceptance, a rejection or an end (Paykit wire 4.16):
+    /// `executor_app_id` only in an acceptance. That it comes from the allower is the
+    /// Allowance record's check, which holds the proposal's role.
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] naming the member.
-    pub fn from_body(body: &Map<String, Value>) -> Result<Self> {
+    /// [`Error::Invalid`] naming the member or rule.
+    pub fn from_body(body: &Map<String, Value>, kind: Kind) -> Result<Self> {
+        ensure(
+            matches!(
+                kind,
+                Kind::AllowanceAcceptance | Kind::AllowanceRejection | Kind::AllowanceEnd
+            ),
+            "Paykit wire 4.16: an acceptance, a rejection or an end",
+        )?;
         let obj = Obj::new(body, "Paykit wire 4.16");
+        let executor_app_id = obj.opt_app_id("executor_app_id")?;
+        ensure(
+            executor_app_id.is_none() || kind == Kind::AllowanceAcceptance,
+            "Paykit wire 4.16: executor_app_id only in an acceptance",
+        )?;
         Ok(Self {
             allowance_id: AllowanceId::parse(obj.req_str("allowance_id")?)?,
-            executor_app_id: obj.opt_app_id("executor_app_id")?,
+            executor_app_id,
         })
     }
 
-    /// Write the body.
+    /// Write the body of `kind`.
     ///
     /// # Errors
     ///
     /// [`Error::Validation`] for a value a recipient drops at check 10: the writer reads
     /// back what it writes by the reader's rules, and refuses a value that fails them or
-    /// doesn't read back as itself.
-    pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, Self::body_unchecked, Self::from_body)
+    /// doesn't read back as itself, such as `executor_app_id` in a rejection or an end.
+    pub fn to_body(&self, kind: Kind) -> Result<Map<String, Value>> {
+        written(self, Self::body_unchecked, |b| Self::from_body(b, kind))
     }
 
     /// The body as written, before the reader checks it.
@@ -1577,10 +1591,12 @@ impl Body {
             }
             Kind::AllowanceProposal => Self::AllowanceProposal(AllowanceProposal::from_body(body)?),
             Kind::AllowanceAcceptance => {
-                Self::AllowanceAcceptance(AllowanceReply::from_body(body)?)
+                Self::AllowanceAcceptance(AllowanceReply::from_body(body, kind)?)
             }
-            Kind::AllowanceRejection => Self::AllowanceRejection(AllowanceReply::from_body(body)?),
-            Kind::AllowanceEnd => Self::AllowanceEnd(AllowanceReply::from_body(body)?),
+            Kind::AllowanceRejection => {
+                Self::AllowanceRejection(AllowanceReply::from_body(body, kind)?)
+            }
+            Kind::AllowanceEnd => Self::AllowanceEnd(AllowanceReply::from_body(body, kind)?),
             Kind::ExecutorNotice => Self::ExecutorNotice(ExecutorNotice::from_body(body)?),
         })
     }
@@ -1632,7 +1648,7 @@ impl Body {
             Self::PrivatePaymentListRequest(b) => b.to_body(),
             Self::AllowanceProposal(b) => b.to_body(),
             Self::AllowanceAcceptance(b) | Self::AllowanceRejection(b) | Self::AllowanceEnd(b) => {
-                b.to_body()
+                b.to_body(self.kind())
             }
             Self::ExecutorNotice(b) => b.to_body(),
         }
@@ -1919,6 +1935,29 @@ mod tests {
             let error = invalid.to_body().expect_err(name);
             assert!(matches!(error, Error::Validation(_)), "{name}: {error}");
         }
+    }
+
+    #[test]
+    fn test_allowance_reply_executor_app_id_only_in_an_acceptance() {
+        let with = body(
+            json!({ "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "executor_app_id": "cw5ahtdkixcafna9zh1y5y5o1w" }),
+        );
+        let reply = AllowanceReply::from_body(&with, Kind::AllowanceAcceptance).unwrap();
+        assert_eq!(reply.to_body(Kind::AllowanceAcceptance).unwrap(), with);
+        for kind in [Kind::AllowanceRejection, Kind::AllowanceEnd] {
+            let error = AllowanceReply::from_body(&with, kind)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("only in an acceptance"), "{kind:?}: {error}");
+            assert!(reply.to_body(kind).is_err(), "{kind:?}");
+            let without = AllowanceReply {
+                executor_app_id: None,
+                ..reply.clone()
+            };
+            without.to_body(kind).unwrap();
+        }
+        assert!(AllowanceReply::from_body(&with, Kind::PaymentReceipt).is_err());
     }
 
     #[test]

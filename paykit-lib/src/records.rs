@@ -26,7 +26,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::allowances::Ledger;
-use crate::bodies::{check_body, Body};
+use crate::bodies::{check_body, Body, ProposerRole};
 use crate::collections::Collection;
 use crate::derive::{natural_key, request_obligation, terms_hash};
 use crate::error::{ensure, invalid, Error, Result};
@@ -1588,6 +1588,16 @@ impl AllowanceRecord {
                 response.sender == self.proposal.message.to,
                 "Paykit wire 5.4: a stored message isn't from the side its kind requires",
             )?;
+            // Paykit wire 4.16: executor_app_id comes in an acceptance from the allower, the
+            // proposal's recipient when the proposer is the allowee.
+            if let (Body::AllowanceAcceptance(r), Body::AllowanceProposal(p)) =
+                (&response.body, &self.proposal.body)
+            {
+                ensure(
+                    r.executor_app_id.is_none() || p.proposer_role == ProposerRole::Allowee,
+                    "Paykit wire 4.16: executor_app_id only in an acceptance from the allower",
+                )?;
+            }
         }
         let proposal = self.proposal.hash();
         if let Some(response) = &self.response {
