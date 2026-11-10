@@ -196,7 +196,9 @@ pub(crate) fn holds_role(scopes: &[String], roles: &[KindRole]) -> bool {
         KindRole::Request => acts_as_payee(scopes),
         KindRole::Allowance => scopes.iter().any(|s| s == "allowance"),
         KindRole::AllowanceExecute => scopes.iter().any(|s| s == "allowance_execute"),
-        KindRole::Any => true,
+        // Any Paykit App: another protocol's scopes alone take no Paykit kind (Switch wire
+        // 3.1 "Several protocols").
+        KindRole::Any => paykit_lib::scopes::holds_paykit_scope(scopes),
     })
 }
 

@@ -9,6 +9,7 @@ mod crash;
 mod destinations;
 mod labels;
 mod one_time;
+mod protocols;
 mod resend;
 mod restore;
 mod unrequested;

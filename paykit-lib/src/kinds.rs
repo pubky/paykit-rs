@@ -50,7 +50,7 @@ pub enum Role {
     Allowance,
     /// An app holding `allowance_execute`.
     AllowanceExecute,
-    /// Any app.
+    /// Any Paykit App: one holding at least one of Paykit's scopes.
     Any,
 }
 
@@ -319,11 +319,13 @@ impl MessageKind {
 }
 
 /// Whether `scopes` hold one of `roles`, a labelled selling scope counting as `request`
-/// (Paykit wire 4.1 check 8; the labels then narrow it).
+/// (Paykit wire 4.1 check 8; the labels then narrow it). [`Role::Any`] is any Paykit App:
+/// a certificate holding at least one of Paykit's scopes, so a certificate of another
+/// protocol only sends and receives no Paykit kind (Switch wire 3.1 "Several protocols").
 fn holds_role(scopes: &[String], roles: &[Role]) -> bool {
     let has = |s: &str| scopes.iter().any(|x| x == s);
     roles.iter().any(|role| match role {
-        Role::Any => true,
+        Role::Any => scopes::holds_paykit_scope(scopes),
         Role::Pay => has("pay"),
         Role::Request => scopes::acts_as_payee(scopes),
         Role::Allowance => has("allowance"),
@@ -354,7 +356,8 @@ fn body_label(message: &Message) -> Result<Option<&str>> {
 ///   `request:<label>` in the own certificate, one without needs `request`, and a
 ///   cancellation without a label, which may be the payee's, passes at an app holding `pay`;
 /// - an extension kind `<prefix>.<name>` needs `ext:<prefix>` in both certificates;
-/// - a `resend_request` names no kinds: any app may send it.
+/// - a `resend_request` names no kinds: any Paykit App may send it, one holding at least one
+///   of Paykit's scopes.
 ///
 /// # Errors
 ///
@@ -586,7 +589,7 @@ mod tests {
         )
         .unwrap();
         let resend = message("paykit.resend_request", json!({}));
-        check_kind_scopes(&resend, &owned(&["contacts"]), &owned(&[])).unwrap();
+        check_kind_scopes(&resend, &owned(&["contacts"]), &owned(&["pay"])).unwrap();
         let ext = message("cap.offer", json!({}));
         check_kind_scopes(&ext, &owned(&["ext:cap"]), &owned(&["ext:cap"])).unwrap();
     }
@@ -638,6 +641,38 @@ mod tests {
             ),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn test_kinds_rules_drop_paykit_kinds_from_another_protocol_only() {
+        let identity = IdentityKey::from_secret([6; 32]);
+        // A chat-only certificate is valid at Paykit's verifiers, but authorizes no Paykit
+        // kind: its payment_request and its resend_request are dropped at check 8.
+        let chat = issued(&identity, &["chat"], &[Permission::ListsRead]);
+        crate::scopes::check_certificate(&chat).unwrap();
+        let wallet = PaykitKindRules::new(owned(&["pay"]));
+        let request = message(
+            "paykit.payment_request",
+            json!({ "amount": { "asset": "btc", "value": "1" }, "payment_reference": "r",
+                "proposal_expires_at": null }),
+        );
+        let error = wallet
+            .check_scopes(&request, &chat)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Paykit spec 3.3"), "{error}");
+        let resend = message("paykit.resend_request", json!({ "msg_ids": [] }));
+        assert!(wallet.check_scopes(&resend, &chat).is_err());
+        // The same kinds from a Paykit App that also chats pass.
+        let shop = issued(
+            &identity,
+            &["request", "chat"],
+            &[Permission::ListsRead, Permission::ConversationAdd],
+        );
+        wallet.check_scopes(&request, &shop).unwrap();
+        wallet.check_scopes(&resend, &shop).unwrap();
+        // An own app of another protocol only takes no Paykit kind either.
+        assert!(check_kind_scopes(&resend, &owned(&["pay"]), &owned(&["chat"])).is_err());
     }
 
     #[test]
