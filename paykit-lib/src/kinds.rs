@@ -495,16 +495,17 @@ pub enum Side {
 /// The payer wraps its acceptance, rejection, cancellation and proof about a labelled
 /// request only to the payee's apps holding `request` or that label, and about an
 /// unlabelled request, or a payment without one, only to those holding `request`. A payee's
-/// cancellation carries no label and goes to the payer's apps holding `pay` or `request`.
-/// Every other kind goes to the apps that receive it (Paykit spec 3.3). A resend answer
-/// follows the same targets (Paykit wire 4.12).
+/// cancellation carries no label and goes only to the payer's apps holding `pay`: a
+/// cancellation's recipient holds the other role than its sender (Paykit spec 3.3), as
+/// check 8 requires ([`check_kind_scopes`]). Every other kind goes to the apps that receive
+/// it (Paykit spec 3.3). A resend answer follows the same targets (Paykit wire 4.12).
 pub fn targets_app(kind: Kind, side: Side, label: Option<&Label>, scopes: &[String]) -> bool {
-    if !holds_role(scopes, kind.recipients()) && kind != Kind::PaymentRequestCancellation {
+    if !holds_role(scopes, kind.recipients()) {
         return false;
     }
     match (kind, side) {
         (Kind::PaymentRequestCancellation, Side::Payee) => {
-            label.is_none() && scopes.iter().any(|s| s == "pay" || s == "request")
+            label.is_none() && scopes.iter().any(|s| s == "pay")
         }
         (k, Side::Payer) if k.is_payer_reply() => match label {
             Some(label) => switch_scopes::holds(scopes, &label.scope()),
@@ -879,6 +880,12 @@ mod tests {
         ));
         let cancel = Kind::PaymentRequestCancellation;
         assert!(targets_app(cancel, Side::Payee, None, &owned(&["pay"])));
+        assert!(targets_app(
+            cancel,
+            Side::Payee,
+            None,
+            &owned(&["pay", "request"])
+        ));
         assert!(!targets_app(
             cancel,
             Side::Payee,
@@ -893,6 +900,69 @@ mod tests {
             None,
             &owned(&["pay"])
         ));
+    }
+
+    #[test]
+    fn test_kinds_cancellation_targets_the_other_role() {
+        let cancel = Kind::PaymentRequestCancellation;
+        let shop1 = Label::parse("shop1").unwrap();
+        // The payee's goes only to the payer's apps holding `pay`, never to one holding only
+        // `request`, which check 8 would drop.
+        assert!(!targets_app(
+            cancel,
+            Side::Payee,
+            None,
+            &owned(&["request"])
+        ));
+        assert!(!targets_app(
+            cancel,
+            Side::Payee,
+            Some(&shop1),
+            &owned(&["pay"])
+        ));
+        // The payer's goes only to the payee's apps the label rule allows, never to `pay`.
+        assert!(!targets_app(cancel, Side::Payer, None, &owned(&["pay"])));
+        assert!(targets_app(
+            cancel,
+            Side::Payer,
+            Some(&shop1),
+            &owned(&["request:shop1"])
+        ));
+        assert!(!targets_app(
+            cancel,
+            Side::Payer,
+            Some(&shop1),
+            &owned(&["pay"])
+        ));
+        // Every app a cancellation targets takes it at check 8, from a sender of that side.
+        let plain = message("paykit.payment_request_cancellation", json!({}));
+        let labelled = message(
+            "paykit.payment_request_cancellation",
+            json!({ "label": "shop1" }),
+        );
+        let scope_sets: [&[&str]; 6] = [
+            &["pay"],
+            &["request"],
+            &["request:shop1"],
+            &["pay", "request"],
+            &["pay", "request:shop1"],
+            &["contacts"],
+        ];
+        for own in scope_sets {
+            let own = owned(own);
+            for (side, sender, label, m) in [
+                (Side::Payee, owned(&["request"]), None, &plain),
+                (Side::Payee, owned(&["request:shop1"]), None, &plain),
+                (Side::Payer, owned(&["pay"]), None, &plain),
+                (Side::Payer, owned(&["pay"]), Some(&shop1), &labelled),
+            ] {
+                assert_eq!(
+                    targets_app(cancel, side, label, &own),
+                    check_kind_scopes(m, &sender, &own).is_ok(),
+                    "{side:?} from {sender:?} to {own:?}"
+                );
+            }
+        }
     }
 
     #[test]
