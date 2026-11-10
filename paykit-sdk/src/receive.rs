@@ -24,15 +24,15 @@
 //! on what the switch holds.
 
 use paykit_lib::bodies::ResendRequest;
-use paykit_lib::derive::{natural_key, request_obligation};
+use paykit_lib::derive::{natural_key, request_obligation_blinded};
 use paykit_lib::records::{PaymentListRecord, StoredMessage, UnrequestedDestination};
 use paykit_lib::{AttemptId, Body};
 use pubky_switch_client::app::{
-    AppError, ClaimOp, LocalWrite, ObligationDeadline, ReceiveContext, Refusal as ClientRefusal,
+    AppError, ClaimFetch, ClaimOp, LocalWrite, Need, ObligationDeadline, ReceiveContext,
+    Refusal as ClientRefusal,
 };
-use pubky_switch_core::claims::{Basis, ClaimStatus, Outcome};
+use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome};
 use pubky_switch_core::enc::serde_b64;
-use pubky_switch_core::ident::NamingKey;
 use pubky_switch_core::scopes::Permission;
 use pubky_switch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
@@ -52,6 +52,9 @@ pub(crate) enum Fail {
     NotNow,
     /// The effect can't be built: the entry is dropped, with the rule.
     Drop(String),
+    /// The effect needs these claims read from the switch first (Switch spec 10.2): the
+    /// client reads them and calls the step again.
+    Need(Vec<Need>),
 }
 
 impl From<AppError> for Fail {
@@ -85,12 +88,10 @@ impl std::fmt::Debug for QueuedAnswer {
 }
 
 /// The writes `stored`, a message that passed check 10, causes, added to `cx` (module docs).
-/// `naming` is the app's naming key, for the claim of a receipt's obligation.
 pub(crate) fn effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
     seq: u64,
-    naming: Option<&NamingKey>,
 ) -> Result<(), Fail> {
     let sender = stored.sender();
     let scopes = cx.cert().scopes().to_vec();
@@ -123,7 +124,7 @@ pub(crate) fn effect(
             }
         }
         Body::PaymentReceipt(receipt) if pay => {
-            receipt_effect(cx, stored, receipt.attempt_id, naming)?;
+            receipt_effect(cx, stored, receipt.attempt_id)?;
         }
         Body::PrivatePaymentList(_) if pay => {
             list_effect(cx, stored)?;
@@ -248,7 +249,6 @@ fn receipt_effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
     attempt_id: AttemptId,
-    naming: Option<&NamingKey>,
 ) -> Result<(), Fail> {
     let sender = stored.sender();
     let own = cx.identity();
@@ -273,13 +273,10 @@ fn receipt_effect(
     }
     let (obligation, deadline) = match stored.message().refs.get(1) {
         Some(request) => {
-            let Some(naming) = naming else {
-                return Ok(());
-            };
             let deadline = crate::requests::request_of(&record)
                 .and_then(|(_, body)| body.attempt_deadline(None).ok())
                 .map_or(ObligationDeadline::NotKnown, crate::pay::own_deadline);
-            (request_obligation(naming, &sender, request, 0), deadline)
+            (obligation(cx, &sender, request, 0), deadline)
         }
         None => {
             // The deadline of a payment without a request is the one its journal kept.
@@ -295,7 +292,9 @@ fn receipt_effect(
             )
         }
     };
-    let Some(view) = cx.claim_view(&obligation)? else {
+    // A claim the app keeps no view of is read from the switch first, so the receipt
+    // settles it in the cursor's batch (Switch spec 10.2 row 3).
+    let Some(view) = claim_view_or_need(cx, &obligation)? else {
         return Ok(());
     };
     if view.status == ClaimStatus::Settled {
@@ -319,6 +318,34 @@ fn receipt_effect(
         cx.claim(op, Vec::new(), deadline)?;
     }
     Ok(())
+}
+
+/// The obligation ID of a request or Billing Period, blinded through the receive context
+/// (Paykit wire 1.5).
+pub(crate) fn obligation(
+    cx: &ReceiveContext<'_>,
+    payee: &[u8; 32],
+    request_hash: &[u8; 32],
+    period_start_secs: u64,
+) -> [u8; 32] {
+    request_obligation_blinded(&cx.blind(payee), &cx.blind(request_hash), period_start_secs)
+}
+
+/// The view of `claim_key` the app keeps, or the switch's answer read for this step;
+/// [`Fail::Need`] when neither is there yet, and `None` when the switch holds no such claim
+/// or refused the read.
+pub(crate) fn claim_view_or_need(
+    cx: &ReceiveContext<'_>,
+    claim_key: &[u8; 32],
+) -> Result<Option<ClaimView>, Fail> {
+    if let Some(view) = cx.claim_view(claim_key)? {
+        return Ok(Some(view));
+    }
+    match cx.switch_claim(claim_key) {
+        None => Err(Fail::Need(vec![Need::Claim(*claim_key)])),
+        Some(ClaimFetch::Read(read)) => Ok(Some(read.view.clone())),
+        Some(_) => Ok(None),
+    }
 }
 
 /// A Private Payment List (Paykit spec 5, 8.4; Paykit wire 5.4): the latest list of its

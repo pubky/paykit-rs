@@ -17,7 +17,7 @@ use paykit_lib::bodies::{
     PaymentDeadline, PaymentReceipt, PaymentRequest, RequestDestination, RequestReply,
 };
 use paykit_lib::collections::Collection;
-use paykit_lib::derive::{natural_key, request_obligation};
+use paykit_lib::derive::natural_key;
 use paykit_lib::kinds::Kind;
 use paykit_lib::records::{ActivityRecord, ActivitySide, StoredMessage};
 use paykit_lib::scopes::{PaykitScope, ScopeName};
@@ -293,15 +293,15 @@ impl Paykit {
             .policy_label(&held.policy)
             .ok_or(Refusal::NotFound)?;
         let value = held.content.value().ok_or(Refusal::NotFound)?;
-        let bound = ActivityRecord::bind(
+        let bound = crate::records::bind_activity(
             value,
             &self.identity(),
             ActivitySide::Payee,
-            self.naming(),
-            record,
             label.as_ref(),
+            record,
+            |t| self.app.record_key(t).ok(),
         )
-        .map_err(|_| Refusal::NotFound)?;
+        .ok_or(Refusal::NotFound)?;
         let target = ActivityTarget::payee(bound.natural_key(&self.identity())?, label.as_ref());
         Ok((target, bound))
     }
@@ -506,13 +506,13 @@ impl Paykit {
             let Some(value) = held.content.value() else {
                 continue;
             };
-            let Ok(record) = ActivityRecord::bind(
+            let Some(record) = crate::records::bind_activity(
                 value,
                 &own,
                 ActivitySide::Payer,
-                self.naming(),
-                &held.key,
                 None,
+                &held.key,
+                |t| self.app.record_key(t).ok(),
             ) else {
                 continue;
             };
@@ -579,7 +579,7 @@ impl Paykit {
         if record.shows_paid() {
             return Ok(RequestStatus::Paid);
         }
-        let obligation = request_obligation(self.naming(), payee, hash, 0);
+        let obligation = self.obligation(payee, hash, 0);
         if let Some(evidence) = self.app.claim_evidence(&obligation).await? {
             let view = evidence.view;
             match view.status {
@@ -675,8 +675,7 @@ impl Paykit {
         if cancelled(&record) {
             return Err(Refusal::Cancelled.into());
         }
-        let obligation =
-            request_obligation(self.naming(), &request.payee, &request.request_hash, 0);
+        let obligation = self.obligation(&request.payee, &request.request_hash, 0);
         if let Some(read) = self.app.read_claim(&obligation).await? {
             refuse_on_claim(&read.view)?;
         }

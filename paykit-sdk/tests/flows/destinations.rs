@@ -1,8 +1,8 @@
 //! Destination checks before paying (Paykit spec 4, 7.2): only from the payee's current app.
 
 use paykit_sdk::{PayOptions, Refusal, RequestStatus};
+use pubky_switch_client::app::UserConfirmed;
 use pubky_switch_client::clock::Clock;
-use pubky_switch_core::claims::Outcome;
 use pubky_switch_core::records::RemovedApp;
 
 use crate::common::{draft, request_from, World};
@@ -37,17 +37,9 @@ async fn test_destinations_from_a_revoked_app_refused() {
         matches!(refused.refusal(), Some(Refusal::Destination(_))),
         "{refused:?}"
     );
-    // The attempt was written, then `failed` instead of paying: nothing moved.
+    // Refused before any write: nothing journaled, no attempt, nothing moved.
     assert!(w.rail.all_executions().is_empty());
-    let payments = wallet.payments().await.unwrap();
-    assert_eq!(payments.len(), 1);
-    let claim = wallet
-        .app_mut()
-        .read_claim(&payments[0].obligation)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(claim.view.attempts[0].outcome, Outcome::Failed);
+    assert!(wallet.payments().await.unwrap().is_empty());
     assert_eq!(
         wallet.request(&request).await.unwrap().status,
         RequestStatus::Open
@@ -80,8 +72,10 @@ async fn test_destinations_payee_identity_unreadable_refused() {
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
-    // The payee's identity.json can't be read before money moves, neither from its
-    // Homeserver nor from its switch: the payment fails closed.
+    // The payee's identity.json can be read neither from its Homeserver nor from its
+    // switch: the copy held stands, and a payment the user started goes on only once the
+    // user confirms it although the switch couldn't confirm the payee's apps (Switch spec
+    // 4.3). Nothing is written before that.
     w.homeserver
         .remove(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH);
     w.router.remove(crate::common::BOB_ORIGIN);
@@ -89,9 +83,42 @@ async fn test_destinations_payee_identity_unreadable_refused() {
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap_err();
-    assert!(
-        matches!(refused.refusal(), Some(Refusal::Destination(_))),
-        "{refused:?}"
-    );
+    assert_eq!(refused.refusal(), Some(&Refusal::IdentityUnconfirmed));
     assert!(w.rail.all_executions().is_empty());
+    assert!(wallet.payments().await.unwrap().is_empty());
+    let confirmed = || PayOptions {
+        unconfirmed_identity_confirmed: Some(UserConfirmed::new()),
+        ..PayOptions::default()
+    };
+    // Once the copy held is more than 10 minutes old and nothing can be read, not even the
+    // user's confirmation lets it be acted on.
+    w.clock.advance_ms(11 * 60_000);
+    let stale = wallet.pay_request(&request, confirmed()).await.unwrap_err();
+    assert!(
+        matches!(stale.refusal(), Some(Refusal::IdentityUnavailable(_))),
+        "{stale:?}"
+    );
+    assert!(wallet.payments().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_destinations_unconfirmed_payee_paid_once_the_user_confirms() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.homeserver
+        .remove(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH);
+    w.router.remove(crate::common::BOB_ORIGIN);
+    let confirmed = PayOptions {
+        unconfirmed_identity_confirmed: Some(UserConfirmed::new()),
+        ..PayOptions::default()
+    };
+    let outcome = wallet.pay_request(&request, confirmed).await.unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
 }

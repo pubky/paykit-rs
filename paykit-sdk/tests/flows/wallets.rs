@@ -90,3 +90,60 @@ async fn test_wallets_one_rejects_the_other_cannot_pay() {
     assert_eq!(refused.refusal(), Some(&Refusal::Rejected));
     assert!(w.rail.all_executions().is_empty());
 }
+
+#[tokio::test]
+async fn test_wallets_receipt_settles_a_claim_the_app_never_read() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+
+    // A wallet joined since holds the request record but no view of its claim. The payee's
+    // receipt makes its receive step read the claim from the switch, and settle the open
+    // attempt by evidence in the cursor's batch (Switch spec 10.2 row 3).
+    let mut tablet = w.wallet("tablet").await;
+    assert!(tablet
+        .app()
+        .claim_evidence(&obligation)
+        .await
+        .unwrap()
+        .is_none());
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[tablet.app_id()],
+        "paykit.payment_receipt",
+        vec![[9; 32], request.request_hash],
+        paykit_lib::bodies::PaymentReceipt {
+            attempt_id,
+            billing_period: None,
+        }
+        .to_body(),
+    );
+    tablet.receive(None).await.unwrap();
+    let claim = tablet
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        claim.view.status,
+        pubky_switch_core::claims::ClaimStatus::Settled
+    );
+    assert_eq!(
+        claim.view.attempts[0].outcome,
+        pubky_switch_core::claims::Outcome::Done
+    );
+}

@@ -12,7 +12,7 @@
 //! attempt wasn't paid (Paykit spec 7.3).
 
 use paykit_lib::collections::Collection;
-use paykit_lib::derive::{payment_obligation, request_obligation};
+use paykit_lib::derive::payment_obligation;
 use paykit_lib::records::{ActivityRecord, ActivitySide, RecordBinding};
 use paykit_lib::AttemptId;
 use pubky_switch_client::app::{ClaimOp, ObligationDeadline, UserConfirmed};
@@ -69,12 +69,7 @@ impl Paykit {
         for record in records {
             match record.binding() {
                 Ok(RecordBinding::Request { request_hash }) => out.push(Obligation {
-                    claim_key: request_obligation(
-                        self.naming(),
-                        &record.counterparty,
-                        &request_hash,
-                        0,
-                    ),
+                    claim_key: self.obligation(&record.counterparty, &request_hash, 0),
                     payee: record.counterparty,
                     request_hash: Some(request_hash),
                 }),
@@ -104,13 +99,13 @@ impl Paykit {
             let Some(value) = held.content.value() else {
                 continue;
             };
-            if let Ok(record) = ActivityRecord::bind(
+            if let Some(record) = crate::records::bind_activity(
                 value,
                 &own,
                 ActivitySide::Payer,
-                self.naming(),
-                &held.key,
                 None,
+                &held.key,
+                |t| self.app.record_key(t).ok(),
             ) {
                 out.push(record);
             }

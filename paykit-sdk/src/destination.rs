@@ -19,61 +19,107 @@
 //! A removed app's destinations are ignored, even if its messages are still held (Paykit spec
 //! 4). Public endpoints, from app records, aren't read yet ([`crate::app_records`]).
 //!
+//! The payee's `identity.json` is acted on as Switch spec 4.3 allows ([`PeerIdentity::may_act`]):
+//! once its switch confirmed the copy; otherwise a payment the user started goes on only on
+//! the user's explicit confirmation, and an automatic one (an executor) never does.
+//!
 //! Security: this is the check that stops a payment to a destination an attacker planted. It
-//! fails closed: a lookup of the payee's `identity.json` that fails, or doesn't complete at
-//! its switch, refuses the payment (Paykit spec 7.2: no lookup, no automatic payment).
+//! fails closed: a lookup that fails refuses the payment, and an automatic payment never acts
+//! on the Homeserver's copy alone (Paykit spec 7.2).
+//!
+//! [`PeerIdentity::may_act`]: pubky_switch_client::app::PeerIdentity::may_act
 
 use paykit_lib::bodies::RequestDestination;
 use paykit_lib::records::{DestinationSource, StoredMessage};
 use paykit_lib::scopes::acts_as_payee;
 use paykit_lib::Body;
-use pubky_switch_client::app::SwitchCopy;
+use pubky_switch_client::app::{Initiator, MayAct, UserConfirmed};
 use pubky_switch_core::records::{IdentityDoc, Standing};
 
-use crate::error::{PaykitError, Result};
+use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::Destination;
 use crate::paykit::Paykit;
 
+/// How long a payment waits for the payee's switch to answer a lookup that is still running
+/// after the Homeserver's read, before a user's payment may go on the user's confirmation
+/// (Switch spec 4.3, "No added latency").
+pub const IDENTITY_GRACE_MS: u64 = 2_000;
+
 impl Paykit {
-    /// The payee's `identity.json`, looked up within the last 10 minutes (Switch spec 4.3):
-    /// the client's copy while fresh, otherwise read again from the Homeserver and the
-    /// payee's switch, the higher version taken. `Err` names why it can't be had: a lookup
-    /// that failed, or one whose switch read didn't complete, for the lookup can't tell
-    /// then whether the copy it returns was read now.
+    /// The payee's `identity.json` for acting on its destinations (Paykit spec 4, 7.2; Switch
+    /// spec 4.3, "The switch's copy"): the copy held while it and its last switch lookup are
+    /// fresh, else the Homeserver's copy and then the payee's switch's, through the client's
+    /// version floor and equivocation check. A copy the switch confirmed is acted on. One it
+    /// couldn't confirm is acted on only for a payment the user started and confirmed
+    /// (`confirmed`); an automatic payment looks it up once more and otherwise isn't made.
+    /// `Err` holds the refusal.
     pub(crate) async fn payee_identity(
         &mut self,
         payee: &[u8; 32],
-    ) -> std::result::Result<IdentityDoc, String> {
-        match self.app.identity_of(payee, false).await {
-            Ok(found) if found.switch_copy == SwitchCopy::Read => Ok(found.doc),
-            Ok(_) => Err(
-                "Switch spec 4.3: the lookup of the payee's identity.json didn't \
-                 complete at its switch"
-                    .into(),
-            ),
-            Err(error) => Err(format!(
-                "Switch spec 4.3: the payee's identity.json can't be read now: {error}"
-            )),
+        by: Initiator,
+        confirmed: Option<UserConfirmed>,
+    ) -> Result<std::result::Result<IdentityDoc, Refusal>> {
+        let mut refresh = false;
+        loop {
+            let lookup = match self.app.begin_identity_lookup(payee, refresh).await {
+                Ok(lookup) => lookup,
+                Err(error) => {
+                    return Ok(Err(Refusal::IdentityUnavailable(format!(
+                        "Switch spec 4.3: the payee's identity.json can't be read now: {error}"
+                    ))))
+                }
+            };
+            let mut identity = lookup.identity;
+            // The switch's half runs to its answer: the SDK keeps no timer of its own, so it
+            // never acts on the Homeserver's copy while the switch may still answer.
+            if let Some(switch) = lookup.switch {
+                identity = match self.app.finish_identity_lookup(switch.await).await {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        return Ok(Err(Refusal::IdentityUnavailable(format!(
+                            "Switch spec 4.3: the payee's identity.json can't be taken: {error}"
+                        ))))
+                    }
+                };
+            }
+            match identity.may_act(self.now(), by, IDENTITY_GRACE_MS) {
+                MayAct::Now => return Ok(Ok(identity.doc)),
+                MayAct::IfUserConfirms if confirmed.is_some() => return Ok(Ok(identity.doc)),
+                MayAct::IfUserConfirms => return Ok(Err(Refusal::IdentityUnconfirmed)),
+                MayAct::No | MayAct::LookUpAgain | MayAct::WaitForLookup if !refresh => {
+                    refresh = true;
+                }
+                _ => {
+                    return Ok(Err(Refusal::IdentityUnavailable(
+                        "Switch spec 4.3: no fresh copy of the payee's identity.json that its \
+                         switch confirmed; an automatic payment never acts on the Homeserver's \
+                         copy alone"
+                            .into(),
+                    )))
+                }
+            }
         }
     }
 
-    /// The checks of a destination before money moves (Paykit spec 4, 7.2): `Err` names the
-    /// rule that refuses it.
+    /// The checks of a destination before money moves (Paykit spec 4, 7.2): `Err` holds the
+    /// refusal.
     pub(crate) async fn check_destination(
         &mut self,
         payee: &[u8; 32],
         destination: &Destination,
         carrier: &StoredMessage,
         request_hash: Option<&[u8; 32]>,
-    ) -> Result<std::result::Result<(), String>> {
+        by: Initiator,
+        confirmed: Option<UserConfirmed>,
+    ) -> Result<std::result::Result<(), Refusal>> {
         if let Err(why) = carries(payee, destination, carrier, request_hash, self.now()) {
-            return Ok(Err(why));
+            return Ok(Err(Refusal::Destination(why)));
         }
-        let doc = match self.payee_identity(payee).await {
+        let doc = match self.payee_identity(payee, by, confirmed).await? {
             Ok(doc) => doc,
-            Err(why) => return Ok(Err(why)),
+            Err(refusal) => return Ok(Err(refusal)),
         };
-        Ok(current(&doc, destination, carrier, self.now()))
+        Ok(current(&doc, destination, carrier, self.now()).map_err(Refusal::Destination))
     }
 }
 

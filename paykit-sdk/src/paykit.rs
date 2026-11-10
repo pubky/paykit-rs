@@ -13,14 +13,13 @@
 
 use std::sync::Arc;
 
+use paykit_lib::derive::request_obligation_blinded;
 use paykit_lib::scopes::{acts_as_payee, check_certificate};
 use paykit_lib::{Decimal, Label};
 use pubky_switch_client::app::{
     App, AppBackup, AppConfig, AppEnv, AppEvent, JoinRequest, ReceiveReport,
 };
 use pubky_switch_client::clock::Clock;
-use pubky_switch_client::store::client_namespace;
-use pubky_switch_core::ident::NamingKey;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PaykitError, Refusal, Result};
@@ -134,11 +133,8 @@ impl std::fmt::Debug for Paykit {
 }
 
 impl Paykit {
-    fn new_protocol(env: &AppEnv, app_id: &[u8; 16]) -> Arc<PaykitProtocol> {
-        Arc::new(PaykitProtocol::new(
-            Arc::clone(env.store.store()),
-            client_namespace(app_id),
-        ))
+    fn new_protocol() -> Arc<PaykitProtocol> {
+        Arc::new(PaykitProtocol::new())
     }
 
     fn assemble(
@@ -152,7 +148,6 @@ impl Paykit {
         // wire 3.1): its scope rules, and permissions exactly as its scopes derive them.
         check_certificate(app.cert())?;
         protocol.set_own(app.identity(), app.cert().clone());
-        protocol.set_naming_key(app.naming_key().clone());
         Ok(Self {
             app,
             protocol,
@@ -175,8 +170,7 @@ impl Paykit {
         request: JoinRequest,
         rail: Arc<dyn Rail>,
     ) -> Result<Self> {
-        let app_id = request.keys.app_id_bytes();
-        let protocol = Self::new_protocol(&env, &app_id);
+        let protocol = Self::new_protocol();
         let app = App::join(env.clone(), protocol.clone(), config.app.clone(), request).await?;
         Self::assemble(app, env, protocol, config, rail)
     }
@@ -193,7 +187,7 @@ impl Paykit {
         app_id: [u8; 16],
         rail: Arc<dyn Rail>,
     ) -> Result<Self> {
-        let protocol = Self::new_protocol(&env, &app_id);
+        let protocol = Self::new_protocol();
         let app = App::load(env.clone(), protocol.clone(), config.app.clone(), app_id).await?;
         Self::assemble(app, env, protocol, config, rail)
     }
@@ -214,17 +208,14 @@ impl Paykit {
     ) -> Result<Self> {
         let app = App::restore(
             env.clone(),
-            Arc::new(PaykitProtocol::new(
-                Arc::clone(env.store.store()),
-                String::new(),
-            )),
+            Self::new_protocol(),
             config.app.clone(),
             &backup.app,
         )
         .await?;
         let app_id = app.app_id();
         drop(app);
-        let protocol = Self::new_protocol(&env, &app_id);
+        let protocol = Self::new_protocol();
         let mut app = App::load(env.clone(), protocol.clone(), config.app.clone(), app_id).await?;
         let mut tx = Tx::default();
         for entry in &backup.journal {
@@ -294,8 +285,20 @@ impl Paykit {
         self.app.highest_service_time()
     }
 
-    pub(crate) fn naming(&self) -> &NamingKey {
-        self.app.naming_key()
+    /// The obligation ID of a request, or of its Billing Period starting at
+    /// `period_start_secs` (0 for a one-time request), blinded through the client with the
+    /// identity's naming key (Paykit spec 7.1, Paykit wire 1.5).
+    pub(crate) fn obligation(
+        &self,
+        payee: &[u8; 32],
+        request_hash: &[u8; 32],
+        period_start_secs: u64,
+    ) -> [u8; 32] {
+        request_obligation_blinded(
+            &self.app.blind(payee),
+            &self.app.blind(request_hash),
+            period_start_secs,
+        )
     }
 
     pub(crate) fn scopes(&self) -> Vec<String> {

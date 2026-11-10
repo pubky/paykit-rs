@@ -72,6 +72,14 @@ pub enum Refusal {
     /// before money moves (Paykit spec 4, 7.2).
     #[error("Paykit spec 7.2: {0}")]
     IdentityUnavailable(String),
+    /// The payee's switch couldn't confirm its `identity.json` in time: a payment the user
+    /// started goes on only once the user confirms paying although the identity's switch
+    /// couldn't confirm its apps (Switch spec 4.3, "No silent fallback"; Paykit spec 7.2).
+    /// Nothing was written.
+    #[error(
+        "Switch spec 4.3: the payee's switch couldn't confirm its apps; the user must confirm"
+    )]
+    IdentityUnconfirmed,
     /// The claim's attempt is open: a rejection or cancellation is refused while a payment is
     /// in progress (Paykit spec 8.1).
     #[error("Paykit spec 8.1: a payment is in progress")]

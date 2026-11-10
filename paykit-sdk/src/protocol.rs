@@ -21,7 +21,7 @@
 //! record marks keep an own app from silently dropping a message another app recorded
 //! (Switch spec 8.2). Destinations never come from shared state alone (Paykit spec 6).
 
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{PoisonError, RwLock};
 
 use paykit_lib::bodies::check_body;
 use paykit_lib::collections::Collection;
@@ -30,12 +30,10 @@ use paykit_lib::records::{ActivitySide, PaymentListRecord, StoredMessage};
 use paykit_lib::scopes::{acts_as_payee, PaykitScope, ScopeName};
 use paykit_lib::{Label, PaykitKindRules};
 use pubky_switch_client::app::{
-    Collection as SwitchCollection, Effect, LocalWrite, LossActions, MissedEntries, OpaqueRule,
-    Outcome, Protocol, ProviderLoss, ReceiveContext, ReceivedMessage, ResendNeeded,
+    Collection as SwitchCollection, Effect, LocalView, LocalWrite, LossActions, MissedEntries,
+    OpaqueRule, Outcome, Protocol, ProviderLoss, ReceiveContext, ReceivedMessage, ResendNeeded,
 };
-use pubky_switch_client::store::StateStore;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
-use pubky_switch_core::ident::NamingKey;
 use pubky_switch_core::message::Message;
 use pubky_switch_core::receive::KindRules;
 use pubky_switch_core::records::{AppCert, AppRecord};
@@ -78,33 +76,31 @@ struct Own {
 
 /// Paykit as the client's [`Protocol`].
 ///
-/// One instance per app: it reads the protocol's own local state in the app's namespace,
-/// and learns the app's identity and certificate once the app has joined or loaded
-/// ([`PaykitProtocol::set_own`]); [`crate::Paykit`] does both.
+/// One instance per app: it learns the app's identity and certificate once the app has
+/// joined or loaded ([`PaykitProtocol::set_own`]); [`crate::Paykit`] does both. Its
+/// callbacks read Paykit's own local state through what the client hands them (the receive
+/// context, a [`LocalView`]), and never hold the naming key: they blind through the client.
 pub struct PaykitProtocol {
-    store: Arc<dyn StateStore>,
-    ns: String,
     own: RwLock<Option<Own>>,
-    /// The identity's naming key, for the claim keys of received receipts' obligations
-    /// (Paykit spec 10): the receive context derives record keys but not a protocol's claim
-    /// keys. Sensitive; zeroized when dropped.
-    naming: RwLock<Option<NamingKey>>,
 }
 
 impl std::fmt::Debug for PaykitProtocol {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "PaykitProtocol({})", self.ns)
+        f.write_str("PaykitProtocol")
+    }
+}
+
+impl Default for PaykitProtocol {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl PaykitProtocol {
-    /// The protocol of the app whose state is in `ns` of `store`.
-    pub fn new(store: Arc<dyn StateStore>, ns: String) -> Self {
+    /// The protocol of one app, before it knows the app.
+    pub fn new() -> Self {
         Self {
-            store,
-            ns,
             own: RwLock::new(None),
-            naming: RwLock::new(None),
         }
     }
 
@@ -114,18 +110,53 @@ impl PaykitProtocol {
         *own = Some(Own { identity, cert });
     }
 
-    /// Set the identity's naming key, after a join or a load.
-    pub(crate) fn set_naming_key(&self, naming: NamingKey) {
-        let mut held = self.naming.write().unwrap_or_else(PoisonError::into_inner);
-        *held = Some(naming);
-    }
-
     fn own(&self) -> Option<Own> {
         self.own
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
+
+    /// The side a payer reply goes from (Paykit spec 3.4): a cancellation's is kept with the
+    /// batch that queued it; without that, a labelled one is a payer's, and an unlabelled one
+    /// from an app that acts only as payee is the payee's.
+    fn reply_side(&self, kind: Kind, label: Option<&Label>, kept: Option<SideTag>) -> Side {
+        if kind != Kind::PaymentRequestCancellation {
+            return Side::Payer;
+        }
+        match kept {
+            Some(SideTag::Payee) => Side::Payee,
+            Some(SideTag::Payer) => Side::Payer,
+            None if label.is_some() => Side::Payer,
+            None => match self.own() {
+                Some(own)
+                    if acts_as_payee(own.cert.scopes())
+                        && !own.cert.scopes().iter().any(|s| s == "pay") =>
+                {
+                    Side::Payee
+                }
+                _ => Side::Payer,
+            },
+        }
+    }
+
+    fn narrows(&self, message: &Message, recipient: &AppRecord, kept: Option<SideTag>) -> bool {
+        let Some(kind) = Kind::from_kind(&message.kind) else {
+            return true;
+        };
+        if !kind.is_payer_reply() {
+            return true;
+        }
+        let label = body_label(message);
+        let side = self.reply_side(kind, label.as_ref(), kept);
+        targets_app(kind, side, label.as_ref(), recipient.cert().scopes())
+    }
+}
+
+/// A record of Paykit's local state, read through a [`LocalView`].
+fn view_get<T: serde::de::DeserializeOwned>(view: &LocalView<'_>, key: &str) -> Option<T> {
+    let bytes = view.local_get(key.as_bytes()).ok()??;
+    state::decode(&bytes).ok()
 }
 
 /// Check 10 of a message that passed checks 1 to 9 (Paykit wire 4.1): a kind this SDK
@@ -224,36 +255,19 @@ impl Protocol for PaykitProtocol {
     /// that label, and about an unlabelled request only to apps holding `request`; a payee's
     /// cancellation, without a label, to apps holding `pay` or `request`.
     fn sends_to(&self, message: &Message, recipient: &AppRecord) -> bool {
-        let Some(kind) = Kind::from_kind(&message.kind) else {
-            return true;
-        };
-        if !kind.is_payer_reply() {
-            return true;
-        }
-        let label = body_label(message);
-        let side = if kind == Kind::PaymentRequestCancellation {
-            match state::get_sync::<SideTag>(
-                self.store.as_ref(),
-                &self.ns,
-                &key::side(&message.msg_id),
-            ) {
-                Some(SideTag::Payee) => Side::Payee,
-                Some(SideTag::Payer) => Side::Payer,
-                None if label.is_some() => Side::Payer,
-                None => match self.own() {
-                    Some(own)
-                        if acts_as_payee(own.cert.scopes())
-                            && !own.cert.scopes().iter().any(|s| s == "pay") =>
-                    {
-                        Side::Payee
-                    }
-                    _ => Side::Payer,
-                },
-            }
-        } else {
-            Side::Payer
-        };
-        targets_app(kind, side, label.as_ref(), recipient.cert().scopes())
+        self.narrows(message, recipient, None)
+    }
+
+    /// [`Protocol::sends_to`], with the side a cancellation was sent from as the batch that
+    /// queued it kept it.
+    fn sends_to_with(
+        &self,
+        message: &Message,
+        recipient: &AppRecord,
+        view: &LocalView<'_>,
+    ) -> bool {
+        let kept = view_get::<SideTag>(view, &key::side(&message.msg_id));
+        self.narrows(message, recipient, kept)
     }
 
     /// Check 10 (Paykit wire 4.1) and the message's effect, added to the batch that moves
@@ -264,14 +278,10 @@ impl Protocol for PaykitProtocol {
             Ok(stored) => stored,
             Err(reason) => return Outcome::Drop { reason },
         };
-        let naming = self
-            .naming
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        match receive::effect(cx, &stored, message.seq, naming.as_ref()) {
+        match receive::effect(cx, &stored, message.seq) {
             // A write that can't be built now leaves the entry waiting, whatever is returned.
             Ok(()) | Err(Fail::NotNow) => Outcome::Apply(Effect::default()),
+            Err(Fail::Need(needs)) => Outcome::Need(needs),
             Err(Fail::Drop(reason)) => Outcome::Drop { reason },
         }
     }
@@ -299,20 +309,32 @@ impl Protocol for PaykitProtocol {
         .unwrap_or_default()
     }
 
-    /// A provider loss (Switch spec 12.6 steps 2 and 4): ask every counterparty with Paykit
-    /// activity to send again from the old cursor's time, and add their conversation entries
-    /// back.
+    /// A provider loss, without the protocol's state at hand: only the re-sends are queued.
     fn provider_lost(&self, loss: &ProviderLoss) -> LossActions {
-        let conversations = state::scan_sync::<u64>(self.store.as_ref(), &self.ns, key::PEERS)
-            .into_iter()
-            .filter_map(|(rest, _)| unb64_array::<32>(&rest).ok())
-            .collect();
         LossActions {
-            conversations,
+            conversations: Vec::new(),
             local: state::local_put(&key::missed(loss.accepted_from_ms), &loss.accepted_from_ms)
                 .map(|w| vec![w])
                 .unwrap_or_default(),
         }
+    }
+
+    /// A provider loss (Switch spec 12.6 steps 2 and 4): ask every counterparty with Paykit
+    /// activity to send again from the old cursor's time, and add their conversation entries
+    /// back.
+    fn provider_lost_with(&self, loss: &ProviderLoss, view: &LocalView<'_>) -> LossActions {
+        let conversations = view
+            .local_scan(key::PEERS.as_bytes())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(k, _)| {
+                let rest = k.get(key::PEERS.len()..)?;
+                unb64_array::<32>(std::str::from_utf8(rest).ok()?).ok()
+            })
+            .collect();
+        let mut actions = self.provider_lost(loss);
+        actions.conversations = conversations;
+        actions
     }
 
     fn adds_conversation(&self, kind: &str) -> bool {
@@ -434,12 +456,11 @@ pub(crate) fn writes_payee_label(scopes: &[String], label: Option<&Label>) -> bo
 
 #[cfg(test)]
 mod tests {
-    use pubky_switch_client::store::MemoryStore;
 
     use super::*;
 
     fn protocol() -> PaykitProtocol {
-        PaykitProtocol::new(Arc::new(MemoryStore::new()), "client/x".into())
+        PaykitProtocol::new()
     }
 
     #[test]
@@ -492,7 +513,6 @@ mod tests {
 #[cfg(test)]
 mod receive_tests {
     use paykit_lib::records::ActivityRecord;
-    use pubky_switch_client::store::MemoryStore;
     use pubky_switch_core::records::Standing;
     use serde_json::json;
 
@@ -515,7 +535,7 @@ mod receive_tests {
     }
 
     fn protocol_of(own: &Party) -> PaykitProtocol {
-        let p = PaykitProtocol::new(Arc::new(MemoryStore::new()), "client/x".into());
+        let p = PaykitProtocol::new();
         p.set_own(own.id(), own.cert.clone());
         p
     }

@@ -20,15 +20,15 @@
 //! second execution").
 
 use paykit_lib::bodies::{PaymentProof, PaymentRequestAcceptance, RequestDestination};
-use paykit_lib::derive::{natural_key, payment_obligation, request_obligation};
+use paykit_lib::derive::{natural_key, payment_obligation};
 use paykit_lib::kinds::Kind;
 use paykit_lib::records::{
     ActivityRecord, ActivitySide, DestinationSource, PaymentListRecord, StoredMessage, UsedEndpoint,
 };
 use paykit_lib::{AttemptId, Body, Label, PaymentAmount, PaymentEndpointIdentifier};
 use pubky_switch_client::app::{
-    claim_conflict, AppError, ClaimOp, ObligationDeadline, OpBatch, Refusal as ClientRefusal,
-    SignedMessage, UserConfirmed,
+    claim_conflict, AppError, ClaimOp, Initiator, ObligationDeadline, OpBatch,
+    Refusal as ClientRefusal, SignedMessage, UserConfirmed,
 };
 use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome};
 use pubky_switch_core::http::ErrorCode;
@@ -75,6 +75,9 @@ pub struct PayOptions {
     /// The user has seen that the destination transfers another amount, or a fee above the
     /// app's cap, and pays it anyway (Paykit spec 7.2 step 1).
     pub transfer_confirmed: Option<UserConfirmed>,
+    /// The user has seen that the payee's switch couldn't confirm the payee's apps, and pays
+    /// anyway ([`Refusal::IdentityUnconfirmed`]; Switch spec 4.3, Paykit spec 7.2).
+    pub unconfirmed_identity_confirmed: Option<UserConfirmed>,
 }
 
 /// The result of a payment.
@@ -137,6 +140,10 @@ struct Plan {
     create: Option<ActivityRecord>,
     /// Condition the attempt on the version of the request record read.
     on_record: bool,
+    /// Who starts the payment: the user, or an executor (Switch spec 4.3).
+    by: Initiator,
+    /// The user's confirmation of a payee identity its switch couldn't confirm.
+    unconfirmed: Option<UserConfirmed>,
 }
 
 fn not_now(refusal: ClientRefusal) -> PaykitError {
@@ -189,8 +196,7 @@ impl Paykit {
         if cancelled(&record) {
             return Err(Refusal::Cancelled.into());
         }
-        let obligation =
-            request_obligation(self.naming(), &request.payee, &request.request_hash, 0);
+        let obligation = self.obligation(&request.payee, &request.request_hash, 0);
         let deadline = body.attempt_deadline(None)?;
         // No attempt once the deadline is at or before the highest service time verified
         // (Paykit spec 7.1); the service refuses one from its own clock anyway.
@@ -266,6 +272,8 @@ impl Paykit {
             reserve,
             create: None,
             on_record: true,
+            by: Initiator::User,
+            unconfirmed: options.unconfirmed_identity_confirmed,
         })
         .await
     }
@@ -329,6 +337,8 @@ impl Paykit {
             reserve,
             create: Some(record),
             on_record: false,
+            by: Initiator::User,
+            unconfirmed: options.unconfirmed_identity_confirmed,
         })
         .await
     }
@@ -527,8 +537,27 @@ impl Paykit {
             reserve,
             create,
             on_record,
+            by,
+            unconfirmed,
         } = plan;
         let attempt_id = entry.attempt()?;
+        // The payee's identity.json, before any write: a payment the user started whose
+        // payee's switch couldn't confirm it needs the user's confirmation first, and an
+        // automatic one isn't made (Paykit spec 7.2 step 1, Switch spec 4.3).
+        let request_hash = entry.request_hash()?;
+        if let Err(refusal) = self
+            .check_destination(
+                &entry.payee,
+                &entry.destination,
+                &carrier,
+                request_hash.as_ref(),
+                by,
+                unconfirmed,
+            )
+            .await?
+        {
+            return Err(refusal.into());
+        }
         // The attempt ID is journaled before the write (Paykit spec 7.2).
         self.save(&entry).await?;
         let op = ClaimOp::attempt(
@@ -620,19 +649,20 @@ impl Paykit {
                 )
                 .await;
         }
-        let request_hash = entry.request_hash()?;
+        // The copy checked before the write is still fresh: this reads no network unless
+        // it aged meanwhile (Switch spec 4.3).
         let checked = self
             .check_destination(
                 &entry.payee,
                 &entry.destination,
                 &carrier,
                 request_hash.as_ref(),
+                by,
+                unconfirmed,
             )
             .await?;
-        if let Err(why) = checked {
-            return self
-                .fail_attempt(&mut entry, Refusal::Destination(why))
-                .await;
+        if let Err(refusal) = checked {
+            return self.fail_attempt(&mut entry, refusal).await;
         }
         // Starting to pay is journaled before the payment begins (Paykit spec 7.2).
         self.set_stage(&mut entry, Stage::Paying).await?;

@@ -11,9 +11,9 @@
 //!   ([`pubky_switch_client::app::OpBatch::local`]);
 //! - on its own, in one store commit ([`pubky_switch_client::app::App::protocol_commit`]).
 //!
-//! Reads go through the client too ([`pubky_switch_client::app::App::protocol_get`],
-//! [`pubky_switch_client::app::App::protocol_scan`] and the receive context's), except in
-//! the protocol callbacks that get no context, which read the store synchronously.
+//! Reads go through the client too: [`pubky_switch_client::app::App::protocol_get`],
+//! [`pubky_switch_client::app::App::protocol_scan`], the receive context's and, in the
+//! protocol's other callbacks, a [`pubky_switch_client::app::LocalView`].
 //! Every value is `{"v":1,"d":<record>}`; a reader refuses another `v` as corrupt.
 //!
 //! | Key (after `p/`) | Holds | Sensitive |
@@ -27,8 +27,7 @@
 //! | `rs/<pubky>/<msg_id>` | when a message was last re-sent to a requester | |
 //! | `rsd/<pubky>/<day>` | how many messages were re-sent to a requester that day | |
 
-use pubky_switch_client::app::{LocalWrite, PROTOCOL_PREFIX};
-use pubky_switch_client::store::StateStore;
+use pubky_switch_client::app::LocalWrite;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -37,9 +36,6 @@ use crate::paykit::Paykit;
 
 /// The schema version of Paykit's local records.
 pub(crate) const LOCAL_VERSION: u32 = 1;
-
-/// The most entries one scan returns; scans page through larger sets.
-const SCAN_PAGE: u32 = 256;
 
 #[derive(Serialize)]
 struct Out<'a, T: Serialize> {
@@ -71,54 +67,12 @@ pub(crate) fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     Ok(read.d)
 }
 
-/// The full store key of a protocol key.
-fn full(key: &str) -> Vec<u8> {
-    [PROTOCOL_PREFIX, key.as_bytes()].concat()
-}
-
 /// A local write the client commits for the protocol: put `value` at `key`.
 pub(crate) fn local_put<T: Serialize>(key: &str, value: &T) -> Result<LocalWrite> {
     Ok(LocalWrite::Put {
         key: key.as_bytes().to_vec(),
         value: encode(value)?,
     })
-}
-
-/// Read a protocol key synchronously, from the protocol's callbacks.
-pub(crate) fn get_sync<T: DeserializeOwned>(
-    store: &dyn StateStore,
-    ns: &str,
-    key: &str,
-) -> Option<T> {
-    let bytes = store.get(ns, &full(key)).ok()??;
-    decode(&bytes).ok()
-}
-
-/// Scan a protocol prefix synchronously: the key's rest after the prefix, with its record.
-/// Entries that don't read are left out.
-pub(crate) fn scan_sync<T: DeserializeOwned>(
-    store: &dyn StateStore,
-    ns: &str,
-    prefix: &str,
-) -> Vec<(String, T)> {
-    let prefix_bytes = full(prefix);
-    let mut out = Vec::new();
-    let mut after: Option<Vec<u8>> = None;
-    loop {
-        let Ok(page) = store.scan(ns, &prefix_bytes, after.as_deref(), SCAN_PAGE) else {
-            return out;
-        };
-        let full_page = page.len() >= SCAN_PAGE as usize;
-        for (key, value) in page {
-            if let (Some(rest), Ok(record)) = (rest_of(&key, &prefix_bytes), decode(&value)) {
-                out.push((rest, record));
-            }
-            after = Some(key);
-        }
-        if !full_page {
-            return out;
-        }
-    }
 }
 
 fn rest_of(key: &[u8], prefix: &[u8]) -> Option<String> {
@@ -253,7 +207,8 @@ pub(crate) mod key {
 mod tests {
     use std::sync::Arc;
 
-    use pubky_switch_client::store::MemoryStore;
+    use pubky_switch_client::app::PROTOCOL_PREFIX;
+    use pubky_switch_client::store::{MemoryStore, StateStore};
 
     use super::*;
 
@@ -273,7 +228,7 @@ mod tests {
         tx.delete("peer/c");
         let writes = tx.into_writes();
         assert_eq!(writes.len(), 3);
-        // The client prefixes the protocol's keys with `p/`: the readers find them there.
+        // The client prefixes the protocol's keys with `p/`.
         let store: Arc<dyn StateStore> = Arc::new(MemoryStore::new());
         let mut batch = pubky_switch_client::store::WriteBatch::new();
         for write in &writes {
@@ -284,15 +239,8 @@ mod tests {
             }
         }
         store.commit(batch).unwrap();
-        assert!(store.get("client/x", b"p/peer/a").unwrap().is_some());
-        assert_eq!(
-            scan_sync::<u64>(store.as_ref(), "client/x", "peer/"),
-            vec![("a".into(), 1), ("b".into(), 2)]
-        );
-        assert_eq!(
-            get_sync::<u64>(store.as_ref(), "client/x", "peer/b"),
-            Some(2)
-        );
+        let held = store.get("client/x", b"p/peer/b").unwrap().unwrap();
+        assert_eq!(decode::<u64>(&held).unwrap(), 2);
         assert!(matches!(&writes[2], LocalWrite::Delete { key } if key == b"peer/c"));
     }
 

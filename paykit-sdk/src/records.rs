@@ -1,6 +1,7 @@
 //! Reading and writing Paykit's shared records through the client (Paykit spec 6, Paykit
-//! wire 5): every record is bound with the reader's own naming key before it is acted on,
-//! and every write is the client's compare-and-swap.
+//! wire 5): every record is bound before it is acted on, its key recomputed from what its
+//! messages name through the client, which blinds with the identity's naming key (Switch
+//! wire 1.5), and every write is the client's compare-and-swap.
 //!
 //! A message whose sending changes a record is signed first, then the record's next value
 //! is built from the signed message, holding its stored copy, and the record write and the
@@ -10,7 +11,8 @@
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::natural_key;
 use paykit_lib::kinds::Kind;
-use paykit_lib::records::{ActivityRecord, PaymentListRecord, StoredMessage};
+use paykit_lib::records::{ActivityRecord, ActivitySide, PaymentListRecord, StoredMessage};
+use paykit_lib::Label;
 use pubky_switch_client::app::{LocalWrite, OpBatch, OutgoingMessage, RecordTarget, SignedMessage};
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::ops::{Condition, OpKind};
@@ -39,15 +41,14 @@ impl Paykit {
         let Some(value) = held.content.value() else {
             return Ok(None);
         };
-        Ok(ActivityRecord::bind(
+        Ok(bind_activity(
             value,
             &self.identity(),
             target.side.side(),
-            self.naming(),
-            &key,
             target.label().as_ref(),
-        )
-        .ok())
+            &key,
+            |t| self.app.record_key(t).ok(),
+        ))
     }
 
     /// The activity record at `target`, read from the switch when the app holds none.
@@ -100,7 +101,8 @@ impl Paykit {
             let Some(value) = record.content.value() else {
                 continue;
             };
-            if let Ok(list) = PaymentListRecord::bind(value, &own, self.naming(), &record.key) {
+            if let Some(list) = bind_list(value, &own, &record.key, |t| self.app.record_key(t).ok())
+            {
                 if &list.payee == payee {
                     out.push(list);
                 }
@@ -180,6 +182,40 @@ impl Paykit {
             }
         }
     }
+}
+
+/// Bind an activity record value held at `key` under the policy of `label` (Paykit wire
+/// 5.1, 5.3, Switch spec 8.2): it reads as `own` holds it, its labels are its policy's, and
+/// `key` is the one its messages name, as `record_key` derives it. `None`: the reader doesn't
+/// act on it.
+pub(crate) fn bind_activity(
+    value: &[u8],
+    own: &[u8; 32],
+    side: ActivitySide,
+    label: Option<&Label>,
+    key: &[u8; 32],
+    record_key: impl Fn(&RecordTarget) -> Option<[u8; 32]>,
+) -> Option<ActivityRecord> {
+    let record = ActivityRecord::read(value, own, side).ok()?;
+    record.check_label(label).ok()?;
+    let natural = record.natural_key(own).ok()?;
+    let target = RecordTarget::new(
+        activity::switch_collection(side.collection(), label),
+        &natural,
+    );
+    (record_key(&target)? == *key).then_some(record)
+}
+
+/// Bind a `payment_lists` value held at `key` (Paykit wire 5.4): `key` is the one derived
+/// from its `payee` and `app_id`.
+pub(crate) fn bind_list(
+    value: &[u8],
+    own: &[u8; 32],
+    key: &[u8; 32],
+    record_key: impl Fn(&RecordTarget) -> Option<[u8; 32]>,
+) -> Option<PaymentListRecord> {
+    let record = PaymentListRecord::read(value, own).ok()?;
+    (record_key(&list_target(&record.payee, &record.app_id))? == *key).then_some(record)
 }
 
 /// The client's target of the `payment_lists` record of a payee app.
