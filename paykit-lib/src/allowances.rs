@@ -817,18 +817,27 @@ impl Ledger {
         serde_json::to_vec(&out).map_err(|_| Error::Invalid(format!("{LEDGER}: can't be written")))
     }
 
-    /// "A valid ledger" against the terms (Paykit wire 5.5): every entry's asset is the
-    /// terms' asset, and each attempt appears once among the entries and `totals.failed`.
+    /// "A valid ledger" against the terms (Paykit wire 5.5): the terms are valid (Paykit wire
+    /// 4.15), every entry's asset is the terms' asset and its `at` a time the grammar writes,
+    /// and each attempt appears once among the entries and `totals.failed`.
     /// Usage, compaction and the check of a newer version refuse a ledger that isn't valid,
     /// a typed one included, so they never count an attempt twice.
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] for an entry of another asset or an attempt listed twice.
+    /// [`Error::Validation`] for terms that aren't valid; [`Error::Invalid`] for an entry of
+    /// another asset or time, or an attempt listed twice.
     pub fn check_valid(&self, terms: &AllowanceTerms) -> Result<()> {
+        // Terms built in code are held to the reader's rules too, such as `every` at least 1
+        // (Paykit wire 4.15): a limit no reader takes never weakens an evaluation.
+        terms.to_json()?;
         ensure(
             self.entries.iter().all(|e| e.asset == terms.asset),
             "Paykit wire 5.5: a ledger entry in another asset than the terms'",
+        )?;
+        ensure(
+            self.entries.iter().all(|e| e.at <= MAX_TIME_MS),
+            "Paykit wire 5.5: a ledger entry's at past the last time Switch wire 1.6 writes",
         )?;
         self.check_attempts_once()
     }
@@ -1995,6 +2004,31 @@ mod tests {
             ..ledger(Vec::new())
         };
         assert!(check_successor(&terms, &held, &compacted, now).is_err());
+    }
+
+    #[test]
+    fn test_evaluation_refuses_terms_and_ledgers_no_reader_takes() {
+        let now = t("2026-02-10T00:00:00.000Z");
+        let terms = AllowanceTerms::from_json(&with_limits(json!([{ "amount_limit": "0.01",
+            "payment_count_limit": null,
+            "period": { "every": 1, "kind": "rolling", "unit": "day" } }])))
+        .unwrap();
+        // A rolling every of 0, which no reader takes, would make L zero.
+        let mut zero = terms.clone();
+        zero.period_limits[0].period = LimitPeriod::Rolling {
+            every: 0,
+            unit: Unit::Day,
+        };
+        let l = ledger(vec![entry(1, "0.01", "2026-02-09T23:00:00.000Z", None)]);
+        usage(&terms, &l, &HashMap::new(), now).unwrap();
+        assert!(matches!(
+            usage(&zero, &l, &HashMap::new(), now),
+            Err(Error::Validation(_))
+        ));
+        // An entry dated past the time grammar.
+        let mut late = l.clone();
+        late.entries[0].at = u64::MAX;
+        assert!(usage(&terms, &late, &HashMap::new(), now).is_err());
     }
 
     #[test]

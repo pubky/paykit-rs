@@ -793,6 +793,8 @@ impl PeriodDetails {
     ///
     /// [`Error::Invalid`] naming the rule.
     pub fn check_against(&self, request: &PaymentRequest) -> Result<BillingPeriod> {
+        // Details built in code are held to check 10's rules first (Paykit wire 4.9).
+        self.to_body()?;
         let period = request.named_period(&self.billing_period)?;
         let mut visible: Vec<&PaymentEndpointIdentifier> = self
             .payment_endpoints
@@ -2246,6 +2248,24 @@ mod tests {
             let error = details(same).check_against(&request).unwrap_err();
             assert!(error.to_string().contains("cross-asset only"), "{same}");
         }
+    }
+
+    #[test]
+    fn test_period_details_check_against_holds_details_built_in_code() {
+        let mut recurring = request();
+        recurring["payment_deadline"] = json!({ "type": "period_start", "seconds": 86400 });
+        recurring["recurrence"] = json!({ "anchor": "2026-01-31T00:00:00.000Z", "every": 1,
+            "unit": "month", "starts_at": "2026-01-31T00:00:00.000Z", "ends_at": null });
+        let request = PaymentRequest::from_body(&body(recurring)).unwrap();
+        let period = request.recurrence.unwrap().first().unwrap();
+        // Details with neither endpoints nor rates, which check 10 drops.
+        let empty = PeriodDetails {
+            billing_period: period.into(),
+            payment_endpoints: None,
+            rates: None,
+            expires_at: period.starts_at,
+        };
+        assert!(empty.check_against(&request).is_err());
     }
 
     #[test]

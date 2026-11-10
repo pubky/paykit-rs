@@ -1082,6 +1082,9 @@ impl ActivityRecord {
     ///
     /// [`Error::Invalid`] naming the rule `later` breaks.
     pub fn check_later_write(&self, later: &ActivityRecord) -> Result<()> {
+        // Records built in code are held to the reader's rules first (Paykit wire 5.3).
+        self.check()?;
+        later.check()?;
         let later_roles = later.stored();
         for (role, seen) in self.stored() {
             let now = later_roles
@@ -1134,6 +1137,9 @@ impl ActivityRecord {
         own: &[u8; 32],
         naming_key: &NamingKey,
     ) -> Result<Vec<u64>> {
+        // Records built in code are held to the reader's rules first (Paykit wire 5.3).
+        self.check()?;
+        later.check()?;
         let RecordBinding::Request { request_hash } = self.binding()? else {
             return invalid("Paykit wire 5.3: attempted_periods belong to a request record");
         };
@@ -1320,6 +1326,9 @@ impl PaymentListRecord {
     ///
     /// [`Error::Invalid`] naming the rule `later` breaks.
     pub fn check_later_write(&self, later: &PaymentListRecord) -> Result<()> {
+        // Records built in code are held to the reader's rules first (Paykit wire 5.4).
+        self.check()?;
+        later.check()?;
         let version = |r: &PaymentListRecord| match r.list.body() {
             Body::PrivatePaymentList(l) => Ok(l.version),
             _ => invalid("Paykit wire 5.4: list holds another kind than private_payment_list"),
@@ -1803,6 +1812,9 @@ impl AllowanceRecord {
     ///
     /// [`Error::Invalid`] naming the rule `later` breaks.
     pub fn check_later_write(&self, later: &AllowanceRecord) -> Result<()> {
+        // Records built in code are held to the reader's rules first (Paykit wire 5.4).
+        self.check()?;
+        later.check()?;
         let kept = |seen: Option<&StoredMessage>, now: Option<&StoredMessage>| {
             seen.is_none_or(|s| now.is_some_and(|n| n.hash() == s.hash()))
         };
