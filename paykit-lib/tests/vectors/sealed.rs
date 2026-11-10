@@ -27,6 +27,7 @@ fn test_vectors_sealed() {
     check_labelled(&keys, &v["labelled"]);
     check_activity_rules(&keys);
     check_activity_records(&keys, &v);
+    check_msg_ids_bounds(&keys, &v);
 }
 
 /// Own cases on activity records (Paykit wire 5.3), built from the vectors' messages: the
@@ -752,6 +753,7 @@ fn generate(keys: &Keys) {
                 serde_json::json!(DESCRIPTION),
             ),
             (Place::Member("/activity_records"), member),
+            (Place::Member("/msg_ids_bounds"), msg_ids_bounds(keys)),
         ],
     );
 }
@@ -861,4 +863,115 @@ fn test_activity_record_refuses_allowance_id_outside_a_payer_request_record() {
         };
         refuses_member(&record, "allowance_id");
     }
+}
+
+const MSG_IDS_DESCRIPTION: &str = "Wire 5.3, 5.4: binding_accepted's payment_lists record with \
+msg_ids replaced, and the msg_ids its reader keeps (kept), which a writer writes: the ID of \
+each message the record stores, then the 16 newest distinct IDs of the others it names, \
+oldest first, each once. Repeats are dropped at their later places before the 16 are taken. \
+The record binds at binding_accepted's record_key.";
+
+/// The `msg_ids` cases of `msg_ids_bounds`: names and the list a record names.
+fn msg_ids_cases(list_id: &str) -> Vec<(&'static str, Vec<String>)> {
+    let uuid = |i: u64| format!("6d7d1f0e-6c4e-4c47-9d2b-{i:012x}");
+    let many: Vec<String> = (0..20).map(uuid).collect();
+    let mut repeats: Vec<String> = (0..16).map(uuid).collect();
+    repeats.extend(std::iter::repeat_n(uuid(15), 8));
+    repeats.extend(std::iter::repeat_n(uuid(99), 8));
+    let mut stored_late: Vec<String> = (0..3).map(uuid).collect();
+    stored_late.push(list_id.to_owned());
+    vec![
+        ("20 other IDs: the 16 newest are kept", many),
+        (
+            "16 other IDs, then two IDs repeated: each counts once",
+            repeats,
+        ),
+        (
+            "the stored list's ID named after others: it comes first",
+            stored_late,
+        ),
+    ]
+}
+
+/// `msg_ids_bounds`, as paykit-lib generates it.
+fn msg_ids_bounds(keys: &Keys) -> Value {
+    let v = paykit("sealed.json");
+    let accepted = &arr(&v, "binding_accepted")[0];
+    let alice = pubky(ALICE);
+    let base = PaymentListRecord::read(value(accepted), &alice).unwrap();
+    let list_id = base.list.message().msg_id.clone();
+    let cases: Vec<Value> = msg_ids_cases(&list_id)
+        .into_iter()
+        .map(|(name, ids)| {
+            let mut record: Value = serde_json::from_slice(value(accepted)).unwrap();
+            record["msg_ids"] = serde_json::json!(ids);
+            let record = serde_json::to_vec(&record).unwrap();
+            let read = PaymentListRecord::bind(
+                &record,
+                &alice,
+                &keys.identity(&alice).naming_key(),
+                &key(accepted),
+            )
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(read.msg_ids.len() <= 1 + paykit_lib::records::RECENT_MSG_IDS);
+            serde_json::json!({
+                "kept": read.msg_ids,
+                "name": name,
+                "value": String::from_utf8(record).unwrap(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "cases": cases, "description": MSG_IDS_DESCRIPTION })
+}
+
+/// `msg_ids_bounds` (Paykit wire 5.3, 5.4): each record binds, its reader keeps `kept`, and
+/// writes it back with that list.
+fn check_msg_ids_bounds(keys: &Keys, v: &Value) {
+    let alice = pubky(ALICE);
+    let accepted = &arr(v, "binding_accepted")[0];
+    let cases = arr(&v["msg_ids_bounds"], "cases");
+    assert_eq!(cases.len(), 3);
+    for case in cases {
+        let name = st(case, "name");
+        let read = PaymentListRecord::bind(
+            value(case),
+            &alice,
+            &keys.identity(&alice).naming_key(),
+            &key(accepted),
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let kept: Vec<String> = serde_json::from_value(case["kept"].clone()).unwrap();
+        assert_eq!(read.msg_ids, kept, "{name}");
+        let back: Value = serde_json::from_slice(&read.to_json().unwrap()).unwrap();
+        assert_eq!(back["msg_ids"], case["kept"], "{name}: written");
+    }
+}
+
+#[test]
+fn test_activity_record_writes_canonical_msg_ids() {
+    let keys = Keys::load();
+    let b = bases(&keys);
+    let request_id = b
+        .payer_request
+        .request
+        .as_ref()
+        .unwrap()
+        .message()
+        .msg_id
+        .clone();
+    let uuid = |i: u64| format!("6d7d1f0e-6c4e-4c47-9d2b-{i:012x}");
+    let mut msg_ids: Vec<String> = (0..20).map(uuid).collect();
+    msg_ids.extend(std::iter::repeat_n(uuid(19), 5));
+    let record = ActivityRecord {
+        msg_ids,
+        ..b.payer_request
+    };
+    let written = record.to_json().unwrap();
+    let back: Value = serde_json::from_slice(&written).unwrap();
+    let mut want = vec![request_id];
+    want.extend((4..20).map(uuid));
+    assert_eq!(back["msg_ids"], serde_json::json!(want));
+    let read = ActivityRecord::read(&written, &pubky(ALICE), ActivitySide::Payer).unwrap();
+    assert_eq!(read.msg_ids, want);
+    assert_eq!(read.to_json().unwrap(), written);
 }
