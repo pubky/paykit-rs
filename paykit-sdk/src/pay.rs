@@ -234,13 +234,25 @@ impl Paykit {
                 );
                 (destination, stored.clone(), None)
             }
+            // The request's accepted identifiers restrict a destination from the payee's lists
+            // as they do its own endpoints (Paykit wire 4.5).
             RequestDestination::RequiredApp(app) => {
-                self.list_destination(&request.payee, Some(*app), &options)
-                    .await?
+                self.list_destination(
+                    &request.payee,
+                    Some(*app),
+                    body.accepted_payment_endpoint_identifiers.as_deref(),
+                    &options,
+                )
+                .await?
             }
             RequestDestination::Any => {
-                self.list_destination(&request.payee, options.list_app, &options)
-                    .await?
+                self.list_destination(
+                    &request.payee,
+                    options.list_app,
+                    body.accepted_payment_endpoint_identifiers.as_deref(),
+                    &options,
+                )
+                .await?
             }
         };
         self.check_transfer(&destination, &body.amount, &options)?;
@@ -294,7 +306,7 @@ impl Paykit {
         self.app.may_attempt(false).map_err(not_now)?;
         let options = payment.options;
         let (destination, carrier, reserve) = self
-            .list_destination(&payment.payee, options.list_app, &options)
+            .list_destination(&payment.payee, options.list_app, None, &options)
             .await?;
         self.check_transfer(&destination, &payment.amount, &options)?;
         let attempt_id = AttemptId::generate()?;
@@ -444,12 +456,14 @@ impl Paykit {
 
     /// A destination from the payee's Private Payment Lists (Paykit spec 8.4): the newest
     /// usable list of the app asked for, or of any app, and an endpoint of it that isn't a
-    /// single-use endpoint already used at that version. Public endpoints are app records',
-    /// not read yet.
+    /// single-use endpoint already used at that version and, for a request that restricts
+    /// them, is one of its accepted identifiers, `allowed` (Paykit wire 4.5). Public endpoints are app
+    /// records', not read yet.
     async fn list_destination(
         &mut self,
         payee: &[u8; 32],
         app: Option<[u8; 16]>,
+        allowed: Option<&[PaymentEndpointIdentifier]>,
         options: &PayOptions,
     ) -> Result<(Destination, StoredMessage, Option<PaymentListRecord>)> {
         if let PaymentMode::Public(_) = options.mode {
@@ -478,6 +492,7 @@ impl Paykit {
             };
             let chosen = list.payment_endpoints.iter().find(|(id, endpoint)| {
                 options.endpoint.as_ref().is_none_or(|want| want == *id)
+                    && allowed.is_none_or(|ids| ids.contains(id))
                     && !(endpoint.single_use && used(id))
             });
             if let Some((id, endpoint)) = chosen {

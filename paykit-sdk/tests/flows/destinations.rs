@@ -178,3 +178,82 @@ async fn test_destinations_own_identity_confirmed_under_60s_ago_paid() {
         "{outcome:?}"
     );
 }
+
+/// A request to `Any` of bob's apps, restricted to bitcoin on-chain.
+fn on_chain_only(now: u64) -> paykit_sdk::RequestDraft {
+    let mut draft = draft("1", now);
+    draft.destination = paykit_lib::bodies::RequestDestination::Any;
+    draft.accepted_endpoint_identifiers = Some(vec![crate::common::endpoint("btc-bitcoin-p2wpkh")]);
+    draft
+}
+
+#[tokio::test]
+async fn test_destinations_list_endpoint_the_request_restricts_refused() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    // Bob's list offers Lightning only.
+    let mut endpoints = std::collections::BTreeMap::new();
+    endpoints.insert(
+        crate::common::endpoint("btc-lightning-bolt12"),
+        paykit_lib::bodies::ListEndpoint {
+            payload: paykit_lib::PaymentEndpointPayload::new("lno1reusable").unwrap(),
+            single_use: false,
+        },
+    );
+    w.list_to_alice_with(&mut shop, &[wallet.app_id()], w.clock.now_ms(), endpoints)
+        .await;
+    let request = request_from(&mut shop, w.alice_id(), on_chain_only(w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    // The request accepts on-chain only: the list has no endpoint it allows (Paykit wire
+    // 4.5), and nothing is paid.
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    assert!(wallet.payments().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_destinations_list_paid_only_to_an_endpoint_the_request_allows() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    // Bob's list offers on-chain and Lightning.
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    let request = request_from(&mut shop, w.alice_id(), on_chain_only(w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    // Naming the Lightning endpoint is refused: the request doesn't allow it.
+    let refused = wallet
+        .pay_request(
+            &request,
+            PayOptions {
+                endpoint: Some(crate::common::endpoint("btc-lightning-bolt12")),
+                ..PayOptions::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
+        "{refused:?}"
+    );
+    // Without a choice, it is paid on-chain.
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+        "{outcome:?}"
+    );
+    let paid = wallet.payments().await.unwrap();
+    assert_eq!(paid.len(), 1);
+    assert_eq!(paid[0].endpoint_id.as_str(), "btc-bitcoin-p2wpkh");
+}

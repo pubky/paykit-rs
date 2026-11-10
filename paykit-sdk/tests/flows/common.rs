@@ -345,8 +345,6 @@ impl World {
         targets: &[[u8; 16]],
         version: u64,
     ) -> String {
-        shop.app_mut().invite(&self.alice_id()).await.unwrap();
-        let app = "shop";
         let mut endpoints = std::collections::BTreeMap::new();
         endpoints.insert(
             endpoint("btc-bitcoin-p2wpkh"),
@@ -362,6 +360,23 @@ impl World {
                 single_use: false,
             },
         );
+        self.list_to_alice_with(shop, targets, version, endpoints)
+            .await
+    }
+
+    /// Bob's `shop` sends alice's apps `targets` a Private Payment List of `version` with
+    /// `endpoints`, for 30 days, as [`World::list_to_alice`].
+    pub async fn list_to_alice_with(
+        &self,
+        shop: &mut Paykit,
+        targets: &[[u8; 16]],
+        version: u64,
+        endpoints: std::collections::BTreeMap<
+            PaymentEndpointIdentifier,
+            paykit_lib::bodies::ListEndpoint,
+        >,
+    ) -> String {
+        shop.app_mut().invite(&self.alice_id()).await.unwrap();
         let body = paykit_lib::bodies::PrivatePaymentList {
             version,
             payment_endpoints: endpoints,
@@ -370,7 +385,7 @@ impl World {
         .to_body();
         self.inject(
             &self.bob,
-            app,
+            "shop",
             &self.alice,
             targets,
             "paykit.private_payment_list",
