@@ -1,24 +1,30 @@
 //! `documents.json`: the executor grant and its grant history entry (Paykit wire 3.3, 5.4),
-//! and Paykit's checks of certificates (Paykit wire 3.1): `certificate_rejections` and
-//! `labelled_scope_rejections`.
+//! Paykit's checks of certificates (Paykit wire 3.1): `certificate_rejections`,
+//! `labelled_scope_rejections` and `multi_protocol_certificates`, and of app records' Paykit
+//! member (Paykit wire 3.2): `app_records`.
 
+use paykit_lib::app_record::{PaykitMember, PROTOCOL_NAME};
 use paykit_lib::grant::ExecutorGrant;
 use paykit_lib::identifiers::AllowanceId;
 use paykit_lib::records::GrantEntry;
-use paykit_lib::scopes::{check_certificate, permissions_for, verify_certificate};
+use paykit_lib::scopes::{
+    check_certificate, paykit_scopes, permissions_for, verify_certificate, PaykitScope,
+};
 use pubky_switch_core::labels;
 use pubky_switch_core::ops::RecordVersion;
-use pubky_switch_core::records::AppCert;
-use pubky_switch_core::scopes::permission_names;
-use serde_json::Value;
+use pubky_switch_core::records::{AppCert, AppRecord};
+use pubky_switch_core::scopes::{permission_names, Permission};
+use serde_json::{json, Value};
 
 use crate::common::{
-    arr, b64n, cert, cert_doc, paykit, pubky, signed, st, Keys, ALICE, ALLOWANCE_ID, BOB,
+    arr, b64n, body_text, cert, cert_doc, document, generated, paykit, pubky, quoted, reissued,
+    signed, signed_json, st, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
 };
 
 #[test]
 fn test_vectors_documents() {
     let keys = Keys::load();
+    generate(&keys);
     let d = paykit("documents.json");
     // Every app certificate of the Switch set is a Paykit App's and passes Paykit's checks:
     // its `permissions` are the list its scopes need.
@@ -31,6 +37,8 @@ fn test_vectors_documents() {
     check_executor_grant(&keys, &d);
     check_certificate_rejections(&keys, &d);
     check_labelled_scope_rejections(&keys, &d);
+    check_multi_protocol_certificates(&d);
+    check_app_records(&keys, &d);
 }
 
 /// The executor grant (Paykit wire 3.3), verified and signed again at the version its grant
@@ -182,4 +190,315 @@ fn check_labelled_scope_rejections(keys: &Keys, d: &Value) {
             assert_eq!(c.permissions(), permissions_for(c.scopes()).as_slice());
         }
     }
+}
+
+/// The top-level description, which names every member.
+const DESCRIPTION: &str = "Paykit's signed documents and Paykit's checks of the Switch's \
+certificates and app records (wire 3): the executor grant, alone and as the Allowance \
+record's grant history holds it, certificates that Paykit's verifiers refuse for their \
+scopes or their permissions, certificates that hold another protocol's scopes beside \
+Paykit's or instead of them, and app records as a Paykit reader reads their Paykit member. \
+The certificates are the Switch set's documents.json certificates with scopes or \
+permissions changed, and the app records its shop app record with its Paykit member changed.";
+
+const MULTI_PROTOCOL_DESCRIPTION: &str = "Wire 3.1, spec 3.2, Switch wire 3.1 \"Several \
+protocols\" and \"Scope roots\": certificates that hold another protocol's scopes beside \
+Paykit's or instead of them, and one whose extension prefix holds no -, as Paykit's \
+verifiers check them. Each is the shop certificate of the Switch set's documents.json (the \
+last, the cap certificate) with scopes and permissions changed, signed again by bob's \
+identity key; the switch takes every one (switch_accepts). A scope whose root, the part \
+before any :, isn't one of Paykit's reserved roots (pay, request, allowance, \
+allowance_execute, contacts, manage_contacts and ext) is another protocol's, such as chat. \
+paykit_scopes are the scopes Paykit reads, and paykit_permissions the list they need. A \
+Paykit verifier requires every permission of paykit_permissions, and, when the certificate \
+holds no other protocol's scope, permissions exactly that list. accepted are certificates \
+Paykit's verifiers take: request beside chat, with lists.read, which chat needs, and \
+conversation.add, which request needs; and chat alone with lists.read, a valid certificate \
+that holds no Paykit scope, whose Paykit messages recipients drop at check 8 (messages.json \
+multi_protocol_senders). refused are certificates they refuse: request beside chat without \
+conversation.add; request alone with lists.read beside conversation.add; and request beside \
+ext:cap, an extension scope whose prefix holds no -. reason is paykit-lib's wording at a \
+Paykit verifier, of the first check that refuses it.";
+
+const APP_RECORDS_DESCRIPTION: &str = "Wire 3.2: Paykit's member of an app record, \
+protocols.paykit, as a Paykit reader reads it. Each record is the shop app record of the \
+Switch set's documents.json with its paykit member changed or removed (and, for public \
+endpoints with expires_at null, expires_at null too), signed again with the shop's signing \
+key; the signatures verify. The switch takes every one, since it checks only the form of \
+protocols (Switch wire 3.2). accepted are records a Paykit reader takes, the first the \
+shop's record as it is; reads is what the reader takes from each: the Payment Endpoint \
+Identifiers of capabilities.endpoint_identifiers, and the public endpoints. A missing or null \
+paykit member, capabilities, endpoint_identifiers or public_endpoints reads as empty, and \
+unknown members are ignored. refused are records Paykit's readers refuse, though the switch \
+takes them (switch_accepts): a capabilities or public_endpoints that isn't an object, an \
+endpoint_identifiers that isn't an array of strings, a payload that isn't a string, public \
+endpoints with expires_at null, and, last, four that break wire 1.4: an endpoint identifier \
+in capabilities that isn't a Payment Endpoint Identifier (btc-lightning/bolt11), a public \
+endpoint key that isn't one (..), the reserved key private, and an empty payload. protocols \
+and expires_at are the record's as signed. reason is the wording at a Paykit reader: the \
+prototype's, and paykit-lib's for the last four.";
+
+/// One certificate case of `multi_protocol_certificates`: its name, the app whose
+/// certificate it changes, its scopes and permissions.
+type CertCase = (
+    &'static str,
+    &'static str,
+    &'static [&'static str],
+    &'static [Permission],
+);
+
+const LISTS_READ: Permission = Permission::ListsRead;
+const ADD: Permission = Permission::ConversationAdd;
+
+const MULTI_PROTOCOL_ACCEPTED: [CertCase; 2] = [
+    (
+        "request and chat, with lists.read and conversation.add",
+        "shop",
+        &["request", "chat"],
+        &[LISTS_READ, ADD],
+    ),
+    (
+        "chat only, with lists.read",
+        "shop",
+        &["chat"],
+        &[LISTS_READ],
+    ),
+];
+
+const MULTI_PROTOCOL_REFUSED: [CertCase; 3] = [
+    (
+        "request and chat without conversation.add",
+        "shop",
+        &["request", "chat"],
+        &[LISTS_READ],
+    ),
+    (
+        "request only, with lists.read beside conversation.add",
+        "shop",
+        &["request"],
+        &[LISTS_READ, ADD],
+    ),
+    (
+        "an extension prefix without a -: ext:cap",
+        "cap",
+        &["request", "ext:cap"],
+        &[ADD],
+    ),
+];
+
+/// The app record cases that break wire 1.4: their names and Paykit members.
+fn app_record_wire_1_4_cases() -> Vec<(&'static str, Value)> {
+    let offer = "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr";
+    let ids = json!(["btc-lightning-bolt11", "btc-bitcoin-p2wpkh"]);
+    vec![
+        (
+            "an endpoint identifier in capabilities that isn't a Payment Endpoint Identifier",
+            json!({
+                "capabilities": { "endpoint_identifiers": ["btc-lightning/bolt11", "btc-bitcoin-p2wpkh"] },
+                "public_endpoints": { "btc-lightning-bolt12": offer },
+            }),
+        ),
+        (
+            "a public endpoint key that isn't a Payment Endpoint Identifier",
+            json!({
+                "capabilities": { "endpoint_identifiers": ids },
+                "public_endpoints": { "..": offer },
+            }),
+        ),
+        (
+            "the reserved public endpoint key private",
+            json!({
+                "capabilities": { "endpoint_identifiers": ids },
+                "public_endpoints": { "private": offer },
+            }),
+        ),
+        (
+            "an empty payload",
+            json!({
+                "capabilities": { "endpoint_identifiers": ids },
+                "public_endpoints": { "btc-lightning-bolt12": "" },
+            }),
+        ),
+    ]
+}
+
+/// One `multi_protocol_certificates` case, built from the Switch set's certificate and
+/// checked as it is built: the switch takes it, and Paykit's verifier gives `accepted`.
+fn cert_case(keys: &Keys, (name, app, scopes, permissions): CertCase, accepted: bool) -> Value {
+    let c = reissued(keys, app, scopes, permissions);
+    assert!(
+        AppCert::verify(c.signed(), &c.identity()).is_ok(),
+        "{name}: the switch takes it"
+    );
+    let mut case = json!({
+        "body": body_text(c.signed()),
+        "name": name,
+        "paykit_permissions": permission_names(&permissions_for(c.scopes())),
+        "paykit_scopes": paykit_scopes(c.scopes()).iter().map(PaykitScope::name).collect::<Vec<_>>(),
+        "permissions": permission_names(c.permissions()),
+        "scopes": c.scopes(),
+        "signed": signed_json(c.signed()),
+        "switch_accepts": true,
+    });
+    match check_certificate(&c) {
+        Ok(()) => assert!(accepted, "{name}: Paykit takes it"),
+        Err(error) => {
+            assert!(!accepted, "{name}: {error}");
+            case["reason"] = json!(quoted(&error.to_string()));
+        }
+    }
+    case
+}
+
+/// One refused `app_records` case: the Switch set's shop app record with its Paykit member
+/// replaced, signed again with the shop's signing key.
+fn app_record_case(keys: &Keys, name: &str, member: &Value) -> Value {
+    let (shop, bob) = (keys.app("shop"), pubky(BOB));
+    let base = AppRecord::verify(&document("shop app record"), &bob).unwrap();
+    let mut body = base.body().clone();
+    body.protocols.clear();
+    body.protocols.insert(
+        PROTOCOL_NAME.to_owned(),
+        member.as_object().unwrap().clone(),
+    );
+    let record = AppRecord::sign(&shop.keys, body).unwrap();
+    let text = body_text(record.signed());
+    let as_signed: Value = serde_json::from_str(&text).unwrap();
+    let error = PaykitMember::read(&record).unwrap_err();
+    json!({
+        "body": text,
+        "expires_at": as_signed["expires_at"],
+        "name": name,
+        "protocols": as_signed["protocols"],
+        "reason": quoted(&error.to_string()),
+        "signed": signed_json(record.signed()),
+        "switch_accepts": AppRecord::verify(record.signed(), &bob).is_ok(),
+    })
+}
+
+/// The cases paykit-lib generates in `documents.json` (README "How the files were
+/// generated"), compared with the file, and written into it with `PAYKIT_WRITE_VECTORS`.
+fn generate(keys: &Keys) {
+    // The certificates rebuild the Switch set's byte for byte before any change.
+    for app in ["shop", "cap"] {
+        let a = keys.app(app);
+        let held = cert(a);
+        let perms = held.permissions().to_vec();
+        let scopes: Vec<&str> = held.scopes().iter().map(String::as_str).collect();
+        assert_eq!(
+            reissued(keys, app, &scopes, &perms).signed(),
+            &cert_doc(app)
+        );
+    }
+    let member = json!({
+        "accepted": MULTI_PROTOCOL_ACCEPTED.iter().map(|c| cert_case(keys, *c, true)).collect::<Vec<_>>(),
+        "description": MULTI_PROTOCOL_DESCRIPTION,
+        "refused": MULTI_PROTOCOL_REFUSED.iter().map(|c| cert_case(keys, *c, false)).collect::<Vec<_>>(),
+    });
+    let mut cases = vec![
+        (Place::Member("/description"), json!(DESCRIPTION)),
+        (Place::Member("/multi_protocol_certificates"), member),
+        (
+            Place::Member("/app_records/description"),
+            json!(APP_RECORDS_DESCRIPTION),
+        ),
+    ];
+    for (name, member) in app_record_wire_1_4_cases() {
+        cases.push((
+            Place::Case("/app_records/refused"),
+            app_record_case(keys, name, &member),
+        ));
+    }
+    generated("documents.json", &cases);
+}
+
+/// `multi_protocol_certificates` (Paykit wire 3.1, Switch wire 3.1 "Several protocols"):
+/// each certificate verifies at the switch, and Paykit's verifiers take the accepted ones and
+/// refuse the others, for their permissions or their scopes.
+fn check_multi_protocol_certificates(d: &Value) {
+    let bob = pubky(BOB);
+    let m = &d["multi_protocol_certificates"];
+    for (list, accepted) in [("accepted", true), ("refused", false)] {
+        for case in arr(m, list) {
+            let name = st(case, "name");
+            let doc = signed(&case["signed"]);
+            assert_eq!(body_text(&doc), st(case, "body"), "{name}");
+            let c = AppCert::verify(&doc, &bob).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(case["switch_accepts"], true, "{name}");
+            assert_eq!(c.scopes(), strings(&case["scopes"]).as_slice(), "{name}");
+            assert_eq!(
+                permission_names(c.permissions()),
+                strings(&case["permissions"])
+            );
+            assert_eq!(
+                permission_names(&permissions_for(c.scopes())),
+                strings(&case["paykit_permissions"]),
+                "{name}"
+            );
+            let verdict = verify_certificate(&doc, &bob);
+            assert_eq!(verdict.is_ok(), accepted, "{name}: {verdict:?}");
+            if let Err(error) = verdict {
+                assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
+            }
+        }
+    }
+    assert_eq!(arr(m, "accepted").len(), 2);
+    assert_eq!(arr(m, "refused").len(), 3);
+}
+
+/// `app_records` (Paykit wire 3.2): each record is the shop's with its Paykit member, and
+/// for one its `expires_at`, changed, signed again by the shop byte for byte; the switch takes
+/// every one; a Paykit reader reads the accepted ones as `reads` says, and refuses the others.
+fn check_app_records(keys: &Keys, d: &Value) {
+    let (shop, bob) = (keys.app("shop"), pubky(BOB));
+    let base: Value = serde_json::from_str(&body_text(&document("shop app record"))).unwrap();
+    let records = &d["app_records"];
+    for (list, accepted) in [("accepted", true), ("refused", false)] {
+        for case in arr(records, list) {
+            let name = st(case, "name");
+            let doc = signed(&case["signed"]);
+            let text = body_text(&doc);
+            assert_eq!(text, st(case, "body"), "{name}");
+            let again = shop
+                .keys
+                .sign_doc(labels::sig::APP_RECORD, &[], text.as_bytes().to_vec());
+            assert_eq!(again, doc, "{name}: signed again");
+            let mut want = base.clone();
+            want["protocols"] = case["protocols"].clone();
+            want["expires_at"] = case["expires_at"].clone();
+            assert_eq!(
+                serde_json::from_str::<Value>(&text).unwrap(),
+                want,
+                "{name}: the shop's record with its member changed"
+            );
+            let record = AppRecord::verify(&doc, &bob).unwrap_or_else(|e| panic!("{name}: {e}"));
+            if !accepted {
+                assert_eq!(case["switch_accepts"], true, "{name}");
+            }
+            match (PaykitMember::read(&record), accepted) {
+                (Ok(read), true) => {
+                    let ids: Vec<&str> = read
+                        .endpoint_identifiers
+                        .iter()
+                        .map(|i| i.as_str())
+                        .collect();
+                    assert_eq!(json!(ids), case["reads"]["endpoint_identifiers"], "{name}");
+                    let endpoints: serde_json::Map<String, Value> = read
+                        .public_endpoints
+                        .iter()
+                        .map(|(i, p)| (i.as_str().to_owned(), json!(p.as_str())))
+                        .collect();
+                    assert_eq!(
+                        Value::Object(endpoints),
+                        case["reads"]["public_endpoints"],
+                        "{name}"
+                    );
+                }
+                (Err(_), false) => {}
+                (verdict, _) => panic!("{name}: {verdict:?}"),
+            }
+        }
+    }
+    assert_eq!(arr(records, "accepted").len(), 12);
+    assert_eq!(arr(records, "refused").len(), 10);
 }

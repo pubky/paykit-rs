@@ -1,5 +1,5 @@
 //! Helpers shared by the vector tests: loading the two sets, the fixed keys and the Switch
-//! set's certificates.
+//! set's certificates, and writing the cases paykit-lib generates.
 
 #![allow(dead_code)]
 
@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use pubky_switch_core::enc::{pubky_key, unb64_array};
 use pubky_switch_core::keys::{AppKeys, IdentityKey};
 use pubky_switch_core::records::AppCert;
+use pubky_switch_core::scopes::Permission;
 use pubky_switch_core::sig::SignedDoc;
 use pubky_switch_core::time::parse_rfc3339;
 use serde_json::Value;
@@ -198,4 +199,101 @@ pub fn message(name: &str) -> Value {
 /// A message's exact JSON bytes.
 pub fn message_json(name: &str) -> Vec<u8> {
     st(&message(name), "json").as_bytes().to_vec()
+}
+
+/// A carried signed document as the files write it.
+pub fn signed_json(doc: &SignedDoc) -> Value {
+    serde_json::json!({ "body": doc.body, "sig": doc.sig })
+}
+
+/// A signed document's body text.
+pub fn body_text(doc: &SignedDoc) -> String {
+    String::from_utf8(doc.body_bytes().unwrap()).unwrap()
+}
+
+/// The Switch set's certificate of `app` with `scopes` and `permissions` changed, signed again
+/// by its identity key: the switch's checks take it (Switch wire 3.1).
+pub fn reissued(keys: &Keys, app: &str, scopes: &[&str], permissions: &[Permission]) -> AppCert {
+    let app = keys.app(app);
+    let mut body = cert(app).body().clone();
+    body.scopes = scopes.iter().map(|s| (*s).to_owned()).collect();
+    body.permissions = pubky_switch_core::scopes::permission_names(permissions);
+    AppCert::issue(keys.identity(&app.identity), body).unwrap()
+}
+
+/// A refusal's reason as the files quote it: without the section it starts with (README
+/// "Rejections").
+pub fn quoted(error: &str) -> String {
+    let (kind, rest) = error.split_once(": ").unwrap_or(("", error));
+    match rest.split_once(": ") {
+        Some((section, tail)) if section.starts_with("Paykit ") => format!("{kind}: {tail}"),
+        _ => error.to_owned(),
+    }
+}
+
+/// Where a case that paykit-lib generates lies in its vector file (README "How the files were
+/// generated"), as a JSON pointer.
+#[derive(Clone, Copy, Debug)]
+pub enum Place<'a> {
+    /// A member paykit-lib writes whole.
+    Member(&'a str),
+    /// A case of an array, found by its `name`.
+    Case(&'a str),
+}
+
+/// The environment variable that makes the vector tests write the cases paykit-lib generates
+/// into `specs/v0.2/vectors/` before comparing them, after an intended change. Test-only: the
+/// generator runs only in these tests.
+pub const WRITE_VECTORS: &str = "PAYKIT_WRITE_VECTORS";
+
+/// Compare the cases paykit-lib generates for the file `name` with the file, value for value;
+/// with [`WRITE_VECTORS`] set, write them into the file first. Every file is JSON written with
+/// sorted members, indented by two spaces, and a final newline, so writing one changes no
+/// other byte of it.
+pub fn generated(name: &str, cases: &[(Place<'_>, Value)]) {
+    if std::env::var_os(WRITE_VECTORS).is_some() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../specs/v0.2/vectors")
+            .join(name);
+        let mut file = paykit(name);
+        for (place, value) in cases {
+            match place {
+                Place::Member(pointer) => {
+                    let (parent, member) = pointer.rsplit_once('/').expect("a member pointer");
+                    file.pointer_mut(parent)
+                        .and_then(Value::as_object_mut)
+                        .unwrap_or_else(|| panic!("{name}: no object at {parent}"))
+                        .insert(member.to_owned(), value.clone());
+                }
+                Place::Case(pointer) => {
+                    let list = file
+                        .pointer_mut(pointer)
+                        .and_then(Value::as_array_mut)
+                        .unwrap_or_else(|| panic!("{name}: no array at {pointer}"));
+                    match list.iter_mut().find(|c| c["name"] == value["name"]) {
+                        Some(held) => *held = value.clone(),
+                        None => list.push(value.clone()),
+                    }
+                }
+            }
+        }
+        let mut text = serde_json::to_string_pretty(&file).unwrap();
+        text.push('\n');
+        std::fs::write(&path, text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    }
+    let file = paykit(name);
+    for (place, value) in cases {
+        let held = match place {
+            Place::Member(pointer) => file.pointer(pointer),
+            Place::Case(pointer) => file
+                .pointer(pointer)
+                .and_then(Value::as_array)
+                .and_then(|list| list.iter().find(|c| c["name"] == value["name"])),
+        };
+        assert_eq!(
+            held,
+            Some(value),
+            "{name}: {place:?} isn't what paykit-lib generates; set {WRITE_VECTORS} after an intended change"
+        );
+    }
 }

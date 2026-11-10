@@ -460,7 +460,7 @@ dependencies = [
 [[package]]
 name = "pubky-switch-core"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-switch?rev=58ae5ed#58ae5ed797f3b7e9978323e675e7e0524f6e7d5d"
+source = "git+https://github.com/pubky/pubky-switch?rev=1259961#1259961f96a6284f3cc7028bbe848c7795bf0f6d"
 dependencies = [
  "base64",
  "blake3",

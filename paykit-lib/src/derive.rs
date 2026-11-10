@@ -70,12 +70,27 @@ pub fn request_obligation(
     request_hash: &[u8; 32],
     period_start_secs: u64,
 ) -> [u8; 32] {
+    request_obligation_blinded(
+        &naming_key.blind(payee),
+        &naming_key.blind(request_hash),
+        period_start_secs,
+    )
+}
+
+/// [`request_obligation`] from its inputs already blinded with the payer's naming key:
+/// `blind(payee identity)` and `blind(request hash)` (Paykit wire 1.5). For an app that
+/// blinds through its Switch client and never holds the naming key itself.
+pub fn request_obligation_blinded(
+    blinded_payee: &[u8; 32],
+    blinded_request_hash: &[u8; 32],
+    period_start_secs: u64,
+) -> [u8; 32] {
     derive(
         OBLIGATION_LABEL,
         &[
             b"request",
-            &naming_key.blind(payee),
-            &naming_key.blind(request_hash),
+            blinded_payee,
+            blinded_request_hash,
             &u64be(period_start_secs),
         ],
     )
@@ -203,6 +218,15 @@ mod tests {
             payment_obligation(&attempt),
             blake3_derive(&payment_obligation_material(&attempt))
         );
+    }
+
+    #[test]
+    fn test_obligation_from_blinded_inputs_is_the_same() {
+        let nk = NamingKey::from_bytes([7; 32]);
+        let blinded = request_obligation_blinded(&nk.blind(&[1; 32]), &nk.blind(&[2; 32]), 5);
+        assert_eq!(blinded, request_obligation(&nk, &[1; 32], &[2; 32], 5));
+        // Unblinded inputs give another obligation.
+        assert_ne!(request_obligation_blinded(&[1; 32], &[2; 32], 5), blinded);
     }
 
     fn blake3_derive(material: &[u8]) -> [u8; 32] {

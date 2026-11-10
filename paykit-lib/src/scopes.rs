@@ -5,8 +5,9 @@
 //! `request`, `request:<label>`, `allowance`, `allowance_execute`, `contacts`,
 //! `manage_contacts` and `ext:<prefix>`. The Switch checks every certificate's scopes
 //! against its own rule; Paykit's verifiers, at apps and at payers, then check Paykit's rules
-//! here and refuse a certificate whose `permissions` aren't exactly the list Paykit's
-//! permission table derives from its scopes.
+//! here and the permissions Paykit's permission table derives from its scopes: exactly that
+//! list, or, for a certificate that also holds another protocol's scopes, at least it
+//! (Switch wire 3.1 "Several protocols", Paykit wire 3.1).
 //!
 //! Security: these checks decide which app may send, receive and read what. A certificate
 //! that fails them is invalid at Paykit's verifiers even though the switch takes it and
@@ -24,8 +25,22 @@ pub const MAX_EXTENSION_SCOPES: usize = 8;
 /// The most labelled selling scopes one certificate holds (Paykit spec 3.1).
 pub const MAX_LABELLED_SCOPES: usize = 8;
 
-/// The prefix Paykit keeps for its own kinds, never an extension's (Paykit wire 3.1).
+/// The prefix of Paykit's own kinds, `paykit.<name>`: Paykit's protocol name, never an
+/// extension's, since an extension prefix holds a `-` (Paykit wire 3.1, 4.3).
 pub const PAYKIT_PREFIX: &str = "paykit";
+
+/// Paykit's scope roots (Paykit spec 3.1, 3.2): a scope whose root, the part before any `:`,
+/// is one of these is Paykit's, valid or not. The roots are reserved for Paykit, so any other
+/// well-formed scope is another protocol's (Switch wire 3.1 "Scope roots").
+pub const PAYKIT_SCOPE_NAMES: [&str; 7] = [
+    "pay",
+    "request",
+    "allowance",
+    "allowance_execute",
+    "contacts",
+    "manage_contacts",
+    "ext",
+];
 
 /// A label of a labelled selling scope `request:<label>` (Paykit spec 3.1): 1 to 32
 /// characters of `a-z`, `0-9` and `-`, starting with a letter or digit, the syntax of the
@@ -77,8 +92,11 @@ impl std::fmt::Display for Label {
 }
 
 /// The prefix of an extension scope `ext:<prefix>` and its kinds `<prefix>.<name>` (Paykit
-/// spec 3.1, Paykit wire 3.1): 1 to 32 characters of `a-z`, `0-9` and `-`, starting with a
-/// letter or digit, and not `paykit`.
+/// spec 3.1, Paykit wire 3.1, 4.3): 1 to 32 characters of `a-z`, `0-9` and `-`, starting with
+/// a letter or digit, and holding a `-`, such as `paykit-cap`.
+///
+/// A protocol's name, the prefix of its kinds, holds no `-` (Switch wire 3.1 "Scope roots"),
+/// so an extension kind is never another protocol's kind, nor Paykit's own `paykit.<name>`.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExtensionPrefix(String);
 
@@ -87,12 +105,12 @@ impl ExtensionPrefix {
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] for a prefix outside the syntax, or `paykit`.
+    /// [`Error::Invalid`] for a prefix outside the syntax or without a `-`, such as `paykit`.
     pub fn parse(text: &str) -> Result<Self> {
-        if text == PAYKIT_PREFIX || !switch_scopes::is_sub(text) {
+        if !text.contains('-') || !switch_scopes::is_sub(text) {
             return invalid(
                 "Paykit wire 3.1: an extension prefix is 1 to 32 of a-z, 0-9 and -, starting with a \
-                 letter or digit, and not paykit",
+                 letter or digit, and holds a -",
             );
         }
         Ok(Self(text.to_owned()))
@@ -102,7 +120,7 @@ impl ExtensionPrefix {
     ///
     /// # Errors
     ///
-    /// [`Error::Validation`] for a prefix outside the syntax, or `paykit`.
+    /// [`Error::Validation`] for a prefix outside the syntax or without a `-`.
     pub fn new(text: &str) -> Result<Self> {
         Self::parse(text).map_err(Error::into_validation)
     }
@@ -145,11 +163,19 @@ pub enum ScopeName {
     /// One of Paykit's scopes.
     Paykit(PaykitScope),
     /// A name that starts with `ext:` or `request:` but isn't a valid extension or
-    /// labelled selling scope, such as `ext:paykit`: a certificate holding one is invalid.
+    /// labelled selling scope, such as `ext:paykit` or `ext:cap`, whose prefix holds no `-`: a
+    /// certificate holding one is invalid.
     Malformed,
-    /// Any other name, such as `pay:x` or a scope a later version adds: ignored, it grants
-    /// no permissions and has no keys.
+    /// A name Paykit gives no meaning under one of its own names, such as `pay:x`,
+    /// `contacts:x` or a plain `ext`, or a string that isn't a scope at all: ignored, it
+    /// grants no permissions and has no keys.
     Unknown,
+    /// A well-formed scope of another protocol: one whose root, the part before any `:`,
+    /// isn't one of Paykit's reserved roots ([`PAYKIT_SCOPE_NAMES`]), such as `chat`. It grants
+    /// nothing in Paykit and has no keys here; holding one lets the certificate's
+    /// `permissions` hold more than Paykit's scopes need (Switch wire 3.1 "Several
+    /// protocols").
+    OtherProtocol,
 }
 
 impl PaykitScope {
@@ -186,7 +212,10 @@ impl PaykitScope {
             "allowance_execute" => ScopeName::Paykit(Self::AllowanceExecute),
             "contacts" => ScopeName::Paykit(Self::Contacts),
             "manage_contacts" => ScopeName::Paykit(Self::ManageContacts),
-            _ => ScopeName::Unknown,
+            _ => match switch_scopes::split(name) {
+                Some((base, _)) if !PAYKIT_SCOPE_NAMES.contains(&base) => ScopeName::OtherProtocol,
+                _ => ScopeName::Unknown,
+            },
         }
     }
 
@@ -227,14 +256,24 @@ pub fn paykit_scopes(scopes: &[String]) -> Vec<PaykitScope> {
         .collect()
 }
 
+/// Whether `scopes` hold a scope of another protocol ([`ScopeName::OtherProtocol`]).
+pub fn holds_other_protocol(scopes: &[String]) -> bool {
+    scopes
+        .iter()
+        .any(|s| PaykitScope::classify(s) == ScopeName::OtherProtocol)
+}
+
 /// Check a certificate's scopes against Paykit's rules (Paykit spec 3.1, Paykit wire 3.1),
 /// after the Switch's scope rule (Switch wire 3.1), which every reader applies first and
-/// which already refuses a name twice and `request` beside a label.
+/// which already refuses a name twice, `request` beside a label, and more than 32 scopes in
+/// all.
 ///
 /// Paykit refuses a malformed `ext:` or `request:` name (such as `ext:paykit`), more than 8
 /// extension scopes, more than 8 labelled selling scopes, and a scope without the scopes it
 /// requires: `allowance_execute` without `allowance` and `pay`, `manage_contacts` without
-/// `contacts`. It ignores other names it doesn't know.
+/// `contacts`. Its bounds count only its own scopes, whatever another protocol's scopes
+/// beside them (Switch wire 3.1 "Several protocols"). It ignores other names it doesn't
+/// know.
 ///
 /// # Errors
 ///
@@ -278,10 +317,12 @@ pub fn check_scopes(scopes: &[String]) -> Result<()> {
 pub fn check_requested_scopes(scopes: &[String]) -> Result<()> {
     switch_scopes::check_scopes(scopes)?;
     check_scopes(scopes)?;
-    if scopes
-        .iter()
-        .any(|s| PaykitScope::classify(s) == ScopeName::Unknown)
-    {
+    if scopes.iter().any(|s| {
+        matches!(
+            PaykitScope::classify(s),
+            ScopeName::Unknown | ScopeName::OtherProtocol
+        )
+    }) {
         return invalid("Paykit spec 3.1: an app request names a scope Paykit doesn't know");
     }
     Ok(())
@@ -302,20 +343,43 @@ pub fn permissions_for(scopes: &[String]) -> Vec<Permission> {
 }
 
 /// Paykit's verifiers' checks on a certificate the Switch's checks took (Paykit spec 3.2,
-/// Paykit wire 3.1): Paykit's scope rules, and `permissions` exactly the list its scopes
-/// need, with none missing and no other.
+/// Paykit wire 3.1; Switch wire 3.1 "Several protocols"):
+///
+/// - Paykit's scope rules apply in full to its own scopes ([`check_scopes`]), and its bounds
+///   count only them.
+/// - Without a scope of another protocol ([`ScopeName::OtherProtocol`]), `permissions` is
+///   exactly the list Paykit's scopes need ([`permissions_for`]), with none missing and no
+///   other.
+/// - With one, such as a wallet that also chats, `permissions` holds every permission
+///   Paykit's scopes need, and may hold more: the other protocol's. The Switch's checks have
+///   already taken the list as well formed, each a switch permission, once, in order.
+///
+/// A `pay:x` or a plain `ext` is Paykit's name with no meaning, not another protocol's
+/// scope, so it doesn't widen the list. Another protocol's scopes, and the permissions they
+/// bring, authorize nothing in Paykit: each of its messages and documents still needs its
+/// own Paykit scope (Paykit spec 3.3).
 ///
 /// # Errors
 ///
 /// [`Error::Invalid`] naming the rule.
 pub fn check_certificate(cert: &AppCert) -> Result<()> {
     check_scopes(cert.scopes())?;
-    if cert.permissions() != permissions_for(cert.scopes()).as_slice() {
-        return invalid(
-            "Paykit spec 3.2: permissions aren't exactly the list its Paykit scopes need",
-        );
+    let needed = permissions_for(cert.scopes());
+    if holds_other_protocol(cert.scopes()) {
+        if !needed.iter().all(|p| cert.permissions().contains(p)) {
+            return invalid("Paykit spec 3.2: permissions lack one that its Paykit scopes need");
+        }
+    } else if cert.permissions() != needed.as_slice() {
+        return invalid("Paykit spec 3.2: permissions aren't exactly what its Paykit scopes need");
     }
     Ok(())
+}
+
+/// Whether `scopes` hold at least one of Paykit's scopes: an app with none, such as one of
+/// another protocol only, isn't a Paykit App and sends or receives no Paykit kind (Paykit
+/// spec 3.3).
+pub fn holds_paykit_scope(scopes: &[String]) -> bool {
+    !paykit_scopes(scopes).is_empty()
 }
 
 /// Verify a certificate as Paykit's verifiers do: the Switch's checks for `identity`
@@ -362,6 +426,8 @@ pub fn acts_as_payee(scopes: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pubky_switch_core::keys::{AppKeys, IdentityKey};
+    use pubky_switch_core::records::AppCertBody;
 
     fn owned(scopes: &[&str]) -> Vec<String> {
         scopes.iter().map(|s| (*s).to_owned()).collect()
@@ -391,6 +457,7 @@ mod tests {
         ));
         for malformed in [
             "ext:paykit",
+            "ext:cap",
             "ext:",
             "ext:-x",
             "request:Shop1",
@@ -403,7 +470,7 @@ mod tests {
                 "{malformed}"
             );
         }
-        for unknown in ["pay:x", "contacts:x", "ext", "future_scope"] {
+        for unknown in ["pay:x", "contacts:x", "ext", "Chat", "chat:Room"] {
             assert_eq!(
                 PaykitScope::classify(unknown),
                 ScopeName::Unknown,
@@ -431,8 +498,10 @@ mod tests {
                 vec!["contacts", "manage_contacts"],
                 vec!["lists.read", "lists.manage"],
             ),
-            (vec!["ext:x"], vec!["conversation.add"]),
+            (vec!["ext:x-1"], vec!["conversation.add"]),
+            (vec!["ext:cap"], vec![]),
             (vec!["future_scope", "pay:x"], vec![]),
+            (vec!["chat", "chat:room1"], vec![]),
             (vec!["ext:paykit"], vec![]),
         ] {
             assert_eq!(names(&permissions_for(&owned(&scopes))), want, "{scopes:?}");
@@ -445,7 +514,7 @@ mod tests {
         check_scopes(&owned(&["pay", "allowance", "allowance_execute"])).unwrap();
         let labels: Vec<String> = (1..=8).map(|i| format!("request:shop{i}")).collect();
         check_scopes(&labels).unwrap();
-        let exts: Vec<String> = (1..=8).map(|i| format!("ext:e{i}")).collect();
+        let exts: Vec<String> = (1..=8).map(|i| format!("ext:e-{i}")).collect();
         check_scopes(&exts).unwrap();
         check_scopes(&owned(&["future_scope"])).unwrap();
     }
@@ -453,9 +522,10 @@ mod tests {
     #[test]
     fn test_scopes_reject_each_rule() {
         let labels: Vec<String> = (1..=9).map(|i| format!("request:shop{i}")).collect();
-        let exts: Vec<String> = (1..=9).map(|i| format!("ext:e{i}")).collect();
+        let exts: Vec<String> = (1..=9).map(|i| format!("ext:e-{i}")).collect();
         for (scopes, rule) in [
             (owned(&["ext:paykit"]), "malformed"),
+            (owned(&["ext:cap"]), "malformed"),
             (owned(&["request:Shop1"]), "malformed"),
             (labels, "more than 8 labelled"),
             (exts, "more than 8 extension"),
@@ -480,7 +550,7 @@ mod tests {
 
     #[test]
     fn test_scopes_keyed_leave_out_extensions_and_unknown_names() {
-        let keyed = keyed_scopes(&owned(&["request", "ext:cap", "pay:x", "allowance"]));
+        let keyed = keyed_scopes(&owned(&["request", "ext:paykit-cap", "pay:x", "allowance"]));
         assert_eq!(keyed, owned(&["request", "allowance"]));
         assert_eq!(
             keyed_scopes(&owned(&["request:shop1"])),
@@ -499,13 +569,189 @@ mod tests {
         assert!(!acts_as_payee(&owned(&["pay"])));
     }
 
+    fn cert(scopes: &[&str], permissions: &[Permission]) -> AppCert {
+        let identity = IdentityKey::from_secret([6; 32]);
+        let app = AppKeys::from_secrets([4; 32], [5; 32]);
+        AppCert::issue(
+            &identity,
+            AppCertBody::new(
+                identity.public(),
+                app.signing_public(),
+                app.bundle_public(),
+                owned(scopes),
+                permissions,
+                1_767_225_600_000,
+                1_767_225_600_000 + 86_400_000,
+            ),
+        )
+        .unwrap()
+    }
+
+    const LISTS_READ: Permission = Permission::ListsRead;
+    const ADD: Permission = Permission::ConversationAdd;
+
+    #[test]
+    fn test_scopes_classify_another_protocols_scopes() {
+        for other in ["chat", "chat:room1", "future_scope", "a-b_c"] {
+            assert_eq!(
+                PaykitScope::classify(other),
+                ScopeName::OtherProtocol,
+                "{other}"
+            );
+        }
+        // Paykit's own names with no meaning, and what isn't a scope, aren't another
+        // protocol's.
+        for not_other in [
+            "pay:x",
+            "allowance:x",
+            "ext",
+            "Chat",
+            "chat:",
+            "chat:a_b",
+            "pay",
+        ] {
+            assert_ne!(
+                PaykitScope::classify(not_other),
+                ScopeName::OtherProtocol,
+                "{not_other}"
+            );
+        }
+        assert!(holds_other_protocol(&owned(&["pay", "chat"])));
+        assert!(!holds_other_protocol(&owned(&["pay", "pay:x", "ext"])));
+        assert!(holds_paykit_scope(&owned(&["chat", "ext:paykit-cap"])));
+        assert!(!holds_paykit_scope(&owned(&["chat", "pay:x", "ext"])));
+    }
+
+    #[test]
+    fn test_scopes_certificate_with_another_protocol_holding_paykit_permissions_accepted() {
+        // A payee that also chats: Paykit's conversation.add, and the chat's lists.read.
+        check_certificate(&cert(&["request", "chat"], &[LISTS_READ, ADD])).unwrap();
+        // Exactly Paykit's list is still enough.
+        check_certificate(&cert(&["request", "chat"], &[ADD])).unwrap();
+    }
+
+    #[test]
+    fn test_scopes_certificate_with_another_protocol_missing_a_paykit_permission_refused() {
+        let error = check_certificate(&cert(&["request", "chat"], &[LISTS_READ]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("lack one that its Paykit scopes need"),
+            "{error}"
+        );
+        assert!(
+            check_certificate(&cert(&["pay", "chat"], &[Permission::ClaimsRead, ADD])).is_err()
+        );
+    }
+
+    #[test]
+    fn test_scopes_paykit_only_certificate_with_an_extra_permission_refused() {
+        let error = check_certificate(&cert(&["request"], &[LISTS_READ, ADD]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exactly what"), "{error}");
+        // `pay:x` and a plain `ext` are Paykit's names, not another protocol's: they don't
+        // let the list hold more.
+        assert!(check_certificate(&cert(&["request", "pay:x"], &[LISTS_READ, ADD])).is_err());
+        assert!(check_certificate(&cert(&["request", "ext"], &[LISTS_READ, ADD])).is_err());
+        check_certificate(&cert(&["request", "pay:x", "ext"], &[ADD])).unwrap();
+    }
+
+    #[test]
+    fn test_scopes_other_protocol_only_certificate_valid() {
+        check_certificate(&cert(&["chat"], &[LISTS_READ])).unwrap();
+        check_certificate(&cert(&["chat"], &[])).unwrap();
+        assert!(!holds_paykit_scope(cert(&["chat"], &[LISTS_READ]).scopes()));
+    }
+
+    #[test]
+    fn test_scopes_paykit_rules_hold_beside_another_protocol() {
+        let mut labels: Vec<String> = (1..=9).map(|i| format!("request:shop{i}")).collect();
+        labels.push("chat".into());
+        let names: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let error = check_certificate(&cert(&names, &[LISTS_READ, ADD]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("more than 8 labelled"), "{error}");
+        for (scopes, rule) in [
+            (vec!["ext:paykit", "chat"], "malformed"),
+            (vec!["ext:cap", "chat"], "malformed"),
+            (
+                vec!["allowance_execute", "allowance", "chat"],
+                "requires allowance and pay",
+            ),
+            (vec!["manage_contacts", "chat"], "requires contacts"),
+        ] {
+            let all = [
+                Permission::ClaimsRead,
+                Permission::ClaimsWrite,
+                LISTS_READ,
+                Permission::ListsManage,
+                ADD,
+            ];
+            let error = check_certificate(&cert(&scopes, &all))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(rule), "{scopes:?}: {error}");
+        }
+        let mut exts: Vec<String> = (1..=9).map(|i| format!("ext:e-{i}")).collect();
+        exts.push("chat".into());
+        assert!(check_scopes(&exts).is_err());
+    }
+
+    #[test]
+    fn test_scopes_bounds_count_only_paykit_scopes() {
+        // Eight labels, eight extension scopes and other protocols' scopes beside them: within
+        // Paykit's bounds, and the Switch's 32 in all.
+        let mut scopes: Vec<String> = (1..=8).map(|i| format!("request:shop{i}")).collect();
+        scopes.extend((1..=8).map(|i| format!("ext:e-{i}")));
+        scopes.extend((1..=16).map(|i| format!("chat{i}")));
+        assert_eq!(scopes.len(), 32);
+        let names: Vec<&str> = scopes.iter().map(String::as_str).collect();
+        check_certificate(&cert(&names, &[LISTS_READ, ADD])).unwrap();
+        // One more is over the Switch's total, whoever's it is.
+        let mut over = names.clone();
+        over.push("chat17");
+        assert!(switch_scopes::check_scopes(&owned(&over)).is_err());
+    }
+
     #[test]
     fn test_label_and_prefix_syntax() {
         assert!(Label::parse("paykit").is_ok());
+        assert!(Label::parse("shop1").is_ok());
         assert!(Label::parse(&"a".repeat(32)).is_ok());
         assert!(Label::parse(&"a".repeat(33)).is_err());
-        assert!(ExtensionPrefix::parse("paykit").is_err());
-        assert!(ExtensionPrefix::parse("paykit-cap").is_ok());
         assert!(matches!(Label::new("A"), Err(Error::Validation(_))));
+    }
+
+    #[test]
+    fn test_scopes_extension_prefix_holds_a_hyphen() {
+        for good in [
+            "paykit-cap",
+            "a-b",
+            "x-",
+            "1-2",
+            &format!("a-{}", "b".repeat(30)),
+        ] {
+            assert!(ExtensionPrefix::parse(good).is_ok(), "{good}");
+        }
+        // Without a `-` a prefix could be a protocol's name, Paykit's included.
+        for bad in [
+            "paykit",
+            "cap",
+            "chat",
+            "x",
+            "-x",
+            "Paykit-cap",
+            "a_b-c",
+            "",
+        ] {
+            assert!(ExtensionPrefix::parse(bad).is_err(), "{bad}");
+        }
+        assert!(ExtensionPrefix::parse(&format!("a-{}", "b".repeat(31))).is_err());
+        assert!(matches!(
+            ExtensionPrefix::new("cap"),
+            Err(Error::Validation(_))
+        ));
     }
 }
