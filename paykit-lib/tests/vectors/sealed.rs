@@ -1661,3 +1661,36 @@ fn test_activity_record_seen_period_details_replaced_only_by_later_ones() {
         .unwrap();
     assert!(with_details(&held, later).check_later_write(&held).is_err());
 }
+
+#[test]
+fn test_allowance_record_seen_roles_are_kept() {
+    let keys = Keys::load();
+    let (accepted, _) = allowance_cases(&keys);
+    let ended = accepted[0].1.clone();
+    ended.check_later_write(&ended).unwrap();
+    let no_end = AllowanceRecord {
+        end: None,
+        ..ended.clone()
+    };
+    // Adding an end is a later write; dropping the one seen isn't.
+    no_end.check_later_write(&ended).unwrap();
+    assert!(ended.check_later_write(&no_end).is_err());
+    // Another acceptance, or another proposal, in place of the one seen.
+    let other_acceptance = resigned(&keys, "allowance_acceptance", None, |body| {
+        body.remove("executor_app_id");
+    });
+    let replaced = AllowanceRecord {
+        response: Some(other_acceptance),
+        end: None,
+        ..ended.clone()
+    };
+    assert!(no_end.check_later_write(&replaced).is_err());
+    let other_proposal = resigned(&keys, "allowance_proposal", None, |body| {
+        body.insert("proposer_role".into(), serde_json::json!("allower"));
+    });
+    let reproposed = AllowanceRecord {
+        proposal: other_proposal,
+        ..no_end.clone()
+    };
+    assert!(no_end.check_later_write(&reproposed).is_err());
+}

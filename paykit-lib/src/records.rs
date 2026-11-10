@@ -1763,6 +1763,29 @@ impl AllowanceRecord {
             .and_then(|e| self.valid_entry(own, e).map(|cert| cert.app_id())))
     }
 
+    /// "Seen roles" of an Allowance record (Paykit spec 6, Paykit wire 5.4, Switch spec 8.2):
+    /// a reader that holds `self` ignores, and shows with its writer, a later write of the
+    /// record that drops or replaces the proposal, the response or the end it saw, by hash,
+    /// or whose grant history doesn't start with the one it saw
+    /// ([`AllowanceRecord::check_later_history`]). No message of these roles replaces
+    /// another, so a tie never decides.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] naming the rule `later` breaks.
+    pub fn check_later_write(&self, later: &AllowanceRecord) -> Result<()> {
+        let kept = |seen: Option<&StoredMessage>, now: Option<&StoredMessage>| {
+            seen.is_none_or(|s| now.is_some_and(|n| n.hash() == s.hash()))
+        };
+        ensure(
+            kept(Some(&self.proposal), Some(&later.proposal))
+                && kept(self.response.as_ref(), later.response.as_ref())
+                && kept(self.end.as_ref(), later.end.as_ref()),
+            "Paykit wire 5.4: a later write drops or replaces a message in a role seen",
+        )?;
+        self.check_later_history(later)
+    }
+
     /// "Rewrites" (Paykit wire 5.4): an app that has seen this history ignores and flags a
     /// later write whose `grants` doesn't start with it. Writers only append.
     ///
