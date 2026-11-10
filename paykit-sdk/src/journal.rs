@@ -206,6 +206,10 @@ pub(crate) struct JournalEntry {
     /// The signed app record carrying a public endpoint, for the same check.
     #[serde(default)]
     pub(crate) carrier_record: Option<SignedDoc>,
+    /// The attempt's transition proof, for the service and generation it was written at
+    /// (Paykit spec 4, "Fresh before paying"). An entry without one is never dispatched again.
+    #[serde(default)]
+    pub(crate) attempt_proof: Option<SignedDoc>,
 }
 
 impl std::fmt::Debug for JournalEntry {

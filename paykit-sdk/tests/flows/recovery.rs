@@ -400,3 +400,135 @@ async fn test_recovery_slow_failed_own_identity_read_refuses_the_repeat() {
     );
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
+
+/// A world where alice's wallet stopped right after journaling `Paying`, before the payment
+/// method was called, on an idempotent rail without a history. Returns the world, the
+/// attempt, the wallet's App ID and its store, as committed.
+async fn stopped_before_the_rail() -> (
+    World,
+    paykit_lib::AttemptId,
+    [u8; 16],
+    Arc<dyn pubky_switch_client::store::StateStore>,
+) {
+    use pubky_switch_client::store::{Fault, FaultStore, StateStore};
+    for n in 1..64 {
+        let w = World::new();
+        w.rail.set_declaration(idempotent_without_history());
+        let base = store();
+        let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+        let app_id = wallet.app_id();
+        let mut shop = w.shop().await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        drop(wallet);
+        let faulty: Arc<dyn StateStore> =
+            Arc::new(FaultStore::new(Arc::clone(&base), Fault::StopAfter(n)));
+        let mut crashing = w
+            .load_on_clock(&w.alice, faulty, app_id, Arc::clone(&w.clock))
+            .await;
+        let _ = crashing.pay_request(&request, PayOptions::default()).await;
+        drop(crashing);
+        if !w.rail.all_executions().is_empty() {
+            panic!("the rail was reached before the stop at {n}");
+        }
+        let wallet = w
+            .load_on_clock(&w.alice, Arc::clone(&base), app_id, Arc::clone(&w.clock))
+            .await;
+        let payments = wallet.payments().await.unwrap();
+        if let [payment] = payments.as_slice() {
+            if payment.stage == Stage::Paying {
+                let attempt_id = payment.attempt_id;
+                drop(wallet);
+                return (w, attempt_id, app_id, base);
+            }
+        }
+    }
+    panic!("no commit journals Paying");
+}
+
+/// Alice's signer publishes her next identity.json at `generation`, naming `inbox`, on her
+/// Homeserver only: the switch her wallet follows isn't told.
+fn publish_provider(w: &World, generation: u64, inbox: pubky_switch_core::records::Inbox) {
+    let held = w.homeserver.identity_doc(&w.alice_id()).unwrap();
+    let old = held.body().inbox.clone();
+    let old_generation = held.generation();
+    w.alice
+        .sign_next(|body| {
+            body.service_keys
+                .push(pubky_switch_core::records::ServiceKeyEntry {
+                    generation: old_generation,
+                    key: old.service_key,
+                });
+            body.generation = generation;
+            body.inbox = inbox;
+        })
+        .unwrap();
+}
+
+async fn resume_after_provider_change(change: impl FnOnce(&World)) {
+    let (w, attempt_id, app_id, base) = stopped_before_the_rail().await;
+    change(&w);
+    let mut wallet = w
+        .load_on_clock(&w.alice, Arc::clone(&base), app_id, Arc::clone(&w.clock))
+        .await;
+    // The attempt was written at a service or generation the identity no longer names:
+    // nothing is paid on it, and it stays "may be paid" until the move rules resolve it
+    // (Paykit spec 4, 7.2; Switch spec 12.5, 12.6).
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert_eq!(w.rail.pay_calls(&attempt_id), 0);
+    assert!(w.rail.all_executions().is_empty());
+    assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Paying);
+}
+
+#[tokio::test]
+async fn test_recovery_not_paid_after_a_provider_change() {
+    resume_after_provider_change(|w| {
+        let held = w.homeserver.identity_doc(&w.alice_id()).unwrap();
+        publish_provider(
+            w,
+            held.generation() + 1,
+            pubky_switch_core::records::Inbox::new("https://alice-next.example", w.bob_id()),
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_recovery_not_paid_after_a_generation_change_at_the_same_service() {
+    resume_after_provider_change(|w| {
+        let held = w.homeserver.identity_doc(&w.alice_id()).unwrap();
+        publish_provider(w, held.generation() + 1, held.body().inbox.clone());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn test_recovery_stopped_before_the_rail_paid_at_the_same_service() {
+    let (w, attempt_id, app_id, base) = stopped_before_the_rail().await;
+    let mut wallet = w
+        .load_on_clock(&w.alice, Arc::clone(&base), app_id, Arc::clone(&w.clock))
+        .await;
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_recovery_not_paid_once_the_own_app_is_unlisted() {
+    let (w, attempt_id, app_id, base) = stopped_before_the_rail().await;
+    // The signer drops the wallet from the identity's apps: its identity.json no longer
+    // authorizes it (Paykit spec 4).
+    w.alice
+        .sign_next(|body| body.apps.retain(|a| a.app_id != app_id))
+        .unwrap();
+    let mut wallet = w
+        .load_on_clock(&w.alice, Arc::clone(&base), app_id, Arc::clone(&w.clock))
+        .await;
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert_eq!(w.rail.pay_calls(&attempt_id), 0);
+}

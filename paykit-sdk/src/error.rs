@@ -80,6 +80,13 @@ pub enum Refusal {
     /// in progress (Paykit spec 8.1).
     #[error("Paykit spec 8.1: a payment is in progress")]
     PaymentInProgress,
+    /// The own `identity.json` doesn't authorize the payment: it doesn't list this app with
+    /// the certificate it holds, or names another service or generation than the one the
+    /// attempt was written at, after a provider change (Paykit spec 4, Switch spec 12.5,
+    /// 12.6). Nothing is paid; the attempt is resolved by the move rules: the claim at the
+    /// service followed, or else "may be paid".
+    #[error("not current here: {0}")]
+    NotCurrent(String),
     /// The client layer holds the attempt back: an alarm, a restore question, reconcile mode,
     /// or the clocks disagreeing (Switch spec 10.1, 12.4).
     #[error("not now: {0}")]

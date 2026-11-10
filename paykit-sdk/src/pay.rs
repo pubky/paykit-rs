@@ -32,6 +32,7 @@ use pubky_switch_client::app::{
     claim_conflict, AppError, ClaimOp, Initiator, ObligationDeadline, OpBatch,
     Refusal as ClientRefusal, SignedMessage, UserConfirmed, REVALIDATION_MS,
 };
+use pubky_switch_core::chain::TransitionProof;
 use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome};
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::message::MessagePlaintext;
@@ -283,6 +284,7 @@ impl Paykit {
             journaled_at_ms: self.now(),
             carrier: None,
             carrier_record: None,
+            attempt_proof: None,
         };
         self.execute(Plan {
             entry,
@@ -350,6 +352,7 @@ impl Paykit {
             journaled_at_ms: self.now(),
             carrier: None,
             carrier_record: None,
+            attempt_proof: None,
         };
         self.execute(Plan {
             entry,
@@ -697,28 +700,31 @@ impl Paykit {
             // moved, so a resume reads the claim and writes `failed` if the attempt is ours.
             Err(error) => return Err(error.into()),
         };
-        entry.step = submitted.proofs.first().and_then(|proof| proof.body().step);
+        let proof = submitted.proofs.first();
+        entry.step = proof.and_then(|proof| proof.body().step);
+        entry.attempt_proof = proof.map(|proof| proof.signed().clone());
+        // The view the attempt's checked proof shows (Switch wire 6.5 "Binding").
+        let claim = proof
+            .map(|proof| ClaimView::from_value(&proof.body().state))
+            .transpose()?;
         self.set_stage(&mut entry, Stage::Attempted).await?;
-        // Before any money moves: the own identity.json, still confirmed within the last
-        // 60 s (read again if not), then the destination (Paykit spec 4, 7.2). Either failing
-        // writes `failed` instead of paying.
-        if let Err(refusal) = self.own_identity_confirmed(false).await {
-            return self.fail_attempt(&mut entry, refusal).await;
-        }
-        // The copy checked before the write is still fresh: this reads no network unless
-        // it aged meanwhile (Switch spec 4.3).
-        let checked = self
-            .check_destination(
-                &entry.payee,
-                &entry.destination,
-                &carrier,
-                request_hash.as_ref(),
-                by,
-                unconfirmed,
-            )
-            .await?;
-        if let Err(refusal) = checked {
-            return self.fail_attempt(&mut entry, refusal).await;
+        // Before any money moves, the gate every dispatch passes (Paykit spec 4, 7.2 step 1).
+        // The copies checked before the write are still fresh: this reads no network unless
+        // they aged meanwhile (Switch spec 4.3). A failure writes `failed` instead of paying,
+        // but for an attempt at a service the identity no longer names, which the move rules
+        // resolve (Switch spec 12.5, 12.6): nothing is written there.
+        let Some(claim) = claim else {
+            return self
+                .fail_attempt(&mut entry, Refusal::NotNow("no attempt proof".into()))
+                .await;
+        };
+        match self
+            .pay_gate(&entry, &carrier, &claim, by, unconfirmed, false)
+            .await?
+        {
+            Ok(()) => {}
+            Err(refusal @ Refusal::NotCurrent(_)) => return Err(refusal.into()),
+            Err(refusal) => return self.fail_attempt(&mut entry, refusal).await,
         }
         // Starting to pay is journaled before the payment begins (Paykit spec 7.2).
         self.set_stage(&mut entry, Stage::Paying).await?;
@@ -1153,17 +1159,26 @@ impl Paykit {
             // A repeat may execute money: only while the claim still shows this app's own
             // attempt open. One resolved meanwhile is never carried out again, and one in
             // doubt (`unknown`, or gone from the claim) stays so (Paykit spec 7.2, 7.3).
-            match self.attempt_state(&entry).await? {
-                Some((step, Outcome::Open)) => entry.step = Some(step),
-                Some((_, Outcome::Done | Outcome::Failed)) => {
+            let Some(claim) = self.app.read_claim(&entry.obligation).await? else {
+                return Ok(Some(PayOutcome::Uncertain { attempt_id }));
+            };
+            let claim = claim.view;
+            let me = self.app_id();
+            match claim
+                .attempt(&attempt_id.to_bytes())
+                .filter(|a| a.owner == me)
+                .map(|a| a.outcome)
+            {
+                Some(Outcome::Open) => entry.step = Some(claim.step),
+                Some(Outcome::Done | Outcome::Failed) => {
                     self.set_stage(&mut entry, Stage::Finished).await?;
                     return Ok(None);
                 }
-                Some((_, Outcome::Unknown)) | None => {
+                Some(Outcome::Unknown) | None => {
                     return Ok(Some(PayOutcome::Uncertain { attempt_id }))
                 }
             }
-            if let Some(held) = self.repeat_held(&entry).await? {
+            if let Some(held) = self.repeat_held(&entry, &claim).await? {
                 return Ok(Some(held));
             }
             // The checks awaited the network: the retention is judged again on the clock now.
@@ -1190,29 +1205,132 @@ impl Paykit {
     ///
     /// [`Refusal::IdentityUnavailable`] when the own `identity.json` isn't confirmed: no
     /// payment of this app goes on then.
-    async fn repeat_held(&mut self, entry: &JournalEntry) -> Result<Option<PayOutcome>> {
+    async fn repeat_held(
+        &mut self,
+        entry: &JournalEntry,
+        claim: &ClaimView,
+    ) -> Result<Option<PayOutcome>> {
         let attempt_id = entry.attempt()?;
-        if self.app.may_attempt(true).is_err() {
-            return Ok(Some(PayOutcome::Pending { attempt_id }));
-        }
-        self.own_identity_confirmed(true).await?;
         let Some(carrier) = entry.kept_carrier(&self.identity())? else {
             return Ok(Some(PayOutcome::Uncertain { attempt_id }));
         };
+        let gate = self
+            .pay_gate(entry, &carrier, claim, Initiator::Automatic, None, true)
+            .await?;
+        Ok(match gate {
+            Ok(()) => None,
+            Err(refusal @ Refusal::IdentityUnavailable(_)) => return Err(refusal.into()),
+            // What may pass later.
+            Err(Refusal::NotNow(_) | Refusal::IdentityUnconfirmed) => {
+                Some(PayOutcome::Pending { attempt_id })
+            }
+            // A destination refused, an attempt the claim or the identity no longer backs:
+            // "may be paid", for a receipt or the user.
+            Err(_) => Some(PayOutcome::Uncertain { attempt_id }),
+        })
+    }
+
+    /// The gate before money moves, the same for a first dispatch and a repeat (Paykit spec
+    /// 4, 7.2 step 1). In order:
+    ///
+    /// 1. the app may make an attempt now: no alarm, not left, no restore question, not in
+    ///    reconcile mode and, for an automatic payment, the clocks within the tolerance
+    ///    (Switch spec 10.1, 12.4);
+    /// 2. `claim`, the view of a checked proof or of a claim read, shows the attempt open,
+    ///    this app's and current (Paykit spec 7.2, "Only a verified answer lets money move");
+    /// 3. the destination passes its checks against its carrier and the payee's
+    ///    `identity.json`, for the initiator (Paykit spec 4, 7.2; Switch spec 4.3);
+    /// 4. the own `identity.json` is confirmed in the last 60 s, read again first with
+    ///    `refresh`, judged on the clock after the read (Paykit spec 4);
+    /// 5. that copy lists this app, not removed, with the certificate it holds counting now
+    ///    (Paykit spec 4, Switch spec 3.2);
+    /// 6. that copy names the generation the attempt was written at, and the service whose
+    ///    key signed the attempt's transition proof (Paykit spec 4, "Fresh before paying";
+    ///    Switch spec 12.5, 12.6).
+    ///
+    /// `Err` inside holds the first refusal; [`Refusal::NotCurrent`] for 5 and 6.
+    pub(crate) async fn pay_gate(
+        &mut self,
+        entry: &JournalEntry,
+        carrier: &Carrier,
+        claim: &ClaimView,
+        by: Initiator,
+        unconfirmed: Option<UserConfirmed>,
+        refresh: bool,
+    ) -> Result<std::result::Result<(), Refusal>> {
+        if let Err(refusal) = self.app.may_attempt(by == Initiator::Automatic) {
+            return Ok(Err(Refusal::NotNow(refusal.to_string())));
+        }
+        let attempt = entry.attempt()?.to_bytes();
+        let me = self.app_id();
+        let open = claim.status == ClaimStatus::Attempting
+            && claim.owner == Some(me)
+            && claim.attempt_id == Some(attempt)
+            && claim
+                .attempt(&attempt)
+                .is_some_and(|a| a.owner == me && a.outcome == Outcome::Open);
+        if !open {
+            return Ok(Err(Refusal::MayBePaid(
+                "Paykit spec 7.2: the claim doesn't show this app's attempt open".into(),
+            )));
+        }
         let checked = self
             .check_destination(
                 &entry.payee,
                 &entry.destination,
-                &carrier,
+                carrier,
                 entry.request_hash()?.as_ref(),
-                Initiator::Automatic,
-                None,
+                by,
+                unconfirmed,
             )
             .await?;
-        Ok(match checked {
-            Ok(()) => None,
-            Err(Refusal::Destination(_)) => Some(PayOutcome::Uncertain { attempt_id }),
-            Err(_) => Some(PayOutcome::Pending { attempt_id }),
-        })
+        if let Err(refusal) = checked {
+            return Ok(Err(refusal));
+        }
+        if let Err(refusal) = self.own_identity_confirmed(refresh).await {
+            return Ok(Err(refusal));
+        }
+        Ok(self
+            .own_identity_authorizes(entry)
+            .map_err(Refusal::NotCurrent))
+    }
+
+    /// Checks 5 and 6 of [`Paykit::pay_gate`], on the own `identity.json` held.
+    fn own_identity_authorizes(&self, entry: &JournalEntry) -> std::result::Result<(), String> {
+        let doc = self.app.own_identity();
+        let me = self.app_id();
+        let cert = self.app.cert().hash();
+        if doc.lists_removed(&me)
+            || doc.listed_cert(&me).is_none()
+            || !doc.counts_at(&me, &cert, self.now())
+        {
+            return Err(
+                "Paykit spec 4: the own identity.json doesn't list this app with its certificate"
+                    .into(),
+            );
+        }
+        let Some(signed) = &entry.attempt_proof else {
+            return Err("Paykit spec 4: the attempt's proof isn't kept".into());
+        };
+        let generation = TransitionProof::peek(signed)
+            .map_err(|_| "Paykit spec 4: the attempt's proof doesn't read".to_owned())?
+            .envelope()
+            .generation;
+        if generation != doc.generation() {
+            return Err(
+                "Switch spec 12.5: the identity names another generation than the attempt's".into(),
+            );
+        }
+        let verified = doc
+            .service_key_of(generation)
+            .is_some_and(|key| TransitionProof::verify(signed, &key, &self.identity()).is_ok());
+        if !verified {
+            return Err(
+                "Paykit spec 4: the identity names another service than the one that signed the \
+                 attempt"
+                    .into(),
+            );
+        }
+        Ok(())
     }
 }

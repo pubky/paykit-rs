@@ -319,6 +319,7 @@ impl Paykit {
             journaled_at_ms: self.now(),
             carrier: None,
             carrier_record: None,
+            attempt_proof: None,
         };
         entry.keep_carrier(&carrier);
         Ok(Some(entry))
