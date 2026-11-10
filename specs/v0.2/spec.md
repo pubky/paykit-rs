@@ -520,6 +520,14 @@ The reference prototype is shared separately, with its history (phase 1, the mec
 - a stored message passes the sender's side of check 8 when it is read (wire 5.2; `sealed.json` `activity_records`);
 - an activity record carries `request_hash`, `billing_period`, `attempt_id`, `unrequested` and `allowance_id` only where its binding and side allow (wire 5.3; `sealed.json` `activity_records`);
 - a record's `msg_ids` names each ID once, the 16 newest distinct others, and readers read it in that form (wire 5.3, 5.4; `sealed.json` `msg_ids_bounds`);
+- a proof's members follow whether it proves a request: `amount` only without one, its Billing Period with the period details it used, and no request context without a request (wire 4.10; `messages.json` `proof_members`);
+- a receipt is of its proof's attempt and Billing Period, and names no period without a request (wire 4.11; `sealed.json` `activity_records`);
+- an Allowance end names the stored acceptance, or is the proposal's withdrawal by its sender before any response; a rejected Allowance has no end; `executor_app_id` only in an acceptance from the allower (wire 4.16; `sealed.json` `allowance_records`);
+- an unrequested destination's `list_version` is present exactly for a list, and is the proof's (wire 5.3);
+- a newer Allowance ledger version holds an attempt that left into its totals in neither its entries nor its `totals.failed` (wire 5.5);
+- period details as late as those held but with another hash replace nothing (wire 4.9, 5.3), and a later write of an `allowances` record keeps the proposal, response and end seen (wire 5.4);
+- a later write of a `payment_lists` record holds no older list, no other list of the same `version`, and every `used` entry seen, whatever its list's `version` (wire 4.13, 5.4);
+- Allowance terms take any positive `every`, and a period too long to evaluate makes the evaluation ineligible, not the terms invalid (wire 4.15);
 - after any restore from a backup, an app holds every open request and Allowance until the record shows a cancellation or end or the user confirms, and asks each counterparty to re-send from the backup's position (Section 7.2, What a restore loses): a rule of an app's run, which neither `paykit-lib`, a stateless library, nor a vector checks; the conformance case `restore_stale_backup_cancellation_stop`, below, does.
 
 Appendix A of the wire format marks the rows where the prototype differs from a choice there: A2, A3, A5, A10 and A14.
