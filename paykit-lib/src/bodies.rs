@@ -108,6 +108,12 @@ fn read_rates(value: &Value, ctx: &str) -> Result<Vec<Rate>> {
     Ok(out)
 }
 
+/// The asset segment of a rate selector (Paykit wire 4.4, `specs/payment-conversion.md`):
+/// `usdt` for both `usdt` and `usdt-polygon`.
+fn selector_asset(selector: &str) -> &str {
+    selector.split('-').next().unwrap_or(selector)
+}
+
 fn rates_json(rates: &[Rate]) -> Value {
     Value::Array(
         rates
@@ -620,20 +626,23 @@ impl PeriodDetails {
     }
 
     /// The checks that need the request (Paykit wire 4.9): the period is one of the
-    /// request's, and the rates are cross-asset only, with no rate for the requested asset.
+    /// request's, and the rates are cross-asset only, with no rate for the requested asset,
+    /// bare (`usdt`) or rail-qualified (`usdt-polygon`), so a same-asset payment of a period
+    /// stays 1:1 whatever its details say (`specs/payment-conversion.md`).
     ///
     /// # Errors
     ///
     /// [`Error::Invalid`] naming the rule.
     pub fn check_against(&self, request: &PaymentRequest) -> Result<BillingPeriod> {
         let period = request.named_period(&self.billing_period)?;
-        if self
-            .rates
-            .iter()
-            .flatten()
-            .any(|r| r.asset() == &request.amount.asset)
-        {
-            return invalid("Paykit wire 4.9: period details' rates are cross-asset only");
+        let requested = request.amount.asset.as_str();
+        if self.rates.iter().flatten().any(|r| {
+            let selector = r.asset().as_str();
+            selector == requested || selector_asset(selector) == requested
+        }) {
+            return invalid(
+                "Paykit wire 4.9: period details' rates are cross-asset only, with no bare or rail-qualified rate for the requested asset",
+            );
         }
         Ok(period)
     }
@@ -1550,6 +1559,33 @@ mod tests {
         twice["rates"] =
             json!([{ "asset": "btc", "value": "1" }, { "asset": "btc", "value": "2" }]);
         assert!(PeriodDetails::from_body(&body(twice)).is_err());
+    }
+
+    #[test]
+    fn test_period_details_rates_are_cross_asset_only() {
+        let mut recurring = request();
+        recurring["amount"] = json!({ "asset": "usdt", "value": "10" });
+        recurring["payment_deadline"] = json!({ "type": "period_start", "seconds": 86400 });
+        recurring["recurrence"] = json!({ "anchor": "2026-01-31T00:00:00.000Z", "every": 1,
+            "unit": "month", "starts_at": "2026-01-31T00:00:00.000Z", "ends_at": null });
+        recurring["payment_endpoints"] =
+            json!({ "btc-lightning-bolt11": "lnbc1", "usdt-polygon-address": "0x1" });
+        recurring["conversion"] = json!({ "type": "per_period" });
+        let request = PaymentRequest::from_body(&body(recurring)).unwrap();
+        let details = |selector: &str| {
+            PeriodDetails::from_body(&body(json!({ "billing_period": {
+                "starts_at": "2026-01-31T00:00:00.000Z", "ends_at": "2026-02-28T00:00:00.000Z" },
+                "expires_at": "2026-02-01T00:00:00.000Z",
+                "rates": [{ "asset": selector, "value": "1.008" }] })))
+            .unwrap()
+        };
+        details("btc").check_against(&request).unwrap();
+        details("btc-lightning").check_against(&request).unwrap();
+        details("usdtx").check_against(&request).unwrap();
+        for same in ["usdt", "usdt-polygon", "usdt-ethereum"] {
+            let error = details(same).check_against(&request).unwrap_err();
+            assert!(error.to_string().contains("cross-asset only"), "{same}");
+        }
     }
 
     #[test]
