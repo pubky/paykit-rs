@@ -124,6 +124,7 @@ fn test_vectors_messages() {
     check_multi_protocol_senders(&keys, &file);
     check_cancellation_roles(&keys, &file);
     check_conversion_terms(&keys, &file);
+    check_proof_members(&keys, &file);
 }
 
 /// `refs` name messages by hash, in each kind's order (Paykit wire 4.3).
@@ -402,7 +403,8 @@ of it copies the label; label_rejections holds requests a payer drops for their 
 multi_protocol_senders holds messages from apps whose certificates hold another protocol's \
 scopes; cancellation_roles holds a cancellation between certificates of each pair of roles; \
 conversion_terms holds the shop's period details and requests with their conversion terms \
-changed, which a payer takes or drops.";
+changed, which a payer takes or drops; proof_members holds alice's proofs with a member \
+outside the payment it proves, which a payee drops.";
 
 const MULTI_PROTOCOL_DESCRIPTION: &str = "Wire 4.1 check 8, spec 3.2, 3.3, Switch wire 3.1 \
 \"Several protocols\": messages.json's payment_request and resend_request_ids, as the shop \
@@ -496,6 +498,7 @@ fn generate(keys: &Keys) {
                 cancellation_roles(keys),
             ),
             (Place::Member("/conversion_terms"), conversion_terms(keys)),
+            (Place::Member("/proof_members"), proof_members(keys)),
         ],
     );
 }
@@ -871,5 +874,99 @@ fn check_conversion_terms(keys: &Keys, file: &Value) {
                 assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
             }
         }
+    }
+}
+
+const PROOF_MEMBERS_DESCRIPTION: &str = "Wire 4.10: alice's proofs, payment_proof of the \
+one-time request and payment_proof_unrequested of a payment without one, with one member \
+added and signed again by her wallet. amount is only in a proof of a payment without a \
+request, whose refs are empty; billing_period, label, payment_reference and allowance_id are \
+only in a proof of a request. A payee drops each at check 10. reason is paykit-lib's \
+wording.";
+
+/// The cases of `proof_members`: name, base and the member added.
+fn proof_cases() -> Vec<(&'static str, &'static str, &'static str, Value)> {
+    vec![
+        (
+            "a request's proof carrying amount",
+            "payment_proof",
+            "amount",
+            json!({ "asset": "btc", "value": "0.00025" }),
+        ),
+        (
+            "a proof without a request carrying billing_period",
+            "payment_proof_unrequested",
+            "billing_period",
+            json!({ "ends_at": "2026-03-31T00:00:00.000Z", "starts_at": "2026-02-28T00:00:00.000Z" }),
+        ),
+        (
+            "a proof without a request carrying label",
+            "payment_proof_unrequested",
+            "label",
+            json!("shop1"),
+        ),
+        (
+            "a proof without a request carrying payment_reference",
+            "payment_proof_unrequested",
+            "payment_reference",
+            json!("order-1042"),
+        ),
+        (
+            "a proof without a request carrying allowance_id",
+            "payment_proof_unrequested",
+            "allowance_id",
+            json!(crate::common::ALLOWANCE_ID),
+        ),
+    ]
+}
+
+/// `proof_members`, as paykit-lib generates it.
+fn proof_members(keys: &Keys) -> Value {
+    let wallet = keys.app("wallet");
+    let refused: Vec<Value> = proof_cases()
+        .into_iter()
+        .map(|(name, base, member, value)| {
+            let mut m = Message::parse(&message_json(base), OPAQUE_MEMBERS).unwrap();
+            m.body.insert(member.into(), value);
+            let json = m.to_json().unwrap();
+            assert_eq!(m.from.app_id, wallet.keys.app_id_bytes(), "{name}");
+            let plaintext =
+                MessagePlaintext::sign_json(&wallet.keys, json.clone(), OPAQUE_MEMBERS).unwrap();
+            let error = check_body(&m, &json).expect_err(name);
+            json!({
+                "base": base,
+                "json": String::from_utf8(json).unwrap(),
+                "name": name,
+                "reason": quoted(&error.to_string()),
+                "sender_app": wallet.app_id,
+                "signature": b64(&plaintext.signature()),
+            })
+        })
+        .collect();
+    json!({ "description": PROOF_MEMBERS_DESCRIPTION, "refused": refused })
+}
+
+/// `proof_members` (Paykit wire 4.10): the wallet's signatures, and the payee dropping each
+/// at check 10.
+fn check_proof_members(keys: &Keys, file: &Value) {
+    let wallet = keys.app("wallet");
+    let cases = arr(&file["proof_members"], "refused");
+    assert_eq!(cases.len(), proof_cases().len());
+    for case in cases {
+        let name = st(case, "name");
+        let json = st(case, "json").as_bytes().to_vec();
+        let plaintext =
+            MessagePlaintext::sign_json(&wallet.keys, json.clone(), OPAQUE_MEMBERS).unwrap();
+        assert_eq!(b64(&plaintext.signature()), st(case, "signature"), "{name}");
+        let message = plaintext
+            .check(
+                &pubky(BOB),
+                &wallet.identity,
+                &VerifiedSender::from_cert(&cert(wallet)),
+                OPAQUE_MEMBERS,
+            )
+            .unwrap();
+        let error = check_body(&message, &json).expect_err(name);
+        assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
     }
 }

@@ -868,6 +868,32 @@ impl PaymentProof {
                 "a proof of a payment without a request carries it",
             ));
         }
+        if refs > 0 && amount.is_some() {
+            return Err(bad(
+                PROOF,
+                "amount",
+                "only in a proof of a payment without a request; a request's comes from the request",
+            ));
+        }
+        if refs == 0 {
+            // Paykit wire 4.10: these members name a request's context, a Billing Period, a
+            // label, a reference or the Allowance an automatic payment of a request is made
+            // under, so a proof of a payment without a request carries none.
+            for member in [
+                "billing_period",
+                "label",
+                "payment_reference",
+                "allowance_id",
+            ] {
+                if obj.opt(member).is_some() {
+                    return Err(bad(
+                        PROOF,
+                        member,
+                        "only in a proof of a request, not of a payment without one",
+                    ));
+                }
+            }
+        }
         Ok(Self {
             attempt_id: AttemptId::from_bytes(obj.req_b64::<16>("attempt_id")?),
             billing_period: obj
@@ -2166,6 +2192,45 @@ mod tests {
                 "{unmatched}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn test_proof_members_follow_its_request() {
+        let p = json!({ "attempt_id": "mAFdg5_0tVNjmrgiTUZW4g", "payment_app_id": "brrz3m6g5rci6iqnzke44q4djc",
+            "payment_endpoint_identifier": "btc-bitcoin-p2wpkh", "proof": { "type": "x" } });
+        // A request's proof carries no amount.
+        let mut with_amount = p.clone();
+        with_amount["amount"] = json!({ "asset": "btc", "value": "0.1" });
+        let error = PaymentProof::from_body(&body(with_amount.clone()), 1).unwrap_err();
+        assert!(error.to_string().contains("amount"), "{error}");
+        let unrequested = PaymentProof::from_body(&body(with_amount.clone()), 0).unwrap();
+        assert!(unrequested.to_body(1).is_err(), "the writer refuses it too");
+        // A proof without a request carries none of a request's members.
+        for (member, value) in [
+            (
+                "billing_period",
+                json!({ "starts_at": "2026-02-28T00:00:00.000Z",
+                "ends_at": "2026-03-31T00:00:00.000Z" }),
+            ),
+            ("label", json!("shop1")),
+            ("payment_reference", json!("order-1")),
+            (
+                "allowance_id",
+                json!("d0efffb7-191b-4709-b6c7-e343af5500b4"),
+            ),
+        ] {
+            let mut b = with_amount.clone();
+            b[member] = value.clone();
+            let error = PaymentProof::from_body(&body(b), 0).unwrap_err();
+            assert!(error.to_string().contains(member), "{member}: {error}");
+            let mut b = p.clone();
+            b[member] = value;
+            PaymentProof::from_body(&body(b), 1).unwrap();
+        }
+        // list_version goes with either.
+        let mut listed = with_amount;
+        listed["list_version"] = json!(7);
+        PaymentProof::from_body(&body(listed), 0).unwrap();
     }
 
     #[test]
