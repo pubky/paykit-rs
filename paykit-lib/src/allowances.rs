@@ -884,26 +884,62 @@ pub fn counts(entry: &LedgerEntry, claim: Option<ClaimState>) -> Counting {
 /// One period limit's usage: the amount and count of the entries it counts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeriodUsage {
-    /// The amount counted.
-    pub amount: Decimal,
-    /// The payments counted.
-    pub count: u64,
+    amount: Decimal,
+    count: u64,
 }
 
-/// Usage of an Allowance at one time (Paykit spec 8.3, Paykit wire 5.5).
+impl PeriodUsage {
+    /// The amount counted.
+    pub fn amount(&self) -> &Decimal {
+        &self.amount
+    }
+
+    /// The payments counted.
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+}
+
+/// Usage of an Allowance at one time (Paykit spec 8.3, Paykit wire 5.5), as [`usage`]
+/// computes it for one set of terms. Only [`usage`] builds one, and it holds the period
+/// limits it was computed for, so [`check_limits`] never takes usage of other terms, nor one
+/// that leaves a limit out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Usage {
+    lifetime: Decimal,
+    periods: Vec<PeriodUsage>,
+    reserved: u64,
+    spent: u64,
+    released: u64,
+    limits: Vec<PeriodLimit>,
+}
+
+impl Usage {
     /// The lifetime amount: compacted totals, reserved and spent entries, and compacted
     /// failed attempts whose claim now shows `done`.
-    pub lifetime: Decimal,
+    pub fn lifetime(&self) -> &Decimal {
+        &self.lifetime
+    }
+
     /// Each period limit's usage, in the order of `period_limits`.
-    pub periods: Vec<PeriodUsage>,
+    pub fn periods(&self) -> &[PeriodUsage] {
+        &self.periods
+    }
+
     /// Entries reserved.
-    pub reserved: u64,
+    pub fn reserved(&self) -> u64 {
+        self.reserved
+    }
+
     /// Entries spent.
-    pub spent: u64,
+    pub fn spent(&self) -> u64 {
+        self.spent
+    }
+
     /// Entries released.
-    pub released: u64,
+    pub fn released(&self) -> u64 {
+        self.released
+    }
 }
 
 fn overflow() -> Error {
@@ -1001,6 +1037,7 @@ pub fn usage(
         reserved,
         spent,
         released,
+        limits: terms.period_limits.clone(),
     })
 }
 
@@ -1015,6 +1052,9 @@ pub enum LimitKind {
     PeriodCount,
     /// The lifetime amount limit: `lifetime`.
     Lifetime,
+    /// Usage that isn't of these terms' period limits, one for each in order:
+    /// `inconsistent_usage`. Every candidate is refused against it.
+    InconsistentUsage,
 }
 
 impl LimitKind {
@@ -1025,6 +1065,7 @@ impl LimitKind {
             Self::PeriodAmount => "period_amount",
             Self::PeriodCount => "period_count",
             Self::Lifetime => "lifetime",
+            Self::InconsistentUsage => "inconsistent_usage",
         }
     }
 }
@@ -1048,6 +1089,11 @@ pub fn check_limits(
         .is_some_and(|range| value < &range.minimum || value > &range.maximum)
     {
         return Err(LimitKind::PerPayment);
+    }
+    // Every limit, each with its own usage: usage of other terms, or one that leaves a limit
+    // out or adds one, refuses rather than skip a limit.
+    if usage.limits != terms.period_limits || usage.periods.len() != terms.period_limits.len() {
+        return Err(LimitKind::InconsistentUsage);
     }
     for (limit, used) in terms.period_limits.iter().zip(&usage.periods) {
         if limit.amount_limit.as_ref().is_some_and(|cap| {
@@ -1537,8 +1583,8 @@ mod tests {
             ),
         ]);
         let u = usage(&terms, &l, &HashMap::new(), t("2026-03-01T00:00:00.000Z")).unwrap();
-        assert_eq!(u.periods[0].count, 1);
-        assert_eq!(u.lifetime.as_str(), "0.02");
+        assert_eq!(u.periods()[0].count(), 1);
+        assert_eq!(u.lifetime().as_str(), "0.02");
         let d = |s: &str| Decimal::parse(s).unwrap();
         assert_eq!(check_limits(&terms, &u, &d("0.01")), Ok(()));
         assert_eq!(
@@ -1574,6 +1620,47 @@ mod tests {
         assert_eq!(
             check_limits(&terms, &spent, &d("0.01")),
             Err(LimitKind::Lifetime)
+        );
+    }
+
+    #[test]
+    fn test_check_limits_refuses_usage_of_other_limits() {
+        // One zero amount ceiling.
+        let terms = AllowanceTerms::from_json(&with_limits(json!([{ "amount_limit": "0",
+            "payment_count_limit": null,
+            "period": { "every": 1, "kind": "rolling", "unit": "day" } }])))
+        .unwrap();
+        let now = t("2026-02-10T00:00:00.000Z");
+        let u = usage(&terms, &ledger(Vec::new()), &HashMap::new(), now).unwrap();
+        // Within the per-payment range, so only the period limit decides.
+        let one = Decimal::parse("0.005").unwrap();
+        assert_eq!(check_limits(&terms, &u, &one), Err(LimitKind::PeriodAmount));
+        // Shorter: the zero ceiling left out isn't skipped.
+        let short = Usage {
+            periods: Vec::new(),
+            ..u.clone()
+        };
+        assert_eq!(
+            check_limits(&terms, &short, &one),
+            Err(LimitKind::InconsistentUsage)
+        );
+        // Longer, and usage of other terms with as many limits.
+        let long = Usage {
+            periods: vec![u.periods[0].clone(), u.periods[0].clone()],
+            ..u.clone()
+        };
+        assert_eq!(
+            check_limits(&terms, &long, &one),
+            Err(LimitKind::InconsistentUsage)
+        );
+        let other = AllowanceTerms::from_json(&with_limits(json!([{ "amount_limit": "5",
+            "payment_count_limit": null,
+            "period": { "every": 1, "kind": "rolling", "unit": "day" } }])))
+        .unwrap();
+        let other_usage = usage(&other, &ledger(Vec::new()), &HashMap::new(), now).unwrap();
+        assert_eq!(
+            check_limits(&terms, &other_usage, &one),
+            Err(LimitKind::InconsistentUsage)
         );
     }
 
