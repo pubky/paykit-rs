@@ -815,3 +815,61 @@ async fn test_restore_one_allowed_mark_rebuilds_the_payment() {
         "{report:?}"
     );
 }
+
+#[tokio::test]
+async fn test_restore_unrebuildable_failure_stays_doubtful_then_paid_is_not_lost() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    // The request offers two endpoints: the records can't tell which one was paid, so no
+    // journal entry can be rebuilt for the attempt.
+    let mut two = draft("1", w.clock.now_ms());
+    if let paykit_lib::bodies::RequestDestination::Endpoints(endpoints) = &mut two.destination {
+        endpoints.insert(
+            crate::common::endpoint("btc-bitcoin-p2wpkh"),
+            paykit_lib::PaymentEndpointPayload::new("bc1qrequest").unwrap(),
+        );
+    }
+    let request = request_from(&mut shop, w.alice_id(), two).await;
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    // The method reports a failure, and the device is lost.
+    w.rail.settle(&attempt_id, false);
+    drop(wallet);
+
+    let mut app = restored(&w, &backup).await;
+    let report = app.reconcile().await.unwrap();
+    // Written `failed`, the claim would be free for a second payment while a late success
+    // could never be reported: it stays doubtful (Paykit spec 7.2).
+    assert_eq!(report.doubtful.len(), 1, "{report:?}");
+    assert_eq!(report.doubtful[0].attempts, vec![attempt_id]);
+    let obligation = report.doubtful[0].obligation;
+    // The payment completes after all: the attempt still blocks a second payment.
+    w.rail.complete_after_failure(&attempt_id);
+    let again = app.reconcile().await.unwrap();
+    assert_eq!(again.doubtful.len(), 1, "{again:?}");
+    let claim = app
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        claim.view.status,
+        pubky_switch_core::claims::ClaimStatus::Attempting
+    );
+    app.end_reconcile(UserConfirmed::new()).await.unwrap();
+    assert!(app
+        .pay_request(&request, PayOptions::default())
+        .await
+        .is_err());
+    assert_eq!(w.rail.all_executions().len(), 1);
+}

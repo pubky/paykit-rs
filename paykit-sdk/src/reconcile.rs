@@ -8,7 +8,8 @@
 //! as any payment's outcome (Paykit spec 7.2 steps 3 and 4); one it shows failed `failed`.
 //! An attempt the journal doesn't hold, made after the backup a restore came from, has its
 //! entry rebuilt from the records; one whose destination they can't tell, and so whose proof
-//! can't be written, stays doubtful. What nothing can tell stays doubtful, "may be paid", for
+//! can't be written, stays doubtful, a reported failure too, since a payment that completed
+//! after all couldn't be reported for it. What nothing can tell stays doubtful, "may be paid", for
 //! the user: [`Paykit::resolve_attempt`] writes the user's choice (`done` basis
 //! `reconcile`, `unknown`, or `failed`). [`Paykit::end_reconcile`] ends the mode.
 //!
@@ -177,17 +178,18 @@ impl Paykit {
                             }
                         }
                         Some(RailOutcome::Failed) => {
-                            match self.rebuilt_entry(&obligation, id).await? {
-                                Some(mut entry) => {
-                                    // Reported failed by the method, so asked again while its
-                                    // history keeps the dispatch (Paykit spec 7.2).
-                                    entry.failed_by_method = true;
-                                    entry.stage = Stage::RailFailed;
-                                    report.resolved.push(self.report(&mut entry).await?);
-                                }
-                                None => self.resolve_own_failed(&obligation.claim_key, id).await?,
+                            // Reported failed by the method, so asked again while its history
+                            // keeps the dispatch, and a payment that completed after all sends
+                            // its proof (Paykit spec 7.2): only with an entry that can do it.
+                            // Without one, writing `failed` would free the claim for a second
+                            // payment while a late success could never be reported: the
+                            // attempt stays doubtful, for a receipt or the user.
+                            if let Some(mut entry) = self.rebuilt_entry(&obligation, id).await? {
+                                entry.failed_by_method = true;
+                                entry.stage = Stage::RailFailed;
+                                report.resolved.push(self.report(&mut entry).await?);
+                                continue;
                             }
-                            continue;
                         }
                         _ => {}
                     }
@@ -348,19 +350,6 @@ impl Paykit {
         };
         entry.keep_carrier(&carrier);
         Ok(Some(entry))
-    }
-
-    /// The owner reports its attempt `failed` (Switch spec 10.2 row 5), when no journal entry
-    /// can be rebuilt for it: a failure needs no proof.
-    async fn resolve_own_failed(&mut self, claim_key: &[u8; 32], attempt: AttemptId) -> Result<()> {
-        let Some(read) = self.app.read_claim(claim_key).await? else {
-            return Ok(());
-        };
-        let op = ClaimOp::failed(*claim_key, read.view.step, attempt.to_bytes());
-        self.app
-            .write_claim(op, Vec::new(), ObligationDeadline::NotKnown)
-            .await?;
-        Ok(())
     }
 
     /// Write the user's resolution of a doubtful attempt (Paykit spec 7.3): `done` with basis
