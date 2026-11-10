@@ -919,11 +919,17 @@ fn in_limit(period: &LimitPeriod, entry_at: u64, t: u64) -> Result<bool> {
         LimitPeriod::Anchored(anchored) => anchored.rule().containing(t)?.contains(entry_at),
         LimitPeriod::Rolling { every, unit } => {
             let len = LimitPeriod::rolling_len(*every, *unit)?;
-            // An entry counts while `t < at + 60 s + L`, with no lower bound.
-            entry_at
+            // An entry counts while `t < at + 60 s + L`, with no lower bound. A bound that
+            // can't be represented makes the evaluation ineligible (`specs/allowances.md`).
+            let until = entry_at
                 .checked_add(ENTRY_WINDOW_MS)
                 .and_then(|x| x.checked_add(len))
-                .is_none_or(|until| t < until)
+                .ok_or_else(|| {
+                    Error::Invalid(format!(
+                        "{TERMS}: a rolling window's end can't be represented; usage fails closed"
+                    ))
+                })?;
+            t < until
         }
     })
 }
@@ -952,8 +958,9 @@ pub fn usage(
             LimitPeriod::Anchored(anchored) => {
                 anchored.rule().containing(t)?;
             }
-            LimitPeriod::Rolling { every, unit } => {
-                LimitPeriod::rolling_len(*every, *unit)?;
+            LimitPeriod::Rolling { .. } => {
+                // The candidate, at t, counts by the same bound as an entry.
+                in_limit(&limit.period, t, t)?;
             }
         }
     }
@@ -1831,6 +1838,30 @@ mod tests {
         let month = with_limits(json!([{ "amount_limit": "1", "payment_count_limit": null,
             "period": { "every": 1, "kind": "rolling", "unit": "month" } }]));
         assert!(AllowanceTerms::from_json(&month).is_err());
+    }
+
+    #[test]
+    fn test_usage_fails_closed_when_a_rolling_window_end_overflows() {
+        // L fits in 64 bits, but an entry's at + 60 s + L doesn't.
+        let every = 30_500_568_904u64;
+        assert!(Unit::Week
+            .fixed_ms()
+            .and_then(|w| w.checked_mul(every))
+            .is_some());
+        let terms = AllowanceTerms::from_json(&with_limits(json!([{ "amount_limit": "1",
+            "payment_count_limit": null,
+            "period": { "every": every, "kind": "rolling", "unit": "week" } }])))
+        .unwrap();
+        let now = t("2026-02-10T00:00:00.000Z");
+        let l = ledger(vec![entry(1, "0.01", "2026-02-10T00:00:00.000Z", None)]);
+        let error = usage(&terms, &l, &HashMap::new(), now).unwrap_err();
+        assert!(
+            error.to_string().contains("can't be represented"),
+            "{error}"
+        );
+        // Without entries, the candidate's own window at t ends past what can be represented
+        // too, so the evaluation is still ineligible.
+        assert!(usage(&terms, &ledger(Vec::new()), &HashMap::new(), now).is_err());
     }
 
     #[test]
