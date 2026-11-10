@@ -13,6 +13,8 @@
 //! app can file a counterparty's message under another obligation, label or Allowance.
 //! Writers may write every member, with `null` for absent; readers read `null` as absent.
 
+use std::collections::HashSet;
+
 use pubky_switch_core::enc::{b64, pubky_id, unb64, zbase32_encode};
 use pubky_switch_core::ident::NamingKey;
 use pubky_switch_core::message::{Message, MessagePlaintext, VerifiedSender};
@@ -33,7 +35,7 @@ use crate::identifiers::{
     AllowanceId, AttemptId, PaymentEndpointIdentifier, PaymentEndpointPayload,
 };
 use crate::json::{bad, check_v1, parse_object, Obj};
-use crate::kinds::{Kind, OPAQUE_MEMBERS};
+use crate::kinds::{check_sender_scopes, Kind, OPAQUE_MEMBERS};
 use crate::periods::PeriodRef;
 use crate::scopes::{self, Label};
 
@@ -44,17 +46,22 @@ pub const RECENT_MSG_IDS: usize = 16;
 /// The most Billing Periods `attempted_periods` lists (Paykit spec 8.2, Paykit wire 5.3).
 pub const MAX_ATTEMPTED_PERIODS: usize = 16;
 
-/// A writer's `msg_ids` (Paykit wire 5.3): the IDs of the messages the record stores, then
-/// the 16 newest of the others it reflects (`others`, oldest first), each once.
+/// The canonical `msg_ids` (Paykit wire 5.3): the IDs of the messages the record stores,
+/// then the 16 newest distinct IDs of the others it reflects (`others`, oldest first), each
+/// ID once. Duplicates are dropped in order, each ID kept at its first place, before the 16
+/// are taken, so repeats never push out an older distinct ID. Writers write this list, and
+/// readers read a record's list as this list of what it names.
 pub fn bounded_msg_ids(stored: &[String], others: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = stored.to_vec();
-    let rest: Vec<&String> = others.iter().filter(|x| !stored.contains(x)).collect();
-    let skip = rest.len().saturating_sub(RECENT_MSG_IDS);
-    for id in rest.into_iter().skip(skip) {
-        if !out.contains(id) {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for id in stored {
+        if seen.insert(id) {
             out.push(id.clone());
         }
     }
+    let rest: Vec<&String> = others.iter().filter(|id| seen.insert(id)).collect();
+    let skip = rest.len().saturating_sub(RECENT_MSG_IDS);
+    out.extend(rest.into_iter().skip(skip).cloned());
     out
 }
 
@@ -127,6 +134,10 @@ impl StoredMessage {
             message.is_from_own_app() == own_kind,
             "Paykit wire 4.3: executor_notice goes between own apps, every other kind between identities",
         )?;
+        // Check 8's sender side, as at the inbox: the kind and its label are the sender's
+        // to send (Paykit spec 3.3, 3.4). Which own app received it isn't recorded, so the
+        // recipient side stays the inbox's.
+        check_sender_scopes(&message, cert.scopes())?;
         let body = check_body(&message, plaintext.json())?;
         Ok(Self {
             sender,
@@ -166,7 +177,8 @@ impl StoredMessage {
 
     /// Read a stored message addressed to `recipient` (Paykit wire 5.2), with the recipient
     /// checks that need no `identity.json` (Switch wire 5.1 checks 2 to 6), Paykit's
-    /// certificate checks (Paykit wire 3.1) and the body (check 10). The sender's standing,
+    /// certificate checks (Paykit wire 3.1), the sender's side of check 8
+    /// ([`check_sender_scopes`]) and the body (check 10). The sender's standing,
     /// check 7, was checked once when the message was recorded (Switch spec 8.2).
     ///
     /// # Errors
@@ -410,20 +422,29 @@ struct ActivityOut<'a> {
     attempted_periods: &'a [u64],
 }
 
-fn read_msg_ids(obj: &Obj<'_>) -> Result<Vec<String>> {
-    let mut out: Vec<String> = Vec::new();
+/// Read `msg_ids` (Paykit wire 5.3), each a lower-case UUID v4, as its canonical list for a
+/// record storing the messages `stored`: [`bounded_msg_ids`] of what it names. A reader
+/// keeps no more than a writer would, so a record listing repeats, or more than 16 other
+/// IDs, reads as the list its writer should have written.
+fn read_msg_ids(obj: &Obj<'_>, stored: &[String]) -> Result<Vec<String>> {
+    let mut named: Vec<String> = Vec::new();
     for id in obj.opt_arr("msg_ids")?.into_iter().flatten() {
         let id = id
             .as_str()
             .ok_or_else(|| bad(obj.ctx(), "msg_ids", "not a string"))?;
         pubky_switch_core::json::check_uuid_v4(id)
             .map_err(|_| bad(obj.ctx(), "msg_ids", "not a lower-case UUID v4"))?;
-        if out.iter().any(|x| x == id) {
-            return Err(bad(obj.ctx(), "msg_ids", "an ID twice"));
-        }
-        out.push(id.to_owned());
+        named.push(id.to_owned());
     }
-    Ok(out)
+    Ok(bounded_msg_ids(stored, &named))
+}
+
+/// The `msg_id`s of stored messages, in order.
+fn msg_ids_of<'a>(stored: impl IntoIterator<Item = &'a StoredMessage>) -> Vec<String> {
+    stored
+        .into_iter()
+        .map(|s| s.message.msg_id.clone())
+        .collect()
 }
 
 fn read_attempted_periods(obj: &Obj<'_>) -> Result<Vec<u64>> {
@@ -531,6 +552,11 @@ impl ActivityRecord {
             .collect()
     }
 
+    /// The `msg_id`s of the messages the record stores, by role.
+    fn stored_msg_ids(&self) -> Vec<String> {
+        msg_ids_of(self.stored().into_iter().map(|(_, s)| s))
+    }
+
     fn payer_payee(&self, own: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
         match self.side {
             ActivitySide::Payer => (*own, self.counterparty),
@@ -604,7 +630,7 @@ impl ActivityRecord {
                 .transpose()?,
             attempt_id: obj.opt_b64::<16>("attempt_id")?.map(AttemptId::from_bytes),
             unrequested: obj.opt("unrequested").map(read_unrequested).transpose()?,
-            msg_ids: read_msg_ids(&obj)?,
+            msg_ids: Vec::new(),
             status: obj.opt_str("status")?.map(str::to_owned),
             allowance_id: obj
                 .opt_str("allowance_id")?
@@ -612,7 +638,10 @@ impl ActivityRecord {
                 .transpose()?,
             attempted_periods: read_attempted_periods(&obj)?,
         };
+        let mut record = record;
+        record.msg_ids = read_msg_ids(&obj, &record.stored_msg_ids())?;
         let binding = record.binding()?;
+        record.check_members(&binding)?;
         record.check_refs(&binding)?;
         if let (RecordBinding::Unrequested, Some(a), Some(Body::PaymentProof(p))) = (
             binding,
@@ -699,6 +728,46 @@ impl ActivityRecord {
             request_hash: h,
             billing_period: p,
         })
+    }
+
+    /// The members only some records carry (Paykit wire 5.3), against the record's binding
+    /// and side: `request_hash` and `billing_period` only in a period record, `attempt_id`
+    /// and `unrequested` only in that of a payment without a request, and `allowance_id`
+    /// only in a payer's request record. `attempted_periods` is checked with the request it
+    /// fences.
+    ///
+    /// Security: these members are unsigned. A record that carries one where its messages
+    /// don't put it is invalid, so a writer can't make a record that reads as two kinds at
+    /// once, such as a request record that also names an attempt of a payment without one.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] naming the member: the record is invalid.
+    fn check_members(&self, binding: &RecordBinding) -> Result<()> {
+        let period = matches!(binding, RecordBinding::Period { .. });
+        let unrequested = matches!(binding, RecordBinding::Unrequested);
+        let payer_request =
+            matches!(binding, RecordBinding::Request { .. }) && self.side == ActivitySide::Payer;
+        ensure(
+            period || self.request_hash.is_none(),
+            "Paykit wire 5.3: request_hash only in a period record",
+        )?;
+        ensure(
+            period || self.billing_period.is_none(),
+            "Paykit wire 5.3: billing_period only in a period record",
+        )?;
+        ensure(
+            unrequested || self.attempt_id.is_none(),
+            "Paykit wire 5.3: attempt_id only in the record of a payment without a request",
+        )?;
+        ensure(
+            unrequested || self.unrequested.is_none(),
+            "Paykit wire 5.3: unrequested only in the record of a payment without a request",
+        )?;
+        ensure(
+            payer_request || self.allowance_id.is_none(),
+            "Paykit wire 5.3: allowance_id only in a payer's request record",
+        )
     }
 
     /// `refs` (Paykit wire 4.3): a response, cancellation and period details name the
@@ -958,12 +1027,15 @@ impl ActivityRecord {
     }
 
     /// Write the record value: every member, `null` for absent, but `allowance_id` when
-    /// absent and `attempted_periods` when empty, which are left out (Paykit wire 5.3).
+    /// absent and `attempted_periods` when empty, which are left out, and `msg_ids` as its
+    /// canonical list, [`bounded_msg_ids`] of the stored messages and `msg_ids` (Paykit wire
+    /// 5.3).
     ///
     /// # Errors
     ///
     /// [`Error::Invalid`] if the value can't be written.
     pub fn to_json(&self) -> Result<Vec<u8>> {
+        let msg_ids = bounded_msg_ids(&self.stored_msg_ids(), &self.msg_ids);
         let out = ActivityOut {
             v: 1,
             counterparty: pubky_id(&self.counterparty),
@@ -974,7 +1046,7 @@ impl ActivityRecord {
             receipt: self.receipt.as_ref().map(StoredMessage::out),
             unrequested: self.unrequested.as_ref().map(unrequested_json),
             attempt_id: self.attempt_id.map(AttemptId::to_text),
-            msg_ids: &self.msg_ids,
+            msg_ids: &msg_ids,
             status: self.status.as_deref(),
             period_details: self.period_details.as_ref().map(StoredMessage::out),
             request_hash: self.request_hash.map(|h| b64(&h)),
@@ -1059,6 +1131,7 @@ impl PaymentListRecord {
             list.message.from.app_id == app_id,
             "Paykit wire 5.4: the stored list's sender app isn't app_id",
         )?;
+        let msg_ids = read_msg_ids(&obj, &msg_ids_of([&list]))?;
         let mut used = Vec::new();
         for item in obj.opt_arr("used")?.into_iter().flatten() {
             let u = Obj::of(item, LISTS, "used")?;
@@ -1073,7 +1146,7 @@ impl PaymentListRecord {
             app_id,
             list,
             used,
-            msg_ids: read_msg_ids(&obj)?,
+            msg_ids,
         })
     }
 
@@ -1111,12 +1184,14 @@ impl PaymentListRecord {
         Ok(record)
     }
 
-    /// Write the record value.
+    /// Write the record value, `msg_ids` as its canonical list, [`bounded_msg_ids`] of the
+    /// stored list and `msg_ids` (Paykit wire 5.3, 5.4).
     ///
     /// # Errors
     ///
     /// [`Error::Invalid`] if the value can't be written.
     pub fn to_json(&self) -> Result<Vec<u8>> {
+        let msg_ids = bounded_msg_ids(&msg_ids_of([&self.list]), &self.msg_ids);
         let out = ListOut {
             v: 1,
             payee: pubky_id(&self.payee),
@@ -1131,7 +1206,7 @@ impl PaymentListRecord {
                     attempt_id: u.attempt_id.to_text(),
                 })
                 .collect(),
-            msg_ids: &self.msg_ids,
+            msg_ids: &msg_ids,
         };
         serde_json::to_vec(&out).map_err(|_| Error::Invalid(format!("{LISTS}: can't be written")))
     }
@@ -1289,6 +1364,10 @@ impl AllowanceRecord {
         for stored in response.iter().chain(end.iter()) {
             refers(stored)?;
         }
+        let msg_ids = read_msg_ids(
+            &obj,
+            &msg_ids_of(std::iter::once(&proposal).chain(&response).chain(&end)),
+        )?;
         let mut grants = Vec::new();
         for item in obj.opt_arr("grants")?.into_iter().flatten() {
             let entry = Obj::of(item, ALLOWANCES, "grants")?;
@@ -1306,9 +1385,9 @@ impl AllowanceRecord {
             proposal,
             response,
             end,
+            msg_ids,
             grant: obj.opt("grant").map(ExecutorGrant::from_json).transpose()?,
             grants,
-            msg_ids: read_msg_ids(&obj)?,
         })
     }
 
@@ -1444,12 +1523,18 @@ impl AllowanceRecord {
         )
     }
 
-    /// Write the record value: every member, `null` for absent, `grants` always.
+    /// Write the record value: every member, `null` for absent, `grants` always, and
+    /// `msg_ids` as its canonical list, [`bounded_msg_ids`] of the stored messages and
+    /// `msg_ids` (Paykit wire 5.3, 5.4).
     ///
     /// # Errors
     ///
     /// [`Error::Invalid`] if the value can't be written.
     pub fn to_json(&self) -> Result<Vec<u8>> {
+        let stored = std::iter::once(&self.proposal)
+            .chain(&self.response)
+            .chain(&self.end);
+        let msg_ids = bounded_msg_ids(&msg_ids_of(stored), &self.msg_ids);
         let out = AllowanceOut {
             v: 1,
             counterparty: pubky_id(&self.counterparty),
@@ -1469,7 +1554,7 @@ impl AllowanceRecord {
                     Value::Object(map)
                 })
                 .collect(),
-            msg_ids: &self.msg_ids,
+            msg_ids: &msg_ids,
         };
         serde_json::to_vec(&out)
             .map_err(|_| Error::Invalid(format!("{ALLOWANCES}: can't be written")))
@@ -1513,6 +1598,11 @@ pub fn bind_ledger(
 mod tests {
     use super::*;
 
+    /// A lower-case UUID v4 for `i`.
+    fn uuid(i: u64) -> String {
+        format!("00000000-0000-4000-8000-{i:012x}")
+    }
+
     #[test]
     fn test_bounded_msg_ids_keeps_stored_and_sixteen_newest() {
         let stored = vec!["s".to_owned()];
@@ -1523,6 +1613,60 @@ mod tests {
         assert_eq!(kept[1..], others[4..]);
         let few = bounded_msg_ids(&stored, &others[..3]);
         assert_eq!(few.len(), 4);
+        // A stored ID among the others is kept once, first.
+        let with_stored = bounded_msg_ids(&stored, &["s".to_owned(), "o1".to_owned()]);
+        assert_eq!(with_stored, ["s", "o1"]);
+    }
+
+    #[test]
+    fn test_bounded_msg_ids_dedupes_a_duplicate_heavy_suffix() {
+        // 16 distinct IDs, then one ID repeated 20 times: the repeats count once, so the
+        // list keeps 16 distinct others, the 15 newest of the first run and the repeated one.
+        let mut others: Vec<String> = (0..16).map(|i| format!("o{i}")).collect();
+        others.extend(std::iter::repeat_n("x".to_owned(), 20));
+        let kept = bounded_msg_ids(&["s".to_owned()], &others);
+        let mut want = vec!["s".to_owned()];
+        want.extend((1..16).map(|i| format!("o{i}")));
+        want.push("x".to_owned());
+        assert_eq!(kept, want);
+        // Repeats of an older ID don't move it, and never fill the 16.
+        let mut mixed: Vec<String> = Vec::new();
+        for i in 0..18 {
+            mixed.push(format!("o{i}"));
+            mixed.push("o0".to_owned());
+        }
+        let kept = bounded_msg_ids(&[], &mixed);
+        assert_eq!(kept.len(), RECENT_MSG_IDS);
+        assert_eq!(kept, (2..18).map(|i| format!("o{i}")).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_msg_ids_read_as_the_canonical_list() {
+        let stored = vec![uuid(100)];
+        let read = |ids: Vec<String>| {
+            let map = serde_json::json!({ "msg_ids": ids })
+                .as_object()
+                .cloned()
+                .unwrap();
+            read_msg_ids(&Obj::new(&map, "t"), &stored)
+        };
+        // More than 16 others: the stored ID, then the 16 newest.
+        let many: Vec<String> = (0..20).map(uuid).collect();
+        let kept = read(many.clone()).unwrap();
+        assert_eq!(kept.len(), 1 + RECENT_MSG_IDS);
+        assert_eq!(kept[0], uuid(100));
+        assert_eq!(kept[1..], many[4..]);
+        // A duplicate-heavy suffix: each ID once, 16 distinct others kept.
+        let mut repeats: Vec<String> = (0..16).map(uuid).collect();
+        repeats.extend(std::iter::repeat_n(uuid(50), 20));
+        let kept = read(repeats).unwrap();
+        assert_eq!(kept.len(), 1 + RECENT_MSG_IDS);
+        assert_eq!(kept.last(), Some(&uuid(50)));
+        assert_eq!(kept[1], uuid(1));
+        // Reading the canonical list again gives it back.
+        assert_eq!(read(kept.clone()).unwrap(), kept);
+        // An ID that isn't a lower-case UUID v4 is still refused.
+        assert!(read(vec!["not-a-uuid".to_owned()]).is_err());
     }
 
     #[test]

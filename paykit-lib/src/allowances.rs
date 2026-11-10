@@ -41,12 +41,82 @@ pub struct PerPaymentRange {
     pub maximum: Decimal,
 }
 
+/// A time of Allowance terms (Paykit wire 4.15): its instant, and its text as spelled.
+///
+/// Terms are signed in the proposal, and two spellings of one instant are distinct period
+/// limits (`specs/allowances.md`), so a received time is written back as it was read. A
+/// time built locally takes the canonical spelling, with three fraction digits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TermsTime {
+    ms: u64,
+    text: String,
+}
+
+impl TermsTime {
+    /// A time built locally, in the canonical spelling (Switch wire 1.6).
+    pub fn new(ms: u64) -> Self {
+        Self {
+            ms,
+            text: rfc3339(ms),
+        }
+    }
+
+    /// Read a time as spelled (Switch wire 1.6).
+    fn read(text: &str, member: &str) -> Result<Self> {
+        Ok(Self {
+            ms: crate::json::time(text, TERMS, member)?,
+            text: text.to_owned(),
+        })
+    }
+
+    /// The instant, in Unix milliseconds.
+    pub fn ms(&self) -> u64 {
+        self.ms
+    }
+
+    /// The time as spelled.
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+}
+
+/// An anchored period of a limit (Paykit wire 4.15): its rule, and its `anchor` as spelled.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnchoredLimit {
+    rule: AnchoredRule,
+    anchor: TermsTime,
+}
+
+impl AnchoredLimit {
+    /// An anchored period from `anchor`, `every` and `unit`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] for `every` of 0.
+    pub fn new(anchor: TermsTime, every: u64, unit: Unit) -> Result<Self> {
+        Ok(Self {
+            rule: AnchoredRule::new(anchor.ms(), every, unit)?,
+            anchor,
+        })
+    }
+
+    /// The rule.
+    pub fn rule(&self) -> &AnchoredRule {
+        &self.rule
+    }
+
+    /// The anchor, as spelled.
+    pub fn anchor(&self) -> &TermsTime {
+        &self.anchor
+    }
+}
+
 /// The period of a limit (Paykit wire 4.15).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LimitPeriod {
     /// `{ "kind": "anchored", "every", "unit", "anchor" }`: the period containing the
     /// evaluation time, by the anchored rule.
-    Anchored(AnchoredRule),
+    Anchored(AnchoredLimit),
     /// `{ "kind": "rolling", "every", "unit" }`, unit minute to week: the last `every` units.
     Rolling {
         /// `every`, at least 1.
@@ -89,9 +159,9 @@ pub struct AllowanceTerms {
     /// The lifetime amount limit, inclusive.
     pub lifetime_amount_limit: Option<Decimal>,
     /// The first eligible instant.
-    pub active_from: Option<u64>,
+    pub active_from: Option<TermsTime>,
     /// The first ineligible instant, after `active_from`.
-    pub expires_at: Option<u64>,
+    pub expires_at: Option<TermsTime>,
     /// The only identifiers an executor may pay to, when set: non-empty, unique.
     pub allowed_payment_endpoint_identifiers: Option<Vec<PaymentEndpointIdentifier>>,
 }
@@ -136,18 +206,26 @@ impl AllowanceTerms {
             })
             .transpose()?;
         let mut period_limits: Vec<PeriodLimit> = Vec::new();
+        let mut spellings: Vec<LimitSpelling<'_>> = Vec::new();
         for item in obj.req_arr("period_limits")? {
-            let limit = read_period_limit(item)?;
-            if period_limits.contains(&limit) {
+            let (limit, spelling) = read_period_limit(item)?;
+            if spellings.contains(&spelling) {
                 return Err(bad(TERMS, "period_limits", "an entry twice"));
             }
+            spellings.push(spelling);
             period_limits.push(limit);
         }
-        let active_from = obj.opt_time("active_from")?;
-        let expires_at = obj.opt_time("expires_at")?;
-        if let (Some(from), Some(until)) = (active_from, expires_at) {
+        let active_from = obj
+            .opt_str("active_from")?
+            .map(|t| TermsTime::read(t, "active_from"))
+            .transpose()?;
+        let expires_at = obj
+            .opt_str("expires_at")?
+            .map(|t| TermsTime::read(t, "expires_at"))
+            .transpose()?;
+        if let (Some(from), Some(until)) = (&active_from, &expires_at) {
             ensure(
-                until > from,
+                until.ms() > from.ms(),
                 "Paykit wire 4.15: expires_at is after active_from",
             )?;
         }
@@ -201,11 +279,16 @@ impl AllowanceTerms {
         Ok(terms)
     }
 
-    /// Write the terms, every member, `null` where unset.
+    /// Write the terms, every member, `null` where unset, each amount and time in the
+    /// spelling it was read with, or the canonical one for terms built locally, so received
+    /// terms write back as they were signed and distinct period limits stay distinct.
     pub fn to_json(&self) -> Value {
         let mut map = Map::new();
-        let time = |t: Option<u64>| t.map_or(Value::Null, |t| Value::String(rfc3339(t)));
-        map.insert("active_from".into(), time(self.active_from));
+        let time = |t: &Option<TermsTime>| {
+            t.as_ref()
+                .map_or(Value::Null, |t| Value::String(t.as_str().into()))
+        };
+        map.insert("active_from".into(), time(&self.active_from));
         map.insert(
             "allowed_payment_endpoint_identifiers".into(),
             self.allowed_payment_endpoint_identifiers
@@ -213,7 +296,7 @@ impl AllowanceTerms {
                 .map_or(Value::Null, |ids| identifiers_json(ids)),
         );
         map.insert("asset".into(), Value::String(self.asset.as_str().into()));
-        map.insert("expires_at".into(), time(self.expires_at));
+        map.insert("expires_at".into(), time(&self.expires_at));
         map.insert(
             "lifetime_amount_limit".into(),
             decimal_or_null(self.lifetime_amount_limit.as_ref()),
@@ -251,7 +334,8 @@ impl AllowanceTerms {
         if amount.asset != self.asset {
             return Err(TermsRefusal::Asset);
         }
-        if self.active_from.is_some_and(|from| t < from) || self.expires_at.is_some_and(|e| t >= e)
+        if self.active_from.as_ref().is_some_and(|from| t < from.ms())
+            || self.expires_at.as_ref().is_some_and(|e| t >= e.ms())
         {
             return Err(TermsRefusal::NotActive);
         }
@@ -275,7 +359,7 @@ impl AllowanceTerms {
         let mut longest = 0u64;
         for limit in &self.period_limits {
             let len = match &limit.period {
-                LimitPeriod::Anchored(rule) => rule.containing(now)?.len_ms(),
+                LimitPeriod::Anchored(limit) => limit.rule().containing(now)?.len_ms(),
                 LimitPeriod::Rolling { every, unit } => LimitPeriod::rolling_len(*every, *unit)?,
             };
             longest = longest.max(len);
@@ -293,7 +377,8 @@ impl AllowanceTerms {
     pub fn entry_window_end(&self, at: u64) -> Result<u64> {
         let mut end = at.saturating_add(ENTRY_WINDOW_MS);
         for limit in &self.period_limits {
-            if let LimitPeriod::Anchored(rule) = &limit.period {
+            if let LimitPeriod::Anchored(anchored) = &limit.period {
+                let rule = anchored.rule();
                 end = end.min(rule.containing(at)?.ends_at);
             }
         }
@@ -316,14 +401,39 @@ fn decimal_or_null(d: Option<&Decimal>) -> Value {
     d.map_or(Value::Null, |d| Value::String(d.as_str().into()))
 }
 
-fn read_period_limit(item: &Value) -> Result<PeriodLimit> {
+/// A period limit as spelled on the wire, which decides whether two entries are duplicates
+/// (Paykit wire 4.15, `specs/allowances.md`): `amount_limit` and `anchor` compare as strings,
+/// so `"1"` and `"1.0"`, or two spellings of one instant, are distinct entries;
+/// `payment_count_limit` and `every` compare as integers, `kind` and `unit` exactly.
+/// Members readers ignore don't count.
+#[derive(PartialEq, Eq)]
+struct LimitSpelling<'a> {
+    amount_limit: Option<&'a str>,
+    payment_count_limit: Option<u64>,
+    kind: &'a str,
+    every: u64,
+    unit: &'a str,
+    anchor: Option<&'a str>,
+}
+
+/// Read a period limit, with its wire spelling.
+fn read_period_limit(item: &Value) -> Result<(PeriodLimit, LimitSpelling<'_>)> {
     let limit = Obj::of(item, TERMS, "period_limits")?;
     let period = limit.req_obj("period")?;
     let every = period.req_int("every")?;
-    let unit = Unit::parse(period.req_str("unit")?)?;
-    let period = match period.req_str("kind")? {
+    let unit_text = period.req_str("unit")?;
+    let unit = Unit::parse(unit_text)?;
+    let kind = period.req_str("kind")?;
+    let mut anchor = None;
+    let period = match kind {
         "anchored" => {
-            LimitPeriod::Anchored(AnchoredRule::new(period.req_time("anchor")?, every, unit)?)
+            let text = period.req_str("anchor")?;
+            anchor = Some(text);
+            LimitPeriod::Anchored(AnchoredLimit::new(
+                TermsTime::read(text, "anchor")?,
+                every,
+                unit,
+            )?)
         }
         "rolling" => {
             ensure(every >= 1, "Paykit wire 4.15: every is at least 1")?;
@@ -332,11 +442,9 @@ fn read_period_limit(item: &Value) -> Result<PeriodLimit> {
         }
         _ => return Err(bad(TERMS, "period", "kind is anchored or rolling")),
     };
+    let amount_text = limit.opt_str("amount_limit")?;
     let out = PeriodLimit {
-        amount_limit: limit
-            .opt_str("amount_limit")?
-            .map(Decimal::parse)
-            .transpose()?,
+        amount_limit: amount_text.map(Decimal::parse).transpose()?,
         payment_count_limit: limit.opt_int("payment_count_limit")?,
         period,
     };
@@ -344,14 +452,26 @@ fn read_period_limit(item: &Value) -> Result<PeriodLimit> {
         out.amount_limit.is_some() || out.payment_count_limit.is_some(),
         "Paykit wire 4.15: a period limit has an amount limit, a count limit or both",
     )?;
-    Ok(out)
+    let spelling = LimitSpelling {
+        amount_limit: amount_text,
+        payment_count_limit: out.payment_count_limit,
+        kind,
+        every,
+        unit: unit_text,
+        anchor,
+    };
+    Ok((out, spelling))
 }
 
 fn period_limit_json(limit: &PeriodLimit) -> Value {
     let mut period = Map::new();
     match &limit.period {
-        LimitPeriod::Anchored(rule) => {
-            period.insert("anchor".into(), Value::String(rfc3339(rule.anchor())));
+        LimitPeriod::Anchored(anchored) => {
+            let rule = anchored.rule();
+            period.insert(
+                "anchor".into(),
+                Value::String(anchored.anchor().as_str().into()),
+            );
             period.insert("every".into(), Value::from(rule.every()));
             period.insert("kind".into(), Value::String("anchored".into()));
             period.insert("unit".into(), Value::String(rule.unit().as_str().into()));
@@ -711,7 +831,7 @@ fn add(a: u128, b: u128) -> Result<u128> {
 
 fn in_limit(period: &LimitPeriod, entry_at: u64, t: u64) -> Result<bool> {
     Ok(match period {
-        LimitPeriod::Anchored(rule) => rule.containing(t)?.contains(entry_at),
+        LimitPeriod::Anchored(anchored) => anchored.rule().containing(t)?.contains(entry_at),
         LimitPeriod::Rolling { every, unit } => {
             let len = LimitPeriod::rolling_len(*every, *unit)?;
             // An entry counts while `t < at + 60 s + L`, with no lower bound.
@@ -1031,6 +1151,119 @@ mod tests {
                 AllowanceId::parse("d0efffb7-191b-4709-b6c7-e343af5500b4").unwrap(),
             )
         }
+    }
+
+    /// Terms with the period limits `limits`.
+    fn with_limits(limits: Value) -> Value {
+        let mut v = terms();
+        v["period_limits"] = limits;
+        v
+    }
+
+    #[test]
+    fn test_terms_period_limit_amounts_differently_spelled_are_distinct() {
+        let limit = |amount: &str| {
+            json!({ "amount_limit": amount, "payment_count_limit": null,
+                "period": { "kind": "rolling", "every": 1, "unit": "day" } })
+        };
+        let terms =
+            AllowanceTerms::from_json(&with_limits(json!([limit("1"), limit("1.0")]))).unwrap();
+        assert_eq!(terms.period_limits.len(), 2);
+        let error = AllowanceTerms::from_json(&with_limits(json!([limit("1.0"), limit("1.0")])))
+            .unwrap_err();
+        assert!(error.to_string().contains("an entry twice"), "{error}");
+    }
+
+    #[test]
+    fn test_terms_period_limit_anchors_differently_spelled_are_distinct() {
+        let limit = |anchor: &str| {
+            json!({ "amount_limit": "1", "payment_count_limit": 2,
+                "period": { "anchor": anchor, "every": 1, "kind": "anchored", "unit": "month" } })
+        };
+        let terms = AllowanceTerms::from_json(&with_limits(json!([
+            limit("2026-01-31T00:00:00Z"),
+            limit("2026-01-31T00:00:00.000Z")
+        ])))
+        .unwrap();
+        assert_eq!(terms.period_limits.len(), 2);
+        let error = AllowanceTerms::from_json(&with_limits(json!([
+            limit("2026-01-31T00:00:00Z"),
+            limit("2026-01-31T00:00:00Z")
+        ])))
+        .unwrap_err();
+        assert!(error.to_string().contains("an entry twice"), "{error}");
+        // A member readers ignore doesn't tell two entries apart.
+        let mut other = limit("2026-01-31T00:00:00Z");
+        other["note"] = json!("x");
+        assert!(AllowanceTerms::from_json(&with_limits(json!([
+            limit("2026-01-31T00:00:00Z"),
+            other
+        ])))
+        .is_err());
+    }
+
+    #[test]
+    fn test_terms_write_back_in_the_spelling_read() {
+        let limit = |amount: &str, anchor: &str| {
+            json!({ "amount_limit": amount, "payment_count_limit": null,
+                "period": { "anchor": anchor, "every": 1, "kind": "anchored", "unit": "month" } })
+        };
+        let mut received = with_limits(json!([
+            limit("1", "2026-01-31T00:00:00Z"),
+            limit("1.0", "2026-01-31T00:00:00Z"),
+            limit("1", "2026-01-31T00:00:00.000Z"),
+            limit("1", "2026-01-31T00:00:00.0000Z"),
+        ]));
+        received["active_from"] = json!("2026-01-01T00:00:00Z");
+        received["expires_at"] = json!("2027-01-01T00:00:00.5Z");
+        received["lifetime_amount_limit"] = json!("0.100");
+        // Read, write, read again: the same entries and the same bytes.
+        let first = AllowanceTerms::from_json(&received).unwrap();
+        let written = first.to_json();
+        assert_eq!(
+            serde_json::to_vec(&written).unwrap(),
+            serde_json::to_vec(&received).unwrap()
+        );
+        let second = AllowanceTerms::from_json(&written).unwrap();
+        assert_eq!(second, first);
+        assert_eq!(second.period_limits.len(), 4);
+        assert_eq!(
+            serde_json::to_vec(&second.to_json()).unwrap(),
+            serde_json::to_vec(&written).unwrap()
+        );
+        // So does a proposal carrying them, the one message whose body holds terms.
+        let body = json!({ "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+            "proposer_role": "allowee", "terms": received });
+        let proposal =
+            crate::bodies::AllowanceProposal::from_body(body.as_object().unwrap()).unwrap();
+        assert_eq!(Value::Object(proposal.to_body()), body);
+    }
+
+    #[test]
+    fn test_terms_built_locally_take_the_canonical_spelling() {
+        let anchor = TermsTime::new(t("2026-01-31T00:00:00Z"));
+        assert_eq!(anchor.as_str(), "2026-01-31T00:00:00.000Z");
+        let limit = PeriodLimit {
+            amount_limit: Some(Decimal::parse("1").unwrap()),
+            payment_count_limit: None,
+            period: LimitPeriod::Anchored(AnchoredLimit::new(anchor, 1, Unit::Month).unwrap()),
+        };
+        let terms = AllowanceTerms {
+            asset: Asset::parse("btc").unwrap(),
+            per_payment_amount: None,
+            period_limits: vec![limit],
+            lifetime_amount_limit: None,
+            active_from: Some(TermsTime::new(t("2026-01-01T00:00:00Z"))),
+            expires_at: None,
+            allowed_payment_endpoint_identifiers: None,
+        };
+        let written = terms.to_json();
+        assert_eq!(written["active_from"], "2026-01-01T00:00:00.000Z");
+        assert_eq!(
+            written["period_limits"][0]["period"]["anchor"],
+            "2026-01-31T00:00:00.000Z"
+        );
+        assert_eq!(AllowanceTerms::from_json(&written).unwrap(), terms);
     }
 
     #[test]

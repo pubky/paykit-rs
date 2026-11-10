@@ -1,5 +1,5 @@
 //! `messages.json`: every kind as v0.2 sends it (Switch wire 4.5, Paykit wire 4),
-//! `label_rejections` and `multi_protocol_senders`.
+//! `label_rejections`, `multi_protocol_senders`, `cancellation_roles` and `conversion_terms`.
 
 use std::collections::HashMap;
 
@@ -122,6 +122,8 @@ fn test_vectors_messages() {
     check_resend(&keys, &read);
     check_label_rejections(&keys, &file);
     check_multi_protocol_senders(&keys, &file);
+    check_cancellation_roles(&keys, &file);
+    check_conversion_terms(&keys, &file);
 }
 
 /// `refs` name messages by hash, in each kind's order (Paykit wire 4.3).
@@ -398,7 +400,9 @@ sender app ID (16) | signature (64) | u32_be(JSON length) | JSON, before zero pa
 payment_request_labelled is sent by bob's hosted app under its label, and alice's acceptance \
 of it copies the label; label_rejections holds requests a payer drops for their label; \
 multi_protocol_senders holds messages from apps whose certificates hold another protocol's \
-scopes.";
+scopes; cancellation_roles holds a cancellation between certificates of each pair of roles; \
+conversion_terms holds the shop's period details and requests with their conversion terms \
+changed, which a payer takes or drops.";
 
 const MULTI_PROTOCOL_DESCRIPTION: &str = "Wire 4.1 check 8, spec 3.2, 3.3, Switch wire 3.1 \
 \"Several protocols\": messages.json's payment_request and resend_request_ids, as the shop \
@@ -487,8 +491,126 @@ fn generate(keys: &Keys) {
         &[
             (Place::Member("/description"), json!(DESCRIPTION)),
             (Place::Member("/multi_protocol_senders"), member),
+            (
+                Place::Member("/cancellation_roles"),
+                cancellation_roles(keys),
+            ),
+            (Place::Member("/conversion_terms"), conversion_terms(keys)),
         ],
     );
+}
+
+const CANCELLATION_DESCRIPTION: &str = "Wire 4.1 check 8, 4.3, 4.8, spec 3.3: messages.json's \
+payment_request_cancellation, as the shop signs it, without a label, presented with a \
+certificate of the shop's keys (sender_cert) at a certificate of alice's wallet's keys \
+(recipient_cert), each with its scopes changed, its permissions those Paykit's scopes need, \
+and signed again. A cancellation's recipient holds the other role than its sender: the \
+payer's goes from pay to request, the payee's from request to pay. accepted are the two \
+pairings the recipient takes at check 8; refused are pay to pay and request to request, \
+which it drops there. reason is paykit-lib's wording, of the first check that refuses it.";
+
+/// The certificate of `app` with `scopes` and the permissions Paykit's scopes need.
+fn with_scopes(keys: &Keys, app: &str, scopes: &[&str]) -> AppCert {
+    let owned: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
+    reissued(
+        keys,
+        app,
+        scopes,
+        &paykit_lib::scopes::permissions_for(&owned),
+    )
+}
+
+/// Check 8 for the shop's cancellation, presented with `sender`, at `recipient`.
+fn cancellation_at(
+    keys: &Keys,
+    json: &[u8],
+    sender: &AppCert,
+    recipient: &AppCert,
+) -> pubky_switch_core::Result<()> {
+    let shop = keys.app("shop");
+    let plaintext = MessagePlaintext::sign_json(&shop.keys, json.to_vec(), OPAQUE_MEMBERS).unwrap();
+    let message = plaintext
+        .check(
+            &pubky(ALICE),
+            &shop.identity,
+            &VerifiedSender::from_cert(sender),
+            OPAQUE_MEMBERS,
+        )
+        .unwrap();
+    PaykitKindRules::for_certificate(recipient).check_scopes(&message, sender)
+}
+
+/// `cancellation_roles`, as paykit-lib generates it.
+fn cancellation_roles(keys: &Keys) -> Value {
+    let base = "payment_request_cancellation";
+    let m = message(base);
+    assert_eq!(st(&m, "sender_app"), keys.app("shop").app_id, "{base}");
+    let json = message_json(base);
+    let case = |name: &str, from: &[&str], to: &[&str], taken: bool| -> Value {
+        let sender = with_scopes(keys, "shop", from);
+        let recipient = with_scopes(keys, "wallet", to);
+        let plaintext =
+            MessagePlaintext::sign_json(&keys.app("shop").keys, json.clone(), OPAQUE_MEMBERS)
+                .unwrap();
+        let mut case = json!({
+            "json": String::from_utf8(json.clone()).unwrap(),
+            "name": name,
+            "recipient_cert": signed_json(recipient.signed()),
+            "sender_app": st(&m, "sender_app"),
+            "sender_cert": signed_json(sender.signed()),
+            "signature": b64(&plaintext.signature()),
+        });
+        match cancellation_at(keys, &json, &sender, &recipient) {
+            Ok(()) => assert!(taken, "{name}: taken"),
+            Err(error) => {
+                assert!(!taken, "{name}: {error}");
+                case["reason"] = json!(quoted(&error.to_string()));
+            }
+        }
+        case
+    };
+    json!({
+        "accepted": [
+            case("the payee's cancellation, from request to pay", &["request"], &["pay"], true),
+            case("the payer's cancellation, from pay to request", &["pay"], &["request"], true),
+        ],
+        "description": CANCELLATION_DESCRIPTION,
+        "refused": [
+            case("a cancellation from pay to pay", &["pay"], &["pay"], false),
+            case("a cancellation from request to request", &["request"], &["request"], false),
+        ],
+    })
+}
+
+/// `cancellation_roles` (Paykit wire 4.1 check 8, 4.8, spec 3.3): the shop's signature,
+/// certificates Paykit's verifiers take, and check 8 taking each pairing of opposite roles
+/// and dropping each pairing of one role.
+fn check_cancellation_roles(keys: &Keys, file: &Value) {
+    let m = &file["cancellation_roles"];
+    let (shop, alice, bob) = (keys.app("shop"), pubky(ALICE), pubky(BOB));
+    assert_eq!(arr(m, "accepted").len(), 2);
+    assert_eq!(arr(m, "refused").len(), 2);
+    for (list, accepted) in [("accepted", true), ("refused", false)] {
+        for case in arr(m, list) {
+            let name = st(case, "name");
+            let json = st(case, "json").as_bytes().to_vec();
+            assert_eq!(st(case, "sender_app"), shop.app_id, "{name}");
+            let plaintext =
+                MessagePlaintext::sign_json(&shop.keys, json.clone(), OPAQUE_MEMBERS).unwrap();
+            assert_eq!(b64(&plaintext.signature()), st(case, "signature"), "{name}");
+            let verify = |doc: &Value, identity: &[u8; 32]| {
+                paykit_lib::scopes::verify_certificate(&signed(doc), identity)
+                    .unwrap_or_else(|e| panic!("{name}: Paykit's verifiers take it: {e}"))
+            };
+            let sender = verify(&case["sender_cert"], &bob);
+            let recipient = verify(&case["recipient_cert"], &alice);
+            let verdict = cancellation_at(keys, &json, &sender, &recipient);
+            assert_eq!(verdict.is_ok(), accepted, "{name}: {verdict:?}");
+            if let Err(error) = verdict {
+                assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
+            }
+        }
+    }
 }
 
 /// `multi_protocol_senders` (Paykit wire 4.1 check 8, spec 3.3): the shop's signatures,
@@ -519,6 +641,210 @@ fn check_multi_protocol_senders(keys: &Keys, file: &Value) {
                     });
             let verdict = at_wallet(keys, &json, &sender);
             assert_eq!(verdict.is_ok(), accepted, "{name}: {verdict:?}");
+            if let Err(error) = verdict {
+                assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
+            }
+        }
+    }
+}
+
+const CONVERSION_DESCRIPTION: &str = "Wire 4.4, 4.5, 4.9, specs/payment-conversion.md: the \
+shop's messages with their conversion terms changed, signed again by the shop, each from \
+messages.json's message base with body replaced by the body given. Requests are \
+payment_request_required_app, which accepts btc-lightning-bolt11 only, with fixed rates: with \
+conversion terms the requested asset is lower-case letters and digits, each rate's asset is \
+<asset> or <asset>-<rail> of such segments, and it matches the asset, and the rail when it \
+names one, of an accepted endpoint. Period details name \
+payment_request_recurring (request), a usd request with per_period conversion: their rates \
+are cross-asset only, so a bare or rail-qualified rate for the requested asset (usd, \
+usd-polygon) makes them invalid against the request. accepted are messages alice takes, \
+at check 10 and, for period details, against their request; refused are those she drops. \
+reason is paykit-lib's wording, of the first check that refuses it.";
+
+/// One case of `conversion_terms`: `base` with its body replaced by `body`, as the shop
+/// signs it.
+struct ConversionCase {
+    name: &'static str,
+    base: &'static str,
+    body: Value,
+    request: Option<&'static str>,
+}
+
+/// The cases of `conversion_terms`, accepted then refused.
+fn conversion_cases() -> (Vec<ConversionCase>, Vec<ConversionCase>) {
+    let details = |name, rates: Value| ConversionCase {
+        name,
+        base: "payment_period_details",
+        body: json!({
+            "billing_period": { "ends_at": "2026-03-31T00:00:00.000Z", "starts_at": "2026-02-28T00:00:00.000Z" },
+            "expires_at": "2026-03-01T00:00:00.000Z",
+            "rates": rates,
+        }),
+        request: Some("payment_request_recurring"),
+    };
+    // payment_request_required_app, a usd request accepting btc-lightning-bolt11 only, with
+    // fixed rates `rates` and its asset `asset`.
+    let request = |name, asset: &str, rates: Value| {
+        let base = Message::parse(
+            &message_json("payment_request_required_app"),
+            OPAQUE_MEMBERS,
+        )
+        .unwrap();
+        let mut body = Value::Object(base.body);
+        body["amount"]["asset"] = json!(asset);
+        body["conversion"] = json!({ "rates": rates, "type": "fixed" });
+        ConversionCase {
+            name,
+            base: "payment_request_required_app",
+            body,
+            request: None,
+        }
+    };
+    let rate = |selector: &str| json!([{ "asset": selector, "value": "0.00001234" }]);
+    let accepted = vec![
+        details(
+            "period details with a rail-qualified rate for another asset",
+            json!([{ "asset": "btc-lightning", "value": "0.00001234" }]),
+        ),
+        request("a request with an asset-wide rate", "usd", rate("btc")),
+        request(
+            "a request with an asset-rail rate",
+            "usd",
+            rate("btc-lightning"),
+        ),
+    ];
+    let refused = vec![
+        request(
+            "a request with conversion terms in an asset in upper case",
+            "USD",
+            rate("btc"),
+        ),
+        request("a rate selector in upper case", "usd", rate("BTC")),
+        request(
+            "a rate selector of three segments",
+            "usd",
+            rate("btc-lightning-bolt11"),
+        ),
+        request(
+            "a rate selector whose asset matches no accepted endpoint",
+            "usd",
+            rate("usdt"),
+        ),
+        request(
+            "a rate selector whose rail matches no accepted endpoint",
+            "usd",
+            rate("btc-bitcoin"),
+        ),
+        details(
+            "period details with a bare rate for the requested asset",
+            json!([{ "asset": "btc", "value": "0.00001234" }, { "asset": "usd", "value": "1" }]),
+        ),
+        details(
+            "period details with a rail-qualified rate for the requested asset",
+            json!([{ "asset": "btc", "value": "0.00001234" }, { "asset": "usd-polygon", "value": "1.008" }]),
+        ),
+    ];
+    (accepted, refused)
+}
+
+/// The JSON of a case: its base's message with the case's body, written as messages are.
+fn conversion_json(case: &ConversionCase) -> Vec<u8> {
+    let mut m = Message::parse(&message_json(case.base), OPAQUE_MEMBERS).unwrap();
+    let Value::Object(body) = case.body.clone() else {
+        panic!("{}: a body", case.name)
+    };
+    m.body = body;
+    m.to_json().unwrap()
+}
+
+/// Alice's checks of a case the shop signed: check 10, then, for period details, the checks
+/// against their request (Paykit wire 4.9).
+fn conversion_verdict(keys: &Keys, json: &[u8], request: Option<&str>) -> paykit_lib::Result<()> {
+    let shop = keys.app("shop");
+    let plaintext = MessagePlaintext::sign_json(&shop.keys, json.to_vec(), OPAQUE_MEMBERS).unwrap();
+    let message = plaintext
+        .check(
+            &pubky(ALICE),
+            &shop.identity,
+            &VerifiedSender::from_cert(&cert(shop)),
+            OPAQUE_MEMBERS,
+        )
+        .unwrap();
+    let body = check_body(&message, json)?;
+    if let (Some(request), Body::PaymentPeriodDetails(details)) = (request, &body) {
+        let Body::PaymentRequest(request) =
+            Body::parse(&Message::parse(&message_json(request), OPAQUE_MEMBERS).unwrap())?
+        else {
+            panic!("{request}: a request")
+        };
+        details.check_against(&request)?;
+    }
+    Ok(())
+}
+
+/// `conversion_terms`, as paykit-lib generates it.
+fn conversion_terms(keys: &Keys) -> Value {
+    let shop = keys.app("shop");
+    let write = |case: &ConversionCase, taken: bool| -> Value {
+        assert_eq!(
+            st(&message(case.base), "sender_app"),
+            shop.app_id,
+            "{}",
+            case.name
+        );
+        let json = conversion_json(case);
+        let plaintext =
+            MessagePlaintext::sign_json(&shop.keys, json.clone(), OPAQUE_MEMBERS).unwrap();
+        let mut out = json!({
+            "base": case.base,
+            "json": String::from_utf8(json.clone()).unwrap(),
+            "name": case.name,
+            "sender_app": shop.app_id,
+            "signature": b64(&plaintext.signature()),
+        });
+        if let Some(request) = case.request {
+            out["request"] = json!(request);
+        }
+        match conversion_verdict(keys, &json, case.request) {
+            Ok(()) => assert!(taken, "{}: taken", case.name),
+            Err(error) => {
+                assert!(!taken, "{}: {error}", case.name);
+                out["reason"] = json!(quoted(&error.to_string()));
+            }
+        }
+        out
+    };
+    let (accepted, refused) = conversion_cases();
+    json!({
+        "accepted": accepted.iter().map(|c| write(c, true)).collect::<Vec<_>>(),
+        "description": CONVERSION_DESCRIPTION,
+        "refused": refused.iter().map(|c| write(c, false)).collect::<Vec<_>>(),
+    })
+}
+
+/// `conversion_terms` (Paykit wire 4.4, 4.5, 4.9): the shop's signatures, each message its
+/// base with the body given, and alice taking or dropping each as its list says.
+fn check_conversion_terms(keys: &Keys, file: &Value) {
+    let m = &file["conversion_terms"];
+    let shop = keys.app("shop");
+    let (accepted, refused) = conversion_cases();
+    assert_eq!(arr(m, "accepted").len(), accepted.len());
+    assert_eq!(arr(m, "refused").len(), refused.len());
+    for (list, taken) in [("accepted", true), ("refused", false)] {
+        for case in arr(m, list) {
+            let name = st(case, "name");
+            let json = st(case, "json").as_bytes().to_vec();
+            assert_eq!(st(case, "sender_app"), shop.app_id, "{name}");
+            let plaintext =
+                MessagePlaintext::sign_json(&shop.keys, json.clone(), OPAQUE_MEMBERS).unwrap();
+            assert_eq!(b64(&plaintext.signature()), st(case, "signature"), "{name}");
+            // The message is its base with only the body changed.
+            let mut base = Message::parse(&message_json(st(case, "base")), OPAQUE_MEMBERS).unwrap();
+            let read = Message::parse(&json, OPAQUE_MEMBERS).unwrap();
+            base.body = read.body.clone();
+            assert_eq!(base.to_json().unwrap(), json, "{name}: its base");
+            let verdict = conversion_verdict(keys, &json, case["request"].as_str());
+            assert_eq!(verdict.is_ok(), taken, "{name}: {verdict:?}");
             if let Err(error) = verdict {
                 assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
             }
