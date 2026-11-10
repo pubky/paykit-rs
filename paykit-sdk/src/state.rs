@@ -31,7 +31,7 @@
 //! | `ct` | the acceptance time of the last Paykit entry the receive step passed | |
 //! | `rh` | the hold a restore set on the open requests (`hold.rs`); never backed up | |
 //! | `hc/<record key>` | the user confirmed a held request; never backed up | |
-//! | `kc/<record key>` | a payee's cancellation received before its request, for the payer's request record | |
+//! | `kc/<record key>` | a payee's cancellation of a one-time request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
 //! | `lr` | when the app last read the lists, on the device clock (Paykit wire 4.1) | |
 //! | `spam/<pubky>` | how many messages from a blocked or flagged sender only were counted (Paykit wire 4.1) | |
