@@ -74,11 +74,11 @@ impl Paykit {
         need: Need,
         by: Initiator,
         confirmed: Option<UserConfirmed>,
-    ) -> Result<std::result::Result<IdentityDoc, Refusal>> {
-        let (doc, _) = self
+    ) -> Result<std::result::Result<PeerIdentity, Refusal>> {
+        let (identity, _) = self
             .payee_identity_with::<()>(payee, need, by, confirmed, |_| None)
             .await?;
-        Ok(doc)
+        Ok(identity)
     }
 
     /// The payee's `identity.json` for acting on its destinations (Paykit spec 4, 7.2; Switch
@@ -101,7 +101,7 @@ impl Paykit {
         by: Initiator,
         confirmed: Option<UserConfirmed>,
         reads: impl FnOnce(&IdentityDoc) -> Option<BoxFuture<'static, R>>,
-    ) -> Result<(std::result::Result<IdentityDoc, Refusal>, Option<R>)> {
+    ) -> Result<(std::result::Result<PeerIdentity, Refusal>, Option<R>)> {
         let mut reads = Some(reads);
         let mut read: Option<R> = None;
         let mut refresh = false;
@@ -182,7 +182,7 @@ impl Paykit {
                     .checked_sub(identity.read_at_ms)
                     .is_some_and(|age| age < DOC_CACHE_MS);
                 if fresh {
-                    return Ok((Ok(identity.doc), read));
+                    return Ok((Ok(identity), read));
                 }
                 if !refresh {
                     refresh = true;
@@ -198,10 +198,8 @@ impl Paykit {
                 ));
             }
             match identity.may_act(self.now(), by, IDENTITY_GRACE_MS) {
-                MayAct::Now => return Ok((Ok(identity.doc), read)),
-                MayAct::IfUserConfirms if confirmed.is_some() => {
-                    return Ok((Ok(identity.doc), read))
-                }
+                MayAct::Now => return Ok((Ok(identity), read)),
+                MayAct::IfUserConfirms if confirmed.is_some() => return Ok((Ok(identity), read)),
                 MayAct::IfUserConfirms => return Ok((Err(Refusal::IdentityUnconfirmed), read)),
                 MayAct::No | MayAct::LookUpAgain | MayAct::WaitForLookup | MayAct::WaitUntil(_)
                     if !refresh =>
@@ -224,7 +222,7 @@ impl Paykit {
     }
 
     /// The checks of a destination before money moves (Paykit spec 4, 7.2): the payee's
-    /// `identity.json` that passed them, or the refusal.
+    /// `identity.json` that passed them, as the lookup found it, or the refusal.
     pub(crate) async fn check_destination(
         &mut self,
         payee: &[u8; 32],
@@ -233,24 +231,52 @@ impl Paykit {
         request_hash: Option<&[u8; 32]>,
         by: Initiator,
         confirmed: Option<UserConfirmed>,
-    ) -> Result<std::result::Result<IdentityDoc, Refusal>> {
+    ) -> Result<std::result::Result<PeerIdentity, Refusal>> {
         if let Err(why) = carries(payee, destination, carrier, request_hash, self.now()) {
             return Ok(Err(Refusal::Destination(why)));
         }
         // Switch spec 4.3 asks for the switch's confirmation for public endpoints only; a
         // request's or a list's endpoint is the payee's verified message (Paykit spec 7.2).
-        let need = match carrier {
-            Carrier::Message(_) => Need::FreshCopy,
-            Carrier::Record(_) => Need::SwitchCopy,
-        };
-        let doc = match self.payee_identity(payee, need, by, confirmed).await? {
-            Ok(doc) => doc,
+        let identity = match self
+            .payee_identity(payee, Need::of(carrier), by, confirmed)
+            .await?
+        {
+            Ok(identity) => identity,
             Err(refusal) => return Ok(Err(refusal)),
         };
         // The lookup awaited the network: the destination is judged again on the clock now.
         Ok(self
-            .destination_valid(payee, destination, carrier, request_hash, &doc)
-            .map(|()| doc))
+            .destination_valid(payee, destination, carrier, request_hash, &identity.doc)
+            .map(|()| identity))
+    }
+
+    /// The payee's switch lookup kept from an earlier check, taken if its answer has come,
+    /// without waiting for one that hasn't (Paykit spec 4): the copy it gives, or `None`
+    /// when none was kept or it still runs, kept again.
+    pub(crate) async fn take_kept_lookup(
+        &mut self,
+        payee: &[u8; 32],
+    ) -> Result<Option<PeerIdentity>> {
+        let Some(kept) = self.lookups.remove(payee) else {
+            return Ok(None);
+        };
+        match race::<()>(kept.switch, None, Box::pin(async {})).await {
+            (Lookup::Answered(answer), _) => match self.app.finish_identity_lookup(answer).await {
+                Ok(identity) => Ok(Some(identity)),
+                // An answer the client can't take leaves the copy the checks passed on.
+                Err(_) => Ok(None),
+            },
+            (Lookup::Running(switch), _) => {
+                self.lookups.insert(
+                    *payee,
+                    KeptLookup {
+                        identity: kept.identity,
+                        switch,
+                    },
+                );
+                Ok(None)
+            }
+        }
     }
 
     /// The checks of a destination that need no network, on the clock now and the payee's
@@ -279,6 +305,16 @@ pub(crate) enum Need {
     SwitchCopy,
     /// A destination a verified message carries: a copy read in the last 10 minutes.
     FreshCopy,
+}
+
+impl Need {
+    /// What `carrier`'s destination needs.
+    pub(crate) fn of(carrier: &Carrier) -> Self {
+        match carrier {
+            Carrier::Message(_) => Self::FreshCopy,
+            Carrier::Record(_) => Self::SwitchCopy,
+        }
+    }
 }
 
 /// A payee's switch lookup still running after its grace, with the copy it began from.

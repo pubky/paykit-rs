@@ -7,6 +7,7 @@
 mod common;
 mod crash;
 mod destinations;
+mod final_check;
 mod labels;
 mod one_time;
 mod protocols;

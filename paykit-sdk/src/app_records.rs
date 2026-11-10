@@ -233,7 +233,7 @@ impl Paykit {
             .payee_identity_with(payee, Need::SwitchCopy, by, confirmed, start)
             .await?;
         let doc = match doc {
-            Ok(doc) => doc,
+            Ok(identity) => identity.doc,
             Err(refusal) => return Ok(Err(refusal)),
         };
         // The reads start with the first copy taken, so they ran.
