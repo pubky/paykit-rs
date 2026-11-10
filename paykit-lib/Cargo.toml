@@ -12,3 +12,17 @@ categories = ["finance", "cryptography"]
 # Unpublished until the v0.2 spec is frozen (specs/v0.2/README.md).
 publish = false
 
+[features]
+# Test-only: writers without their rules, for the rejection cases of the vector tests. No
+# production build enables it; the crate's own tests do, through its dev-dependency on itself.
+test-vectors = []
+
+[dependencies]
+pubky-switch-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+paykit-lib = { path = ".", features = ["test-vectors"] }
+pubky-switch-core = { workspace = true, features = ["test-vectors"] }
