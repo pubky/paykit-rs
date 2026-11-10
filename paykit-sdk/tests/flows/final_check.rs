@@ -415,3 +415,58 @@ async fn test_final_check_recovery_payee_copy_aged_during_the_own_read_not_paid(
     assert_eq!(resumed, vec![PayOutcome::Pending { attempt_id }]);
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
 }
+
+// ---------------------------------------------------------------------------------------
+// A repeat's idempotency retention ending during the final check's await
+
+#[tokio::test]
+async fn test_final_check_repeat_retention_ending_during_the_lookup_not_paid() {
+    let w = World::new();
+    const RETENTION_MS: u64 = 60 * 60_000;
+    w.rail.set_declaration(RailDeclaration {
+        idempotent: true,
+        idempotency_retention_ms: Some(RETENTION_MS),
+        history: false,
+        history_retention_ms: None,
+        history_survives_restore: false,
+    });
+    let (store, app_id, request) = with_a_request(&w).await;
+    let journaled = w.clock.now_ms();
+    let mut first = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id } = first
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    drop(first);
+    // Resumed 30 s before the retention ends: every check passes, and the kept lookup of
+    // bob's switch answers in the final check, 31 s later, past the retention's end. The
+    // method may have forgotten the key: no repeat (Paykit spec 7.2).
+    w.clock.set_ms(journaled + RETENTION_MS - 30_000);
+    let slow = held_switch(&w);
+    slow.delay_answer(Arc::clone(&w.clock), 31_000);
+    let reads = HookedReads::new(&w);
+    let release = Arc::clone(&slow);
+    reads.then(w.alice_id(), 0, Some(Box::new(move || release.release())));
+    let mut wallet = wallet(
+        &w,
+        Arc::clone(&store) as Arc<dyn StateStore>,
+        app_id,
+        &reads,
+        &slow,
+    )
+    .await;
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}

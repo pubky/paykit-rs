@@ -596,6 +596,8 @@ pub struct SlowSwitch {
     pub origin: String,
     held: std::sync::atomic::AtomicBool,
     wakers: std::sync::Mutex<Vec<std::task::Waker>>,
+    /// Once released, the next held read takes this long on this clock to answer.
+    answer_delay: std::sync::Mutex<Option<(Arc<TestClock>, u64)>>,
 }
 
 impl SlowSwitch {
@@ -605,7 +607,13 @@ impl SlowSwitch {
             origin: origin.to_owned(),
             held: std::sync::atomic::AtomicBool::new(true),
             wakers: std::sync::Mutex::new(Vec::new()),
+            answer_delay: std::sync::Mutex::new(None),
         }
+    }
+
+    /// The next held read, once released, takes `ms` on `clock` to answer.
+    pub fn delay_answer(&self, clock: Arc<TestClock>, ms: u64) {
+        *self.answer_delay.lock().unwrap() = Some((clock, ms));
     }
 
     /// The switch answers from now on, the reads held included.
@@ -642,6 +650,9 @@ impl Transport for SlowSwitch {
                     }
                 })
                 .await;
+                if let Some((clock, ms)) = self.answer_delay.lock().unwrap().take() {
+                    clock.advance_ms(ms);
+                }
             }
             self.inner.send(request).await
         })

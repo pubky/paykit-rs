@@ -174,6 +174,30 @@ fn not_now(refusal: ClientRefusal) -> PaykitError {
 /// read first.
 const SERVICE_TIME_RECENT_MS: u64 = 60_000;
 
+/// Which dispatch [`Paykit::final_payment_check`] judges.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Dispatch {
+    /// The first: nothing was submitted before.
+    First,
+    /// A repeat under the same idempotency key, harmless only within the method's
+    /// idempotency retention (Paykit spec 7.2).
+    Repeat {
+        /// The retention the method declares; `None` for good.
+        idempotency_retention_ms: Option<u64>,
+    },
+}
+
+/// What [`Paykit::final_payment_check`] decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FinalCheck {
+    /// Pay now.
+    Pay,
+    /// Not now: nothing is paid and the attempt stays open.
+    Hold,
+    /// A repeat past the idempotency retention: never made.
+    Lapsed,
+}
+
 /// Whether the payment method still keeps what it keeps for `retention` (`None` for good)
 /// of a dispatch journaled at `journaled_at_ms`, at the device clock `now` (Paykit spec 7.2,
 /// "What a payment method declares"): its age counts from the journaling, and the retention
@@ -772,7 +796,8 @@ impl Paykit {
         // Starting to pay is journaled before the payment begins (Paykit spec 7.2).
         self.set_stage(&mut entry, Stage::Paying).await?;
         self.queue_owed_acceptance(&mut entry).await?;
-        self.dispatch(entry, doc, by, unconfirmed).await
+        self.dispatch(entry, doc, by, unconfirmed, Dispatch::First)
+            .await
     }
 
     /// The own `identity.json` revalidated in the last [`REVALIDATION_MS`] (Paykit spec 4,
@@ -886,6 +911,7 @@ impl Paykit {
         payee: PeerIdentity,
         by: Initiator,
         confirmed: Option<UserConfirmed>,
+        kind: Dispatch,
     ) -> Result<PayOutcome> {
         let attempt_id = entry.attempt()?;
         let payment = RailPayment {
@@ -898,11 +924,15 @@ impl Paykit {
         // Nothing is submitted unless the final payment check passes; nothing awaits
         // between it and the payment method's call. Refused, the attempt stays open for a
         // resume to decide.
-        if !self
-            .final_payment_check(&entry, payee, by, confirmed)
+        match self
+            .final_payment_check(&entry, payee, by, confirmed, kind)
             .await?
         {
-            return Ok(PayOutcome::Pending { attempt_id });
+            FinalCheck::Pay => {}
+            FinalCheck::Hold => return Ok(PayOutcome::Pending { attempt_id }),
+            // The method may have forgotten the key: the repeat isn't made, and the attempt
+            // stays "may be paid" (Paykit spec 7.2).
+            FinalCheck::Lapsed => return Ok(PayOutcome::Uncertain { attempt_id }),
         }
         let outcome = self.rail.pay(payment).await;
         // The acceptance goes out while the payment runs, not awaited (Paykit spec 7.2 step
@@ -1300,16 +1330,13 @@ impl Paykit {
                 Ok(doc) => doc,
                 Err(held) => return Ok(Some(held)),
             };
-            // The checks awaited the network: the retention is judged again on the clock now.
-            if !retained(
-                declaration.idempotency_retention_ms,
-                entry.journaled_at_ms,
-                self.now(),
-            ) {
-                return Ok(Some(PayOutcome::Uncertain { attempt_id }));
-            }
+            // The retention is judged again by the final payment check, after its await and
+            // just before the call: the checks awaited the network meanwhile.
+            let repeat = Dispatch::Repeat {
+                idempotency_retention_ms: declaration.idempotency_retention_ms,
+            };
             return self
-                .dispatch(entry, doc, Initiator::Automatic, None)
+                .dispatch(entry, doc, Initiator::Automatic, None, repeat)
                 .await
                 .map(Some);
         }
@@ -1328,25 +1355,37 @@ impl Paykit {
     /// 3. the payee's copy may still be acted on: read in the last 10 minutes for a
     ///    request's or a list's endpoint, by the switch's rules for a public endpoint;
     /// 4. the own `identity.json` is confirmed in the last 60 s, and lists this app at the
-    ///    attempt's service and generation.
+    ///    attempt's service and generation;
+    /// 5. for a repeat, the method's idempotency retention hasn't ended
+    ///    ([`FinalCheck::Lapsed`]).
     ///
-    /// Checks 2 to 4 run on the clock after the last await, and none follows them before the
-    /// call. `false`: nothing is paid; a copy past its age is looked up again by the next
-    /// check, at a resume.
+    /// Checks 2 to 5 run on the clock after the one await, and none follows them before the
+    /// call. Anything but [`FinalCheck::Pay`]: nothing is paid; a copy past its age is looked
+    /// up again by the next check, at a resume.
     pub(crate) async fn final_payment_check(
         &mut self,
         entry: &JournalEntry,
         payee: PeerIdentity,
         by: Initiator,
         confirmed: Option<UserConfirmed>,
-    ) -> Result<bool> {
+        kind: Dispatch,
+    ) -> Result<FinalCheck> {
         let payee = match self.take_kept_lookup(&entry.payee).await? {
             Some(answered) => answered,
             None => payee,
         };
         // From here to the payment method's call, nothing awaits.
+        let now = self.now();
+        if let Dispatch::Repeat {
+            idempotency_retention_ms,
+        } = kind
+        {
+            if !retained(idempotency_retention_ms, entry.journaled_at_ms, now) {
+                return Ok(FinalCheck::Lapsed);
+            }
+        }
         let Some(carrier) = entry.kept_carrier(&self.identity())? else {
-            return Ok(false);
+            return Ok(FinalCheck::Hold);
         };
         let destination = self
             .destination_valid(
@@ -1357,10 +1396,15 @@ impl Paykit {
                 &payee.doc,
             )
             .is_ok();
-        Ok(destination
+        let clear = destination
             && self.payee_copy_usable(&payee, Need::of(&carrier), by, confirmed)
             && self.own_identity_fresh()
-            && self.own_identity_authorizes(entry).is_ok())
+            && self.own_identity_authorizes(entry).is_ok();
+        Ok(if clear {
+            FinalCheck::Pay
+        } else {
+            FinalCheck::Hold
+        })
     }
 
     /// The checks before a repeat, the same as before a first dispatch (Paykit spec 7.2 step
