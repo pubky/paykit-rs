@@ -140,7 +140,7 @@ const SEEN_RECORDS: usize = 64;
 
 /// The records of one payee app a reader has seen that took part in its comparison (Switch
 /// spec 4.2, Switch wire 3.2 "Equal times"), oldest first (`p/ar/<payee>/<app>`). Replayed
-/// in order, they rebuild the client's [`RecordView`]; kept, they survive a restart, so a
+/// in order, they rebuild the core's [`RecordView`]; kept, they survive a restart, so a
 /// copy older than one seen, or one conflicting with it, is never used after a reload.
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct SeenRecords {
@@ -148,6 +148,25 @@ struct SeenRecords {
 }
 
 impl SeenRecords {
+    /// Keep `record`, which took part, after `held`, the records kept, verified in order.
+    /// Past [`SEEN_RECORDS`] the oldest are dropped, but never one at the newest `updated_at`:
+    /// those are the newest record and, during a conflict, every side of it, so a conflict
+    /// is never forgotten and neither side becomes usable by compaction (Switch spec 4.2).
+    /// Dropping an older record can only lose the earlier record a conflict falls back to,
+    /// which leaves no record used rather than a wrong one.
+    fn keep(&mut self, record: &AppRecord, held: &[AppRecord]) {
+        self.records.push(record.signed().clone());
+        let times: Vec<u64> = held
+            .iter()
+            .map(AppRecord::updated_at)
+            .chain(std::iter::once(record.updated_at()))
+            .collect();
+        let newest = times.iter().copied().max().unwrap_or(0);
+        let excess = self.records.len().saturating_sub(SEEN_RECORDS);
+        let droppable = times.iter().take_while(|t| **t < newest).count();
+        self.records.drain(..excess.min(droppable));
+    }
+
     /// The view the records give, at the reader's clock `now`. A kept record that no longer
     /// verifies is a corrupt store.
     fn view(&self, payee: &[u8; 32], now: u64) -> Result<(RecordView, Vec<AppRecord>)> {
@@ -165,11 +184,15 @@ impl SeenRecords {
 /// Whether `record` can change a view that has seen `held`: one ahead of the clock takes part
 /// in nothing, one seen already is the same record, and one earlier than a record seen is
 /// earlier than the newest, which the view never goes back from (Switch wire 3.2).
-fn takes_part(record: &AppRecord, held: &[AppRecord], now: u64) -> bool {
-    !record.is_ahead(now)
-        && !held
-            .iter()
-            .any(|h| matches!(record.order(h), RecordOrder::Same | RecordOrder::Earlier))
+/// A record conflicting with the newest while the view is in conflict already adds nothing:
+/// one more body at that `updated_at` keeps the conflict as it is.
+fn takes_part(record: &AppRecord, held: &[AppRecord], view: &RecordView, now: u64) -> bool {
+    let adds_nothing = |h: &AppRecord| match record.order(h) {
+        RecordOrder::Same | RecordOrder::Earlier => true,
+        RecordOrder::Conflict => view.in_conflict(),
+        RecordOrder::Later => false,
+    };
+    !record.is_ahead(now) && !held.iter().any(adds_nothing)
 }
 
 impl Paykit {
@@ -250,12 +273,14 @@ impl Paykit {
                 .await?
                 .unwrap_or_default();
             let (mut view, held) = seen.view(payee, now)?;
+            // Only a record whose Paykit member reads takes part (Paykit wire 3.2): a reader
+            // refuses a malformed one as it refuses any invalid record, and it never displaces
+            // a valid one.
+            let read = read.filter(|record| PaykitMember::read(record).is_ok());
             if let Some(record) = read {
-                if takes_part(&record, &held, now) {
+                if takes_part(&record, &held, &view, now) {
                     view.see(&record, now);
-                    seen.records.push(record.signed().clone());
-                    let excess = seen.records.len().saturating_sub(SEEN_RECORDS);
-                    seen.records.drain(..excess);
+                    seen.keep(&record, &held);
                     self.local_put(&seen_key, &seen).await?;
                 }
             }

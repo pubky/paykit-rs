@@ -472,3 +472,88 @@ async fn test_public_record_of_an_app_only_the_switch_lists_read() {
         .await;
     assert_eq!(listed(&mut phone, &w).await, ["btc-lightning-bolt12"]);
 }
+
+#[tokio::test]
+async fn test_public_malformed_newer_record_never_displaces_a_valid_one() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    let valid = publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1ok"),
+        t0,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    // A newer record whose Paykit member doesn't read: refused as an invalid record, it
+    // takes no part in the comparison (Paykit wire 3.2).
+    publish_at(
+        &w,
+        json!({ "public_endpoints": { "btc-lightning-bolt12": 7 } }),
+        t0 + 1000,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    // The valid record served again is still the one used.
+    serve(&w, &valid);
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+}
+
+#[tokio::test]
+async fn test_public_conflict_kept_past_the_history_bound_and_a_reload() {
+    let w = World::new();
+    let base = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&base)).await;
+    let app_id = wallet.app_id();
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    // More renewals than the history keeps, then a conflict at the newest updated_at.
+    for i in 0..70u64 {
+        publish_at(
+            &w,
+            one_endpoint("btc-lightning-bolt11", &format!("lnbc1r{i}")),
+            t0 + i,
+            expiry,
+        );
+        listed(&mut wallet, &w).await;
+    }
+    publish_at(
+        &w,
+        one_endpoint("btc-bitcoin-p2wpkh", "bc1qother"),
+        t0 + 69,
+        expiry,
+    );
+    // Neither side of the conflict is used: the wallet falls back to the earlier record.
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    // Many more bodies at that updated_at keep the conflict as it is, and a reload too: the
+    // rejected endpoint never becomes usable.
+    for i in 0..70u64 {
+        publish_at(
+            &w,
+            one_endpoint("btc-bitcoin-p2tr", &format!("bc1p{i}")),
+            t0 + 69,
+            expiry,
+        );
+        assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    }
+    drop(wallet);
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            std::sync::Arc::clone(&base),
+            app_id,
+            std::sync::Arc::clone(&w.clock),
+        )
+        .await;
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    publish_at(
+        &w,
+        one_endpoint("btc-bitcoin-p2wpkh", "bc1qsecond"),
+        t0 + 69,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+}
