@@ -1694,3 +1694,93 @@ fn test_allowance_record_seen_roles_are_kept() {
     };
     assert!(no_end.check_later_write(&reproposed).is_err());
 }
+
+/// The `payment_lists` record of `binding_accepted`, a used single-use endpoint of its list,
+/// and that list signed again with `version` moved by `delta`, other content otherwise the
+/// same.
+fn list_case(keys: &Keys, delta: i64) -> (PaymentListRecord, paykit_lib::records::StoredMessage) {
+    let alice = pubky(ALICE);
+    let s = paykit("sealed.json");
+    let mut held = PaymentListRecord::read(value(&arr(&s, "binding_accepted")[0]), &alice).unwrap();
+    held.used.push(paykit_lib::records::UsedEndpoint {
+        version: 1,
+        endpoint: paykit_lib::identifiers::PaymentEndpointIdentifier::parse("btc-bitcoin-p2wpkh")
+            .unwrap(),
+        attempt_id: paykit_lib::identifiers::AttemptId::from_bytes([3; 16]),
+    });
+    let list = resigned(keys, "private_payment_list", None, |body| {
+        let version = body["version"].as_u64().unwrap();
+        body.insert(
+            "version".into(),
+            serde_json::json!(version.checked_add_signed(delta).unwrap()),
+        );
+        if delta == 0 {
+            // The same version, other signed content.
+            let expires = body["expires_at"]
+                .as_str()
+                .unwrap()
+                .replace(".000Z", ".001Z");
+            body.insert("expires_at".into(), serde_json::json!(expires));
+        }
+    });
+    (held, list)
+}
+
+#[test]
+fn test_payment_list_record_later_write_follows_the_list_version() {
+    let keys = Keys::load();
+    let (held, other_same_version) = list_case(&keys, 0);
+    // The same list, its used grown: taken.
+    let mut grown = held.clone();
+    grown.used.push(paykit_lib::records::UsedEndpoint {
+        attempt_id: paykit_lib::identifiers::AttemptId::from_bytes([4; 16]),
+        ..held.used[0].clone()
+    });
+    held.check_later_write(&grown).unwrap();
+    held.check_later_write(&held).unwrap();
+    // A greater version: taken, with the used entries it held.
+    let (_, newer) = list_case(&keys, 1);
+    let newer = PaymentListRecord {
+        list: newer,
+        ..held.clone()
+    };
+    held.check_later_write(&newer).unwrap();
+    // A lower version, or another list of the same version: refused.
+    let (_, older) = list_case(&keys, -1);
+    let older = PaymentListRecord {
+        list: older,
+        ..held.clone()
+    };
+    assert!(held.check_later_write(&older).is_err());
+    assert_ne!(other_same_version.hash(), held.list.hash());
+    let equivocation = PaymentListRecord {
+        list: other_same_version,
+        ..held.clone()
+    };
+    let error = held
+        .check_later_write(&equivocation)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("same version"), "{error}");
+}
+
+#[test]
+fn test_payment_list_record_later_write_keeps_used_entries() {
+    let keys = Keys::load();
+    let (held, _) = list_case(&keys, 0);
+    // At the same version, dropping a used entry is refused.
+    let dropped = PaymentListRecord {
+        used: Vec::new(),
+        ..held.clone()
+    };
+    let error = held.check_later_write(&dropped).unwrap_err().to_string();
+    assert!(error.contains("seen used"), "{error}");
+    // At a greater version too: wire 5.4 gives a newer list no reset of used.
+    let (_, newer) = list_case(&keys, 1);
+    let newer_dropped = PaymentListRecord {
+        list: newer,
+        used: Vec::new(),
+        ..held.clone()
+    };
+    assert!(held.check_later_write(&newer_dropped).is_err());
+}
