@@ -10,6 +10,7 @@ use paykit_lib::records::{
 use paykit_lib::scopes::{Label, PaykitScope, ScopeName};
 use pubky_switch_core::enc::b64;
 use pubky_switch_core::ident::key_of_scope;
+use pubky_switch_core::records::AppCert;
 use pubky_switch_core::sealed::{aad, pad, RecordValue, SealedValue};
 use serde_json::Value;
 
@@ -1823,4 +1824,38 @@ fn test_record_transitions_hold_records_built_in_code() {
         ..ended.clone()
     };
     assert!(ended.check_later_write(&renamed).is_err());
+}
+
+#[test]
+fn test_stored_message_from_received_is_its_plaintexts() {
+    use paykit_lib::records::StoredMessage;
+    let keys = Keys::load();
+    let request = stored_message(&keys, "payment_request");
+    let other = stored_message(&keys, "payment_request_recurring");
+    let built = |s: &StoredMessage, message: &pubky_switch_core::message::Message| {
+        StoredMessage::from_received(
+            s.sender(),
+            s.cert().clone(),
+            s.plaintext().clone(),
+            message.clone(),
+            Some(1),
+        )
+    };
+    // The client's own parts: the same stored copy as a reader rebuilds.
+    let same = built(&request, request.message()).unwrap();
+    assert_eq!(same.hash(), request.hash());
+    // A parsed message beside another message's plaintext: refused, so no record writer gets
+    // a copy whose checks and bytes disagree.
+    let error = built(&request, other.message()).unwrap_err().to_string();
+    assert!(error.contains("isn't the stored plaintext's"), "{error}");
+    // Another app's certificate beside the plaintext.
+    let cap = AppCert::verify(&crate::common::cert_doc("cap"), &pubky(BOB)).unwrap();
+    assert!(StoredMessage::from_received(
+        request.sender(),
+        cap,
+        request.plaintext().clone(),
+        request.message().clone(),
+        Some(1),
+    )
+    .is_err());
 }
