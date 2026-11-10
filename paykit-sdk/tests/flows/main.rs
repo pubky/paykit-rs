@@ -16,5 +16,6 @@ mod receive_faults;
 mod recovery;
 mod resend;
 mod restore;
+mod restore_hold;
 mod unrequested;
 mod wallets;

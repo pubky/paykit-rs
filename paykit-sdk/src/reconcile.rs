@@ -136,6 +136,11 @@ impl Paykit {
     /// The client's errors; the rail's errors.
     pub async fn reconcile(&mut self) -> Result<ReconcileReport> {
         self.app.list_collections().await?;
+        // After a restore, the counterparties of the open requests the records now show are
+        // asked to re-send from the backup's cursor time, once (`hold.rs`, Paykit spec 7.2);
+        // what isn't sent now goes at the next receive.
+        self.queue_restore_asks().await?;
+        let _ = self.send_asks().await;
         let mut report = ReconcileReport {
             resolved: self.resume_payments().await?,
             doubtful: Vec::new(),

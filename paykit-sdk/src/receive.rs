@@ -116,6 +116,7 @@ pub(crate) fn effect(
     let scopes = cx.cert().scopes().to_vec();
     let pay = scopes.iter().any(|s| s == "pay");
     let payee = paykit_lib::scopes::acts_as_payee(&scopes);
+    note_cursor_time(cx, stored)?;
     match stored.body() {
         Body::PaymentRequest(_) if pay => {
             let target =
@@ -168,6 +169,23 @@ pub(crate) fn effect(
 
 fn local<T: Serialize>(key: &str, value: &T) -> Result<LocalWrite, Fail> {
     state::local_put(key, value).map_err(|_| Fail::corrupt())
+}
+
+/// Keep the acceptance time of the latest Paykit entry the receive step passed, with the
+/// cursor move: a backup carries it, and a restore asks the counterparties to re-send from
+/// it (`hold.rs`, Paykit spec 7.2).
+fn note_cursor_time(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Result<(), Fail> {
+    let Some(at) = stored.accepted_at() else {
+        return Ok(());
+    };
+    let held = match cx.local_get(key::CURSOR_TIME.as_bytes())? {
+        Some(bytes) => state::decode::<u64>(&bytes).map_err(|_| Fail::corrupt())?,
+        None => 0,
+    };
+    if at > held {
+        cx.local(local(key::CURSOR_TIME, &at)?);
+    }
+    Ok(())
 }
 
 /// Note a counterparty with Paykit activity, for re-sends after a `missed` item or a

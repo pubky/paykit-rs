@@ -46,6 +46,7 @@ use pubky_switch_core::scopes as switch_scopes;
 use serde::{Deserialize, Serialize};
 
 use crate::activity::{self, SideTag};
+use crate::hold::RestoreHold;
 use crate::journal::JournalEntry;
 use crate::receive::{self, Fail};
 use crate::state::{self, key};
@@ -256,7 +257,17 @@ pub(crate) fn restore_paykit_layer(
         .ok_or_else(|| String::from("Paykit's layer doesn't read as local state"))?;
     let mut open = std::collections::BTreeSet::new();
     let mut writes = Vec::with_capacity(state.len());
+    let mut cursor_time_ms = 0;
     for (key, value) in state {
+        // A hold, or a user's confirmation of one, belongs to a restore before: this one
+        // sets its own (`hold.rs`).
+        if key == key::RESTORE_HOLD.as_bytes() || key.starts_with(key::HOLD_CONFIRMED.as_bytes()) {
+            continue;
+        }
+        if key == key::CURSOR_TIME.as_bytes() {
+            cursor_time_ms = state::decode::<u64>(&value)
+                .map_err(|_| String::from("Paykit's cursor time in the backup doesn't read"))?;
+        }
         let Some(rest) = key.strip_prefix(key::JOURNAL.as_bytes()) else {
             writes.push(LocalWrite::Put { key, value });
             continue;
@@ -277,6 +288,11 @@ pub(crate) fn restore_paykit_layer(
         let value = state::encode(&entry).map_err(|_| bad())?;
         writes.push(LocalWrite::Put { key, value });
     }
+    // Every open request is held after a restore, set in the restore's own commit (Paykit
+    // spec 7.2, "What a restore loses"; `hold.rs`).
+    let hold = state::local_put(key::RESTORE_HOLD, &RestoreHold::of(cursor_time_ms))
+        .map_err(|_| String::from("the restore's hold can't be written"))?;
+    writes.push(hold);
     Ok(writes)
 }
 

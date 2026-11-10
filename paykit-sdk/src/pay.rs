@@ -81,6 +81,11 @@ pub struct PayOptions {
     /// The user has seen that the payee's switch couldn't confirm the payee's apps, and pays
     /// anyway ([`Refusal::IdentityUnconfirmed`]; Switch spec 4.3, Paykit spec 7.2).
     pub unconfirmed_identity_confirmed: Option<UserConfirmed>,
+    /// The user has seen that the payee may have cancelled this request since the backup the
+    /// app was restored from, and pays it anyway ([`Refusal::HeldAfterRestore`]; Paykit spec
+    /// 7.2, "What a restore loses"). It ends the request's hold; it never overrides a
+    /// cancellation the app holds.
+    pub possibly_cancelled_confirmed: Option<UserConfirmed>,
 }
 
 /// The result of a payment.
@@ -259,6 +264,15 @@ impl Paykit {
         // attempt (Paykit spec 8.1, the kept-copy stop).
         if cancelled(&record) || self.kept_stop(&target).await? {
             return Err(Refusal::Cancelled.into());
+        }
+        // Held after a restore: paid only once the user has seen the payee may have
+        // cancelled it, which ends the hold (Paykit spec 7.2, "What a restore loses").
+        let record_key = self.activity_key(&target)?;
+        if self.held(&record_key, &record).await? {
+            if options.possibly_cancelled_confirmed.is_none() {
+                return Err(Refusal::HeldAfterRestore.into());
+            }
+            self.end_hold(&record_key).await?;
         }
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);
         let deadline = body.attempt_deadline(None)?;

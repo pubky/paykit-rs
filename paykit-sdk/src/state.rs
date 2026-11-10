@@ -28,6 +28,9 @@
 //! | `j/<attempt_id>` | the payment journal: one payment, from before its `attempt` | yes |
 //! | `side/<msg_id>` | the side a cancellation is sent from, kept with the batch that queues it | |
 //! | `ar/<payee>/<app_id>` | a payee app's records that took part in its comparison, for its public endpoints | |
+//! | `ct` | the acceptance time of the last Paykit entry the receive step passed | |
+//! | `rh` | the hold a restore set on the open requests (`hold.rs`); never backed up | |
+//! | `hc/<record key>` | the user confirmed a held request; never backed up | |
 //! | `kc/<record key>` | a payee's cancellation received before its request, for the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
 //! | `rs/<pubky>/<msg_id>` | when a message was last re-sent to a requester | |
@@ -176,6 +179,9 @@ pub(crate) mod key {
     pub(crate) const JOURNAL: &str = "j/";
     pub(crate) const PEERS: &str = "peer/";
     pub(crate) const KEPT_CANCELLATIONS: &str = "kc/";
+    pub(crate) const CURSOR_TIME: &str = "ct";
+    pub(crate) const RESTORE_HOLD: &str = "rh";
+    pub(crate) const HOLD_CONFIRMED: &str = "hc/";
 
     pub(crate) fn ask(sender: &[u8; 32], from: u64) -> String {
         format!("{ASKS}{}/{}", b64(sender), num(from))
@@ -199,6 +205,10 @@ pub(crate) mod key {
 
     pub(crate) fn seen_records(payee: &[u8; 32], app_id: &[u8; 16]) -> String {
         format!("ar/{}/{}", b64(payee), b64(app_id))
+    }
+
+    pub(crate) fn hold_confirmed(record_key: &[u8; 32]) -> String {
+        format!("{HOLD_CONFIRMED}{}", b64(record_key))
     }
 
     pub(crate) fn kept_cancellation(record_key: &[u8; 32]) -> String {

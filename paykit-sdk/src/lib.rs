@@ -41,6 +41,7 @@ pub mod app_records;
 mod approval;
 mod destination;
 mod error;
+mod hold;
 mod journal;
 mod pay;
 mod paykit;

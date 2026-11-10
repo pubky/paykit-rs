@@ -98,6 +98,10 @@ pub enum RequestStatus {
     Cancelled,
     /// Its proposal expired unpaid.
     Expired,
+    /// Held after a restore: the payee may have cancelled it since the backup, and it is
+    /// paid only once the user has seen that (Paykit spec 7.2,
+    /// [`crate::PayOptions::possibly_cancelled_confirmed`]).
+    Held,
 }
 
 /// A request the payer holds.
@@ -650,6 +654,9 @@ impl Paykit {
                 .is_some()
         {
             status = RequestStatus::Cancelled;
+        }
+        if status == RequestStatus::Open && self.held(&record_key, record).await? {
+            status = RequestStatus::Held;
         }
         Ok(Some(RequestView {
             request: RequestRef {
