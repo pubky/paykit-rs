@@ -62,8 +62,7 @@ impl Paykit {
             request_hashes: selection.request_hashes,
             billing_period: None,
         }
-        .to_body();
-        ResendRequest::from_body(&body).map_err(paykit_lib::Error::into_validation)?;
+        .to_body()?;
         let signed = self.sign(counterparty, Kind::ResendRequest, Vec::new(), body)?;
         let msg_id = self.app.queue_signed(signed).await?;
         self.app.flush_message(&msg_id).await?;

@@ -243,8 +243,8 @@ impl Paykit {
             conversion: None,
             metadata: draft.metadata,
         };
-        let body = request.to_body();
-        PaymentRequest::from_body(&body).map_err(paykit_lib::Error::into_validation)?;
+        // The writer reads back what it writes by the recipient's rules (Paykit wire 4.5).
+        let body = request.to_body()?;
         let signed = self.sign(to, Kind::PaymentRequest, Vec::new(), body)?;
         let msg_id = signed.msg_id().to_owned();
         let hash = signed.hash();
@@ -394,7 +394,7 @@ impl Paykit {
                 attempt_id: proof.attempt_id,
                 billing_period: proof.billing_period,
             }
-            .to_body();
+            .to_body()?;
             // The receipt goes into the payee's record in the batch that queues it.
             let signed = self.sign(bound.counterparty, Kind::PaymentReceipt, refs, body)?;
             match self
@@ -439,7 +439,7 @@ impl Paykit {
                 reason: reason.clone(),
                 label: None,
             }
-            .to_body();
+            .to_body()?;
             let signed = self.sign(
                 bound.counterparty,
                 Kind::PaymentRequestCancellation,
@@ -744,7 +744,7 @@ impl Paykit {
             request.payee,
             kind,
             vec![request.request_hash],
-            reply.to_body(),
+            reply.to_body()?,
         )?;
         let mut tx = Tx::default();
         if cancel {

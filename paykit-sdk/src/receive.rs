@@ -333,7 +333,18 @@ fn receipt_effect(
     if record.counterparty != sender {
         return Ok(());
     }
-    place(cx, &target, sender, Role::Receipt, stored)?;
+    // A receipt names the proof it confirms first (Paykit wire 4.11), and the record holds a
+    // receipt only beside that proof (Paykit wire 5.3): the payer's proof goes into the
+    // record in the batch that sends it, so a receipt for a record without it, or naming
+    // another proof, isn't stored. Stored, it would leave the payer unable to record its own
+    // proof. It still settles the attempt it names.
+    let names_held_proof = record
+        .proof
+        .as_ref()
+        .is_some_and(|proof| stored.message().refs.first() == Some(&proof.hash()));
+    if names_held_proof {
+        place(cx, &target, sender, Role::Receipt, stored)?;
+    }
     if !cx.cert().has_permission(Permission::ClaimsWrite) {
         return Ok(());
     }

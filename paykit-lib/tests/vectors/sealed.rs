@@ -58,8 +58,20 @@ fn check_activity_rules(keys: &Keys) {
         )
         .unwrap()
     };
+    // Written without the writer's rules, so the reader's refusals show; the writer refuses
+    // every record the reader does.
     let read = |record: &ActivityRecord| {
-        ActivityRecord::read(&record.to_json().unwrap(), &alice, ActivitySide::Payer)
+        let read = ActivityRecord::read(
+            &record.to_json_unchecked().unwrap(),
+            &alice,
+            ActivitySide::Payer,
+        );
+        assert_eq!(
+            read.is_ok(),
+            record.to_json().is_ok(),
+            "writer and reader agree"
+        );
+        read
     };
     let base = ActivityRecord {
         side: ActivitySide::Payer,
@@ -119,7 +131,13 @@ fn check_activity_rules(keys: &Keys) {
         side: ActivitySide::Payee,
         ..held.clone()
     };
-    assert!(ActivityRecord::read(&payee.to_json().unwrap(), &bob, ActivitySide::Payee).is_err());
+    assert!(payee.to_json().is_err());
+    assert!(ActivityRecord::read(
+        &payee.to_json_unchecked().unwrap(),
+        &bob,
+        ActivitySide::Payee
+    )
+    .is_err());
     // Seen roles: a later write that drops the request is ignored.
     let dropped = ActivityRecord {
         request: None,
@@ -729,7 +747,9 @@ refuses it.";
 fn generate(keys: &Keys) {
     let (accepted, refused) = activity_cases(keys);
     let write = |(name, record, key): &ActivityCase, taken: bool| -> Value {
-        let value = record.to_json().unwrap();
+        // A refused record is written without the writer's rules, which refuse it too.
+        assert_eq!(record.to_json().is_ok(), taken, "{name}: the writer");
+        let value = record.to_json_unchecked().unwrap();
         let mut out = serde_json::json!({
             "collection": side_collection(record.side),
             "name": name,
@@ -816,11 +836,18 @@ fn check_activity_records(keys: &Keys, v: &Value) {
 /// A base record with one member placed where its binding or side doesn't allow it is
 /// refused, naming that member (Paykit wire 5.3).
 fn refuses_member(record: &ActivityRecord, member: &str) {
-    let error = ActivityRecord::read(&record.to_json().unwrap(), &reader(record), record.side)
+    let json = record.to_json_unchecked().unwrap();
+    let error = ActivityRecord::read(&json, &reader(record), record.side)
         .unwrap_err()
         .to_string();
     assert!(
         error.contains(&format!("{member} only in")),
+        "{member}: {error}"
+    );
+    // The writer refuses to write it, for the same rule.
+    let error = record.to_json().unwrap_err();
+    assert!(
+        matches!(&error, paykit_lib::Error::Validation(why) if why.contains(&format!("{member} only in"))),
         "{member}: {error}"
     );
 }
@@ -1091,4 +1118,112 @@ fn test_stored_message_refuses_a_label_its_sender_does_not_hold() {
         &alice,
     )
     .unwrap();
+}
+
+#[test]
+fn test_activity_record_writer_refuses_what_readers_refuse() {
+    use paykit_lib::records::DestinationSource;
+    let keys = Keys::load();
+    let b = bases(&keys);
+    let other_request = stored_message(&keys, "payment_request_acceptance");
+    let mut no_version = b.unrequested.clone();
+    if let Some(u) = no_version.unrequested.as_mut() {
+        u.source = DestinationSource::List;
+        u.list_version = None;
+    }
+    let cases: Vec<(&str, ActivityRecord)> = vec![
+        (
+            "a response to another request (binding, refs)",
+            ActivityRecord {
+                response: Some(other_request),
+                ..b.payer_request.clone()
+            },
+        ),
+        (
+            "a request in the proof's role (kind)",
+            ActivityRecord {
+                proof: b.payer_request.request.clone(),
+                ..b.period.clone()
+            },
+        ),
+        (
+            "a period record whose billing_period isn't its messages'",
+            ActivityRecord {
+                billing_period: Some(paykit_lib::periods::PeriodRef {
+                    starts_at: 0,
+                    ends_at: 1,
+                }),
+                ..b.period.clone()
+            },
+        ),
+        (
+            "attempted_periods out of order",
+            ActivityRecord {
+                attempted_periods: vec![1_772_236_800, 1_769_817_600],
+                ..b.payer_request.clone()
+            },
+        ),
+        (
+            "attempted_periods in a period record",
+            ActivityRecord {
+                attempted_periods: vec![1_769_817_600],
+                ..b.period.clone()
+            },
+        ),
+        ("a list destination without its version", no_version),
+        (
+            "a payer's record seen as the payee's (side)",
+            ActivityRecord {
+                side: ActivitySide::Payee,
+                allowance_id: None,
+                ..b.payer_request.clone()
+            },
+        ),
+    ];
+    for (name, record) in cases {
+        let error = record.to_json().expect_err(name);
+        assert!(
+            matches!(error, paykit_lib::Error::Validation(_)),
+            "{name}: {error}"
+        );
+        let json = record.to_json_unchecked().unwrap();
+        let own = reader(&record);
+        assert!(
+            ActivityRecord::read(&json, &own, record.side).is_err(),
+            "{name}: the reader refuses it too"
+        );
+    }
+    // The base records write, and read back.
+    for record in [b.payer_request, b.period, b.unrequested, b.payee_request] {
+        let json = record.to_json().unwrap();
+        ActivityRecord::read(&json, &reader(&record), record.side).unwrap();
+    }
+}
+
+#[test]
+fn test_record_writers_refuse_msg_ids_that_are_not_uuids() {
+    let keys = Keys::load();
+    let alice = pubky(ALICE);
+    let v = paykit("sealed.json");
+    let accepted = arr(&v, "binding_accepted");
+    let bad = vec!["not-a-uuid".to_owned()];
+    let upper = vec!["6D7D1F0E-6C4E-4C47-9D2B-000000000001".to_owned()];
+    for ids in [bad, upper] {
+        let activity = ActivityRecord {
+            msg_ids: ids.clone(),
+            ..bases(&keys).payer_request
+        };
+        assert!(activity.to_json().is_err(), "activity record {ids:?}");
+        let mut list = PaymentListRecord::read(value(&accepted[0]), &alice).unwrap();
+        list.msg_ids = ids.clone();
+        assert!(list.to_json().is_err(), "payment_lists record {ids:?}");
+        let mut allowance = AllowanceRecord::read(value(&accepted[1]), &alice).unwrap();
+        allowance.msg_ids = ids.clone();
+        assert!(allowance.to_json().is_err(), "allowances record {ids:?}");
+    }
+    // A UUID v4 among them writes, after the stored IDs.
+    let mut list = PaymentListRecord::read(value(&accepted[0]), &alice).unwrap();
+    list.msg_ids = vec!["6d7d1f0e-6c4e-4c47-9d2b-000000000001".to_owned()];
+    let back = PaymentListRecord::read(&list.to_json().unwrap(), &alice).unwrap();
+    assert_eq!(back.msg_ids.len(), 2);
 }

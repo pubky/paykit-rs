@@ -444,7 +444,8 @@ impl World {
             payment_endpoints: endpoints,
             expires_at: self.clock.now_ms() + 30 * 24 * HOUR_MS,
         }
-        .to_body();
+        .to_body()
+        .unwrap();
         self.inject(
             &self.bob,
             "shop",

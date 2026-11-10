@@ -327,7 +327,8 @@ fn cancel_to(w: &World, targets: &[[u8; 16]], hash: [u8; 32]) -> String {
         reason: None,
         label: None,
     }
-    .to_body();
+    .to_body()
+    .unwrap();
     w.inject(
         &w.bob,
         "shop",
@@ -405,4 +406,62 @@ async fn test_one_time_cancellation_kept_applies_to_another_wallets_record() {
         phone.request(&request).await.unwrap().status,
         RequestStatus::Cancelled
     );
+}
+
+#[tokio::test]
+async fn test_one_time_receipt_naming_another_proof_leaves_the_proof_recordable() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    // Bob's receipt for the attempt names a proof alice's record doesn't hold (Paykit wire
+    // 4.11): it settles the attempt, and isn't stored beside a proof it doesn't confirm.
+    let body = paykit_lib::bodies::PaymentReceipt {
+        attempt_id,
+        billing_period: None,
+    }
+    .to_body()
+    .unwrap();
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.payment_receipt",
+        vec![[7; 32], request.request_hash],
+        body,
+    );
+    wallet.receive(None).await.unwrap();
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Paid
+    );
+    // The payment completes: its proof is still recorded, in a record readers take (Paykit
+    // wire 5.3), and sent.
+    w.rail.settle(&attempt_id, true);
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            resumed.as_slice(),
+            [PayOutcome::Paid {
+                proof_msg_id: Some(_),
+                ..
+            }]
+        ),
+        "{resumed:?}"
+    );
+    let key = wallet.request(&request).await.unwrap().record;
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    assert!(!value["proof"].is_null());
+    assert!(value["receipt"].is_null());
 }

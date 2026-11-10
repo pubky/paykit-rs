@@ -56,7 +56,11 @@ fn test_vectors_allowance_usage() {
     for case in cases {
         let name = st(case, "name");
         let terms = AllowanceTerms::from_json(&case["terms"]).unwrap();
-        assert_eq!(terms.to_json(), case["terms"], "{name}: terms write back");
+        assert_eq!(
+            terms.to_json().unwrap(),
+            case["terms"],
+            "{name}: terms write back"
+        );
         let l = ledger(&case["ledger"]);
         assert_eq!(l.counterparty, pubky(BOB));
         let back: Value = serde_json::from_slice(&l.to_json().unwrap()).unwrap();
@@ -114,6 +118,12 @@ fn test_vectors_allowance_usage() {
     assert!(usage(&terms, &other, &claim_map, now).is_err());
     assert!(compact(&terms, &other, now).is_err());
     check_spellings(&v);
+    for case in arr(&v["period_limit_members"], "refused") {
+        let name = st(case, "name");
+        let error = AllowanceTerms::from_json(&case["terms"]).expect_err(name);
+        assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
+    }
+    assert_eq!(arr(&v["period_limit_members"], "refused").len(), 2);
 }
 
 /// The top-level description, which names every member.
@@ -131,7 +141,8 @@ first limit that refuses. A totals.failed item counts like an entry's own failed
 lifetime amount only: it adds its value while its attempt's claim is done, until the \
 executor moves it into spent and count. Compaction keeps each compacted failed entry's \
 attempt, obligation and value in totals.failed. period_limit_spellings holds terms whose \
-period limits are, or aren't, duplicates by their wire spelling (wire 4.15).";
+period limits are, or aren't, duplicates by their wire spelling (wire 4.15); \
+period_limit_members holds terms whose period limit leaves out one of its limits.";
 
 const SPELLINGS_DESCRIPTION: &str = "Wire 4.15, specs/allowances.md: the terms of the first \
 case with period_limits replaced. Two period limits are duplicates when every member is \
@@ -219,8 +230,41 @@ fn generate() {
                 Place::Member("/period_limit_spellings"),
                 json!({ "accepted": accepted, "description": SPELLINGS_DESCRIPTION, "refused": refused }),
             ),
+            (
+                Place::Member("/period_limit_members"),
+                period_limit_members(),
+            ),
         ],
     );
+}
+
+const MEMBERS_DESCRIPTION: &str = "Wire 4.15, specs/allowances.md: the terms of the first \
+case with its period limit's amount_limit or payment_count_limit left out. A period limit \
+carries both, each possibly null, not both null; a missing one isn't read as null, so every \
+reader refuses these terms. reason is paykit-lib's wording.";
+
+/// `period_limit_members`, as paykit-lib generates it.
+fn period_limit_members() -> Value {
+    let base = paykit("allowance_usage.json")["cases"][0]["terms"].clone();
+    let refused: Vec<Value> = [
+        ("a period limit without amount_limit", "amount_limit"),
+        (
+            "a period limit without payment_count_limit",
+            "payment_count_limit",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, member)| {
+        let mut terms = base.clone();
+        terms["period_limits"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove(member);
+        let error = AllowanceTerms::from_json(&terms).expect_err(name);
+        json!({ "name": name, "reason": quoted(&error.to_string()), "terms": terms })
+    })
+    .collect();
+    json!({ "description": MEMBERS_DESCRIPTION, "refused": refused })
 }
 
 /// `period_limit_spellings` (Paykit wire 4.15): readers take the accepted terms with every
@@ -240,9 +284,13 @@ fn check_spellings(v: &Value) {
             "{name}"
         );
         // Written in the spelling read, they read again to the same entries.
-        assert_eq!(terms.to_json(), case["terms"], "{name}: terms write back");
         assert_eq!(
-            AllowanceTerms::from_json(&terms.to_json()).unwrap(),
+            terms.to_json().unwrap(),
+            case["terms"],
+            "{name}: terms write back"
+        );
+        assert_eq!(
+            AllowanceTerms::from_json(&terms.to_json().unwrap()).unwrap(),
             terms,
             "{name}"
         );

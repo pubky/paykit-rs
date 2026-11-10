@@ -827,7 +827,7 @@ impl Paykit {
             entry.payee,
             Kind::PaymentRequestAcceptance,
             vec![request_hash],
-            PaymentRequestAcceptance { label }.to_body(),
+            PaymentRequestAcceptance { label }.to_body()?,
         )?;
         entry.acceptance_msg_id = Some(signed.msg_id().to_owned());
         entry.acceptance_plaintext = Some(signed.plaintext().encode());
@@ -1084,12 +1084,9 @@ impl Paykit {
             payment_reference: None,
             proof: entry.rail_proof.clone().ok_or_else(PaykitError::corrupt)?,
         };
-        self.sign(
-            entry.payee,
-            Kind::PaymentProof,
-            request_hash.into_iter().collect(),
-            proof.to_body(),
-        )
+        let refs: Vec<[u8; 32]> = request_hash.into_iter().collect();
+        let body = proof.to_body(refs.len())?;
+        self.sign(entry.payee, Kind::PaymentProof, refs, body)
     }
 
     /// Finish the payments a crash, a lost answer or a pending payment method left in the

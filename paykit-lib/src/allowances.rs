@@ -282,7 +282,25 @@ impl AllowanceTerms {
     /// Write the terms, every member, `null` where unset, each amount and time in the
     /// spelling it was read with, or the canonical one for terms built locally, so received
     /// terms write back as they were signed and distinct period limits stay distinct.
-    pub fn to_json(&self) -> Value {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for terms a recipient refuses (Paykit wire 4.15): the writer
+    /// reads them back by [`AllowanceTerms::from_json`], and refuses terms that fail it or
+    /// don't read back as themselves.
+    pub fn to_json(&self) -> Result<Value> {
+        let value = self.json_unchecked();
+        let back = Self::from_json(&value).map_err(Error::into_validation)?;
+        if &back != self {
+            return Err(Error::Validation(format!(
+                "{TERMS}: the terms don't write as themselves"
+            )));
+        }
+        Ok(value)
+    }
+
+    /// The terms as written, before the reader checks them.
+    pub(crate) fn json_unchecked(&self) -> Value {
         let mut map = Map::new();
         let time = |t: &Option<TermsTime>| {
             t.as_ref()
@@ -442,6 +460,17 @@ fn read_period_limit(item: &Value) -> Result<(PeriodLimit, LimitSpelling<'_>)> {
         }
         _ => return Err(bad(TERMS, "period", "kind is anchored or rolling")),
     };
+    // Paykit wire 4.15: both limits are present, each possibly null; a missing one isn't
+    // read as null.
+    for member in ["amount_limit", "payment_count_limit"] {
+        if !limit.has(member) {
+            return Err(bad(
+                TERMS,
+                member,
+                "missing; a period limit carries both limits",
+            ));
+        }
+    }
     let amount_text = limit.opt_str("amount_limit")?;
     let out = PeriodLimit {
         amount_limit: amount_text.map(Decimal::parse).transpose()?,
@@ -691,12 +720,26 @@ impl Ledger {
 
     /// Write the ledger value: every entry with its `outcome` (`null` while unknown), and
     /// `totals` with `spent` `""` for a ledger never compacted and `failed` left out when
-    /// empty.
+    /// empty. The value is read back by [`Ledger::from_json`] before it is handed out, so
+    /// the writer never writes a ledger its readers refuse.
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] if the value can't be written.
+    /// [`Error::Validation`] for a ledger readers refuse, such as an attempt listed twice
+    /// (Paykit wire 5.5), or one that doesn't read back as itself; [`Error::Invalid`] if the
+    /// value can't be written.
     pub fn to_json(&self) -> Result<Vec<u8>> {
+        let json = self.json_unchecked()?;
+        let back = Self::from_json(&json).map_err(Error::into_validation)?;
+        if &back != self {
+            return Err(Error::Validation(format!(
+                "{LEDGER}: the ledger doesn't write as itself"
+            )));
+        }
+        Ok(json)
+    }
+
+    fn json_unchecked(&self) -> Result<Vec<u8>> {
         let out = LedgerOut {
             v: 1,
             counterparty: pubky_id(&self.counterparty),
@@ -1219,7 +1262,7 @@ mod tests {
         received["lifetime_amount_limit"] = json!("0.100");
         // Read, write, read again: the same entries and the same bytes.
         let first = AllowanceTerms::from_json(&received).unwrap();
-        let written = first.to_json();
+        let written = first.to_json().unwrap();
         assert_eq!(
             serde_json::to_vec(&written).unwrap(),
             serde_json::to_vec(&received).unwrap()
@@ -1228,7 +1271,7 @@ mod tests {
         assert_eq!(second, first);
         assert_eq!(second.period_limits.len(), 4);
         assert_eq!(
-            serde_json::to_vec(&second.to_json()).unwrap(),
+            serde_json::to_vec(&second.to_json().unwrap()).unwrap(),
             serde_json::to_vec(&written).unwrap()
         );
         // So does a proposal carrying them, the one message whose body holds terms.
@@ -1236,7 +1279,7 @@ mod tests {
             "proposer_role": "allowee", "terms": received });
         let proposal =
             crate::bodies::AllowanceProposal::from_body(body.as_object().unwrap()).unwrap();
-        assert_eq!(Value::Object(proposal.to_body()), body);
+        assert_eq!(Value::Object(proposal.to_body().unwrap()), body);
     }
 
     #[test]
@@ -1257,7 +1300,7 @@ mod tests {
             expires_at: None,
             allowed_payment_endpoint_identifiers: None,
         };
-        let written = terms.to_json();
+        let written = terms.to_json().unwrap();
         assert_eq!(written["active_from"], "2026-01-01T00:00:00.000Z");
         assert_eq!(
             written["period_limits"][0]["period"]["anchor"],
@@ -1267,9 +1310,30 @@ mod tests {
     }
 
     #[test]
+    fn test_terms_period_limit_needs_both_limits_present() {
+        let full = json!({ "amount_limit": "1", "payment_count_limit": null,
+            "period": { "every": 1, "kind": "rolling", "unit": "day" } });
+        AllowanceTerms::from_json(&with_limits(json!([full.clone()]))).unwrap();
+        for member in ["amount_limit", "payment_count_limit"] {
+            let mut missing = full.clone();
+            missing.as_object_mut().unwrap().remove(member);
+            if member == "amount_limit" {
+                missing["payment_count_limit"] = json!(2);
+            }
+            let error = AllowanceTerms::from_json(&with_limits(json!([missing])))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(member) && error.contains("missing"),
+                "{member}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn test_terms_round_trip() {
         let parsed = AllowanceTerms::from_json(&terms()).unwrap();
-        assert_eq!(parsed.to_json(), terms());
+        assert_eq!(parsed.to_json().unwrap(), terms());
     }
 
     #[test]
@@ -1472,7 +1536,9 @@ mod tests {
             attempt_id: AttemptId::from_bytes([1; 16]),
             value: Decimal::zero(),
         });
-        assert!(Ledger::from_json(&twice.to_json().unwrap()).is_err());
+        // The writer refuses what the reader refuses: an attempt listed twice.
+        assert!(matches!(twice.to_json(), Err(Error::Validation(_))));
+        assert!(Ledger::from_json(&twice.json_unchecked().unwrap()).is_err());
         assert!(Ledger::from_json(br#"{"v":2,"counterparty":"x","allowance_id":"y"}"#).is_err());
     }
 

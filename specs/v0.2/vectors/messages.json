@@ -89,7 +89,7 @@
         "signature": "4-0Tlx7v9bWHIqAs1QnauGvhtJMVJVeQmvNVntZusaf_U4wE7WwHd5LFiRum3MQWA_43uvcBkw1wrszLiIEpCA"
       }
     ],
-    "description": "Wire 4.4, 4.5, 4.9, specs/payment-conversion.md: the shop's messages with their conversion terms changed, signed again by the shop, each from messages.json's message base with body replaced by the body given. Requests are payment_request_required_app, which accepts btc-lightning-bolt11 only, with fixed rates: with conversion terms the requested asset is lower-case letters and digits, each rate's asset is <asset> or <asset>-<rail> of such segments, and it matches the asset, and the rail when it names one, of an accepted endpoint. Period details name payment_request_recurring (request), a usd request with per_period conversion: their rates are cross-asset only, so a bare or rail-qualified rate for the requested asset (usd, usd-polygon) makes them invalid against the request. accepted are messages alice takes, at check 10 and, for period details, against their request; refused are those she drops. reason is paykit-lib's wording, of the first check that refuses it.",
+    "description": "Wire 4.4, 4.5, 4.9, specs/payment-conversion.md: the shop's messages with their conversion terms changed, signed again by the shop, each from messages.json's message base with body replaced by the body given. Requests are payment_request_required_app, which accepts btc-lightning-bolt11 only, with fixed rates: with conversion terms the requested asset is lower-case letters and digits, each rate's asset is <asset> or <asset>-<rail> of such segments, and it matches the asset, and the rail when it names one, of an accepted endpoint. Period details name payment_request_recurring (request), a usd request with per_period conversion: their rates are cross-asset only, so a bare or rail-qualified rate for the requested asset (usd, usd-polygon) makes them invalid against the request; each rate's asset is <asset> or <asset>-<rail> of lower-case letters and digits, and matches an endpoint the details or the request name (here btc-lightning-bolt11). accepted are messages alice takes, at check 10 and, for period details, against their request; refused are those she drops. reason is paykit-lib's wording, of the first check that refuses it.",
     "refused": [
       {
         "base": "payment_request_required_app",
@@ -148,6 +148,51 @@
         "request": "payment_request_recurring",
         "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
         "signature": "2iTZ-Nq_B8-wkvChfqk35nUfUItAOD54_MOfZMm2Fll8eHhddA_7xnYqUAK49igWdZfZez62XpgDzBXGKHs0AA"
+      },
+      {
+        "base": "payment_period_details",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_period_details\",\"msg_id\":\"c2ea19d4-b378-439b-a8ee-9019b3360b21\",\"created_at\":\"2026-02-27T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"c_ys4n4gUNKJa3D13sszDTpkj8rqdB206n-gIMVuzXY\"],\"body\":{\"billing_period\":{\"ends_at\":\"2026-03-31T00:00:00.000Z\",\"starts_at\":\"2026-02-28T00:00:00.000Z\"},\"expires_at\":\"2026-03-01T00:00:00.000Z\",\"rates\":[{\"asset\":\"BTC\",\"value\":\"0.00001234\"}]}}",
+        "name": "period details with a rate selector in upper case",
+        "reason": "invalid: a rate's asset is <asset> or <asset>-<rail>, each segment lower-case letters and digits",
+        "request": "payment_request_recurring",
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "signature": "tq18gou6N_yRLZkGfxkSPR0rYhTUMVeibutF9uBLxidWR39sBS-nfQMAs7A2EnwfkiTSkxFWKRtqrXJp6pe7Cw"
+      },
+      {
+        "base": "payment_period_details",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_period_details\",\"msg_id\":\"c2ea19d4-b378-439b-a8ee-9019b3360b21\",\"created_at\":\"2026-02-27T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"c_ys4n4gUNKJa3D13sszDTpkj8rqdB206n-gIMVuzXY\"],\"body\":{\"billing_period\":{\"ends_at\":\"2026-03-31T00:00:00.000Z\",\"starts_at\":\"2026-02-28T00:00:00.000Z\"},\"expires_at\":\"2026-03-01T00:00:00.000Z\",\"rates\":[{\"asset\":\"btc-\",\"value\":\"0.00001234\"}]}}",
+        "name": "period details with a rate selector with an empty rail",
+        "reason": "invalid: a rate's asset is <asset> or <asset>-<rail>, each segment lower-case letters and digits",
+        "request": "payment_request_recurring",
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "signature": "lUOLWpgImJ-uHjhUuLO1FtWrf583V515piDMWfu0Mg0lAxC-AF7kE_pA3QhafUg8qmcWPRqJyT0hS-6Zl4pUAA"
+      },
+      {
+        "base": "payment_period_details",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_period_details\",\"msg_id\":\"c2ea19d4-b378-439b-a8ee-9019b3360b21\",\"created_at\":\"2026-02-27T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"c_ys4n4gUNKJa3D13sszDTpkj8rqdB206n-gIMVuzXY\"],\"body\":{\"billing_period\":{\"ends_at\":\"2026-03-31T00:00:00.000Z\",\"starts_at\":\"2026-02-28T00:00:00.000Z\"},\"expires_at\":\"2026-03-01T00:00:00.000Z\",\"rates\":[{\"asset\":\"btc-lightning-bolt11\",\"value\":\"0.00001234\"}]}}",
+        "name": "period details with a rate selector of three segments",
+        "reason": "invalid: a rate's asset is <asset> or <asset>-<rail>, each segment lower-case letters and digits",
+        "request": "payment_request_recurring",
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "signature": "dm87AAtkihjlGueif5POKOtQybSuJoO-X4sguQAGFv7E1g3b-zY5KEdGeUowMd9NdyG2U78_OsJ8uTp7fUIDCA"
+      },
+      {
+        "base": "payment_period_details",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_period_details\",\"msg_id\":\"c2ea19d4-b378-439b-a8ee-9019b3360b21\",\"created_at\":\"2026-02-27T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"c_ys4n4gUNKJa3D13sszDTpkj8rqdB206n-gIMVuzXY\"],\"body\":{\"billing_period\":{\"ends_at\":\"2026-03-31T00:00:00.000Z\",\"starts_at\":\"2026-02-28T00:00:00.000Z\"},\"expires_at\":\"2026-03-01T00:00:00.000Z\",\"rates\":[{\"asset\":\"eth\",\"value\":\"0.0004\"}]}}",
+        "name": "period details with a rate whose asset matches no endpoint",
+        "reason": "invalid: a rate's asset matches no accepted endpoint",
+        "request": "payment_request_recurring",
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "signature": "ovBs8Os0-ZWYJRX_XtsRJ3uuI9X_Htz75u6FPaH4lvaFGa7-t-nSX0yp5Org4gw93EmRSKQARoWWshsXsr3GBw"
+      },
+      {
+        "base": "payment_period_details",
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_period_details\",\"msg_id\":\"c2ea19d4-b378-439b-a8ee-9019b3360b21\",\"created_at\":\"2026-02-27T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"c_ys4n4gUNKJa3D13sszDTpkj8rqdB206n-gIMVuzXY\"],\"body\":{\"billing_period\":{\"ends_at\":\"2026-03-31T00:00:00.000Z\",\"starts_at\":\"2026-02-28T00:00:00.000Z\"},\"expires_at\":\"2026-03-01T00:00:00.000Z\",\"rates\":[{\"asset\":\"btc-bitcoin\",\"value\":\"0.00001234\"}]}}",
+        "name": "period details with a rate whose rail matches no endpoint",
+        "reason": "invalid: a rate's asset matches no accepted endpoint",
+        "request": "payment_request_recurring",
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "signature": "0LbC-oPZKEfGM5PattZCGitTv0fH7zTTs-2pa5LtWd1S_SDl4Zl8UWaaJ8HH8gnUg4noaNJQG07neA8bNSUWBg"
       }
     ]
   },
