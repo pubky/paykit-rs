@@ -1600,3 +1600,64 @@ fn test_activity_record_proof_names_the_list_it_paid() {
     assert!(ActivityRecord::read(&json, &pubky(ALICE), ActivitySide::Payer).is_err());
     b.unrequested.to_json().unwrap();
 }
+
+/// A period record holding `messages.json`'s period details, and a later write of it with
+/// `details` instead.
+fn period_held(keys: &Keys) -> (ActivityRecord, paykit_lib::records::StoredMessage) {
+    let details = stored_message(keys, "payment_period_details");
+    let held = ActivityRecord {
+        proof: None,
+        period_details: Some(details.clone()),
+        ..bases(keys).period
+    };
+    (held, details)
+}
+
+fn with_details(held: &ActivityRecord, d: paykit_lib::records::StoredMessage) -> ActivityRecord {
+    ActivityRecord {
+        period_details: Some(d),
+        ..held.clone()
+    }
+}
+
+#[test]
+fn test_activity_record_seen_period_details_again_as_late_is_kept() {
+    // The same message again, as late with the same hash: nothing changes. A check that
+    // took only later details would refuse it.
+    let keys = Keys::load();
+    let (held, details) = period_held(&keys);
+    held.check_later_write(&with_details(&held, details))
+        .unwrap();
+}
+
+#[test]
+fn test_activity_record_seen_period_details_as_late_with_another_hash_are_refused() {
+    // Another signed message as late (the same created_at and msg_id), other rates: an
+    // equivocation, refused, and the held details stay.
+    let keys = Keys::load();
+    let (held, details) = period_held(&keys);
+    let equivocation = resigned(&keys, "payment_period_details", None, |body| {
+        body.insert(
+            "rates".into(),
+            serde_json::json!([{ "asset": "btc", "value": "0.00009999" }]),
+        );
+    });
+    assert_ne!(equivocation.hash(), details.hash());
+    let error = held
+        .check_later_write(&with_details(&held, equivocation))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("other details as late"), "{error}");
+}
+
+#[test]
+fn test_activity_record_seen_period_details_replaced_only_by_later_ones() {
+    let keys = Keys::load();
+    let (held, _) = period_held(&keys);
+    let later = resign_with(&keys, "payment_period_details", |m| {
+        m.created_at_ms += 1;
+    });
+    held.check_later_write(&with_details(&held, later.clone()))
+        .unwrap();
+    assert!(with_details(&held, later).check_later_write(&held).is_err());
+}

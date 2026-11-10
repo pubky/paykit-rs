@@ -1075,8 +1075,8 @@ impl ActivityRecord {
     /// "Seen roles" and "Seen Allowance" (Paykit wire 5.3, Switch spec 8.2): a reader that
     /// holds `self` ignores, and shows with its writer, a later write of the same record
     /// that drops or replaces a message in a role it saw, holds older period details than
-    /// those it saw (by `created_at`, then `msg_id`) or none, or changes or drops the
-    /// `allowance_id` it saw.
+    /// those it saw (by `created_at`, then `msg_id`), other details as late as them, or
+    /// none, or changes or drops the `allowance_id` it saw.
     ///
     /// # Errors
     ///
@@ -1089,12 +1089,18 @@ impl ActivityRecord {
                 .find(|(r, _)| *r == role)
                 .map(|(_, s)| *s);
             if role == "period_details" {
+                // Paykit wire 4.9: only later details replace those seen. Details as late as
+                // those seen are the same message only by hash; others are an equivocation,
+                // which never replaces what is held.
                 ensure(
                     now.is_some_and(|n| {
-                        crate::bodies::period_details_order(&n.message, &seen.message)
-                            != std::cmp::Ordering::Less
+                        match crate::bodies::period_details_order(&n.message, &seen.message) {
+                            std::cmp::Ordering::Greater => true,
+                            std::cmp::Ordering::Equal => n.hash() == seen.hash(),
+                            std::cmp::Ordering::Less => false,
+                        }
                     }),
-                    "Paykit wire 5.3: a later write holds older period details than seen, or none",
+                    "Paykit wire 5.3: a later write holds older period details than seen, other details as late, or none",
                 )?;
             } else {
                 ensure(
