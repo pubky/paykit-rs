@@ -1165,6 +1165,15 @@ pub fn check_successor(
         if newer.failed.iter().any(|f| f.attempt_id == item.attempt_id) {
             return refuse("changes a totals.failed item");
         }
+        // Into the totals once: the attempt is then counted in spent and count, so it can't
+        // also come back as an entry.
+        if newer
+            .entries
+            .iter()
+            .any(|e| e.attempt_id == item.attempt_id)
+        {
+            return refuse("moves a totals.failed item into the totals and keeps it as an entry");
+        }
         into_spent = add(into_spent, item.value.scaled())?;
         into_count = into_count.checked_add(1).ok_or_else(overflow)?;
     }
@@ -1578,6 +1587,40 @@ mod tests {
         assert!(matches!(twice.to_json(), Err(Error::Validation(_))));
         assert!(Ledger::from_json(&twice.json_unchecked().unwrap()).is_err());
         assert!(Ledger::from_json(br#"{"v":2,"counterparty":"x","allowance_id":"y"}"#).is_err());
+    }
+
+    #[test]
+    fn test_successor_moves_a_compacted_failed_into_the_totals_once() {
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let item = CompactedFailed {
+            obligation: [7; 32],
+            attempt_id: AttemptId::from_bytes([7; 16]),
+            value: Decimal::parse("1").unwrap(),
+        };
+        let held = Ledger {
+            failed: vec![item.clone()],
+            ..ledger(Vec::new())
+        };
+        let moved = Ledger {
+            spent: Some(Decimal::parse("1").unwrap()),
+            count: 1,
+            ..ledger(Vec::new())
+        };
+        let now = t("2026-03-10T00:00:00.000Z");
+        check_successor(&terms, &held, &moved, now).unwrap();
+        // The same attempt also back as an entry would count twice.
+        let twice = Ledger {
+            entries: vec![LedgerEntry {
+                outcome: Some(EntryOutcome::Done),
+                ..entry(7, "1", "2026-01-05T00:00:00.000Z", None)
+            }],
+            ..moved
+        };
+        let error = check_successor(&terms, &held, &twice, now).unwrap_err();
+        assert!(
+            error.to_string().contains("keeps it as an entry"),
+            "{error}"
+        );
     }
 
     #[test]
