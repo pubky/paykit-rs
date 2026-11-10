@@ -249,6 +249,8 @@ pub struct FailingRecordReads {
     armed: std::sync::atomic::AtomicBool,
     /// Once set, the read of a held record that brings it to 1 fails, alone.
     countdown: std::sync::atomic::AtomicU64,
+    /// While set, every journal entry reads back as bytes that don't read.
+    corrupt_journal: std::sync::atomic::AtomicBool,
 }
 
 impl FailingRecordReads {
@@ -263,6 +265,12 @@ impl FailingRecordReads {
         self.countdown.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Serve every journal entry as bytes that don't read, or stop.
+    pub fn corrupt_journal(&self, corrupt: bool) {
+        self.corrupt_journal
+            .store(corrupt, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Fail only the `n`th read of a held record from now on, once.
     pub fn fail_nth(&self, n: u64) {
         self.countdown.store(n, std::sync::atomic::Ordering::SeqCst);
@@ -275,6 +283,13 @@ impl StateStore for FailingRecordReads {
         ns: &str,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        if self
+            .corrupt_journal
+            .load(std::sync::atomic::Ordering::SeqCst)
+            && key.starts_with(b"p/j/")
+        {
+            return Ok(Some(b"not a journal entry".to_vec()));
+        }
         if key.starts_with(b"rec/") {
             if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(pubky_switch_client::error::StoreError::Unavailable);

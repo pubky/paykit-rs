@@ -130,3 +130,65 @@ async fn test_receive_faults_receipt_applied_once_the_store_heals() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_receive_faults_receipt_parked_on_a_corrupt_journal_then_settles() {
+    let w = World::new();
+    let failing = failing_store().await;
+    let mut wallet = w
+        .wallet_on("wallet", Arc::clone(&failing) as Arc<dyn StateStore>)
+        .await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id } = wallet
+        .pay_without_request(paykit_sdk::UnrequestedPayment {
+            payee: w.bob_id(),
+            amount: crate::common::btc("0.001"),
+            options: PayOptions {
+                endpoint: Some(crate::common::endpoint("btc-lightning-bolt12")),
+                ..PayOptions::default()
+            },
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    // Bob's receipt for the attempt arrives while the payment's journal entry, which holds
+    // its deadline, doesn't read: the entry is parked at once, never consumed without
+    // settling the claim (Switch spec 8.2).
+    let body = paykit_lib::bodies::PaymentReceipt {
+        attempt_id,
+        billing_period: None,
+    }
+    .to_body()
+    .unwrap();
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.payment_receipt",
+        vec![[7; 32]],
+        body,
+    );
+    failing.corrupt_journal(true);
+    let _ = wallet.receive(None).await;
+    failing.corrupt_journal(false);
+    // Once the entry reads again, the parked receipt settles the claim by evidence.
+    wallet.receive(None).await.unwrap();
+    let claim = wallet
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        claim.view.status,
+        pubky_switch_core::claims::ClaimStatus::Settled
+    );
+}

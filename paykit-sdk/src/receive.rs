@@ -34,6 +34,7 @@ use pubky_switch_client::app::{
     AppError, ClaimFetch, ClaimOp, LocalWrite, Need, ObligationDeadline, ReceiveContext,
     Refusal as ClientRefusal, StoreFailure,
 };
+use pubky_switch_client::error::StoreError;
 use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome};
 use pubky_switch_core::enc::serde_b64;
 use pubky_switch_core::scopes::Permission;
@@ -62,6 +63,14 @@ pub(crate) enum Fail {
     /// The store failed, or holds data of the SDK's own that doesn't read: the entry is
     /// held, or parked, never consumed (Switch spec 8.2).
     Store(StoreFailure),
+}
+
+impl Fail {
+    /// Local data of the SDK's own that doesn't read: retrying on the feed can't mend it,
+    /// so the entry is parked at once.
+    pub(crate) fn corrupt() -> Self {
+        Self::Store(StoreFailure::of_entry(StoreError::Corrupt))
+    }
 }
 
 impl From<AppError> for Fail {
@@ -156,7 +165,7 @@ pub(crate) fn effect(
 }
 
 fn local<T: Serialize>(key: &str, value: &T) -> Result<LocalWrite, Fail> {
-    state::local_put(key, value).map_err(|_| Fail::Drop("the effect can't be kept".into()))
+    state::local_put(key, value).map_err(|_| Fail::corrupt())
 }
 
 /// Note a counterparty with Paykit activity, for re-sends after a `missed` item or a
@@ -246,7 +255,7 @@ fn place_request(
     // payable.
     let cancellation = state::decode::<KeptMessage>(&bytes)
         .and_then(|kept| kept.stored(&own))
-        .map_err(|_| Fail::Drop("a kept cancellation doesn't read".into()))?;
+        .map_err(|_| Fail::corrupt())?;
     let current = held_value(cx, target)?;
     let mut record = activity::read(current.as_deref(), &own, ActivitySide::Payer)
         .unwrap_or_else(|| activity::empty(ActivitySide::Payer, payee));
@@ -364,13 +373,13 @@ fn receipt_effect(
         }
         None => {
             // The deadline of a payment without a request is the one its journal kept.
-            // A kept entry that doesn't read holds the receipt back rather than settling the
-            // claim with no deadline (Switch spec 8.2): the store is corrupt.
+            // A kept entry that doesn't read parks the receipt rather than settling the claim
+            // with no deadline, or consuming it (Switch spec 8.2): the store is corrupt.
             let journaled = match cx.local_get(key::journal(&attempt_id).as_bytes())? {
                 Some(bytes) => Some(
                     state::decode::<JournalEntry>(&bytes)
                         .and_then(|entry| entry.check().map(|()| entry))
-                        .map_err(|_| Fail::NotNow)?,
+                        .map_err(|_| Fail::corrupt())?,
                 ),
                 None => None,
             };
