@@ -479,9 +479,10 @@ impl Paykit {
     // The payer
 
     /// The payer's request record of `request`, read from the switch when not held. A
-    /// cancellation this app kept for it, received before the request (`receive.rs`), is
-    /// placed in the record first: another own app may have written the record from a copy
-    /// of the request it got without the cancellation (Paykit spec 8.1).
+    /// cancellation this app kept for it (`receive.rs`) is placed in the record first, if it
+    /// can be: another own app may have written the record from a copy of the request it got
+    /// without the cancellation (Paykit spec 8.1). A placement that fails changes nothing
+    /// here: the kept stop still stands, and [`Paykit::kept_stop`] refuses the payment.
     pub(crate) async fn payer_request(
         &mut self,
         request: &RequestRef,
@@ -494,7 +495,8 @@ impl Paykit {
         if request_of(&record).is_none() {
             return Err(Refusal::NotFound.into());
         }
-        if self.place_kept_cancellation(&target).await? {
+        // The kept stop refuses whatever this placement does; it is tried again later.
+        if self.place_kept_cancellation(&target).await.unwrap_or(false) {
             let record = self.activity(&target).await?.ok_or(Refusal::NotFound)?;
             return Ok((target, record));
         }
@@ -533,6 +535,45 @@ impl Paykit {
             None => self.local_commit(tx).await?,
         }
         Ok(true)
+    }
+
+    /// Whether this app keeps a payee's cancellation for the request record at `target`, the
+    /// kept-copy stop (Paykit spec 8.1): read by every path that makes a new attempt on the
+    /// request, so a stop not yet placed in the record still refuses it.
+    pub(crate) async fn kept_stop(&self, target: &ActivityTarget) -> Result<bool> {
+        let kept_key = key::kept_cancellation(&self.activity_key(target)?);
+        Ok(self.local_get::<KeptMessage>(&kept_key).await?.is_some())
+    }
+
+    /// Place every kept cancellation whose request record this app holds, each as a later
+    /// write of its own with the kept copy dropped (Paykit spec 8.1). Run after each
+    /// receive, at a resume, and before any payment. One that can't be placed now stays
+    /// kept, for the next run; its kept copy refuses every new attempt meanwhile.
+    pub(crate) async fn place_kept_cancellations(&mut self) -> Result<()> {
+        let own = self.identity();
+        for (_, kept) in self
+            .local_scan::<KeptMessage>(key::KEPT_CANCELLATIONS)
+            .await?
+        {
+            let cancellation = kept.stored(&own)?;
+            let Some(request) = cancellation.message().refs.first().copied() else {
+                continue;
+            };
+            let target = ActivityTarget::payer(natural_key::request_record(
+                &cancellation.sender(),
+                &request,
+            ));
+            let held = self
+                .held_activity(&target)
+                .await?
+                .is_some_and(|record| request_of(&record).is_some());
+            if held {
+                // A placement that fails now is tried again at the next run; the kept stop
+                // stands meanwhile, so it can't let a payment through.
+                let _ = self.place_kept_cancellation(&target).await;
+            }
+        }
+        Ok(())
     }
 
     /// Every request the payer's apps received, from the `payer_activity` records this app
@@ -728,7 +769,7 @@ impl Paykit {
         if rejected(&record) {
             return Err(Refusal::Rejected.into());
         }
-        if cancelled(&record) {
+        if cancelled(&record) || self.kept_stop(&target).await? {
             return Err(Refusal::Cancelled.into());
         }
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);

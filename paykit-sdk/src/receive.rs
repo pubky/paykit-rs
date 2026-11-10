@@ -8,9 +8,9 @@
 //! [`ReceiveContext`], the writes the message causes:
 //!
 //! - **payer side** (`pay`): a request opens its request record; a payee's cancellation, a
-//!   receipt and a Private Payment List go into theirs. A cancellation of a request the app
-//!   holds no record of yet is kept, and placed in the batch that opens the record. A
-//!   receipt also settles the attempt
+//!   receipt and a Private Payment List go into theirs. A payee's cancellation is kept,
+//!   never written in the receive step: the app places it in the request record afterwards
+//!   (the kept-copy stop, Paykit spec 8.1). A receipt also settles the attempt
 //!   it names, by evidence (Switch spec 10.2 row 3), in the same batch: only the payee's yes
 //!   counts (Paykit spec 7.3).
 //! - **payee side** (`request` or a label): the payer's acceptance, rejection, cancellation
@@ -28,7 +28,7 @@
 
 use paykit_lib::bodies::ResendRequest;
 use paykit_lib::derive::{natural_key, request_obligation_blinded};
-use paykit_lib::records::{ActivitySide, PaymentListRecord, StoredMessage, UnrequestedDestination};
+use paykit_lib::records::{PaymentListRecord, StoredMessage, UnrequestedDestination};
 use paykit_lib::{AttemptId, Body};
 use pubky_switch_client::app::{
     AppError, ClaimFetch, ClaimOp, LocalWrite, Need, ObligationDeadline, ReceiveContext,
@@ -120,7 +120,7 @@ pub(crate) fn effect(
         Body::PaymentRequest(_) if pay => {
             let target =
                 ActivityTarget::payer(natural_key::request_record(&sender, &stored.hash()));
-            place_request(cx, &target, sender, stored)?;
+            place(cx, &target, sender, Role::Request, stored)?;
             note_peer(cx, &sender, stored)?;
         }
         Body::PaymentRequestAcceptance(_)
@@ -136,11 +136,13 @@ pub(crate) fn effect(
             };
             let payer_target =
                 ActivityTarget::payer(natural_key::request_record(&sender, &request));
-            if pay && held_value(cx, &payer_target)?.is_some() {
-                place(cx, &payer_target, sender, Role::Cancellation, stored)?;
-            } else if payee && payer_reply(cx, stored, &scopes)? {
+            if payee && payer_reply(cx, stored, &scopes)? {
                 // A payer's cancellation of a request this app sent.
             } else if pay {
+                // A payee's cancellation is kept, the kept-copy stop (Paykit spec 8.1): the
+                // receive step writes no record for it. The app places it in the request
+                // record itself, as a later write of its own, and every new attempt reads
+                // the kept copy, so a stop that can't be placed still refuses the payment.
                 keep_cancellation(cx, &payer_target, stored)?;
             }
         }
@@ -212,19 +214,22 @@ fn place(
     Ok(())
 }
 
-/// A payee's cancellation of a request the payer holds no record of yet, kept with the
-/// cursor move until the request comes (Paykit spec 8.1): a request first unopenable and
-/// re-sent later (Paykit spec 9) then opens its record already cancelled, in the batch that
-/// writes it ([`place_request`]), and is never payable. A later cancellation of the same
-/// request adds nothing; one record holds one per role (Paykit spec 6).
+/// A payee's cancellation of a one-time request, kept with the cursor move (Paykit spec
+/// 8.1, the kept-copy stop): the receive step writes no record for it. The app places it in
+/// the request record as a later write of its own ([`crate::Paykit::receive`],
+/// [`crate::Paykit::resume_payments`] and before any payment), once it holds the record, a
+/// request first unopenable and re-sent later (Paykit spec 9) included; and every new
+/// attempt reads the kept copy itself, so a stop that can't be placed still refuses the
+/// payment. A later cancellation of the same request adds nothing; one record holds one per
+/// role (Paykit spec 6).
 ///
 /// Security: the cancellation passed every recipient check and check 10 before it was kept,
 /// and is verified again when it is placed. It is keyed by the payer's record of the request
 /// it names first in `refs`, which derives from the sender and that hash, so it can only
-/// cancel that sender's request. It is kept until its request comes: a request record can
-/// still come from another own app after the sender stops re-sending, and a cancelled
-/// request must never become payable. Admission bounds what a sender can make the app keep
-/// (Switch spec 7).
+/// cancel that sender's request. It is kept until it is placed: a request record can still
+/// come from another own app after the sender stops re-sending, and a cancelled request must
+/// never become payable. Admission bounds what a sender can make the app keep (Switch spec
+/// 7).
 fn keep_cancellation(
     cx: &mut ReceiveContext<'_>,
     target: &ActivityTarget,
@@ -235,38 +240,6 @@ fn keep_cancellation(
         return Ok(());
     }
     cx.local(local(&kept, &KeptMessage::of(stored))?);
-    Ok(())
-}
-
-/// A request: placed in the payer's request record with the cancellation kept for it, if
-/// any, in the effect's batch, which also drops the kept copy (Paykit spec 8.1).
-fn place_request(
-    cx: &mut ReceiveContext<'_>,
-    target: &ActivityTarget,
-    payee: [u8; 32],
-    stored: &StoredMessage,
-) -> Result<(), Fail> {
-    let own = cx.identity();
-    let kept_key = key::kept_cancellation(&cx.record_key(&target.record_target())?);
-    let Some(bytes) = cx.local_get(kept_key.as_bytes())? else {
-        return place(cx, target, payee, Role::Request, stored);
-    };
-    // A kept cancellation that no longer reads leaves the request unopened rather than
-    // payable.
-    let cancellation = state::decode::<KeptMessage>(&bytes)
-        .and_then(|kept| kept.stored(&own))
-        .map_err(|_| Fail::corrupt())?;
-    let current = held_value(cx, target)?;
-    let mut record = activity::read(current.as_deref(), &own, ActivitySide::Payer)
-        .unwrap_or_else(|| activity::empty(ActivitySide::Payer, payee));
-    let placed = activity::place(&mut record, Role::Request, stored.clone());
-    let cancelled = activity::place(&mut record, Role::Cancellation, cancellation);
-    if placed || cancelled {
-        cx.put_record(&target.record_target(), &record.to_json()?, Vec::new())?;
-    }
-    cx.local(LocalWrite::Delete {
-        key: kept_key.into_bytes(),
-    });
     Ok(())
 }
 

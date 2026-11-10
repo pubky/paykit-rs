@@ -359,6 +359,9 @@ impl Paykit {
     pub async fn receive(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
         let report = self.app.receive(wait).await?;
         self.refresh_own();
+        // The payees' cancellations the read kept go into their records, as later writes of
+        // this app's own (Paykit spec 8.1).
+        self.place_kept_cancellations().await?;
         let applied = report
             .events
             .iter()

@@ -465,3 +465,118 @@ async fn test_one_time_receipt_naming_another_proof_leaves_the_proof_recordable(
     assert!(!value["proof"].is_null());
     assert!(value["receipt"].is_null());
 }
+
+// ---------------------------------------------------------------------------------------
+// The kept-copy stop (Paykit spec 8.1): a payee's cancellation that can't be placed in its
+// record still refuses every new attempt
+
+/// The next `n` batches the wallet's switch is sent are refused, `403`: the app's
+/// placements of a kept cancellation among them.
+fn refuse_batches(w: &World, n: usize) {
+    for _ in 0..n {
+        w.alice
+            .switch()
+            .fail_next(pubky_switch_client::testing::Fault::Error {
+                path: "/ops".into(),
+                code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+                current: serde_json::Value::Null,
+            });
+    }
+}
+
+/// Alice's wallet on `store`, holding bob's request, which bob then cancels; the wallet
+/// receives the cancellation, and its placement in the record is refused.
+async fn cancelled_unplaced(
+    w: &World,
+    store: std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+) -> (paykit_sdk::Paykit, paykit_sdk::RequestRef) {
+    let mut wallet = w.wallet_on("wallet", store).await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    shop.cancel_sent_request(&record, None).await.unwrap();
+    refuse_batches(w, 1);
+    wallet.receive(None).await.unwrap();
+    (wallet, request)
+}
+
+/// The record holds no cancellation: the placement failed.
+async fn record_uncancelled(wallet: &paykit_sdk::Paykit, request: &paykit_sdk::RequestRef) {
+    let key = wallet.request(request).await.unwrap().record;
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    assert!(
+        value["cancellation"].is_null(),
+        "the cancellation was placed"
+    );
+}
+
+#[tokio::test]
+async fn test_one_time_kept_stop_refuses_a_first_payment_it_couldnt_place() {
+    let w = World::new();
+    let (mut wallet, request) = cancelled_unplaced(&w, crate::common::store()).await;
+    record_uncancelled(&wallet, &request).await;
+    // The placement before the payment is refused too: the kept stop refuses it.
+    refuse_batches(&w, 1);
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_one_time_kept_stop_refuses_a_payment_after_a_resume() {
+    let w = World::new();
+    let store = crate::common::store();
+    let (wallet, request) = cancelled_unplaced(&w, std::sync::Arc::clone(&store)).await;
+    let app_id = wallet.app_id();
+    drop(wallet);
+    // Restarted: the resume's placement and the one before the payment are refused.
+    let mut wallet = w
+        .load_on_clock(&w.alice, store, app_id, std::sync::Arc::clone(&w.clock))
+        .await;
+    refuse_batches(&w, 1);
+    let _ = wallet.resume_payments().await;
+    record_uncancelled(&wallet, &request).await;
+    refuse_batches(&w, 1);
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_one_time_kept_stop_refuses_a_payment_after_a_restore() {
+    let w = World::new();
+    let (mut wallet, request) = cancelled_unplaced(&w, crate::common::store()).await;
+    // A backup holding the kept stop, restored; its placements are refused.
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let mut app = paykit_sdk::Paykit::restore(
+        w.env(&w.alice, crate::common::store()),
+        paykit_sdk::PaykitConfig::default(),
+        &backup,
+        std::sync::Arc::clone(&w.rail) as std::sync::Arc<dyn paykit_sdk::Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    refuse_batches(&w, 1);
+    let _ = app.reconcile().await;
+    app.end_reconcile(pubky_switch_client::app::UserConfirmed::new())
+        .await
+        .unwrap();
+    record_uncancelled(&app, &request).await;
+    refuse_batches(&w, 1);
+    let refused = app
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::Cancelled));
+    assert!(w.rail.all_executions().is_empty());
+}

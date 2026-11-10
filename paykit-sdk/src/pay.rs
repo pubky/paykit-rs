@@ -255,8 +255,9 @@ impl Paykit {
         if rejected(&record) {
             return Err(Refusal::Rejected.into());
         }
-        // A payer that has recorded a cancellation makes no new attempt (Paykit spec 8.1).
-        if cancelled(&record) {
+        // A payer that has recorded a cancellation, or keeps one not yet placed, makes no new
+        // attempt (Paykit spec 8.1, the kept-copy stop).
+        if cancelled(&record) || self.kept_stop(&target).await? {
             return Err(Refusal::Cancelled.into());
         }
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);
@@ -1212,6 +1213,8 @@ impl Paykit {
         // Batches kept from before go first, so the claim read below shows them and the
         // journal holds what their answers settled.
         self.app.flush_outbox().await?;
+        // Cancellations kept and not yet placed go into their records (Paykit spec 8.1).
+        self.place_kept_cancellations().await?;
         let mut out = Vec::new();
         for mut entry in self.journal().await? {
             if !entry.open() {
