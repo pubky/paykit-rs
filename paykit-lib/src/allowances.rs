@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use pubky_switch_core::enc::{b64, pubky_id};
-use pubky_switch_core::time::rfc3339;
+use pubky_switch_core::time::{rfc3339, MAX_TIME_MS};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -389,16 +389,33 @@ impl AllowanceTerms {
     /// Paykit wire 5.5): `at + 60 s`, cut at the next boundary of any anchored limit, so the
     /// entry lies in exactly one period of every anchored limit.
     ///
+    /// Both bounds are written in the condition, so each is a time the grammar writes, at
+    /// most 9999-12-31T23:59:59.999Z (Switch wire 1.6).
+    ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] for a period outside the times the grammar writes.
+    /// [`Error::Validation`] for an `at`, the executor's own stated time, or an `end` past the
+    /// last time the grammar writes; [`Error::Invalid`] for a period of the terms outside
+    /// the times the grammar writes.
     pub fn entry_window_end(&self, at: u64) -> Result<u64> {
+        let beyond = || {
+            Error::Validation(
+                "Paykit wire 5.5: an executor batch's window ends past the last time Switch wire 1.6 writes"
+                    .into(),
+            )
+        };
+        if at > MAX_TIME_MS {
+            return Err(beyond());
+        }
         let mut end = at.saturating_add(ENTRY_WINDOW_MS);
         for limit in &self.period_limits {
             if let LimitPeriod::Anchored(anchored) = &limit.period {
                 let rule = anchored.rule();
                 end = end.min(rule.containing(at)?.ends_at);
             }
+        }
+        if end > MAX_TIME_MS {
+            return Err(beyond());
         }
         Ok(end)
     }
@@ -1608,5 +1625,21 @@ mod tests {
         let mid = t("2026-02-10T00:00:00.000Z");
         assert_eq!(terms.entry_window_end(mid).unwrap(), mid + ENTRY_WINDOW_MS);
         assert_eq!(terms.longest_period(mid).unwrap(), 28 * 86_400_000);
+    }
+
+    #[test]
+    fn test_entry_window_stays_within_the_time_grammar() {
+        let terms = AllowanceTerms::from_json(&with_limits(json!([{ "amount_limit": "1",
+            "payment_count_limit": null,
+            "period": { "every": 1, "kind": "rolling", "unit": "day" } }])))
+        .unwrap();
+        let last = MAX_TIME_MS - ENTRY_WINDOW_MS;
+        assert_eq!(terms.entry_window_end(last).unwrap(), MAX_TIME_MS);
+        for at in [last + 1, MAX_TIME_MS, MAX_TIME_MS + 1, u64::MAX] {
+            assert!(
+                matches!(terms.entry_window_end(at), Err(Error::Validation(_))),
+                "{at}"
+            );
+        }
     }
 }
