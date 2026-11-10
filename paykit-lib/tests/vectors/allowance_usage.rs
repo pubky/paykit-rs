@@ -224,7 +224,7 @@ fn generate() {
 }
 
 /// `period_limit_spellings` (Paykit wire 4.15): readers take the accepted terms with every
-/// period limit, and refuse the others.
+/// period limit and write them back as read, and refuse the others.
 fn check_spellings(v: &Value) {
     let m = &v["period_limit_spellings"];
     let (accepted, refused) = spelling_cases();
@@ -237,6 +237,13 @@ fn check_spellings(v: &Value) {
         assert_eq!(
             terms.period_limits.len(),
             arr(&case["terms"], "period_limits").len(),
+            "{name}"
+        );
+        // Written in the spelling read, they read again to the same entries.
+        assert_eq!(terms.to_json(), case["terms"], "{name}: terms write back");
+        assert_eq!(
+            AllowanceTerms::from_json(&terms.to_json()).unwrap(),
+            terms,
             "{name}"
         );
     }
