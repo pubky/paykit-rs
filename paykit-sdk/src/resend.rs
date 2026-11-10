@@ -21,7 +21,7 @@ use pubky_switch_core::records::DAY_MS;
 use pubky_switch_core::sig::SignedDoc;
 
 use crate::activity::SideTag;
-use crate::error::Result;
+use crate::error::{PaykitError, Result};
 use crate::paykit::Paykit;
 use crate::protocol::{body_label, holds_role, QueuedAsk};
 use crate::state::{key, Tx};
@@ -97,8 +97,8 @@ impl Paykit {
             .local_scan::<u64>(key::PEERS)
             .await?
             .into_iter()
-            .filter_map(|(rest, _)| unb64_array::<32>(&rest).ok())
-            .collect();
+            .map(|(rest, _)| unb64_array::<32>(&rest).map_err(|_| PaykitError::corrupt()))
+            .collect::<Result<_>>()?;
         for peer in peers {
             self.request_resend(
                 peer,
@@ -210,12 +210,16 @@ impl Paykit {
             return Ok(true);
         }
         let side = if kind == Kind::PaymentRequestCancellation {
+            // The side is kept with every cancellation this app sends. One without it isn't
+            // re-sent: taking either side would guess which apps may get it (Paykit spec
+            // 3.4).
             match self
                 .local_get::<SideTag>(&key::side(&message.msg_id))
                 .await?
             {
                 Some(SideTag::Payee) => Side::Payee,
-                _ => Side::Payer,
+                Some(SideTag::Payer) => Side::Payer,
+                None => return Ok(false),
             }
         } else {
             Side::Payer

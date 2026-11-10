@@ -19,11 +19,15 @@
 //! Sensitive: an entry holds the destination's payload, the message carrying it and the
 //! rail's proof.
 
+use paykit_lib::derive::{natural_key, payment_obligation};
 use paykit_lib::records::DestinationSource;
 use paykit_lib::{
-    Asset, AttemptId, Decimal, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
+    Asset, AttemptId, Decimal, Label, PaymentAmount, PaymentEndpointIdentifier,
+    PaymentEndpointPayload, PaymentReference,
 };
+use pubky_switch_core::chain::TransitionProof;
 use pubky_switch_core::enc::{serde_b64, serde_b64_vec};
+use pubky_switch_core::message::MessagePlaintext;
 use pubky_switch_core::records::AppRecord;
 use pubky_switch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
@@ -129,12 +133,27 @@ impl Destination {
         Ok(PaymentEndpointPayload::parse(&self.payload)?)
     }
 
-    pub(crate) fn source(&self) -> DestinationSource {
+    /// Where the destination came from; a kept value other than the three written is a
+    /// corrupt store, never taken as one of them.
+    pub(crate) fn source(&self) -> Result<DestinationSource> {
         match self.source.as_str() {
-            "list" => DestinationSource::List,
-            "public" => DestinationSource::Public,
-            _ => DestinationSource::Request,
+            "request" => Ok(DestinationSource::Request),
+            "list" => Ok(DestinationSource::List),
+            "public" => Ok(DestinationSource::Public),
+            _ => Err(PaykitError::corrupt()),
         }
+    }
+
+    /// The destination's members read, and agree: a list version and a single-use mark only
+    /// for a Private Payment List's endpoint.
+    fn check(&self) -> Result<()> {
+        self.endpoint_id()?;
+        self.payload()?;
+        let list = self.source()? == DestinationSource::List;
+        if list != self.list_version.is_some() || (self.single_use && !list) {
+            return Err(PaykitError::corrupt());
+        }
+        Ok(())
     }
 }
 
@@ -238,6 +257,82 @@ impl JournalEntry {
             .transpose()
     }
 
+    /// The label kept, read as written: one that doesn't read is a corrupt store.
+    pub(crate) fn label(&self) -> Result<Option<Label>> {
+        self.label
+            .as_deref()
+            .map(Label::parse)
+            .transpose()
+            .map_err(|_| PaykitError::corrupt())
+    }
+
+    /// Check an entry read back from the store or a backup: every member reads, and they
+    /// agree (Paykit spec 7.2). A malformed entry is refused as a corrupt store, never taken
+    /// with a member defaulted: a damaged label or destination would send a payment's
+    /// evidence where it doesn't belong.
+    ///
+    /// - the attempt ID, the request hash, the amount, the label and the payment reference
+    ///   read; the destination's members read and agree;
+    /// - a payment of a request has its payment reference, and its record's natural key is
+    ///   the request's; a payment without a request has neither, owes no acceptance, and its
+    ///   claim key is the attempt's;
+    /// - an acceptance is kept with its plaintext, which reads, and only when owed;
+    /// - the method's proof is kept from `RailPaid` on, and before any payment time or
+    ///   proof message; a `Finished` entry marked failed by the method holds no proof;
+    /// - at most one carrier, which reads; the attempt's proof, when kept, reads.
+    pub(crate) fn check(&self) -> Result<()> {
+        let bad = || Err(PaykitError::corrupt());
+        let attempt = self.attempt()?;
+        let request_hash = self.request_hash()?;
+        self.amount.amount()?;
+        self.destination.check()?;
+        self.label()?;
+        match (&request_hash, &self.payment_reference) {
+            (Some(hash), Some(reference)) => {
+                PaymentReference::parse(reference).map_err(|_| PaykitError::corrupt())?;
+                if self.natural_key != natural_key::request_record(&self.payee, hash) {
+                    return bad();
+                }
+            }
+            (None, None) => {
+                if self.acceptance_owed
+                    || self.destination.source()? == DestinationSource::Request
+                    || self.obligation != payment_obligation(&attempt)
+                {
+                    return bad();
+                }
+            }
+            _ => return bad(),
+        }
+        if self.acceptance_msg_id.is_some() != self.acceptance_plaintext.is_some()
+            || (self.acceptance_msg_id.is_some() && !self.acceptance_owed)
+        {
+            return bad();
+        }
+        if let Some(bytes) = &self.acceptance_plaintext {
+            MessagePlaintext::decode(bytes).map_err(|_| PaykitError::corrupt())?;
+        }
+        let paid_members = self.paid_at_ms.is_some() || self.proof_msg_id.is_some();
+        if (self.stage == Stage::RailPaid || paid_members) && self.rail_proof.is_none() {
+            return bad();
+        }
+        if self.failed_by_method && self.rail_proof.is_some() {
+            return bad();
+        }
+        match (&self.carrier, &self.carrier_record) {
+            (Some(_), Some(_)) => return bad(),
+            (Some(kept), None) => kept.check_shape()?,
+            (None, Some(signed)) => {
+                AppRecord::verify(signed, &self.payee).map_err(|_| PaykitError::corrupt())?;
+            }
+            (None, None) => {}
+        }
+        if let Some(signed) = &self.attempt_proof {
+            TransitionProof::peek(signed).map_err(|_| PaykitError::corrupt())?;
+        }
+        Ok(())
+    }
+
     /// Keep the destination's carrier in the entry.
     pub(crate) fn keep_carrier(&mut self, carrier: &Carrier) {
         match carrier {
@@ -317,7 +412,12 @@ mod tests {
         );
         let text = format!("{destination:?}");
         assert!(!text.contains("secret"), "{text}");
-        assert_eq!(destination.source(), DestinationSource::Request);
+        assert_eq!(destination.source().unwrap(), DestinationSource::Request);
+        // A source other than the three written isn't taken as one of them.
+        let mut unknown = destination.clone();
+        unknown.source = "elsewhere".into();
+        assert!(unknown.source().is_err());
+        assert!(unknown.check().is_err());
         assert_eq!(destination.payload().unwrap().as_str(), "lnbc-secret");
     }
 

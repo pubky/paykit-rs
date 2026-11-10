@@ -45,11 +45,11 @@ impl Role {
 
 /// Which activity record a message goes into: the side, the natural key and, for a payee's
 /// record of a labelled request, its label (Paykit spec 6, Paykit wire 5.1).
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct ActivityTarget {
     pub(crate) side: SideTag,
     pub(crate) natural_key: Vec<u8>,
-    pub(crate) label: Option<String>,
+    pub(crate) label: Option<Label>,
 }
 
 impl std::fmt::Debug for ActivityTarget {
@@ -90,12 +90,12 @@ impl ActivityTarget {
         Self {
             side: SideTag::Payee,
             natural_key,
-            label: label.map(|l| l.as_str().to_owned()),
+            label: label.cloned(),
         }
     }
 
     pub(crate) fn label(&self) -> Option<Label> {
-        self.label.as_deref().and_then(|l| Label::parse(l).ok())
+        self.label.clone()
     }
 
     pub(crate) fn collection(&self) -> Collection {

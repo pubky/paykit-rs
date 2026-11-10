@@ -186,7 +186,10 @@ pub(crate) fn carries(
         return Err("Paykit wire 4.4: the destination isn't owned by the sending app".into());
     }
     let endpoint_id = destination.endpoint_id().map_err(|e| e.to_string())?;
-    match (destination.source(), carrier.body()) {
+    match (
+        destination.source().map_err(|e| e.to_string())?,
+        carrier.body(),
+    ) {
         (DestinationSource::Request, Body::PaymentRequest(request)) => {
             if request_hash.is_some_and(|h| *h != carrier.hash()) {
                 return Err("Paykit spec 7.2: the destination comes from another request".into());
@@ -230,7 +233,7 @@ fn record_carries(
     record: &AppRecord,
     now: u64,
 ) -> std::result::Result<(), String> {
-    if destination.source() != DestinationSource::Public {
+    if destination.source().map_err(|e| e.to_string())? != DestinationSource::Public {
         return Err("Paykit spec 7.2: no verified message carries the destination".into());
     }
     if &record.body().identity != payee {

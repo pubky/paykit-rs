@@ -27,7 +27,7 @@ use paykit_lib::kinds::Kind;
 use paykit_lib::records::{
     ActivityRecord, ActivitySide, DestinationSource, PaymentListRecord, StoredMessage, UsedEndpoint,
 };
-use paykit_lib::{AttemptId, Body, Label, PaymentAmount, PaymentEndpointIdentifier};
+use paykit_lib::{AttemptId, Body, PaymentAmount, PaymentEndpointIdentifier};
 use pubky_switch_client::app::{
     claim_conflict, AppError, ClaimOp, Initiator, ObligationDeadline, OpBatch,
     Refusal as ClientRefusal, SignedMessage, UserConfirmed, REVALIDATION_MS,
@@ -384,13 +384,17 @@ impl Paykit {
             .collect()
     }
 
+    /// The journal, every entry checked as read back ([`JournalEntry::check`]).
     pub(crate) async fn journal(&self) -> Result<Vec<JournalEntry>> {
-        Ok(self
-            .local_scan::<JournalEntry>(key::JOURNAL)
-            .await?
-            .into_iter()
-            .map(|(_, entry)| entry)
-            .collect())
+        let mut out = Vec::new();
+        for (rest, entry) in self.local_scan::<JournalEntry>(key::JOURNAL).await? {
+            entry.check()?;
+            if rest != entry.attempt_id {
+                return Err(PaykitError::corrupt());
+            }
+            out.push(entry);
+        }
+        Ok(out)
     }
 
     async fn save(&mut self, entry: &JournalEntry) -> Result<()> {
@@ -645,7 +649,10 @@ impl Paykit {
             // A single-use endpoint is marked used in the attempt's batch (Paykit spec 7.2
             // step 1, 8.4).
             list.used.push(UsedEndpoint {
-                version: entry.destination.list_version.unwrap_or(0),
+                version: entry
+                    .destination
+                    .list_version
+                    .ok_or_else(PaykitError::corrupt)?,
                 endpoint: entry.destination.endpoint_id()?,
                 attempt_id,
             });
@@ -798,7 +805,7 @@ impl Paykit {
         let Some(request_hash) = entry.request_hash()? else {
             return Ok(());
         };
-        let label = entry.label.as_deref().and_then(|l| Label::parse(l).ok());
+        let label = entry.label()?;
         let signed = self.sign(
             entry.payee,
             Kind::PaymentRequestAcceptance,
@@ -915,6 +922,7 @@ impl Paykit {
                 .local_get::<JournalEntry>(&key::journal(&attempt_id))
                 .await?
             {
+                kept.check()?;
                 if kept.stage == Stage::Finished {
                     *entry = kept;
                     return Ok(());
@@ -1055,9 +1063,9 @@ impl Paykit {
                 .then(|| entry.amount.amount())
                 .transpose()?,
             allowance_id: None,
-            label: entry.label.as_deref().and_then(|l| Label::parse(l).ok()),
+            label: entry.label()?,
             payment_reference: None,
-            proof: entry.rail_proof.clone().unwrap_or_default(),
+            proof: entry.rail_proof.clone().ok_or_else(PaykitError::corrupt)?,
         };
         self.sign(
             entry.payee,

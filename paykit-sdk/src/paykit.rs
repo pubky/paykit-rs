@@ -95,6 +95,23 @@ impl PaykitBackup {
         serde_json::to_vec(self).map_err(|_| PaykitError::corrupt())
     }
 
+    /// The backup's journal, checked as one (Paykit spec 7.2): every entry as
+    /// [`JournalEntry::check`] checks it, each attempt once, and at most one open entry for
+    /// one obligation, since a payment in progress blocks any other.
+    fn check_journal(&self) -> Result<()> {
+        let mut attempts = std::collections::BTreeSet::new();
+        let mut open = std::collections::BTreeSet::new();
+        for entry in &self.journal {
+            entry.check()?;
+            if !attempts.insert(entry.attempt_id.clone())
+                || (entry.open() && !open.insert(entry.obligation))
+            {
+                return Err(PaykitError::corrupt());
+            }
+        }
+        Ok(())
+    }
+
     /// Read a backup's bytes.
     ///
     /// # Errors
@@ -195,20 +212,24 @@ impl Paykit {
         Self::assemble(app, env, protocol, config, rail)
     }
 
-    /// Restore from a backup (Switch spec 12.4): the client's restore, then the journal, its
-    /// entries marked restored, so their open attempts are resolved as a restore requires
+    /// Restore from a backup (Switch spec 12.4): the journal checked whole first, then the
+    /// client's restore, then the journal, its entries marked restored, so their open attempts are resolved as a restore requires
     /// (Paykit spec 7.2). The app is in reconcile mode until [`Paykit::reconcile`] and
     /// [`Paykit::end_reconcile`].
     ///
     /// # Errors
     ///
-    /// The client's errors.
+    /// A store failure (`Corrupt`) for a journal with a malformed or repeated entry, before
+    /// anything is restored; the client's errors.
     pub async fn restore(
         env: AppEnv,
         config: PaykitConfig,
         backup: &PaykitBackup,
         rail: Arc<dyn Rail>,
     ) -> Result<Self> {
+        // The journal is checked whole before anything is restored: a backup with a damaged
+        // or repeated entry is refused, never taken in part.
+        backup.check_journal()?;
         let app = App::restore(
             env.clone(),
             Self::new_protocol(),

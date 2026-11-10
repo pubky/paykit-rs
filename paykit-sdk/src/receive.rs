@@ -346,9 +346,16 @@ fn receipt_effect(
         }
         None => {
             // The deadline of a payment without a request is the one its journal kept.
-            let journaled = cx
-                .local_get(key::journal(&attempt_id).as_bytes())?
-                .and_then(|bytes| state::decode::<JournalEntry>(&bytes).ok());
+            // A kept entry that doesn't read holds the receipt back rather than settling the
+            // claim with no deadline (Switch spec 8.2): the store is corrupt.
+            let journaled = match cx.local_get(key::journal(&attempt_id).as_bytes())? {
+                Some(bytes) => Some(
+                    state::decode::<JournalEntry>(&bytes)
+                        .and_then(|entry| entry.check().map(|()| entry))
+                        .map_err(|_| Fail::NotNow)?,
+                ),
+                None => None,
+            };
             let deadline = journaled.map_or(ObligationDeadline::NotKnown, |e| {
                 crate::pay::own_deadline(e.deadline)
             });
@@ -487,7 +494,7 @@ pub(crate) fn unrequested_of(
         app_id: destination.app_id,
         endpoint_id: destination.endpoint_id()?,
         payload: destination.payload()?,
-        source: destination.source(),
+        source: destination.source()?,
         list_version: destination.list_version,
         single_use: destination.single_use,
     })

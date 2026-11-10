@@ -289,3 +289,80 @@ async fn test_restore_paid_attempt_to_an_unknown_destination_stays_doubtful() {
         pubky_switch_core::claims::ClaimStatus::Attempting
     );
 }
+
+/// A backup of a wallet with one payment in flight, as JSON, to damage.
+async fn backup_with_a_payment(w: &World) -> serde_json::Value {
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.labelled_shop("shop1", "shop1").await;
+    let labelled = draft("1", w.clock.now_ms());
+    let request = request_from(&mut shop, w.alice_id(), labelled).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    let bytes = wallet.backup().await.unwrap().to_bytes().unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// Restore from `backup`, damaged: the error, or a panic if it was taken.
+async fn refused_restore(w: &World, backup: serde_json::Value) -> paykit_sdk::PaykitError {
+    let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&backup).unwrap()).unwrap();
+    let restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+    )
+    .await;
+    match restored {
+        Ok(_) => panic!("a damaged journal was restored"),
+        Err(error) => error,
+    }
+}
+
+fn is_corrupt(error: &paykit_sdk::PaykitError) -> bool {
+    matches!(
+        error,
+        paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Store(
+            pubky_switch_client::error::StoreError::Corrupt
+        ))
+    )
+}
+
+#[tokio::test]
+async fn test_restore_corrupt_journal_refused() {
+    let w = World::new();
+    let good = backup_with_a_payment(&w).await;
+    assert_eq!(good["journal"][0]["label"], "shop1");
+    // Each damage reads as JSON of the right shape, and is refused for its meaning: a label
+    // that isn't one, a destination source that isn't one of the three, a list version on a
+    // request's own endpoint, and a payment reference dropped from a request's payment.
+    let damages: [(&str, serde_json::Value); 4] = [
+        ("label", serde_json::json!("Not A Label!")),
+        ("source", serde_json::json!("elsewhere")),
+        ("list_version", serde_json::json!(7)),
+        ("payment_reference", serde_json::Value::Null),
+    ];
+    for (member, value) in damages {
+        let mut damaged = good.clone();
+        let entry = &mut damaged["journal"][0];
+        match member {
+            "source" | "list_version" => entry["destination"][member] = value,
+            _ => entry[member] = value,
+        }
+        let error = refused_restore(&w, damaged).await;
+        assert!(is_corrupt(&error), "{member}: {error:?}");
+    }
+}
+
+#[tokio::test]
+async fn test_restore_duplicate_journal_entry_refused() {
+    let w = World::new();
+    let mut backup = backup_with_a_payment(&w).await;
+    let entry = backup["journal"][0].clone();
+    backup["journal"].as_array_mut().unwrap().push(entry);
+    let error = refused_restore(&w, backup).await;
+    assert!(is_corrupt(&error), "{error:?}");
+}

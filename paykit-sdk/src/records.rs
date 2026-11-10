@@ -56,6 +56,13 @@ impl KeptMessage {
         }
     }
 
+    /// Whether the kept plaintext reads, without the recipient a full check needs.
+    pub(crate) fn check_shape(&self) -> Result<()> {
+        MessagePlaintext::decode(&self.plaintext)
+            .map(|_| ())
+            .map_err(|_| PaykitError::corrupt())
+    }
+
     /// The stored message again, verified for `recipient` as a record's copy is (Paykit wire
     /// 5.2). A kept message that no longer reads is a corrupt store.
     pub(crate) fn stored(&self, recipient: &[u8; 32]) -> Result<StoredMessage> {

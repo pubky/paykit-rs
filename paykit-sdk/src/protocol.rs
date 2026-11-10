@@ -155,10 +155,16 @@ impl PaykitProtocol {
     }
 }
 
-/// A record of Paykit's local state, read through a [`LocalView`].
-fn view_get<T: serde::de::DeserializeOwned>(view: &LocalView<'_>, key: &str) -> Option<T> {
-    let bytes = view.local_get(key.as_bytes()).ok()??;
-    state::decode(&bytes).ok()
+/// A record of Paykit's local state, read through a [`LocalView`]: `Err` when the store
+/// can't be read or the record doesn't read, which the caller never takes as an absent one.
+fn view_get<T: serde::de::DeserializeOwned>(
+    view: &LocalView<'_>,
+    key: &str,
+) -> std::result::Result<Option<T>, ()> {
+    match view.local_get(key.as_bytes()).map_err(|_| ())? {
+        None => Ok(None),
+        Some(bytes) => state::decode(&bytes).map(Some).map_err(|_| ()),
+    }
 }
 
 /// Check 10 of a message that passed checks 1 to 9 (Paykit wire 4.1), with no effect: a kind
@@ -278,8 +284,12 @@ impl Protocol for PaykitProtocol {
         recipient: &AppRecord,
         view: &LocalView<'_>,
     ) -> bool {
-        let kept = view_get::<SideTag>(view, &key::side(&message.msg_id));
-        self.narrows(message, recipient, kept)
+        // A kept side that can't be read sends to no one rather than guess (Paykit spec 3.4):
+        // the message isn't sealed to this recipient.
+        match view_get::<SideTag>(view, &key::side(&message.msg_id)) {
+            Ok(kept) => self.narrows(message, recipient, kept),
+            Err(()) => false,
+        }
     }
 
     /// Check 10 (Paykit wire 4.1), with no effect: a kind this SDK handles ([`HANDLED_KINDS`])
