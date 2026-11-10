@@ -686,3 +686,141 @@ async fn test_recovery_list_expiring_during_the_own_identity_read_not_paid() {
     assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
+
+/// The retention the boundary tests declare.
+const RETENTION_MS: u64 = HOUR_MS;
+
+/// The ages around the retention's end the boundary tests resume at: one before, at, and
+/// one after.
+const AROUND_THE_END: [(u64, bool); 3] = [
+    (RETENTION_MS - 1, true),
+    (RETENTION_MS, false),
+    (RETENTION_MS + 1, false),
+];
+
+#[tokio::test]
+async fn test_recovery_empty_history_proves_nothing_from_the_retention_end() {
+    for (age, kept) in AROUND_THE_END {
+        let w = World::new();
+        let base = store();
+        let journaled = w.clock.now_ms();
+        let (attempt_id, app_id) = in_flight(&w, &base).await;
+        w.rail.set_declaration(RailDeclaration {
+            idempotent: false,
+            idempotency_retention_ms: None,
+            history: true,
+            history_retention_ms: Some(RETENTION_MS),
+            history_survives_restore: true,
+        });
+        w.rail.forget_history(&attempt_id);
+        let mut wallet = w
+            .load_on_clock(
+                &w.alice,
+                Arc::clone(&base),
+                app_id,
+                Arc::new(TestClock::new(journaled + age)),
+            )
+            .await;
+        let resumed = wallet.resume_payments().await.unwrap();
+        // Within the retention an empty history shows the dispatch never started; from its
+        // end on, the history may have dropped it (Paykit spec 7.2).
+        if kept {
+            assert!(
+                matches!(resumed.as_slice(), [PayOutcome::Failed { .. }]),
+                "age {age}: {resumed:?}"
+            );
+        } else {
+            assert_eq!(
+                resumed,
+                vec![PayOutcome::Uncertain { attempt_id }],
+                "age {age}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_recovery_repeat_only_before_the_idempotency_retention_end() {
+    for (age, kept) in AROUND_THE_END {
+        let w = World::new();
+        let base = store();
+        let journaled = w.clock.now_ms();
+        let (attempt_id, app_id) = in_flight(&w, &base).await;
+        w.rail.set_declaration(RailDeclaration {
+            idempotent: true,
+            idempotency_retention_ms: Some(RETENTION_MS),
+            history: false,
+            history_retention_ms: None,
+            history_survives_restore: false,
+        });
+        w.clock.set_ms(journaled + age);
+        let mut wallet = w
+            .load_on_clock(&w.alice, Arc::clone(&base), app_id, Arc::clone(&w.clock))
+            .await;
+        let resumed = wallet.resume_payments().await.unwrap();
+        // At the retention's end the method may have forgotten the key: no repeat.
+        if kept {
+            assert_eq!(
+                resumed,
+                vec![PayOutcome::Pending { attempt_id }],
+                "age {age}"
+            );
+            assert_eq!(w.rail.pay_calls(&attempt_id), 2, "age {age}");
+        } else {
+            assert_eq!(
+                resumed,
+                vec![PayOutcome::Uncertain { attempt_id }],
+                "age {age}"
+            );
+            assert_eq!(w.rail.pay_calls(&attempt_id), 1, "age {age}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_recovery_failure_asked_about_only_before_the_history_retention_end() {
+    for (age, kept) in AROUND_THE_END {
+        let w = World::new();
+        let base = store();
+        let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+        let app_id = wallet.app_id();
+        let mut shop = w.shop().await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        w.rail.set_declaration(RailDeclaration {
+            idempotent: true,
+            idempotency_retention_ms: None,
+            history: true,
+            history_retention_ms: Some(RETENTION_MS),
+            history_survives_restore: true,
+        });
+        let journaled = w.clock.now_ms();
+        w.rail.next(Behaviour::Fail);
+        let outcome = wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap();
+        let PayOutcome::Failed { attempt_id, .. } = outcome else {
+            panic!("{outcome:?}");
+        };
+        drop(wallet);
+        w.rail.complete_after_failure(&attempt_id);
+        let mut wallet = w
+            .load_on_clock(
+                &w.alice,
+                Arc::clone(&base),
+                app_id,
+                Arc::new(TestClock::new(journaled + age)),
+            )
+            .await;
+        let resumed = wallet.resume_payments().await.unwrap();
+        if kept {
+            assert!(
+                matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
+                "age {age}: {resumed:?}"
+            );
+        } else {
+            assert!(resumed.is_empty(), "age {age}: {resumed:?}");
+        }
+    }
+}

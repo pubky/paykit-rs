@@ -174,6 +174,17 @@ fn not_now(refusal: ClientRefusal) -> PaykitError {
 /// read first.
 const SERVICE_TIME_RECENT_MS: u64 = 60_000;
 
+/// Whether the payment method still keeps what it keeps for `retention` (`None` for good)
+/// of a dispatch journaled at `journaled_at_ms`, at the device clock `now` (Paykit spec 7.2,
+/// "What a payment method declares"): its age counts from the journaling, and the retention
+/// is half-open, so at `journaled_at_ms + retention` the history or the idempotency key may
+/// be gone already. A clock now behind the journaling can't tell the age, which is outside
+/// every finite retention: an empty history proves nothing then, and a repeat may find the
+/// key forgotten. A retention kept for good holds whatever the clock.
+pub(crate) fn retained(retention: Option<u64>, journaled_at_ms: u64, now: u64) -> bool {
+    retention.is_none_or(|r| now.checked_sub(journaled_at_ms).is_some_and(|age| age < r))
+}
+
 /// How many times the outcome's batch is built again after `409 conflict`.
 const OUTCOME_TRIES: usize = 3;
 
@@ -1204,11 +1215,12 @@ impl Paykit {
             if entry.stage != Stage::Finished || !entry.failed_by_method {
                 continue;
             }
-            let age = self.now().checked_sub(entry.journaled_at_ms);
             let kept = declaration.history
-                && declaration
-                    .history_retention_ms
-                    .is_none_or(|r| age.is_some_and(|age| age <= r));
+                && retained(
+                    declaration.history_retention_ms,
+                    entry.journaled_at_ms,
+                    self.now(),
+                );
             if !kept {
                 entry.failed_by_method = false;
                 self.save(&entry).await?;
@@ -1248,13 +1260,8 @@ impl Paykit {
             return self.take_outcome(&mut entry, outcome).await.map(Some);
         }
         let declaration = self.rail.declaration();
-        // The age counts from when the attempt was journaled (Paykit spec 7.2). A device clock
-        // now behind that time can't tell how long ago it was, so the dispatch counts as
-        // outside every finite retention: an empty history proves nothing and a repeat may
-        // find the key forgotten. Only a retention kept for good holds whatever the clock.
-        let age = self.now().checked_sub(entry.journaled_at_ms);
-        let within =
-            |retention: Option<u64>| retention.is_none_or(|r| age.is_some_and(|age| age <= r));
+        let now = self.now();
+        let within = |retention: Option<u64>| retained(retention, entry.journaled_at_ms, now);
         if declaration.history
             && within(declaration.history_retention_ms)
             && (!entry.restored || declaration.history_survives_restore)
@@ -1294,9 +1301,11 @@ impl Paykit {
                 Err(held) => return Ok(Some(held)),
             };
             // The checks awaited the network: the retention is judged again on the clock now.
-            let age = self.now().checked_sub(entry.journaled_at_ms);
-            let retention = declaration.idempotency_retention_ms;
-            if !retention.is_none_or(|r| age.is_some_and(|age| age <= r)) {
+            if !retained(
+                declaration.idempotency_retention_ms,
+                entry.journaled_at_ms,
+                self.now(),
+            ) {
                 return Ok(Some(PayOutcome::Uncertain { attempt_id }));
             }
             return self
