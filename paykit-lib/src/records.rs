@@ -439,6 +439,25 @@ fn read_msg_ids(obj: &Obj<'_>, stored: &[String]) -> Result<Vec<String>> {
     Ok(bounded_msg_ids(stored, &named))
 }
 
+/// The `msg_ids` a writer writes (Paykit wire 5.3, 5.4): the canonical list,
+/// [`bounded_msg_ids`] of the stored messages' IDs and `others`, each a lower-case UUID v4,
+/// as readers read them (Switch wire 1.1).
+///
+/// # Errors
+///
+/// [`Error::Validation`] for an ID that isn't a lower-case UUID v4.
+fn written_msg_ids(stored: &[String], others: &[String]) -> Result<Vec<String>> {
+    let ids = bounded_msg_ids(stored, others);
+    for id in &ids {
+        pubky_switch_core::json::check_uuid_v4(id).map_err(|_| {
+            Error::Validation(
+                "Paykit wire 5.3: msg_ids: an ID that isn't a lower-case UUID v4".into(),
+            )
+        })?;
+    }
+    Ok(ids)
+}
+
 /// The `msg_id`s of stored messages, in order.
 fn msg_ids_of<'a>(stored: impl IntoIterator<Item = &'a StoredMessage>) -> Vec<String> {
     stored
@@ -1121,7 +1140,7 @@ impl ActivityRecord {
     }
 
     fn json_unchecked(&self) -> Result<Vec<u8>> {
-        let msg_ids = bounded_msg_ids(&self.stored_msg_ids(), &self.msg_ids);
+        let msg_ids = written_msg_ids(&self.stored_msg_ids(), &self.msg_ids)?;
         let out = ActivityOut {
             v: 1,
             counterparty: pubky_id(&self.counterparty),
@@ -1277,7 +1296,7 @@ impl PaymentListRecord {
     ///
     /// [`Error::Invalid`] if the value can't be written.
     pub fn to_json(&self) -> Result<Vec<u8>> {
-        let msg_ids = bounded_msg_ids(&msg_ids_of([&self.list]), &self.msg_ids);
+        let msg_ids = written_msg_ids(&msg_ids_of([&self.list]), &self.msg_ids)?;
         let out = ListOut {
             v: 1,
             payee: pubky_id(&self.payee),
@@ -1620,7 +1639,7 @@ impl AllowanceRecord {
         let stored = std::iter::once(&self.proposal)
             .chain(&self.response)
             .chain(&self.end);
-        let msg_ids = bounded_msg_ids(&msg_ids_of(stored), &self.msg_ids);
+        let msg_ids = written_msg_ids(&msg_ids_of(stored), &self.msg_ids)?;
         let out = AllowanceOut {
             v: 1,
             counterparty: pubky_id(&self.counterparty),

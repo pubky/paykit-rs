@@ -1199,3 +1199,31 @@ fn test_activity_record_writer_refuses_what_readers_refuse() {
         ActivityRecord::read(&json, &reader(&record), record.side).unwrap();
     }
 }
+
+#[test]
+fn test_record_writers_refuse_msg_ids_that_are_not_uuids() {
+    let keys = Keys::load();
+    let alice = pubky(ALICE);
+    let v = paykit("sealed.json");
+    let accepted = arr(&v, "binding_accepted");
+    let bad = vec!["not-a-uuid".to_owned()];
+    let upper = vec!["6D7D1F0E-6C4E-4C47-9D2B-000000000001".to_owned()];
+    for ids in [bad, upper] {
+        let activity = ActivityRecord {
+            msg_ids: ids.clone(),
+            ..bases(&keys).payer_request
+        };
+        assert!(activity.to_json().is_err(), "activity record {ids:?}");
+        let mut list = PaymentListRecord::read(value(&accepted[0]), &alice).unwrap();
+        list.msg_ids = ids.clone();
+        assert!(list.to_json().is_err(), "payment_lists record {ids:?}");
+        let mut allowance = AllowanceRecord::read(value(&accepted[1]), &alice).unwrap();
+        allowance.msg_ids = ids.clone();
+        assert!(allowance.to_json().is_err(), "allowances record {ids:?}");
+    }
+    // A UUID v4 among them writes, after the stored IDs.
+    let mut list = PaymentListRecord::read(value(&accepted[0]), &alice).unwrap();
+    list.msg_ids = vec!["6d7d1f0e-6c4e-4c47-9d2b-000000000001".to_owned()];
+    let back = PaymentListRecord::read(&list.to_json().unwrap(), &alice).unwrap();
+    assert_eq!(back.msg_ids.len(), 2);
+}
