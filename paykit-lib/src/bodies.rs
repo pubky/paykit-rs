@@ -121,7 +121,7 @@ fn read_rates(value: &Value, ctx: &str) -> Result<Vec<Rate>> {
     let mut out: Vec<Rate> = Vec::with_capacity(items.len());
     for item in items {
         let obj = Obj::of(item, ctx, "rates")?;
-        let rate = Rate::new(
+        let rate = Rate::read(
             Asset::parse(obj.req_str("asset")?)?,
             Decimal::parse(obj.req_str("value")?)?,
         )?;

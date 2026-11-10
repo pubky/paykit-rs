@@ -88,14 +88,23 @@ pub struct AnchoredLimit {
 }
 
 impl AnchoredLimit {
-    /// An anchored period from `anchor`, `every` and `unit`.
+    /// An anchored period the caller supplies, from `anchor`, `every` and `unit`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for `every` of 0.
+    pub fn new(anchor: TermsTime, every: u64, unit: Unit) -> Result<Self> {
+        Self::read(anchor, every, unit).map_err(Error::into_validation)
+    }
+
+    /// An anchored period read from terms (Paykit wire 4.15).
     ///
     /// # Errors
     ///
     /// [`Error::Invalid`] for `every` of 0.
-    pub fn new(anchor: TermsTime, every: u64, unit: Unit) -> Result<Self> {
+    fn read(anchor: TermsTime, every: u64, unit: Unit) -> Result<Self> {
         Ok(Self {
-            rule: AnchoredRule::new(anchor.ms(), every, unit)?,
+            rule: AnchoredRule::read(anchor.ms(), every, unit)?,
             anchor,
         })
     }
@@ -466,7 +475,7 @@ fn read_period_limit(item: &Value) -> Result<(PeriodLimit, LimitSpelling<'_>)> {
         "anchored" => {
             let text = period.req_str("anchor")?;
             anchor = Some(text);
-            LimitPeriod::Anchored(AnchoredLimit::new(
+            LimitPeriod::Anchored(AnchoredLimit::read(
                 TermsTime::read(text, "anchor")?,
                 every,
                 unit,
@@ -2029,6 +2038,26 @@ mod tests {
         let mut late = l.clone();
         late.entries[0].at = u64::MAX;
         assert!(usage(&terms, &late, &HashMap::new(), now).is_err());
+    }
+
+    #[test]
+    fn test_anchored_limit_error_class_follows_its_source() {
+        let anchor = TermsTime::new(t("2026-01-31T00:00:00Z"));
+        assert!(matches!(
+            AnchoredLimit::new(anchor.clone(), 0, Unit::Month),
+            Err(Error::Validation(_))
+        ));
+        assert!(matches!(
+            AnchoredLimit::read(anchor, 0, Unit::Month),
+            Err(Error::Invalid(_))
+        ));
+        let terms = with_limits(json!([{ "amount_limit": "1", "payment_count_limit": null,
+            "period": { "anchor": "2026-01-31T00:00:00Z", "every": 0, "kind": "anchored",
+            "unit": "month" } }]));
+        assert!(matches!(
+            AllowanceTerms::from_json(&terms),
+            Err(Error::Invalid(_))
+        ));
     }
 
     #[test]
