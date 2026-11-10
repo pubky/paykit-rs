@@ -617,3 +617,72 @@ async fn test_recovery_failure_past_the_history_window_not_asked_again() {
         paykit_sdk::RequestStatus::Paid
     );
 }
+
+#[tokio::test]
+async fn test_recovery_list_expiring_during_the_own_identity_read_not_paid() {
+    let w = World::new();
+    w.rail.set_declaration(idempotent_without_history());
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let app_id = wallet.app_id();
+    let mut shop = w.shop().await;
+    // Bob's list expires in 30 s.
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let mut endpoints = std::collections::BTreeMap::new();
+    endpoints.insert(
+        crate::common::endpoint("btc-lightning-bolt12"),
+        paykit_lib::bodies::ListEndpoint {
+            payload: paykit_lib::PaymentEndpointPayload::new("lno1reusable").unwrap(),
+            single_use: false,
+        },
+    );
+    let body = paykit_lib::bodies::PrivatePaymentList {
+        version: w.clock.now_ms(),
+        payment_endpoints: endpoints,
+        expires_at: w.clock.now_ms() + 30_000,
+    }
+    .to_body()
+    .unwrap();
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[app_id],
+        "paykit.private_payment_list",
+        Vec::new(),
+        body,
+    );
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id } = wallet
+        .pay_without_request(paykit_sdk::UnrequestedPayment {
+            payee: w.bob_id(),
+            amount: crate::common::btc("0.001"),
+            options: PayOptions::default(),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    drop(wallet);
+    // On resume, the list is still usable at the destination check; the own identity.json's
+    // read then takes 61 s and succeeds, past the list's expiry. Nothing is paid on it
+    // (Paykit spec 5, 7.2).
+    let reads = Arc::new(crate::common::ScriptedIdentityReads::new(
+        Arc::clone(&w.homeserver),
+        Arc::clone(&w.clock),
+    ));
+    reads.then(w.alice_id(), 61_000, false);
+    let mut wallet = w
+        .load_with_homeserver(
+            &w.alice,
+            Arc::clone(&base),
+            app_id,
+            Arc::clone(&reads) as Arc<dyn pubky_switch_client::app::HomeserverReader>,
+        )
+        .await;
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}

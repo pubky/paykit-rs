@@ -37,6 +37,7 @@ use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome};
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::message::MessagePlaintext;
 use pubky_switch_core::ops::{Condition, OpKind};
+use pubky_switch_core::records::IdentityDoc;
 
 use crate::activity::{self, ActivityTarget, Role};
 use crate::destination::Carrier;
@@ -744,19 +745,19 @@ impl Paykit {
                 .fail_attempt(&mut entry, Refusal::NotNow("no attempt proof".into()))
                 .await;
         };
-        match self
+        let doc = match self
             .pay_gate(&entry, &carrier, &claim, by, unconfirmed, false)
             .await?
             .map_err(Held::refusal)
         {
-            Ok(()) => {}
+            Ok(doc) => doc,
             Err(refusal @ Refusal::NotCurrent(_)) => return Err(refusal.into()),
             Err(refusal) => return self.fail_attempt(&mut entry, refusal).await,
-        }
+        };
         // Starting to pay is journaled before the payment begins (Paykit spec 7.2).
         self.set_stage(&mut entry, Stage::Paying).await?;
         self.queue_owed_acceptance(&mut entry).await?;
-        self.dispatch(entry).await
+        self.dispatch(entry, &doc).await
     }
 
     /// The own `identity.json` revalidated in the last [`REVALIDATION_MS`] (Paykit spec 4,
@@ -837,7 +838,11 @@ impl Paykit {
     }
 
     /// Step 2: pay through the rail with the attempt ID as the idempotency key.
-    async fn dispatch(&mut self, mut entry: JournalEntry) -> Result<PayOutcome> {
+    async fn dispatch(
+        &mut self,
+        mut entry: JournalEntry,
+        payee: &IdentityDoc,
+    ) -> Result<PayOutcome> {
         let attempt_id = entry.attempt()?;
         let payment = RailPayment {
             endpoint_id: entry.destination.endpoint_id()?,
@@ -846,10 +851,22 @@ impl Paykit {
             idempotency_key: attempt_id,
             payment_reference: entry.payment_reference.clone(),
         };
-        // The last check, on the clock of the call itself: every await before it may have
-        // aged the own identity.json's confirmation past 60 s (Paykit spec 4). Nothing was
-        // submitted, so the attempt stays open for a resume to decide.
-        if !self.own_identity_fresh() {
+        // The last checks, on the clock of the call itself: every await before it may have
+        // aged the own identity.json's confirmation past 60 s, or taken the destination past
+        // its expiry (Paykit spec 4, 5). Nothing was submitted, so the attempt stays open for
+        // a resume to decide.
+        let carrier = entry.kept_carrier(&self.identity())?;
+        let destination_valid = carrier.is_some_and(|carrier| {
+            self.destination_valid(
+                &entry.payee,
+                &entry.destination,
+                &carrier,
+                entry.request_hash().ok().flatten().as_ref(),
+                payee,
+            )
+            .is_ok()
+        });
+        if !self.own_identity_fresh() || !destination_valid {
             return Ok(PayOutcome::Pending { attempt_id });
         }
         let outcome = self.rail.pay(payment).await;
@@ -1248,16 +1265,17 @@ impl Paykit {
                     return Ok(Some(PayOutcome::Uncertain { attempt_id }))
                 }
             }
-            if let Some(held) = self.repeat_held(&entry, &claim).await? {
-                return Ok(Some(held));
-            }
+            let doc = match self.repeat_held(&entry, &claim).await? {
+                Ok(doc) => doc,
+                Err(held) => return Ok(Some(held)),
+            };
             // The checks awaited the network: the retention is judged again on the clock now.
             let age = self.now().checked_sub(entry.journaled_at_ms);
             let retention = declaration.idempotency_retention_ms;
             if !retention.is_none_or(|r| age.is_some_and(|age| age <= r)) {
                 return Ok(Some(PayOutcome::Uncertain { attempt_id }));
             }
-            return self.dispatch(entry).await.map(Some);
+            return self.dispatch(entry, &doc).await.map(Some);
         }
         Ok(Some(PayOutcome::Uncertain { attempt_id }))
     }
@@ -1279,27 +1297,27 @@ impl Paykit {
         &mut self,
         entry: &JournalEntry,
         claim: &ClaimView,
-    ) -> Result<Option<PayOutcome>> {
+    ) -> Result<std::result::Result<IdentityDoc, PayOutcome>> {
         let attempt_id = entry.attempt()?;
         let Some(carrier) = entry.kept_carrier(&self.identity())? else {
-            return Ok(Some(PayOutcome::Uncertain { attempt_id }));
+            return Ok(Err(PayOutcome::Uncertain { attempt_id }));
         };
         let gate = self
             .pay_gate(entry, &carrier, claim, Initiator::Automatic, None, true)
             .await?;
-        Ok(match gate {
-            Ok(()) => None,
+        Ok(Err(match gate {
+            Ok(doc) => return Ok(Ok(doc)),
             // No payment of this app goes on without its own identity.json confirmed.
             Err(Held::OwnIdentity(refusal)) => return Err(refusal.into()),
             // What may pass later: the app held back, or the payee's identity.json not
             // confirmed yet.
             Err(Held::Check(
                 Refusal::NotNow(_) | Refusal::IdentityUnavailable(_) | Refusal::IdentityUnconfirmed,
-            )) => Some(PayOutcome::Pending { attempt_id }),
+            )) => PayOutcome::Pending { attempt_id },
             // A destination refused, an attempt the claim or the identity no longer backs:
             // "may be paid", for a receipt or the user.
-            Err(Held::Check(_)) => Some(PayOutcome::Uncertain { attempt_id }),
-        })
+            Err(Held::Check(_)) => PayOutcome::Uncertain { attempt_id },
+        }))
     }
 
     /// The gate before money moves, the same for a first dispatch and a repeat (Paykit spec
@@ -1330,7 +1348,7 @@ impl Paykit {
         by: Initiator,
         unconfirmed: Option<UserConfirmed>,
         refresh: bool,
-    ) -> Result<std::result::Result<(), Held>> {
+    ) -> Result<std::result::Result<IdentityDoc, Held>> {
         if let Err(refusal) = self.app.may_attempt(by == Initiator::Automatic) {
             return Ok(Err(Held::Check(Refusal::NotNow(refusal.to_string()))));
         }
@@ -1347,25 +1365,39 @@ impl Paykit {
                 "Paykit spec 7.2: the claim doesn't show this app's attempt open".into(),
             ))));
         }
+        let request_hash = entry.request_hash()?;
         let checked = self
             .check_destination(
                 &entry.payee,
                 &entry.destination,
                 carrier,
-                entry.request_hash()?.as_ref(),
+                request_hash.as_ref(),
                 by,
                 unconfirmed,
             )
             .await?;
-        if let Err(refusal) = checked {
-            return Ok(Err(Held::Check(refusal)));
-        }
+        let doc = match checked {
+            Ok(doc) => doc,
+            Err(refusal) => return Ok(Err(Held::Check(refusal))),
+        };
         if let Err(refusal) = self.own_identity_confirmed(refresh).await {
             return Ok(Err(Held::OwnIdentity(refusal)));
         }
-        Ok(self
-            .own_identity_authorizes(entry)
-            .map_err(|why| Held::Check(Refusal::NotCurrent(why))))
+        // Nothing time-bound is judged before an await and trusted after it: the own
+        // identity.json's read may have taken the destination past its expiry.
+        if let Err(refusal) = self.destination_valid(
+            &entry.payee,
+            &entry.destination,
+            carrier,
+            request_hash.as_ref(),
+            &doc,
+        ) {
+            return Ok(Err(Held::Check(refusal)));
+        }
+        if let Err(why) = self.own_identity_authorizes(entry) {
+            return Ok(Err(Held::Check(Refusal::NotCurrent(why))));
+        }
+        Ok(Ok(doc))
     }
 
     /// Checks 5 and 6 of [`Paykit::pay_gate`], on the own `identity.json` held.

@@ -188,8 +188,8 @@ impl Paykit {
         }
     }
 
-    /// The checks of a destination before money moves (Paykit spec 4, 7.2): `Err` holds the
-    /// refusal.
+    /// The checks of a destination before money moves (Paykit spec 4, 7.2): the payee's
+    /// `identity.json` that passed them, or the refusal.
     pub(crate) async fn check_destination(
         &mut self,
         payee: &[u8; 32],
@@ -198,7 +198,7 @@ impl Paykit {
         request_hash: Option<&[u8; 32]>,
         by: Initiator,
         confirmed: Option<UserConfirmed>,
-    ) -> Result<std::result::Result<(), Refusal>> {
+    ) -> Result<std::result::Result<IdentityDoc, Refusal>> {
         if let Err(why) = carries(payee, destination, carrier, request_hash, self.now()) {
             return Ok(Err(Refusal::Destination(why)));
         }
@@ -206,12 +206,26 @@ impl Paykit {
             Ok(doc) => doc,
             Err(refusal) => return Ok(Err(refusal)),
         };
-        // The lookup awaited the network: the expiry is judged again on the clock now.
+        // The lookup awaited the network: the destination is judged again on the clock now.
+        Ok(self
+            .destination_valid(payee, destination, carrier, request_hash, &doc)
+            .map(|()| doc))
+    }
+
+    /// The checks of a destination that need no network, on the clock now and the payee's
+    /// `identity.json` taken (Paykit spec 4, 5, 7.2): the carrier carries it and hasn't
+    /// expired, and its app is current. Run again after every await before money moves.
+    pub(crate) fn destination_valid(
+        &self,
+        payee: &[u8; 32],
+        destination: &Destination,
+        carrier: &Carrier,
+        request_hash: Option<&[u8; 32]>,
+        doc: &IdentityDoc,
+    ) -> std::result::Result<(), Refusal> {
         let now = self.now();
-        if let Err(why) = carries(payee, destination, carrier, request_hash, now) {
-            return Ok(Err(Refusal::Destination(why)));
-        }
-        Ok(current(&doc, &destination.app_id, carrier, now).map_err(Refusal::Destination))
+        carries(payee, destination, carrier, request_hash, now).map_err(Refusal::Destination)?;
+        current(doc, &destination.app_id, carrier, now).map_err(Refusal::Destination)
     }
 }
 
