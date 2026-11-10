@@ -613,6 +613,7 @@ impl ActivityRecord {
             attempted_periods: read_attempted_periods(&obj)?,
         };
         let binding = record.binding()?;
+        record.check_members(&binding)?;
         record.check_refs(&binding)?;
         if let (RecordBinding::Unrequested, Some(a), Some(Body::PaymentProof(p))) = (
             binding,
@@ -699,6 +700,46 @@ impl ActivityRecord {
             request_hash: h,
             billing_period: p,
         })
+    }
+
+    /// The members only some records carry (Paykit wire 5.3), against the record's binding
+    /// and side: `request_hash` and `billing_period` only in a period record, `attempt_id`
+    /// and `unrequested` only in that of a payment without a request, and `allowance_id`
+    /// only in a payer's request record. `attempted_periods` is checked with the request it
+    /// fences.
+    ///
+    /// Security: these members are unsigned. A record that carries one where its messages
+    /// don't put it is invalid, so a writer can't make a record that reads as two kinds at
+    /// once, such as a request record that also names an attempt of a payment without one.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] naming the member: the record is invalid.
+    fn check_members(&self, binding: &RecordBinding) -> Result<()> {
+        let period = matches!(binding, RecordBinding::Period { .. });
+        let unrequested = matches!(binding, RecordBinding::Unrequested);
+        let payer_request =
+            matches!(binding, RecordBinding::Request { .. }) && self.side == ActivitySide::Payer;
+        ensure(
+            period || self.request_hash.is_none(),
+            "Paykit wire 5.3: request_hash only in a period record",
+        )?;
+        ensure(
+            period || self.billing_period.is_none(),
+            "Paykit wire 5.3: billing_period only in a period record",
+        )?;
+        ensure(
+            unrequested || self.attempt_id.is_none(),
+            "Paykit wire 5.3: attempt_id only in the record of a payment without a request",
+        )?;
+        ensure(
+            unrequested || self.unrequested.is_none(),
+            "Paykit wire 5.3: unrequested only in the record of a payment without a request",
+        )?;
+        ensure(
+            payer_request || self.allowance_id.is_none(),
+            "Paykit wire 5.3: allowance_id only in a payer's request record",
+        )
     }
 
     /// `refs` (Paykit wire 4.3): a response, cancellation and period details name the

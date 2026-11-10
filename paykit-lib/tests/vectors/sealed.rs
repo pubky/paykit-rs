@@ -1,5 +1,6 @@
-//! `sealed.json`: record values a reader binds to their keys, the rejections, and the
-//! labelled payee record (Paykit wire 5, 5.1, 5.3, 5.4, 5.5).
+//! `sealed.json`: record values a reader binds to their keys, the rejections, the labelled
+//! payee record and the activity records a reader takes or refuses (Paykit wire 5, 5.1, 5.3,
+//! 5.4, 5.5).
 
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::{natural_key, request_hash};
@@ -13,16 +14,19 @@ use pubky_switch_core::sealed::{aad, pad, RecordValue, SealedValue};
 use serde_json::Value;
 
 use crate::common::{
-    arr, b64n, hex, message_json, paykit, pubky, st, switch, unhex32, Keys, ALICE, BOB,
+    arr, b64n, generated, hex, message_json, paykit, pubky, quoted, st, switch, unhex32, Keys,
+    Place, ALICE, ALLOWANCE_ID, BOB,
 };
 
 #[test]
 fn test_vectors_sealed() {
     let keys = Keys::load();
+    generate(&keys);
     let v = paykit("sealed.json");
     check_bindings(&keys, &v);
     check_labelled(&keys, &v["labelled"]);
     check_activity_rules(&keys);
+    check_activity_records(&keys, &v);
 }
 
 /// Own cases on activity records (Paykit wire 5.3), built from the vectors' messages: the
@@ -416,4 +420,445 @@ fn check_labelled(keys: &Keys, l: &Value) {
         payer.record_key(&alice, &anks, Some(&shop1)).unwrap(),
         payer.record_key(&alice, &anks, None).unwrap()
     );
+}
+
+/// A stored message of `messages.json`, by name, as its recipient stores it.
+fn stored_message(keys: &Keys, name: &str) -> paykit_lib::records::StoredMessage {
+    let m = crate::common::message(name);
+    stored_json(keys, &m)
+}
+
+/// A stored message from a message case: its `json`, `signature` and `sender_app`, with the
+/// sender app's certificate of the Switch set.
+fn stored_json(keys: &Keys, m: &Value) -> paykit_lib::records::StoredMessage {
+    use pubky_switch_core::message::MessagePlaintext;
+    let sender = keys.app_by_id(st(m, "sender_app"));
+    let plaintext = MessagePlaintext::from_parts(
+        sender.keys.app_id_bytes(),
+        b64n::<64>(st(m, "signature")),
+        st(m, "json").as_bytes().to_vec(),
+    )
+    .unwrap();
+    let to = pubky_switch_core::message::Message::parse(
+        st(m, "json").as_bytes(),
+        paykit_lib::kinds::OPAQUE_MEMBERS,
+    )
+    .unwrap()
+    .to;
+    paykit_lib::records::StoredMessage::new(
+        sender.identity,
+        &crate::common::cert_doc(&sender.name),
+        plaintext,
+        None,
+        &to,
+    )
+    .unwrap()
+}
+
+/// An empty activity record.
+fn activity(side: ActivitySide, counterparty: [u8; 32]) -> ActivityRecord {
+    ActivityRecord {
+        side,
+        counterparty,
+        request: None,
+        response: None,
+        cancellation: None,
+        proof: None,
+        receipt: None,
+        period_details: None,
+        request_hash: None,
+        billing_period: None,
+        attempt_id: None,
+        unrequested: None,
+        msg_ids: Vec::new(),
+        status: None,
+        allowance_id: None,
+        attempted_periods: Vec::new(),
+    }
+}
+
+/// The three records the cases change, as their readers hold them: alice's payer request
+/// record of the recurring request, naming the Allowance; her period record of its February
+/// period, with its details and proof; her record of the payment without a request; and
+/// bob's payee request record of the recurring request.
+struct Bases {
+    payer_request: ActivityRecord,
+    period: ActivityRecord,
+    unrequested: ActivityRecord,
+    payee_request: ActivityRecord,
+}
+
+fn bases(keys: &Keys) -> Bases {
+    use paykit_lib::bodies::Body;
+    use paykit_lib::identifiers::AllowanceId;
+    use paykit_lib::records::{DestinationSource, UnrequestedDestination};
+    let (alice, bob) = (pubky(ALICE), pubky(BOB));
+    let request = stored_message(keys, "payment_request_recurring");
+    let payer_request = ActivityRecord {
+        request: Some(request.clone()),
+        allowance_id: Some(AllowanceId::parse(ALLOWANCE_ID).unwrap()),
+        ..activity(ActivitySide::Payer, bob)
+    };
+    let details = stored_message(keys, "payment_period_details");
+    let period_proof = stored_message(keys, "payment_proof_period");
+    let period = ActivityRecord {
+        request_hash: Some(request.hash()),
+        billing_period: details.body().billing_period().copied(),
+        period_details: Some(details),
+        proof: Some(period_proof),
+        ..activity(ActivitySide::Payer, bob)
+    };
+    let proof = stored_message(keys, "payment_proof_unrequested");
+    let list = stored_message(keys, "private_payment_list");
+    let (Body::PaymentProof(p), Body::PrivatePaymentList(l)) = (proof.body(), list.body()) else {
+        panic!("a proof and a list")
+    };
+    let endpoint = &l.payment_endpoints[&p.payment_endpoint_identifier];
+    let unrequested = ActivityRecord {
+        attempt_id: Some(p.attempt_id),
+        unrequested: Some(UnrequestedDestination {
+            app_id: list.message().from.app_id,
+            endpoint_id: p.payment_endpoint_identifier.clone(),
+            payload: endpoint.payload.clone(),
+            source: DestinationSource::List,
+            list_version: Some(l.version),
+            single_use: endpoint.single_use,
+        }),
+        proof: Some(proof.clone()),
+        ..activity(ActivitySide::Payer, bob)
+    };
+    let payee_request = ActivityRecord {
+        request: Some(request),
+        ..activity(ActivitySide::Payee, alice)
+    };
+    Bases {
+        payer_request,
+        period,
+        unrequested,
+        payee_request,
+    }
+}
+
+/// The reader of a record: its identity, by side.
+fn reader(record: &ActivityRecord) -> [u8; 32] {
+    match record.side {
+        ActivitySide::Payer => pubky(ALICE),
+        ActivitySide::Payee => pubky(BOB),
+    }
+}
+
+/// The record key of `base` with its reader's naming key, under the fixed policy.
+fn base_key(keys: &Keys, base: &ActivityRecord) -> [u8; 32] {
+    let own = reader(base);
+    base.record_key(&own, &keys.identity(&own).naming_key(), None)
+        .unwrap()
+}
+
+/// Bind `value`, a record of `side`, at `key` under the fixed policy, as its reader.
+fn bind_activity(
+    keys: &Keys,
+    value: &[u8],
+    side: ActivitySide,
+    key: &[u8; 32],
+) -> paykit_lib::Result<ActivityRecord> {
+    let own = match side {
+        ActivitySide::Payer => pubky(ALICE),
+        ActivitySide::Payee => pubky(BOB),
+    };
+    ActivityRecord::bind(
+        value,
+        &own,
+        side,
+        &keys.identity(&own).naming_key(),
+        key,
+        None,
+    )
+}
+
+/// A case of `activity_records`: its name, the record and the key it sits at.
+type ActivityCase = (&'static str, ActivityRecord, [u8; 32]);
+
+/// The cases of `activity_records`, accepted then refused.
+fn activity_cases(keys: &Keys) -> (Vec<ActivityCase>, Vec<ActivityCase>) {
+    use paykit_lib::identifiers::AllowanceId;
+    let b = bases(keys);
+    let keyed =
+        |name, record: ActivityRecord, base: &ActivityRecord| (name, record, base_key(keys, base));
+    let allowance = Some(AllowanceId::parse(ALLOWANCE_ID).unwrap());
+    let request_hash = b.period.request_hash;
+    let billing_period = b.period.billing_period;
+    let accepted = vec![
+        keyed(
+            "a payer's request record naming its Allowance",
+            b.payer_request.clone(),
+            &b.payer_request,
+        ),
+        keyed(
+            "a period record with request_hash and billing_period",
+            b.period.clone(),
+            &b.period,
+        ),
+        keyed(
+            "the record of a payment without a request with attempt_id and unrequested",
+            b.unrequested.clone(),
+            &b.unrequested,
+        ),
+        keyed(
+            "a payee's request record",
+            b.payee_request.clone(),
+            &b.payee_request,
+        ),
+    ];
+    let refused = vec![
+        keyed(
+            "request_hash in a request record",
+            ActivityRecord {
+                request_hash,
+                ..b.payer_request.clone()
+            },
+            &b.payer_request,
+        ),
+        keyed(
+            "billing_period in a request record",
+            ActivityRecord {
+                billing_period,
+                ..b.payer_request.clone()
+            },
+            &b.payer_request,
+        ),
+        keyed(
+            "attempt_id in a request record",
+            ActivityRecord {
+                attempt_id: b.unrequested.attempt_id,
+                ..b.payer_request.clone()
+            },
+            &b.payer_request,
+        ),
+        keyed(
+            "unrequested in a request record",
+            ActivityRecord {
+                unrequested: b.unrequested.unrequested.clone(),
+                ..b.payer_request.clone()
+            },
+            &b.payer_request,
+        ),
+        keyed(
+            "attempt_id in a period record",
+            ActivityRecord {
+                attempt_id: b.unrequested.attempt_id,
+                ..b.period.clone()
+            },
+            &b.period,
+        ),
+        keyed(
+            "unrequested in a period record",
+            ActivityRecord {
+                unrequested: b.unrequested.unrequested.clone(),
+                ..b.period.clone()
+            },
+            &b.period,
+        ),
+        keyed(
+            "allowance_id in a period record",
+            ActivityRecord {
+                allowance_id: allowance.clone(),
+                ..b.period.clone()
+            },
+            &b.period,
+        ),
+        keyed(
+            "allowance_id in the record of a payment without a request",
+            ActivityRecord {
+                allowance_id: allowance.clone(),
+                ..b.unrequested.clone()
+            },
+            &b.unrequested,
+        ),
+        keyed(
+            "allowance_id in a payee's request record",
+            ActivityRecord {
+                allowance_id: allowance,
+                ..b.payee_request.clone()
+            },
+            &b.payee_request,
+        ),
+    ];
+    (accepted, refused)
+}
+
+fn side_collection(side: ActivitySide) -> &'static str {
+    match side {
+        ActivitySide::Payer => "payer_activity",
+        ActivitySide::Payee => "payee_activity",
+    }
+}
+
+/// The top-level description, which names every member.
+const DESCRIPTION: &str =
+    "Paykit's sealed record values (wire 5), sealed as the Switch's sealed values are (the \
+Switch set's sealed.json) under alice's scope_key(2, \"pay\") from the Switch set's \
+keys.json, with record keys blinded with alice's naming key. binding_accepted holds record \
+values, as they are sealed, that a reader binds to their record keys, recomputed with \
+alice's naming key (wire 5.4, 5.5): a payment_lists record, an allowances record and its \
+allowance_ledgers record, checked against that allowances record. binding_rejections holds \
+the same values at a wrong key or with a field that doesn't match, a list record whose \
+payee isn't the identity that sent its list (bob's list, filed under payee alice at the \
+key of alice and the shop's App ID) and an acceptance naming another Allowance, each of \
+which a reader refuses. labelled is a payee record of a labelled request. activity_records \
+holds activity records a reader binds, and the same records with a member their binding \
+and side don't allow, which it refuses.";
+
+const ACTIVITY_DESCRIPTION: &str =
+    "Wire 5.3: activity record values, built from messages.json's messages, and \
+the record keys they sit at under the fixed policy, blinded with their reader's naming key: \
+alice's for payer_activity, bob's for payee_activity. Some members only some records carry: \
+request_hash and billing_period only a period record, attempt_id and unrequested only the \
+record of a payment without a request, and allowance_id only a payer's request record. \
+accepted are records their reader binds at their keys; refused are the same records with a \
+member where their binding and side don't allow it, which their reader refuses. reason is \
+paykit-lib's wording, of the first check that refuses it.";
+
+/// The cases paykit-lib generates in `sealed.json` (README "How the files were generated"),
+/// compared with the file, and written into it with `PAYKIT_WRITE_VECTORS`.
+fn generate(keys: &Keys) {
+    let (accepted, refused) = activity_cases(keys);
+    let write = |(name, record, key): &ActivityCase, taken: bool| -> Value {
+        let value = record.to_json().unwrap();
+        let mut out = serde_json::json!({
+            "collection": side_collection(record.side),
+            "name": name,
+            "record_key": b64(key),
+            "value": String::from_utf8(value.clone()).unwrap(),
+        });
+        match bind_activity(keys, &value, record.side, key) {
+            Ok(_) => assert!(taken, "{name}: taken"),
+            Err(error) => {
+                assert!(!taken, "{name}: {error}");
+                out["reason"] = serde_json::json!(quoted(&error.to_string()));
+            }
+        }
+        out
+    };
+    let member = serde_json::json!({
+        "accepted": accepted.iter().map(|c| write(c, true)).collect::<Vec<_>>(),
+        "description": ACTIVITY_DESCRIPTION,
+        "refused": refused.iter().map(|c| write(c, false)).collect::<Vec<_>>(),
+    });
+    generated(
+        "sealed.json",
+        &[
+            (
+                Place::Member("/description"),
+                serde_json::json!(DESCRIPTION),
+            ),
+            (Place::Member("/activity_records"), member),
+        ],
+    );
+}
+
+/// `activity_records` (Paykit wire 5.3): each record binds at its key, or is refused, as its
+/// list says; the accepted ones write back byte for byte.
+fn check_activity_records(keys: &Keys, v: &Value) {
+    let m = &v["activity_records"];
+    let (accepted, refused) = activity_cases(keys);
+    assert_eq!(arr(m, "accepted").len(), accepted.len());
+    assert_eq!(arr(m, "refused").len(), refused.len());
+    for (list, taken) in [("accepted", true), ("refused", false)] {
+        for case in arr(m, list) {
+            let name = st(case, "name");
+            let side = match st(case, "collection") {
+                "payer_activity" => ActivitySide::Payer,
+                "payee_activity" => ActivitySide::Payee,
+                other => panic!("{name}: collection {other}"),
+            };
+            match bind_activity(keys, value(case), side, &key(case)) {
+                Ok(record) => {
+                    assert!(taken, "{name}: taken");
+                    assert_eq!(
+                        record.to_json().unwrap(),
+                        value(case),
+                        "{name}: writes back"
+                    );
+                }
+                Err(error) => {
+                    assert!(!taken, "{name}: {error}");
+                    assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
+                }
+            }
+        }
+    }
+}
+
+/// A base record with one member placed where its binding or side doesn't allow it is
+/// refused, naming that member (Paykit wire 5.3).
+fn refuses_member(record: &ActivityRecord, member: &str) {
+    let error = ActivityRecord::read(&record.to_json().unwrap(), &reader(record), record.side)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(&format!("{member} only in")),
+        "{member}: {error}"
+    );
+}
+
+#[test]
+fn test_activity_record_refuses_request_hash_outside_a_period_record() {
+    let keys = Keys::load();
+    let b = bases(&keys);
+    let record = ActivityRecord {
+        request_hash: b.period.request_hash,
+        ..b.payer_request
+    };
+    refuses_member(&record, "request_hash");
+}
+
+#[test]
+fn test_activity_record_refuses_billing_period_outside_a_period_record() {
+    let keys = Keys::load();
+    let b = bases(&keys);
+    let record = ActivityRecord {
+        billing_period: b.period.billing_period,
+        ..b.payer_request
+    };
+    refuses_member(&record, "billing_period");
+}
+
+#[test]
+fn test_activity_record_refuses_attempt_id_outside_an_unrequested_record() {
+    let keys = Keys::load();
+    let b = bases(&keys);
+    for base in [b.payer_request, b.period] {
+        let record = ActivityRecord {
+            attempt_id: b.unrequested.attempt_id,
+            ..base
+        };
+        refuses_member(&record, "attempt_id");
+    }
+}
+
+#[test]
+fn test_activity_record_refuses_unrequested_outside_an_unrequested_record() {
+    let keys = Keys::load();
+    let b = bases(&keys);
+    for base in [b.payer_request, b.period] {
+        let record = ActivityRecord {
+            unrequested: b.unrequested.unrequested.clone(),
+            ..base
+        };
+        refuses_member(&record, "unrequested");
+    }
+}
+
+#[test]
+fn test_activity_record_refuses_allowance_id_outside_a_payer_request_record() {
+    let keys = Keys::load();
+    let b = bases(&keys);
+    let allowance = b.payer_request.allowance_id.clone();
+    for base in [b.period, b.unrequested, b.payee_request] {
+        let record = ActivityRecord {
+            allowance_id: allowance.clone(),
+            ..base
+        };
+        refuses_member(&record, "allowance_id");
+    }
 }
