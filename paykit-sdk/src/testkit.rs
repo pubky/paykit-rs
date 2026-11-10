@@ -65,6 +65,17 @@ impl Party {
         refs: Vec<[u8; 32]>,
         body: Map<String, Value>,
     ) -> StoredMessage {
+        self.try_message(to, kind, refs, body).unwrap()
+    }
+
+    /// As [`Party::message`], with the refusal of a message its reader wouldn't store.
+    pub(crate) fn try_message(
+        &self,
+        to: &Party,
+        kind: &str,
+        refs: Vec<[u8; 32]>,
+        body: Map<String, Value>,
+    ) -> Result<StoredMessage, paykit_lib::error::Error> {
         let message = Message::new(
             kind,
             Sender::of_app(self.id(), &self.keys),
@@ -82,7 +93,6 @@ impl Party {
             Some(NOW),
             &to.id(),
         )
-        .unwrap()
     }
 
     /// The app's record, accepting `accepts`.

@@ -508,23 +508,11 @@ mod tests {
             NOW
         )
         .is_err());
-        // A destination from an app without `request` isn't one.
+        // A request from an app without `request` carries no destination: the reader refuses
+        // to store it at all (Paykit wire 5.2, the sender's side of check 8).
         let payer_app = Party::new("bob", "wallet", &["pay"]);
-        let from_payer =
-            payer_app.message(&alice, "paykit.payment_request", vec![], request_body());
-        let doc = bob.doc(&[&payer_app]);
-        let dest = destination(
-            &payer_app,
-            "btc-lightning-bolt11",
-            "lnbc1",
-            DestinationSource::Request,
-        );
-        assert!(current(
-            &doc,
-            &dest.app_id,
-            &Carrier::Message(Box::new(from_payer.clone())),
-            NOW
-        )
-        .is_err());
+        assert!(payer_app
+            .try_message(&alice, "paykit.payment_request", vec![], request_body())
+            .is_err());
     }
 }
