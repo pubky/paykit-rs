@@ -137,6 +137,21 @@ impl Paykit {
             .await?
             .unwrap_or(0);
         let mut resent = 0u64;
+        // A time selector matches a message's first acceptance or any later re-send's
+        // (Paykit wire 4.12). The client keeps every acceptance time and selects by any of
+        // them in a range, but reports only the first with each message: the range is read
+        // once, and its messages are selected by time; the other selectors are evaluated
+        // below without times.
+        let by_time: std::collections::BTreeSet<String> = match request.accepted_from {
+            Some(from) => self
+                .app
+                .sent_to(requester, from, request.accepted_until.unwrap_or(u64::MAX))
+                .await?
+                .into_iter()
+                .map(|sent| sent.msg_id)
+                .collect(),
+            None => std::collections::BTreeSet::new(),
+        };
         for sent in self.app.sent_to(requester, since, u64::MAX).await? {
             if count >= self.config.resend_budget {
                 break;
@@ -152,7 +167,9 @@ impl Paykit {
             let period = paykit_lib::Body::parse(&message)
                 .ok()
                 .and_then(|b| b.billing_period().copied());
-            if !request.selects(&message, &sent.plaintext.hash(), &[first], period.as_ref()) {
+            let selected = by_time.contains(&sent.msg_id)
+                || request.selects(&message, &sent.plaintext.hash(), &[], period.as_ref());
+            if !selected {
                 continue;
             }
             if !self.requester_takes(&message, cert.scopes()).await? {
