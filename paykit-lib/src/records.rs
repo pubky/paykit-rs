@@ -1085,6 +1085,7 @@ impl ActivityRecord {
         // Records built in code are held to the reader's rules first (Paykit wire 5.3).
         self.check()?;
         later.check()?;
+        self.check_same_record(later)?;
         let later_roles = later.stored();
         for (role, seen) in self.stored() {
             let now = later_roles
@@ -1121,6 +1122,23 @@ impl ActivityRecord {
         Ok(())
     }
 
+    /// Two versions of one activity record (Paykit wire 5.3): the same collection and
+    /// counterparty, the same binding (request, Billing Period, or a payment without a
+    /// request), and, for a payment without a request, the `attempt_id` held.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] for another record.
+    fn check_same_record(&self, later: &ActivityRecord) -> Result<()> {
+        ensure(
+            self.side == later.side
+                && self.counterparty == later.counterparty
+                && self.binding()? == later.binding()?
+                && self.attempt_id.is_none_or(|a| later.attempt_id == Some(a)),
+            "Paykit wire 5.3: a later write is another record's",
+        )
+    }
+
     /// "Attempted periods" (Paykit wire 5.3): a reader that holds the version a write was
     /// built on (`self`) checks every listed period `later` drops: the write's `conditions`
     /// carry a `claim_step` condition on that period's claim, the obligation of (payee,
@@ -1140,6 +1158,7 @@ impl ActivityRecord {
         // Records built in code are held to the reader's rules first (Paykit wire 5.3).
         self.check()?;
         later.check()?;
+        self.check_same_record(later)?;
         let RecordBinding::Request { request_hash } = self.binding()? else {
             return invalid("Paykit wire 5.3: attempted_periods belong to a request record");
         };
@@ -1329,6 +1348,10 @@ impl PaymentListRecord {
         // Records built in code are held to the reader's rules first (Paykit wire 5.4).
         self.check()?;
         later.check()?;
+        ensure(
+            self.payee == later.payee && self.app_id == later.app_id,
+            "Paykit wire 5.4: a later write is another payee app's list record",
+        )?;
         let version = |r: &PaymentListRecord| match r.list.body() {
             Body::PrivatePaymentList(l) => Ok(l.version),
             _ => invalid("Paykit wire 5.4: list holds another kind than private_payment_list"),
@@ -1834,6 +1857,10 @@ impl AllowanceRecord {
     ///
     /// [`Error::Invalid`] for a later write that changes or drops an entry seen.
     pub fn check_later_history(&self, later: &AllowanceRecord) -> Result<()> {
+        ensure(
+            self.counterparty == later.counterparty && self.allowance_id == later.allowance_id,
+            "Paykit wire 5.4: a later write is another Allowance's record",
+        )?;
         ensure(
             later.grants.len() >= self.grants.len()
                 && self.grants.iter().zip(&later.grants).all(|(a, b)| a == b),
