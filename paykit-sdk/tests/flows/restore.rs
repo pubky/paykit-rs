@@ -600,18 +600,8 @@ async fn test_restore_journal_entry_naming_another_obligation_refused() {
         restored.is_err(),
         "a journal naming another obligation was restored"
     );
-    // Nor is the entry used afterwards: the journal refuses to read.
-    let loaded = Paykit::load(
-        w.env(&w.alice, target),
-        PaykitConfig::default(),
-        app_id,
-        Arc::clone(&w.rail) as Arc<dyn Rail>,
-        w.timer(),
-    )
-    .await;
-    if let Ok(app) = loaded {
-        assert!(app.payments().await.is_err());
-    }
+    // Refused before the restore's commit: nothing of either layer is in the store.
+    nothing_restored(&w, target, app_id).await;
 }
 
 // ---------------------------------------------------------------------------------------

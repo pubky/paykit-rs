@@ -27,6 +27,7 @@ use std::sync::{PoisonError, RwLock};
 
 use paykit_lib::bodies::check_body;
 use paykit_lib::collections::Collection;
+use paykit_lib::derive::request_obligation_blinded;
 use paykit_lib::kinds::{targets_app, Kind, Role as KindRole, Side, OPAQUE_MEMBERS};
 use paykit_lib::records::{ActivitySide, PaymentListRecord, StoredMessage};
 use paykit_lib::scopes::{acts_as_payee, PaykitScope, ScopeName};
@@ -240,11 +241,13 @@ pub const BACKUP_NAME: &str = "paykit";
 /// The writes that install Paykit's backup layer (Switch spec 12.4): every key of its local
 /// state, as the default layer holds it, with the payment journal checked whole first and
 /// its entries marked restored (Paykit spec 7.2). The journal's checks are
-/// [`JournalEntry::check`]'s, each entry at its own attempt's key, and at most one open entry
+/// [`JournalEntry::check_bound`]'s, with `request_obligation` blinding under the backup's
+/// naming key, each entry at its own attempt's key, and at most one open entry
 /// for one obligation, since a payment in progress blocks any other. `Err` names the rule,
 /// without content: nothing is written. Pure: it is called at backup time too.
 pub(crate) fn restore_paykit_layer(
     layer: Option<&ProtocolLayer>,
+    request_obligation: impl Fn(&[u8; 32], &[u8; 32]) -> [u8; 32],
 ) -> Result<Vec<LocalWrite>, String> {
     let Some(layer) = layer else {
         return Err("a Paykit App's backup carries Paykit's layer, with its journal".into());
@@ -260,7 +263,10 @@ pub(crate) fn restore_paykit_layer(
         };
         let bad = || String::from("Paykit spec 7.2: a journal entry in the backup doesn't read");
         let mut entry = state::decode::<JournalEntry>(&value).map_err(|_| bad())?;
-        entry.check().map_err(|_| bad())?;
+        // Each request payment's claim key is the one its payee and request blind to under
+        // the backup's naming key, which the restore context gives (Paykit spec 7.1, Paykit
+        // wire 1.5): checked here, before anything is written.
+        entry.check_bound(&request_obligation).map_err(|_| bad())?;
         if rest != entry.attempt_id.as_bytes() {
             return Err(bad());
         }
@@ -286,8 +292,9 @@ impl Protocol for PaykitProtocol {
         layer: Option<&ProtocolLayer>,
         restoring: &RestoreContext<'_>,
     ) -> Result<Vec<LocalWrite>, String> {
-        let _ = restoring;
-        restore_paykit_layer(layer)
+        restore_paykit_layer(layer, |payee, request_hash| {
+            request_obligation_blinded(&restoring.blind(payee), &restoring.blind(request_hash), 0)
+        })
     }
 
     fn opaque_members(&self) -> Vec<OpaqueRule> {
