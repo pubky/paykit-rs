@@ -713,26 +713,39 @@ impl Ledger {
                 (spent, t.req_int("count")?, failed)
             }
         };
-        let ids: Vec<AttemptId> = entries
-            .iter()
-            .map(|e| e.attempt_id)
-            .chain(failed.iter().map(|f| f.attempt_id))
-            .collect();
-        for (i, id) in ids.iter().enumerate() {
-            if ids.iter().take(i).any(|x| x == id) {
-                return invalid(
-                    "Paykit wire 5.5: an attempt listed twice among the entries and totals.failed",
-                );
-            }
-        }
-        Ok(Self {
+        let ledger = Self {
             counterparty: obj.req_pubky("counterparty")?,
             allowance_id: AllowanceId::parse(obj.req_str("allowance_id")?)?,
             entries,
             spent,
             count,
             failed,
-        })
+        };
+        ledger.check_attempts_once()?;
+        Ok(ledger)
+    }
+
+    /// Each `attempt_id` appears once among the entries and `totals.failed` (Paykit wire 5.5
+    /// "A valid ledger"), so no attempt is counted twice.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] for an attempt listed twice.
+    fn check_attempts_once(&self) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        let ids = self
+            .entries
+            .iter()
+            .map(|e| e.attempt_id)
+            .chain(self.failed.iter().map(|f| f.attempt_id));
+        for id in ids {
+            if !seen.insert(id) {
+                return invalid(
+                    "Paykit wire 5.5: an attempt listed twice among the entries and totals.failed",
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Write the ledger value: every entry with its `outcome` (`null` while unknown), and
@@ -796,16 +809,19 @@ impl Ledger {
     }
 
     /// "A valid ledger" against the terms (Paykit wire 5.5): every entry's asset is the
-    /// terms' asset. Usage and compaction refuse a ledger that isn't valid.
+    /// terms' asset, and each attempt appears once among the entries and `totals.failed`.
+    /// Usage, compaction and the check of a newer version refuse a ledger that isn't valid,
+    /// a typed one included, so they never count an attempt twice.
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] for an entry of another asset.
+    /// [`Error::Invalid`] for an entry of another asset or an attempt listed twice.
     pub fn check_valid(&self, terms: &AllowanceTerms) -> Result<()> {
         ensure(
             self.entries.iter().all(|e| e.asset == terms.asset),
             "Paykit wire 5.5: a ledger entry in another asset than the terms'",
-        )
+        )?;
+        self.check_attempts_once()
     }
 
     fn spent_scaled(&self) -> u128 {
@@ -1621,6 +1637,26 @@ mod tests {
             error.to_string().contains("keeps it as an entry"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn test_ledger_valid_lists_each_attempt_once() {
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let held = ledger(Vec::new());
+        let twice = Ledger {
+            failed: vec![CompactedFailed {
+                obligation: [1; 32],
+                attempt_id: AttemptId::from_bytes([1; 16]),
+                value: Decimal::parse("0.01").unwrap(),
+            }],
+            ..ledger(vec![entry(1, "0.01", "2026-02-10T00:00:00.000Z", None)])
+        };
+        let now = t("2026-02-10T00:00:00.000Z");
+        assert!(twice.check_valid(&terms).is_err());
+        assert!(usage(&terms, &twice, &HashMap::new(), now).is_err());
+        assert!(compact(&terms, &twice, now).is_err());
+        let error = check_successor(&terms, &held, &twice, now).unwrap_err();
+        assert!(error.to_string().contains("listed twice"), "{error}");
     }
 
     #[test]
