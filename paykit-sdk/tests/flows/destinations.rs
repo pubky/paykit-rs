@@ -257,3 +257,60 @@ async fn test_destinations_list_paid_only_to_an_endpoint_the_request_allows() {
     assert_eq!(paid.len(), 1);
     assert_eq!(paid[0].endpoint_id.as_str(), "btc-bitcoin-p2wpkh");
 }
+
+#[tokio::test]
+async fn test_destinations_check_after_the_attempt_writes_failed_and_says_so() {
+    let w = World::new();
+    let base = crate::common::store();
+    let wallet = w.wallet_on("wallet", std::sync::Arc::clone(&base)).await;
+    let app_id = wallet.app_id();
+    drop(wallet);
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    let reads = std::sync::Arc::new(crate::common::ScriptedIdentityReads::new(
+        std::sync::Arc::clone(&w.homeserver),
+        std::sync::Arc::clone(&w.clock),
+    ));
+    let mut wallet = w
+        .load_with_homeserver(
+            &w.alice,
+            std::sync::Arc::clone(&base),
+            app_id,
+            std::sync::Arc::clone(&reads)
+                as std::sync::Arc<dyn pubky_switch_client::app::HomeserverReader>,
+        )
+        .await;
+    wallet.receive(None).await.unwrap();
+    // The payer's copy of bob's identity.json is old: the check before the attempt reads it
+    // again, and that read takes 61 s. The own identity.json, confirmed just before it, is
+    // then too old at the check after the attempt, and reading it again fails.
+    w.clock.advance_ms(11 * 60_000);
+    reads.then(w.alice_id(), 0, false);
+    reads.then(w.bob_id(), 61_000, false);
+    reads.then(w.alice_id(), 0, true);
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    // `failed` was written on the attempt, and the refusal says so (Paykit spec 7.2 step 1).
+    let Some(Refusal::AttemptFailed(inner)) = refused.refusal() else {
+        panic!("{refused:?}");
+    };
+    assert!(
+        matches!(**inner, Refusal::IdentityUnavailable(_)),
+        "{inner:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Finished);
+    let claim = wallet
+        .app_mut()
+        .read_claim(&payment.obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        claim.view.attempts[0].outcome,
+        pubky_switch_core::claims::Outcome::Failed
+    );
+}

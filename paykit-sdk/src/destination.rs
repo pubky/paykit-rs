@@ -43,7 +43,7 @@ use paykit_lib::Body;
 use pubky_switch_client::app::{Initiator, MayAct, UserConfirmed};
 use pubky_switch_core::records::{AppCert, AppRecord, IdentityDoc, Standing};
 
-use crate::error::{PaykitError, Refusal, Result};
+use crate::error::{Refusal, Result};
 use crate::journal::Destination;
 use crate::paykit::Paykit;
 
@@ -288,11 +288,6 @@ pub(crate) fn current(
         }
     }
     Ok(())
-}
-
-/// A refusal of the destination check, as the caller sees it.
-pub(crate) fn refused(why: String) -> PaykitError {
-    crate::error::Refusal::Destination(why).into()
 }
 
 #[cfg(test)]

@@ -364,13 +364,10 @@ async fn test_recovery_slow_failed_own_identity_read_refuses_the_repeat() {
     w.rail.set_declaration(idempotent_without_history());
     let base = store();
     let (attempt_id, app_id) = in_flight(&w, &base).await;
-    let homeserver = Arc::new(crate::common::SlowFailingIdentityRead {
-        inner: Arc::clone(&w.homeserver),
-        clock: Arc::clone(&w.clock),
-        identity: w.alice_id(),
-        delay_ms: 61_000,
-        armed: std::sync::atomic::AtomicBool::new(false),
-    });
+    let homeserver = Arc::new(crate::common::ScriptedIdentityReads::new(
+        Arc::clone(&w.homeserver),
+        Arc::clone(&w.clock),
+    ));
     let mut wallet = w
         .load_with_homeserver(
             &w.alice,
@@ -389,7 +386,7 @@ async fn test_recovery_slow_failed_own_identity_read_refuses_the_repeat() {
         .unwrap()
         .confirmed_at()
         .is_some());
-    homeserver.arm();
+    homeserver.then(w.alice_id(), 61_000, true);
     let refused = wallet.resume_payments().await.unwrap_err();
     assert!(
         matches!(

@@ -39,7 +39,7 @@ use pubky_switch_core::message::MessagePlaintext;
 use pubky_switch_core::ops::{Condition, OpKind};
 
 use crate::activity::{self, ActivityTarget, Role};
-use crate::destination::{refused, Carrier};
+use crate::destination::Carrier;
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::{Destination, JournalEntry, KeptAmount, PaymentView, Stage};
 use crate::paykit::Paykit;
@@ -172,8 +172,9 @@ impl Paykit {
     ///
     /// A [`Refusal`] for a request that isn't payable: rejected, cancelled, paid, being paid
     /// by another own app, may already be paid, expired, recurring, without a usable
-    /// destination, or a destination refused by the checks before money moves (then
-    /// `failed` is written); [`PaykitError::Conflict`] when the request record changed
+    /// destination, or a check before money moves that refused it: before the attempt was
+    /// written, nothing was written; after it, [`Refusal::AttemptFailed`] says `failed` was
+    /// written; [`PaykitError::Conflict`] when the request record changed
     /// meanwhile; the client's errors. A failure after money may have moved is never an
     /// error: it is [`PayOutcome::Pending`] or [`PayOutcome::Uncertain`].
     pub async fn pay_request(
@@ -690,7 +691,7 @@ impl Paykit {
             Err(AppError::InvalidData(why)) => {
                 // The attempt's proof showed another state: the client wrote it `failed`.
                 self.set_stage(&mut entry, Stage::Finished).await?;
-                return Err(refused(why));
+                return Err(Refusal::AttemptFailed(Box::new(Refusal::Destination(why))).into());
             }
             Err(error @ AppError::Refused(_)) => {
                 self.set_stage(&mut entry, Stage::Abandoned).await?;
@@ -777,7 +778,7 @@ impl Paykit {
     /// paying (Paykit spec 7.2 step 1).
     async fn fail_attempt(&mut self, entry: &mut JournalEntry, why: Refusal) -> Result<PayOutcome> {
         self.write_outcome(entry, false).await?;
-        Err(why.into())
+        Err(Refusal::AttemptFailed(Box::new(why)).into())
     }
 
     /// The acceptance of a one-time request, sent with its payment (Paykit spec 7.2 step 2,

@@ -52,10 +52,17 @@ pub enum Refusal {
     /// do yet (Paykit spec 8.2).
     #[error("Paykit spec 8.2: a recurring request is paid per Billing Period")]
     Recurring,
-    /// The destination check failed (Paykit spec 4, 7.2): the text names the rule. The app
-    /// wrote `failed` instead of paying.
+    /// The destination check failed (Paykit spec 4, 7.2): the text names the rule. Refused
+    /// before the attempt was written, nothing was written; refused after it, the refusal
+    /// comes as [`Refusal::AttemptFailed`].
     #[error("Paykit spec 7.2: destination refused: {0}")]
     Destination(String),
+    /// The attempt was written, and a check before money moved then refused the payment: the
+    /// app wrote `failed` on it instead of paying, and nothing was paid (Paykit spec 7.2 step
+    /// 1). The inner refusal names the check. Any other refusal of a payment was made before
+    /// the attempt, and wrote nothing.
+    #[error("Paykit spec 7.2: `failed` written: {0}")]
+    AttemptFailed(Box<Refusal>),
     /// No usable destination: no endpoint of the request, no usable Private Payment List, no
     /// usable public endpoint, or none the caller named (Paykit spec 4, 8.1, 8.4).
     #[error("no usable destination: {0}")]
