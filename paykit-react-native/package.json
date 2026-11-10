@@ -1,6 +1,6 @@
 {
   "name": "@synonymdev/react-native-paykit",
-  "version": "0.1.1-rc6",
+  "version": "0.1.1-rc7",
   "description": "React Native bindings for the Paykit SDK, generated with uniffi-bindgen-react-native",
   "source": "./src/index.tsx",
   "main": "./lib/module/index.js",
