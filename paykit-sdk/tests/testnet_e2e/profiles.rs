@@ -418,3 +418,155 @@ async fn test_public_file_fetch_validates_uris_and_body_limits() {
         assert!(err.to_string().contains("5242880"));
     }
 }
+
+#[tokio::test]
+async fn test_pubky_profile_publish_merges_and_rejects_stale_revisions() {
+    let testnet = crate::harness::build_testnet().await;
+    let capabilities = format!(
+        "{},{}",
+        paykit_sdk::PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        paykit_sdk::PUBKY_APP_PROFILE_SESSION_CAPABILITIES
+    );
+    let user = crate::harness::TestUser::sign_up_with_capabilities(
+        &testnet,
+        crate::harness::app_id("bitkit"),
+        &capabilities,
+    )
+    .await;
+    let sdk = &user.sdk;
+    let update = |name: &str| paykit_sdk::PubkyProfileUpdate {
+        name: Some(name.into()),
+        ..Default::default()
+    };
+
+    assert!(sdk
+        .fetch_pubky_profile_with_revision(user.public_key.clone())
+        .await
+        .unwrap()
+        .is_none());
+    let created = sdk
+        .publish_pubky_profile(update("Alice"), None)
+        .await
+        .unwrap();
+
+    // pubky.app adds a status and a key Paykit does not know.
+    user.access
+        .session
+        .storage()
+        .put(
+            paykit_sdk::PUBKY_PROFILE_PATH,
+            r#"{"name":"Alice","status":"away","theme":"dark"}"#,
+        )
+        .await
+        .unwrap();
+    let stale = sdk
+        .publish_pubky_profile(update("Alicia"), Some(created.revision))
+        .await
+        .unwrap_err();
+    assert!(stale.is_concurrent_update(), "{stale:?}");
+
+    let current = sdk
+        .fetch_pubky_profile_with_revision(user.public_key.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let current_revision_before_publish = current.revision.clone();
+    let published = sdk
+        .publish_pubky_profile(update("Alicia"), Some(current.revision))
+        .await
+        .unwrap();
+    assert_eq!(published.profile.name, "Alicia");
+    assert_eq!(published.profile.status.as_deref(), Some("away"));
+    let raw = user
+        .access
+        .session
+        .storage()
+        .get(paykit_sdk::PUBKY_PROFILE_PATH)
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let raw: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(raw["theme"], "dark");
+
+    let stale = sdk
+        .delete_pubky_profile(current_revision_before_publish)
+        .await
+        .unwrap_err();
+    assert!(stale.is_concurrent_update(), "{stale:?}");
+    sdk.delete_pubky_profile(published.revision).await.unwrap();
+    assert!(sdk
+        .fetch_pubky_profile_with_revision(user.public_key.clone())
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn test_pubky_app_avatar_upload_writes_blob_and_file() {
+    let testnet = crate::harness::build_testnet().await;
+    let capabilities = format!(
+        "{},{}",
+        paykit_sdk::PAYKIT_AUTHORIZER_SESSION_CAPABILITIES,
+        paykit_sdk::PUBKY_APP_PROFILE_SESSION_CAPABILITIES
+    );
+    let user = crate::harness::TestUser::sign_up_with_capabilities(
+        &testnet,
+        crate::harness::app_id("bitkit"),
+        &capabilities,
+    )
+    .await;
+    let bytes = vec![0xff, 0xd8, 0xff, 0xe0, 1, 2, 3];
+    let file_uri = user
+        .sdk
+        .upload_pubky_app_avatar(bytes.clone(), "image/jpeg")
+        .await
+        .unwrap();
+    assert!(file_uri.contains("/pub/pubky.app/files/"), "{file_uri}");
+
+    let file = user
+        .sdk
+        .fetch_pubky_text(&file_uri, 4096)
+        .await
+        .unwrap()
+        .unwrap();
+    let file: serde_json::Value = serde_json::from_str(&file).unwrap();
+    assert_eq!(file["content_type"], "image/jpeg");
+    assert_eq!(file["size"], bytes.len());
+    let blob = user
+        .sdk
+        .fetch_pubky_file(file["src"].as_str().unwrap(), 4096)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(blob, bytes);
+
+    let without_scope = crate::harness::two_party().await;
+    let error = without_scope
+        .alice
+        .sdk
+        .upload_pubky_app_avatar(bytes, "image/jpeg")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, paykit_sdk::PaykitSdkError::Identity { .. }),
+        "{error:?}"
+    );
+    let error = without_scope
+        .alice
+        .sdk
+        .publish_pubky_profile(
+            paykit_sdk::PubkyProfileUpdate {
+                name: Some("Alice".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, paykit_sdk::PaykitSdkError::Identity { .. }),
+        "{error:?}"
+    );
+}
