@@ -236,8 +236,9 @@ impl Kind {
 pub const MAX_EXTENSION_NAME_LEN: usize = 64;
 
 /// An extension kind `<prefix>.<name>` (Paykit spec 3.3, Paykit wire 4.3): a prefix of an
-/// extension scope, then a name of 1 to 64 characters of `a-z`, `0-9` and `_`. It carries no
-/// Paykit payment semantics.
+/// extension scope, which holds a `-`, then a name of 1 to 64 characters of `a-z`, `0-9` and
+/// `_`. It carries no Paykit payment semantics. A kind whose prefix holds no `-`, such as
+/// `chat.message`, is another protocol's or Paykit's own, never an extension kind.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ExtensionKind {
     prefix: ExtensionPrefix,
@@ -565,12 +566,14 @@ mod tests {
             "cap",
             "paykit-cap.",
             "-x.offer",
-            "x.Offer",
+            "x-y.Offer",
             "paykit.offer",
+            "cap.offer",
+            "chat.message",
         ] {
             assert!(ExtensionKind::parse(bad).is_err(), "{bad}");
         }
-        let long = format!("cap.{}", "a".repeat(65));
+        let long = format!("paykit-cap.{}", "a".repeat(65));
         assert!(ExtensionKind::parse(&long).is_err());
     }
 
@@ -590,8 +593,13 @@ mod tests {
         .unwrap();
         let resend = message("paykit.resend_request", json!({}));
         check_kind_scopes(&resend, &owned(&["contacts"]), &owned(&["pay"])).unwrap();
-        let ext = message("cap.offer", json!({}));
-        check_kind_scopes(&ext, &owned(&["ext:cap"]), &owned(&["ext:cap"])).unwrap();
+        let ext = message("paykit-cap.offer", json!({}));
+        check_kind_scopes(
+            &ext,
+            &owned(&["ext:paykit-cap"]),
+            &owned(&["ext:paykit-cap"]),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -602,8 +610,16 @@ mod tests {
         assert!(check_kind_scopes(&request, &owned(&["request:shop1"]), &owned(&["pay"])).is_err());
         let other = message("paykit.payment_request", json!({ "label": "shop2" }));
         assert!(check_kind_scopes(&other, &owned(&["request:shop1"]), &owned(&["pay"])).is_err());
-        let ext = message("cap.offer", json!({}));
-        assert!(check_kind_scopes(&ext, &owned(&["ext:cap"]), &owned(&["ext:other"])).is_err());
+        let ext = message("paykit-cap.offer", json!({}));
+        assert!(check_kind_scopes(
+            &ext,
+            &owned(&["ext:paykit-cap"]),
+            &owned(&["ext:paykit-other"])
+        )
+        .is_err());
+        // A prefix without a `-` is no extension's: the kind is dropped, whatever the scopes.
+        let other = message("cap.offer", json!({}));
+        assert!(check_kind_scopes(&other, &owned(&["ext:cap"]), &owned(&["ext:cap"])).is_err());
         let unknown = message("paykit.other", json!({}));
         assert!(check_kind_scopes(&unknown, &owned(&["pay"]), &owned(&["pay"])).is_err());
     }

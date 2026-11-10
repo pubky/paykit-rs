@@ -19,7 +19,7 @@
 //!   paying ([`Paykit::pay_request`], [`Paykit::pay_without_request`],
 //!   [`Paykit::resume_payments`]), receiving ([`Paykit::receive`]) and reconciliation
 //!   ([`Paykit::reconcile`]).
-//! - [`Rail`]: the payment method's interface; [`rail::FakeRail`] for tests (feature
+//! - [`Rail`]: the payment method's interface; `rail::FakeRail` for tests (feature
 //!   `test-support`).
 //! - [`AppScopes`]: Paykit's side of approval.
 //! - [`app_records`]: where Paykit's app record members plug in.

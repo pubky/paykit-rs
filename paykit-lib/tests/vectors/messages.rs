@@ -1,5 +1,5 @@
-//! `messages.json`: every kind as v0.2 sends it (Switch wire 4.5, Paykit wire 4), and
-//! `label_rejections`.
+//! `messages.json`: every kind as v0.2 sends it (Switch wire 4.5, Paykit wire 4),
+//! `label_rejections` and `multi_protocol_senders`.
 
 use std::collections::HashMap;
 
@@ -12,8 +12,13 @@ use pubky_switch_core::enc::b64;
 use pubky_switch_core::message::{Message, MessagePlaintext, VerifiedSender};
 use pubky_switch_core::receive::KindRules;
 use pubky_switch_core::records::AppCert;
+use pubky_switch_core::scopes::Permission;
+use serde_json::{json, Value};
 
-use crate::common::{arr, cert, hex, paykit, pubky, signed, st, Keys, ALICE, ALLOWANCE_ID, BOB};
+use crate::common::{
+    arr, cert, generated, hex, message, message_json, paykit, pubky, quoted, reissued, signed,
+    signed_json, st, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
+};
 
 /// One message of the file, checked and read.
 struct Read {
@@ -25,6 +30,7 @@ struct Read {
 #[test]
 fn test_vectors_messages() {
     let keys = Keys::load();
+    generate(&keys);
     let file = paykit("messages.json");
     let mut read: HashMap<String, Read> = HashMap::new();
     let mut names_by_hash: HashMap<[u8; 32], String> = HashMap::new();
@@ -115,6 +121,7 @@ fn test_vectors_messages() {
     check_contents(&keys, &read);
     check_resend(&keys, &read);
     check_label_rejections(&keys, &file);
+    check_multi_protocol_senders(&keys, &file);
 }
 
 /// `refs` name messages by hash, in each kind's order (Paykit wire 4.3).
@@ -379,6 +386,142 @@ fn check_label_rejections(keys: &Keys, file: &serde_json::Value) {
             && case.get("recipient_cert").is_some()
         {
             assert!(check_kind_scopes(&message, sender_cert.scopes(), own.scopes()).is_err());
+        }
+    }
+}
+
+/// The top-level description, which names every member.
+const DESCRIPTION: &str = "Every message kind as sent in v0.2 (Switch wire 4.5, wire 4): the \
+exact JSON bytes, their BLAKE3 hash (refs, request hash), the sender app's signature over \
+lp(\"pubky-switch/v1/msg\", recipient identity, JSON), and the signed plaintext layout \
+sender app ID (16) | signature (64) | u32_be(JSON length) | JSON, before zero padding. \
+payment_request_labelled is sent by bob's hosted app under its label, and alice's acceptance \
+of it copies the label; label_rejections holds requests a payer drops for their label; \
+multi_protocol_senders holds messages from apps whose certificates hold another protocol's \
+scopes.";
+
+const MULTI_PROTOCOL_DESCRIPTION: &str = "Wire 4.1 check 8, spec 3.2, 3.3, Switch wire 3.1 \
+\"Several protocols\": messages.json's payment_request and resend_request_ids, as the shop \
+signs them, each presented with a certificate of the shop's keys that holds another \
+protocol's scope, chat (sender_cert, documents.json multi_protocol_certificates), at alice's \
+wallet (recipient_app), whose certificate is the Switch set's. Another protocol's scopes, \
+and the switch permissions they bring, authorize no Paykit message: each kind still needs \
+its Paykit scope, and a resend_request needs a Paykit App, one holding at least one Paykit \
+scope. accepted are messages the wallet takes at check 8, from the shop holding request \
+beside chat; refused are those it drops there, from the shop holding chat alone, a \
+certificate Paykit's verifiers take. reason is paykit-lib's wording, of the first check \
+that refuses it.";
+
+/// The certificates of `multi_protocol_senders`: request beside chat, and chat alone.
+fn sender_cert(keys: &Keys, chat_only: bool) -> AppCert {
+    if chat_only {
+        reissued(keys, "shop", &["chat"], &[Permission::ListsRead])
+    } else {
+        reissued(
+            keys,
+            "shop",
+            &["request", "chat"],
+            &[Permission::ListsRead, Permission::ConversationAdd],
+        )
+    }
+}
+
+/// Check 8 at alice's wallet for a message the shop signed, presented with `sender`: the
+/// recipient checks that need the certificate first (Switch wire 5.1 checks 4 to 6).
+fn at_wallet(keys: &Keys, json: &[u8], sender: &AppCert) -> pubky_switch_core::Result<()> {
+    let shop = keys.app("shop");
+    let plaintext = MessagePlaintext::sign_json(&shop.keys, json.to_vec(), OPAQUE_MEMBERS).unwrap();
+    let message = plaintext
+        .check(
+            &pubky(ALICE),
+            &shop.identity,
+            &VerifiedSender::from_cert(sender),
+            OPAQUE_MEMBERS,
+        )
+        .unwrap();
+    PaykitKindRules::for_certificate(&cert(keys.app("wallet"))).check_scopes(&message, sender)
+}
+
+/// The cases paykit-lib generates in `messages.json` (README "How the files were
+/// generated"), compared with the file, and written into it with `PAYKIT_WRITE_VECTORS`.
+fn generate(keys: &Keys) {
+    let wallet = keys.app("wallet");
+    let case = |name: &str, base: &str, chat_only: bool| -> Value {
+        let m = message(base);
+        assert_eq!(st(&m, "sender_app"), keys.app("shop").app_id, "{base}");
+        let json = message_json(base);
+        let sender = sender_cert(keys, chat_only);
+        let plaintext =
+            MessagePlaintext::sign_json(&keys.app("shop").keys, json.clone(), OPAQUE_MEMBERS)
+                .unwrap();
+        let mut case = json!({
+            "json": String::from_utf8(json.clone()).unwrap(),
+            "name": name,
+            "recipient_app": wallet.app_id,
+            "sender_app": st(&m, "sender_app"),
+            "sender_cert": signed_json(sender.signed()),
+            "signature": b64(&plaintext.signature()),
+        });
+        match at_wallet(keys, &json, &sender) {
+            Ok(()) => assert!(!chat_only, "{name}: taken"),
+            Err(error) => {
+                assert!(chat_only, "{name}: {error}");
+                case["reason"] = json!(quoted(&error.to_string()));
+            }
+        }
+        case
+    };
+    let member = json!({
+        "accepted": [
+            case("a payment_request from an app holding request and chat", "payment_request", false),
+            case("a resend_request from an app holding request and chat", "resend_request_ids", false),
+        ],
+        "description": MULTI_PROTOCOL_DESCRIPTION,
+        "refused": [
+            case("a payment_request from an app holding only chat", "payment_request", true),
+            case("a resend_request from an app holding only chat", "resend_request_ids", true),
+        ],
+    });
+    generated(
+        "messages.json",
+        &[
+            (Place::Member("/description"), json!(DESCRIPTION)),
+            (Place::Member("/multi_protocol_senders"), member),
+        ],
+    );
+}
+
+/// `multi_protocol_senders` (Paykit wire 4.1 check 8, spec 3.3): the shop's signatures,
+/// certificates Paykit's verifiers take, and check 8 at alice's wallet taking the messages
+/// from request beside chat and dropping those from chat alone.
+fn check_multi_protocol_senders(keys: &Keys, file: &Value) {
+    let m = &file["multi_protocol_senders"];
+    let (shop, bob) = (keys.app("shop"), pubky(BOB));
+    assert_eq!(arr(m, "accepted").len(), 2);
+    assert_eq!(arr(m, "refused").len(), 2);
+    for (list, accepted) in [("accepted", true), ("refused", false)] {
+        for case in arr(m, list) {
+            let name = st(case, "name");
+            let json = st(case, "json").as_bytes().to_vec();
+            assert_eq!(st(case, "sender_app"), shop.app_id, "{name}");
+            assert_eq!(
+                st(case, "recipient_app"),
+                keys.app("wallet").app_id,
+                "{name}"
+            );
+            let plaintext =
+                MessagePlaintext::sign_json(&shop.keys, json.clone(), OPAQUE_MEMBERS).unwrap();
+            assert_eq!(b64(&plaintext.signature()), st(case, "signature"), "{name}");
+            let sender =
+                paykit_lib::scopes::verify_certificate(&signed(&case["sender_cert"]), &bob)
+                    .unwrap_or_else(|e| {
+                        panic!("{name}: Paykit's verifiers take the certificate: {e}")
+                    });
+            let verdict = at_wallet(keys, &json, &sender);
+            assert_eq!(verdict.is_ok(), accepted, "{name}: {verdict:?}");
+            if let Err(error) = verdict {
+                assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
+            }
         }
     }
 }

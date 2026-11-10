@@ -20,7 +20,7 @@
 //! definitively not paid"): verified success, definitive failure, or nothing yet. A call that
 //! errs after a payment may have been submitted is nothing yet, never a failure.
 //!
-//! [`FakeRail`] (feature `test-support`, tests only) is an in-memory rail for tests.
+//! `FakeRail` (feature `test-support`, tests only) is an in-memory rail for tests.
 
 use paykit_lib::{AttemptId, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload};
 use pubky_switch_client::transport::BoxFuture;

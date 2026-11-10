@@ -25,6 +25,7 @@
 
 pub mod allowances;
 pub mod amount;
+pub mod app_record;
 pub mod bodies;
 pub mod collections;
 pub mod derive;
