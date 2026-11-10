@@ -206,6 +206,12 @@ pub(crate) struct JournalEntry {
     /// The signed app record carrying a public endpoint, for the same check.
     #[serde(default)]
     pub(crate) carrier_record: Option<SignedDoc>,
+    /// The payment method reported the dispatch failed, and `failed` was written on it: the
+    /// method's history is asked again within its retention, and a payment that completed
+    /// after all is reported with its proof (Paykit spec 7.2, "What a payment method
+    /// declares").
+    #[serde(default)]
+    pub(crate) failed_by_method: bool,
     /// The attempt's transition proof, for the service and generation it was written at
     /// (Paykit spec 4, "Fresh before paying"). An entry without one is never dispatched again.
     #[serde(default)]

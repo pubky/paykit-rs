@@ -529,3 +529,91 @@ async fn test_recovery_not_paid_once_the_own_app_is_unlisted() {
     assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
 }
+
+#[tokio::test]
+async fn test_recovery_failure_that_completed_after_all_sends_its_proof() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Fail);
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    let PayOutcome::Failed { attempt_id, .. } = outcome else {
+        panic!("{outcome:?}");
+    };
+    // The method reported a failure, but the payment completed after all: its history shows
+    // it paid. The owner sends its proof (Paykit spec 7.2).
+    w.rail.complete_after_failure(&attempt_id);
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            resumed.as_slice(),
+            [PayOutcome::Paid {
+                proof_msg_id: Some(_),
+                ..
+            }]
+        ),
+        "{resumed:?}"
+    );
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        paykit_sdk::RequestStatus::Paid
+    );
+    // Asked once: it isn't reported twice.
+    assert!(wallet.resume_payments().await.unwrap().is_empty());
+    // The payee verifies it and its receipt settles the claim.
+    shop.receive(None).await.unwrap();
+    let sales = shop.payee_activity().await.unwrap();
+    assert_eq!(sales[0].attempt_id, Some(attempt_id));
+    assert!(shop
+        .confirm_payment(&sales[0].record)
+        .await
+        .unwrap()
+        .is_some());
+    wallet.receive(None).await.unwrap();
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    let claim = wallet
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.view.status, ClaimStatus::Settled);
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_recovery_failure_past_the_history_window_not_asked_again() {
+    let w = World::new();
+    w.rail.set_declaration(RailDeclaration {
+        idempotent: true,
+        idempotency_retention_ms: None,
+        history: true,
+        history_retention_ms: Some(DAY_MS),
+        history_survives_restore: true,
+    });
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Fail);
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    let PayOutcome::Failed { attempt_id, .. } = outcome else {
+        panic!("{outcome:?}");
+    };
+    // Past the day the history keeps a dispatch, it is no evidence either way.
+    w.clock.advance_ms(2 * DAY_MS);
+    w.rail.complete_after_failure(&attempt_id);
+    assert!(wallet.resume_payments().await.unwrap().is_empty());
+    assert_ne!(
+        wallet.request(&request).await.unwrap().status,
+        paykit_sdk::RequestStatus::Paid
+    );
+}

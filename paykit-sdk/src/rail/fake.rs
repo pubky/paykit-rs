@@ -154,6 +154,25 @@ impl FakeRail {
         }
     }
 
+    /// A payment the method reported failed completes after all: its history shows it paid,
+    /// and money moved once.
+    pub fn complete_after_failure(&self, key: &AttemptId) {
+        let now = self.now();
+        let mut inner = self.lock();
+        let counter = inner.counter;
+        let completed = inner.payments.get_mut(key).is_some_and(|payment| {
+            if payment.outcome != RailOutcome::Failed {
+                return false;
+            }
+            payment.outcome = paid_outcome(key, counter, now);
+            true
+        });
+        if completed {
+            let count = inner.executions.entry(*key).or_insert(0);
+            *count = count.saturating_add(1);
+        }
+    }
+
     /// What a payload fixes: `...?amount=<value>`.
     fn fixed_amount(payload: &str, amount: &PaymentAmount) -> Option<Option<PaymentAmount>> {
         let (_, query) = payload.split_once('?')?;

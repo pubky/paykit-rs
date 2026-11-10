@@ -286,6 +286,7 @@ impl Paykit {
             carrier: None,
             carrier_record: None,
             attempt_proof: None,
+            failed_by_method: false,
         };
         self.execute(Plan {
             entry,
@@ -354,6 +355,7 @@ impl Paykit {
             carrier: None,
             carrier_record: None,
             attempt_proof: None,
+            failed_by_method: false,
         };
         self.execute(Plan {
             entry,
@@ -852,7 +854,10 @@ impl Paykit {
                 entry.paid_at_ms = paid_at_ms;
                 self.set_stage(entry, Stage::RailPaid).await?;
             }
-            RailOutcome::Failed => self.set_stage(entry, Stage::RailFailed).await?,
+            RailOutcome::Failed => {
+                entry.failed_by_method = true;
+                self.set_stage(entry, Stage::RailFailed).await?;
+            }
             RailOutcome::Pending => return Ok(PayOutcome::Pending { attempt_id }),
         }
         self.report(entry).await
@@ -1118,7 +1123,49 @@ impl Paykit {
                 Stage::Finished | Stage::Abandoned => {}
             }
         }
+        out.extend(self.recheck_failed().await?);
         let _ = self.app.flush_outbox().await;
+        Ok(out)
+    }
+
+    /// Ask the payment method's history again about the dispatches it reported failed, while
+    /// that history keeps them (Paykit spec 7.2, "What a payment method declares"): an owner
+    /// that finds a payment it reported failed completed after all sends its proof, and the
+    /// payee's receipt corrects the claim. Such a payment is reported as any other, its
+    /// activity record and its proof in one batch; a dispatch the history no longer keeps
+    /// isn't asked about again.
+    async fn recheck_failed(&mut self) -> Result<Vec<PayOutcome>> {
+        let declaration = self.rail.declaration();
+        let mut out = Vec::new();
+        for mut entry in self.journal().await? {
+            if entry.stage != Stage::Finished || !entry.failed_by_method {
+                continue;
+            }
+            let age = self.now().checked_sub(entry.journaled_at_ms);
+            let kept = declaration.history
+                && declaration
+                    .history_retention_ms
+                    .is_none_or(|r| age.is_some_and(|age| age <= r));
+            if !kept {
+                entry.failed_by_method = false;
+                self.save(&entry).await?;
+                continue;
+            }
+            let Some(RailOutcome::Paid { proof, paid_at_ms }) =
+                self.rail.payment(entry.attempt()?).await?
+            else {
+                continue;
+            };
+            entry.failed_by_method = false;
+            // The attempt is `failed` on the claim: no claim entry is written, and the
+            // payee's receipt settles it by evidence (Switch spec 10.2 row 3).
+            entry.step = None;
+            entry.rail_proof = Some(proof);
+            entry.paid_at_ms = paid_at_ms;
+            // Opened again, so the outcome's batch is built afresh rather than taken as done.
+            self.set_stage(&mut entry, Stage::RailPaid).await?;
+            out.push(self.report(&mut entry).await?);
+        }
         Ok(out)
     }
 

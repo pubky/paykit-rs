@@ -320,6 +320,7 @@ impl Paykit {
             carrier: None,
             carrier_record: None,
             attempt_proof: None,
+            failed_by_method: false,
         };
         entry.keep_carrier(&carrier);
         Ok(Some(entry))
