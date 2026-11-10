@@ -246,6 +246,15 @@ pub struct ExtensionKind {
 }
 
 impl ExtensionKind {
+    /// An extension kind the caller supplies (Paykit wire 4.3).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for anything else, a Paykit kind `paykit.<name>` included.
+    pub fn new(kind: &str) -> Result<Self> {
+        Self::parse(kind).map_err(Error::into_validation)
+    }
+
     /// Read an extension kind (Paykit wire 4.3).
     ///
     /// # Errors
@@ -639,6 +648,14 @@ mod tests {
         }
         let long = format!("paykit-cap.{}", "a".repeat(65));
         assert!(ExtensionKind::parse(&long).is_err());
+        assert!(matches!(
+            ExtensionKind::new("cap.offer"),
+            Err(Error::Validation(_))
+        ));
+        assert!(matches!(
+            ExtensionKind::parse("cap.offer"),
+            Err(Error::Invalid(_))
+        ));
     }
 
     #[test]

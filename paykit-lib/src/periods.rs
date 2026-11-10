@@ -173,12 +173,21 @@ pub struct AnchoredRule {
 }
 
 impl AnchoredRule {
-    /// A rule, with `every` at least 1.
+    /// A rule the caller supplies, with `every` at least 1.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for `every` of 0.
+    pub fn new(anchor: u64, every: u64, unit: Unit) -> Result<Self> {
+        Self::read(anchor, every, unit).map_err(Error::into_validation)
+    }
+
+    /// A rule read from a document, with `every` at least 1 (Paykit wire 4.4).
     ///
     /// # Errors
     ///
     /// [`Error::Invalid`] for `every` of 0.
-    pub fn new(anchor: u64, every: u64, unit: Unit) -> Result<Self> {
+    pub(crate) fn read(anchor: u64, every: u64, unit: Unit) -> Result<Self> {
         if every == 0 {
             return invalid("Paykit wire 4.4: every is at least 1");
         }
@@ -318,12 +327,21 @@ pub struct Recurrence {
 }
 
 impl Recurrence {
-    /// A recurrence.
+    /// A recurrence the caller supplies.
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] for `every` of 0 or an `ends_at` not after `starts_at`.
+    /// [`Error::Validation`] for an `ends_at` not after `starts_at`.
     pub fn new(rule: AnchoredRule, starts_at: u64, ends_at: Option<u64>) -> Result<Self> {
+        Self::read(rule, starts_at, ends_at).map_err(Error::into_validation)
+    }
+
+    /// A recurrence read from a document (Paykit wire 4.4).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] for an `ends_at` not after `starts_at`.
+    fn read(rule: AnchoredRule, starts_at: u64, ends_at: Option<u64>) -> Result<Self> {
         if ends_at.is_some_and(|e| e <= starts_at) {
             return invalid("Paykit wire 4.4: recurrence: ends_at isn't after starts_at");
         }
@@ -341,7 +359,7 @@ impl Recurrence {
     /// [`Error::Invalid`] naming the member or rule.
     pub fn from_json(value: &Value) -> Result<Self> {
         let obj = Obj::of(value, "Paykit wire 4.4: recurrence", "recurrence")?;
-        let rule = AnchoredRule::new(
+        let rule = AnchoredRule::read(
             obj.req_time("anchor")?,
             obj.req_int("every")?,
             Unit::parse(obj.req_str("unit")?)?,
@@ -351,7 +369,7 @@ impl Recurrence {
         if !obj.has("ends_at") {
             return invalid("Paykit wire 4.4: recurrence: ends_at: missing; null for none");
         }
-        Self::new(rule, obj.req_time("starts_at")?, obj.opt_time("ends_at")?)
+        Self::read(rule, obj.req_time("starts_at")?, obj.opt_time("ends_at")?)
     }
 
     /// The recurrence's members, `ends_at` always written (`null` when unset).
@@ -583,7 +601,25 @@ mod tests {
 
     #[test]
     fn test_periods_refuse_out_of_range_and_zero_every() {
-        assert!(AnchoredRule::new(0, 0, Unit::Day).is_err());
+        assert!(matches!(
+            AnchoredRule::new(0, 0, Unit::Day),
+            Err(Error::Validation(_))
+        ));
+        assert!(matches!(
+            AnchoredRule::read(0, 0, Unit::Day),
+            Err(Error::Invalid(_))
+        ));
+        let rule = AnchoredRule::new(0, 1, Unit::Day).unwrap();
+        assert!(matches!(
+            Recurrence::new(rule, 5, Some(5)),
+            Err(Error::Validation(_))
+        ));
+        assert!(matches!(
+            Recurrence::from_json(&serde_json::json!({ "anchor": "2026-01-31T00:00:00.000Z",
+                "every": 1, "unit": "month", "starts_at": "2026-01-31T00:00:00.000Z",
+                "ends_at": "2026-01-31T00:00:00.000Z" })),
+            Err(Error::Invalid(_))
+        ));
         let rule = AnchoredRule::new(0, 1, Unit::Day).unwrap();
         assert!(rule.boundary(-1).is_err());
         assert!(rule.boundary(i64::MAX).is_err());

@@ -10,6 +10,7 @@ use paykit_lib::records::{
 use paykit_lib::scopes::{Label, PaykitScope, ScopeName};
 use pubky_switch_core::enc::b64;
 use pubky_switch_core::ident::key_of_scope;
+use pubky_switch_core::records::AppCert;
 use pubky_switch_core::sealed::{aad, pad, RecordValue, SealedValue};
 use serde_json::Value;
 
@@ -1823,4 +1824,94 @@ fn test_record_transitions_hold_records_built_in_code() {
         ..ended.clone()
     };
     assert!(ended.check_later_write(&renamed).is_err());
+}
+
+#[test]
+fn test_stored_message_from_received_is_its_plaintexts() {
+    use paykit_lib::records::StoredMessage;
+    let keys = Keys::load();
+    let request = stored_message(&keys, "payment_request");
+    let other = stored_message(&keys, "payment_request_recurring");
+    let built = |s: &StoredMessage, message: &pubky_switch_core::message::Message| {
+        StoredMessage::from_received(
+            s.sender(),
+            s.cert().clone(),
+            s.plaintext().clone(),
+            message.clone(),
+            Some(1),
+        )
+    };
+    // The client's own parts: the same stored copy as a reader rebuilds.
+    let same = built(&request, request.message()).unwrap();
+    assert_eq!(same.hash(), request.hash());
+    // A parsed message beside another message's plaintext: refused, so no record writer gets
+    // a copy whose checks and bytes disagree.
+    let error = built(&request, other.message()).unwrap_err().to_string();
+    assert!(error.contains("isn't the stored plaintext's"), "{error}");
+    // Another app's certificate beside the plaintext.
+    let cap = AppCert::verify(&crate::common::cert_doc("cap"), &pubky(BOB)).unwrap();
+    assert!(StoredMessage::from_received(
+        request.sender(),
+        cap,
+        request.plaintext().clone(),
+        request.message().clone(),
+        Some(1),
+    )
+    .is_err());
+}
+
+#[test]
+fn test_record_transitions_compare_versions_of_one_record() {
+    let keys = Keys::load();
+    let alice = pubky(ALICE);
+    let b = bases(&keys);
+    // An unrequested record holds no message to keep: another attempt's record isn't its
+    // next version.
+    let bare = ActivityRecord {
+        proof: None,
+        ..b.unrequested.clone()
+    };
+    bare.check_later_write(&bare).unwrap();
+    let other_attempt = ActivityRecord {
+        attempt_id: Some(paykit_lib::identifiers::AttemptId::from_bytes([9; 16])),
+        ..bare.clone()
+    };
+    let error = bare
+        .check_later_write(&other_attempt)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("another record's"), "{error}");
+    // A request record against a period record of the same request.
+    let held = ActivityRecord {
+        attempted_periods: Vec::new(),
+        ..b.payer_request.clone()
+    };
+    assert!(held
+        .check_dropped_periods(&b.period, &[], &alice, &keys.identity(&alice).naming_key())
+        .is_err());
+    // A valid payment_lists record of another of bob's apps, with a newer version.
+    let (list, _) = list_case(&keys, 0);
+    let cap = keys.app("cap").keys.app_id_bytes();
+    let cap_list = resign_with(&keys, "private_payment_list", |m| {
+        m.from.app_id = cap;
+        let version = m.body["version"].as_u64().unwrap();
+        m.body
+            .insert("version".into(), serde_json::json!(version + 1));
+    });
+    let other_app = PaymentListRecord {
+        app_id: cap,
+        list: cap_list,
+        ..list.clone()
+    };
+    let error = list.check_later_write(&other_app).unwrap_err().to_string();
+    assert!(error.contains("another payee app's"), "{error}");
+    // An allowances record with another counterparty, its messages unchanged.
+    let (accepted, _) = allowance_cases(&keys);
+    let ended = accepted[0].1.clone();
+    let swapped = AllowanceRecord {
+        counterparty: alice,
+        ..ended.clone()
+    };
+    assert!(ended.check_later_history(&swapped).is_err());
+    assert!(ended.check_later_write(&swapped).is_err());
 }

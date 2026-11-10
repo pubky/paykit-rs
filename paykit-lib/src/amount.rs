@@ -228,12 +228,21 @@ pub struct Rate {
 }
 
 impl Rate {
-    /// A rate, whose value must be above zero (Paykit wire 1.2).
+    /// A rate the caller supplies, whose value must be above zero (Paykit wire 1.2).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a zero value.
+    pub fn new(asset: Asset, value: Decimal) -> Result<Self> {
+        Self::read(asset, value).map_err(Error::into_validation)
+    }
+
+    /// A rate read from a document (Paykit wire 1.2).
     ///
     /// # Errors
     ///
     /// [`Error::Invalid`] for a zero value.
-    pub fn new(asset: Asset, value: Decimal) -> Result<Self> {
+    pub(crate) fn read(asset: Asset, value: Decimal) -> Result<Self> {
         if value.is_zero() {
             return invalid("Paykit wire 1.2: a rate is above zero");
         }
@@ -329,6 +338,17 @@ mod tests {
     fn test_rate_is_above_zero() {
         let btc = Asset::parse("btc").unwrap();
         assert!(Rate::new(btc.clone(), Decimal::parse("0.1").unwrap()).is_ok());
-        assert!(Rate::new(btc, Decimal::parse("0.000").unwrap()).is_err());
+        assert!(Rate::new(btc.clone(), Decimal::parse("0.000").unwrap()).is_err());
+    }
+
+    #[test]
+    fn test_rate_error_class_follows_its_source() {
+        let btc = Asset::parse("btc").unwrap();
+        let zero = Decimal::parse("0").unwrap();
+        assert!(matches!(
+            Rate::new(btc.clone(), zero.clone()),
+            Err(Error::Validation(_))
+        ));
+        assert!(matches!(Rate::read(btc, zero), Err(Error::Invalid(_))));
     }
 }

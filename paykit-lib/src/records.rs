@@ -149,14 +149,17 @@ impl StoredMessage {
         })
     }
 
-    /// A stored message from one the Switch client received and checked: the recipient
-    /// checks 1 to 9 (Switch wire 5.1) passed in the client, with Paykit's certificate checks
-    /// at check 8 (Paykit wire 3.1), and check 10 passed in [`check_body`]. Nothing is checked
-    /// again; the body is read once more, for its typed value.
+    /// A stored message from one the Switch client received and checked: the sender, its
+    /// certificate, the signed plaintext and the parsed message the client gives. The stored
+    /// copy is rebuilt from the sender, the certificate and the plaintext alone, through
+    /// [`StoredMessage::new`], as a reader rebuilds it from the record (Paykit wire 5.2), and
+    /// `message` must be what that plaintext parses to, addressed as it says. So the copy a
+    /// record holds is always the one its readers verify, and its parts can't disagree.
     ///
     /// # Errors
     ///
-    /// As [`Body::parse`], for a body that didn't pass check 10.
+    /// As [`StoredMessage::new`], and [`Error::Invalid`] for a `message` or certificate that
+    /// isn't the plaintext's.
     pub fn from_received(
         sender: [u8; 32],
         cert: AppCert,
@@ -164,15 +167,12 @@ impl StoredMessage {
         message: Message,
         accepted_at: Option<u64>,
     ) -> Result<Self> {
-        let body = Body::parse(&message)?;
-        Ok(Self {
-            sender,
-            cert,
-            plaintext,
-            message,
-            body,
-            accepted_at,
-        })
+        let stored = Self::new(sender, cert.signed(), plaintext, accepted_at, &message.to)?;
+        ensure(
+            stored.message == message && stored.cert.signed() == cert.signed(),
+            "Paykit wire 5.2: the parsed message or certificate isn't the stored plaintext's",
+        )?;
+        Ok(stored)
     }
 
     /// Read a stored message addressed to `recipient` (Paykit wire 5.2), with the recipient
@@ -1085,6 +1085,7 @@ impl ActivityRecord {
         // Records built in code are held to the reader's rules first (Paykit wire 5.3).
         self.check()?;
         later.check()?;
+        self.check_same_record(later)?;
         let later_roles = later.stored();
         for (role, seen) in self.stored() {
             let now = later_roles
@@ -1121,6 +1122,23 @@ impl ActivityRecord {
         Ok(())
     }
 
+    /// Two versions of one activity record (Paykit wire 5.3): the same collection and
+    /// counterparty, the same binding (request, Billing Period, or a payment without a
+    /// request), and, for a payment without a request, the `attempt_id` held.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] for another record.
+    fn check_same_record(&self, later: &ActivityRecord) -> Result<()> {
+        ensure(
+            self.side == later.side
+                && self.counterparty == later.counterparty
+                && self.binding()? == later.binding()?
+                && self.attempt_id.is_none_or(|a| later.attempt_id == Some(a)),
+            "Paykit wire 5.3: a later write is another record's",
+        )
+    }
+
     /// "Attempted periods" (Paykit wire 5.3): a reader that holds the version a write was
     /// built on (`self`) checks every listed period `later` drops: the write's `conditions`
     /// carry a `claim_step` condition on that period's claim, the obligation of (payee,
@@ -1140,6 +1158,7 @@ impl ActivityRecord {
         // Records built in code are held to the reader's rules first (Paykit wire 5.3).
         self.check()?;
         later.check()?;
+        self.check_same_record(later)?;
         let RecordBinding::Request { request_hash } = self.binding()? else {
             return invalid("Paykit wire 5.3: attempted_periods belong to a request record");
         };
@@ -1329,6 +1348,10 @@ impl PaymentListRecord {
         // Records built in code are held to the reader's rules first (Paykit wire 5.4).
         self.check()?;
         later.check()?;
+        ensure(
+            self.payee == later.payee && self.app_id == later.app_id,
+            "Paykit wire 5.4: a later write is another payee app's list record",
+        )?;
         let version = |r: &PaymentListRecord| match r.list.body() {
             Body::PrivatePaymentList(l) => Ok(l.version),
             _ => invalid("Paykit wire 5.4: list holds another kind than private_payment_list"),
@@ -1834,6 +1857,10 @@ impl AllowanceRecord {
     ///
     /// [`Error::Invalid`] for a later write that changes or drops an entry seen.
     pub fn check_later_history(&self, later: &AllowanceRecord) -> Result<()> {
+        ensure(
+            self.counterparty == later.counterparty && self.allowance_id == later.allowance_id,
+            "Paykit wire 5.4: a later write is another Allowance's record",
+        )?;
         ensure(
             later.grants.len() >= self.grants.len()
                 && self.grants.iter().zip(&later.grants).all(|(a, b)| a == b),

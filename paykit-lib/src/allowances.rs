@@ -88,14 +88,23 @@ pub struct AnchoredLimit {
 }
 
 impl AnchoredLimit {
-    /// An anchored period from `anchor`, `every` and `unit`.
+    /// An anchored period the caller supplies, from `anchor`, `every` and `unit`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for `every` of 0.
+    pub fn new(anchor: TermsTime, every: u64, unit: Unit) -> Result<Self> {
+        Self::read(anchor, every, unit).map_err(Error::into_validation)
+    }
+
+    /// An anchored period read from terms (Paykit wire 4.15).
     ///
     /// # Errors
     ///
     /// [`Error::Invalid`] for `every` of 0.
-    pub fn new(anchor: TermsTime, every: u64, unit: Unit) -> Result<Self> {
+    fn read(anchor: TermsTime, every: u64, unit: Unit) -> Result<Self> {
         Ok(Self {
-            rule: AnchoredRule::new(anchor.ms(), every, unit)?,
+            rule: AnchoredRule::read(anchor.ms(), every, unit)?,
             anchor,
         })
     }
@@ -466,7 +475,7 @@ fn read_period_limit(item: &Value) -> Result<(PeriodLimit, LimitSpelling<'_>)> {
         "anchored" => {
             let text = period.req_str("anchor")?;
             anchor = Some(text);
-            LimitPeriod::Anchored(AnchoredLimit::new(
+            LimitPeriod::Anchored(AnchoredLimit::read(
                 TermsTime::read(text, "anchor")?,
                 every,
                 unit,
@@ -1228,6 +1237,10 @@ pub fn check_successor(
     held.check_valid(terms)?;
     newer.check_valid(terms)?;
     let refuse = |why: &str| invalid(format!("Paykit wire 5.5: a newer ledger version {why}"));
+    // One ledger, two versions: the same Allowance with the same counterparty.
+    if newer.counterparty != held.counterparty || newer.allowance_id != held.allowance_id {
+        return refuse("is another Allowance's ledger");
+    }
     let longest = terms.longest_period(newer_time)?;
     let (mut into_spent, mut into_count) = (0u128, 0u64);
     for entry in &held.entries {
@@ -1802,6 +1815,33 @@ mod tests {
     }
 
     #[test]
+    fn test_successor_is_the_same_allowances_ledger() {
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let now = t("2026-03-10T00:00:00.000Z");
+        let empty = ledger(Vec::new());
+        check_successor(&terms, &empty, &empty, now).unwrap();
+        let other_counterparty = Ledger {
+            counterparty: [6; 32],
+            ..empty.clone()
+        };
+        let other_allowance = Ledger {
+            allowance_id: AllowanceId::parse("55de1f16-1a9e-4504-bc9c-57efc3a2b38c").unwrap(),
+            ..empty.clone()
+        };
+        for newer in [other_counterparty, other_allowance] {
+            let error = check_successor(&terms, &empty, &newer, now).unwrap_err();
+            assert!(error.to_string().contains("another Allowance"), "{error}");
+        }
+        // Non-empty too.
+        let held = ledger(vec![entry(1, "0.01", "2026-03-01T00:00:00.000Z", None)]);
+        let moved = Ledger {
+            counterparty: [6; 32],
+            ..held.clone()
+        };
+        assert!(check_successor(&terms, &held, &moved, now).is_err());
+    }
+
+    #[test]
     fn test_successor_refuses_each_rule() {
         let terms = AllowanceTerms::from_json(&terms()).unwrap();
         let now = t("2026-03-10T00:00:00.000Z");
@@ -2029,6 +2069,26 @@ mod tests {
         let mut late = l.clone();
         late.entries[0].at = u64::MAX;
         assert!(usage(&terms, &late, &HashMap::new(), now).is_err());
+    }
+
+    #[test]
+    fn test_anchored_limit_error_class_follows_its_source() {
+        let anchor = TermsTime::new(t("2026-01-31T00:00:00Z"));
+        assert!(matches!(
+            AnchoredLimit::new(anchor.clone(), 0, Unit::Month),
+            Err(Error::Validation(_))
+        ));
+        assert!(matches!(
+            AnchoredLimit::read(anchor, 0, Unit::Month),
+            Err(Error::Invalid(_))
+        ));
+        let terms = with_limits(json!([{ "amount_limit": "1", "payment_count_limit": null,
+            "period": { "anchor": "2026-01-31T00:00:00Z", "every": 0, "kind": "anchored",
+            "unit": "month" } }]));
+        assert!(matches!(
+            AllowanceTerms::from_json(&terms),
+            Err(Error::Invalid(_))
+        ));
     }
 
     #[test]
