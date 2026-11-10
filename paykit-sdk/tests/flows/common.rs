@@ -247,12 +247,25 @@ pub fn store() -> Arc<dyn StateStore> {
 pub struct FailingRecordReads {
     inner: MemoryStore,
     armed: std::sync::atomic::AtomicBool,
+    /// Once set, the read of a held record that brings it to 1 fails, alone.
+    countdown: std::sync::atomic::AtomicU64,
 }
 
 impl FailingRecordReads {
     /// Fail every read of a held record from now on.
     pub fn arm(&self) {
         self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The store heals: reads pass again.
+    pub fn heal(&self) {
+        self.armed.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.countdown.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Fail only the `n`th read of a held record from now on, once.
+    pub fn fail_nth(&self, n: u64) {
+        self.countdown.store(n, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -262,8 +275,18 @@ impl StateStore for FailingRecordReads {
         ns: &str,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
-        if self.armed.load(std::sync::atomic::Ordering::SeqCst) && key.starts_with(b"rec/") {
-            return Err(pubky_switch_client::error::StoreError::Unavailable);
+        if key.starts_with(b"rec/") {
+            if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(pubky_switch_client::error::StoreError::Unavailable);
+            }
+            let left = self.countdown.load(std::sync::atomic::Ordering::SeqCst);
+            if left > 0 {
+                self.countdown
+                    .store(left - 1, std::sync::atomic::Ordering::SeqCst);
+                if left == 1 {
+                    return Err(pubky_switch_client::error::StoreError::Unavailable);
+                }
+            }
         }
         self.inner.get(ns, key)
     }

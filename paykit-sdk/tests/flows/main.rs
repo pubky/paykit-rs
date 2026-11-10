@@ -11,6 +11,7 @@ mod labels;
 mod one_time;
 mod protocols;
 mod public;
+mod receive_faults;
 mod recovery;
 mod resend;
 mod restore;

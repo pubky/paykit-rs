@@ -32,7 +32,7 @@ use paykit_lib::records::{ActivitySide, PaymentListRecord, StoredMessage, Unrequ
 use paykit_lib::{AttemptId, Body};
 use pubky_switch_client::app::{
     AppError, ClaimFetch, ClaimOp, LocalWrite, Need, ObligationDeadline, ReceiveContext,
-    Refusal as ClientRefusal,
+    Refusal as ClientRefusal, StoreFailure,
 };
 use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome};
 use pubky_switch_core::enc::serde_b64;
@@ -50,20 +50,27 @@ use crate::state::{self, key, Tx};
 
 /// Why an effect wasn't built.
 pub(crate) enum Fail {
-    /// A write can't be built now, for want of a scope key: the client keeps the entry and
-    /// hands it over again (Switch spec 3.5).
+    /// A record write can't be built now, for want of a scope key. Only the receive
+    /// context's write gives it, and the context then holds the entry itself, whatever the
+    /// step returns (Switch spec 3.5): the SDK never makes one of its own.
     NotNow,
     /// The effect can't be built: the entry is dropped, with the rule.
     Drop(String),
     /// The effect needs these claims read from the switch first (Switch spec 10.2): the
     /// client reads them and calls the step again.
     Need(Vec<Need>),
+    /// The store failed, or holds data of the SDK's own that doesn't read: the entry is
+    /// held, or parked, never consumed (Switch spec 8.2).
+    Store(StoreFailure),
 }
 
 impl From<AppError> for Fail {
     fn from(error: AppError) -> Self {
         match error {
             AppError::Refused(ClientRefusal::NotNow(_)) => Self::NotNow,
+            // A store that fails for now, or holds a value that doesn't read, holds the
+            // entry: a valid message is never consumed by a store failure (Switch spec 8.2).
+            AppError::Store(error) => Self::Store(StoreFailure::from(error)),
             _ => Self::Drop("the message's effect can't be built".into()),
         }
     }

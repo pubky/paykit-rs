@@ -307,10 +307,12 @@ impl Protocol for PaykitProtocol {
             Err(reason) => return Outcome::Drop { reason },
         };
         match receive::effect(cx, &stored, message.seq) {
-            // A write that can't be built now leaves the entry waiting, whatever is returned.
+            // A write the context couldn't build for want of a key: the context holds the
+            // entry itself, whatever is returned (Switch spec 3.5).
             Ok(()) | Err(Fail::NotNow) => Outcome::Apply(Effect::default()),
             Err(Fail::Need(needs)) => Outcome::Need(needs),
             Err(Fail::Drop(reason)) => Outcome::Drop { reason },
+            Err(Fail::Store(failure)) => Outcome::Retry(failure),
         }
     }
 
