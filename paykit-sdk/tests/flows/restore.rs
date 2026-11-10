@@ -368,3 +368,57 @@ async fn test_restore_duplicate_journal_entry_refused() {
     let error = refused_restore(&w, backup).await;
     assert!(is_corrupt(&error), "{error:?}");
 }
+
+#[tokio::test]
+async fn test_restore_failure_rebuilt_that_completed_after_all_sends_its_proof() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let backup = wallet.backup().await.unwrap();
+    // Paid after the backup; the method reports a failure, and the device is lost before
+    // the outcome is written.
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    w.rail.settle(&attempt_id, false);
+    drop(wallet);
+
+    // The restored app rebuilds the payment from its records and writes it `failed`.
+    let mut app = restored(&w, &backup).await;
+    let report = app.reconcile().await.unwrap();
+    assert!(
+        matches!(report.resolved.as_slice(), [PayOutcome::Failed { .. }]),
+        "{report:?}"
+    );
+    app.end_reconcile(UserConfirmed::new()).await.unwrap();
+    // The payment completed after all: the owner finds it and sends its proof (Paykit spec
+    // 7.2).
+    w.rail.complete_after_failure(&attempt_id);
+    let resumed = app.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            resumed.as_slice(),
+            [PayOutcome::Paid {
+                proof_msg_id: Some(_),
+                ..
+            }]
+        ),
+        "{resumed:?}"
+    );
+    assert!(record_holds_proof(&app, &request).await);
+    shop.receive(None).await.unwrap();
+    let sales = shop.payee_activity().await.unwrap();
+    assert_eq!(sales[0].attempt_id, Some(attempt_id));
+    assert!(shop
+        .verify_payment(&sales[0].record)
+        .await
+        .unwrap()
+        .is_some());
+}

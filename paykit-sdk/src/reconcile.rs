@@ -179,6 +179,9 @@ impl Paykit {
                         Some(RailOutcome::Failed) => {
                             match self.rebuilt_entry(&obligation, id).await? {
                                 Some(mut entry) => {
+                                    // Reported failed by the method, so asked again while its
+                                    // history keeps the dispatch (Paykit spec 7.2).
+                                    entry.failed_by_method = true;
                                     entry.stage = Stage::RailFailed;
                                     report.resolved.push(self.report(&mut entry).await?);
                                 }
