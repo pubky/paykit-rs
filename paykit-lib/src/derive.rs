@@ -155,10 +155,16 @@ pub mod natural_key {
 /// The settlement ID of a payment proof's `proof` object (Paykit wire 1.5): the bytes its
 /// payment method defines to name one settlement, in that method's one spelling.
 ///
-/// The one method the wire format fixes is `bitcoin-txid`: its `txid`, 64 lower-case hex
-/// characters, as its UTF-8 text. `None` for a proof in another spelling, or of a method
-/// this crate doesn't know: such a proof isn't credited as a payment without a request.
+/// The methods the wire format fixes are `bitcoin-txid`, whose settlement ID is its `txid`,
+/// 64 lower-case hex characters, as its UTF-8 text; and the prototype's fake rail,
+/// `{ "rail": "fake", "tx": ... }` without a `type`, whose settlement ID is its `tx` text,
+/// not empty. `None` for a proof in another spelling, or of a method this crate doesn't
+/// know: such a proof isn't credited as a payment without a request.
 pub fn settlement_id(proof: &Map<String, Value>) -> Option<Vec<u8>> {
+    if !proof.contains_key("type") && proof.get("rail").and_then(Value::as_str) == Some("fake") {
+        let tx = proof.get("tx")?.as_str()?;
+        return (!tx.is_empty()).then(|| tx.as_bytes().to_vec());
+    }
     match proof.get("type")?.as_str()? {
         "bitcoin-txid" => {
             let txid = proof.get("txid")?.as_str()?;
@@ -191,6 +197,21 @@ mod tests {
     }
 
     #[test]
+    fn test_settlement_id_of_the_fake_rail() {
+        let id = settlement_id(&proof(json!({ "rail": "fake", "tx": "t1" })));
+        assert_eq!(id, Some(b"t1".to_vec()));
+        for bad in [
+            json!({ "rail": "fake" }),
+            json!({ "rail": "fake", "tx": "" }),
+            json!({ "rail": "fake", "tx": 1 }),
+            json!({ "rail": "fake", "tx": null }),
+            json!({ "rail": "other", "tx": "t1" }),
+        ] {
+            assert_eq!(settlement_id(&proof(bad.clone())), None, "{bad}");
+        }
+    }
+
+    #[test]
     fn test_settlement_id_refuses_other_spellings_and_methods() {
         let upper = "4A5E1E4BAAB89F3A32518A88C31BC87F618F76673E2CC77AB2127B7AFDEDA33B";
         for bad in [
@@ -198,7 +219,7 @@ mod tests {
             json!({ "type": "bitcoin-txid", "txid": "4a5e" }),
             json!({ "type": "bitcoin-txid" }),
             json!({ "type": "bitcoin-bolt11-preimage", "data": "00" }),
-            json!({ "rail": "fake", "tx": "t1" }),
+            json!({ "rail": "fake", "tx": "t1", "type": "bitcoin-txid" }),
         ] {
             assert_eq!(settlement_id(&proof(bad.clone())), None, "{bad}");
         }
