@@ -550,11 +550,16 @@ impl PaymentRequest {
     /// payment deadline's `timestamp`, and for a Billing Period of a recurring request the
     /// period's start plus the payment deadline's `seconds`. `None` when there is no `d`.
     ///
+    /// A `d + 1 ms` past the last time the grammar writes, 9999-12-31T23:59:59.999Z, is that
+    /// last time, which means "never": a sum past the last time Switch wire 1.6 can write
+    /// means "never" (Switch wire 1.1), and the Switch's `attempt_deadline` saturates there.
+    ///
     /// # Errors
     ///
     /// [`Error::Invalid`] for a period with a one-time request, none with a recurring one, a
-    /// period that isn't one of this request's (Paykit wire 4.4), or a deadline past the last
-    /// time the grammar writes.
+    /// period that isn't one of this request's (Paykit wire 4.4), or a `seconds` so large the
+    /// sum overflows 64 bits, which no request read from the wire carries (Switch wire 1.1
+    /// integers are at most 2^53 - 1).
     pub fn attempt_deadline(&self, period: Option<&BillingPeriod>) -> Result<Option<u64>> {
         let d = match (self.is_recurring(), period) {
             (false, None) => {
@@ -577,9 +582,7 @@ impl PaymentRequest {
                             .checked_mul(1000)
                             .and_then(|s| period.starts_at.checked_add(s))
                             .ok_or_else(|| {
-                                Error::Invalid(
-                                    "Paykit wire 4.5: a deadline past the grammar's times".into(),
-                                )
+                                Error::Invalid("Paykit wire 4.5: a deadline past 64 bits".into())
                             })?,
                     ),
                     _ => None,
@@ -2081,6 +2084,40 @@ mod tests {
         );
         assert!(r.attempt_deadline(None).is_err());
         assert_eq!(r.acceptance_end(), r.proposal_expires_at.map(|e| e + 1));
+    }
+
+    #[test]
+    fn test_request_deadline_past_the_grammar_means_never() {
+        use pubky_switch_core::time::MAX_TIME_MS;
+        let mut b = request();
+        b["payment_deadline"] = json!({ "type": "period_start", "seconds": 1 });
+        b["recurrence"] = json!({ "anchor": "2026-01-31T00:00:00.000Z", "every": 1, "unit": "month",
+            "starts_at": "2026-01-31T00:00:00.000Z", "ends_at": null });
+        let base = PaymentRequest::from_body(&body(b.clone())).unwrap();
+        let period = base.recurrence.unwrap().first().unwrap();
+        let with = |seconds: u64| PaymentRequest {
+            payment_deadline: Some(PaymentDeadline::PeriodStart { seconds }),
+            ..base.clone()
+        };
+        // The last whole second whose d + 1 ms the grammar writes: written as it is.
+        let last = (MAX_TIME_MS - period.starts_at) / 1000;
+        let d = period.starts_at + last * 1000;
+        assert_eq!(
+            with(last).attempt_deadline(Some(&period)).unwrap(),
+            Some(d + 1)
+        );
+        // At and past the last time: the last time, "never".
+        for seconds in [last + 1, (1u64 << 53) - 1] {
+            assert_eq!(
+                with(seconds).attempt_deadline(Some(&period)).unwrap(),
+                Some(MAX_TIME_MS),
+                "{seconds}"
+            );
+        }
+        // Past 64 bits, only from a caller's own value: refused.
+        assert!(with(u64::MAX / 1000 + 1)
+            .attempt_deadline(Some(&period))
+            .is_err());
     }
 
     #[test]
