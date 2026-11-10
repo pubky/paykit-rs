@@ -1,5 +1,5 @@
 //! `messages.json`: every kind as v0.2 sends it (Switch wire 4.5, Paykit wire 4),
-//! `label_rejections` and `multi_protocol_senders`.
+//! `label_rejections`, `multi_protocol_senders` and `cancellation_roles`.
 
 use std::collections::HashMap;
 
@@ -122,6 +122,7 @@ fn test_vectors_messages() {
     check_resend(&keys, &read);
     check_label_rejections(&keys, &file);
     check_multi_protocol_senders(&keys, &file);
+    check_cancellation_roles(&keys, &file);
 }
 
 /// `refs` name messages by hash, in each kind's order (Paykit wire 4.3).
@@ -398,7 +399,7 @@ sender app ID (16) | signature (64) | u32_be(JSON length) | JSON, before zero pa
 payment_request_labelled is sent by bob's hosted app under its label, and alice's acceptance \
 of it copies the label; label_rejections holds requests a payer drops for their label; \
 multi_protocol_senders holds messages from apps whose certificates hold another protocol's \
-scopes.";
+scopes; cancellation_roles holds a cancellation between certificates of each pair of roles.";
 
 const MULTI_PROTOCOL_DESCRIPTION: &str = "Wire 4.1 check 8, spec 3.2, 3.3, Switch wire 3.1 \
 \"Several protocols\": messages.json's payment_request and resend_request_ids, as the shop \
@@ -487,8 +488,125 @@ fn generate(keys: &Keys) {
         &[
             (Place::Member("/description"), json!(DESCRIPTION)),
             (Place::Member("/multi_protocol_senders"), member),
+            (
+                Place::Member("/cancellation_roles"),
+                cancellation_roles(keys),
+            ),
         ],
     );
+}
+
+const CANCELLATION_DESCRIPTION: &str = "Wire 4.1 check 8, 4.3, 4.8, spec 3.3: messages.json's \
+payment_request_cancellation, as the shop signs it, without a label, presented with a \
+certificate of the shop's keys (sender_cert) at a certificate of alice's wallet's keys \
+(recipient_cert), each with its scopes changed, its permissions those Paykit's scopes need, \
+and signed again. A cancellation's recipient holds the other role than its sender: the \
+payer's goes from pay to request, the payee's from request to pay. accepted are the two \
+pairings the recipient takes at check 8; refused are pay to pay and request to request, \
+which it drops there. reason is paykit-lib's wording, of the first check that refuses it.";
+
+/// The certificate of `app` with `scopes` and the permissions Paykit's scopes need.
+fn with_scopes(keys: &Keys, app: &str, scopes: &[&str]) -> AppCert {
+    let owned: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
+    reissued(
+        keys,
+        app,
+        scopes,
+        &paykit_lib::scopes::permissions_for(&owned),
+    )
+}
+
+/// Check 8 for the shop's cancellation, presented with `sender`, at `recipient`.
+fn cancellation_at(
+    keys: &Keys,
+    json: &[u8],
+    sender: &AppCert,
+    recipient: &AppCert,
+) -> pubky_switch_core::Result<()> {
+    let shop = keys.app("shop");
+    let plaintext = MessagePlaintext::sign_json(&shop.keys, json.to_vec(), OPAQUE_MEMBERS).unwrap();
+    let message = plaintext
+        .check(
+            &pubky(ALICE),
+            &shop.identity,
+            &VerifiedSender::from_cert(sender),
+            OPAQUE_MEMBERS,
+        )
+        .unwrap();
+    PaykitKindRules::for_certificate(recipient).check_scopes(&message, sender)
+}
+
+/// `cancellation_roles`, as paykit-lib generates it.
+fn cancellation_roles(keys: &Keys) -> Value {
+    let base = "payment_request_cancellation";
+    let m = message(base);
+    assert_eq!(st(&m, "sender_app"), keys.app("shop").app_id, "{base}");
+    let json = message_json(base);
+    let case = |name: &str, from: &[&str], to: &[&str], taken: bool| -> Value {
+        let sender = with_scopes(keys, "shop", from);
+        let recipient = with_scopes(keys, "wallet", to);
+        let plaintext =
+            MessagePlaintext::sign_json(&keys.app("shop").keys, json.clone(), OPAQUE_MEMBERS)
+                .unwrap();
+        let mut case = json!({
+            "json": String::from_utf8(json.clone()).unwrap(),
+            "name": name,
+            "recipient_cert": signed_json(recipient.signed()),
+            "sender_app": st(&m, "sender_app"),
+            "sender_cert": signed_json(sender.signed()),
+            "signature": b64(&plaintext.signature()),
+        });
+        match cancellation_at(keys, &json, &sender, &recipient) {
+            Ok(()) => assert!(taken, "{name}: taken"),
+            Err(error) => {
+                assert!(!taken, "{name}: {error}");
+                case["reason"] = json!(quoted(&error.to_string()));
+            }
+        }
+        case
+    };
+    json!({
+        "accepted": [
+            case("the payee's cancellation, from request to pay", &["request"], &["pay"], true),
+            case("the payer's cancellation, from pay to request", &["pay"], &["request"], true),
+        ],
+        "description": CANCELLATION_DESCRIPTION,
+        "refused": [
+            case("a cancellation from pay to pay", &["pay"], &["pay"], false),
+            case("a cancellation from request to request", &["request"], &["request"], false),
+        ],
+    })
+}
+
+/// `cancellation_roles` (Paykit wire 4.1 check 8, 4.8, spec 3.3): the shop's signature,
+/// certificates Paykit's verifiers take, and check 8 taking each pairing of opposite roles
+/// and dropping each pairing of one role.
+fn check_cancellation_roles(keys: &Keys, file: &Value) {
+    let m = &file["cancellation_roles"];
+    let (shop, alice, bob) = (keys.app("shop"), pubky(ALICE), pubky(BOB));
+    assert_eq!(arr(m, "accepted").len(), 2);
+    assert_eq!(arr(m, "refused").len(), 2);
+    for (list, accepted) in [("accepted", true), ("refused", false)] {
+        for case in arr(m, list) {
+            let name = st(case, "name");
+            let json = st(case, "json").as_bytes().to_vec();
+            assert_eq!(st(case, "sender_app"), shop.app_id, "{name}");
+            let plaintext =
+                MessagePlaintext::sign_json(&shop.keys, json.clone(), OPAQUE_MEMBERS).unwrap();
+            assert_eq!(b64(&plaintext.signature()), st(case, "signature"), "{name}");
+            let verify = |doc: &Value, identity: &[u8; 32]| {
+                paykit_lib::scopes::verify_certificate(&signed(doc), identity)
+                    .unwrap_or_else(|e| panic!("{name}: Paykit's verifiers take it: {e}"))
+            };
+            let sender = verify(&case["sender_cert"], &bob);
+            let recipient = verify(&case["recipient_cert"], &alice);
+            let verdict = cancellation_at(keys, &json, &sender, &recipient);
+            assert_eq!(verdict.is_ok(), accepted, "{name}: {verdict:?}");
+            if let Err(error) = verdict {
+                assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
+            }
+        }
+    }
 }
 
 /// `multi_protocol_senders` (Paykit wire 4.1 check 8, spec 3.3): the shop's signatures,

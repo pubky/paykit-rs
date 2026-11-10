@@ -354,8 +354,10 @@ fn body_label(message: &Message) -> Result<Option<&str>> {
 /// - a `payment_request` with `label` needs `request` or `request:<label>` in the sender's
 ///   certificate, and one without needs `request`;
 /// - a payer's acceptance, rejection, cancellation or proof with `label` needs `request` or
-///   `request:<label>` in the own certificate, one without needs `request`, and a
-///   cancellation without a label, which may be the payee's, passes at an app holding `pay`;
+///   `request:<label>` in the own certificate, and one without needs `request`;
+/// - a cancellation goes to the other role than its sender's: the payer's, from `pay`, at
+///   an app the label rule above lets take it, or the payee's, which carries no label, from
+///   `request` or a labelled selling scope at an app holding `pay`;
 /// - an extension kind `<prefix>.<name>` needs `ext:<prefix>` in both certificates;
 /// - a `resend_request` names no kinds: any Paykit App may send it, one holding at least one
 ///   of Paykit's scopes.
@@ -395,7 +397,10 @@ pub fn check_kind_scopes(message: &Message, sender: &[String], own: &[String]) -
             );
         }
     }
-    if kind.is_payer_reply() && !reply_label_allowed(kind, label, own) {
+    if kind == Kind::PaymentRequestCancellation {
+        return check_cancellation_roles(label, sender, own);
+    }
+    if kind.is_payer_reply() && !reply_label_allowed(label, own) {
         return invalid(
             "Paykit spec 3.4: the reply's label is outside the recipient's certificate",
         );
@@ -403,16 +408,33 @@ pub fn check_kind_scopes(message: &Message, sender: &[String], own: &[String]) -
     Ok(())
 }
 
-/// Whether an app holding `scopes` takes a payer's reply of `kind` labelled `label` (Paykit
-/// spec 3.4, Paykit wire 4.1 check 8): with a label, `request` or that label; without,
-/// `request`, or `pay` for a cancellation, which may be the payee's.
-fn reply_label_allowed(kind: Kind, label: Option<&str>, scopes: &[String]) -> bool {
+/// A cancellation's roles (Paykit spec 3.3, Paykit wire 4.3, 4.8): its recipient holds the
+/// other role than its sender. It is the payer's, sent from `pay` to an app that takes the
+/// payer's replies under its label (Paykit spec 3.4), or the payee's, which carries no
+/// label, sent from `request` or a labelled selling scope to an app holding `pay`. So `pay`
+/// to `pay` and `request` to `request` are dropped, whatever the label.
+///
+/// Security: check 8 sees only the two certificates, not which side the sender is on; the
+/// request record decides the side (Paykit wire 5.3). An app holding both roles may stand on
+/// either side, so the check passes when either pairing holds.
+fn check_cancellation_roles(label: Option<&str>, sender: &[String], own: &[String]) -> Result<()> {
+    let holds_pay = |scopes: &[String]| scopes.iter().any(|s| s == "pay");
+    let payer_cancels = holds_pay(sender) && reply_label_allowed(label, own);
+    let payee_cancels = label.is_none() && scopes::acts_as_payee(sender) && holds_pay(own);
+    if payer_cancels || payee_cancels {
+        return Ok(());
+    }
+    invalid(
+        "Paykit spec 3.3: a cancellation's recipient doesn't hold the other role than its sender",
+    )
+}
+
+/// Whether an app holding `scopes` takes a payer's reply labelled `label` (Paykit spec 3.4,
+/// Paykit wire 4.1 check 8): with a label, `request` or that label; without, `request`.
+fn reply_label_allowed(label: Option<&str>, scopes: &[String]) -> bool {
     match label {
         Some(label) => switch_scopes::holds(scopes, &format!("request:{label}")),
-        None => {
-            scopes.iter().any(|s| s == "request")
-                || (kind == Kind::PaymentRequestCancellation && scopes.iter().any(|s| s == "pay"))
-        }
+        None => scopes.iter().any(|s| s == "request"),
     }
 }
 
@@ -640,6 +662,42 @@ mod tests {
         let cancel = message("paykit.payment_request_cancellation", json!({}));
         check_kind_scopes(&cancel, &owned(&["request"]), &owned(&["pay"])).unwrap();
         assert!(check_kind_scopes(&cancel, &owned(&["pay"]), &owned(&["request:shop1"])).is_err());
+    }
+
+    #[test]
+    fn test_kinds_cancellation_goes_to_the_other_role() {
+        let plain = message("paykit.payment_request_cancellation", json!({}));
+        let labelled = message(
+            "paykit.payment_request_cancellation",
+            json!({ "label": "shop1" }),
+        );
+        // The payee's, to the payer's `pay`; the payer's, to the payee's `request` or label.
+        check_kind_scopes(&plain, &owned(&["request"]), &owned(&["pay"])).unwrap();
+        check_kind_scopes(&plain, &owned(&["request:shop1"]), &owned(&["pay"])).unwrap();
+        check_kind_scopes(&plain, &owned(&["pay"]), &owned(&["request"])).unwrap();
+        check_kind_scopes(&labelled, &owned(&["pay"]), &owned(&["request:shop1"])).unwrap();
+        check_kind_scopes(&labelled, &owned(&["pay"]), &owned(&["request"])).unwrap();
+        // An app holding both roles may be on either side.
+        check_kind_scopes(&plain, &owned(&["pay", "request"]), &owned(&["pay"])).unwrap();
+        // The same role on both ends is dropped.
+        for (sender, own) in [
+            (&["pay"][..], &["pay"][..]),
+            (&["request"][..], &["request"][..]),
+            (&["request:shop1"][..], &["request"][..]),
+            (&["request"][..], &["request:shop1"][..]),
+        ] {
+            let error = check_kind_scopes(&plain, &owned(sender), &owned(own)).unwrap_err();
+            assert!(
+                error.to_string().contains("other role"),
+                "{sender:?} to {own:?}"
+            );
+        }
+        // A labelled cancellation is the payer's: from `request`, or to `pay`, it is dropped.
+        assert!(check_kind_scopes(&labelled, &owned(&["request"]), &owned(&["pay"])).is_err());
+        assert!(check_kind_scopes(&labelled, &owned(&["pay"]), &owned(&["pay"])).is_err());
+        assert!(
+            check_kind_scopes(&labelled, &owned(&["request:shop1"]), &owned(&["request"])).is_err()
+        );
     }
 
     fn issued(identity: &IdentityKey, scopes: &[&str], permissions: &[Permission]) -> AppCert {

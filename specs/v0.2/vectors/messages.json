@@ -1,5 +1,70 @@
 {
-  "description": "Every message kind as sent in v0.2 (Switch wire 4.5, wire 4): the exact JSON bytes, their BLAKE3 hash (refs, request hash), the sender app's signature over lp(\"pubky-switch/v1/msg\", recipient identity, JSON), and the signed plaintext layout sender app ID (16) | signature (64) | u32_be(JSON length) | JSON, before zero padding. payment_request_labelled is sent by bob's hosted app under its label, and alice's acceptance of it copies the label; label_rejections holds requests a payer drops for their label; multi_protocol_senders holds messages from apps whose certificates hold another protocol's scopes.",
+  "cancellation_roles": {
+    "accepted": [
+      {
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_request_cancellation\",\"msg_id\":\"d2c95fff-c3f8-42fb-9f8b-94057e391fc4\",\"created_at\":\"2026-02-10T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"c_ys4n4gUNKJa3D13sszDTpkj8rqdB206n-gIMVuzXY\"],\"body\":{\"reason\":\"subscription_ended\"}}",
+        "name": "the payee's cancellation, from request to pay",
+        "recipient_cert": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoid2VqZjM3bmdyN3FpemVqM2VvaWpuM2hxNGMiLCJzaWduaW5nX2tleSI6IjM0WkdWbVZaTEVhVzlMVi1mdmRocTVMV3N0UGhsakhHYkpnY1FWU1I5RWsiLCJidW5kbGVfa2V5IjoiaVNGVk9XV2V1TjRFdU5CN2p4MEljT0NoWGRqRmFGRjBQOVlaR2VZTHNtRSIsInNjb3BlcyI6WyJwYXkiXSwicGVybWlzc2lvbnMiOlsiY2xhaW1zLnJlYWQiLCJjbGFpbXMud3JpdGUiLCJjb252ZXJzYXRpb24uYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "UD6xmIfy6B3PfPAP-am0JQt6CCfscGeljzZgFHhtcmtNrR_w8NQKXl-20JYHI1sWCrITWvCVSDyjmdac0UHbBw"
+        },
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "sender_cert": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0Il0sInBlcm1pc3Npb25zIjpbImNvbnZlcnNhdGlvbi5hZGQiXSwiaXNzdWVkX2F0IjoiMjAyNS0xMi0wMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTItMDFUMDA6MDA6MDAuMDAwWiJ9",
+          "sig": "kjRn-Ypl6ldNI3Zzbos4kiF-j0aasP4o9asfK6iwH-zdYqUgUyDRAZSCouLlK4wzKtkKQUHF3s5oYztLZCu1Bw"
+        },
+        "signature": "0prmCC_v8TQJSZVgtpg-MjWqP4CnoVOB7ISYxev5QMlX6w93x0LaicnlzExtUk7Q5uFGghieycuSsGeBmdcdCg"
+      },
+      {
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_request_cancellation\",\"msg_id\":\"d2c95fff-c3f8-42fb-9f8b-94057e391fc4\",\"created_at\":\"2026-02-10T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"c_ys4n4gUNKJa3D13sszDTpkj8rqdB206n-gIMVuzXY\"],\"body\":{\"reason\":\"subscription_ended\"}}",
+        "name": "the payer's cancellation, from pay to request",
+        "recipient_cert": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoid2VqZjM3bmdyN3FpemVqM2VvaWpuM2hxNGMiLCJzaWduaW5nX2tleSI6IjM0WkdWbVZaTEVhVzlMVi1mdmRocTVMV3N0UGhsakhHYkpnY1FWU1I5RWsiLCJidW5kbGVfa2V5IjoiaVNGVk9XV2V1TjRFdU5CN2p4MEljT0NoWGRqRmFGRjBQOVlaR2VZTHNtRSIsInNjb3BlcyI6WyJyZXF1ZXN0Il0sInBlcm1pc3Npb25zIjpbImNvbnZlcnNhdGlvbi5hZGQiXSwiaXNzdWVkX2F0IjoiMjAyNS0xMi0wMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTItMDFUMDA6MDA6MDAuMDAwWiJ9",
+          "sig": "dnlO9BzjdL9SJZ44JrVhS0n9Vv5WOrCc1RC3zMopcCV987_wnvzq2-Ieb5sJUjUp-hNwBniPAnbXF0OHANm_BQ"
+        },
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "sender_cert": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXkiXSwicGVybWlzc2lvbnMiOlsiY2xhaW1zLnJlYWQiLCJjbGFpbXMud3JpdGUiLCJjb252ZXJzYXRpb24uYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "ae8OW0pL_VkfzD05_uLpx7zd5dKX5djj0DC9SYDOuxVNc6rv-ynY7idalzayG-9nk4O9oivPXmxYrrnYxLDwBQ"
+        },
+        "signature": "0prmCC_v8TQJSZVgtpg-MjWqP4CnoVOB7ISYxev5QMlX6w93x0LaicnlzExtUk7Q5uFGghieycuSsGeBmdcdCg"
+      }
+    ],
+    "description": "Wire 4.1 check 8, 4.3, 4.8, spec 3.3: messages.json's payment_request_cancellation, as the shop signs it, without a label, presented with a certificate of the shop's keys (sender_cert) at a certificate of alice's wallet's keys (recipient_cert), each with its scopes changed, its permissions those Paykit's scopes need, and signed again. A cancellation's recipient holds the other role than its sender: the payer's goes from pay to request, the payee's from request to pay. accepted are the two pairings the recipient takes at check 8; refused are pay to pay and request to request, which it drops there. reason is paykit-lib's wording, of the first check that refuses it.",
+    "refused": [
+      {
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_request_cancellation\",\"msg_id\":\"d2c95fff-c3f8-42fb-9f8b-94057e391fc4\",\"created_at\":\"2026-02-10T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"c_ys4n4gUNKJa3D13sszDTpkj8rqdB206n-gIMVuzXY\"],\"body\":{\"reason\":\"subscription_ended\"}}",
+        "name": "a cancellation from pay to pay",
+        "reason": "invalid: a cancellation's recipient doesn't hold the other role than its sender",
+        "recipient_cert": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoid2VqZjM3bmdyN3FpemVqM2VvaWpuM2hxNGMiLCJzaWduaW5nX2tleSI6IjM0WkdWbVZaTEVhVzlMVi1mdmRocTVMV3N0UGhsakhHYkpnY1FWU1I5RWsiLCJidW5kbGVfa2V5IjoiaVNGVk9XV2V1TjRFdU5CN2p4MEljT0NoWGRqRmFGRjBQOVlaR2VZTHNtRSIsInNjb3BlcyI6WyJwYXkiXSwicGVybWlzc2lvbnMiOlsiY2xhaW1zLnJlYWQiLCJjbGFpbXMud3JpdGUiLCJjb252ZXJzYXRpb24uYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "UD6xmIfy6B3PfPAP-am0JQt6CCfscGeljzZgFHhtcmtNrR_w8NQKXl-20JYHI1sWCrITWvCVSDyjmdac0UHbBw"
+        },
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "sender_cert": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJwYXkiXSwicGVybWlzc2lvbnMiOlsiY2xhaW1zLnJlYWQiLCJjbGFpbXMud3JpdGUiLCJjb252ZXJzYXRpb24uYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "ae8OW0pL_VkfzD05_uLpx7zd5dKX5djj0DC9SYDOuxVNc6rv-ynY7idalzayG-9nk4O9oivPXmxYrrnYxLDwBQ"
+        },
+        "signature": "0prmCC_v8TQJSZVgtpg-MjWqP4CnoVOB7ISYxev5QMlX6w93x0LaicnlzExtUk7Q5uFGghieycuSsGeBmdcdCg"
+      },
+      {
+        "json": "{\"v\":1,\"kind\":\"paykit.payment_request_cancellation\",\"msg_id\":\"d2c95fff-c3f8-42fb-9f8b-94057e391fc4\",\"created_at\":\"2026-02-10T00:00:00.000Z\",\"from\":{\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\"},\"to\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"refs\":[\"c_ys4n4gUNKJa3D13sszDTpkj8rqdB206n-gIMVuzXY\"],\"body\":{\"reason\":\"subscription_ended\"}}",
+        "name": "a cancellation from request to request",
+        "reason": "invalid: a cancellation's recipient doesn't hold the other role than its sender",
+        "recipient_cert": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoid2VqZjM3bmdyN3FpemVqM2VvaWpuM2hxNGMiLCJzaWduaW5nX2tleSI6IjM0WkdWbVZaTEVhVzlMVi1mdmRocTVMV3N0UGhsakhHYkpnY1FWU1I5RWsiLCJidW5kbGVfa2V5IjoiaVNGVk9XV2V1TjRFdU5CN2p4MEljT0NoWGRqRmFGRjBQOVlaR2VZTHNtRSIsInNjb3BlcyI6WyJyZXF1ZXN0Il0sInBlcm1pc3Npb25zIjpbImNvbnZlcnNhdGlvbi5hZGQiXSwiaXNzdWVkX2F0IjoiMjAyNS0xMi0wMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTItMDFUMDA6MDA6MDAuMDAwWiJ9",
+          "sig": "dnlO9BzjdL9SJZ44JrVhS0n9Vv5WOrCc1RC3zMopcCV987_wnvzq2-Ieb5sJUjUp-hNwBniPAnbXF0OHANm_BQ"
+        },
+        "sender_app": "brrz3m6g5rci6iqnzke44q4djc",
+        "sender_cert": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0Il0sInBlcm1pc3Npb25zIjpbImNvbnZlcnNhdGlvbi5hZGQiXSwiaXNzdWVkX2F0IjoiMjAyNS0xMi0wMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMTItMDFUMDA6MDA6MDAuMDAwWiJ9",
+          "sig": "kjRn-Ypl6ldNI3Zzbos4kiF-j0aasP4o9asfK6iwH-zdYqUgUyDRAZSCouLlK4wzKtkKQUHF3s5oYztLZCu1Bw"
+        },
+        "signature": "0prmCC_v8TQJSZVgtpg-MjWqP4CnoVOB7ISYxev5QMlX6w93x0LaicnlzExtUk7Q5uFGghieycuSsGeBmdcdCg"
+      }
+    ]
+  },
+  "description": "Every message kind as sent in v0.2 (Switch wire 4.5, wire 4): the exact JSON bytes, their BLAKE3 hash (refs, request hash), the sender app's signature over lp(\"pubky-switch/v1/msg\", recipient identity, JSON), and the signed plaintext layout sender app ID (16) | signature (64) | u32_be(JSON length) | JSON, before zero padding. payment_request_labelled is sent by bob's hosted app under its label, and alice's acceptance of it copies the label; label_rejections holds requests a payer drops for their label; multi_protocol_senders holds messages from apps whose certificates hold another protocol's scopes; cancellation_roles holds a cancellation between certificates of each pair of roles.",
   "label_rejections": {
     "cases": [
       {
