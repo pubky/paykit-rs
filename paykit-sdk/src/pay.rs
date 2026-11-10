@@ -1,12 +1,14 @@
 //! Paying (Paykit spec 7.1, 7.2, 8.1, 8.4, 8.5): the paying order, with the payment journal.
 //!
-//! 1. **Attempt.** The transfer is checked first; the payment is journaled; then the `attempt`
+//! 1. **Attempt.** The transfer is checked first, then, before any write, the own
+//!    `identity.json` (read again, and confirmed within the last 60 s) and the payee's; the
+//!    payment is journaled; then the `attempt`
 //!    is written on the obligation's claim, conditioned on the version of the request record
 //!    the app read and carrying the request's deadline. A payment without a request writes
 //!    its `payer_activity` record in the same batch, and a single-use endpoint its
 //!    `payment_lists` mark. The client checks the attempt's proof: only a verified answer
 //!    showing this app's own open attempt lets money move.
-//! 2. **Check, then pay.** The own `identity.json` is revalidated and the destination checked
+//! 2. **Check, then pay.** The own `identity.json` is still confirmed and the destination checked
 //!    ([`crate::destination`]); a failure writes `failed` instead of paying. The start of the
 //!    payment is journaled, then the rail pays with the attempt ID as its idempotency key,
 //!    and a one-time request's acceptance goes out at the same time.
@@ -28,7 +30,7 @@ use paykit_lib::records::{
 use paykit_lib::{AttemptId, Body, Label, PaymentAmount, PaymentEndpointIdentifier};
 use pubky_switch_client::app::{
     claim_conflict, AppError, ClaimOp, Initiator, ObligationDeadline, OpBatch,
-    Refusal as ClientRefusal, SignedMessage, UserConfirmed,
+    Refusal as ClientRefusal, SignedMessage, UserConfirmed, REVALIDATION_MS,
 };
 use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome};
 use pubky_switch_core::http::ErrorCode;
@@ -541,6 +543,9 @@ impl Paykit {
             unconfirmed,
         } = plan;
         let attempt_id = entry.attempt()?;
+        // The own identity.json, read again and confirmed, before any write: no attempt
+        // without a copy revalidated in the last 60 s (Paykit spec 4, Switch spec 12.6).
+        self.own_identity_confirmed(true).await?;
         // The payee's identity.json, before any write: a payment the user started whose
         // payee's switch couldn't confirm it needs the user's confirmation first, and an
         // automatic one isn't made (Paykit spec 7.2 step 1, Switch spec 4.3).
@@ -639,15 +644,11 @@ impl Paykit {
         };
         entry.step = submitted.proofs.first().and_then(|proof| proof.body().step);
         self.set_stage(&mut entry, Stage::Attempted).await?;
-        // Before any money moves: the own identity.json, then the destination (Paykit spec 4,
-        // 7.2). Either failing writes `failed` instead of paying.
-        if self.app.refresh_identity().await.is_err() {
-            return self
-                .fail_attempt(
-                    &mut entry,
-                    Refusal::IdentityUnavailable("the own identity.json isn't revalidated".into()),
-                )
-                .await;
+        // Before any money moves: the own identity.json, still confirmed within the last
+        // 60 s (read again if not), then the destination (Paykit spec 4, 7.2). Either failing
+        // writes `failed` instead of paying.
+        if let Err(refusal) = self.own_identity_confirmed(false).await {
+            return self.fail_attempt(&mut entry, refusal).await;
         }
         // The copy checked before the write is still fresh: this reads no network unless
         // it aged meanwhile (Switch spec 4.3).
@@ -668,6 +669,33 @@ impl Paykit {
         self.set_stage(&mut entry, Stage::Paying).await?;
         self.queue_owed_acceptance(&mut entry).await?;
         self.dispatch(entry).await
+    }
+
+    /// The own `identity.json` revalidated in the last [`REVALIDATION_MS`] (Paykit spec 4,
+    /// "Fresh before paying"; Switch spec 12.6 "Residual risk"): with `refresh`, it is read
+    /// again first, and without it only once its last confirmation is that old. A read that
+    /// confirms the copy held, or a confirmation under 60 s old, lets the payment go on;
+    /// `Missing`, `Older`, `Unavailable` and an error confirm nothing.
+    pub(crate) async fn own_identity_confirmed(
+        &mut self,
+        refresh: bool,
+    ) -> std::result::Result<(), Refusal> {
+        let now = self.now();
+        let recent =
+            |at: Option<u64>| at.is_some_and(|at| now.saturating_sub(at) < REVALIDATION_MS);
+        if !refresh && recent(self.app.identity_confirmed_at()) {
+            return Ok(());
+        }
+        let refreshed = match self.app.refresh_identity().await {
+            Ok(refreshed) => refreshed.confirmed_at().is_some(),
+            Err(_) => false,
+        };
+        if refreshed || recent(self.app.identity_confirmed_at()) {
+            return Ok(());
+        }
+        Err(Refusal::IdentityUnavailable(
+            "Paykit spec 4: the own identity.json wasn't confirmed in the last 60 s".into(),
+        ))
     }
 
     /// Whether `deadline` is at or before the highest service time the app verified: no

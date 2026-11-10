@@ -6,8 +6,10 @@
 //! - **Kinds an app takes:** its record's `accepts` lists the kinds its scopes receive that
 //!   this SDK handles; a sender wraps a kind to any app whose scopes receive it, by Paykit's
 //!   table (Paykit spec 3.3), and narrows a payer's replies by label (Paykit spec 3.4).
-//! - **Receiving** ([`Protocol::receive_with`]): check 10, then the message's effect, built
-//!   through the client's receive context so the record write it causes, any claim entry and
+//! - **Check 10** ([`Protocol::check_body`]): the kind and its body, with no effect, the one
+//!   place these rules run, so a push peek and the receive step agree.
+//! - **Receiving** ([`Protocol::receive_with`]): the effect of a message that passed check 10,
+//!   built through the client's receive context so the record write it causes, any claim entry and
 //!   local write go in the batch that moves the cursor (Switch spec 8.2; `crate::receive`).
 //!   After `409 conflict` the client reads the records again and calls it once more, and the
 //!   effect is built again from them.
@@ -159,22 +161,30 @@ fn view_get<T: serde::de::DeserializeOwned>(view: &LocalView<'_>, key: &str) -> 
     state::decode(&bytes).ok()
 }
 
-/// Check 10 of a message that passed checks 1 to 9 (Paykit wire 4.1): a kind this SDK
-/// handles, a body that parses for it, and a verifiable stored copy (Switch spec 8.2), the
-/// copy its records hold. `Err` names the rule that drops it.
-pub(crate) fn check(message: &ReceivedMessage, own: &[u8; 32]) -> Result<StoredMessage, String> {
+/// Check 10 of a message that passed checks 1 to 9 (Paykit wire 4.1), with no effect: a kind
+/// this SDK handles, and a body that parses for it, within the size of a recorded kind. The
+/// one place these rules run: the client runs it before the receive step, and a push peek
+/// runs it alone. `Err` names the rule that drops the message.
+pub(crate) fn check_message(message: &ReceivedMessage) -> Result<(), String> {
     let handled =
         Kind::from_kind(&message.message.kind).is_some_and(|kind| HANDLED_KINDS.contains(&kind));
     if !handled {
         return Err("Paykit wire 4.1 check 10: a kind this app doesn't handle".into());
     }
-    check_body(&message.message, message.plaintext.json()).map_err(|error| error.to_string())?;
-    StoredMessage::new(
+    check_body(&message.message, message.plaintext.json())
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// The stored copy of a message whose body passed check 10, as its records hold it
+/// (Paykit wire 5.2, Switch spec 8.2): nothing is checked again.
+pub(crate) fn stored_copy(message: &ReceivedMessage) -> Result<StoredMessage, String> {
+    StoredMessage::from_received(
         message.sender,
-        message.cert.signed(),
+        message.cert.clone(),
         message.plaintext.clone(),
+        message.message.clone(),
         Some(message.accepted_at_ms),
-        own,
     )
     .map_err(|error| error.to_string())
 }
@@ -270,11 +280,17 @@ impl Protocol for PaykitProtocol {
         self.narrows(message, recipient, kept)
     }
 
-    /// Check 10 (Paykit wire 4.1) and the message's effect, added to the batch that moves
-    /// the cursor (Switch spec 8.2; `crate::receive`). Called again after `409 conflict`,
-    /// with the records read again: the effect is built anew from them.
+    /// Check 10 (Paykit wire 4.1), with no effect: a kind this SDK handles ([`HANDLED_KINDS`])
+    /// and a body that parses for it, within the size of a recorded kind.
+    fn check_body(&self, message: &ReceivedMessage) -> Result<(), String> {
+        check_message(message)
+    }
+
+    /// The effect of a message that passed check 10, added to the batch that moves the
+    /// cursor (Switch spec 8.2; `crate::receive`). Called again after `409 conflict`, with
+    /// the records read again: the effect is built anew from them.
     fn receive_with(&self, message: &ReceivedMessage, cx: &mut ReceiveContext<'_>) -> Outcome {
-        let stored = match check(message, &cx.identity()) {
+        let stored = match stored_copy(message) {
             Ok(stored) => stored,
             Err(reason) => return Outcome::Drop { reason },
         };
@@ -549,28 +565,33 @@ mod receive_tests {
     }
 
     #[test]
-    fn test_protocol_check_keeps_a_valid_message_as_stored() {
+    fn test_protocol_check_body_passes_a_valid_message_kept_as_stored() {
         let alice = Party::new("alice", "wallet", &["pay"]);
         let bob = Party::new("bob", "shop", &["request"]);
         let stored = bob.message(&alice, "paykit.payment_request", vec![], request_body());
-        let checked = check(&received(&stored), &alice.id()).unwrap();
-        assert_eq!(checked.hash(), stored.hash());
-        assert_eq!(checked.accepted_at(), Some(NOW));
+        let message = received(&stored);
+        assert_eq!(protocol_of(&alice).check_body(&message), Ok(()));
+        let kept = stored_copy(&message).unwrap();
+        assert_eq!(kept.hash(), stored.hash());
+        assert_eq!(kept.accepted_at(), Some(NOW));
     }
 
     #[test]
-    fn test_protocol_check_drops_an_unhandled_kind_a_bad_body_and_another_recipient() {
+    fn test_protocol_check_body_drops_an_unhandled_kind_and_a_bad_body() {
         let alice = Party::new("alice", "wallet", &["pay", "allowance"]);
         let bob = Party::new("bob", "shop", &["request", "allowance"]);
+        let p = protocol_of(&alice);
         let stored = bob.message(&alice, "paykit.payment_request", vec![], request_body());
         let mut message = received(&stored);
         message.message.kind = "paykit.allowance_end".into();
-        assert!(check(&message, &alice.id()).is_err());
+        assert!(p.check_body(&message).is_err());
         let mut message = received(&stored);
         message.message.body.remove("amount");
-        assert!(check(&message, &alice.id()).is_err());
-        // A copy addressed to another identity doesn't verify as alice's.
-        assert!(check(&received(&stored), &bob.id()).is_err());
+        assert!(p.check_body(&message).is_err());
+        // Refs the kind doesn't allow.
+        let mut message = received(&stored);
+        message.message.refs.push([1; 32]);
+        assert!(p.check_body(&message).is_err());
     }
 
     #[test]

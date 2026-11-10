@@ -138,6 +138,32 @@ impl StoredMessage {
         })
     }
 
+    /// A stored message from one the Switch client received and checked: the recipient
+    /// checks 1 to 9 (Switch wire 5.1) passed in the client, with Paykit's certificate checks
+    /// at check 8 (Paykit wire 3.1), and check 10 passed in [`check_body`]. Nothing is checked
+    /// again; the body is read once more, for its typed value.
+    ///
+    /// # Errors
+    ///
+    /// As [`Body::parse`], for a body that didn't pass check 10.
+    pub fn from_received(
+        sender: [u8; 32],
+        cert: AppCert,
+        plaintext: MessagePlaintext,
+        message: Message,
+        accepted_at: Option<u64>,
+    ) -> Result<Self> {
+        let body = Body::parse(&message)?;
+        Ok(Self {
+            sender,
+            cert,
+            plaintext,
+            message,
+            body,
+            accepted_at,
+        })
+    }
+
     /// Read a stored message addressed to `recipient` (Paykit wire 5.2), with the recipient
     /// checks that need no `identity.json` (Switch wire 5.1 checks 2 to 6), Paykit's
     /// certificate checks (Paykit wire 3.1) and the body (check 10). The sender's standing,

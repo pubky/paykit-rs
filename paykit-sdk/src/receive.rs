@@ -3,7 +3,8 @@
 //! that the record write it causes and the cursor move past it go in one batch (Switch spec
 //! 8.2).
 //!
-//! [`crate::PaykitProtocol`] runs check 10, then [`effect`] adds, through the client's
+//! The client runs check 10 first ([`crate::PaykitProtocol`]'s `check_body`); then [`effect`]
+//! adds, through the client's
 //! [`ReceiveContext`], the writes the message causes:
 //!
 //! - **payer side** (`pay`): a request opens its request record; a payee's cancellation, a

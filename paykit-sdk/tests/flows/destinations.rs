@@ -122,3 +122,59 @@ async fn test_destinations_unconfirmed_payee_paid_once_the_user_confirms() {
     );
     assert_eq!(w.rail.all_executions().len(), 1);
 }
+
+#[tokio::test]
+async fn test_destinations_own_identity_missing_for_over_60s_refused() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    // The wallet's own identity.json was confirmed, then goes missing from its Homeserver
+    // for more than 60 s: no read confirms the copy held any more (Paykit spec 4, Switch
+    // spec 12.6), so the payment is refused before any write and the rail is never called.
+    assert!(wallet
+        .app_mut()
+        .refresh_identity()
+        .await
+        .unwrap()
+        .confirmed_at()
+        .is_some());
+    w.homeserver
+        .remove(w.alice_id(), pubky_switch_core::records::IDENTITY_PATH);
+    w.clock.advance_ms(61_000);
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::IdentityUnavailable(_))),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    assert!(wallet.payments().await.unwrap().is_empty());
+    let obligation = wallet.request(&request).await.unwrap();
+    assert_eq!(obligation.status, RequestStatus::Open);
+}
+
+#[tokio::test]
+async fn test_destinations_own_identity_confirmed_under_60s_ago_paid() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    // Missing now, but confirmed 30 s ago: within the 60 s the payment goes on.
+    wallet.app_mut().refresh_identity().await.unwrap();
+    w.homeserver
+        .remove(w.alice_id(), pubky_switch_core::records::IDENTITY_PATH);
+    w.clock.advance_ms(30_000);
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+        "{outcome:?}"
+    );
+}
