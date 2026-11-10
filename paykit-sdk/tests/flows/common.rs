@@ -146,6 +146,27 @@ impl World {
         app
     }
 
+    /// Load app `app_id` of `signer` from `store`, its device clock `clock` instead of the
+    /// world's, which the switches keep.
+    pub async fn load_on_clock(
+        &self,
+        signer: &TestSigner,
+        store: Arc<dyn StateStore>,
+        app_id: [u8; 16],
+        clock: Arc<TestClock>,
+    ) -> Paykit {
+        let mut env = self.env(signer, store);
+        env.clock = clock as Arc<dyn Clock>;
+        Paykit::load(
+            env,
+            PaykitConfig::default(),
+            app_id,
+            Arc::clone(&self.rail) as Arc<dyn paykit_sdk::Rail>,
+        )
+        .await
+        .unwrap()
+    }
+
     pub async fn join(&self, signer: &TestSigner, name: &str, scopes: RequestedScopes) -> Paykit {
         self.join_with(signer, name, scopes, PaykitConfig::default(), store())
             .await

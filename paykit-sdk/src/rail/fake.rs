@@ -44,6 +44,8 @@ struct Inner {
     counter: u64,
     idempotent: bool,
     forgotten: Vec<AttemptId>,
+    calls: BTreeMap<AttemptId, u64>,
+    declaration: Option<RailDeclaration>,
 }
 
 /// An in-memory payment rail shared by payers and payees. Tests only.
@@ -104,6 +106,20 @@ impl FakeRail {
     /// Make the rail idempotent on the key, or not: then a repeat pays again.
     pub fn set_idempotent(&self, idempotent: bool) {
         self.lock().idempotent = idempotent;
+    }
+
+    /// Declare `declaration` from now on instead of the default (idempotent while
+    /// [`FakeRail::set_idempotent`] says so, a history kept for good that survives a
+    /// restore). A declaration without a history makes [`Rail::payment`] show none.
+    pub fn set_declaration(&self, declaration: RailDeclaration) {
+        let mut inner = self.lock();
+        inner.idempotent = declaration.idempotent;
+        inner.declaration = Some(declaration);
+    }
+
+    /// How many times [`Rail::pay`] was called under `key`, repeats included.
+    pub fn pay_calls(&self, key: &AttemptId) -> u64 {
+        self.lock().calls.get(key).copied().unwrap_or(0)
     }
 
     /// How many times money moved under `key`: more than one is a second execution.
@@ -175,8 +191,12 @@ fn paid_outcome(key: &AttemptId, counter: u64, now: Option<u64>) -> RailOutcome 
 
 impl Rail for FakeRail {
     fn declaration(&self) -> RailDeclaration {
+        let inner = self.lock();
+        if let Some(declared) = inner.declaration {
+            return declared;
+        }
         RailDeclaration {
-            idempotent: self.lock().idempotent,
+            idempotent: inner.idempotent,
             idempotency_retention_ms: None,
             history: true,
             history_retention_ms: None,
@@ -201,6 +221,8 @@ impl Rail for FakeRail {
         let answer = {
             let mut inner = self.lock();
             let key = payment.idempotency_key;
+            let calls = inner.calls.entry(key).or_insert(0);
+            *calls = calls.saturating_add(1);
             let repeat = inner.payments.get(&key).cloned();
             match repeat {
                 Some(held) if inner.idempotent => Ok(held.outcome),
@@ -246,7 +268,8 @@ impl Rail for FakeRail {
         idempotency_key: AttemptId,
     ) -> BoxFuture<'_, Result<Option<RailOutcome>, RailError>> {
         let inner = self.lock();
-        let answer = if inner.forgotten.contains(&idempotency_key) {
+        let keeps_history = inner.declaration.is_none_or(|d| d.history);
+        let answer = if !keeps_history || inner.forgotten.contains(&idempotency_key) {
             None
         } else {
             inner

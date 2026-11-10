@@ -681,8 +681,12 @@ impl Paykit {
         refresh: bool,
     ) -> std::result::Result<(), Refusal> {
         let now = self.now();
-        let recent =
-            |at: Option<u64>| at.is_some_and(|at| now.saturating_sub(at) < REVALIDATION_MS);
+        // A confirmation the device clock now puts in the future is no evidence of a recent
+        // one: the clock went back, and the copy is read again.
+        let recent = |at: Option<u64>| {
+            at.and_then(|at| now.checked_sub(at))
+                .is_some_and(|age| age < REVALIDATION_MS)
+        };
         if !refresh && recent(self.app.identity_confirmed_at()) {
             return Ok(());
         }
@@ -1058,8 +1062,13 @@ impl Paykit {
             return self.take_outcome(&mut entry, outcome).await;
         }
         let declaration = self.rail.declaration();
-        let age = self.now().saturating_sub(entry.journaled_at_ms);
-        let within = |retention: Option<u64>| retention.is_none_or(|r| age <= r);
+        // The age counts from when the attempt was journaled (Paykit spec 7.2). A device clock
+        // now behind that time can't tell how long ago it was, so the dispatch counts as
+        // outside every finite retention: an empty history proves nothing and a repeat may
+        // find the key forgotten. Only a retention kept for good holds whatever the clock.
+        let age = self.now().checked_sub(entry.journaled_at_ms);
+        let within =
+            |retention: Option<u64>| retention.is_none_or(|r| age.is_some_and(|age| age <= r));
         if declaration.history
             && within(declaration.history_retention_ms)
             && (!entry.restored || declaration.history_survives_restore)

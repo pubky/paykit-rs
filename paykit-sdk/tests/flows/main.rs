@@ -10,6 +10,7 @@ mod destinations;
 mod labels;
 mod one_time;
 mod protocols;
+mod recovery;
 mod resend;
 mod restore;
 mod unrequested;
