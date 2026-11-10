@@ -713,26 +713,39 @@ impl Ledger {
                 (spent, t.req_int("count")?, failed)
             }
         };
-        let ids: Vec<AttemptId> = entries
-            .iter()
-            .map(|e| e.attempt_id)
-            .chain(failed.iter().map(|f| f.attempt_id))
-            .collect();
-        for (i, id) in ids.iter().enumerate() {
-            if ids.iter().take(i).any(|x| x == id) {
-                return invalid(
-                    "Paykit wire 5.5: an attempt listed twice among the entries and totals.failed",
-                );
-            }
-        }
-        Ok(Self {
+        let ledger = Self {
             counterparty: obj.req_pubky("counterparty")?,
             allowance_id: AllowanceId::parse(obj.req_str("allowance_id")?)?,
             entries,
             spent,
             count,
             failed,
-        })
+        };
+        ledger.check_attempts_once()?;
+        Ok(ledger)
+    }
+
+    /// Each `attempt_id` appears once among the entries and `totals.failed` (Paykit wire 5.5
+    /// "A valid ledger"), so no attempt is counted twice.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] for an attempt listed twice.
+    fn check_attempts_once(&self) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        let ids = self
+            .entries
+            .iter()
+            .map(|e| e.attempt_id)
+            .chain(self.failed.iter().map(|f| f.attempt_id));
+        for id in ids {
+            if !seen.insert(id) {
+                return invalid(
+                    "Paykit wire 5.5: an attempt listed twice among the entries and totals.failed",
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Write the ledger value: every entry with its `outcome` (`null` while unknown), and
@@ -796,16 +809,19 @@ impl Ledger {
     }
 
     /// "A valid ledger" against the terms (Paykit wire 5.5): every entry's asset is the
-    /// terms' asset. Usage and compaction refuse a ledger that isn't valid.
+    /// terms' asset, and each attempt appears once among the entries and `totals.failed`.
+    /// Usage, compaction and the check of a newer version refuse a ledger that isn't valid,
+    /// a typed one included, so they never count an attempt twice.
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] for an entry of another asset.
+    /// [`Error::Invalid`] for an entry of another asset or an attempt listed twice.
     pub fn check_valid(&self, terms: &AllowanceTerms) -> Result<()> {
         ensure(
             self.entries.iter().all(|e| e.asset == terms.asset),
             "Paykit wire 5.5: a ledger entry in another asset than the terms'",
-        )
+        )?;
+        self.check_attempts_once()
     }
 
     fn spent_scaled(&self) -> u128 {
@@ -1164,6 +1180,15 @@ pub fn check_successor(
         }
         if newer.failed.iter().any(|f| f.attempt_id == item.attempt_id) {
             return refuse("changes a totals.failed item");
+        }
+        // Into the totals once: the attempt is then counted in spent and count, so it can't
+        // also come back as an entry.
+        if newer
+            .entries
+            .iter()
+            .any(|e| e.attempt_id == item.attempt_id)
+        {
+            return refuse("moves a totals.failed item into the totals and keeps it as an entry");
         }
         into_spent = add(into_spent, item.value.scaled())?;
         into_count = into_count.checked_add(1).ok_or_else(overflow)?;
@@ -1578,6 +1603,146 @@ mod tests {
         assert!(matches!(twice.to_json(), Err(Error::Validation(_))));
         assert!(Ledger::from_json(&twice.json_unchecked().unwrap()).is_err());
         assert!(Ledger::from_json(br#"{"v":2,"counterparty":"x","allowance_id":"y"}"#).is_err());
+    }
+
+    #[test]
+    fn test_successor_moves_a_compacted_failed_into_the_totals_once() {
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let item = CompactedFailed {
+            obligation: [7; 32],
+            attempt_id: AttemptId::from_bytes([7; 16]),
+            value: Decimal::parse("1").unwrap(),
+        };
+        let held = Ledger {
+            failed: vec![item.clone()],
+            ..ledger(Vec::new())
+        };
+        let moved = Ledger {
+            spent: Some(Decimal::parse("1").unwrap()),
+            count: 1,
+            ..ledger(Vec::new())
+        };
+        let now = t("2026-03-10T00:00:00.000Z");
+        check_successor(&terms, &held, &moved, now).unwrap();
+        // The same attempt also back as an entry would count twice.
+        let twice = Ledger {
+            entries: vec![LedgerEntry {
+                outcome: Some(EntryOutcome::Done),
+                ..entry(7, "1", "2026-01-05T00:00:00.000Z", None)
+            }],
+            ..moved
+        };
+        let error = check_successor(&terms, &held, &twice, now).unwrap_err();
+        assert!(
+            error.to_string().contains("keeps it as an entry"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn test_ledger_valid_lists_each_attempt_once() {
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let held = ledger(Vec::new());
+        let twice = Ledger {
+            failed: vec![CompactedFailed {
+                obligation: [1; 32],
+                attempt_id: AttemptId::from_bytes([1; 16]),
+                value: Decimal::parse("0.01").unwrap(),
+            }],
+            ..ledger(vec![entry(1, "0.01", "2026-02-10T00:00:00.000Z", None)])
+        };
+        let now = t("2026-02-10T00:00:00.000Z");
+        assert!(twice.check_valid(&terms).is_err());
+        assert!(usage(&terms, &twice, &HashMap::new(), now).is_err());
+        assert!(compact(&terms, &twice, now).is_err());
+        let error = check_successor(&terms, &held, &twice, now).unwrap_err();
+        assert!(error.to_string().contains("listed twice"), "{error}");
+    }
+
+    #[test]
+    fn test_successor_refuses_each_rule() {
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let now = t("2026-03-10T00:00:00.000Z");
+        let failed_item = |id: u8, value: &str| CompactedFailed {
+            obligation: [id; 32],
+            attempt_id: AttemptId::from_bytes([id; 16]),
+            value: Decimal::parse(value).unwrap(),
+        };
+        let held = Ledger {
+            failed: vec![failed_item(9, "0.02")],
+            spent: Some(Decimal::parse("0.05").unwrap()),
+            count: 2,
+            ..ledger(vec![
+                entry(
+                    1,
+                    "0.01",
+                    "2026-01-05T00:00:00.000Z",
+                    Some(EntryOutcome::Done),
+                ),
+                entry(
+                    2,
+                    "0.02",
+                    "2026-01-06T00:00:00.000Z",
+                    Some(EntryOutcome::Failed),
+                ),
+            ])
+        };
+        check_successor(&terms, &held, &held, now).unwrap();
+        let mut changed = held.clone();
+        changed.entries[0].value = Decimal::parse("0.001").unwrap();
+        let mut done_failed = held.clone();
+        done_failed.entries.remove(0);
+        done_failed.failed.push(failed_item(1, "0.01"));
+        let mut other_value = held.clone();
+        other_value.entries.remove(1);
+        other_value.failed.push(failed_item(2, "0.03"));
+        let mut item_changed = held.clone();
+        item_changed.failed[0].value = Decimal::parse("0.01").unwrap();
+        let mut item_dropped = held.clone();
+        item_dropped.failed.clear();
+        let mut count_short = held.clone();
+        count_short.entries.remove(0);
+        count_short.spent = Some(Decimal::parse("0.06").unwrap());
+        for (name, newer, rule) in [
+            ("an entry's value changed", changed, "changes an entry"),
+            (
+                "a done entry into totals.failed",
+                done_failed,
+                "moves a done entry into totals.failed",
+            ),
+            (
+                "a compacted entry with another value",
+                other_value,
+                "another obligation or value",
+            ),
+            (
+                "a totals.failed item changed",
+                item_changed,
+                "changes a totals.failed item",
+            ),
+            (
+                "a totals.failed item dropped",
+                item_dropped,
+                "doesn't grow spent and count",
+            ),
+            (
+                "an entry into spent but not count",
+                count_short,
+                "doesn't grow spent and count",
+            ),
+        ] {
+            let error = check_successor(&terms, &held, &newer, now).unwrap_err();
+            assert!(error.to_string().contains(rule), "{name}: {error}");
+        }
+        // Sums that overflow fail closed, in a newer version and in compaction.
+        let full = Ledger {
+            spent: Some(Decimal::from_scaled(u128::MAX)),
+            ..held.clone()
+        };
+        let mut over = full.clone();
+        over.entries.remove(0);
+        assert!(check_successor(&terms, &full, &over, now).is_err());
+        assert!(compact(&terms, &full, now).is_err());
     }
 
     #[test]

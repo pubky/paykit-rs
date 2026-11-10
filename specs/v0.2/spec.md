@@ -505,7 +505,8 @@ The reference prototype is shared separately, with its history (phase 1, the mec
 - a proof's members follow whether it proves a request: `amount` only without one, its Billing Period with the period details it used, and no request context without a request (wire 4.10; `messages.json` `proof_members`);
 - a receipt is of its proof's attempt and Billing Period, and names no period without a request (wire 4.11; `sealed.json` `activity_records`);
 - an Allowance end names the stored acceptance, or is the proposal's withdrawal by its sender before any response; a rejected Allowance has no end; `executor_app_id` only in an acceptance from the allower (wire 4.16; `sealed.json` `allowance_records`);
-- an unrequested destination's `list_version` is present exactly for a list, and is the proof's (wire 5.3).
+- an unrequested destination's `list_version` is present exactly for a list, and is the proof's (wire 5.3);
+- a newer Allowance ledger version holds an attempt that left into its totals in neither its entries nor its `totals.failed` (wire 5.5).
 
 Appendix A of the wire format marks the rows where the prototype differs from a choice there: A2, A3, A5, A10 and A14.
 

@@ -4,7 +4,8 @@ on:
   push:
     branches: [v0.2]
   pull_request:
-    branches: [v0.2]
+    # Stacked v0.2 PRs target a feature branch; they get the same checks.
+    branches: [v0.2, "feat/**"]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
