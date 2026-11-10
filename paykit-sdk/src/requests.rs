@@ -390,11 +390,12 @@ impl Paykit {
             if let Some((request, _)) = request_of(&bound) {
                 refs.push(request.hash());
             }
+            // The receipt carries the proof's attempt and Billing Period (Paykit wire 4.11).
             let body = PaymentReceipt {
                 attempt_id: proof.attempt_id,
                 billing_period: proof.billing_period,
             }
-            .to_body()?;
+            .to_body(refs.len())?;
             // The receipt goes into the payee's record in the batch that queues it.
             let signed = self.sign(bound.counterparty, Kind::PaymentReceipt, refs, body)?;
             match self

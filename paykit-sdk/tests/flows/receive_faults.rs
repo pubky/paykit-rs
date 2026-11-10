@@ -165,7 +165,7 @@ async fn test_receive_faults_receipt_parked_on_a_corrupt_journal_then_settles() 
         attempt_id,
         billing_period: None,
     }
-    .to_body()
+    .to_body(1)
     .unwrap();
     w.inject(
         &w.bob,

@@ -129,7 +129,7 @@ async fn test_wallets_receipt_settles_a_claim_the_app_never_read() {
             attempt_id,
             billing_period: None,
         }
-        .to_body()
+        .to_body(2)
         .unwrap(),
     );
     tablet.receive(None).await.unwrap();

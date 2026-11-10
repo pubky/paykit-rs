@@ -429,7 +429,7 @@ async fn test_one_time_receipt_naming_another_proof_leaves_the_proof_recordable(
         attempt_id,
         billing_period: None,
     }
-    .to_body()
+    .to_body(2)
     .unwrap();
     w.inject(
         &w.bob,

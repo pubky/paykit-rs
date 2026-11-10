@@ -194,3 +194,68 @@ async fn test_unrequested_after_an_idle_spell_not_refused_for_its_deadline() {
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
+
+#[tokio::test]
+async fn test_unrequested_proof_and_receipt_carry_the_attempt_and_no_request_members() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    let outcome = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap();
+    let PayOutcome::Paid { attempt_id, .. } = outcome else {
+        panic!("{outcome:?}");
+    };
+    // The payee takes the proof: one without refs carries no label, Billing Period, payment
+    // reference or Allowance, and the list version of its list destination (Paykit wire
+    // 4.10, 5.3).
+    shop.receive(None).await.unwrap();
+    let sales = shop.payee_activity().await.unwrap();
+    assert_eq!(sales.len(), 1, "the proof wasn't taken");
+    assert_eq!(sales[0].attempt_id, Some(attempt_id));
+    assert!(shop
+        .confirm_payment(&sales[0].record)
+        .await
+        .unwrap()
+        .is_some());
+    wallet.receive(None).await.unwrap();
+    // The payer's record holds both: the receipt names the proof's attempt, which is the
+    // record's (Paykit wire 4.11, 5.3).
+    let held = wallet
+        .app()
+        .records_of("payer_activity")
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|r| r.content.value().map(<[u8]>::to_vec))
+        .unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&held).unwrap();
+    let body = |member: &str| {
+        let json = record[member]["plaintext"]["json"].as_str().unwrap();
+        let bytes = pubky_switch_core::enc::unb64(json).unwrap();
+        let message: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        message["body"].clone()
+    };
+    let proof = body("proof");
+    for member in [
+        "label",
+        "billing_period",
+        "payment_reference",
+        "allowance_id",
+    ] {
+        assert!(proof[member].is_null(), "{member} in a proof without refs");
+    }
+    assert_eq!(
+        proof["list_version"], record["unrequested"]["list_version"],
+        "the proof's list version isn't the destination's"
+    );
+    assert!(!record["unrequested"]["list_version"].is_null());
+    let receipt = body("receipt");
+    assert_eq!(receipt["attempt_id"], proof["attempt_id"]);
+    assert_eq!(receipt["attempt_id"], record["attempt_id"]);
+    assert!(receipt["billing_period"].is_null());
+}

@@ -236,7 +236,7 @@ async fn crash_receiving_a_receipt(fault: Fault) -> bool {
         attempt_id,
         billing_period: None,
     }
-    .to_body()
+    .to_body(2)
     .unwrap();
     w.inject(
         &w.bob,
