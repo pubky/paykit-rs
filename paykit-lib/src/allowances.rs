@@ -472,7 +472,14 @@ fn read_period_limit(item: &Value) -> Result<(PeriodLimit, LimitSpelling<'_>)> {
         }
         "rolling" => {
             ensure(every >= 1, "Paykit wire 4.15: every is at least 1")?;
-            LimitPeriod::rolling_len(every, unit)?;
+            // Paykit wire 4.15: a rolling unit is a fixed one, minute to week. Its length,
+            // every units, isn't computed here: one too long to represent makes the
+            // evaluation that needs it ineligible (`specs/allowances.md`), not the terms
+            // invalid.
+            ensure(
+                unit.fixed_ms().is_some(),
+                "Paykit wire 4.15: a rolling period's unit is minute, hour, day or week",
+            )?;
             LimitPeriod::Rolling { every, unit }
         }
         _ => return Err(bad(TERMS, "period", "kind is anchored or rolling")),
@@ -937,6 +944,19 @@ pub fn usage(
     t: u64,
 ) -> Result<Usage> {
     ledger.check_valid(terms)?;
+    // Every limit's period at t, whatever the entries: a duration or boundary that can't be
+    // represented makes the evaluation ineligible (`specs/allowances.md`), never a limit
+    // left out.
+    for limit in &terms.period_limits {
+        match &limit.period {
+            LimitPeriod::Anchored(anchored) => {
+                anchored.rule().containing(t)?;
+            }
+            LimitPeriod::Rolling { every, unit } => {
+                LimitPeriod::rolling_len(*every, *unit)?;
+            }
+        }
+    }
     let mut lifetime = ledger.spent_scaled();
     let mut periods = vec![(0u128, 0u64); terms.period_limits.len()];
     let (mut reserved, mut spent, mut released) = (0u64, 0u64, 0u64);
@@ -1790,6 +1810,27 @@ mod tests {
         let mid = t("2026-02-10T00:00:00.000Z");
         assert_eq!(terms.entry_window_end(mid).unwrap(), mid + ENTRY_WINDOW_MS);
         assert_eq!(terms.longest_period(mid).unwrap(), 28 * 86_400_000);
+    }
+
+    #[test]
+    fn test_terms_take_a_rolling_period_too_long_to_evaluate() {
+        let long = with_limits(json!([{ "amount_limit": "1", "payment_count_limit": null,
+            "period": { "every": 30_500_568_905u64, "kind": "rolling", "unit": "week" } }]));
+        // Structurally valid: it parses and writes back as signed.
+        let terms = AllowanceTerms::from_json(&long).unwrap();
+        assert_eq!(terms.to_json().unwrap(), long);
+        // Its length overflows, so every evaluation that needs it is ineligible.
+        let l = ledger(vec![entry(1, "0.01", "2026-02-10T00:00:00.000Z", None)]);
+        let now = t("2026-02-10T00:00:00.000Z");
+        assert!(usage(&terms, &l, &HashMap::new(), now).is_err());
+        assert!(usage(&terms, &ledger(Vec::new()), &HashMap::new(), now).is_err());
+        assert!(terms.longest_period(now).is_err());
+        assert!(compact(&terms, &l, now).is_err());
+        assert!(check_successor(&terms, &l, &l, now).is_err());
+        // A rolling month stays invalid.
+        let month = with_limits(json!([{ "amount_limit": "1", "payment_count_limit": null,
+            "period": { "every": 1, "kind": "rolling", "unit": "month" } }]));
+        assert!(AllowanceTerms::from_json(&month).is_err());
     }
 
     #[test]
