@@ -5,7 +5,7 @@ use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{PayOptions, PayOutcome, PayeeStatus, Refusal, RequestStatus};
 use pubky_switch_client::clock::Clock;
 
-use crate::common::{draft, request_from, World, HOUR_MS};
+use crate::common::{draft, request_from, FailingRecordReads, World, HOUR_MS};
 
 #[tokio::test]
 async fn test_one_time_request_paid_proven_and_receipted() {
@@ -265,4 +265,35 @@ async fn test_one_time_transfer_of_another_amount_refused() {
         "{refused:?}"
     );
     assert!(wallet.payments().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_one_time_payee_activity_store_failure_is_an_error() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let failing = std::sync::Arc::new(FailingRecordReads::default());
+    let mut shop = w
+        .join_with(
+            &w.bob,
+            "shop",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+            paykit_sdk::PaykitConfig::default(),
+            std::sync::Arc::clone(&failing)
+                as std::sync::Arc<dyn pubky_switch_client::store::StateStore>,
+        )
+        .await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(shop.payee_activity().await.unwrap().len(), 1);
+    // The collection lists, but its record can't be read again: the store failure is the
+    // answer, never a list that silently leaves the record out.
+    failing.arm();
+    let error = shop.payee_activity().await.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Store(_))
+        ),
+        "{error:?}"
+    );
 }

@@ -307,11 +307,12 @@ impl Paykit {
     }
 
     /// Every request this identity sent and payment without a request it received, from the
-    /// `payee_activity` records this app holds (Paykit spec 6).
+    /// `payee_activity` records this app holds (Paykit spec 6). A record that doesn't bind is
+    /// left out, as a reader doesn't act on it (Paykit wire 5.3).
     ///
     /// # Errors
     ///
-    /// A store failure.
+    /// A store failure, also one reading a single record: the list is never partial.
     pub async fn payee_activity(&self) -> Result<Vec<PayeeActivity>> {
         let mut out = Vec::new();
         for held in self
@@ -319,10 +320,13 @@ impl Paykit {
             .records_of(Collection::PayeeActivity.name())
             .await?
         {
-            let Ok((_, record)) = self.payee_record(&held.key).await else {
-                continue;
-            };
-            out.push(payee_view(held.key, &record));
+            match self.payee_record(&held.key).await {
+                Ok((_, record)) => out.push(payee_view(held.key, &record)),
+                // A record that doesn't bind, or isn't held under a Paykit policy, isn't acted
+                // on (Paykit wire 5.3): it is left out. A failure to read it is not.
+                Err(PaykitError::Refused(Refusal::NotFound) | PaykitError::Lib(_)) => {}
+                Err(error) => return Err(error),
+            }
         }
         Ok(out)
     }

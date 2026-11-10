@@ -220,6 +220,52 @@ pub fn store() -> Arc<dyn StateStore> {
     Arc::new(MemoryStore::new())
 }
 
+/// A store whose reads of single shared records fail once armed, while its scans still
+/// answer: a collection listed, then a record of it that can't be read again.
+#[derive(Default)]
+pub struct FailingRecordReads {
+    inner: MemoryStore,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+impl FailingRecordReads {
+    /// Fail every read of a held record from now on.
+    pub fn arm(&self) {
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl StateStore for FailingRecordReads {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        if self.armed.load(std::sync::atomic::Ordering::SeqCst) && key.starts_with(b"rec/") {
+            return Err(pubky_switch_client::error::StoreError::Unavailable);
+        }
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.inner.commit(batch)
+    }
+}
+
 pub fn btc(value: &str) -> PaymentAmount {
     PaymentAmount {
         value: Decimal::new(value).unwrap(),
