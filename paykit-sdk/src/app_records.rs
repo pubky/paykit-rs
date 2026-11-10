@@ -214,9 +214,23 @@ impl Paykit {
             Err(refusal) => return Ok(Err(refusal)),
         };
         // The reads start with the first copy taken, so they ran.
-        let Some(reads) = reads else {
+        let Some(mut reads) = reads else {
             return Ok(Ok(Vec::new()));
         };
+        // A newer copy the switch gave may list apps the first didn't: their records are
+        // read now.
+        for listed in &doc.body().apps {
+            if app.is_some_and(|a| a != listed.app_id)
+                || reads.iter().any(|(id, _)| *id == listed.app_id)
+            {
+                continue;
+            }
+            let bytes = self
+                .homeserver
+                .get(*payee, app_record_path(&listed.app_id))
+                .await;
+            reads.push((listed.app_id, bytes));
+        }
         let mut out = Vec::new();
         for (app_id, bytes) in reads {
             // Only the apps the copy acted on lists.

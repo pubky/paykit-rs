@@ -447,3 +447,28 @@ async fn test_public_request_endpoint_beside_a_slow_switch_not_waited_on() {
         .unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }
+
+#[tokio::test]
+async fn test_public_record_of_an_app_only_the_switch_lists_read() {
+    let w = World::new();
+    // Bob's identity.json lists another app first; the Homeserver keeps serving that copy
+    // after the shop joins, while his switch serves the newer one listing the shop.
+    let _other = w.labelled_shop("other", "other").await;
+    let older = w
+        .homeserver
+        .file(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH)
+        .unwrap();
+    let _shop = w.shop().await;
+    publish(&w, tip_jar(), Some(w.clock.now_ms() + 30 * DAY_MS));
+    w.homeserver
+        .put(w.bob_id(), pubky_switch_core::records::IDENTITY_PATH, older);
+    // A wallet that never looked bob up: the first lookup starts from the older copy.
+    let mut phone = w
+        .join(
+            &w.alice,
+            "phone",
+            paykit_sdk::AppScopes::new().pay().build().unwrap(),
+        )
+        .await;
+    assert_eq!(listed(&mut phone, &w).await, ["btc-lightning-bolt12"]);
+}
