@@ -1,4 +1,449 @@
 {
+  "app_records": {
+    "accepted": [
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"signing_key\":\"D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM\",\"cert\":{\"body\":\"eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiYWxsb3dhbmNlIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0\",\"sig\":\"DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw\"},\"accepts\":[\"paykit.payment_request_acceptance\",\"paykit.payment_request_rejection\",\"paykit.payment_request_cancellation\",\"paykit.payment_proof\",\"paykit.private_payment_list_request\",\"paykit.resend_request\",\"paykit.allowance_proposal\",\"paykit.allowance_acceptance\",\"paykit.allowance_rejection\",\"paykit.allowance_end\"],\"protocols\":{\"paykit\":{\"capabilities\":{\"endpoint_identifiers\":[\"btc-lightning-bolt11\",\"btc-bitcoin-p2wpkh\"]},\"public_endpoints\":{\"btc-lightning-bolt12\":\"lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr\"}}},\"label\":\"bob shop\",\"updated_at\":\"2025-12-31T00:00:00.000Z\",\"expires_at\":\"2026-01-30T00:00:00.000Z\"}",
+        "expires_at": "2026-01-30T00:00:00.000Z",
+        "name": "shop's record as documents.json has it: endpoint identifiers, and public endpoints with expires_at",
+        "protocols": {
+          "paykit": {
+            "capabilities": {
+              "endpoint_identifiers": [
+                "btc-lightning-bolt11",
+                "btc-bitcoin-p2wpkh"
+              ]
+            },
+            "public_endpoints": {
+              "btc-lightning-bolt12": "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr"
+            }
+          }
+        },
+        "reads": {
+          "endpoint_identifiers": [
+            "btc-lightning-bolt11",
+            "btc-bitcoin-p2wpkh"
+          ],
+          "public_endpoints": {
+            "btc-lightning-bolt12": "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr"
+          }
+        },
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcCIsImlkZW50aXR5IjoiN3A0Zm40NHFvc2hjd2dmbmR6NWdydDdmeXl6MWV5Y3F5ZHV4ZHFlOG81OG9mMWJ5em9kbyIsImFwcF9pZCI6ImJycnozbTZnNXJjaTZpcW56a2U0NHE0ZGpjIiwic2lnbmluZ19rZXkiOiJEOXZYaHlPaTc2QnNTdVBzY3FqM3RVOHRfaTVyY1JrZE9rcVB5TXkxV1dNIiwiY2VydCI6eyJib2R5IjoiZXlKMklqb3hMQ0pyYVc1a0lqb2ljSFZpYTNrdGMzZHBkR05vTG1Gd2NGOWpaWEowSWl3aWFXUmxiblJwZEhraU9pSTNjRFJtYmpRMGNXOXphR04zWjJadVpIbzFaM0owTjJaNWVYb3haWGxqY1hsa2RYaGtjV1U0YnpVNGIyWXhZbmw2YjJSdklpd2lZWEJ3WDJsa0lqb2lZbkp5ZWpOdE5tYzFjbU5wTm1seGJucHJaVFEwY1RSa2FtTWlMQ0p6YVdkdWFXNW5YMnRsZVNJNklrUTVkbGhvZVU5cE56WkNjMU4xVUhOamNXb3pkRlU0ZEY5cE5YSmpVbXRrVDJ0eFVIbE5lVEZYVjAwaUxDSmlkVzVrYkdWZmEyVjVJam9pWWpaUlVXZDFOMVJFTm1kaU1IaHpZM0IzUzBRNFNFSm5kbVphUzFac2J6ZHNSVXMzVFVFd1FqUklNQ0lzSW5OamIzQmxjeUk2V3lKeVpYRjFaWE4wSWl3aVlXeHNiM2RoYm1ObElsMHNJbkJsY20xcGMzTnBiMjV6SWpwYkltTnNZV2x0Y3k1eVpXRmtJaXdpWTI5dWRtVnljMkYwYVc5dUxtRmtaQ0pkTENKcGMzTjFaV1JmWVhRaU9pSXlNREkxTFRFeUxUQXhWREF3T2pBd09qQXdMakF3TUZvaUxDSmxlSEJwY21WelgyRjBJam9pTWpBeU5pMHhNaTB3TVZRd01Eb3dNRG93TUM0d01EQmFJbjAiLCJzaWciOiJEY1ppajlSQkpGa2M5ektnNEpSYzl6ZHoyc2dEdlVSMFpBV1AyX1ZCZ0txQ1VJSkZLUVN5MngydUtBcHpZQ2ZpRkQ2REZ2S0wxNjFuNmtqLUpfRkdCdyJ9LCJhY2NlcHRzIjpbInBheWtpdC5wYXltZW50X3JlcXVlc3RfYWNjZXB0YW5jZSIsInBheWtpdC5wYXltZW50X3JlcXVlc3RfcmVqZWN0aW9uIiwicGF5a2l0LnBheW1lbnRfcmVxdWVzdF9jYW5jZWxsYXRpb24iLCJwYXlraXQucGF5bWVudF9wcm9vZiIsInBheWtpdC5wcml2YXRlX3BheW1lbnRfbGlzdF9yZXF1ZXN0IiwicGF5a2l0LnJlc2VuZF9yZXF1ZXN0IiwicGF5a2l0LmFsbG93YW5jZV9wcm9wb3NhbCIsInBheWtpdC5hbGxvd2FuY2VfYWNjZXB0YW5jZSIsInBheWtpdC5hbGxvd2FuY2VfcmVqZWN0aW9uIiwicGF5a2l0LmFsbG93YW5jZV9lbmQiXSwicHJvdG9jb2xzIjp7InBheWtpdCI6eyJjYXBhYmlsaXRpZXMiOnsiZW5kcG9pbnRfaWRlbnRpZmllcnMiOlsiYnRjLWxpZ2h0bmluZy1ib2x0MTEiLCJidGMtYml0Y29pbi1wMndwa2giXX0sInB1YmxpY19lbmRwb2ludHMiOnsiYnRjLWxpZ2h0bmluZy1ib2x0MTIiOiJsbm8xcWdzcXZnbndnY2czNXo2ZWUyaDN5Y3pyYWRkbTcyeHJmdWE5dXZlMnJscm05ZGV1N3h5ZnpyIn19fSwibGFiZWwiOiJib2Igc2hvcCIsInVwZGF0ZWRfYXQiOiIyMDI1LTEyLTMxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0wMS0zMFQwMDowMDowMC4wMDBaIn0",
+          "sig": "-x-nn21xTjLV-lNSXQxvkZSTmK2XIpB3IEdEE8Wm26jriq5Y-uWgUjOGJzXPyWmz4x3fn9p7p6R5F1TTKLN6Cg"
+        }
+      },
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"signing_key\":\"D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM\",\"cert\":{\"body\":\"eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiYWxsb3dhbmNlIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0\",\"sig\":\"DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw\"},\"accepts\":[\"paykit.payment_request_acceptance\",\"paykit.payment_request_rejection\",\"paykit.payment_request_cancellation\",\"paykit.payment_proof\",\"paykit.private_payment_list_request\",\"paykit.resend_request\",\"paykit.allowance_proposal\",\"paykit.allowance_acceptance\",\"paykit.allowance_rejection\",\"paykit.allowance_end\"],\"protocols\":{},\"label\":\"bob shop\",\"updated_at\":\"2025-12-31T00:00:00.000Z\",\"expires_at\":\"2026-01-30T00:00:00.000Z\"}",
+        "expires_at": "2026-01-30T00:00:00.000Z",
+        "name": "no paykit member",
+        "protocols": {},
+        "reads": {
+          "endpoint_identifiers": [],
+          "public_endpoints": {}
+        },
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcCIsImlkZW50aXR5IjoiN3A0Zm40NHFvc2hjd2dmbmR6NWdydDdmeXl6MWV5Y3F5ZHV4ZHFlOG81OG9mMWJ5em9kbyIsImFwcF9pZCI6ImJycnozbTZnNXJjaTZpcW56a2U0NHE0ZGpjIiwic2lnbmluZ19rZXkiOiJEOXZYaHlPaTc2QnNTdVBzY3FqM3RVOHRfaTVyY1JrZE9rcVB5TXkxV1dNIiwiY2VydCI6eyJib2R5IjoiZXlKMklqb3hMQ0pyYVc1a0lqb2ljSFZpYTNrdGMzZHBkR05vTG1Gd2NGOWpaWEowSWl3aWFXUmxiblJwZEhraU9pSTNjRFJtYmpRMGNXOXphR04zWjJadVpIbzFaM0owTjJaNWVYb3haWGxqY1hsa2RYaGtjV1U0YnpVNGIyWXhZbmw2YjJSdklpd2lZWEJ3WDJsa0lqb2lZbkp5ZWpOdE5tYzFjbU5wTm1seGJucHJaVFEwY1RSa2FtTWlMQ0p6YVdkdWFXNW5YMnRsZVNJNklrUTVkbGhvZVU5cE56WkNjMU4xVUhOamNXb3pkRlU0ZEY5cE5YSmpVbXRrVDJ0eFVIbE5lVEZYVjAwaUxDSmlkVzVrYkdWZmEyVjVJam9pWWpaUlVXZDFOMVJFTm1kaU1IaHpZM0IzUzBRNFNFSm5kbVphUzFac2J6ZHNSVXMzVFVFd1FqUklNQ0lzSW5OamIzQmxjeUk2V3lKeVpYRjFaWE4wSWl3aVlXeHNiM2RoYm1ObElsMHNJbkJsY20xcGMzTnBiMjV6SWpwYkltTnNZV2x0Y3k1eVpXRmtJaXdpWTI5dWRtVnljMkYwYVc5dUxtRmtaQ0pkTENKcGMzTjFaV1JmWVhRaU9pSXlNREkxTFRFeUxUQXhWREF3T2pBd09qQXdMakF3TUZvaUxDSmxlSEJwY21WelgyRjBJam9pTWpBeU5pMHhNaTB3TVZRd01Eb3dNRG93TUM0d01EQmFJbjAiLCJzaWciOiJEY1ppajlSQkpGa2M5ektnNEpSYzl6ZHoyc2dEdlVSMFpBV1AyX1ZCZ0txQ1VJSkZLUVN5MngydUtBcHpZQ2ZpRkQ2REZ2S0wxNjFuNmtqLUpfRkdCdyJ9LCJhY2NlcHRzIjpbInBheWtpdC5wYXltZW50X3JlcXVlc3RfYWNjZXB0YW5jZSIsInBheWtpdC5wYXltZW50X3JlcXVlc3RfcmVqZWN0aW9uIiwicGF5a2l0LnBheW1lbnRfcmVxdWVzdF9jYW5jZWxsYXRpb24iLCJwYXlraXQucGF5bWVudF9wcm9vZiIsInBheWtpdC5wcml2YXRlX3BheW1lbnRfbGlzdF9yZXF1ZXN0IiwicGF5a2l0LnJlc2VuZF9yZXF1ZXN0IiwicGF5a2l0LmFsbG93YW5jZV9wcm9wb3NhbCIsInBheWtpdC5hbGxvd2FuY2VfYWNjZXB0YW5jZSIsInBheWtpdC5hbGxvd2FuY2VfcmVqZWN0aW9uIiwicGF5a2l0LmFsbG93YW5jZV9lbmQiXSwicHJvdG9jb2xzIjp7fSwibGFiZWwiOiJib2Igc2hvcCIsInVwZGF0ZWRfYXQiOiIyMDI1LTEyLTMxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0wMS0zMFQwMDowMDowMC4wMDBaIn0",
+          "sig": "L9J2iH8PA8Cj3FqAifLHuHo0JZP-j1Iz9trRxc3Fug5Teyf6FbCKQLvRV0zG3RvRw-Gm4YWIw3kSTy_MGr49Ag"
+        }
+      },
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"signing_key\":\"D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM\",\"cert\":{\"body\":\"eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiYWxsb3dhbmNlIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0\",\"sig\":\"DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw\"},\"accepts\":[\"paykit.payment_request_acceptance\",\"paykit.payment_request_rejection\",\"paykit.payment_request_cancellation\",\"paykit.payment_proof\",\"paykit.private_payment_list_request\",\"paykit.resend_request\",\"paykit.allowance_proposal\",\"paykit.allowance_acceptance\",\"paykit.allowance_rejection\",\"paykit.allowance_end\"],\"protocols\":{\"paykit\":null},\"label\":\"bob shop\",\"updated_at\":\"2025-12-31T00:00:00.000Z\",\"expires_at\":\"2026-01-30T00:00:00.000Z\"}",
+        "expires_at": "2026-01-30T00:00:00.000Z",
+        "name": "a null paykit member",
+        "protocols": {
+          "paykit": null
+        },
+        "reads": {
+          "endpoint_identifiers": [],
+          "public_endpoints": {}
+        },
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcCIsImlkZW50aXR5IjoiN3A0Zm40NHFvc2hjd2dmbmR6NWdydDdmeXl6MWV5Y3F5ZHV4ZHFlOG81OG9mMWJ5em9kbyIsImFwcF9pZCI6ImJycnozbTZnNXJjaTZpcW56a2U0NHE0ZGpjIiwic2lnbmluZ19rZXkiOiJEOXZYaHlPaTc2QnNTdVBzY3FqM3RVOHRfaTVyY1JrZE9rcVB5TXkxV1dNIiwiY2VydCI6eyJib2R5IjoiZXlKMklqb3hMQ0pyYVc1a0lqb2ljSFZpYTNrdGMzZHBkR05vTG1Gd2NGOWpaWEowSWl3aWFXUmxiblJwZEhraU9pSTNjRFJtYmpRMGNXOXphR04zWjJadVpIbzFaM0owTjJaNWVYb3haWGxqY1hsa2RYaGtjV1U0YnpVNGIyWXhZbmw2YjJSdklpd2lZWEJ3WDJsa0lqb2lZbkp5ZWpOdE5tYzFjbU5wTm1seGJucHJaVFEwY1RSa2FtTWlMQ0p6YVdkdWFXNW5YMnRsZVNJNklrUTVkbGhvZVU5cE56WkNjMU4xVUhOamNXb3pkRlU0ZEY5cE5YSmpVbXRrVDJ0eFVIbE5lVEZYVjAwaUxDSmlkVzVrYkdWZmEyVjVJam9pWWpaUlVXZDFOMVJFTm1kaU1IaHpZM0IzUzBRNFNFSm5kbVphUzFac2J6ZHNSVXMzVFVFd1FqUklNQ0lzSW5OamIzQmxjeUk2V3lKeVpYRjFaWE4wSWl3aVlXeHNiM2RoYm1ObElsMHNJbkJsY20xcGMzTnBiMjV6SWpwYkltTnNZV2x0Y3k1eVpXRmtJaXdpWTI5dWRtVnljMkYwYVc5dUxtRmtaQ0pkTENKcGMzTjFaV1JmWVhRaU9pSXlNREkxTFRFeUxUQXhWREF3T2pBd09qQXdMakF3TUZvaUxDSmxlSEJwY21WelgyRjBJam9pTWpBeU5pMHhNaTB3TVZRd01Eb3dNRG93TUM0d01EQmFJbjAiLCJzaWciOiJEY1ppajlSQkpGa2M5ektnNEpSYzl6ZHoyc2dEdlVSMFpBV1AyX1ZCZ0txQ1VJSkZLUVN5MngydUtBcHpZQ2ZpRkQ2REZ2S0wxNjFuNmtqLUpfRkdCdyJ9LCJhY2NlcHRzIjpbInBheWtpdC5wYXltZW50X3JlcXVlc3RfYWNjZXB0YW5jZSIsInBheWtpdC5wYXltZW50X3JlcXVlc3RfcmVqZWN0aW9uIiwicGF5a2l0LnBheW1lbnRfcmVxdWVzdF9jYW5jZWxsYXRpb24iLCJwYXlraXQucGF5bWVudF9wcm9vZiIsInBheWtpdC5wcml2YXRlX3BheW1lbnRfbGlzdF9yZXF1ZXN0IiwicGF5a2l0LnJlc2VuZF9yZXF1ZXN0IiwicGF5a2l0LmFsbG93YW5jZV9wcm9wb3NhbCIsInBheWtpdC5hbGxvd2FuY2VfYWNjZXB0YW5jZSIsInBheWtpdC5hbGxvd2FuY2VfcmVqZWN0aW9uIiwicGF5a2l0LmFsbG93YW5jZV9lbmQiXSwicHJvdG9jb2xzIjp7InBheWtpdCI6bnVsbH0sImxhYmVsIjoiYm9iIHNob3AiLCJ1cGRhdGVkX2F0IjoiMjAyNS0xMi0zMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDEtMzBUMDA6MDA6MDAuMDAwWiJ9",
+          "sig": "XdLCZ_1s9mFye-ZaFX-1Fz9Vn4tdFJ3G1-UhfpVdk8nWOY0p8yccVVxH4bnLXvJKN-URdG5MXjmnYti72ju5Aw"
+        }
+      },
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"signing_key\":\"D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM\",\"cert\":{\"body\":\"eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiYWxsb3dhbmNlIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0\",\"sig\":\"DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw\"},\"accepts\":[\"paykit.payment_request_acceptance\",\"paykit.payment_request_rejection\",\"paykit.payment_request_cancellation\",\"paykit.payment_proof\",\"paykit.private_payment_list_request\",\"paykit.resend_request\",\"paykit.allowance_proposal\",\"paykit.allowance_acceptance\",\"paykit.allowance_rejection\",\"paykit.allowance_end\"],\"protocols\":{\"paykit\":{\"public_endpoints\":{\"btc-lightning-bolt12\":\"lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr\"}}},\"label\":\"bob shop\",\"updated_at\":\"2025-12-31T00:00:00.000Z\",\"expires_at\":\"2026-01-30T00:00:00.000Z\"}",
+        "expires_at": "2026-01-30T00:00:00.000Z",
+        "name": "capabilities missing",
+        "protocols": {
+          "paykit": {
+            "public_endpoints": {
+              "btc-lightning-bolt12": "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr"
+            }
+          }
+        },
+        "reads": {
+          "endpoint_identifiers": [],
+          "public_endpoints": {
+            "btc-lightning-bolt12": "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr"
+          }
+        },
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcCIsImlkZW50aXR5IjoiN3A0Zm40NHFvc2hjd2dmbmR6NWdydDdmeXl6MWV5Y3F5ZHV4ZHFlOG81OG9mMWJ5em9kbyIsImFwcF9pZCI6ImJycnozbTZnNXJjaTZpcW56a2U0NHE0ZGpjIiwic2lnbmluZ19rZXkiOiJEOXZYaHlPaTc2QnNTdVBzY3FqM3RVOHRfaTVyY1JrZE9rcVB5TXkxV1dNIiwiY2VydCI6eyJib2R5IjoiZXlKMklqb3hMQ0pyYVc1a0lqb2ljSFZpYTNrdGMzZHBkR05vTG1Gd2NGOWpaWEowSWl3aWFXUmxiblJwZEhraU9pSTNjRFJtYmpRMGNXOXphR04zWjJadVpIbzFaM0owTjJaNWVYb3haWGxqY1hsa2RYaGtjV1U0YnpVNGIyWXhZbmw2YjJSdklpd2lZWEJ3WDJsa0lqb2lZbkp5ZWpOdE5tYzFjbU5wTm1seGJucHJaVFEwY1RSa2FtTWlMQ0p6YVdkdWFXNW5YMnRsZVNJNklrUTVkbGhvZVU5cE56WkNjMU4xVUhOamNXb3pkRlU0ZEY5cE5YSmpVbXRrVDJ0eFVIbE5lVEZYVjAwaUxDSmlkVzVrYkdWZmEyVjVJam9pWWpaUlVXZDFOMVJFTm1kaU1IaHpZM0IzUzBRNFNFSm5kbVphUzFac2J6ZHNSVXMzVFVFd1FqUklNQ0lzSW5OamIzQmxjeUk2V3lKeVpYRjFaWE4wSWl3aVlXeHNiM2RoYm1ObElsMHNJbkJsY20xcGMzTnBiMjV6SWpwYkltTnNZV2x0Y3k1eVpXRmtJaXdpWTI5dWRtVnljMkYwYVc5dUxtRmtaQ0pkTENKcGMzTjFaV1JmWVhRaU9pSXlNREkxTFRFeUxUQXhWREF3T2pBd09qQXdMakF3TUZvaUxDSmxlSEJwY21WelgyRjBJam9pTWpBeU5pMHhNaTB3TVZRd01Eb3dNRG93TUM0d01EQmFJbjAiLCJzaWciOiJEY1ppajlSQkpGa2M5ektnNEpSYzl6ZHoyc2dEdlVSMFpBV1AyX1ZCZ0txQ1VJSkZLUVN5MngydUtBcHpZQ2ZpRkQ2REZ2S0wxNjFuNmtqLUpfRkdCdyJ9LCJhY2NlcHRzIjpbInBheWtpdC5wYXltZW50X3JlcXVlc3RfYWNjZXB0YW5jZSIsInBheWtpdC5wYXltZW50X3JlcXVlc3RfcmVqZWN0aW9uIiwicGF5a2l0LnBheW1lbnRfcmVxdWVzdF9jYW5jZWxsYXRpb24iLCJwYXlraXQucGF5bWVudF9wcm9vZiIsInBheWtpdC5wcml2YXRlX3BheW1lbnRfbGlzdF9yZXF1ZXN0IiwicGF5a2l0LnJlc2VuZF9yZXF1ZXN0IiwicGF5a2l0LmFsbG93YW5jZV9wcm9wb3NhbCIsInBheWtpdC5hbGxvd2FuY2VfYWNjZXB0YW5jZSIsInBheWtpdC5hbGxvd2FuY2VfcmVqZWN0aW9uIiwicGF5a2l0LmFsbG93YW5jZV9lbmQiXSwicHJvdG9jb2xzIjp7InBheWtpdCI6eyJwdWJsaWNfZW5kcG9pbnRzIjp7ImJ0Yy1saWdodG5pbmctYm9sdDEyIjoibG5vMXFnc3F2Z253Z2NnMzV6NmVlMmgzeWN6cmFkZG03MnhyZnVhOXV2ZTJybHJtOWRldTd4eWZ6ciJ9fX0sImxhYmVsIjoiYm9iIHNob3AiLCJ1cGRhdGVkX2F0IjoiMjAyNS0xMi0zMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDEtMzBUMDA6MDA6MDAuMDAwWiJ9",
+          "sig": "U9BITE16YgVtTJbmo8hM98QM8HZFQdd5eeCAKX4-eOGEu7LON8Y2ib8WYDujY_2GX0YYRYTixxZFUsv8NG9_DA"
+        }
+      },
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"signing_key\":\"D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM\",\"cert\":{\"body\":\"eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiYWxsb3dhbmNlIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0\",\"sig\":\"DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw\"},\"accepts\":[\"paykit.payment_request_acceptance\",\"paykit.payment_request_rejection\",\"paykit.payment_request_cancellation\",\"paykit.payment_proof\",\"paykit.private_payment_list_request\",\"paykit.resend_request\",\"paykit.allowance_proposal\",\"paykit.allowance_acceptance\",\"paykit.allowance_rejection\",\"paykit.allowance_end\"],\"protocols\":{\"paykit\":{\"capabilities\":null,\"public_endpoints\":{\"btc-lightning-bolt12\":\"lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr\"}}},\"label\":\"bob shop\",\"updated_at\":\"2025-12-31T00:00:00.000Z\",\"expires_at\":\"2026-01-30T00:00:00.000Z\"}",
+        "expires_at": "2026-01-30T00:00:00.000Z",
+        "name": "capabilities null",
+        "protocols": {
+          "paykit": {
+            "capabilities": null,
+            "public_endpoints": {
+              "btc-lightning-bolt12": "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr"
+            }
+          }
+        },
+        "reads": {
+          "endpoint_identifiers": [],
+          "public_endpoints": {
+            "btc-lightning-bolt12": "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr"
+          }
+        },
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcCIsImlkZW50aXR5IjoiN3A0Zm40NHFvc2hjd2dmbmR6NWdydDdmeXl6MWV5Y3F5ZHV4ZHFlOG81OG9mMWJ5em9kbyIsImFwcF9pZCI6ImJycnozbTZnNXJjaTZpcW56a2U0NHE0ZGpjIiwic2lnbmluZ19rZXkiOiJEOXZYaHlPaTc2QnNTdVBzY3FqM3RVOHRfaTVyY1JrZE9rcVB5TXkxV1dNIiwiY2VydCI6eyJib2R5IjoiZXlKMklqb3hMQ0pyYVc1a0lqb2ljSFZpYTNrdGMzZHBkR05vTG1Gd2NGOWpaWEowSWl3aWFXUmxiblJwZEhraU9pSTNjRFJtYmpRMGNXOXphR04zWjJadVpIbzFaM0owTjJaNWVYb3haWGxqY1hsa2RYaGtjV1U0YnpVNGIyWXhZbmw2YjJSdklpd2lZWEJ3WDJsa0lqb2lZbkp5ZWpOdE5tYzFjbU5wTm1seGJucHJaVFEwY1RSa2FtTWlMQ0p6YVdkdWFXNW5YMnRsZVNJNklrUTVkbGhvZVU5cE56WkNjMU4xVUhOamNXb3pkRlU0ZEY5cE5YSmpVbXRrVDJ0eFVIbE5lVEZYVjAwaUxDSmlkVzVrYkdWZmEyVjVJam9pWWpaUlVXZDFOMVJFTm1kaU1IaHpZM0IzUzBRNFNFSm5kbVphUzFac2J6ZHNSVXMzVFVFd1FqUklNQ0lzSW5OamIzQmxjeUk2V3lKeVpYRjFaWE4wSWl3aVlXeHNiM2RoYm1ObElsMHNJbkJsY20xcGMzTnBiMjV6SWpwYkltTnNZV2x0Y3k1eVpXRmtJaXdpWTI5dWRtVnljMkYwYVc5dUxtRmtaQ0pkTENKcGMzTjFaV1JmWVhRaU9pSXlNREkxTFRFeUxUQXhWREF3T2pBd09qQXdMakF3TUZvaUxDSmxlSEJwY21WelgyRjBJam9pTWpBeU5pMHhNaTB3TVZRd01Eb3dNRG93TUM0d01EQmFJbjAiLCJzaWciOiJEY1ppajlSQkpGa2M5ektnNEpSYzl6ZHoyc2dEdlVSMFpBV1AyX1ZCZ0txQ1VJSkZLUVN5MngydUtBcHpZQ2ZpRkQ2REZ2S0wxNjFuNmtqLUpfRkdCdyJ9LCJhY2NlcHRzIjpbInBheWtpdC5wYXltZW50X3JlcXVlc3RfYWNjZXB0YW5jZSIsInBheWtpdC5wYXltZW50X3JlcXVlc3RfcmVqZWN0aW9uIiwicGF5a2l0LnBheW1lbnRfcmVxdWVzdF9jYW5jZWxsYXRpb24iLCJwYXlraXQucGF5bWVudF9wcm9vZiIsInBheWtpdC5wcml2YXRlX3BheW1lbnRfbGlzdF9yZXF1ZXN0IiwicGF5a2l0LnJlc2VuZF9yZXF1ZXN0IiwicGF5a2l0LmFsbG93YW5jZV9wcm9wb3NhbCIsInBheWtpdC5hbGxvd2FuY2VfYWNjZXB0YW5jZSIsInBheWtpdC5hbGxvd2FuY2VfcmVqZWN0aW9uIiwicGF5a2l0LmFsbG93YW5jZV9lbmQiXSwicHJvdG9jb2xzIjp7InBheWtpdCI6eyJjYXBhYmlsaXRpZXMiOm51bGwsInB1YmxpY19lbmRwb2ludHMiOnsiYnRjLWxpZ2h0bmluZy1ib2x0MTIiOiJsbm8xcWdzcXZnbndnY2czNXo2ZWUyaDN5Y3pyYWRkbTcyeHJmdWE5dXZlMnJscm05ZGV1N3h5ZnpyIn19fSwibGFiZWwiOiJib2Igc2hvcCIsInVwZGF0ZWRfYXQiOiIyMDI1LTEyLTMxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0wMS0zMFQwMDowMDowMC4wMDBaIn0",
+          "sig": "RWQUH7dr8eozm6gbHMzoMafF0IiW5011OgdkOoFTqbo1P1xzh_Ap64Py3LO1K7kFEm9Zu2YulExps7pURGEqDQ"
+        }
+      },
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"signing_key\":\"D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM\",\"cert\":{\"body\":\"eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiYWxsb3dhbmNlIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0\",\"sig\":\"DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw\"},\"accepts\":[\"paykit.payment_request_acceptance\",\"paykit.payment_request_rejection\",\"paykit.payment_request_cancellation\",\"paykit.payment_proof\",\"paykit.private_payment_list_request\",\"paykit.resend_request\",\"paykit.allowance_proposal\",\"paykit.allowance_acceptance\",\"paykit.allowance_rejection\",\"paykit.allowance_end\"],\"protocols\":{\"paykit\":{\"capabilities\":{},\"public_endpoints\":{\"btc-lightning-bolt12\":\"lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr\"}}},\"label\":\"bob shop\",\"updated_at\":\"2025-12-31T00:00:00.000Z\",\"expires_at\":\"2026-01-30T00:00:00.000Z\"}",
+        "expires_at": "2026-01-30T00:00:00.000Z",
+        "name": "endpoint_identifiers missing",
+        "protocols": {
+          "paykit": {
+            "capabilities": {},
+            "public_endpoints": {
+              "btc-lightning-bolt12": "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr"
+            }
+          }
+        },
+        "reads": {
+          "endpoint_identifiers": [],
+          "public_endpoints": {
+            "btc-lightning-bolt12": "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr"
+          }
+        },
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcCIsImlkZW50aXR5IjoiN3A0Zm40NHFvc2hjd2dmbmR6NWdydDdmeXl6MWV5Y3F5ZHV4ZHFlOG81OG9mMWJ5em9kbyIsImFwcF9pZCI6ImJycnozbTZnNXJjaTZpcW56a2U0NHE0ZGpjIiwic2lnbmluZ19rZXkiOiJEOXZYaHlPaTc2QnNTdVBzY3FqM3RVOHRfaTVyY1JrZE9rcVB5TXkxV1dNIiwiY2VydCI6eyJib2R5IjoiZXlKMklqb3hMQ0pyYVc1a0lqb2ljSFZpYTNrdGMzZHBkR05vTG1Gd2NGOWpaWEowSWl3aWFXUmxiblJwZEhraU9pSTNjRFJtYmpRMGNXOXphR04zWjJadVpIbzFaM0owTjJaNWVYb3haWGxqY1hsa2RYaGtjV1U0YnpVNGIyWXhZbmw2YjJSdklpd2lZWEJ3WDJsa0lqb2lZbkp5ZWpOdE5tYzFjbU5wTm1seGJucHJaVFEwY1RSa2FtTWlMQ0p6YVdkdWFXNW5YMnRsZVNJNklrUTVkbGhvZVU5cE56WkNjMU4xVUhOamNXb3pkRlU0ZEY5cE5YSmpVbXRrVDJ0eFVIbE5lVEZYVjAwaUxDSmlkVzVrYkdWZmEyVjVJam9pWWpaUlVXZDFOMVJFTm1kaU1IaHpZM0IzUzBRNFNFSm5kbVphUzFac2J6ZHNSVXMzVFVFd1FqUklNQ0lzSW5OamIzQmxjeUk2V3lKeVpYRjFaWE4wSWl3aVlXeHNiM2RoYm1ObElsMHNJbkJsY20xcGMzTnBiMjV6SWpwYkltTnNZV2x0Y3k1eVpXRmtJaXdpWTI5dWRtVnljMkYwYVc5dUxtRmtaQ0pkTENKcGMzTjFaV1JmWVhRaU9pSXlNREkxTFRFeUxUQXhWREF3T2pBd09qQXdMakF3TUZvaUxDSmxlSEJwY21WelgyRjBJam9pTWpBeU5pMHhNaTB3TVZRd01Eb3dNRG93TUM0d01EQmFJbjAiLCJzaWciOiJEY1ppajlSQkpGa2M5ektnNEpSYzl6ZHoyc2dEdlVSMFpBV1AyX1ZCZ0txQ1VJSkZLUVN5MngydUtBcHpZQ2ZpRkQ2REZ2S0wxNjFuNmtqLUpfRkdCdyJ9LCJhY2NlcHRzIjpbInBheWtpdC5wYXltZW50X3JlcXVlc3RfYWNjZXB0YW5jZSIsInBheWtpdC5wYXltZW50X3JlcXVlc3RfcmVqZWN0aW9uIiwicGF5a2l0LnBheW1lbnRfcmVxdWVzdF9jYW5jZWxsYXRpb24iLCJwYXlraXQucGF5bWVudF9wcm9vZiIsInBheWtpdC5wcml2YXRlX3BheW1lbnRfbGlzdF9yZXF1ZXN0IiwicGF5a2l0LnJlc2VuZF9yZXF1ZXN0IiwicGF5a2l0LmFsbG93YW5jZV9wcm9wb3NhbCIsInBheWtpdC5hbGxvd2FuY2VfYWNjZXB0YW5jZSIsInBheWtpdC5hbGxvd2FuY2VfcmVqZWN0aW9uIiwicGF5a2l0LmFsbG93YW5jZV9lbmQiXSwicHJvdG9jb2xzIjp7InBheWtpdCI6eyJjYXBhYmlsaXRpZXMiOnt9LCJwdWJsaWNfZW5kcG9pbnRzIjp7ImJ0Yy1saWdodG5pbmctYm9sdDEyIjoibG5vMXFnc3F2Z253Z2NnMzV6NmVlMmgzeWN6cmFkZG03MnhyZnVhOXV2ZTJybHJtOWRldTd4eWZ6ciJ9fX0sImxhYmVsIjoiYm9iIHNob3AiLCJ1cGRhdGVkX2F0IjoiMjAyNS0xMi0zMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDEtMzBUMDA6MDA6MDAuMDAwWiJ9",
+          "sig": "yygNC9adzfbG5gicXB8H3zxC-gS4myoHUxGyUfBLwAwgWLElMoQZ82iEJFpB3XO0YLv2fNzvT6ua8rRYRtlqAA"
+        }
+      },
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"signing_key\":\"D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM\",\"cert\":{\"body\":\"eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiYWxsb3dhbmNlIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0\",\"sig\":\"DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw\"},\"accepts\":[\"paykit.payment_request_acceptance\",\"paykit.payment_request_rejection\",\"paykit.payment_request_cancellation\",\"paykit.payment_proof\",\"paykit.private_payment_list_request\",\"paykit.resend_request\",\"paykit.allowance_proposal\",\"paykit.allowance_acceptance\",\"paykit.allowance_rejection\",\"paykit.allowance_end\"],\"protocols\":{\"paykit\":{\"capabilities\":{\"endpoint_identifiers\":null},\"public_endpoints\":{\"btc-lightning-bolt12\":\"lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr\"}}},\"label\":\"bob shop\",\"updated_at\":\"2025-12-31T00:00:00.000Z\",\"expires_at\":\"2026-01-30T00:00:00.000Z\"}",
+        "expires_at": "2026-01-30T00:00:00.000Z",
+        "name": "endpoint_identifiers null",
+        "protocols": {
+          "paykit": {
+            "capabilities": {
+              "endpoint_identifiers": null
+            },
+            "public_endpoints": {
+              "btc-lightning-bolt12": "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr"
+            }
+          }
+        },
+        "reads": {
+          "endpoint_identifiers": [],
+          "public_endpoints": {
+            "btc-lightning-bolt12": "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr"
+          }
+        },
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcCIsImlkZW50aXR5IjoiN3A0Zm40NHFvc2hjd2dmbmR6NWdydDdmeXl6MWV5Y3F5ZHV4ZHFlOG81OG9mMWJ5em9kbyIsImFwcF9pZCI6ImJycnozbTZnNXJjaTZpcW56a2U0NHE0ZGpjIiwic2lnbmluZ19rZXkiOiJEOXZYaHlPaTc2QnNTdVBzY3FqM3RVOHRfaTVyY1JrZE9rcVB5TXkxV1dNIiwiY2VydCI6eyJib2R5IjoiZXlKMklqb3hMQ0pyYVc1a0lqb2ljSFZpYTNrdGMzZHBkR05vTG1Gd2NGOWpaWEowSWl3aWFXUmxiblJwZEhraU9pSTNjRFJtYmpRMGNXOXphR04zWjJadVpIbzFaM0owTjJaNWVYb3haWGxqY1hsa2RYaGtjV1U0YnpVNGIyWXhZbmw2YjJSdklpd2lZWEJ3WDJsa0lqb2lZbkp5ZWpOdE5tYzFjbU5wTm1seGJucHJaVFEwY1RSa2FtTWlMQ0p6YVdkdWFXNW5YMnRsZVNJNklrUTVkbGhvZVU5cE56WkNjMU4xVUhOamNXb3pkRlU0ZEY5cE5YSmpVbXRrVDJ0eFVIbE5lVEZYVjAwaUxDSmlkVzVrYkdWZmEyVjVJam9pWWpaUlVXZDFOMVJFTm1kaU1IaHpZM0IzUzBRNFNFSm5kbVphUzFac2J6ZHNSVXMzVFVFd1FqUklNQ0lzSW5OamIzQmxjeUk2V3lKeVpYRjFaWE4wSWl3aVlXeHNiM2RoYm1ObElsMHNJbkJsY20xcGMzTnBiMjV6SWpwYkltTnNZV2x0Y3k1eVpXRmtJaXdpWTI5dWRtVnljMkYwYVc5dUxtRmtaQ0pkTENKcGMzTjFaV1JmWVhRaU9pSXlNREkxTFRFeUxUQXhWREF3T2pBd09qQXdMakF3TUZvaUxDSmxlSEJwY21WelgyRjBJam9pTWpBeU5pMHhNaTB3TVZRd01Eb3dNRG93TUM0d01EQmFJbjAiLCJzaWciOiJEY1ppajlSQkpGa2M5ektnNEpSYzl6ZHoyc2dEdlVSMFpBV1AyX1ZCZ0txQ1VJSkZLUVN5MngydUtBcHpZQ2ZpRkQ2REZ2S0wxNjFuNmtqLUpfRkdCdyJ9LCJhY2NlcHRzIjpbInBheWtpdC5wYXltZW50X3JlcXVlc3RfYWNjZXB0YW5jZSIsInBheWtpdC5wYXltZW50X3JlcXVlc3RfcmVqZWN0aW9uIiwicGF5a2l0LnBheW1lbnRfcmVxdWVzdF9jYW5jZWxsYXRpb24iLCJwYXlraXQucGF5bWVudF9wcm9vZiIsInBheWtpdC5wcml2YXRlX3BheW1lbnRfbGlzdF9yZXF1ZXN0IiwicGF5a2l0LnJlc2VuZF9yZXF1ZXN0IiwicGF5a2l0LmFsbG93YW5jZV9wcm9wb3NhbCIsInBheWtpdC5hbGxvd2FuY2VfYWNjZXB0YW5jZSIsInBheWtpdC5hbGxvd2FuY2VfcmVqZWN0aW9uIiwicGF5a2l0LmFsbG93YW5jZV9lbmQiXSwicHJvdG9jb2xzIjp7InBheWtpdCI6eyJjYXBhYmlsaXRpZXMiOnsiZW5kcG9pbnRfaWRlbnRpZmllcnMiOm51bGx9LCJwdWJsaWNfZW5kcG9pbnRzIjp7ImJ0Yy1saWdodG5pbmctYm9sdDEyIjoibG5vMXFnc3F2Z253Z2NnMzV6NmVlMmgzeWN6cmFkZG03MnhyZnVhOXV2ZTJybHJtOWRldTd4eWZ6ciJ9fX0sImxhYmVsIjoiYm9iIHNob3AiLCJ1cGRhdGVkX2F0IjoiMjAyNS0xMi0zMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDEtMzBUMDA6MDA6MDAuMDAwWiJ9",
+          "sig": "qsbr8oQq2Jdk6FIEOws6IfkRTxggUn84kB3fvivvGTJW0o93f13ad9_uHA_i2rXS0nzwv1Kxw1MS9EQ1xcqgBQ"
+        }
+      },
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"signing_key\":\"D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM\",\"cert\":{\"body\":\"eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiYWxsb3dhbmNlIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0\",\"sig\":\"DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw\"},\"accepts\":[\"paykit.payment_request_acceptance\",\"paykit.payment_request_rejection\",\"paykit.payment_request_cancellation\",\"paykit.payment_proof\",\"paykit.private_payment_list_request\",\"paykit.resend_request\",\"paykit.allowance_proposal\",\"paykit.allowance_acceptance\",\"paykit.allowance_rejection\",\"paykit.allowance_end\"],\"protocols\":{\"paykit\":{\"capabilities\":{\"endpoint_identifiers\":[\"btc-lightning-bolt11\",\"btc-bitcoin-p2wpkh\"]}}},\"label\":\"bob shop\",\"updated_at\":\"2025-12-31T00:00:00.000Z\",\"expires_at\":\"2026-01-30T00:00:00.000Z\"}",
+        "expires_at": "2026-01-30T00:00:00.000Z",
+        "name": "public_endpoints missing",
+        "protocols": {
+          "paykit": {
+            "capabilities": {
+              "endpoint_identifiers": [
+                "btc-lightning-bolt11",
+                "btc-bitcoin-p2wpkh"
+              ]
+            }
+          }
+        },
+        "reads": {
+          "endpoint_identifiers": [
+            "btc-lightning-bolt11",
+            "btc-bitcoin-p2wpkh"
+          ],
+          "public_endpoints": {}
+        },
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcCIsImlkZW50aXR5IjoiN3A0Zm40NHFvc2hjd2dmbmR6NWdydDdmeXl6MWV5Y3F5ZHV4ZHFlOG81OG9mMWJ5em9kbyIsImFwcF9pZCI6ImJycnozbTZnNXJjaTZpcW56a2U0NHE0ZGpjIiwic2lnbmluZ19rZXkiOiJEOXZYaHlPaTc2QnNTdVBzY3FqM3RVOHRfaTVyY1JrZE9rcVB5TXkxV1dNIiwiY2VydCI6eyJib2R5IjoiZXlKMklqb3hMQ0pyYVc1a0lqb2ljSFZpYTNrdGMzZHBkR05vTG1Gd2NGOWpaWEowSWl3aWFXUmxiblJwZEhraU9pSTNjRFJtYmpRMGNXOXphR04zWjJadVpIbzFaM0owTjJaNWVYb3haWGxqY1hsa2RYaGtjV1U0YnpVNGIyWXhZbmw2YjJSdklpd2lZWEJ3WDJsa0lqb2lZbkp5ZWpOdE5tYzFjbU5wTm1seGJucHJaVFEwY1RSa2FtTWlMQ0p6YVdkdWFXNW5YMnRsZVNJNklrUTVkbGhvZVU5cE56WkNjMU4xVUhOamNXb3pkRlU0ZEY5cE5YSmpVbXRrVDJ0eFVIbE5lVEZYVjAwaUxDSmlkVzVrYkdWZmEyVjVJam9pWWpaUlVXZDFOMVJFTm1kaU1IaHpZM0IzUzBRNFNFSm5kbVphUzFac2J6ZHNSVXMzVFVFd1FqUklNQ0lzSW5OamIzQmxjeUk2V3lKeVpYRjFaWE4wSWl3aVlXeHNiM2RoYm1ObElsMHNJbkJsY20xcGMzTnBiMjV6SWpwYkltTnNZV2x0Y3k1eVpXRmtJaXdpWTI5dWRtVnljMkYwYVc5dUxtRmtaQ0pkTENKcGMzTjFaV1JmWVhRaU9pSXlNREkxTFRFeUxUQXhWREF3T2pBd09qQXdMakF3TUZvaUxDSmxlSEJwY21WelgyRjBJam9pTWpBeU5pMHhNaTB3TVZRd01Eb3dNRG93TUM0d01EQmFJbjAiLCJzaWciOiJEY1ppajlSQkpGa2M5ektnNEpSYzl6ZHoyc2dEdlVSMFpBV1AyX1ZCZ0txQ1VJSkZLUVN5MngydUtBcHpZQ2ZpRkQ2REZ2S0wxNjFuNmtqLUpfRkdCdyJ9LCJhY2NlcHRzIjpbInBheWtpdC5wYXltZW50X3JlcXVlc3RfYWNjZXB0YW5jZSIsInBheWtpdC5wYXltZW50X3JlcXVlc3RfcmVqZWN0aW9uIiwicGF5a2l0LnBheW1lbnRfcmVxdWVzdF9jYW5jZWxsYXRpb24iLCJwYXlraXQucGF5bWVudF9wcm9vZiIsInBheWtpdC5wcml2YXRlX3BheW1lbnRfbGlzdF9yZXF1ZXN0IiwicGF5a2l0LnJlc2VuZF9yZXF1ZXN0IiwicGF5a2l0LmFsbG93YW5jZV9wcm9wb3NhbCIsInBheWtpdC5hbGxvd2FuY2VfYWNjZXB0YW5jZSIsInBheWtpdC5hbGxvd2FuY2VfcmVqZWN0aW9uIiwicGF5a2l0LmFsbG93YW5jZV9lbmQiXSwicHJvdG9jb2xzIjp7InBheWtpdCI6eyJjYXBhYmlsaXRpZXMiOnsiZW5kcG9pbnRfaWRlbnRpZmllcnMiOlsiYnRjLWxpZ2h0bmluZy1ib2x0MTEiLCJidGMtYml0Y29pbi1wMndwa2giXX19fSwibGFiZWwiOiJib2Igc2hvcCIsInVwZGF0ZWRfYXQiOiIyMDI1LTEyLTMxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0wMS0zMFQwMDowMDowMC4wMDBaIn0",
+          "sig": "7QfJA3HSxj-Pz_Dqo_oa3f7m8Ycan0-Jw3ozDaPJUN9rKYtfIYN5rsxhj7cYFtDHwbZk5vv_6IC_odmJ1pMEBg"
+        }
+      },
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"signing_key\":\"D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM\",\"cert\":{\"body\":\"eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiYWxsb3dhbmNlIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0\",\"sig\":\"DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw\"},\"accepts\":[\"paykit.payment_request_acceptance\",\"paykit.payment_request_rejection\",\"paykit.payment_request_cancellation\",\"paykit.payment_proof\",\"paykit.private_payment_list_request\",\"paykit.resend_request\",\"paykit.allowance_proposal\",\"paykit.allowance_acceptance\",\"paykit.allowance_rejection\",\"paykit.allowance_end\"],\"protocols\":{\"paykit\":{\"capabilities\":{\"endpoint_identifiers\":[\"btc-lightning-bolt11\",\"btc-bitcoin-p2wpkh\"]},\"public_endpoints\":null}},\"label\":\"bob shop\",\"updated_at\":\"2025-12-31T00:00:00.000Z\",\"expires_at\":\"2026-01-30T00:00:00.000Z\"}",
+        "expires_at": "2026-01-30T00:00:00.000Z",
+        "name": "public_endpoints null",
+        "protocols": {
+          "paykit": {
+            "capabilities": {
+              "endpoint_identifiers": [
+                "btc-lightning-bolt11",
+                "btc-bitcoin-p2wpkh"
+              ]
+            },
+            "public_endpoints": null
+          }
+        },
+        "reads": {
+          "endpoint_identifiers": [
+            "btc-lightning-bolt11",
+            "btc-bitcoin-p2wpkh"
+          ],
+          "public_endpoints": {}
+        },
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcCIsImlkZW50aXR5IjoiN3A0Zm40NHFvc2hjd2dmbmR6NWdydDdmeXl6MWV5Y3F5ZHV4ZHFlOG81OG9mMWJ5em9kbyIsImFwcF9pZCI6ImJycnozbTZnNXJjaTZpcW56a2U0NHE0ZGpjIiwic2lnbmluZ19rZXkiOiJEOXZYaHlPaTc2QnNTdVBzY3FqM3RVOHRfaTVyY1JrZE9rcVB5TXkxV1dNIiwiY2VydCI6eyJib2R5IjoiZXlKMklqb3hMQ0pyYVc1a0lqb2ljSFZpYTNrdGMzZHBkR05vTG1Gd2NGOWpaWEowSWl3aWFXUmxiblJwZEhraU9pSTNjRFJtYmpRMGNXOXphR04zWjJadVpIbzFaM0owTjJaNWVYb3haWGxqY1hsa2RYaGtjV1U0YnpVNGIyWXhZbmw2YjJSdklpd2lZWEJ3WDJsa0lqb2lZbkp5ZWpOdE5tYzFjbU5wTm1seGJucHJaVFEwY1RSa2FtTWlMQ0p6YVdkdWFXNW5YMnRsZVNJNklrUTVkbGhvZVU5cE56WkNjMU4xVUhOamNXb3pkRlU0ZEY5cE5YSmpVbXRrVDJ0eFVIbE5lVEZYVjAwaUxDSmlkVzVrYkdWZmEyVjVJam9pWWpaUlVXZDFOMVJFTm1kaU1IaHpZM0IzUzBRNFNFSm5kbVphUzFac2J6ZHNSVXMzVFVFd1FqUklNQ0lzSW5OamIzQmxjeUk2V3lKeVpYRjFaWE4wSWl3aVlXeHNiM2RoYm1ObElsMHNJbkJsY20xcGMzTnBiMjV6SWpwYkltTnNZV2x0Y3k1eVpXRmtJaXdpWTI5dWRtVnljMkYwYVc5dUxtRmtaQ0pkTENKcGMzTjFaV1JmWVhRaU9pSXlNREkxTFRFeUxUQXhWREF3T2pBd09qQXdMakF3TUZvaUxDSmxlSEJwY21WelgyRjBJam9pTWpBeU5pMHhNaTB3TVZRd01Eb3dNRG93TUM0d01EQmFJbjAiLCJzaWciOiJEY1ppajlSQkpGa2M5ektnNEpSYzl6ZHoyc2dEdlVSMFpBV1AyX1ZCZ0txQ1VJSkZLUVN5MngydUtBcHpZQ2ZpRkQ2REZ2S0wxNjFuNmtqLUpfRkdCdyJ9LCJhY2NlcHRzIjpbInBheWtpdC5wYXltZW50X3JlcXVlc3RfYWNjZXB0YW5jZSIsInBheWtpdC5wYXltZW50X3JlcXVlc3RfcmVqZWN0aW9uIiwicGF5a2l0LnBheW1lbnRfcmVxdWVzdF9jYW5jZWxsYXRpb24iLCJwYXlraXQucGF5bWVudF9wcm9vZiIsInBheWtpdC5wcml2YXRlX3BheW1lbnRfbGlzdF9yZXF1ZXN0IiwicGF5a2l0LnJlc2VuZF9yZXF1ZXN0IiwicGF5a2l0LmFsbG93YW5jZV9wcm9wb3NhbCIsInBheWtpdC5hbGxvd2FuY2VfYWNjZXB0YW5jZSIsInBheWtpdC5hbGxvd2FuY2VfcmVqZWN0aW9uIiwicGF5a2l0LmFsbG93YW5jZV9lbmQiXSwicHJvdG9jb2xzIjp7InBheWtpdCI6eyJjYXBhYmlsaXRpZXMiOnsiZW5kcG9pbnRfaWRlbnRpZmllcnMiOlsiYnRjLWxpZ2h0bmluZy1ib2x0MTEiLCJidGMtYml0Y29pbi1wMndwa2giXX0sInB1YmxpY19lbmRwb2ludHMiOm51bGx9fSwibGFiZWwiOiJib2Igc2hvcCIsInVwZGF0ZWRfYXQiOiIyMDI1LTEyLTMxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0wMS0zMFQwMDowMDowMC4wMDBaIn0",
+          "sig": "GdIUUuifWwc0KrfF84GJhtYE2qHsG0knMyppdsnT_XDWycfZhxsUuuJZZziM8qOmGdN2y4b8XVDlgAjDJ5TkCQ"
+        }
+      },
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"signing_key\":\"D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM\",\"cert\":{\"body\":\"eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiYWxsb3dhbmNlIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0\",\"sig\":\"DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw\"},\"accepts\":[\"paykit.payment_request_acceptance\",\"paykit.payment_request_rejection\",\"paykit.payment_request_cancellation\",\"paykit.payment_proof\",\"paykit.private_payment_list_request\",\"paykit.resend_request\",\"paykit.allowance_proposal\",\"paykit.allowance_acceptance\",\"paykit.allowance_rejection\",\"paykit.allowance_end\"],\"protocols\":{\"paykit\":{\"capabilities\":{\"endpoint_identifiers\":[\"btc-lightning-bolt11\",\"btc-bitcoin-p2wpkh\"]},\"future\":{\"level\":1},\"public_endpoints\":{\"btc-lightning-bolt12\":\"lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr\"}}},\"label\":\"bob shop\",\"updated_at\":\"2025-12-31T00:00:00.000Z\",\"expires_at\":\"2026-01-30T00:00:00.000Z\"}",
+        "expires_at": "2026-01-30T00:00:00.000Z",
+        "name": "an unknown member in the paykit member, ignored",
+        "protocols": {
+          "paykit": {
+            "capabilities": {
+              "endpoint_identifiers": [
+                "btc-lightning-bolt11",
+                "btc-bitcoin-p2wpkh"
+              ]
+            },
+            "future": {
+              "level": 1
+            },
+            "public_endpoints": {
+              "btc-lightning-bolt12": "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr"
+            }
+          }
+        },
+        "reads": {
+          "endpoint_identifiers": [
+            "btc-lightning-bolt11",
+            "btc-bitcoin-p2wpkh"
+          ],
+          "public_endpoints": {
+            "btc-lightning-bolt12": "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr"
+          }
+        },
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcCIsImlkZW50aXR5IjoiN3A0Zm40NHFvc2hjd2dmbmR6NWdydDdmeXl6MWV5Y3F5ZHV4ZHFlOG81OG9mMWJ5em9kbyIsImFwcF9pZCI6ImJycnozbTZnNXJjaTZpcW56a2U0NHE0ZGpjIiwic2lnbmluZ19rZXkiOiJEOXZYaHlPaTc2QnNTdVBzY3FqM3RVOHRfaTVyY1JrZE9rcVB5TXkxV1dNIiwiY2VydCI6eyJib2R5IjoiZXlKMklqb3hMQ0pyYVc1a0lqb2ljSFZpYTNrdGMzZHBkR05vTG1Gd2NGOWpaWEowSWl3aWFXUmxiblJwZEhraU9pSTNjRFJtYmpRMGNXOXphR04zWjJadVpIbzFaM0owTjJaNWVYb3haWGxqY1hsa2RYaGtjV1U0YnpVNGIyWXhZbmw2YjJSdklpd2lZWEJ3WDJsa0lqb2lZbkp5ZWpOdE5tYzFjbU5wTm1seGJucHJaVFEwY1RSa2FtTWlMQ0p6YVdkdWFXNW5YMnRsZVNJNklrUTVkbGhvZVU5cE56WkNjMU4xVUhOamNXb3pkRlU0ZEY5cE5YSmpVbXRrVDJ0eFVIbE5lVEZYVjAwaUxDSmlkVzVrYkdWZmEyVjVJam9pWWpaUlVXZDFOMVJFTm1kaU1IaHpZM0IzUzBRNFNFSm5kbVphUzFac2J6ZHNSVXMzVFVFd1FqUklNQ0lzSW5OamIzQmxjeUk2V3lKeVpYRjFaWE4wSWl3aVlXeHNiM2RoYm1ObElsMHNJbkJsY20xcGMzTnBiMjV6SWpwYkltTnNZV2x0Y3k1eVpXRmtJaXdpWTI5dWRtVnljMkYwYVc5dUxtRmtaQ0pkTENKcGMzTjFaV1JmWVhRaU9pSXlNREkxTFRFeUxUQXhWREF3T2pBd09qQXdMakF3TUZvaUxDSmxlSEJwY21WelgyRjBJam9pTWpBeU5pMHhNaTB3TVZRd01Eb3dNRG93TUM0d01EQmFJbjAiLCJzaWciOiJEY1ppajlSQkpGa2M5ektnNEpSYzl6ZHoyc2dEdlVSMFpBV1AyX1ZCZ0txQ1VJSkZLUVN5MngydUtBcHpZQ2ZpRkQ2REZ2S0wxNjFuNmtqLUpfRkdCdyJ9LCJhY2NlcHRzIjpbInBheWtpdC5wYXltZW50X3JlcXVlc3RfYWNjZXB0YW5jZSIsInBheWtpdC5wYXltZW50X3JlcXVlc3RfcmVqZWN0aW9uIiwicGF5a2l0LnBheW1lbnRfcmVxdWVzdF9jYW5jZWxsYXRpb24iLCJwYXlraXQucGF5bWVudF9wcm9vZiIsInBheWtpdC5wcml2YXRlX3BheW1lbnRfbGlzdF9yZXF1ZXN0IiwicGF5a2l0LnJlc2VuZF9yZXF1ZXN0IiwicGF5a2l0LmFsbG93YW5jZV9wcm9wb3NhbCIsInBheWtpdC5hbGxvd2FuY2VfYWNjZXB0YW5jZSIsInBheWtpdC5hbGxvd2FuY2VfcmVqZWN0aW9uIiwicGF5a2l0LmFsbG93YW5jZV9lbmQiXSwicHJvdG9jb2xzIjp7InBheWtpdCI6eyJjYXBhYmlsaXRpZXMiOnsiZW5kcG9pbnRfaWRlbnRpZmllcnMiOlsiYnRjLWxpZ2h0bmluZy1ib2x0MTEiLCJidGMtYml0Y29pbi1wMndwa2giXX0sImZ1dHVyZSI6eyJsZXZlbCI6MX0sInB1YmxpY19lbmRwb2ludHMiOnsiYnRjLWxpZ2h0bmluZy1ib2x0MTIiOiJsbm8xcWdzcXZnbndnY2czNXo2ZWUyaDN5Y3pyYWRkbTcyeHJmdWE5dXZlMnJscm05ZGV1N3h5ZnpyIn19fSwibGFiZWwiOiJib2Igc2hvcCIsInVwZGF0ZWRfYXQiOiIyMDI1LTEyLTMxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0wMS0zMFQwMDowMDowMC4wMDBaIn0",
+          "sig": "521hbJnjXciFmEfekp9neeJGsPQ7LbY4NgbakZmN400yHkYcvemmaw-EJkmfht7Nf_WJq1NIM9y7LKLR3yyoAA"
+        }
+      },
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"signing_key\":\"D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM\",\"cert\":{\"body\":\"eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiYWxsb3dhbmNlIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0\",\"sig\":\"DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw\"},\"accepts\":[\"paykit.payment_request_acceptance\",\"paykit.payment_request_rejection\",\"paykit.payment_request_cancellation\",\"paykit.payment_proof\",\"paykit.private_payment_list_request\",\"paykit.resend_request\",\"paykit.allowance_proposal\",\"paykit.allowance_acceptance\",\"paykit.allowance_rejection\",\"paykit.allowance_end\"],\"protocols\":{\"paykit\":{\"capabilities\":{\"endpoint_identifiers\":[\"btc-lightning-bolt11\",\"btc-bitcoin-p2wpkh\"],\"future\":true},\"public_endpoints\":{\"btc-lightning-bolt12\":\"lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr\"}}},\"label\":\"bob shop\",\"updated_at\":\"2025-12-31T00:00:00.000Z\",\"expires_at\":\"2026-01-30T00:00:00.000Z\"}",
+        "expires_at": "2026-01-30T00:00:00.000Z",
+        "name": "an unknown member in capabilities, ignored",
+        "protocols": {
+          "paykit": {
+            "capabilities": {
+              "endpoint_identifiers": [
+                "btc-lightning-bolt11",
+                "btc-bitcoin-p2wpkh"
+              ],
+              "future": true
+            },
+            "public_endpoints": {
+              "btc-lightning-bolt12": "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr"
+            }
+          }
+        },
+        "reads": {
+          "endpoint_identifiers": [
+            "btc-lightning-bolt11",
+            "btc-bitcoin-p2wpkh"
+          ],
+          "public_endpoints": {
+            "btc-lightning-bolt12": "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr"
+          }
+        },
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcCIsImlkZW50aXR5IjoiN3A0Zm40NHFvc2hjd2dmbmR6NWdydDdmeXl6MWV5Y3F5ZHV4ZHFlOG81OG9mMWJ5em9kbyIsImFwcF9pZCI6ImJycnozbTZnNXJjaTZpcW56a2U0NHE0ZGpjIiwic2lnbmluZ19rZXkiOiJEOXZYaHlPaTc2QnNTdVBzY3FqM3RVOHRfaTVyY1JrZE9rcVB5TXkxV1dNIiwiY2VydCI6eyJib2R5IjoiZXlKMklqb3hMQ0pyYVc1a0lqb2ljSFZpYTNrdGMzZHBkR05vTG1Gd2NGOWpaWEowSWl3aWFXUmxiblJwZEhraU9pSTNjRFJtYmpRMGNXOXphR04zWjJadVpIbzFaM0owTjJaNWVYb3haWGxqY1hsa2RYaGtjV1U0YnpVNGIyWXhZbmw2YjJSdklpd2lZWEJ3WDJsa0lqb2lZbkp5ZWpOdE5tYzFjbU5wTm1seGJucHJaVFEwY1RSa2FtTWlMQ0p6YVdkdWFXNW5YMnRsZVNJNklrUTVkbGhvZVU5cE56WkNjMU4xVUhOamNXb3pkRlU0ZEY5cE5YSmpVbXRrVDJ0eFVIbE5lVEZYVjAwaUxDSmlkVzVrYkdWZmEyVjVJam9pWWpaUlVXZDFOMVJFTm1kaU1IaHpZM0IzUzBRNFNFSm5kbVphUzFac2J6ZHNSVXMzVFVFd1FqUklNQ0lzSW5OamIzQmxjeUk2V3lKeVpYRjFaWE4wSWl3aVlXeHNiM2RoYm1ObElsMHNJbkJsY20xcGMzTnBiMjV6SWpwYkltTnNZV2x0Y3k1eVpXRmtJaXdpWTI5dWRtVnljMkYwYVc5dUxtRmtaQ0pkTENKcGMzTjFaV1JmWVhRaU9pSXlNREkxTFRFeUxUQXhWREF3T2pBd09qQXdMakF3TUZvaUxDSmxlSEJwY21WelgyRjBJam9pTWpBeU5pMHhNaTB3TVZRd01Eb3dNRG93TUM0d01EQmFJbjAiLCJzaWciOiJEY1ppajlSQkpGa2M5ektnNEpSYzl6ZHoyc2dEdlVSMFpBV1AyX1ZCZ0txQ1VJSkZLUVN5MngydUtBcHpZQ2ZpRkQ2REZ2S0wxNjFuNmtqLUpfRkdCdyJ9LCJhY2NlcHRzIjpbInBheWtpdC5wYXltZW50X3JlcXVlc3RfYWNjZXB0YW5jZSIsInBheWtpdC5wYXltZW50X3JlcXVlc3RfcmVqZWN0aW9uIiwicGF5a2l0LnBheW1lbnRfcmVxdWVzdF9jYW5jZWxsYXRpb24iLCJwYXlraXQucGF5bWVudF9wcm9vZiIsInBheWtpdC5wcml2YXRlX3BheW1lbnRfbGlzdF9yZXF1ZXN0IiwicGF5a2l0LnJlc2VuZF9yZXF1ZXN0IiwicGF5a2l0LmFsbG93YW5jZV9wcm9wb3NhbCIsInBheWtpdC5hbGxvd2FuY2VfYWNjZXB0YW5jZSIsInBheWtpdC5hbGxvd2FuY2VfcmVqZWN0aW9uIiwicGF5a2l0LmFsbG93YW5jZV9lbmQiXSwicHJvdG9jb2xzIjp7InBheWtpdCI6eyJjYXBhYmlsaXRpZXMiOnsiZW5kcG9pbnRfaWRlbnRpZmllcnMiOlsiYnRjLWxpZ2h0bmluZy1ib2x0MTEiLCJidGMtYml0Y29pbi1wMndwa2giXSwiZnV0dXJlIjp0cnVlfSwicHVibGljX2VuZHBvaW50cyI6eyJidGMtbGlnaHRuaW5nLWJvbHQxMiI6ImxubzFxZ3Nxdmdud2djZzM1ejZlZTJoM3ljenJhZGRtNzJ4cmZ1YTl1dmUycmxybTlkZXU3eHlmenIifX19LCJsYWJlbCI6ImJvYiBzaG9wIiwidXBkYXRlZF9hdCI6IjIwMjUtMTItMzFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTAxLTMwVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "Hntwr_zxJDZyabwGvg-Nr2Kc0dN6KAMMvNI0NTdjwZ4Zo8c-3HrjmS77Ro-42s7bwMKOJdb5mes5nMxR2kAEDw"
+        }
+      },
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"signing_key\":\"D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM\",\"cert\":{\"body\":\"eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiYWxsb3dhbmNlIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0\",\"sig\":\"DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw\"},\"accepts\":[\"paykit.payment_request_acceptance\",\"paykit.payment_request_rejection\",\"paykit.payment_request_cancellation\",\"paykit.payment_proof\",\"paykit.private_payment_list_request\",\"paykit.resend_request\",\"paykit.allowance_proposal\",\"paykit.allowance_acceptance\",\"paykit.allowance_rejection\",\"paykit.allowance_end\"],\"protocols\":{\"paykit\":{\"capabilities\":{\"endpoint_identifiers\":[\"btc-lightning-bolt11\",\"btc-bitcoin-p2wpkh\"]},\"public_endpoints\":{}}},\"label\":\"bob shop\",\"updated_at\":\"2025-12-31T00:00:00.000Z\",\"expires_at\":null}",
+        "expires_at": null,
+        "name": "no public endpoints, and expires_at null",
+        "protocols": {
+          "paykit": {
+            "capabilities": {
+              "endpoint_identifiers": [
+                "btc-lightning-bolt11",
+                "btc-bitcoin-p2wpkh"
+              ]
+            },
+            "public_endpoints": {}
+          }
+        },
+        "reads": {
+          "endpoint_identifiers": [
+            "btc-lightning-bolt11",
+            "btc-bitcoin-p2wpkh"
+          ],
+          "public_endpoints": {}
+        },
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcCIsImlkZW50aXR5IjoiN3A0Zm40NHFvc2hjd2dmbmR6NWdydDdmeXl6MWV5Y3F5ZHV4ZHFlOG81OG9mMWJ5em9kbyIsImFwcF9pZCI6ImJycnozbTZnNXJjaTZpcW56a2U0NHE0ZGpjIiwic2lnbmluZ19rZXkiOiJEOXZYaHlPaTc2QnNTdVBzY3FqM3RVOHRfaTVyY1JrZE9rcVB5TXkxV1dNIiwiY2VydCI6eyJib2R5IjoiZXlKMklqb3hMQ0pyYVc1a0lqb2ljSFZpYTNrdGMzZHBkR05vTG1Gd2NGOWpaWEowSWl3aWFXUmxiblJwZEhraU9pSTNjRFJtYmpRMGNXOXphR04zWjJadVpIbzFaM0owTjJaNWVYb3haWGxqY1hsa2RYaGtjV1U0YnpVNGIyWXhZbmw2YjJSdklpd2lZWEJ3WDJsa0lqb2lZbkp5ZWpOdE5tYzFjbU5wTm1seGJucHJaVFEwY1RSa2FtTWlMQ0p6YVdkdWFXNW5YMnRsZVNJNklrUTVkbGhvZVU5cE56WkNjMU4xVUhOamNXb3pkRlU0ZEY5cE5YSmpVbXRrVDJ0eFVIbE5lVEZYVjAwaUxDSmlkVzVrYkdWZmEyVjVJam9pWWpaUlVXZDFOMVJFTm1kaU1IaHpZM0IzUzBRNFNFSm5kbVphUzFac2J6ZHNSVXMzVFVFd1FqUklNQ0lzSW5OamIzQmxjeUk2V3lKeVpYRjFaWE4wSWl3aVlXeHNiM2RoYm1ObElsMHNJbkJsY20xcGMzTnBiMjV6SWpwYkltTnNZV2x0Y3k1eVpXRmtJaXdpWTI5dWRtVnljMkYwYVc5dUxtRmtaQ0pkTENKcGMzTjFaV1JmWVhRaU9pSXlNREkxTFRFeUxUQXhWREF3T2pBd09qQXdMakF3TUZvaUxDSmxlSEJwY21WelgyRjBJam9pTWpBeU5pMHhNaTB3TVZRd01Eb3dNRG93TUM0d01EQmFJbjAiLCJzaWciOiJEY1ppajlSQkpGa2M5ektnNEpSYzl6ZHoyc2dEdlVSMFpBV1AyX1ZCZ0txQ1VJSkZLUVN5MngydUtBcHpZQ2ZpRkQ2REZ2S0wxNjFuNmtqLUpfRkdCdyJ9LCJhY2NlcHRzIjpbInBheWtpdC5wYXltZW50X3JlcXVlc3RfYWNjZXB0YW5jZSIsInBheWtpdC5wYXltZW50X3JlcXVlc3RfcmVqZWN0aW9uIiwicGF5a2l0LnBheW1lbnRfcmVxdWVzdF9jYW5jZWxsYXRpb24iLCJwYXlraXQucGF5bWVudF9wcm9vZiIsInBheWtpdC5wcml2YXRlX3BheW1lbnRfbGlzdF9yZXF1ZXN0IiwicGF5a2l0LnJlc2VuZF9yZXF1ZXN0IiwicGF5a2l0LmFsbG93YW5jZV9wcm9wb3NhbCIsInBheWtpdC5hbGxvd2FuY2VfYWNjZXB0YW5jZSIsInBheWtpdC5hbGxvd2FuY2VfcmVqZWN0aW9uIiwicGF5a2l0LmFsbG93YW5jZV9lbmQiXSwicHJvdG9jb2xzIjp7InBheWtpdCI6eyJjYXBhYmlsaXRpZXMiOnsiZW5kcG9pbnRfaWRlbnRpZmllcnMiOlsiYnRjLWxpZ2h0bmluZy1ib2x0MTEiLCJidGMtYml0Y29pbi1wMndwa2giXX0sInB1YmxpY19lbmRwb2ludHMiOnt9fX0sImxhYmVsIjoiYm9iIHNob3AiLCJ1cGRhdGVkX2F0IjoiMjAyNS0xMi0zMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6bnVsbH0",
+          "sig": "SgfYwk0V2iEUbXK8xS-dLrDTO2cM0twBIYo8ZjdlrG4z8JHdm9NvBj_2Cp9mNaLZxxHlVJra9EULa44_pv3bDQ"
+        }
+      }
+    ],
+    "description": "Wire 3.2: Paykit's member of an app record, protocols.paykit, as a Paykit reader reads it. Each record is the shop app record of the Switch set's documents.json with its paykit member changed or removed (and, last of refused, expires_at null too), signed again with the shop's signing key; the signatures verify. The switch takes every one, since it checks only the form of protocols (Switch wire 3.2). accepted are records a Paykit reader takes, the first the shop's record as it is; reads is what the reader takes from each: the Payment Endpoint Identifiers of capabilities.endpoint_identifiers, and the public endpoints. A missing or null paykit member, capabilities, endpoint_identifiers or public_endpoints reads as empty, and unknown members are ignored. refused are records Paykit's readers refuse, though the switch takes them (switch_accepts): a capabilities or public_endpoints that isn't an object, an endpoint_identifiers that isn't an array of strings, a payload that isn't a string, and public endpoints with expires_at null. protocols and expires_at are the record's as signed. reason is the prototype's wording at a Paykit reader.",
+    "refused": [
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"signing_key\":\"D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM\",\"cert\":{\"body\":\"eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiYWxsb3dhbmNlIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0\",\"sig\":\"DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw\"},\"accepts\":[\"paykit.payment_request_acceptance\",\"paykit.payment_request_rejection\",\"paykit.payment_request_cancellation\",\"paykit.payment_proof\",\"paykit.private_payment_list_request\",\"paykit.resend_request\",\"paykit.allowance_proposal\",\"paykit.allowance_acceptance\",\"paykit.allowance_rejection\",\"paykit.allowance_end\"],\"protocols\":{\"paykit\":{\"capabilities\":[],\"public_endpoints\":{\"btc-lightning-bolt12\":\"lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr\"}}},\"label\":\"bob shop\",\"updated_at\":\"2025-12-31T00:00:00.000Z\",\"expires_at\":\"2026-01-30T00:00:00.000Z\"}",
+        "expires_at": "2026-01-30T00:00:00.000Z",
+        "name": "capabilities that isn't an object: an empty array",
+        "protocols": {
+          "paykit": {
+            "capabilities": [],
+            "public_endpoints": {
+              "btc-lightning-bolt12": "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr"
+            }
+          }
+        },
+        "reason": "invalid: the record's paykit member is malformed: capabilities isn't an object",
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcCIsImlkZW50aXR5IjoiN3A0Zm40NHFvc2hjd2dmbmR6NWdydDdmeXl6MWV5Y3F5ZHV4ZHFlOG81OG9mMWJ5em9kbyIsImFwcF9pZCI6ImJycnozbTZnNXJjaTZpcW56a2U0NHE0ZGpjIiwic2lnbmluZ19rZXkiOiJEOXZYaHlPaTc2QnNTdVBzY3FqM3RVOHRfaTVyY1JrZE9rcVB5TXkxV1dNIiwiY2VydCI6eyJib2R5IjoiZXlKMklqb3hMQ0pyYVc1a0lqb2ljSFZpYTNrdGMzZHBkR05vTG1Gd2NGOWpaWEowSWl3aWFXUmxiblJwZEhraU9pSTNjRFJtYmpRMGNXOXphR04zWjJadVpIbzFaM0owTjJaNWVYb3haWGxqY1hsa2RYaGtjV1U0YnpVNGIyWXhZbmw2YjJSdklpd2lZWEJ3WDJsa0lqb2lZbkp5ZWpOdE5tYzFjbU5wTm1seGJucHJaVFEwY1RSa2FtTWlMQ0p6YVdkdWFXNW5YMnRsZVNJNklrUTVkbGhvZVU5cE56WkNjMU4xVUhOamNXb3pkRlU0ZEY5cE5YSmpVbXRrVDJ0eFVIbE5lVEZYVjAwaUxDSmlkVzVrYkdWZmEyVjVJam9pWWpaUlVXZDFOMVJFTm1kaU1IaHpZM0IzUzBRNFNFSm5kbVphUzFac2J6ZHNSVXMzVFVFd1FqUklNQ0lzSW5OamIzQmxjeUk2V3lKeVpYRjFaWE4wSWl3aVlXeHNiM2RoYm1ObElsMHNJbkJsY20xcGMzTnBiMjV6SWpwYkltTnNZV2x0Y3k1eVpXRmtJaXdpWTI5dWRtVnljMkYwYVc5dUxtRmtaQ0pkTENKcGMzTjFaV1JmWVhRaU9pSXlNREkxTFRFeUxUQXhWREF3T2pBd09qQXdMakF3TUZvaUxDSmxlSEJwY21WelgyRjBJam9pTWpBeU5pMHhNaTB3TVZRd01Eb3dNRG93TUM0d01EQmFJbjAiLCJzaWciOiJEY1ppajlSQkpGa2M5ektnNEpSYzl6ZHoyc2dEdlVSMFpBV1AyX1ZCZ0txQ1VJSkZLUVN5MngydUtBcHpZQ2ZpRkQ2REZ2S0wxNjFuNmtqLUpfRkdCdyJ9LCJhY2NlcHRzIjpbInBheWtpdC5wYXltZW50X3JlcXVlc3RfYWNjZXB0YW5jZSIsInBheWtpdC5wYXltZW50X3JlcXVlc3RfcmVqZWN0aW9uIiwicGF5a2l0LnBheW1lbnRfcmVxdWVzdF9jYW5jZWxsYXRpb24iLCJwYXlraXQucGF5bWVudF9wcm9vZiIsInBheWtpdC5wcml2YXRlX3BheW1lbnRfbGlzdF9yZXF1ZXN0IiwicGF5a2l0LnJlc2VuZF9yZXF1ZXN0IiwicGF5a2l0LmFsbG93YW5jZV9wcm9wb3NhbCIsInBheWtpdC5hbGxvd2FuY2VfYWNjZXB0YW5jZSIsInBheWtpdC5hbGxvd2FuY2VfcmVqZWN0aW9uIiwicGF5a2l0LmFsbG93YW5jZV9lbmQiXSwicHJvdG9jb2xzIjp7InBheWtpdCI6eyJjYXBhYmlsaXRpZXMiOltdLCJwdWJsaWNfZW5kcG9pbnRzIjp7ImJ0Yy1saWdodG5pbmctYm9sdDEyIjoibG5vMXFnc3F2Z253Z2NnMzV6NmVlMmgzeWN6cmFkZG03MnhyZnVhOXV2ZTJybHJtOWRldTd4eWZ6ciJ9fX0sImxhYmVsIjoiYm9iIHNob3AiLCJ1cGRhdGVkX2F0IjoiMjAyNS0xMi0zMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDEtMzBUMDA6MDA6MDAuMDAwWiJ9",
+          "sig": "H75GWZ-Fjw0v_O5F3zfSKZXjeziybsIBgxREV3si1xx1Uhjd3qqVIpw4EUgbStX8LaPZJ1NAMsuWU_k4BYvdCQ"
+        },
+        "switch_accepts": true
+      },
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"signing_key\":\"D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM\",\"cert\":{\"body\":\"eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiYWxsb3dhbmNlIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0\",\"sig\":\"DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw\"},\"accepts\":[\"paykit.payment_request_acceptance\",\"paykit.payment_request_rejection\",\"paykit.payment_request_cancellation\",\"paykit.payment_proof\",\"paykit.private_payment_list_request\",\"paykit.resend_request\",\"paykit.allowance_proposal\",\"paykit.allowance_acceptance\",\"paykit.allowance_rejection\",\"paykit.allowance_end\"],\"protocols\":{\"paykit\":{\"capabilities\":{\"endpoint_identifiers\":\"btc-lightning-bolt11\"},\"public_endpoints\":{\"btc-lightning-bolt12\":\"lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr\"}}},\"label\":\"bob shop\",\"updated_at\":\"2025-12-31T00:00:00.000Z\",\"expires_at\":\"2026-01-30T00:00:00.000Z\"}",
+        "expires_at": "2026-01-30T00:00:00.000Z",
+        "name": "endpoint_identifiers that isn't an array",
+        "protocols": {
+          "paykit": {
+            "capabilities": {
+              "endpoint_identifiers": "btc-lightning-bolt11"
+            },
+            "public_endpoints": {
+              "btc-lightning-bolt12": "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr"
+            }
+          }
+        },
+        "reason": "invalid: the record's paykit member is malformed: invalid type: string \"btc-lightning-bolt11\", expected a sequence",
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcCIsImlkZW50aXR5IjoiN3A0Zm40NHFvc2hjd2dmbmR6NWdydDdmeXl6MWV5Y3F5ZHV4ZHFlOG81OG9mMWJ5em9kbyIsImFwcF9pZCI6ImJycnozbTZnNXJjaTZpcW56a2U0NHE0ZGpjIiwic2lnbmluZ19rZXkiOiJEOXZYaHlPaTc2QnNTdVBzY3FqM3RVOHRfaTVyY1JrZE9rcVB5TXkxV1dNIiwiY2VydCI6eyJib2R5IjoiZXlKMklqb3hMQ0pyYVc1a0lqb2ljSFZpYTNrdGMzZHBkR05vTG1Gd2NGOWpaWEowSWl3aWFXUmxiblJwZEhraU9pSTNjRFJtYmpRMGNXOXphR04zWjJadVpIbzFaM0owTjJaNWVYb3haWGxqY1hsa2RYaGtjV1U0YnpVNGIyWXhZbmw2YjJSdklpd2lZWEJ3WDJsa0lqb2lZbkp5ZWpOdE5tYzFjbU5wTm1seGJucHJaVFEwY1RSa2FtTWlMQ0p6YVdkdWFXNW5YMnRsZVNJNklrUTVkbGhvZVU5cE56WkNjMU4xVUhOamNXb3pkRlU0ZEY5cE5YSmpVbXRrVDJ0eFVIbE5lVEZYVjAwaUxDSmlkVzVrYkdWZmEyVjVJam9pWWpaUlVXZDFOMVJFTm1kaU1IaHpZM0IzUzBRNFNFSm5kbVphUzFac2J6ZHNSVXMzVFVFd1FqUklNQ0lzSW5OamIzQmxjeUk2V3lKeVpYRjFaWE4wSWl3aVlXeHNiM2RoYm1ObElsMHNJbkJsY20xcGMzTnBiMjV6SWpwYkltTnNZV2x0Y3k1eVpXRmtJaXdpWTI5dWRtVnljMkYwYVc5dUxtRmtaQ0pkTENKcGMzTjFaV1JmWVhRaU9pSXlNREkxTFRFeUxUQXhWREF3T2pBd09qQXdMakF3TUZvaUxDSmxlSEJwY21WelgyRjBJam9pTWpBeU5pMHhNaTB3TVZRd01Eb3dNRG93TUM0d01EQmFJbjAiLCJzaWciOiJEY1ppajlSQkpGa2M5ektnNEpSYzl6ZHoyc2dEdlVSMFpBV1AyX1ZCZ0txQ1VJSkZLUVN5MngydUtBcHpZQ2ZpRkQ2REZ2S0wxNjFuNmtqLUpfRkdCdyJ9LCJhY2NlcHRzIjpbInBheWtpdC5wYXltZW50X3JlcXVlc3RfYWNjZXB0YW5jZSIsInBheWtpdC5wYXltZW50X3JlcXVlc3RfcmVqZWN0aW9uIiwicGF5a2l0LnBheW1lbnRfcmVxdWVzdF9jYW5jZWxsYXRpb24iLCJwYXlraXQucGF5bWVudF9wcm9vZiIsInBheWtpdC5wcml2YXRlX3BheW1lbnRfbGlzdF9yZXF1ZXN0IiwicGF5a2l0LnJlc2VuZF9yZXF1ZXN0IiwicGF5a2l0LmFsbG93YW5jZV9wcm9wb3NhbCIsInBheWtpdC5hbGxvd2FuY2VfYWNjZXB0YW5jZSIsInBheWtpdC5hbGxvd2FuY2VfcmVqZWN0aW9uIiwicGF5a2l0LmFsbG93YW5jZV9lbmQiXSwicHJvdG9jb2xzIjp7InBheWtpdCI6eyJjYXBhYmlsaXRpZXMiOnsiZW5kcG9pbnRfaWRlbnRpZmllcnMiOiJidGMtbGlnaHRuaW5nLWJvbHQxMSJ9LCJwdWJsaWNfZW5kcG9pbnRzIjp7ImJ0Yy1saWdodG5pbmctYm9sdDEyIjoibG5vMXFnc3F2Z253Z2NnMzV6NmVlMmgzeWN6cmFkZG03MnhyZnVhOXV2ZTJybHJtOWRldTd4eWZ6ciJ9fX0sImxhYmVsIjoiYm9iIHNob3AiLCJ1cGRhdGVkX2F0IjoiMjAyNS0xMi0zMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDEtMzBUMDA6MDA6MDAuMDAwWiJ9",
+          "sig": "PpDpMyKJOSacK2P-lBrXQk9P0nQBpngm5ztR1xSJoNzBo0EpmS42g75biR49UKE_d0A595_qgrJlmOY8FGm0Dg"
+        },
+        "switch_accepts": true
+      },
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"signing_key\":\"D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM\",\"cert\":{\"body\":\"eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiYWxsb3dhbmNlIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0\",\"sig\":\"DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw\"},\"accepts\":[\"paykit.payment_request_acceptance\",\"paykit.payment_request_rejection\",\"paykit.payment_request_cancellation\",\"paykit.payment_proof\",\"paykit.private_payment_list_request\",\"paykit.resend_request\",\"paykit.allowance_proposal\",\"paykit.allowance_acceptance\",\"paykit.allowance_rejection\",\"paykit.allowance_end\"],\"protocols\":{\"paykit\":{\"capabilities\":{\"endpoint_identifiers\":[\"btc-lightning-bolt11\",1]},\"public_endpoints\":{\"btc-lightning-bolt12\":\"lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr\"}}},\"label\":\"bob shop\",\"updated_at\":\"2025-12-31T00:00:00.000Z\",\"expires_at\":\"2026-01-30T00:00:00.000Z\"}",
+        "expires_at": "2026-01-30T00:00:00.000Z",
+        "name": "endpoint_identifiers holding a non-string",
+        "protocols": {
+          "paykit": {
+            "capabilities": {
+              "endpoint_identifiers": [
+                "btc-lightning-bolt11",
+                1
+              ]
+            },
+            "public_endpoints": {
+              "btc-lightning-bolt12": "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr"
+            }
+          }
+        },
+        "reason": "invalid: the record's paykit member is malformed: invalid type: integer `1`, expected a string",
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcCIsImlkZW50aXR5IjoiN3A0Zm40NHFvc2hjd2dmbmR6NWdydDdmeXl6MWV5Y3F5ZHV4ZHFlOG81OG9mMWJ5em9kbyIsImFwcF9pZCI6ImJycnozbTZnNXJjaTZpcW56a2U0NHE0ZGpjIiwic2lnbmluZ19rZXkiOiJEOXZYaHlPaTc2QnNTdVBzY3FqM3RVOHRfaTVyY1JrZE9rcVB5TXkxV1dNIiwiY2VydCI6eyJib2R5IjoiZXlKMklqb3hMQ0pyYVc1a0lqb2ljSFZpYTNrdGMzZHBkR05vTG1Gd2NGOWpaWEowSWl3aWFXUmxiblJwZEhraU9pSTNjRFJtYmpRMGNXOXphR04zWjJadVpIbzFaM0owTjJaNWVYb3haWGxqY1hsa2RYaGtjV1U0YnpVNGIyWXhZbmw2YjJSdklpd2lZWEJ3WDJsa0lqb2lZbkp5ZWpOdE5tYzFjbU5wTm1seGJucHJaVFEwY1RSa2FtTWlMQ0p6YVdkdWFXNW5YMnRsZVNJNklrUTVkbGhvZVU5cE56WkNjMU4xVUhOamNXb3pkRlU0ZEY5cE5YSmpVbXRrVDJ0eFVIbE5lVEZYVjAwaUxDSmlkVzVrYkdWZmEyVjVJam9pWWpaUlVXZDFOMVJFTm1kaU1IaHpZM0IzUzBRNFNFSm5kbVphUzFac2J6ZHNSVXMzVFVFd1FqUklNQ0lzSW5OamIzQmxjeUk2V3lKeVpYRjFaWE4wSWl3aVlXeHNiM2RoYm1ObElsMHNJbkJsY20xcGMzTnBiMjV6SWpwYkltTnNZV2x0Y3k1eVpXRmtJaXdpWTI5dWRtVnljMkYwYVc5dUxtRmtaQ0pkTENKcGMzTjFaV1JmWVhRaU9pSXlNREkxTFRFeUxUQXhWREF3T2pBd09qQXdMakF3TUZvaUxDSmxlSEJwY21WelgyRjBJam9pTWpBeU5pMHhNaTB3TVZRd01Eb3dNRG93TUM0d01EQmFJbjAiLCJzaWciOiJEY1ppajlSQkpGa2M5ektnNEpSYzl6ZHoyc2dEdlVSMFpBV1AyX1ZCZ0txQ1VJSkZLUVN5MngydUtBcHpZQ2ZpRkQ2REZ2S0wxNjFuNmtqLUpfRkdCdyJ9LCJhY2NlcHRzIjpbInBheWtpdC5wYXltZW50X3JlcXVlc3RfYWNjZXB0YW5jZSIsInBheWtpdC5wYXltZW50X3JlcXVlc3RfcmVqZWN0aW9uIiwicGF5a2l0LnBheW1lbnRfcmVxdWVzdF9jYW5jZWxsYXRpb24iLCJwYXlraXQucGF5bWVudF9wcm9vZiIsInBheWtpdC5wcml2YXRlX3BheW1lbnRfbGlzdF9yZXF1ZXN0IiwicGF5a2l0LnJlc2VuZF9yZXF1ZXN0IiwicGF5a2l0LmFsbG93YW5jZV9wcm9wb3NhbCIsInBheWtpdC5hbGxvd2FuY2VfYWNjZXB0YW5jZSIsInBheWtpdC5hbGxvd2FuY2VfcmVqZWN0aW9uIiwicGF5a2l0LmFsbG93YW5jZV9lbmQiXSwicHJvdG9jb2xzIjp7InBheWtpdCI6eyJjYXBhYmlsaXRpZXMiOnsiZW5kcG9pbnRfaWRlbnRpZmllcnMiOlsiYnRjLWxpZ2h0bmluZy1ib2x0MTEiLDFdfSwicHVibGljX2VuZHBvaW50cyI6eyJidGMtbGlnaHRuaW5nLWJvbHQxMiI6ImxubzFxZ3Nxdmdud2djZzM1ejZlZTJoM3ljenJhZGRtNzJ4cmZ1YTl1dmUycmxybTlkZXU3eHlmenIifX19LCJsYWJlbCI6ImJvYiBzaG9wIiwidXBkYXRlZF9hdCI6IjIwMjUtMTItMzFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTAxLTMwVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "x544iRmLDhbjqDoe14NPQmDv4yG08nhRC2bLpsXMl1xBzj-N5VSQgbW_ZtjUeO3MXoYVqn_7bdOBLK-dBjtfCg"
+        },
+        "switch_accepts": true
+      },
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"signing_key\":\"D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM\",\"cert\":{\"body\":\"eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiYWxsb3dhbmNlIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0\",\"sig\":\"DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw\"},\"accepts\":[\"paykit.payment_request_acceptance\",\"paykit.payment_request_rejection\",\"paykit.payment_request_cancellation\",\"paykit.payment_proof\",\"paykit.private_payment_list_request\",\"paykit.resend_request\",\"paykit.allowance_proposal\",\"paykit.allowance_acceptance\",\"paykit.allowance_rejection\",\"paykit.allowance_end\"],\"protocols\":{\"paykit\":{\"capabilities\":{\"endpoint_identifiers\":[\"btc-lightning-bolt11\",\"btc-bitcoin-p2wpkh\"]},\"public_endpoints\":[\"btc-lightning-bolt12\"]}},\"label\":\"bob shop\",\"updated_at\":\"2025-12-31T00:00:00.000Z\",\"expires_at\":\"2026-01-30T00:00:00.000Z\"}",
+        "expires_at": "2026-01-30T00:00:00.000Z",
+        "name": "public_endpoints that isn't an object",
+        "protocols": {
+          "paykit": {
+            "capabilities": {
+              "endpoint_identifiers": [
+                "btc-lightning-bolt11",
+                "btc-bitcoin-p2wpkh"
+              ]
+            },
+            "public_endpoints": [
+              "btc-lightning-bolt12"
+            ]
+          }
+        },
+        "reason": "invalid: the record's paykit member is malformed: invalid type: sequence, expected a map",
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcCIsImlkZW50aXR5IjoiN3A0Zm40NHFvc2hjd2dmbmR6NWdydDdmeXl6MWV5Y3F5ZHV4ZHFlOG81OG9mMWJ5em9kbyIsImFwcF9pZCI6ImJycnozbTZnNXJjaTZpcW56a2U0NHE0ZGpjIiwic2lnbmluZ19rZXkiOiJEOXZYaHlPaTc2QnNTdVBzY3FqM3RVOHRfaTVyY1JrZE9rcVB5TXkxV1dNIiwiY2VydCI6eyJib2R5IjoiZXlKMklqb3hMQ0pyYVc1a0lqb2ljSFZpYTNrdGMzZHBkR05vTG1Gd2NGOWpaWEowSWl3aWFXUmxiblJwZEhraU9pSTNjRFJtYmpRMGNXOXphR04zWjJadVpIbzFaM0owTjJaNWVYb3haWGxqY1hsa2RYaGtjV1U0YnpVNGIyWXhZbmw2YjJSdklpd2lZWEJ3WDJsa0lqb2lZbkp5ZWpOdE5tYzFjbU5wTm1seGJucHJaVFEwY1RSa2FtTWlMQ0p6YVdkdWFXNW5YMnRsZVNJNklrUTVkbGhvZVU5cE56WkNjMU4xVUhOamNXb3pkRlU0ZEY5cE5YSmpVbXRrVDJ0eFVIbE5lVEZYVjAwaUxDSmlkVzVrYkdWZmEyVjVJam9pWWpaUlVXZDFOMVJFTm1kaU1IaHpZM0IzUzBRNFNFSm5kbVphUzFac2J6ZHNSVXMzVFVFd1FqUklNQ0lzSW5OamIzQmxjeUk2V3lKeVpYRjFaWE4wSWl3aVlXeHNiM2RoYm1ObElsMHNJbkJsY20xcGMzTnBiMjV6SWpwYkltTnNZV2x0Y3k1eVpXRmtJaXdpWTI5dWRtVnljMkYwYVc5dUxtRmtaQ0pkTENKcGMzTjFaV1JmWVhRaU9pSXlNREkxTFRFeUxUQXhWREF3T2pBd09qQXdMakF3TUZvaUxDSmxlSEJwY21WelgyRjBJam9pTWpBeU5pMHhNaTB3TVZRd01Eb3dNRG93TUM0d01EQmFJbjAiLCJzaWciOiJEY1ppajlSQkpGa2M5ektnNEpSYzl6ZHoyc2dEdlVSMFpBV1AyX1ZCZ0txQ1VJSkZLUVN5MngydUtBcHpZQ2ZpRkQ2REZ2S0wxNjFuNmtqLUpfRkdCdyJ9LCJhY2NlcHRzIjpbInBheWtpdC5wYXltZW50X3JlcXVlc3RfYWNjZXB0YW5jZSIsInBheWtpdC5wYXltZW50X3JlcXVlc3RfcmVqZWN0aW9uIiwicGF5a2l0LnBheW1lbnRfcmVxdWVzdF9jYW5jZWxsYXRpb24iLCJwYXlraXQucGF5bWVudF9wcm9vZiIsInBheWtpdC5wcml2YXRlX3BheW1lbnRfbGlzdF9yZXF1ZXN0IiwicGF5a2l0LnJlc2VuZF9yZXF1ZXN0IiwicGF5a2l0LmFsbG93YW5jZV9wcm9wb3NhbCIsInBheWtpdC5hbGxvd2FuY2VfYWNjZXB0YW5jZSIsInBheWtpdC5hbGxvd2FuY2VfcmVqZWN0aW9uIiwicGF5a2l0LmFsbG93YW5jZV9lbmQiXSwicHJvdG9jb2xzIjp7InBheWtpdCI6eyJjYXBhYmlsaXRpZXMiOnsiZW5kcG9pbnRfaWRlbnRpZmllcnMiOlsiYnRjLWxpZ2h0bmluZy1ib2x0MTEiLCJidGMtYml0Y29pbi1wMndwa2giXX0sInB1YmxpY19lbmRwb2ludHMiOlsiYnRjLWxpZ2h0bmluZy1ib2x0MTIiXX19LCJsYWJlbCI6ImJvYiBzaG9wIiwidXBkYXRlZF9hdCI6IjIwMjUtMTItMzFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTAxLTMwVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "zL4lzvrPxt1EuaOiq_SnizSUf3NbKYRdN8mkxHhcMnJWQ47tIeWT4SaKlkI_abtI0wwQI-Ly1MfsFW4QBdKRBg"
+        },
+        "switch_accepts": true
+      },
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"signing_key\":\"D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM\",\"cert\":{\"body\":\"eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiYWxsb3dhbmNlIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0\",\"sig\":\"DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw\"},\"accepts\":[\"paykit.payment_request_acceptance\",\"paykit.payment_request_rejection\",\"paykit.payment_request_cancellation\",\"paykit.payment_proof\",\"paykit.private_payment_list_request\",\"paykit.resend_request\",\"paykit.allowance_proposal\",\"paykit.allowance_acceptance\",\"paykit.allowance_rejection\",\"paykit.allowance_end\"],\"protocols\":{\"paykit\":{\"capabilities\":{\"endpoint_identifiers\":[\"btc-lightning-bolt11\",\"btc-bitcoin-p2wpkh\"]},\"public_endpoints\":{\"btc-lightning-bolt12\":{\"offer\":\"lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr\"}}}},\"label\":\"bob shop\",\"updated_at\":\"2025-12-31T00:00:00.000Z\",\"expires_at\":\"2026-01-30T00:00:00.000Z\"}",
+        "expires_at": "2026-01-30T00:00:00.000Z",
+        "name": "a payload that isn't a string",
+        "protocols": {
+          "paykit": {
+            "capabilities": {
+              "endpoint_identifiers": [
+                "btc-lightning-bolt11",
+                "btc-bitcoin-p2wpkh"
+              ]
+            },
+            "public_endpoints": {
+              "btc-lightning-bolt12": {
+                "offer": "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr"
+              }
+            }
+          }
+        },
+        "reason": "invalid: the record's paykit member is malformed: invalid type: map, expected a string",
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcCIsImlkZW50aXR5IjoiN3A0Zm40NHFvc2hjd2dmbmR6NWdydDdmeXl6MWV5Y3F5ZHV4ZHFlOG81OG9mMWJ5em9kbyIsImFwcF9pZCI6ImJycnozbTZnNXJjaTZpcW56a2U0NHE0ZGpjIiwic2lnbmluZ19rZXkiOiJEOXZYaHlPaTc2QnNTdVBzY3FqM3RVOHRfaTVyY1JrZE9rcVB5TXkxV1dNIiwiY2VydCI6eyJib2R5IjoiZXlKMklqb3hMQ0pyYVc1a0lqb2ljSFZpYTNrdGMzZHBkR05vTG1Gd2NGOWpaWEowSWl3aWFXUmxiblJwZEhraU9pSTNjRFJtYmpRMGNXOXphR04zWjJadVpIbzFaM0owTjJaNWVYb3haWGxqY1hsa2RYaGtjV1U0YnpVNGIyWXhZbmw2YjJSdklpd2lZWEJ3WDJsa0lqb2lZbkp5ZWpOdE5tYzFjbU5wTm1seGJucHJaVFEwY1RSa2FtTWlMQ0p6YVdkdWFXNW5YMnRsZVNJNklrUTVkbGhvZVU5cE56WkNjMU4xVUhOamNXb3pkRlU0ZEY5cE5YSmpVbXRrVDJ0eFVIbE5lVEZYVjAwaUxDSmlkVzVrYkdWZmEyVjVJam9pWWpaUlVXZDFOMVJFTm1kaU1IaHpZM0IzUzBRNFNFSm5kbVphUzFac2J6ZHNSVXMzVFVFd1FqUklNQ0lzSW5OamIzQmxjeUk2V3lKeVpYRjFaWE4wSWl3aVlXeHNiM2RoYm1ObElsMHNJbkJsY20xcGMzTnBiMjV6SWpwYkltTnNZV2x0Y3k1eVpXRmtJaXdpWTI5dWRtVnljMkYwYVc5dUxtRmtaQ0pkTENKcGMzTjFaV1JmWVhRaU9pSXlNREkxTFRFeUxUQXhWREF3T2pBd09qQXdMakF3TUZvaUxDSmxlSEJwY21WelgyRjBJam9pTWpBeU5pMHhNaTB3TVZRd01Eb3dNRG93TUM0d01EQmFJbjAiLCJzaWciOiJEY1ppajlSQkpGa2M5ektnNEpSYzl6ZHoyc2dEdlVSMFpBV1AyX1ZCZ0txQ1VJSkZLUVN5MngydUtBcHpZQ2ZpRkQ2REZ2S0wxNjFuNmtqLUpfRkdCdyJ9LCJhY2NlcHRzIjpbInBheWtpdC5wYXltZW50X3JlcXVlc3RfYWNjZXB0YW5jZSIsInBheWtpdC5wYXltZW50X3JlcXVlc3RfcmVqZWN0aW9uIiwicGF5a2l0LnBheW1lbnRfcmVxdWVzdF9jYW5jZWxsYXRpb24iLCJwYXlraXQucGF5bWVudF9wcm9vZiIsInBheWtpdC5wcml2YXRlX3BheW1lbnRfbGlzdF9yZXF1ZXN0IiwicGF5a2l0LnJlc2VuZF9yZXF1ZXN0IiwicGF5a2l0LmFsbG93YW5jZV9wcm9wb3NhbCIsInBheWtpdC5hbGxvd2FuY2VfYWNjZXB0YW5jZSIsInBheWtpdC5hbGxvd2FuY2VfcmVqZWN0aW9uIiwicGF5a2l0LmFsbG93YW5jZV9lbmQiXSwicHJvdG9jb2xzIjp7InBheWtpdCI6eyJjYXBhYmlsaXRpZXMiOnsiZW5kcG9pbnRfaWRlbnRpZmllcnMiOlsiYnRjLWxpZ2h0bmluZy1ib2x0MTEiLCJidGMtYml0Y29pbi1wMndwa2giXX0sInB1YmxpY19lbmRwb2ludHMiOnsiYnRjLWxpZ2h0bmluZy1ib2x0MTIiOnsib2ZmZXIiOiJsbm8xcWdzcXZnbndnY2czNXo2ZWUyaDN5Y3pyYWRkbTcyeHJmdWE5dXZlMnJscm05ZGV1N3h5ZnpyIn19fX0sImxhYmVsIjoiYm9iIHNob3AiLCJ1cGRhdGVkX2F0IjoiMjAyNS0xMi0zMVQwMDowMDowMC4wMDBaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDEtMzBUMDA6MDA6MDAuMDAwWiJ9",
+          "sig": "MD5ZXy93E2jj4cOLlcXgyZWdneIRdtrGW-SUHaKqDxqWYAauEjcmfqG9O3qi28-bQP234ZaOHUCsmKlSHRsfDg"
+        },
+        "switch_accepts": true
+      },
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app\",\"identity\":\"7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo\",\"app_id\":\"brrz3m6g5rci6iqnzke44q4djc\",\"signing_key\":\"D9vXhyOi76BsSuPscqj3tU8t_i5rcRkdOkqPyMy1WWM\",\"cert\":{\"body\":\"eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoiYnJyejNtNmc1cmNpNmlxbnprZTQ0cTRkamMiLCJzaWduaW5nX2tleSI6IkQ5dlhoeU9pNzZCc1N1UHNjcWozdFU4dF9pNXJjUmtkT2txUHlNeTFXV00iLCJidW5kbGVfa2V5IjoiYjZRUWd1N1RENmdiMHhzY3B3S0Q4SEJndmZaS1ZsbzdsRUs3TUEwQjRIMCIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiYWxsb3dhbmNlIl0sInBlcm1pc3Npb25zIjpbImNsYWltcy5yZWFkIiwiY29udmVyc2F0aW9uLmFkZCJdLCJpc3N1ZWRfYXQiOiIyMDI1LTEyLTAxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMi0wMVQwMDowMDowMC4wMDBaIn0\",\"sig\":\"DcZij9RBJFkc9zKg4JRc9zdz2sgDvUR0ZAWP2_VBgKqCUIJFKQSy2x2uKApzYCfiFD6DFvKL161n6kj-J_FGBw\"},\"accepts\":[\"paykit.payment_request_acceptance\",\"paykit.payment_request_rejection\",\"paykit.payment_request_cancellation\",\"paykit.payment_proof\",\"paykit.private_payment_list_request\",\"paykit.resend_request\",\"paykit.allowance_proposal\",\"paykit.allowance_acceptance\",\"paykit.allowance_rejection\",\"paykit.allowance_end\"],\"protocols\":{\"paykit\":{\"capabilities\":{\"endpoint_identifiers\":[\"btc-lightning-bolt11\",\"btc-bitcoin-p2wpkh\"]},\"public_endpoints\":{\"btc-lightning-bolt12\":\"lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr\"}}},\"label\":\"bob shop\",\"updated_at\":\"2025-12-31T00:00:00.000Z\",\"expires_at\":null}",
+        "expires_at": null,
+        "name": "public endpoints with expires_at null",
+        "protocols": {
+          "paykit": {
+            "capabilities": {
+              "endpoint_identifiers": [
+                "btc-lightning-bolt11",
+                "btc-bitcoin-p2wpkh"
+              ]
+            },
+            "public_endpoints": {
+              "btc-lightning-bolt12": "lno1qgsqvgnwgcg35z6ee2h3yczraddm72xrfua9uve2rlrm9deu7xyfzr"
+            }
+          }
+        },
+        "reason": "invalid: a record with public endpoints carries expires_at",
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcCIsImlkZW50aXR5IjoiN3A0Zm40NHFvc2hjd2dmbmR6NWdydDdmeXl6MWV5Y3F5ZHV4ZHFlOG81OG9mMWJ5em9kbyIsImFwcF9pZCI6ImJycnozbTZnNXJjaTZpcW56a2U0NHE0ZGpjIiwic2lnbmluZ19rZXkiOiJEOXZYaHlPaTc2QnNTdVBzY3FqM3RVOHRfaTVyY1JrZE9rcVB5TXkxV1dNIiwiY2VydCI6eyJib2R5IjoiZXlKMklqb3hMQ0pyYVc1a0lqb2ljSFZpYTNrdGMzZHBkR05vTG1Gd2NGOWpaWEowSWl3aWFXUmxiblJwZEhraU9pSTNjRFJtYmpRMGNXOXphR04zWjJadVpIbzFaM0owTjJaNWVYb3haWGxqY1hsa2RYaGtjV1U0YnpVNGIyWXhZbmw2YjJSdklpd2lZWEJ3WDJsa0lqb2lZbkp5ZWpOdE5tYzFjbU5wTm1seGJucHJaVFEwY1RSa2FtTWlMQ0p6YVdkdWFXNW5YMnRsZVNJNklrUTVkbGhvZVU5cE56WkNjMU4xVUhOamNXb3pkRlU0ZEY5cE5YSmpVbXRrVDJ0eFVIbE5lVEZYVjAwaUxDSmlkVzVrYkdWZmEyVjVJam9pWWpaUlVXZDFOMVJFTm1kaU1IaHpZM0IzUzBRNFNFSm5kbVphUzFac2J6ZHNSVXMzVFVFd1FqUklNQ0lzSW5OamIzQmxjeUk2V3lKeVpYRjFaWE4wSWl3aVlXeHNiM2RoYm1ObElsMHNJbkJsY20xcGMzTnBiMjV6SWpwYkltTnNZV2x0Y3k1eVpXRmtJaXdpWTI5dWRtVnljMkYwYVc5dUxtRmtaQ0pkTENKcGMzTjFaV1JmWVhRaU9pSXlNREkxTFRFeUxUQXhWREF3T2pBd09qQXdMakF3TUZvaUxDSmxlSEJwY21WelgyRjBJam9pTWpBeU5pMHhNaTB3TVZRd01Eb3dNRG93TUM0d01EQmFJbjAiLCJzaWciOiJEY1ppajlSQkpGa2M5ektnNEpSYzl6ZHoyc2dEdlVSMFpBV1AyX1ZCZ0txQ1VJSkZLUVN5MngydUtBcHpZQ2ZpRkQ2REZ2S0wxNjFuNmtqLUpfRkdCdyJ9LCJhY2NlcHRzIjpbInBheWtpdC5wYXltZW50X3JlcXVlc3RfYWNjZXB0YW5jZSIsInBheWtpdC5wYXltZW50X3JlcXVlc3RfcmVqZWN0aW9uIiwicGF5a2l0LnBheW1lbnRfcmVxdWVzdF9jYW5jZWxsYXRpb24iLCJwYXlraXQucGF5bWVudF9wcm9vZiIsInBheWtpdC5wcml2YXRlX3BheW1lbnRfbGlzdF9yZXF1ZXN0IiwicGF5a2l0LnJlc2VuZF9yZXF1ZXN0IiwicGF5a2l0LmFsbG93YW5jZV9wcm9wb3NhbCIsInBheWtpdC5hbGxvd2FuY2VfYWNjZXB0YW5jZSIsInBheWtpdC5hbGxvd2FuY2VfcmVqZWN0aW9uIiwicGF5a2l0LmFsbG93YW5jZV9lbmQiXSwicHJvdG9jb2xzIjp7InBheWtpdCI6eyJjYXBhYmlsaXRpZXMiOnsiZW5kcG9pbnRfaWRlbnRpZmllcnMiOlsiYnRjLWxpZ2h0bmluZy1ib2x0MTEiLCJidGMtYml0Y29pbi1wMndwa2giXX0sInB1YmxpY19lbmRwb2ludHMiOnsiYnRjLWxpZ2h0bmluZy1ib2x0MTIiOiJsbm8xcWdzcXZnbndnY2czNXo2ZWUyaDN5Y3pyYWRkbTcyeHJmdWE5dXZlMnJscm05ZGV1N3h5ZnpyIn19fSwibGFiZWwiOiJib2Igc2hvcCIsInVwZGF0ZWRfYXQiOiIyMDI1LTEyLTMxVDAwOjAwOjAwLjAwMFoiLCJleHBpcmVzX2F0IjpudWxsfQ",
+          "sig": "zCN-KVUVRvcrBLku5AJU3moSWjUBRYG06job8amZYZlHdei6T4rqMUOaaojvnpVFb4TNkXHUtAojAQH1nTeLAw"
+        },
+        "switch_accepts": true
+      }
+    ]
+  },
   "certificate_rejections": {
     "cases": [
       {
@@ -59,7 +504,7 @@
     ],
     "description": "Wire 3.1: certificates whose permissions are well formed but aren't exactly the list Paykit's table derives from their scopes (paykit_permissions). Each is the wallet certificate of the Switch set's documents.json with scopes and permissions changed, signed by alice's identity key; the signatures verify. The switch takes them and enforces exactly that list (switch_accepts), while Paykit's verifiers, apps and payers, refuse them. The lists that aren't well formed, which every verifier refuses, are the Switch set's permission_rejections. reason is the prototype's wording at a Paykit verifier."
   },
-  "description": "Paykit's signed documents and Paykit's checks of the Switch's certificates (wire 3): the executor grant, alone and as the Allowance record's grant history holds it, and certificates that Paykit's verifiers refuse for their scopes or their permissions. The certificates are the Switch set's documents.json certificates with scopes or permissions changed.",
+  "description": "Paykit's signed documents and Paykit's checks of the Switch's certificates and app records (wire 3): the executor grant, alone and as the Allowance record's grant history holds it, certificates that Paykit's verifiers refuse for their scopes or their permissions, and app records as a Paykit reader reads their Paykit member. The certificates are the Switch set's documents.json certificates with scopes or permissions changed, and the app records its shop app record with its Paykit member changed.",
   "executor_grant": {
     "app_id": "cw5ahtdkixcafna9zh1y5y5o1w",
     "cert": {
