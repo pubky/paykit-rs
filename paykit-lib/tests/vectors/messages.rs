@@ -650,7 +650,11 @@ fn check_multi_protocol_senders(keys: &Keys, file: &Value) {
 
 const CONVERSION_DESCRIPTION: &str = "Wire 4.4, 4.5, 4.9, specs/payment-conversion.md: the \
 shop's messages with their conversion terms changed, signed again by the shop, each from \
-messages.json's message base with body replaced by the body given. Period details name \
+messages.json's message base with body replaced by the body given. Requests are \
+payment_request_required_app, which accepts btc-lightning-bolt11 only, with fixed rates: with \
+conversion terms the requested asset is lower-case letters and digits, each rate's asset is \
+<asset> or <asset>-<rail> of such segments, and it matches the asset, and the rail when it \
+names one, of an accepted endpoint. Period details name \
 payment_request_recurring (request), a usd request with per_period conversion: their rates \
 are cross-asset only, so a bare or rail-qualified rate for the requested asset (usd, \
 usd-polygon) makes them invalid against the request. accepted are messages alice takes, \
@@ -678,11 +682,59 @@ fn conversion_cases() -> (Vec<ConversionCase>, Vec<ConversionCase>) {
         }),
         request: Some("payment_request_recurring"),
     };
-    let accepted = vec![details(
-        "period details with a rail-qualified rate for another asset",
-        json!([{ "asset": "btc-lightning", "value": "0.00001234" }]),
-    )];
+    // payment_request_required_app, a usd request accepting btc-lightning-bolt11 only, with
+    // fixed rates `rates` and its asset `asset`.
+    let request = |name, asset: &str, rates: Value| {
+        let base = Message::parse(
+            &message_json("payment_request_required_app"),
+            OPAQUE_MEMBERS,
+        )
+        .unwrap();
+        let mut body = Value::Object(base.body);
+        body["amount"]["asset"] = json!(asset);
+        body["conversion"] = json!({ "rates": rates, "type": "fixed" });
+        ConversionCase {
+            name,
+            base: "payment_request_required_app",
+            body,
+            request: None,
+        }
+    };
+    let rate = |selector: &str| json!([{ "asset": selector, "value": "0.00001234" }]);
+    let accepted = vec![
+        details(
+            "period details with a rail-qualified rate for another asset",
+            json!([{ "asset": "btc-lightning", "value": "0.00001234" }]),
+        ),
+        request("a request with an asset-wide rate", "usd", rate("btc")),
+        request(
+            "a request with an asset-rail rate",
+            "usd",
+            rate("btc-lightning"),
+        ),
+    ];
     let refused = vec![
+        request(
+            "a request with conversion terms in an asset in upper case",
+            "USD",
+            rate("btc"),
+        ),
+        request("a rate selector in upper case", "usd", rate("BTC")),
+        request(
+            "a rate selector of three segments",
+            "usd",
+            rate("btc-lightning-bolt11"),
+        ),
+        request(
+            "a rate selector whose asset matches no accepted endpoint",
+            "usd",
+            rate("usdt"),
+        ),
+        request(
+            "a rate selector whose rail matches no accepted endpoint",
+            "usd",
+            rate("btc-bitcoin"),
+        ),
         details(
             "period details with a bare rate for the requested asset",
             json!([{ "asset": "btc", "value": "0.00001234" }, { "asset": "usd", "value": "1" }]),

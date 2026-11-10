@@ -114,6 +114,57 @@ fn selector_asset(selector: &str) -> &str {
     selector.split('-').next().unwrap_or(selector)
 }
 
+/// Whether `text` is one segment of the conversion convention: non-empty, lower-case ASCII
+/// letters and digits (Paykit wire 4.4, `specs/payment-conversion.md`).
+fn is_conversion_segment(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+}
+
+/// The constraints of conversion terms (Paykit wire 4.4, `specs/payment-conversion.md`), for
+/// a request in `asset` whose accepted endpoints are `accepted`, already in the form
+/// `<asset>-<rail>-<format>` (Paykit wire 1.4):
+///
+/// - the requested asset is one segment, lower-case letters and digits;
+/// - each fixed rate's selector is one or two such segments, `<asset>` or `<asset>-<rail>`;
+/// - each selector matches at least one accepted endpoint: its asset, and its rail when it
+///   names one. A selector never adds an endpoint.
+///
+/// A request that names no endpoint, neither `accepted_payment_endpoint_identifiers` nor
+/// `payment_endpoints`, accepts those of the payee's lists, which check 10 doesn't see; the
+/// payer matches the selectors against the endpoint it picks when it prices a payment.
+fn check_conversion_terms(
+    asset: &Asset,
+    conversion: &Conversion,
+    accepted: &[&PaymentEndpointIdentifier],
+) -> Result<()> {
+    ensure(
+        is_conversion_segment(asset.as_str()),
+        "Paykit wire 4.4: a request with conversion terms is in an asset of lower-case letters and digits",
+    )?;
+    let Conversion::Fixed(rates) = conversion else {
+        return Ok(());
+    };
+    for rate in rates {
+        let selector: Vec<&str> = rate.asset().as_str().split('-').collect();
+        ensure(
+            (1..=2).contains(&selector.len()) && selector.iter().all(|s| is_conversion_segment(s)),
+            "Paykit wire 4.4: a rate's asset is <asset> or <asset>-<rail>, each segment lower-case letters and digits",
+        )?;
+        let matches = |id: &&PaymentEndpointIdentifier| {
+            let segments: Vec<&str> = id.as_str().split('-').collect();
+            segments.get(..selector.len()) == Some(&selector[..])
+        };
+        ensure(
+            accepted.is_empty() || accepted.iter().any(matches),
+            "Paykit wire 4.4: a rate's asset matches no accepted endpoint",
+        )?;
+    }
+    Ok(())
+}
+
 fn rates_json(rates: &[Rate]) -> Value {
     Value::Array(
         rates
@@ -323,7 +374,7 @@ impl PaymentRequest {
                 )),
             })
             .transpose()?;
-        if conversion.is_some() {
+        if let Some(conversion) = &conversion {
             // Paykit wire 1.4: requests with conversion terms use the recommended form.
             let mut ids: Vec<&PaymentEndpointIdentifier> = accepted.iter().flatten().collect();
             if let RequestDestination::Endpoints(e) = &destination {
@@ -333,6 +384,7 @@ impl PaymentRequest {
                 ids.iter().all(|i| i.is_recommended_form()),
                 "Paykit wire 1.4: a request with conversion terms uses identifiers <asset>-<rail>-<format>",
             )?;
+            check_conversion_terms(&amount.asset, conversion, &ids)?;
         }
         let metadata = obj
             .opt("metadata")
@@ -1559,6 +1611,63 @@ mod tests {
         twice["rates"] =
             json!([{ "asset": "btc", "value": "1" }, { "asset": "btc", "value": "2" }]);
         assert!(PeriodDetails::from_body(&body(twice)).is_err());
+    }
+
+    #[test]
+    fn test_request_conversion_terms_constraints() {
+        let fixed = |asset: &str, selectors: &[&str], accepted: Option<Value>| {
+            let mut b = request();
+            b["amount"] = json!({ "asset": asset, "value": "10" });
+            b["payment_endpoints"] =
+                json!({ "btc-lightning-bolt11": "lnbc1", "usdt-polygon-address": "0x1" });
+            if let Some(ids) = accepted {
+                b["accepted_payment_endpoint_identifiers"] = ids;
+            }
+            let rates: Vec<Value> = selectors
+                .iter()
+                .map(|s| json!({ "asset": s, "value": "1" }))
+                .collect();
+            b["conversion"] = json!({ "type": "fixed", "rates": rates });
+            PaymentRequest::from_body(&body(b))
+        };
+        fixed("usd", &["btc", "usdt-polygon"], None).unwrap();
+        fixed("usdt", &["usdt-polygon"], None).unwrap();
+        let wider = json!([
+            "btc-lightning-bolt11",
+            "usdt-polygon-address",
+            "eth-ethereum-address"
+        ]);
+        fixed("usd", &["eth"], Some(wider)).unwrap();
+        for (asset, selectors, rule) in [
+            ("USD", &["btc"][..], "lower-case letters and digits"),
+            ("usd-x", &["btc"][..], "lower-case letters and digits"),
+            ("usd", &["BTC"][..], "<asset>-<rail>"),
+            ("usd", &["btc-Lightning"][..], "<asset>-<rail>"),
+            ("usd", &["btc-lightning-bolt11"][..], "<asset>-<rail>"),
+            ("usd", &["btc-"][..], "<asset>-<rail>"),
+            ("usd", &["eth"][..], "matches no accepted endpoint"),
+            (
+                "usd",
+                &["btc", "btc-onchain"][..],
+                "matches no accepted endpoint",
+            ),
+            (
+                "usd",
+                &["usdt-ethereum"][..],
+                "matches no accepted endpoint",
+            ),
+        ] {
+            let error = fixed(asset, selectors, None).unwrap_err().to_string();
+            assert!(error.contains(rule), "{asset} {selectors:?}: {error}");
+        }
+        // A per-period request in an asset outside the convention is refused too.
+        let mut recurring = request();
+        recurring["amount"] = json!({ "asset": "Usd", "value": "10" });
+        recurring["payment_deadline"] = json!({ "type": "period_start", "seconds": 1 });
+        recurring["recurrence"] = json!({ "anchor": "2026-01-31T00:00:00.000Z", "every": 1,
+            "unit": "month", "starts_at": "2026-01-31T00:00:00.000Z", "ends_at": null });
+        recurring["conversion"] = json!({ "type": "per_period" });
+        assert!(PaymentRequest::from_body(&body(recurring)).is_err());
     }
 
     #[test]
