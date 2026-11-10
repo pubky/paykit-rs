@@ -250,6 +250,30 @@ impl Paykit {
             .map(|()| identity))
     }
 
+    /// The payee's copy of `identity.json` may still be acted on now, on the clock (Paykit
+    /// spec 4, 7.2; Switch spec 4.3): read in the last 10 minutes, for a destination a
+    /// verified message carries; for a public endpoint, as the switch's rules let `by`
+    /// act, `confirmed` standing for the user's confirmation.
+    pub(crate) fn payee_copy_usable(
+        &self,
+        identity: &PeerIdentity,
+        need: Need,
+        by: Initiator,
+        confirmed: Option<UserConfirmed>,
+    ) -> bool {
+        let now = self.now();
+        match need {
+            Need::FreshCopy => now
+                .checked_sub(identity.read_at_ms)
+                .is_some_and(|age| age < DOC_CACHE_MS),
+            Need::SwitchCopy => match identity.may_act(now, by, IDENTITY_GRACE_MS) {
+                MayAct::Now => true,
+                MayAct::IfUserConfirms => confirmed.is_some(),
+                _ => false,
+            },
+        }
+    }
+
     /// The payee's switch lookup kept from an earlier check, taken if its answer has come,
     /// without waiting for one that hasn't (Paykit spec 4): the copy it gives, or `None`
     /// when none was kept or it still runs, kept again.

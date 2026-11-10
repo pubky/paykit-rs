@@ -335,3 +335,83 @@ async fn test_final_check_recovery_late_answer_removing_the_app_not_paid() {
     assert_eq!(resumed, vec![PayOutcome::Pending { attempt_id }]);
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
 }
+
+// ---------------------------------------------------------------------------------------
+// An own identity.json read that succeeds after 11 minutes
+
+#[tokio::test]
+async fn test_final_check_first_dispatch_payee_copy_aged_during_the_own_read_not_paid() {
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    w.clock.advance_ms(11 * 60_000);
+    // Before the attempt: the own identity.json is read at once, then bob's, which takes
+    // 61 s. After it, the own copy is over 60 s old and read again: that read succeeds after
+    // 11 minutes, leaving bob's copy past its 10.
+    let reads = HookedReads::new(&w);
+    reads.then(w.alice_id(), 0, None);
+    reads.then(w.bob_id(), 61_000, None);
+    reads.then(w.alice_id(), 11 * 60_000, None);
+    let slow = held_switch(&w);
+    slow.release();
+    let mut wallet = wallet(
+        &w,
+        Arc::clone(&store) as Arc<dyn StateStore>,
+        app_id,
+        &reads,
+        &slow,
+    )
+    .await;
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    let PayOutcome::Pending { attempt_id } = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(w.rail.pay_calls(&attempt_id), 0);
+}
+
+#[tokio::test]
+async fn test_final_check_resume_payee_copy_aged_during_the_own_read_not_paid() {
+    let w = World::new();
+    let (store, app_id, attempt_id) = in_flight(&w).await;
+    w.clock.advance_ms(11 * 60_000);
+    // The destination's check reads bob's copy; the own identity.json's read after it
+    // succeeds after 11 minutes.
+    let reads = HookedReads::new(&w);
+    reads.then(w.alice_id(), 11 * 60_000, None);
+    let slow = held_switch(&w);
+    slow.release();
+    let mut wallet = wallet(
+        &w,
+        Arc::clone(&store) as Arc<dyn StateStore>,
+        app_id,
+        &reads,
+        &slow,
+    )
+    .await;
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert_eq!(resumed, vec![PayOutcome::Pending { attempt_id }]);
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_final_check_recovery_payee_copy_aged_during_the_own_read_not_paid() {
+    let (w, store, app_id, attempt_id) = stopped_before_the_rail().await;
+    w.clock.advance_ms(11 * 60_000);
+    let reads = HookedReads::new(&w);
+    reads.then(w.alice_id(), 11 * 60_000, None);
+    let slow = held_switch(&w);
+    slow.release();
+    let mut wallet = wallet(
+        &w,
+        Arc::clone(&store) as Arc<dyn StateStore>,
+        app_id,
+        &reads,
+        &slow,
+    )
+    .await;
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert_eq!(resumed, vec![PayOutcome::Pending { attempt_id }]);
+    assert_eq!(w.rail.pay_calls(&attempt_id), 0);
+}

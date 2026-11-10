@@ -39,7 +39,7 @@ use pubky_switch_core::message::MessagePlaintext;
 use pubky_switch_core::ops::{Condition, OpKind};
 
 use crate::activity::{self, ActivityTarget, Role};
-use crate::destination::Carrier;
+use crate::destination::{Carrier, Need};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::{Destination, JournalEntry, KeptAmount, PaymentView, Stage};
 use crate::paykit::Paykit;
@@ -1316,11 +1316,14 @@ impl Paykit {
     /// 2. the destination, against the payee's `identity.json` that gives: its carrier
     ///    carries it and hasn't expired, and its app is current, not removed, with the
     ///    certificate the carrier came with;
-    /// 3. the own `identity.json` is confirmed in the last 60 s, and lists this app at the
+    /// 3. the payee's copy may still be acted on: read in the last 10 minutes for a
+    ///    request's or a list's endpoint, by the switch's rules for a public endpoint;
+    /// 4. the own `identity.json` is confirmed in the last 60 s, and lists this app at the
     ///    attempt's service and generation.
     ///
-    /// Checks 2 and 3 run on the clock after the last await, and none follows them before
-    /// the call. `false`: nothing is paid.
+    /// Checks 2 to 4 run on the clock after the last await, and none follows them before the
+    /// call. `false`: nothing is paid; a copy past its age is looked up again by the next
+    /// check, at a resume.
     pub(crate) async fn final_payment_check(
         &mut self,
         entry: &JournalEntry,
@@ -1345,8 +1348,10 @@ impl Paykit {
                 &payee.doc,
             )
             .is_ok();
-        let _ = (by, confirmed);
-        Ok(destination && self.own_identity_fresh() && self.own_identity_authorizes(entry).is_ok())
+        Ok(destination
+            && self.payee_copy_usable(&payee, Need::of(&carrier), by, confirmed)
+            && self.own_identity_fresh()
+            && self.own_identity_authorizes(entry).is_ok())
     }
 
     /// The checks before a repeat, the same as before a first dispatch (Paykit spec 7.2 step
