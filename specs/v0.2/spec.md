@@ -485,11 +485,11 @@ The reference prototype is shared separately, with its history (phase 1, the mec
 
 **Not covered yet:** a real phone with APNs or FCM, the Pubky staging Homeserver, a real network (the profiles below are simulated), persistent storage on disk, per-app Pubky grants (apps write through their identity's session), and histories of days or weeks.
 
-**Tests** (counts as of 2026-11-07; update them here when the suites change):
+**Tests** (counts as of 2026-11-08; update them here when the suites change):
 
-- The reference prototype's suite reports 668 passing tests, 0 failing and 3 ignored (the scale run, the soak and the vector generator, run on demand). 4 of the 668, the end-to-end tests, need PostgreSQL for the local Pubky testnet; in the run reported here it was available, so all 668 ran, but without it those 4 print `SKIPPED` and still report a pass.
+- The reference prototype's suite reports 681 passing tests, 0 failing and 3 ignored (the scale run, the soak and the vector generator, run on demand). 4 of the 681, the end-to-end tests, need PostgreSQL for the local Pubky testnet; in the run reported here it was available, so all 681 ran, but without it those 4 print `SKIPPED` and still report a pass.
 - With `PAYKIT_E2E_REQUIRED=1`, a missing database makes those 4 tests fail instead. CI's test job sets it.
-- The independent implementation has 20 vector tests of its own, one per file of the two sets, separate from the 668; all 20 pass on the current vectors.
+- The independent implementation has 20 vector tests of its own, one per file of the two sets, separate from the 681; all 20 pass on the current vectors.
 
 **Results**
 
