@@ -156,3 +156,131 @@ async fn test_recovery_clock_gone_back_own_identity_read_again() {
     );
     assert!(w.rail.all_executions().is_empty());
 }
+
+/// An idempotent rail without a history, remembering keys for good: only the claim can tell
+/// a resume that an attempt was resolved.
+fn idempotent_without_history() -> RailDeclaration {
+    RailDeclaration {
+        idempotent: true,
+        idempotency_retention_ms: None,
+        history: false,
+        history_retention_ms: None,
+        history_survives_restore: false,
+    }
+}
+
+#[tokio::test]
+async fn test_recovery_attempt_resolved_failed_may_be_paid_again() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    // The user resolves the attempt as failed: the journal follows, so the request is
+    // payable again, here as on the claim.
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    wallet
+        .resolve_attempt(
+            &obligation,
+            attempt_id,
+            paykit_sdk::Resolution::Failed,
+            pubky_switch_client::app::UserConfirmed::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Finished);
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        paykit_sdk::RequestStatus::Open
+    );
+    let again = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(again, PayOutcome::Paid { .. }), "{again:?}");
+}
+
+#[tokio::test]
+async fn test_recovery_attempt_resolved_done_never_dispatched_again() {
+    let w = World::new();
+    w.rail.set_declaration(idempotent_without_history());
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(Behaviour::Hang);
+    let PayOutcome::Pending { attempt_id } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    wallet
+        .resolve_attempt(
+            &obligation,
+            attempt_id,
+            paykit_sdk::Resolution::Done,
+            pubky_switch_client::app::UserConfirmed::new(),
+        )
+        .await
+        .unwrap();
+    // A resume finds nothing to do: the user said it was paid.
+    assert!(wallet.resume_payments().await.unwrap().is_empty());
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_recovery_attempt_resolved_on_the_claim_not_dispatched_again() {
+    let w = World::new();
+    w.rail.set_declaration(idempotent_without_history());
+    let base = store();
+    let (attempt_id, app_id) = in_flight(&w, &base).await;
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&base),
+            app_id,
+            Arc::new(TestClock::new(w.clock.now_ms())),
+        )
+        .await;
+    // The attempt is resolved on the claim behind the journal's back, as a receipt or
+    // another own app's resolution would: the resume reads the claim before any repeat.
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    let step = wallet
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap()
+        .view
+        .step;
+    wallet
+        .app_mut()
+        .write_claim(
+            pubky_switch_client::app::ClaimOp::done(
+                obligation,
+                step,
+                attempt_id.to_bytes(),
+                pubky_switch_core::claims::Basis::Owner,
+                None,
+            )
+            .unwrap(),
+            Vec::new(),
+            pubky_switch_client::app::ObligationDeadline::NotKnown,
+        )
+        .await
+        .unwrap();
+    assert!(wallet.resume_payments().await.unwrap().is_empty());
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Finished);
+}

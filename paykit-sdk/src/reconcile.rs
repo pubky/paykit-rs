@@ -15,13 +15,15 @@ use paykit_lib::collections::Collection;
 use paykit_lib::derive::payment_obligation;
 use paykit_lib::records::{ActivityRecord, ActivitySide, RecordBinding};
 use paykit_lib::AttemptId;
-use pubky_switch_client::app::{ClaimOp, ObligationDeadline, UserConfirmed};
+use pubky_switch_client::app::{ClaimOp, ObligationDeadline, OpBatch, UserConfirmed};
 use pubky_switch_core::claims::{Basis, Outcome};
 
 use crate::error::{Refusal, Result};
-use crate::pay::PayOutcome;
+use crate::journal::{JournalEntry, Stage};
+use crate::pay::{own_deadline, PayOutcome};
 use crate::paykit::Paykit;
 use crate::rail::RailOutcome;
+use crate::state::{self, key};
 
 /// How the user resolves a doubtful attempt (Paykit spec 7.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,7 +226,8 @@ impl Paykit {
     /// `reconcile` or `unknown` for an orphaned attempt, `failed` for an `unknown` one or an
     /// orphaned one whose owner isn't current. An attempt of this app's own is reported as
     /// its owner reports it: `done` with basis `owner`, or `failed` (Switch spec 10.2 rows 2
-    /// and 5). The user has seen "may already be paid".
+    /// and 5). The user has seen "may already be paid". The attempt's journal entry, if this
+    /// app holds one, is finished in the same batch.
     ///
     /// # Errors
     ///
@@ -256,9 +259,22 @@ impl Paykit {
             Resolution::Unknown => ClaimOp::unknown(*obligation, step, attempt.to_bytes()),
             Resolution::Failed => ClaimOp::failed(*obligation, step, attempt.to_bytes()),
         };
-        self.app
-            .write_claim(op, Vec::new(), ObligationDeadline::NotKnown)
-            .await?;
+        // The journal entry of an own attempt is finished with the resolution, in its batch:
+        // the user decided, so it neither blocks another payment as one in progress nor is
+        // resumed, and never dispatched again (Paykit spec 7.2, "No second execution").
+        let journal_key = key::journal(&attempt);
+        let entry = self.local_get::<JournalEntry>(&journal_key).await?;
+        let deadline = entry
+            .as_ref()
+            .map_or(ObligationDeadline::NotKnown, |e| own_deadline(e.deadline));
+        let mut batch = OpBatch::new()
+            .op(op.kind())
+            .obligation_deadline(*obligation, deadline);
+        if let Some(mut entry) = entry.filter(JournalEntry::open) {
+            entry.stage = Stage::Finished;
+            batch = batch.local(state::local_put(&journal_key, &entry)?);
+        }
+        self.app.submit_batch(batch).await?;
         Ok(())
     }
 

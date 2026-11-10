@@ -1030,7 +1030,7 @@ impl Paykit {
                         Some((step, Outcome::Open | Outcome::Unknown)) => {
                             entry.step = Some(step);
                             entry.stage = Stage::Paying;
-                            out.push(self.resolve_dispatched(entry).await?);
+                            out.extend(self.resolve_dispatched(entry).await?);
                         }
                         Some(_) => self.set_stage(&mut entry, Stage::Finished).await?,
                         None => self.set_stage(&mut entry, Stage::Abandoned).await?,
@@ -1051,7 +1051,7 @@ impl Paykit {
                 },
                 Stage::Paying => {
                     self.queue_owed_acceptance(&mut entry).await?;
-                    out.push(self.resolve_dispatched(entry).await?);
+                    out.extend(self.resolve_dispatched(entry).await?);
                 }
                 Stage::RailPaid | Stage::RailFailed => {
                     out.push(self.report(&mut entry).await?);
@@ -1067,14 +1067,16 @@ impl Paykit {
     /// payment method declares"): any history record resolves it; an empty history means it
     /// never started only within the history's retention, and for a restored entry only if
     /// the history survives a restore; otherwise an idempotent method is asked again within
-    /// its retention, and anything else stays "may be paid".
+    /// its retention, while the claim still shows this app's attempt open, and anything else
+    /// stays "may be paid". `None` when the claim shows the attempt resolved already, by the
+    /// user or by evidence: the entry is finished, with no outcome of its own.
     pub(crate) async fn resolve_dispatched(
         &mut self,
         mut entry: JournalEntry,
-    ) -> Result<PayOutcome> {
+    ) -> Result<Option<PayOutcome>> {
         let attempt_id = entry.attempt()?;
         if let Some(outcome) = self.rail.payment(attempt_id).await? {
-            return self.take_outcome(&mut entry, outcome).await;
+            return self.take_outcome(&mut entry, outcome).await.map(Some);
         }
         let declaration = self.rail.declaration();
         // The age counts from when the attempt was journaled (Paykit spec 7.2). A device clock
@@ -1089,12 +1091,28 @@ impl Paykit {
             && (!entry.restored || declaration.history_survives_restore)
         {
             entry.stage = Stage::Paying;
-            return self.take_outcome(&mut entry, RailOutcome::Failed).await;
+            return self
+                .take_outcome(&mut entry, RailOutcome::Failed)
+                .await
+                .map(Some);
         }
         if !entry.restored && declaration.idempotent && within(declaration.idempotency_retention_ms)
         {
-            return self.dispatch(entry).await;
+            // A repeat may execute money: only while the claim still shows this app's own
+            // attempt open. One resolved meanwhile is never carried out again, and one in
+            // doubt (`unknown`, or gone from the claim) stays so (Paykit spec 7.2, 7.3).
+            match self.attempt_state(&entry).await? {
+                Some((step, Outcome::Open)) => entry.step = Some(step),
+                Some((_, Outcome::Done | Outcome::Failed)) => {
+                    self.set_stage(&mut entry, Stage::Finished).await?;
+                    return Ok(None);
+                }
+                Some((_, Outcome::Unknown)) | None => {
+                    return Ok(Some(PayOutcome::Uncertain { attempt_id }))
+                }
+            }
+            return self.dispatch(entry).await.map(Some);
         }
-        Ok(PayOutcome::Uncertain { attempt_id })
+        Ok(Some(PayOutcome::Uncertain { attempt_id }))
     }
 }
