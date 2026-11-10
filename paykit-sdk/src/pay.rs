@@ -843,7 +843,7 @@ impl Paykit {
 
     /// Steps 3 and 4: the outcome, the activity record and the proof, in one batch, then
     /// the proof is sent.
-    async fn report(&mut self, entry: &mut JournalEntry) -> Result<PayOutcome> {
+    pub(crate) async fn report(&mut self, entry: &mut JournalEntry) -> Result<PayOutcome> {
         let attempt_id = entry.attempt()?;
         let paid = entry.rail_proof.is_some();
         match self.write_outcome(entry, paid).await {
