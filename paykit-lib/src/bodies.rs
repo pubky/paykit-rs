@@ -815,6 +815,8 @@ impl PeriodDetails {
 
 /// The order of period details for one period (Paykit wire 4.9): later means a later
 /// `created_at` instant, then, at the same instant, the greater `msg_id` compared as text.
+/// `Equal` decides nothing: details as late as those held replace them only if they are the
+/// same message, by hash; other details as late are an equivocation, and the held ones stay.
 pub fn period_details_order(a: &Message, b: &Message) -> Ordering {
     a.created_at_ms
         .cmp(&b.created_at_ms)
