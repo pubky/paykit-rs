@@ -460,6 +460,17 @@ fn read_period_limit(item: &Value) -> Result<(PeriodLimit, LimitSpelling<'_>)> {
         }
         _ => return Err(bad(TERMS, "period", "kind is anchored or rolling")),
     };
+    // Paykit wire 4.15: both limits are present, each possibly null; a missing one isn't
+    // read as null.
+    for member in ["amount_limit", "payment_count_limit"] {
+        if !limit.has(member) {
+            return Err(bad(
+                TERMS,
+                member,
+                "missing; a period limit carries both limits",
+            ));
+        }
+    }
     let amount_text = limit.opt_str("amount_limit")?;
     let out = PeriodLimit {
         amount_limit: amount_text.map(Decimal::parse).transpose()?,
@@ -1282,6 +1293,27 @@ mod tests {
             "2026-01-31T00:00:00.000Z"
         );
         assert_eq!(AllowanceTerms::from_json(&written).unwrap(), terms);
+    }
+
+    #[test]
+    fn test_terms_period_limit_needs_both_limits_present() {
+        let full = json!({ "amount_limit": "1", "payment_count_limit": null,
+            "period": { "every": 1, "kind": "rolling", "unit": "day" } });
+        AllowanceTerms::from_json(&with_limits(json!([full.clone()]))).unwrap();
+        for member in ["amount_limit", "payment_count_limit"] {
+            let mut missing = full.clone();
+            missing.as_object_mut().unwrap().remove(member);
+            if member == "amount_limit" {
+                missing["payment_count_limit"] = json!(2);
+            }
+            let error = AllowanceTerms::from_json(&with_limits(json!([missing])))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(member) && error.contains("missing"),
+                "{member}: {error}"
+            );
+        }
     }
 
     #[test]
