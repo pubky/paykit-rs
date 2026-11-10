@@ -414,6 +414,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 name = "paykit-lib"
 version = "0.2.0-alpha.0"
 dependencies = [
+ "paykit-lib",
  "pubky-switch-core",
  "serde",
  "serde_json",

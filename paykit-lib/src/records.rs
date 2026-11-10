@@ -448,7 +448,6 @@ fn msg_ids_of<'a>(stored: impl IntoIterator<Item = &'a StoredMessage>) -> Vec<St
 }
 
 fn read_attempted_periods(obj: &Obj<'_>) -> Result<Vec<u64>> {
-    let mut out: Vec<u64> = Vec::new();
     let items = obj
         .opt_arr("attempted_periods")?
         .map_or(&[][..], Vec::as_slice);
@@ -456,15 +455,24 @@ fn read_attempted_periods(obj: &Obj<'_>) -> Result<Vec<u64>> {
         items.len() <= MAX_ATTEMPTED_PERIODS,
         "Paykit wire 5.3: attempted_periods lists at most 16 periods",
     )?;
-    for item in items {
-        let start = crate::json::as_int(item, obj.ctx(), "attempted_periods")?;
-        ensure(
-            out.last().is_none_or(|p| *p < start),
-            "Paykit wire 5.3: attempted_periods is ascending, each start once",
-        )?;
-        out.push(start);
-    }
+    let out = items
+        .iter()
+        .map(|item| crate::json::as_int(item, obj.ctx(), "attempted_periods"))
+        .collect::<Result<Vec<u64>>>()?;
+    check_attempted_periods(&out)?;
     Ok(out)
+}
+
+/// The shape of `attempted_periods` (Paykit wire 5.3): at most 16, ascending, each once.
+fn check_attempted_periods(periods: &[u64]) -> Result<()> {
+    ensure(
+        periods.len() <= MAX_ATTEMPTED_PERIODS,
+        "Paykit wire 5.3: attempted_periods lists at most 16 periods",
+    )?;
+    ensure(
+        periods.windows(2).all(|w| w.first() < w.get(1)),
+        "Paykit wire 5.3: attempted_periods is ascending, each start once",
+    )
 }
 
 fn read_unrequested(value: &Value) -> Result<UnrequestedDestination> {
@@ -640,30 +648,93 @@ impl ActivityRecord {
         };
         let mut record = record;
         record.msg_ids = read_msg_ids(&obj, &record.stored_msg_ids())?;
-        let binding = record.binding()?;
-        record.check_members(&binding)?;
-        record.check_refs(&binding)?;
+        record.check()?;
+        Ok(record)
+    }
+
+    /// The record's rules (Paykit wire 5.3), the same for the reader and the writer: the
+    /// stored messages are between the counterparty and one other identity, each of its
+    /// role's kind, from the side that sends it and addressed to the other; the members'
+    /// shapes; the binding; the members only some records carry; the `refs` that tie the
+    /// messages together; `attempt_id`, the stored proof's; and `attempted_periods`, only in a
+    /// payer's request record of a recurring request, ascending, each once, at most 16.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] naming the rule: the record is invalid.
+    fn check(&self) -> Result<()> {
+        let mut own: Option<[u8; 32]> = None;
+        for (role, stored) in self.stored() {
+            let (kinds, sends) = ROLES
+                .iter()
+                .find(|(r, _, _)| *r == role)
+                .map(|(_, k, s)| (*k, *s))
+                .ok_or_else(|| Error::Invalid(format!("{ACTIVITY}: roles")))?;
+            ensure(
+                kinds.contains(&stored.body.kind()),
+                "Paykit wire 5.3: a member holds another kind",
+            )?;
+            let (sender, to) = (stored.sender, stored.message.to);
+            let other = if sender == self.counterparty {
+                to
+            } else {
+                sender
+            };
+            ensure(
+                (sender == self.counterparty || to == self.counterparty)
+                    && other != self.counterparty
+                    && own.is_none_or(|o| o == other),
+                "Paykit wire 5.3: a stored message isn't between this identity and the counterparty",
+            )?;
+            own = Some(other);
+            let (payer, payee) = self.payer_payee(&other);
+            let side_ok = match sends {
+                Sends::Payee => sender == payee,
+                Sends::Payer => sender == payer,
+                Sends::Either => sender == payer || sender == payee,
+            };
+            ensure(
+                side_ok,
+                "Paykit wire 5.3: a stored message from the wrong side",
+            )?;
+        }
+        if let Some(p) = &self.billing_period {
+            ensure(
+                p.ends_at > p.starts_at,
+                "Paykit wire 5.3: billing_period: ends_at isn't after starts_at",
+            )?;
+        }
+        if let Some(u) = &self.unrequested {
+            ensure(
+                u.source != DestinationSource::List || u.list_version.is_some(),
+                "Paykit wire 5.3: unrequested.list_version: missing for a list",
+            )?;
+        }
+        check_attempted_periods(&self.attempted_periods)?;
+        let binding = self.binding()?;
+        self.check_members(&binding)?;
+        self.check_refs(&binding)?;
         if let (RecordBinding::Unrequested, Some(a), Some(Body::PaymentProof(p))) = (
             binding,
-            record.attempt_id,
-            record.proof.as_ref().map(StoredMessage::body),
+            self.attempt_id,
+            self.proof.as_ref().map(StoredMessage::body),
         ) {
             ensure(
                 p.attempt_id == a,
                 "Paykit wire 5.3: attempt_id isn't the stored proof's",
             )?;
         }
-        if !record.attempted_periods.is_empty() {
+        if !self.attempted_periods.is_empty() {
             let recurring_request = matches!(
-                record.request.as_ref().map(StoredMessage::body),
+                self.request.as_ref().map(StoredMessage::body),
                 Some(Body::PaymentRequest(r)) if r.is_recurring()
             );
             ensure(
-                side == ActivitySide::Payer && recurring_request,
+                self.side == ActivitySide::Payer && recurring_request,
                 "Paykit wire 5.3: attempted_periods only in a payer's request record of a recurring request",
             )?;
         }
-        Ok(record)
+        Ok(())
     }
 
     /// What the record is, from its messages' signed fields (Paykit wire 5.3 "Binding"): a
@@ -1029,12 +1100,27 @@ impl ActivityRecord {
     /// Write the record value: every member, `null` for absent, but `allowance_id` when
     /// absent and `attempted_periods` when empty, which are left out, and `msg_ids` as its
     /// canonical list, [`bounded_msg_ids`] of the stored messages and `msg_ids` (Paykit wire
-    /// 5.3).
+    /// 5.3). The record's rules are checked first, as a reader checks them, so the writer
+    /// never writes a record its readers refuse.
     ///
     /// # Errors
     ///
+    /// [`Error::Validation`] for a record that breaks a rule of Paykit wire 5.3, and
     /// [`Error::Invalid`] if the value can't be written.
     pub fn to_json(&self) -> Result<Vec<u8>> {
+        self.check().map_err(Error::into_validation)?;
+        self.json_unchecked()
+    }
+
+    /// Write the record value without its rules, for the vector tests' rejection cases, which
+    /// readers must refuse (Paykit wire 5.3). Test-only: no production build has it.
+    #[cfg(feature = "test-vectors")]
+    #[doc(hidden)]
+    pub fn to_json_unchecked(&self) -> Result<Vec<u8>> {
+        self.json_unchecked()
+    }
+
+    fn json_unchecked(&self) -> Result<Vec<u8>> {
         let msg_ids = bounded_msg_ids(&self.stored_msg_ids(), &self.msg_ids);
         let out = ActivityOut {
             v: 1,
