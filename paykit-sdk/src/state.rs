@@ -23,6 +23,7 @@
 //! | `missed/<from>` | entries missed while lagging, or before a provider loss | |
 //! | `j/<attempt_id>` | the payment journal: one payment, from before its `attempt` | yes |
 //! | `side/<msg_id>` | the side a cancellation is sent from, kept with the batch that queues it | |
+//! | `ar/<payee>/<app_id>` | a payee app's records that took part in its comparison, for its public endpoints | |
 //! | `kc/<record key>` | a payee's cancellation received before its request, for the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
 //! | `rs/<pubky>/<msg_id>` | when a message was last re-sent to a requester | |
@@ -190,6 +191,10 @@ pub(crate) mod key {
 
     pub(crate) fn side(msg_id: &str) -> String {
         format!("side/{msg_id}")
+    }
+
+    pub(crate) fn seen_records(payee: &[u8; 32], app_id: &[u8; 16]) -> String {
+        format!("ar/{}/{}", b64(payee), b64(app_id))
     }
 
     pub(crate) fn kept_cancellation(record_key: &[u8; 32]) -> String {

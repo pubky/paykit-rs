@@ -13,8 +13,13 @@ use crate::common::{btc, endpoint, World, HOUR_MS};
 const DAY_MS: u64 = 24 * HOUR_MS;
 
 /// Bob's `shop` publishes its record on his Homeserver with `member` as its Paykit member,
-/// expiring at `expires_at`.
-fn publish(w: &World, member: Value, expires_at: Option<u64>) {
+/// expiring at `expires_at`, made now.
+fn publish(w: &World, member: Value, expires_at: Option<u64>) -> Vec<u8> {
+    publish_at(w, member, w.clock.now_ms(), expires_at)
+}
+
+/// As [`publish`], made at `updated_at`. Returns the bytes served.
+fn publish_at(w: &World, member: Value, updated_at: u64, expires_at: Option<u64>) -> Vec<u8> {
     let keys = w.bob.identity().app_keys("shop");
     let app_id = keys.app_id_bytes();
     let held = w.bob.switch().app(&app_id).record.unwrap();
@@ -26,14 +31,35 @@ fn publish(w: &World, member: Value, expires_at: Option<u64>) {
         unreachable!()
     };
     body.protocols.insert("paykit".into(), member);
-    body.updated_at = w.clock.now_ms();
+    body.updated_at = updated_at;
     body.expires_at = expires_at;
     let record = AppRecord::sign(&keys, body).unwrap();
-    w.homeserver.put(
-        w.bob_id(),
-        &app_record_path(&app_id),
-        serde_json::to_vec(record.signed()).unwrap(),
-    );
+    let bytes = serde_json::to_vec(record.signed()).unwrap();
+    serve(w, &bytes);
+    bytes
+}
+
+/// Bob's Homeserver serves `bytes` as the shop's record.
+fn serve(w: &World, bytes: &[u8]) {
+    let app_id = w.bob.identity().app_keys("shop").app_id_bytes();
+    w.homeserver
+        .put(w.bob_id(), &app_record_path(&app_id), bytes.to_vec());
+}
+
+/// A member with one public endpoint.
+fn one_endpoint(id: &str, payload: &str) -> Value {
+    json!({ "public_endpoints": { id: payload } })
+}
+
+/// The endpoint identifiers of bob's public endpoints, as the wallet reads them now.
+async fn listed(wallet: &mut paykit_sdk::Paykit, w: &World) -> Vec<String> {
+    wallet
+        .public_endpoints(&w.bob_id(), None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.endpoint_id.as_str().to_owned())
+        .collect()
 }
 
 fn tip_jar() -> Value {
@@ -174,4 +200,122 @@ async fn test_public_record_without_public_endpoints_offers_none() {
         matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
         "{refused:?}"
     );
+}
+
+#[tokio::test]
+async fn test_public_older_record_after_a_newer_one_not_used() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    let older = publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1old"),
+        t0,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1new"),
+        t0 + 1000,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+    // A stale copy is served again: an older record never replaces a newer one (Switch spec
+    // 4.2), and the payment goes to the newer record's endpoint.
+    serve(&w, &older);
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id,
+        endpoint("btc-lightning-bolt12")
+    );
+}
+
+#[tokio::test]
+async fn test_public_conflicting_records_use_the_earlier_one_until_a_later_one() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1first"),
+        t0,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1a"),
+        t0 + 1000,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+    // Another body at the same updated_at: a conflict. Neither is used; the wallet goes on
+    // with the earlier record it holds (Switch spec 4.2).
+    publish_at(
+        &w,
+        one_endpoint("btc-bitcoin-p2wpkh", "bc1qother"),
+        t0 + 1000,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt11"]);
+    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id,
+        endpoint("btc-lightning-bolt11")
+    );
+    // A strictly later record ends the conflict.
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1b"),
+        t0 + 2000,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+}
+
+#[tokio::test]
+async fn test_public_record_comparison_survives_a_reload() {
+    let w = World::new();
+    let base = crate::common::store();
+    let mut wallet = w.wallet_on("wallet", std::sync::Arc::clone(&base)).await;
+    let app_id = wallet.app_id();
+    let _shop = w.shop().await;
+    let t0 = w.clock.now_ms();
+    let expiry = Some(t0 + 30 * DAY_MS);
+    let older = publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt11", "lnbc1old"),
+        t0,
+        expiry,
+    );
+    listed(&mut wallet, &w).await;
+    publish_at(
+        &w,
+        one_endpoint("btc-lightning-bolt12", "lno1new"),
+        t0 + 1000,
+        expiry,
+    );
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
+    drop(wallet);
+    // Restarted, the wallet is served the older copy: what it saw is in its store.
+    serve(&w, &older);
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            std::sync::Arc::clone(&base),
+            app_id,
+            std::sync::Arc::clone(&w.clock),
+        )
+        .await;
+    assert_eq!(listed(&mut wallet, &w).await, ["btc-lightning-bolt12"]);
 }

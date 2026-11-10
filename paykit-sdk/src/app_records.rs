@@ -18,6 +18,12 @@
 //!   plus the identity's `record_max_age`, and its `updated_at` isn't ahead of the payer's
 //!   clock (Paykit spec 4).
 //!
+//! Of one app's records, the one used is the one the Switch's comparison rules pick (Switch
+//! spec 4.2, Switch wire 3.2 "Equal times"), through the core's `RecordView`: the newest
+//! seen; during a conflict, two bodies at one `updated_at`, the earlier one held, if any,
+//! until a strictly later record ends it. The records that took part are kept in the
+//! store, so the comparison survives a restart.
+//!
 //! A record that fails any of these is ignored, as a reader ignores any invalid record: its
 //! endpoints are never paid. A Homeserver that can't be read now is an error. The same
 //! checks run again before money moves, on the record kept as the destination's carrier.
@@ -38,13 +44,17 @@
 use paykit_lib::app_record::PaykitMember;
 use paykit_lib::{PaymentEndpointIdentifier, PaymentEndpointPayload};
 use pubky_switch_client::app::{Initiator, UserConfirmed};
-use pubky_switch_core::records::{app_record_path, AppRecord, IdentityDoc};
+use pubky_switch_core::records::{
+    app_record_path, AppRecord, IdentityDoc, RecordOrder, RecordView,
+};
 use pubky_switch_core::sig::SignedDoc;
+use serde::{Deserialize, Serialize};
 
 use crate::destination::{current, Carrier};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::Destination;
 use crate::paykit::Paykit;
+use crate::state::key;
 use paykit_lib::records::DestinationSource;
 
 /// A public endpoint of a payee app, from its app record (Paykit spec 4).
@@ -82,33 +92,74 @@ impl UsableRecord {
     }
 }
 
-/// Whether a record read for `app_id` of `payee` may be used now (module docs). `None` when
-/// it isn't: it is ignored.
+/// A record read from `app_id`'s path on `payee`'s Homeserver, verified for the payee and
+/// named by its path (Switch wire 3.2, Switch spec 4.2). `None` when it isn't: it is ignored.
+pub(crate) fn read_record(payee: &[u8; 32], app_id: &[u8; 16], bytes: &[u8]) -> Option<AppRecord> {
+    let signed: SignedDoc = serde_json::from_slice(bytes).ok()?;
+    let record = AppRecord::verify(&signed, payee).ok()?;
+    (&record.body().app_id == app_id).then_some(record)
+}
+
+/// Whether `record`, the record of `app_id` a reader uses, may be paid now (module docs).
+/// `None` when it isn't: it is ignored.
 pub(crate) fn usable(
-    payee: &[u8; 32],
     app_id: &[u8; 16],
-    bytes: &[u8],
+    record: &AppRecord,
     doc: &IdentityDoc,
     now: u64,
 ) -> Option<UsableRecord> {
-    let signed: SignedDoc = serde_json::from_slice(bytes).ok()?;
-    let record = AppRecord::verify(&signed, payee).ok()?;
-    // Switch spec 4.2: a record is used only from its own app's path.
-    if &record.body().app_id != app_id {
-        return None;
-    }
-    let member = PaykitMember::read(&record).ok()?;
+    let member = PaykitMember::read(record).ok()?;
     if record.is_ahead(now) || record.expires_at().is_none_or(|at| at <= now) {
         return None;
     }
-    let carrier = Carrier::Record(Box::new(record));
+    let carrier = Carrier::Record(Box::new(record.clone()));
     // The app's standing, with the record's certificate, and the record age limit.
     current(doc, app_id, &carrier, now).ok()?;
-    let Carrier::Record(record) = carrier else {
-        return None;
-    };
-    let record = *record;
-    Some(UsableRecord { record, member })
+    Some(UsableRecord {
+        record: record.clone(),
+        member,
+    })
+}
+
+/// How many records of one payee app are kept for its comparison state. Each kept record is
+/// strictly later than the one before it, or conflicts with it once: at a renewal a fortnight,
+/// that is years of records. Past it the oldest is dropped, which can only lose an earlier
+/// record a long-lasting conflict would fall back to; the core's `RecordView` can't be kept
+/// in a store as it is, so it is rebuilt from these.
+const SEEN_RECORDS: usize = 64;
+
+/// The records of one payee app a reader has seen that took part in its comparison (Switch
+/// spec 4.2, Switch wire 3.2 "Equal times"), oldest first (`p/ar/<payee>/<app>`). Replayed
+/// in order, they rebuild the client's [`RecordView`]; kept, they survive a restart, so a
+/// copy older than one seen, or one conflicting with it, is never used after a reload.
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct SeenRecords {
+    records: Vec<SignedDoc>,
+}
+
+impl SeenRecords {
+    /// The view the records give, at the reader's clock `now`. A kept record that no longer
+    /// verifies is a corrupt store.
+    fn view(&self, payee: &[u8; 32], now: u64) -> Result<(RecordView, Vec<AppRecord>)> {
+        let mut view = RecordView::new();
+        let mut records = Vec::with_capacity(self.records.len());
+        for signed in &self.records {
+            let record = AppRecord::verify(signed, payee).map_err(|_| PaykitError::corrupt())?;
+            view.see(&record, now);
+            records.push(record);
+        }
+        Ok((view, records))
+    }
+}
+
+/// Whether `record` can change a view that has seen `held`: one ahead of the clock takes part
+/// in nothing, one seen already is the same record, and one earlier than a record seen is
+/// earlier than the newest, which the view never goes back from (Switch wire 3.2).
+fn takes_part(record: &AppRecord, held: &[AppRecord], now: u64) -> bool {
+    !record.is_ahead(now)
+        && !held
+            .iter()
+            .any(|h| matches!(record.order(h), RecordOrder::Same | RecordOrder::Earlier))
 }
 
 impl Paykit {
@@ -136,10 +187,31 @@ impl Paykit {
                 .get(*payee, app_record_path(&listed.app_id))
                 .await
                 .map_err(PaykitError::Homeserver)?;
-            let Some(bytes) = bytes else {
+            let read = bytes.and_then(|b| read_record(payee, &listed.app_id, &b));
+            let now = self.now();
+            // The record served is compared with those seen before (Switch spec 4.2): an older
+            // one never replaces a newer one, and two bodies at one `updated_at` are a
+            // conflict, during which neither is used and the reader goes on with the earlier
+            // record it holds, until a strictly later one ends it.
+            let seen_key = key::seen_records(payee, &listed.app_id);
+            let mut seen = self
+                .local_get::<SeenRecords>(&seen_key)
+                .await?
+                .unwrap_or_default();
+            let (mut view, held) = seen.view(payee, now)?;
+            if let Some(record) = read {
+                if takes_part(&record, &held, now) {
+                    view.see(&record, now);
+                    seen.records.push(record.signed().clone());
+                    let excess = seen.records.len().saturating_sub(SEEN_RECORDS);
+                    seen.records.drain(..excess);
+                    self.local_put(&seen_key, &seen).await?;
+                }
+            }
+            let Some(used) = view.used() else {
                 continue;
             };
-            if let Some(usable) = usable(payee, &listed.app_id, &bytes, &doc, self.now()) {
+            if let Some(usable) = usable(&listed.app_id, used, &doc, now) {
                 out.push(usable);
             }
         }
@@ -189,6 +261,17 @@ mod tests {
     use crate::destination::carries;
     use crate::testkit::{object, Party, NOW};
 
+    /// A record served at `app_id`'s path, read and checked as one used.
+    fn usable_bytes(
+        payee: &[u8; 32],
+        app_id: &[u8; 16],
+        bytes: &[u8],
+        doc: &IdentityDoc,
+        now: u64,
+    ) -> Option<UsableRecord> {
+        usable(app_id, &read_record(payee, app_id, bytes)?, doc, now)
+    }
+
     const DAY_MS: u64 = 86_400_000;
 
     /// `app`'s record with `member` as its Paykit member, made at `updated_at` and expiring
@@ -216,7 +299,7 @@ mod tests {
         let bob = Party::new("bob", "shop", &["request"]);
         let doc = bob.doc(&[&bob]);
         let bytes = record_bytes(&bob, tip_jar(), NOW, Some(NOW + 30 * DAY_MS));
-        let usable = usable(&bob.id(), &bob.app_id(), &bytes, &doc, NOW + 1).unwrap();
+        let usable = usable_bytes(&bob.id(), &bob.app_id(), &bytes, &doc, NOW + 1).unwrap();
         let (id, payload) = usable.member.public_endpoints.iter().next().unwrap();
         let destination = usable.destination(id, payload);
         let carrier = Carrier::Record(Box::new(usable.record));
@@ -243,16 +326,16 @@ mod tests {
             NOW,
             Some(later),
         );
-        assert!(usable(&bob.id(), &bob.app_id(), &bad, &doc, NOW + 1).is_none());
+        assert!(usable_bytes(&bob.id(), &bob.app_id(), &bad, &doc, NOW + 1).is_none());
         let no_expiry = record_bytes(&bob, tip_jar(), NOW, None);
-        assert!(usable(&bob.id(), &bob.app_id(), &no_expiry, &doc, NOW + 1).is_none());
+        assert!(usable_bytes(&bob.id(), &bob.app_id(), &no_expiry, &doc, NOW + 1).is_none());
         // Bytes that aren't a signed record, and a record read from another app's path.
-        assert!(usable(&bob.id(), &bob.app_id(), b"{}", &doc, NOW + 1).is_none());
+        assert!(usable_bytes(&bob.id(), &bob.app_id(), b"{}", &doc, NOW + 1).is_none());
         let good = record_bytes(&bob, tip_jar(), NOW, Some(later));
-        assert!(usable(&bob.id(), &[9; 16], &good, &doc, NOW + 1).is_none());
+        assert!(usable_bytes(&bob.id(), &[9; 16], &good, &doc, NOW + 1).is_none());
         // Another identity's record.
         let carol = Party::new("carol", "shop", &["request"]);
-        assert!(usable(&carol.id(), &bob.app_id(), &good, &doc, NOW + 1).is_none());
+        assert!(usable_bytes(&carol.id(), &bob.app_id(), &good, &doc, NOW + 1).is_none());
     }
 
     #[test]
@@ -261,27 +344,27 @@ mod tests {
         let doc = bob.doc(&[&bob]);
         // Expired at its own expires_at.
         let bytes = record_bytes(&bob, tip_jar(), NOW, Some(NOW + DAY_MS));
-        assert!(usable(&bob.id(), &bob.app_id(), &bytes, &doc, NOW + DAY_MS - 1).is_some());
-        assert!(usable(&bob.id(), &bob.app_id(), &bytes, &doc, NOW + DAY_MS).is_none());
+        assert!(usable_bytes(&bob.id(), &bob.app_id(), &bytes, &doc, NOW + DAY_MS - 1).is_some());
+        assert!(usable_bytes(&bob.id(), &bob.app_id(), &bytes, &doc, NOW + DAY_MS).is_none());
         // Past updated_at plus the identity's record age limit (90 days when absent), whatever
         // expires_at it signed.
         let far = record_bytes(&bob, tip_jar(), NOW, Some(NOW + 365 * DAY_MS));
-        assert!(usable(&bob.id(), &bob.app_id(), &far, &doc, NOW + 89 * DAY_MS).is_some());
-        assert!(usable(&bob.id(), &bob.app_id(), &far, &doc, NOW + 90 * DAY_MS).is_none());
+        assert!(usable_bytes(&bob.id(), &bob.app_id(), &far, &doc, NOW + 89 * DAY_MS).is_some());
+        assert!(usable_bytes(&bob.id(), &bob.app_id(), &far, &doc, NOW + 90 * DAY_MS).is_none());
         // Made more than 5 minutes ahead of the payer's clock.
         let ahead = record_bytes(&bob, tip_jar(), NOW + 10 * 60_000, Some(NOW + DAY_MS));
-        assert!(usable(&bob.id(), &bob.app_id(), &ahead, &doc, NOW).is_none());
+        assert!(usable_bytes(&bob.id(), &bob.app_id(), &ahead, &doc, NOW).is_none());
     }
 
     #[test]
     fn test_app_records_record_of_an_app_not_current_ignored() {
         let bob = Party::new("bob", "shop", &["request"]);
         let bytes = record_bytes(&bob, tip_jar(), NOW, Some(NOW + DAY_MS));
-        assert!(usable(&bob.id(), &bob.app_id(), &bytes, &bob.doc(&[]), NOW + 1).is_none());
+        assert!(usable_bytes(&bob.id(), &bob.app_id(), &bytes, &bob.doc(&[]), NOW + 1).is_none());
         // An app without `request` publishes no destination.
         let wallet = Party::new("bob", "wallet", &["pay"]);
         let bytes = record_bytes(&wallet, tip_jar(), NOW, Some(NOW + DAY_MS));
         let doc = bob.doc(&[&wallet]);
-        assert!(usable(&bob.id(), &wallet.app_id(), &bytes, &doc, NOW + 1).is_none());
+        assert!(usable_bytes(&bob.id(), &wallet.app_id(), &bytes, &doc, NOW + 1).is_none());
     }
 }
