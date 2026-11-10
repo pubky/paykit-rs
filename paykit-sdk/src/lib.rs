@@ -22,7 +22,8 @@
 //! - [`Rail`]: the payment method's interface; `rail::FakeRail` for tests (feature
 //!   `test-support`).
 //! - [`AppScopes`]: Paykit's side of approval.
-//! - [`app_records`]: where Paykit's app record members plug in.
+//! - [`app_records`]: Paykit's member of app records, and reading a payee's public
+//!   endpoints from them ([`Paykit::public_endpoints`]).
 //!
 //! Recurring requests, Allowances with executors and ledgers, and publishing Private Payment
 //! Lists build on the same parts, in their own modules.

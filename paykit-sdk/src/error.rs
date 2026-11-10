@@ -56,14 +56,10 @@ pub enum Refusal {
     /// wrote `failed` instead of paying.
     #[error("Paykit spec 7.2: destination refused: {0}")]
     Destination(String),
-    /// No usable destination: no endpoint of the request, no usable Private Payment List, or
-    /// none the caller named (Paykit spec 8.1, 8.4).
+    /// No usable destination: no endpoint of the request, no usable Private Payment List, no
+    /// usable public endpoint, or none the caller named (Paykit spec 4, 8.1, 8.4).
     #[error("no usable destination: {0}")]
     NoDestination(String),
-    /// The payee's public endpoints are read from app records, which this version of the SDK
-    /// doesn't read yet (Paykit spec 4).
-    #[error("Paykit spec 4: public endpoints aren't read yet")]
-    PublicEndpointsUnavailable,
     /// The payment method would transfer another amount or asset, an amount it can't tell, or
     /// a fee above the app's cap, and the user didn't choose it (Paykit spec 7.2 step 1).
     #[error("Paykit spec 7.2 step 1: {0}")]

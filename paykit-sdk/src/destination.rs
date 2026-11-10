@@ -16,8 +16,14 @@
 //!   listed certificate hasn't expired, and the app is current in the payee's
 //!   `identity.json`, its certificate counting at the time the message was accepted.
 //!
-//! A removed app's destinations are ignored, even if its messages are still held (Paykit spec
-//! 4). Public endpoints, from app records, aren't read yet ([`crate::app_records`]).
+//! A public endpoint's carrier is the payee app's record, read from the Homeserver
+//! ([`crate::app_records`]): it names the app whose path it was read from, carries the
+//! endpoint in its Paykit member, and is used only until the earlier of its `expires_at` and
+//! its `updated_at` plus the identity's record age limit, and not while its `updated_at` is
+//! ahead of the payer's clock (Paykit spec 4, Paykit wire 3.2).
+//!
+//! A removed app's destinations are ignored, even if its messages or its record are still
+//! held (Paykit spec 4).
 //!
 //! The payee's `identity.json` is acted on as Switch spec 4.3 allows ([`PeerIdentity::may_act`]):
 //! once its switch confirmed the copy; otherwise a payment the user started goes on only on
@@ -29,12 +35,13 @@
 //!
 //! [`PeerIdentity::may_act`]: pubky_switch_client::app::PeerIdentity::may_act
 
+use paykit_lib::app_record::PaykitMember;
 use paykit_lib::bodies::RequestDestination;
 use paykit_lib::records::{DestinationSource, StoredMessage};
 use paykit_lib::scopes::acts_as_payee;
 use paykit_lib::Body;
 use pubky_switch_client::app::{Initiator, MayAct, UserConfirmed};
-use pubky_switch_core::records::{IdentityDoc, Standing};
+use pubky_switch_core::records::{AppCert, AppRecord, IdentityDoc, Standing};
 
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::Destination;
@@ -107,7 +114,7 @@ impl Paykit {
         &mut self,
         payee: &[u8; 32],
         destination: &Destination,
-        carrier: &StoredMessage,
+        carrier: &Carrier,
         request_hash: Option<&[u8; 32]>,
         by: Initiator,
         confirmed: Option<UserConfirmed>,
@@ -119,19 +126,54 @@ impl Paykit {
             Ok(doc) => doc,
             Err(refusal) => return Ok(Err(refusal)),
         };
-        Ok(current(&doc, destination, carrier, self.now()).map_err(Refusal::Destination))
+        Ok(current(&doc, &destination.app_id, carrier, self.now()).map_err(Refusal::Destination))
     }
 }
 
-/// The message carries the destination, names the obligation, and hasn't expired (Paykit
-/// spec 4, 5, 7.2).
+/// What carries a destination (Paykit spec 4, 7.2): a verified message from the payee, a
+/// request or a Private Payment List, or the payee app's verified record, for a public
+/// endpoint.
+#[derive(Clone, Debug)]
+pub(crate) enum Carrier {
+    /// A request or a Private Payment List.
+    Message(Box<StoredMessage>),
+    /// An app record, read from the Homeserver.
+    Record(Box<AppRecord>),
+}
+
+impl Carrier {
+    /// The certificate the carrier came with.
+    fn cert(&self) -> &AppCert {
+        match self {
+            Self::Message(message) => message.cert(),
+            Self::Record(record) => record.cert(),
+        }
+    }
+
+    /// When the certificate must count: when the inbox accepted the message, or now for a
+    /// record, read now.
+    fn counts_at(&self, now: u64) -> u64 {
+        match self {
+            Self::Message(message) => message.accepted_at().unwrap_or(now),
+            Self::Record(_) => now,
+        }
+    }
+}
+
+/// The carrier carries the destination, names the obligation, and hasn't expired (Paykit
+/// spec 4, 5, 7.2). A record's age limit needs the identity's `identity.json`, and is checked
+/// with the app's standing ([`current`]).
 pub(crate) fn carries(
     payee: &[u8; 32],
     destination: &Destination,
-    carrier: &StoredMessage,
+    carrier: &Carrier,
     request_hash: Option<&[u8; 32]>,
     now: u64,
 ) -> std::result::Result<(), String> {
+    let carrier = match carrier {
+        Carrier::Message(message) => message,
+        Carrier::Record(record) => return record_carries(payee, destination, record, now),
+    };
     if &carrier.sender() != payee {
         return Err("Paykit spec 6: the destination comes from another identity".into());
     }
@@ -173,27 +215,72 @@ pub(crate) fn carries(
     }
 }
 
-/// The sending app is current in the payee's `identity.json`, with a certificate that allows
-/// `request` and, when listed, hasn't expired (Paykit spec 4).
+/// A public endpoint's record carries it (Paykit spec 4, Paykit wire 3.2): the payee's
+/// record of the app the destination names, whose Paykit member reads and lists the
+/// endpoint with its payload, that has its `expires_at` after `now` and whose `updated_at`
+/// isn't ahead of the payer's clock.
+fn record_carries(
+    payee: &[u8; 32],
+    destination: &Destination,
+    record: &AppRecord,
+    now: u64,
+) -> std::result::Result<(), String> {
+    if destination.source() != DestinationSource::Public {
+        return Err("Paykit spec 7.2: no verified message carries the destination".into());
+    }
+    if &record.body().identity != payee {
+        return Err("Paykit spec 6: the destination comes from another identity".into());
+    }
+    if record.body().app_id != destination.app_id {
+        return Err("Paykit wire 3.2: the record isn't the destination app's".into());
+    }
+    let member = PaykitMember::read(record).map_err(|e| e.to_string())?;
+    let endpoint_id = destination.endpoint_id().map_err(|e| e.to_string())?;
+    if member
+        .public_endpoints
+        .get(&endpoint_id)
+        .is_none_or(|p| p.as_str() != destination.payload)
+    {
+        return Err("Paykit spec 7.2: the record doesn't carry the destination".into());
+    }
+    if record.is_ahead(now) {
+        return Err("Paykit spec 4: the record's updated_at is ahead of the clock".into());
+    }
+    if record.expires_at().is_none_or(|at| at <= now) {
+        return Err("Paykit spec 4: the record has expired".into());
+    }
+    Ok(())
+}
+
+/// The app `app_id` that sent the carrier, or whose record it is, is current in the payee's
+/// `identity.json`, with a certificate that allows `request` and, when listed, hasn't
+/// expired; a record is also within the identity's record age limit (Paykit spec 4).
 pub(crate) fn current(
     doc: &IdentityDoc,
-    destination: &Destination,
-    carrier: &StoredMessage,
+    app_id: &[u8; 16],
+    carrier: &Carrier,
     now: u64,
 ) -> std::result::Result<(), String> {
     let cert = carrier.cert();
     if !acts_as_payee(cert.scopes()) {
         return Err("Paykit spec 4: the sending app's certificate doesn't allow request".into());
     }
-    let standing = doc.standing(&destination.app_id, &cert.hash());
+    let standing = doc.standing(app_id, &cert.hash());
     if standing == Standing::Listed && cert.expired_at(now) {
         return Err("Paykit spec 4: the sending app's listed certificate has expired".into());
     }
-    let at = carrier.accepted_at().unwrap_or(now);
-    if doc.listed_cert(&destination.app_id).is_none() || !standing.counts_at(at) {
+    let at = carrier.counts_at(now);
+    if doc.listed_cert(app_id).is_none() || !standing.counts_at(at) {
         return Err(
             "Paykit spec 4: the sending app isn't current in the payee's identity.json".into(),
         );
+    }
+    // The record age limit is the identity's (Paykit spec 4): a record is used only until
+    // its `updated_at` plus `record_max_age`, whatever `expires_at` it signed.
+    if let Carrier::Record(record) = carrier {
+        if now >= record.trusted_until(doc.record_max_age_ms() / 1000) {
+            return Err("Paykit spec 4: the record is past the identity's record age limit".into());
+        }
     }
     Ok(())
 }
@@ -258,7 +345,13 @@ mod tests {
             DestinationSource::Request,
         );
         assert_eq!(
-            carries(&bob.id(), &dest, &request, Some(&request.hash()), NOW),
+            carries(
+                &bob.id(),
+                &dest,
+                &Carrier::Message(Box::new(request.clone())),
+                Some(&request.hash()),
+                NOW
+            ),
             Ok(())
         );
     }
@@ -274,22 +367,50 @@ mod tests {
             "lnbc1",
             DestinationSource::Request,
         );
-        assert!(carries(&carol.id(), &dest, &request, None, NOW).is_err());
+        assert!(carries(
+            &carol.id(),
+            &dest,
+            &Carrier::Message(Box::new(request.clone())),
+            None,
+            NOW
+        )
+        .is_err());
         let other_app = destination(
             &carol,
             "btc-lightning-bolt11",
             "lnbc1",
             DestinationSource::Request,
         );
-        assert!(carries(&bob.id(), &other_app, &request, None, NOW).is_err());
+        assert!(carries(
+            &bob.id(),
+            &other_app,
+            &Carrier::Message(Box::new(request.clone())),
+            None,
+            NOW
+        )
+        .is_err());
         let other_payload = destination(
             &bob,
             "btc-lightning-bolt11",
             "lnbc2",
             DestinationSource::Request,
         );
-        assert!(carries(&bob.id(), &other_payload, &request, None, NOW).is_err());
-        assert!(carries(&bob.id(), &dest, &request, Some(&[9; 32]), NOW).is_err());
+        assert!(carries(
+            &bob.id(),
+            &other_payload,
+            &Carrier::Message(Box::new(request.clone())),
+            None,
+            NOW
+        )
+        .is_err());
+        assert!(carries(
+            &bob.id(),
+            &dest,
+            &Carrier::Message(Box::new(request.clone())),
+            Some(&[9; 32]),
+            NOW
+        )
+        .is_err());
     }
 
     #[test]
@@ -302,11 +423,34 @@ mod tests {
             list_body(NOW + 3_600_000),
         );
         let dest = destination(&bob, "btc-bitcoin-p2wpkh", "bc1q", DestinationSource::List);
-        assert_eq!(carries(&bob.id(), &dest, &list, None, NOW), Ok(()));
-        assert!(carries(&bob.id(), &dest, &list, None, NOW + 3_600_000).is_err());
+        assert_eq!(
+            carries(
+                &bob.id(),
+                &dest,
+                &Carrier::Message(Box::new(list.clone())),
+                None,
+                NOW
+            ),
+            Ok(())
+        );
+        assert!(carries(
+            &bob.id(),
+            &dest,
+            &Carrier::Message(Box::new(list.clone())),
+            None,
+            NOW + 3_600_000
+        )
+        .is_err());
         let mut other_version = dest.clone();
         other_version.list_version = Some(8);
-        assert!(carries(&bob.id(), &other_version, &list, None, NOW).is_err());
+        assert!(carries(
+            &bob.id(),
+            &other_version,
+            &Carrier::Message(Box::new(list.clone())),
+            None,
+            NOW
+        )
+        .is_err());
     }
 
     #[test]
@@ -319,9 +463,23 @@ mod tests {
             "lnbc1",
             DestinationSource::Request,
         );
-        assert_eq!(current(&bob.doc(&[&bob]), &dest, &request, NOW), Ok(()));
+        assert_eq!(
+            current(
+                &bob.doc(&[&bob]),
+                &dest.app_id,
+                &Carrier::Message(Box::new(request.clone())),
+                NOW
+            ),
+            Ok(())
+        );
         // Not listed.
-        assert!(current(&bob.doc(&[]), &dest, &request, NOW).is_err());
+        assert!(current(
+            &bob.doc(&[]),
+            &dest.app_id,
+            &Carrier::Message(Box::new(request.clone())),
+            NOW
+        )
+        .is_err());
     }
 
     #[test]
@@ -343,7 +501,13 @@ mod tests {
             distrust_from: NOW - 1,
         });
         let removed = IdentityDoc::sign(&bob.key, body).unwrap();
-        assert!(current(&removed, &dest, &request, NOW).is_err());
+        assert!(current(
+            &removed,
+            &dest.app_id,
+            &Carrier::Message(Box::new(request.clone())),
+            NOW
+        )
+        .is_err());
         // A destination from an app without `request` isn't one.
         let payer_app = Party::new("bob", "wallet", &["pay"]);
         let from_payer =
@@ -355,6 +519,12 @@ mod tests {
             "lnbc1",
             DestinationSource::Request,
         );
-        assert!(current(&doc, &dest, &from_payer, NOW).is_err());
+        assert!(current(
+            &doc,
+            &dest.app_id,
+            &Carrier::Message(Box::new(from_payer.clone())),
+            NOW
+        )
+        .is_err());
     }
 }

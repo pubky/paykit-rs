@@ -24,9 +24,12 @@ use paykit_lib::{
     Asset, AttemptId, Decimal, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
 };
 use pubky_switch_core::enc::{serde_b64, serde_b64_vec};
+use pubky_switch_core::records::AppRecord;
+use pubky_switch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::destination::Carrier;
 use crate::error::{PaykitError, Result};
 use crate::records::KeptMessage;
 
@@ -196,10 +199,13 @@ pub(crate) struct JournalEntry {
     /// Device time when journaled: the earliest a dispatch could start.
     pub(crate) journaled_at_ms: u64,
     /// The verified message carrying the destination, for the destination check before a
-    /// repeat (Paykit spec 7.2 step 1). `None` in an entry kept before it was journaled: such
-    /// an entry is never dispatched again.
+    /// repeat (Paykit spec 7.2 step 1). Neither it nor `carrier_record` in an entry kept
+    /// before carriers were journaled: such an entry is never dispatched again.
     #[serde(default)]
     pub(crate) carrier: Option<KeptMessage>,
+    /// The signed app record carrying a public endpoint, for the same check.
+    #[serde(default)]
+    pub(crate) carrier_record: Option<SignedDoc>,
 }
 
 impl std::fmt::Debug for JournalEntry {
@@ -220,6 +226,27 @@ impl JournalEntry {
                 pubky_switch_core::enc::unb64_array::<32>(h).map_err(|_| PaykitError::corrupt())
             })
             .transpose()
+    }
+
+    /// Keep the destination's carrier in the entry.
+    pub(crate) fn keep_carrier(&mut self, carrier: &Carrier) {
+        match carrier {
+            Carrier::Message(message) => self.carrier = Some(KeptMessage::of(message)),
+            Carrier::Record(record) => self.carrier_record = Some(record.signed().clone()),
+        }
+    }
+
+    /// The destination's carrier, verified again for `own`; `None` when the entry keeps none.
+    pub(crate) fn kept_carrier(&self, own: &[u8; 32]) -> Result<Option<Carrier>> {
+        if let Some(kept) = &self.carrier {
+            return Ok(Some(Carrier::Message(Box::new(kept.stored(own)?))));
+        }
+        match &self.carrier_record {
+            Some(signed) => AppRecord::verify(signed, &self.payee)
+                .map(|record| Some(Carrier::Record(Box::new(record))))
+                .map_err(|_| PaykitError::corrupt()),
+            None => Ok(None),
+        }
     }
 
     /// Whether the entry still has work: not finished, not abandoned.

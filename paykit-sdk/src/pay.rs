@@ -38,12 +38,12 @@ use pubky_switch_core::message::MessagePlaintext;
 use pubky_switch_core::ops::{Condition, OpKind};
 
 use crate::activity::{self, ActivityTarget, Role};
-use crate::destination::refused;
+use crate::destination::{refused, Carrier};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::{Destination, JournalEntry, KeptAmount, PaymentView, Stage};
 use crate::paykit::Paykit;
 use crate::rail::{RailOutcome, RailPayment};
-use crate::records::{list_target, KeptMessage};
+use crate::records::list_target;
 use crate::requests::{cancelled, rejected, request_of, RequestRef};
 use crate::state::{self, key};
 
@@ -134,7 +134,7 @@ pub struct UnrequestedPayment {
 struct Plan {
     entry: JournalEntry,
     record: ActivityTarget,
-    carrier: StoredMessage,
+    carrier: Carrier,
     step: u64,
     /// The `payment_lists` record whose single-use mark the attempt's batch writes.
     reserve: Option<PaymentListRecord>,
@@ -232,7 +232,11 @@ impl Paykit {
                     None,
                     false,
                 );
-                (destination, stored.clone(), None)
+                (
+                    destination,
+                    Carrier::Message(Box::new(stored.clone())),
+                    None,
+                )
             }
             // The request's accepted identifiers restrict a destination from the payee's lists
             // as they do its own endpoints (Paykit wire 4.5).
@@ -278,6 +282,7 @@ impl Paykit {
             restored: false,
             journaled_at_ms: self.now(),
             carrier: None,
+            carrier_record: None,
         };
         self.execute(Plan {
             entry,
@@ -344,6 +349,7 @@ impl Paykit {
             restored: false,
             journaled_at_ms: self.now(),
             carrier: None,
+            carrier_record: None,
         };
         self.execute(Plan {
             entry,
@@ -459,17 +465,44 @@ impl Paykit {
     /// A destination from the payee's Private Payment Lists (Paykit spec 8.4): the newest
     /// usable list of the app asked for, or of any app, and an endpoint of it that isn't a
     /// single-use endpoint already used at that version and, for a request that restricts
-    /// them, is one of its accepted identifiers, `allowed` (Paykit wire 4.5). Public endpoints are app
-    /// records', not read yet.
+    /// them, is one of its accepted identifiers, `allowed` (Paykit wire 4.5). In
+    /// [`PaymentMode::Public`], an endpoint of the payee's public endpoints instead, from its
+    /// current apps' records ([`crate::app_records`]), with the same restrictions.
     async fn list_destination(
         &mut self,
         payee: &[u8; 32],
         app: Option<[u8; 16]>,
         allowed: Option<&[PaymentEndpointIdentifier]>,
         options: &PayOptions,
-    ) -> Result<(Destination, StoredMessage, Option<PaymentListRecord>)> {
+    ) -> Result<(Destination, Carrier, Option<PaymentListRecord>)> {
+        let wanted = |id: &PaymentEndpointIdentifier| {
+            options.endpoint.as_ref().is_none_or(|want| want == id)
+                && allowed.is_none_or(|ids| ids.contains(id))
+        };
         if let PaymentMode::Public(_) = options.mode {
-            crate::app_records::public_endpoints(payee)?;
+            let records = self
+                .public_records(
+                    payee,
+                    app,
+                    Initiator::User,
+                    options.unconfirmed_identity_confirmed,
+                )
+                .await??;
+            for usable in records {
+                if let Some((id, payload)) = usable
+                    .member
+                    .public_endpoints
+                    .iter()
+                    .find(|(id, _)| wanted(id))
+                {
+                    let destination = usable.destination(id, payload);
+                    return Ok((destination, Carrier::Record(Box::new(usable.record)), None));
+                }
+            }
+            return Err(Refusal::NoDestination(
+                "Paykit spec 4: the payee has no usable public endpoint".into(),
+            )
+            .into());
         }
         let now = self.now();
         let mut lists = self.lists_of(payee).await?;
@@ -492,11 +525,10 @@ impl Paykit {
                     .iter()
                     .any(|u| u.version == list.version && &u.endpoint == id)
             };
-            let chosen = list.payment_endpoints.iter().find(|(id, endpoint)| {
-                options.endpoint.as_ref().is_none_or(|want| want == *id)
-                    && allowed.is_none_or(|ids| ids.contains(id))
-                    && !(endpoint.single_use && used(id))
-            });
+            let chosen = list
+                .payment_endpoints
+                .iter()
+                .find(|(id, endpoint)| wanted(id) && !(endpoint.single_use && used(id)));
             if let Some((id, endpoint)) = chosen {
                 let destination = Destination::new(
                     record.app_id,
@@ -507,7 +539,11 @@ impl Paykit {
                     endpoint.single_use,
                 );
                 let reserve = endpoint.single_use.then(|| record.clone());
-                return Ok((destination, record.list.clone(), reserve));
+                return Ok((
+                    destination,
+                    Carrier::Message(Box::new(record.list.clone())),
+                    reserve,
+                ));
             }
         }
         Err(Refusal::NoDestination(
@@ -561,7 +597,7 @@ impl Paykit {
         } = plan;
         let attempt_id = entry.attempt()?;
         // The carrier is journaled with the entry, for the checks before any repeat.
-        entry.carrier = Some(KeptMessage::of(&carrier));
+        entry.keep_carrier(&carrier);
         // The own identity.json, read again and confirmed, before any write: no attempt
         // without a copy revalidated in the last 60 s (Paykit spec 4, Switch spec 12.6).
         self.own_identity_confirmed(true).await?;
@@ -1144,10 +1180,9 @@ impl Paykit {
             return Ok(Some(PayOutcome::Pending { attempt_id }));
         }
         self.own_identity_confirmed(true).await?;
-        let Some(kept) = &entry.carrier else {
+        let Some(carrier) = entry.kept_carrier(&self.identity())? else {
             return Ok(Some(PayOutcome::Uncertain { attempt_id }));
         };
-        let carrier = kept.stored(&self.identity())?;
         let checked = self
             .check_destination(
                 &entry.payee,

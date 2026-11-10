@@ -17,7 +17,7 @@ use paykit_lib::derive::request_obligation_blinded;
 use paykit_lib::scopes::{acts_as_payee, check_certificate};
 use paykit_lib::{Decimal, Label};
 use pubky_switch_client::app::{
-    App, AppBackup, AppConfig, AppEnv, AppEvent, JoinRequest, ReceiveReport,
+    App, AppBackup, AppConfig, AppEnv, AppEvent, HomeserverReader, JoinRequest, ReceiveReport,
 };
 use pubky_switch_client::clock::Clock;
 use serde::{Deserialize, Serialize};
@@ -123,6 +123,8 @@ pub struct Paykit {
     pub(crate) protocol: Arc<PaykitProtocol>,
     pub(crate) rail: Arc<dyn Rail>,
     pub(crate) clock: Arc<dyn Clock>,
+    /// The Homeserver reader, for the payees' app records (Paykit spec 4).
+    pub(crate) homeserver: Arc<dyn HomeserverReader>,
     pub(crate) config: PaykitConfig,
 }
 
@@ -153,6 +155,7 @@ impl Paykit {
             protocol,
             rail,
             clock: env.clock,
+            homeserver: env.homeserver,
             config,
         })
     }

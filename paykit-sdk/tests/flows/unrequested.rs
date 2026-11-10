@@ -149,7 +149,12 @@ async fn test_unrequested_without_a_list_refused() {
         })
         .await
         .unwrap_err();
-    assert_eq!(public.refusal(), Some(&Refusal::PublicEndpointsUnavailable));
+    // Nor can bob be paid publicly: he has no identity.json, so no current app (Paykit spec
+    // 4).
+    assert!(
+        matches!(public.refusal(), Some(Refusal::IdentityUnavailable(_))),
+        "{public:?}"
+    );
 }
 
 #[tokio::test]
