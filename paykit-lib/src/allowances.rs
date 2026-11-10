@@ -1660,6 +1660,92 @@ mod tests {
     }
 
     #[test]
+    fn test_successor_refuses_each_rule() {
+        let terms = AllowanceTerms::from_json(&terms()).unwrap();
+        let now = t("2026-03-10T00:00:00.000Z");
+        let failed_item = |id: u8, value: &str| CompactedFailed {
+            obligation: [id; 32],
+            attempt_id: AttemptId::from_bytes([id; 16]),
+            value: Decimal::parse(value).unwrap(),
+        };
+        let held = Ledger {
+            failed: vec![failed_item(9, "0.02")],
+            spent: Some(Decimal::parse("0.05").unwrap()),
+            count: 2,
+            ..ledger(vec![
+                entry(
+                    1,
+                    "0.01",
+                    "2026-01-05T00:00:00.000Z",
+                    Some(EntryOutcome::Done),
+                ),
+                entry(
+                    2,
+                    "0.02",
+                    "2026-01-06T00:00:00.000Z",
+                    Some(EntryOutcome::Failed),
+                ),
+            ])
+        };
+        check_successor(&terms, &held, &held, now).unwrap();
+        let mut changed = held.clone();
+        changed.entries[0].value = Decimal::parse("0.001").unwrap();
+        let mut done_failed = held.clone();
+        done_failed.entries.remove(0);
+        done_failed.failed.push(failed_item(1, "0.01"));
+        let mut other_value = held.clone();
+        other_value.entries.remove(1);
+        other_value.failed.push(failed_item(2, "0.03"));
+        let mut item_changed = held.clone();
+        item_changed.failed[0].value = Decimal::parse("0.01").unwrap();
+        let mut item_dropped = held.clone();
+        item_dropped.failed.clear();
+        let mut count_short = held.clone();
+        count_short.entries.remove(0);
+        count_short.spent = Some(Decimal::parse("0.06").unwrap());
+        for (name, newer, rule) in [
+            ("an entry's value changed", changed, "changes an entry"),
+            (
+                "a done entry into totals.failed",
+                done_failed,
+                "moves a done entry into totals.failed",
+            ),
+            (
+                "a compacted entry with another value",
+                other_value,
+                "another obligation or value",
+            ),
+            (
+                "a totals.failed item changed",
+                item_changed,
+                "changes a totals.failed item",
+            ),
+            (
+                "a totals.failed item dropped",
+                item_dropped,
+                "doesn't grow spent and count",
+            ),
+            (
+                "an entry into spent but not count",
+                count_short,
+                "doesn't grow spent and count",
+            ),
+        ] {
+            let error = check_successor(&terms, &held, &newer, now).unwrap_err();
+            assert!(error.to_string().contains(rule), "{name}: {error}");
+        }
+        // Sums that overflow fail closed, in a newer version and in compaction.
+        let full = Ledger {
+            spent: Some(Decimal::from_scaled(u128::MAX)),
+            ..held.clone()
+        };
+        let mut over = full.clone();
+        over.entries.remove(0);
+        assert!(check_successor(&terms, &full, &over, now).is_err());
+        assert!(compact(&terms, &full, now).is_err());
+    }
+
+    #[test]
     fn test_compaction_and_successor() {
         let terms = AllowanceTerms::from_json(&terms()).unwrap();
         let before = ledger(vec![
