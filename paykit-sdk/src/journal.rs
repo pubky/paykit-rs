@@ -333,6 +333,25 @@ impl JournalEntry {
         Ok(())
     }
 
+    /// [`JournalEntry::check`], and the entry's claim key bound to what it pays: for a
+    /// payment of a request, the obligation `request_obligation` derives from the payee and
+    /// the request, a one-time request's, Billing Period 0 (Paykit spec 7.1, Paykit wire
+    /// 1.5); a payment without a request's is checked by `check` already. An entry whose
+    /// claim key names another obligation would read and write one claim while its record
+    /// and proof name another: it is a corrupt store.
+    pub(crate) fn check_bound(
+        &self,
+        request_obligation: impl Fn(&[u8; 32], &[u8; 32]) -> [u8; 32],
+    ) -> Result<()> {
+        self.check()?;
+        if let Some(hash) = self.request_hash()? {
+            if self.obligation != request_obligation(&self.payee, &hash) {
+                return Err(PaykitError::corrupt());
+            }
+        }
+        Ok(())
+    }
+
     /// Keep the destination's carrier in the entry.
     pub(crate) fn keep_carrier(&mut self, carrier: &Carrier) {
         match carrier {

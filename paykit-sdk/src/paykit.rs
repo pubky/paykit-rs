@@ -207,8 +207,12 @@ impl Paykit {
     /// Paykit's layer, its local state with the journal, in the commit of its own state.
     /// The journal is checked whole before anything is written, and its entries are marked
     /// restored, so their open attempts are resolved as a restore requires (Paykit spec
-    /// 7.2). On an error, neither layer is in the store. The app is in reconcile mode until
-    /// [`Paykit::reconcile`] and [`Paykit::end_reconcile`].
+    /// 7.2). On an error from those checks, neither layer is in the store. Each request
+    /// payment's claim key is bound to its request through the identity's naming key, which
+    /// only the restored app holds, so that binding is checked once both layers are in: an
+    /// entry naming another obligation refuses the restore then, and the journal refuses
+    /// every later read, so no claim is read or written for it. The app is in reconcile mode
+    /// until [`Paykit::reconcile`] and [`Paykit::end_reconcile`].
     ///
     /// # Errors
     ///
@@ -233,7 +237,13 @@ impl Paykit {
             &backup.app,
         )
         .await?;
-        Self::assemble(app, env, protocol, config, rail, timer)
+        let restored = Self::assemble(app, env, protocol, config, rail, timer)?;
+        // Each request payment's claim key is bound to its request through the identity's
+        // naming key, which only the restored app holds: an entry naming another obligation
+        // refuses the restore, and every later read of the journal refuses it too, so no
+        // claim is read or written for it (Paykit spec 7.1).
+        restored.journal().await?;
+        Ok(restored)
     }
 
     /// The app's backup: the client's state and Paykit's, the payment journal in it, read in

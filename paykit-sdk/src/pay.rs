@@ -447,13 +447,19 @@ impl Paykit {
     pub(crate) async fn journal(&self) -> Result<Vec<JournalEntry>> {
         let mut out = Vec::new();
         for (rest, entry) in self.local_scan::<JournalEntry>(key::JOURNAL).await? {
-            entry.check()?;
+            self.check_entry(&entry)?;
             if rest != entry.attempt_id {
                 return Err(PaykitError::corrupt());
             }
             out.push(entry);
         }
         Ok(out)
+    }
+
+    /// A journal entry read back, checked and bound to its obligation through this app's
+    /// naming key ([`JournalEntry::check_bound`]).
+    pub(crate) fn check_entry(&self, entry: &JournalEntry) -> Result<()> {
+        entry.check_bound(|payee, request_hash| self.obligation(payee, request_hash, 0))
     }
 
     async fn save(&mut self, entry: &JournalEntry) -> Result<()> {
@@ -1041,7 +1047,7 @@ impl Paykit {
                 .local_get::<JournalEntry>(&key::journal(&attempt_id))
                 .await?
             {
-                kept.check()?;
+                self.check_entry(&kept)?;
                 if kept.stage == Stage::Finished {
                     *entry = kept;
                     return Ok(());

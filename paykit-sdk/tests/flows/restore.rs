@@ -572,3 +572,44 @@ async fn test_restore_failure_rebuilt_that_completed_after_all_sends_its_proof()
         .unwrap()
         .is_some());
 }
+
+#[tokio::test]
+async fn test_restore_journal_entry_naming_another_obligation_refused() {
+    let w = World::new();
+    let (good, app_id) = backup_with_a_payment(&w).await;
+    let mut state = layer_of(&good);
+    let journal = state
+        .iter()
+        .position(|(k, _)| k.starts_with(b"j/"))
+        .unwrap();
+    // The entry's claim key names another obligation than its request's (Paykit spec 7.1).
+    state[journal].1["d"]["obligation"] =
+        serde_json::Value::String(pubky_switch_core::enc::b64(&[7; 32]));
+    let target = store();
+    let backup =
+        PaykitBackup::from_bytes(&serde_json::to_vec(&with_layer(&good, state)).unwrap()).unwrap();
+    let restored = Paykit::restore(
+        w.env(&w.alice, Arc::clone(&target)),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await;
+    assert!(
+        restored.is_err(),
+        "a journal naming another obligation was restored"
+    );
+    // Nor is the entry used afterwards: the journal refuses to read.
+    let loaded = Paykit::load(
+        w.env(&w.alice, target),
+        PaykitConfig::default(),
+        app_id,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await;
+    if let Ok(app) = loaded {
+        assert!(app.payments().await.is_err());
+    }
+}
