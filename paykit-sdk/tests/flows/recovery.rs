@@ -106,10 +106,16 @@ async fn test_recovery_within_retention_idempotent_rail_asked_again() {
         history_retention_ms: None,
         history_survives_restore: false,
     });
-    // The clock moved on, within the day: the method still remembers the key.
-    let device = Arc::new(TestClock::new(w.clock.now_ms() + HOUR_MS));
+    // The clock moved on, within the day: the method still remembers the key, and every
+    // check before paying passes again.
+    w.clock.advance_ms(HOUR_MS);
     let mut wallet = w
-        .load_on_clock(&w.alice, Arc::clone(&base), app_id, device)
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&base),
+            app_id,
+            Arc::new(TestClock::new(w.clock.now_ms())),
+        )
         .await;
     let resumed = wallet.resume_payments().await.unwrap();
     assert_eq!(resumed, vec![PayOutcome::Pending { attempt_id }]);
@@ -283,4 +289,71 @@ async fn test_recovery_attempt_resolved_on_the_claim_not_dispatched_again() {
     assert!(wallet.resume_payments().await.unwrap().is_empty());
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
     assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Finished);
+}
+
+#[tokio::test]
+async fn test_recovery_repeat_refused_without_a_fresh_own_identity() {
+    let w = World::new();
+    w.rail.set_declaration(idempotent_without_history());
+    let base = store();
+    let (attempt_id, app_id) = in_flight(&w, &base).await;
+    // The payer's identity.json goes missing, and its last confirmation is over 60 s old:
+    // a repeat may execute money, so it needs the check a first dispatch does (Paykit spec
+    // 4, 7.2).
+    w.homeserver
+        .remove(w.alice_id(), pubky_switch_core::records::IDENTITY_PATH);
+    w.clock.advance_ms(61_000);
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&base),
+            app_id,
+            Arc::new(TestClock::new(w.clock.now_ms())),
+        )
+        .await;
+    let refused = wallet.resume_payments().await.unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::IdentityUnavailable(_))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Paying);
+}
+
+#[tokio::test]
+async fn test_recovery_repeat_to_a_revoked_payee_app_held() {
+    let w = World::new();
+    w.rail.set_declaration(idempotent_without_history());
+    let base = store();
+    let (attempt_id, app_id) = in_flight(&w, &base).await;
+    // Bob revokes the shop whose request carries the destination; the payer's copy of his
+    // identity.json is looked up again once over 10 minutes old.
+    let shop_id = w.bob.identity().app_keys("shop").app_id_bytes();
+    let now = w.clock.now_ms();
+    w.bob
+        .next_doc(|body| {
+            body.apps.retain(|a| a.app_id != shop_id);
+            body.removed.push(pubky_switch_core::records::RemovedApp {
+                app_id: shop_id,
+                distrust_from: now,
+            });
+        })
+        .unwrap();
+    w.clock.advance_ms(11 * 60_000);
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&base),
+            app_id,
+            Arc::new(TestClock::new(w.clock.now_ms())),
+        )
+        .await;
+    // Not repeated, and not written `failed`: the first dispatch may have paid.
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+    assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Paying);
 }

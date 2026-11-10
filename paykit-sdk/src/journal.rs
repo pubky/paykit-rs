@@ -8,14 +8,16 @@
 //!   written `failed`.
 //! - **Paying**: the payment may have been submitted. It is resolved from the payment
 //!   method's history, never carried out again unless the method is idempotent on the
-//!   attempt ID; otherwise it stays open, "may be paid".
+//!   attempt ID, the claim still shows the attempt open, and every check before a first
+//!   dispatch passes again; otherwise it stays open, "may be paid".
 //! - **After paying** (`RailPaid`, `RailFailed`): the outcome, the activity record and the
 //!   proof go in one batch, which also moves the entry to `Finished` once applied.
 //! - **A restored journal** may predate a payment made after its backup, so its open attempts
 //!   are resolved from a history that survives a restore, or left "may be paid" (Pubky Switch
 //!   spec, Section 12.4).
 //!
-//! Sensitive: an entry holds the destination's payload and the rail's proof.
+//! Sensitive: an entry holds the destination's payload, the message carrying it and the
+//! rail's proof.
 
 use paykit_lib::records::DestinationSource;
 use paykit_lib::{
@@ -26,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::error::{PaykitError, Result};
+use crate::records::KeptMessage;
 
 /// An optional byte string as base64url, or null.
 mod serde_b64_opt {
@@ -192,6 +195,11 @@ pub(crate) struct JournalEntry {
     pub(crate) restored: bool,
     /// Device time when journaled: the earliest a dispatch could start.
     pub(crate) journaled_at_ms: u64,
+    /// The verified message carrying the destination, for the destination check before a
+    /// repeat (Paykit spec 7.2 step 1). `None` in an entry kept before it was journaled: such
+    /// an entry is never dispatched again.
+    #[serde(default)]
+    pub(crate) carrier: Option<KeptMessage>,
 }
 
 impl std::fmt::Debug for JournalEntry {

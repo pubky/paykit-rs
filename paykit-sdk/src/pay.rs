@@ -43,7 +43,7 @@ use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::{Destination, JournalEntry, KeptAmount, PaymentView, Stage};
 use crate::paykit::Paykit;
 use crate::rail::{RailOutcome, RailPayment};
-use crate::records::list_target;
+use crate::records::{list_target, KeptMessage};
 use crate::requests::{cancelled, rejected, request_of, RequestRef};
 use crate::state::{self, key};
 
@@ -277,6 +277,7 @@ impl Paykit {
             proof_msg_id: None,
             restored: false,
             journaled_at_ms: self.now(),
+            carrier: None,
         };
         self.execute(Plan {
             entry,
@@ -342,6 +343,7 @@ impl Paykit {
             proof_msg_id: None,
             restored: false,
             journaled_at_ms: self.now(),
+            carrier: None,
         };
         self.execute(Plan {
             entry,
@@ -558,6 +560,8 @@ impl Paykit {
             unconfirmed,
         } = plan;
         let attempt_id = entry.attempt()?;
+        // The carrier is journaled with the entry, for the checks before any repeat.
+        entry.carrier = Some(KeptMessage::of(&carrier));
         // The own identity.json, read again and confirmed, before any write: no attempt
         // without a copy revalidated in the last 60 s (Paykit spec 4, Switch spec 12.6).
         self.own_identity_confirmed(true).await?;
@@ -1009,11 +1013,13 @@ impl Paykit {
     /// journal (Paykit spec 7.2): before money could move, an own attempt still open is
     /// written `failed`; once paying, the method's history decides, and a dispatch is never
     /// carried out again unless the method is idempotent on the attempt ID; a restored entry
-    /// is resolved only from a history that survives a restore.
+    /// is resolved only from a history that survives a restore. A repeat on an idempotent
+    /// method passes every check a first dispatch does.
     ///
     /// # Errors
     ///
-    /// The client's errors; the rail's errors.
+    /// [`Refusal::IdentityUnavailable`] when a repeat is due and the own `identity.json`
+    /// isn't confirmed in the last 60 s; the client's errors; the rail's errors.
     pub async fn resume_payments(&mut self) -> Result<Vec<PayOutcome>> {
         // Batches kept from before go first, so the claim read below shows them and the
         // journal holds what their answers settled.
@@ -1111,8 +1117,51 @@ impl Paykit {
                     return Ok(Some(PayOutcome::Uncertain { attempt_id }))
                 }
             }
+            if let Some(held) = self.repeat_held(&entry).await? {
+                return Ok(Some(held));
+            }
             return self.dispatch(entry).await.map(Some);
         }
         Ok(Some(PayOutcome::Uncertain { attempt_id }))
+    }
+
+    /// The checks before a repeat, the same as before a first dispatch (Paykit spec 7.2 step
+    /// 1): a repeat may execute money, so an idempotency guarantee alone doesn't let it go.
+    /// The app may make an automatic attempt now (no alarm, not in reconcile mode, the clocks
+    /// within the tolerance), its own `identity.json` is confirmed within the last 60 s, and
+    /// the destination passes its checks, for an automatic payment. `None` lets the repeat
+    /// go; otherwise the attempt stays open, as nothing may be written `failed` once a
+    /// payment may have been submitted: [`PayOutcome::Pending`] for what may pass later,
+    /// [`PayOutcome::Uncertain`] for a destination refused, or one this entry can't check.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::IdentityUnavailable`] when the own `identity.json` isn't confirmed: no
+    /// payment of this app goes on then.
+    async fn repeat_held(&mut self, entry: &JournalEntry) -> Result<Option<PayOutcome>> {
+        let attempt_id = entry.attempt()?;
+        if self.app.may_attempt(true).is_err() {
+            return Ok(Some(PayOutcome::Pending { attempt_id }));
+        }
+        self.own_identity_confirmed(true).await?;
+        let Some(kept) = &entry.carrier else {
+            return Ok(Some(PayOutcome::Uncertain { attempt_id }));
+        };
+        let carrier = kept.stored(&self.identity())?;
+        let checked = self
+            .check_destination(
+                &entry.payee,
+                &entry.destination,
+                &carrier,
+                entry.request_hash()?.as_ref(),
+                Initiator::Automatic,
+                None,
+            )
+            .await?;
+        Ok(match checked {
+            Ok(()) => None,
+            Err(Refusal::Destination(_)) => Some(PayOutcome::Uncertain { attempt_id }),
+            Err(_) => Some(PayOutcome::Pending { attempt_id }),
+        })
     }
 }
