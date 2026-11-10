@@ -282,7 +282,25 @@ impl AllowanceTerms {
     /// Write the terms, every member, `null` where unset, each amount and time in the
     /// spelling it was read with, or the canonical one for terms built locally, so received
     /// terms write back as they were signed and distinct period limits stay distinct.
-    pub fn to_json(&self) -> Value {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for terms a recipient refuses (Paykit wire 4.15): the writer
+    /// reads them back by [`AllowanceTerms::from_json`], and refuses terms that fail it or
+    /// don't read back as themselves.
+    pub fn to_json(&self) -> Result<Value> {
+        let value = self.json_unchecked();
+        let back = Self::from_json(&value).map_err(Error::into_validation)?;
+        if &back != self {
+            return Err(Error::Validation(format!(
+                "{TERMS}: the terms don't write as themselves"
+            )));
+        }
+        Ok(value)
+    }
+
+    /// The terms as written, before the reader checks them.
+    pub(crate) fn json_unchecked(&self) -> Value {
         let mut map = Map::new();
         let time = |t: &Option<TermsTime>| {
             t.as_ref()
@@ -1219,7 +1237,7 @@ mod tests {
         received["lifetime_amount_limit"] = json!("0.100");
         // Read, write, read again: the same entries and the same bytes.
         let first = AllowanceTerms::from_json(&received).unwrap();
-        let written = first.to_json();
+        let written = first.to_json().unwrap();
         assert_eq!(
             serde_json::to_vec(&written).unwrap(),
             serde_json::to_vec(&received).unwrap()
@@ -1228,7 +1246,7 @@ mod tests {
         assert_eq!(second, first);
         assert_eq!(second.period_limits.len(), 4);
         assert_eq!(
-            serde_json::to_vec(&second.to_json()).unwrap(),
+            serde_json::to_vec(&second.to_json().unwrap()).unwrap(),
             serde_json::to_vec(&written).unwrap()
         );
         // So does a proposal carrying them, the one message whose body holds terms.
@@ -1236,7 +1254,7 @@ mod tests {
             "proposer_role": "allowee", "terms": received });
         let proposal =
             crate::bodies::AllowanceProposal::from_body(body.as_object().unwrap()).unwrap();
-        assert_eq!(Value::Object(proposal.to_body()), body);
+        assert_eq!(Value::Object(proposal.to_body().unwrap()), body);
     }
 
     #[test]
@@ -1257,7 +1275,7 @@ mod tests {
             expires_at: None,
             allowed_payment_endpoint_identifiers: None,
         };
-        let written = terms.to_json();
+        let written = terms.to_json().unwrap();
         assert_eq!(written["active_from"], "2026-01-01T00:00:00.000Z");
         assert_eq!(
             written["period_limits"][0]["period"]["anchor"],
@@ -1269,7 +1287,7 @@ mod tests {
     #[test]
     fn test_terms_round_trip() {
         let parsed = AllowanceTerms::from_json(&terms()).unwrap();
-        assert_eq!(parsed.to_json(), terms());
+        assert_eq!(parsed.to_json().unwrap(), terms());
     }
 
     #[test]

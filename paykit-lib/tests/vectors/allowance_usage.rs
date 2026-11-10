@@ -56,7 +56,11 @@ fn test_vectors_allowance_usage() {
     for case in cases {
         let name = st(case, "name");
         let terms = AllowanceTerms::from_json(&case["terms"]).unwrap();
-        assert_eq!(terms.to_json(), case["terms"], "{name}: terms write back");
+        assert_eq!(
+            terms.to_json().unwrap(),
+            case["terms"],
+            "{name}: terms write back"
+        );
         let l = ledger(&case["ledger"]);
         assert_eq!(l.counterparty, pubky(BOB));
         let back: Value = serde_json::from_slice(&l.to_json().unwrap()).unwrap();
@@ -240,9 +244,13 @@ fn check_spellings(v: &Value) {
             "{name}"
         );
         // Written in the spelling read, they read again to the same entries.
-        assert_eq!(terms.to_json(), case["terms"], "{name}: terms write back");
         assert_eq!(
-            AllowanceTerms::from_json(&terms.to_json()).unwrap(),
+            terms.to_json().unwrap(),
+            case["terms"],
+            "{name}: terms write back"
+        );
+        assert_eq!(
+            AllowanceTerms::from_json(&terms.to_json().unwrap()).unwrap(),
             terms,
             "{name}"
         );

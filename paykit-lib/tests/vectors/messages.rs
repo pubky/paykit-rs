@@ -88,7 +88,7 @@ fn test_vectors_messages() {
         assert_eq!(body.kind().as_str(), message.kind);
         // The body writes back to the same JSON, byte for byte.
         let rebuilt = Message {
-            body: body.to_body(),
+            body: body.to_body(message.refs.len()).unwrap(),
             ..message.clone()
         };
         assert_eq!(rebuilt.to_json().unwrap(), json, "{name}: rebuilt");

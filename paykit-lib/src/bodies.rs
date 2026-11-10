@@ -31,6 +31,28 @@ use crate::scopes::Label;
 /// days (Paykit spec 5, Paykit wire 4.13).
 pub const PRIVATE_LIST_MAX_AGE_MS: u64 = 30 * 86_400_000;
 
+/// The writers' check: `map`, the body `value` writes, read back by `read`, the reader's
+/// own rules (check 10 of Paykit wire 4.1), must give `value` again. So a writer never emits
+/// a body a recipient drops, and the rules live once, in the reader.
+///
+/// # Errors
+///
+/// [`Error::Validation`] for a value the reader refuses, or one it doesn't read back as
+/// itself, such as a member the writer leaves out.
+pub(crate) fn written<T: PartialEq>(
+    value: &T,
+    map: Map<String, Value>,
+    read: impl FnOnce(&Map<String, Value>) -> Result<T>,
+) -> Result<Map<String, Value>> {
+    let back = read(&map).map_err(Error::into_validation)?;
+    if &back != value {
+        return Err(Error::Validation(
+            "Paykit wire 4.1 check 10: the value doesn't write as itself".into(),
+        ));
+    }
+    Ok(map)
+}
+
 /// Payment endpoints (Paykit wire 4.4): Payment Endpoint Identifiers to non-empty payloads,
 /// at least one. The sending app owns them (`from.app_id`).
 pub type PaymentEndpoints = BTreeMap<PaymentEndpointIdentifier, PaymentEndpointPayload>;
@@ -411,7 +433,18 @@ impl PaymentRequest {
 
     /// Write the body: absent optional members omitted, `proposal_expires_at` always written,
     /// `per_period_endpoints` only when true.
-    pub fn to_body(&self) -> Map<String, Value> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a value a recipient drops at check 10: the writer reads
+    /// back what it writes by the reader's rules, and refuses a value that fails them or
+    /// doesn't read back as itself.
+    pub fn to_body(&self) -> Result<Map<String, Value>> {
+        written(self, self.body_unchecked(), Self::from_body)
+    }
+
+    /// The body as written, before the reader checks it.
+    fn body_unchecked(&self) -> Map<String, Value> {
         let mut map = Map::new();
         if let Some(ids) = &self.accepted_payment_endpoint_identifiers {
             map.insert(
@@ -576,7 +609,18 @@ impl PaymentRequestAcceptance {
     }
 
     /// Write the body.
-    pub fn to_body(&self) -> Map<String, Value> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a value a recipient drops at check 10: the writer reads
+    /// back what it writes by the reader's rules, and refuses a value that fails them or
+    /// doesn't read back as itself.
+    pub fn to_body(&self) -> Result<Map<String, Value>> {
+        written(self, self.body_unchecked(), Self::from_body)
+    }
+
+    /// The body as written, before the reader checks it.
+    fn body_unchecked(&self) -> Map<String, Value> {
         let mut map = Map::new();
         insert_label(&mut map, &self.label);
         map
@@ -610,7 +654,18 @@ impl RequestReply {
     }
 
     /// Write the body.
-    pub fn to_body(&self) -> Map<String, Value> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a value a recipient drops at check 10: the writer reads
+    /// back what it writes by the reader's rules, and refuses a value that fails them or
+    /// doesn't read back as itself.
+    pub fn to_body(&self) -> Result<Map<String, Value>> {
+        written(self, self.body_unchecked(), Self::from_body)
+    }
+
+    /// The body as written, before the reader checks it.
+    fn body_unchecked(&self) -> Map<String, Value> {
         let mut map = Map::new();
         insert_label(&mut map, &self.label);
         if let Some(reason) = &self.reason {
@@ -664,7 +719,18 @@ impl PeriodDetails {
     }
 
     /// Write the body.
-    pub fn to_body(&self) -> Map<String, Value> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a value a recipient drops at check 10: the writer reads
+    /// back what it writes by the reader's rules, and refuses a value that fails them or
+    /// doesn't read back as itself.
+    pub fn to_body(&self) -> Result<Map<String, Value>> {
+        written(self, self.body_unchecked(), Self::from_body)
+    }
+
+    /// The body as written, before the reader checks it.
+    fn body_unchecked(&self) -> Map<String, Value> {
         let mut map = Map::new();
         map.insert("billing_period".into(), self.billing_period.to_json());
         map.insert("expires_at".into(), time_value(self.expires_at));
@@ -675,6 +741,18 @@ impl PeriodDetails {
             map.insert("rates".into(), rates_json(r));
         }
         map
+    }
+
+    /// Write the body of period details about `request`, as a sender writes them: the checks
+    /// against the request ([`PeriodDetails::check_against`]), then [`PeriodDetails::to_body`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for details a recipient holding the request drops.
+    pub fn to_body_for(&self, request: &PaymentRequest) -> Result<Map<String, Value>> {
+        self.check_against(request)
+            .map_err(Error::into_validation)?;
+        self.to_body()
     }
 
     /// The checks that need the request (Paykit wire 4.9): the period is one of the
@@ -785,7 +863,18 @@ impl PaymentProof {
     }
 
     /// Write the body.
-    pub fn to_body(&self) -> Map<String, Value> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a value a recipient drops at check 10: the writer reads
+    /// back what it writes by the reader's rules, and refuses a value that fails them or
+    /// doesn't read back as itself.
+    pub fn to_body(&self, refs: usize) -> Result<Map<String, Value>> {
+        written(self, self.body_unchecked(), |b| Self::from_body(b, refs))
+    }
+
+    /// The body as written, before the reader checks it.
+    fn body_unchecked(&self) -> Map<String, Value> {
         let mut map = Map::new();
         if let Some(id) = &self.allowance_id {
             map.insert("allowance_id".into(), Value::String(id.as_str().into()));
@@ -882,7 +971,18 @@ impl PaymentReceipt {
     }
 
     /// Write the body.
-    pub fn to_body(&self) -> Map<String, Value> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a value a recipient drops at check 10: the writer reads
+    /// back what it writes by the reader's rules, and refuses a value that fails them or
+    /// doesn't read back as itself.
+    pub fn to_body(&self) -> Result<Map<String, Value>> {
+        written(self, self.body_unchecked(), Self::from_body)
+    }
+
+    /// The body as written, before the reader checks it.
+    fn body_unchecked(&self) -> Map<String, Value> {
         let mut map = Map::new();
         map.insert(
             "attempt_id".into(),
@@ -958,7 +1058,18 @@ impl ResendRequest {
 
     /// Write the body: empty selectors left out, `billing_period` only with
     /// `request_hashes`.
-    pub fn to_body(&self) -> Map<String, Value> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a value a recipient drops at check 10: the writer reads
+    /// back what it writes by the reader's rules, and refuses a value that fails them or
+    /// doesn't read back as itself.
+    pub fn to_body(&self) -> Result<Map<String, Value>> {
+        written(self, self.body_unchecked(), Self::from_body)
+    }
+
+    /// The body as written, before the reader checks it.
+    fn body_unchecked(&self) -> Map<String, Value> {
         let mut map = Map::new();
         if let Some(t) = self.accepted_from {
             map.insert("accepted_from".into(), time_value(t));
@@ -1082,7 +1193,18 @@ impl PrivatePaymentList {
     }
 
     /// Write the body.
-    pub fn to_body(&self) -> Map<String, Value> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a value a recipient drops at check 10: the writer reads
+    /// back what it writes by the reader's rules, and refuses a value that fails them or
+    /// doesn't read back as itself.
+    pub fn to_body(&self) -> Result<Map<String, Value>> {
+        written(self, self.body_unchecked(), Self::from_body)
+    }
+
+    /// The body as written, before the reader checks it.
+    fn body_unchecked(&self) -> Map<String, Value> {
         let mut map = Map::new();
         map.insert("expires_at".into(), time_value(self.expires_at));
         let endpoints = self
@@ -1134,7 +1256,18 @@ impl PrivatePaymentListRequest {
     }
 
     /// Write the body, `held_version` always.
-    pub fn to_body(&self) -> Map<String, Value> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a value a recipient drops at check 10: the writer reads
+    /// back what it writes by the reader's rules, and refuses a value that fails them or
+    /// doesn't read back as itself.
+    pub fn to_body(&self) -> Result<Map<String, Value>> {
+        written(self, self.body_unchecked(), Self::from_body)
+    }
+
+    /// The body as written, before the reader checks it.
+    fn body_unchecked(&self) -> Map<String, Value> {
         let mut map = Map::new();
         if let Some(app) = &self.app_id {
             map.insert("app_id".into(), Value::String(zbase32_encode(app)));
@@ -1191,7 +1324,18 @@ impl AllowanceProposal {
     }
 
     /// Write the body.
-    pub fn to_body(&self) -> Map<String, Value> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a value a recipient drops at check 10: the writer reads
+    /// back what it writes by the reader's rules, and refuses a value that fails them or
+    /// doesn't read back as itself.
+    pub fn to_body(&self) -> Result<Map<String, Value>> {
+        written(self, self.body_unchecked(), Self::from_body)
+    }
+
+    /// The body as written, before the reader checks it.
+    fn body_unchecked(&self) -> Map<String, Value> {
         let mut map = Map::new();
         map.insert(
             "allowance_id".into(),
@@ -1202,7 +1346,7 @@ impl AllowanceProposal {
             ProposerRole::Allowee => "allowee",
         };
         map.insert("proposer_role".into(), Value::String(role.into()));
-        map.insert("terms".into(), self.terms.to_json());
+        map.insert("terms".into(), self.terms.json_unchecked());
         map
     }
 }
@@ -1232,7 +1376,18 @@ impl AllowanceReply {
     }
 
     /// Write the body.
-    pub fn to_body(&self) -> Map<String, Value> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a value a recipient drops at check 10: the writer reads
+    /// back what it writes by the reader's rules, and refuses a value that fails them or
+    /// doesn't read back as itself.
+    pub fn to_body(&self) -> Result<Map<String, Value>> {
+        written(self, self.body_unchecked(), Self::from_body)
+    }
+
+    /// The body as written, before the reader checks it.
+    fn body_unchecked(&self) -> Map<String, Value> {
         let mut map = Map::new();
         map.insert(
             "allowance_id".into(),
@@ -1283,7 +1438,18 @@ impl ExecutorNotice {
     }
 
     /// Write the body.
-    pub fn to_body(&self) -> Map<String, Value> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a value a recipient drops at check 10: the writer reads
+    /// back what it writes by the reader's rules, and refuses a value that fails them or
+    /// doesn't read back as itself.
+    pub fn to_body(&self) -> Result<Map<String, Value>> {
+        written(self, self.body_unchecked(), Self::from_body)
+    }
+
+    /// The body as written, before the reader checks it.
+    fn body_unchecked(&self) -> Map<String, Value> {
         let mut map = Map::new();
         map.insert(
             "allowance_record".into(),
@@ -1405,14 +1571,26 @@ impl Body {
         }
     }
 
-    /// Write the body.
-    pub fn to_body(&self) -> Map<String, Value> {
+    /// Write the body of a message with `refs` references, as each kind's writer writes it.
+    /// Period details are checked on their own here; against their request, a sender
+    /// writes them with [`PeriodDetails::to_body_for`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] for a value a recipient drops at check 10, or a `refs` count the
+    /// kind doesn't allow (Paykit wire 4.3).
+    pub fn to_body(&self, refs: usize) -> Result<Map<String, Value>> {
+        if !self.kind().refs_counts().contains(&refs) {
+            return Err(Error::Validation(
+                "Paykit wire 4.3: refs aren't the kind's".into(),
+            ));
+        }
         match self {
             Self::PaymentRequest(b) => b.to_body(),
             Self::PaymentRequestAcceptance(b) => b.to_body(),
             Self::PaymentRequestRejection(b) | Self::PaymentRequestCancellation(b) => b.to_body(),
             Self::PaymentPeriodDetails(b) => b.to_body(),
-            Self::PaymentProof(b) => b.to_body(),
+            Self::PaymentProof(b) => b.to_body(refs),
             Self::PaymentReceipt(b) => b.to_body(),
             Self::ResendRequest(b) => b.to_body(),
             Self::PrivatePaymentList(b) => b.to_body(),
@@ -1526,7 +1704,7 @@ mod tests {
     #[test]
     fn test_request_round_trips_and_gives_its_deadline() {
         let r = PaymentRequest::from_body(&body(request())).unwrap();
-        assert_eq!(Value::Object(r.to_body()), request());
+        assert_eq!(Value::Object(r.to_body().unwrap()), request());
         let d = r.attempt_deadline(None).unwrap().unwrap();
         assert_eq!(
             d,
@@ -1582,6 +1760,188 @@ mod tests {
     }
 
     #[test]
+    fn test_request_writer_refuses_what_check_10_drops() {
+        let good = PaymentRequest::from_body(&body(request())).unwrap();
+        let written = good.to_body().unwrap();
+        assert_eq!(PaymentRequest::from_body(&written).unwrap(), good);
+        let id = |s: &str| PaymentEndpointIdentifier::parse(s).unwrap();
+        let recurrence = Recurrence::from_json(&json!({ "anchor": "2026-01-31T00:00:00.000Z",
+            "every": 1, "unit": "month", "starts_at": "2026-01-31T00:00:00.000Z", "ends_at": null }))
+        .unwrap();
+        let rate =
+            |s: &str| Rate::new(Asset::parse(s).unwrap(), Decimal::parse("1").unwrap()).unwrap();
+        let cases: Vec<(&str, PaymentRequest)> = vec![
+            (
+                "no endpoints",
+                PaymentRequest {
+                    destination: RequestDestination::Endpoints(PaymentEndpoints::new()),
+                    ..good.clone()
+                },
+            ),
+            (
+                "per_period_endpoints without recurrence",
+                PaymentRequest {
+                    per_period_endpoints: true,
+                    ..good.clone()
+                },
+            ),
+            (
+                "a period_start deadline on a one-time request",
+                PaymentRequest {
+                    payment_deadline: Some(PaymentDeadline::PeriodStart { seconds: 1 }),
+                    ..good.clone()
+                },
+            ),
+            (
+                "an at deadline on a recurring request",
+                PaymentRequest {
+                    recurrence: Some(recurrence),
+                    ..good.clone()
+                },
+            ),
+            (
+                "per_period conversion on a one-time request",
+                PaymentRequest {
+                    conversion: Some(Conversion::PerPeriod),
+                    ..good.clone()
+                },
+            ),
+            (
+                "no accepted identifiers",
+                PaymentRequest {
+                    accepted_payment_endpoint_identifiers: Some(Vec::new()),
+                    ..good.clone()
+                },
+            ),
+            (
+                "an accepted identifier twice",
+                PaymentRequest {
+                    accepted_payment_endpoint_identifiers: Some(vec![
+                        id("btc-lightning-bolt11"),
+                        id("btc-lightning-bolt11"),
+                    ]),
+                    ..good.clone()
+                },
+            ),
+            (
+                "an endpoint outside the accepted identifiers",
+                PaymentRequest {
+                    accepted_payment_endpoint_identifiers: Some(vec![id("btc-bitcoin-p2wpkh")]),
+                    ..good.clone()
+                },
+            ),
+            (
+                "conversion with an identifier outside the convention",
+                PaymentRequest {
+                    destination: RequestDestination::Endpoints(
+                        [(id("LN"), PaymentEndpointPayload::parse("lnbc1").unwrap())].into(),
+                    ),
+                    conversion: Some(Conversion::Fixed(vec![rate("btc")])),
+                    ..good.clone()
+                },
+            ),
+            (
+                "conversion with no rates",
+                PaymentRequest {
+                    conversion: Some(Conversion::Fixed(Vec::new())),
+                    ..good.clone()
+                },
+            ),
+            (
+                "a rate selector twice",
+                PaymentRequest {
+                    conversion: Some(Conversion::Fixed(vec![rate("btc"), rate("btc")])),
+                    ..good.clone()
+                },
+            ),
+            (
+                "a rate selector in upper case",
+                PaymentRequest {
+                    conversion: Some(Conversion::Fixed(vec![rate("BTC")])),
+                    ..good.clone()
+                },
+            ),
+            (
+                "a rate selector matching no endpoint",
+                PaymentRequest {
+                    conversion: Some(Conversion::Fixed(vec![rate("eth")])),
+                    ..good.clone()
+                },
+            ),
+            (
+                "conversion in an upper-case asset",
+                PaymentRequest {
+                    amount: PaymentAmount {
+                        asset: Asset::parse("BTC").unwrap(),
+                        ..good.amount.clone()
+                    },
+                    conversion: Some(Conversion::Fixed(vec![rate("btc")])),
+                    ..good.clone()
+                },
+            ),
+        ];
+        for (name, invalid) in cases {
+            let error = invalid.to_body().expect_err(name);
+            assert!(matches!(error, Error::Validation(_)), "{name}: {error}");
+        }
+    }
+
+    #[test]
+    fn test_writers_refuse_what_their_readers_drop() {
+        // A resend_request that selects nothing, or names a Billing Period without a
+        // request, or a msg_id that isn't a UUID.
+        assert!(ResendRequest::default().to_body().is_err());
+        let period = PeriodRef {
+            starts_at: 1_000,
+            ends_at: 2_000,
+        };
+        let by_period = ResendRequest {
+            accepted_from: Some(0),
+            billing_period: Some(period),
+            ..ResendRequest::default()
+        };
+        assert!(by_period.to_body().is_err());
+        let not_uuid = ResendRequest {
+            msg_ids: vec!["not-a-uuid".into()],
+            ..ResendRequest::default()
+        };
+        assert!(not_uuid.to_body().is_err());
+        // Period details with neither endpoints nor rates, or an empty period.
+        let details = PeriodDetails {
+            billing_period: period,
+            payment_endpoints: None,
+            rates: None,
+            expires_at: 0,
+        };
+        assert!(details.to_body().is_err());
+        let empty = PeriodDetails {
+            billing_period: PeriodRef {
+                starts_at: 2_000,
+                ends_at: 2_000,
+            },
+            rates: Some(vec![Rate::new(
+                Asset::parse("btc").unwrap(),
+                Decimal::parse("1").unwrap(),
+            )
+            .unwrap()]),
+            ..details
+        };
+        assert!(empty.to_body().is_err());
+        // A proof without refs carries its amount.
+        let proof = PaymentProof::from_body(
+            &body(json!({ "attempt_id": "mAFdg5_0tVNjmrgiTUZW4g",
+                "payment_app_id": "brrz3m6g5rci6iqnzke44q4djc",
+                "payment_endpoint_identifier": "btc-bitcoin-p2wpkh", "proof": { "type": "x" } })),
+            1,
+        )
+        .unwrap();
+        proof.to_body(1).unwrap();
+        assert!(proof.to_body(0).is_err());
+        // The body of a kind with the wrong number of refs.
+        assert!(Body::PaymentProof(proof).to_body(3).is_err());
+    }
+
+    #[test]
     fn test_request_recurring_deadline_and_acceptance_end() {
         let mut b = request();
         b["payment_deadline"] = json!({ "type": "period_start", "seconds": 86400 });
@@ -1603,7 +1963,7 @@ mod tests {
             "ends_at": "2026-03-31T00:00:00.000Z" }, "expires_at": "2026-03-01T00:00:00.000Z",
             "rates": [{ "asset": "btc", "value": "0.1" }] });
         let d = PeriodDetails::from_body(&body(ok.clone())).unwrap();
-        assert_eq!(Value::Object(d.to_body()), ok);
+        assert_eq!(Value::Object(d.to_body().unwrap()), ok);
         let mut neither = ok.clone();
         neither.as_object_mut().unwrap().remove("rates");
         assert!(PeriodDetails::from_body(&body(neither)).is_err());
@@ -1706,7 +2066,7 @@ mod tests {
         let mut with = p;
         with["amount"] = json!({ "asset": "btc", "value": "0.1" });
         let proof = PaymentProof::from_body(&body(with.clone()), 0).unwrap();
-        assert_eq!(Value::Object(proof.to_body()), with);
+        assert_eq!(Value::Object(proof.to_body(0).unwrap()), with);
     }
 
     #[test]
@@ -1773,7 +2133,7 @@ mod tests {
             "payment_endpoints": { "btc-bitcoin-p2wpkh": { "payload": "bc1q", "single_use": true },
                 "btc-lightning-bolt12": { "payload": "lno1" } } });
         let list = PrivatePaymentList::from_body(&body(l.clone())).unwrap();
-        assert_eq!(Value::Object(list.to_body()), l);
+        assert_eq!(Value::Object(list.to_body().unwrap()), l);
         assert_eq!(list.usable_until(0), PRIVATE_LIST_MAX_AGE_MS);
         assert_eq!(list.usable_until(list.expires_at), list.expires_at);
         let mut missing = l;
@@ -1800,7 +2160,7 @@ mod tests {
     fn test_executor_notice_reason() {
         let ok = json!({ "allowance_record": b64(&[1; 32]), "reason": "handed_off" });
         let n = ExecutorNotice::from_body(&body(ok.clone())).unwrap();
-        assert_eq!(Value::Object(n.to_body()), ok);
+        assert_eq!(Value::Object(n.to_body().unwrap()), ok);
         let mut bad = ok;
         bad["reason"] = json!("paused");
         assert!(ExecutorNotice::from_body(&body(bad)).is_err());
