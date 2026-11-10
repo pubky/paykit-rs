@@ -161,11 +161,13 @@ pub mod natural_key {
 /// not empty. `None` for a proof in another spelling, or of a method this crate doesn't
 /// know: such a proof isn't credited as a payment without a request.
 pub fn settlement_id(proof: &Map<String, Value>) -> Option<Vec<u8>> {
-    if !proof.contains_key("type") && proof.get("rail").and_then(Value::as_str) == Some("fake") {
+    // A `null` type reads as a missing one (Paykit wire, Conventions).
+    let typed = proof.get("type").filter(|t| !t.is_null());
+    if typed.is_none() && proof.get("rail").and_then(Value::as_str) == Some("fake") {
         let tx = proof.get("tx")?.as_str()?;
         return (!tx.is_empty()).then(|| tx.as_bytes().to_vec());
     }
-    match proof.get("type")?.as_str()? {
+    match typed?.as_str()? {
         "bitcoin-txid" => {
             let txid = proof.get("txid")?.as_str()?;
             let spelled = txid.len() == 64
@@ -199,6 +201,9 @@ mod tests {
     #[test]
     fn test_settlement_id_of_the_fake_rail() {
         let id = settlement_id(&proof(json!({ "rail": "fake", "tx": "t1" })));
+        assert_eq!(id, Some(b"t1".to_vec()));
+        // A null type reads as none.
+        let id = settlement_id(&proof(json!({ "type": null, "rail": "fake", "tx": "t1" })));
         assert_eq!(id, Some(b"t1".to_vec()));
         for bad in [
             json!({ "rail": "fake" }),
