@@ -470,3 +470,147 @@ async fn test_final_check_repeat_retention_ending_during_the_lookup_not_paid() {
     assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
+
+// ---------------------------------------------------------------------------------------
+// Conflicting identity documents arriving with the late answer
+
+/// Bob's signer equivocates: his switch holds one document at the next version, his
+/// Homeserver another body at that same version.
+fn equivocate(w: &World) {
+    let switch_copy = w
+        .bob
+        .sign_next(|body| body.record_max_age = Some(30 * 86_400))
+        .unwrap();
+    w.bob.switch().deliver_identity(&switch_copy).unwrap();
+    let mut other = switch_copy.body().clone();
+    other.record_max_age = Some(60 * 86_400);
+    let homeserver_copy =
+        pubky_switch_core::records::IdentityDoc::sign(w.bob.identity().key(), other).unwrap();
+    w.homeserver.publish(&homeserver_copy).unwrap();
+}
+
+#[tokio::test]
+async fn test_final_check_first_dispatch_late_equivocation_refused() {
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    equivocate(&w);
+    w.clock.advance_ms(11 * 60_000);
+    let slow = held_switch(&w);
+    let reads = HookedReads::new(&w);
+    let release = Arc::clone(&slow);
+    store.on_paying(Box::new(move || release.release()));
+    let mut wallet = wallet(
+        &w,
+        Arc::clone(&store) as Arc<dyn StateStore>,
+        app_id,
+        &reads,
+        &slow,
+    )
+    .await;
+    // The switch's copy arrives during the final journal write, another body at the version
+    // the Homeserver's has: equivocation. Nothing is paid, `failed` is written, and the
+    // payment is refused (Switch wire 3.3).
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::AttemptFailed(inner))
+                if matches!(**inner, paykit_sdk::Refusal::IdentityUnavailable(_))
+        ),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Finished);
+    assert_eq!(w.rail.pay_calls(&payment.attempt_id), 0);
+}
+
+#[tokio::test]
+async fn test_final_check_resume_late_equivocation_not_paid() {
+    let w = World::new();
+    let (store, app_id, attempt_id) = in_flight(&w).await;
+    equivocate(&w);
+    w.clock.advance_ms(11 * 60_000);
+    let slow = held_switch(&w);
+    let reads = HookedReads::new(&w);
+    let release = Arc::clone(&slow);
+    reads.then(w.alice_id(), 0, Some(Box::new(move || release.release())));
+    let mut wallet = wallet(
+        &w,
+        Arc::clone(&store) as Arc<dyn StateStore>,
+        app_id,
+        &reads,
+        &slow,
+    )
+    .await;
+    // A repeat may follow a dispatch that paid: it stays "may be paid".
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_final_check_recovery_late_equivocation_not_paid() {
+    let (w, store, app_id, attempt_id) = stopped_before_the_rail().await;
+    equivocate(&w);
+    w.clock.advance_ms(11 * 60_000);
+    let slow = held_switch(&w);
+    let reads = HookedReads::new(&w);
+    let release = Arc::clone(&slow);
+    reads.then(w.alice_id(), 0, Some(Box::new(move || release.release())));
+    let mut wallet = wallet(
+        &w,
+        Arc::clone(&store) as Arc<dyn StateStore>,
+        app_id,
+        &reads,
+        &slow,
+    )
+    .await;
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert_eq!(w.rail.pay_calls(&attempt_id), 0);
+}
+
+#[tokio::test]
+async fn test_final_check_repeat_on_an_own_identity_read_that_errs_refused() {
+    let w = World::new();
+    let (store, app_id, attempt_id) = in_flight(&w).await;
+    let slow = held_switch(&w);
+    slow.release();
+    let reads = HookedReads::new(&w);
+    let mut wallet = wallet(
+        &w,
+        Arc::clone(&store) as Arc<dyn StateStore>,
+        app_id,
+        &reads,
+        &slow,
+    )
+    .await;
+    assert!(wallet
+        .app_mut()
+        .refresh_identity()
+        .await
+        .unwrap()
+        .confirmed_at()
+        .is_some());
+    // Within the 60 s of that confirmation, the repeat's read of the own identity.json
+    // finds a copy that doesn't verify: an error, not "unavailable", and it stops the
+    // payment rather than leaving the earlier confirmation to stand.
+    w.homeserver.put(
+        w.alice_id(),
+        IDENTITY_PATH,
+        b"{\"body\":\"x\",\"sig\":\"y\"}".to_vec(),
+    );
+    let refused = wallet.resume_payments().await.unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::IdentityUnavailable(_))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}

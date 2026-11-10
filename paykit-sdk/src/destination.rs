@@ -150,15 +150,7 @@ impl Paykit {
                         Lookup::Answered(answer) => {
                             match self.app.finish_identity_lookup(answer).await {
                                 Ok(identity) => identity,
-                                Err(error) => {
-                                    return Ok((
-                                        Err(Refusal::IdentityUnavailable(format!(
-                                            "Switch spec 4.3: the payee's identity.json can't \
-                                             be taken: {error}"
-                                        ))),
-                                        read,
-                                    ))
-                                }
+                                Err(error) => return Ok((Err(not_taken(&error)), read)),
                             }
                         }
                         Lookup::Running(switch) => {
@@ -276,19 +268,22 @@ impl Paykit {
 
     /// The payee's switch lookup kept from an earlier check, taken if its answer has come,
     /// without waiting for one that hasn't (Paykit spec 4): the copy it gives, or `None`
-    /// when none was kept or it still runs, kept again.
+    /// when none was kept or it still runs, kept again. `Err` inside: the client refused
+    /// the answer, and nothing is paid on it.
     pub(crate) async fn take_kept_lookup(
         &mut self,
         payee: &[u8; 32],
-    ) -> Result<Option<PeerIdentity>> {
+    ) -> Result<std::result::Result<Option<PeerIdentity>, Refusal>> {
         let Some(kept) = self.lookups.remove(payee) else {
-            return Ok(None);
+            return Ok(Ok(None));
         };
         match race::<()>(kept.switch, None, Box::pin(async {})).await {
             (Lookup::Answered(answer), _) => match self.app.finish_identity_lookup(answer).await {
-                Ok(identity) => Ok(Some(identity)),
-                // An answer the client can't take leaves the copy the checks passed on.
-                Err(_) => Ok(None),
+                Ok(identity) => Ok(Ok(Some(identity))),
+                // An answer the client refuses to take is no answer to ignore: it may show
+                // the payee's identity.json equivocating, and then nothing is paid to it
+                // (Switch wire 3.3). It refuses as it does anywhere else.
+                Err(error) => Ok(Err(not_taken(&error))),
             },
             (Lookup::Running(switch), _) => {
                 self.lookups.insert(
@@ -298,7 +293,7 @@ impl Paykit {
                         switch,
                     },
                 );
-                Ok(None)
+                Ok(Ok(None))
             }
         }
     }
@@ -318,6 +313,16 @@ impl Paykit {
         carries(payee, destination, carrier, request_hash, now).map_err(Refusal::Destination)?;
         current(doc, &destination.app_id, carrier, now).map_err(Refusal::Destination)
     }
+}
+
+/// The refusal of a switch answer the client wouldn't take, such as two documents at one
+/// version, equivocation (Switch wire 3.3), for which the client also raises
+/// `AppEvent::PeerEquivocation` for the host to alert the user, and refuses every later
+/// lookup of that identity.
+fn not_taken(error: &pubky_switch_client::app::AppError) -> Refusal {
+    Refusal::IdentityUnavailable(format!(
+        "Switch spec 4.3: the payee's identity.json can't be taken: {error}"
+    ))
 }
 
 /// What a destination needs of the payee's `identity.json` (Paykit spec 4, 7.2; Switch spec

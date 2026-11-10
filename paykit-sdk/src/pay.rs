@@ -188,7 +188,7 @@ pub(crate) enum Dispatch {
 }
 
 /// What [`Paykit::final_payment_check`] decided.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FinalCheck {
     /// Pay now.
     Pay,
@@ -196,6 +196,9 @@ pub(crate) enum FinalCheck {
     Hold,
     /// A repeat past the idempotency retention: never made.
     Lapsed,
+    /// The client refused the payee's late switch answer, such as an equivocation (Switch
+    /// wire 3.3): nothing is paid, and the refusal is the caller's.
+    Refused(Refusal),
 }
 
 /// Whether the payment method still keeps what it keeps for `retention` (`None` for good)
@@ -804,15 +807,21 @@ impl Paykit {
     /// "Fresh before paying"; Switch spec 12.6 "Residual risk"): with `refresh`, it is read
     /// again first, and without it only once its last confirmation is that old. A read that
     /// confirms the copy held, or a confirmation under 60 s old, lets the payment go on;
-    /// `Missing`, `Older`, `Unavailable` and an error confirm nothing.
+    /// `Missing`, `Older` and `Unavailable` confirm nothing, and an error refuses.
     pub(crate) async fn own_identity_confirmed(
         &mut self,
         refresh: bool,
     ) -> std::result::Result<(), Refusal> {
         if refresh || !self.own_identity_fresh() {
-            // A read that fails confirms nothing; the confirmation held still counts if it is
-            // fresh once the read is over.
-            let _ = self.app.refresh_identity().await;
+            // A Homeserver that can't be read now confirms nothing (`Unavailable`), and the
+            // confirmation held still counts if it is fresh once the read is over. An error
+            // is more: a copy that doesn't verify, a store that fails, or an alarm, such as
+            // the own identity.json equivocating (Switch wire 3.3), and it stops the payment.
+            if let Err(error) = self.app.refresh_identity().await {
+                return Err(Refusal::IdentityUnavailable(format!(
+                    "Paykit spec 4: the own identity.json can't be read again: {error}"
+                )));
+            }
         }
         // Freshness is judged on the clock after the read, never on a time read before it: a
         // slow read that fails can't stretch the 60 s (Paykit spec 4).
@@ -933,6 +942,15 @@ impl Paykit {
             // The method may have forgotten the key: the repeat isn't made, and the attempt
             // stays "may be paid" (Paykit spec 7.2).
             FinalCheck::Lapsed => return Ok(PayOutcome::Uncertain { attempt_id }),
+            // A refused answer stops the payment. A first dispatch submitted nothing, so it
+            // is written `failed` and refused with the answer's refusal; a repeat may follow
+            // a dispatch that paid, so it stays "may be paid", for a receipt or the user.
+            FinalCheck::Refused(refusal) => {
+                return match kind {
+                    Dispatch::First => self.fail_attempt(&mut entry, refusal).await,
+                    Dispatch::Repeat { .. } => Ok(PayOutcome::Uncertain { attempt_id }),
+                }
+            }
         }
         let outcome = self.rail.pay(payment).await;
         // The acceptance goes out while the payment runs, not awaited (Paykit spec 7.2 step
@@ -997,6 +1015,8 @@ impl Paykit {
             });
         }
         if let Some(msg_id) = entry.proof_msg_id.clone() {
+            // After the payment and its outcome's batch: a delivery failure leaves the proof
+            // queued for the next flush, and decides nothing about paying.
             let _ = self.app.flush_message(&msg_id).await;
         }
         Ok(PayOutcome::Paid {
@@ -1228,6 +1248,7 @@ impl Paykit {
             }
         }
         out.extend(self.recheck_failed().await?);
+        // Last, after every payment's own work: what can't be delivered now stays queued.
         let _ = self.app.flush_outbox().await;
         Ok(out)
     }
@@ -1348,7 +1369,9 @@ impl Paykit {
     /// spec 4, 7.2). In order:
     ///
     /// 1. a switch lookup kept for the payee whose answer has come is taken, so a late
-    ///    answer that removes the destination's app is acted on (Switch spec 4.3);
+    ///    answer that removes the destination's app is acted on (Switch spec 4.3), and one
+    ///    the client refuses, such as an equivocation, stops the payment
+    ///    ([`FinalCheck::Refused`], Switch wire 3.3);
     /// 2. the destination, against the payee's `identity.json` that gives: its carrier
     ///    carries it and hasn't expired, and its app is current, not removed, with the
     ///    certificate the carrier came with;
@@ -1357,7 +1380,9 @@ impl Paykit {
     /// 4. the own `identity.json` is confirmed in the last 60 s, and lists this app at the
     ///    attempt's service and generation;
     /// 5. for a repeat, the method's idempotency retention hasn't ended
-    ///    ([`FinalCheck::Lapsed`]).
+    ///    ([`FinalCheck::Lapsed`]);
+    /// 6. the app may still make the attempt: no alarm or restore question raised meanwhile,
+    ///    and for an automatic payment the clocks within the tolerance.
     ///
     /// Checks 2 to 5 run on the clock after the one await, and none follows them before the
     /// call. Anything but [`FinalCheck::Pay`]: nothing is paid; a copy past its age is looked
@@ -1371,8 +1396,9 @@ impl Paykit {
         kind: Dispatch,
     ) -> Result<FinalCheck> {
         let payee = match self.take_kept_lookup(&entry.payee).await? {
-            Some(answered) => answered,
-            None => payee,
+            Ok(Some(answered)) => answered,
+            Ok(None) => payee,
+            Err(refusal) => return Ok(FinalCheck::Refused(refusal)),
         };
         // From here to the payment method's call, nothing awaits.
         let now = self.now();
@@ -1396,7 +1422,10 @@ impl Paykit {
                 &payee.doc,
             )
             .is_ok();
-        let clear = destination
+        // An alarm or a restore question raised during any await holds the payment back
+        // (Switch spec 10.1, 12.4).
+        let clear = self.app.may_attempt(by == Initiator::Automatic).is_ok()
+            && destination
             && self.payee_copy_usable(&payee, Need::of(&carrier), by, confirmed)
             && self.own_identity_fresh()
             && self.own_identity_authorizes(entry).is_ok();
