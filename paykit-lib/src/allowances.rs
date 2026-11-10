@@ -720,12 +720,26 @@ impl Ledger {
 
     /// Write the ledger value: every entry with its `outcome` (`null` while unknown), and
     /// `totals` with `spent` `""` for a ledger never compacted and `failed` left out when
-    /// empty.
+    /// empty. The value is read back by [`Ledger::from_json`] before it is handed out, so
+    /// the writer never writes a ledger its readers refuse.
     ///
     /// # Errors
     ///
-    /// [`Error::Invalid`] if the value can't be written.
+    /// [`Error::Validation`] for a ledger readers refuse, such as an attempt listed twice
+    /// (Paykit wire 5.5), or one that doesn't read back as itself; [`Error::Invalid`] if the
+    /// value can't be written.
     pub fn to_json(&self) -> Result<Vec<u8>> {
+        let json = self.json_unchecked()?;
+        let back = Self::from_json(&json).map_err(Error::into_validation)?;
+        if &back != self {
+            return Err(Error::Validation(format!(
+                "{LEDGER}: the ledger doesn't write as itself"
+            )));
+        }
+        Ok(json)
+    }
+
+    fn json_unchecked(&self) -> Result<Vec<u8>> {
         let out = LedgerOut {
             v: 1,
             counterparty: pubky_id(&self.counterparty),
@@ -1522,7 +1536,9 @@ mod tests {
             attempt_id: AttemptId::from_bytes([1; 16]),
             value: Decimal::zero(),
         });
-        assert!(Ledger::from_json(&twice.to_json().unwrap()).is_err());
+        // The writer refuses what the reader refuses: an attempt listed twice.
+        assert!(matches!(twice.to_json(), Err(Error::Validation(_))));
+        assert!(Ledger::from_json(&twice.json_unchecked().unwrap()).is_err());
         assert!(Ledger::from_json(br#"{"v":2,"counterparty":"x","allowance_id":"y"}"#).is_err());
     }
 

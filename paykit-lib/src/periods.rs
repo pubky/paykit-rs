@@ -345,6 +345,11 @@ impl Recurrence {
             obj.req_int("every")?,
             Unit::parse(obj.req_str("unit")?)?,
         )?;
+        // Paykit wire 4.4: ends_at is present, a time or null; a missing one isn't read as
+        // null.
+        if !obj.has("ends_at") {
+            return invalid("Paykit wire 4.4: recurrence: ends_at: missing; null for none");
+        }
         Self::new(rule, obj.req_time("starts_at")?, obj.opt_time("ends_at")?)
     }
 
@@ -533,6 +538,18 @@ mod tests {
 
     fn t(text: &str) -> u64 {
         parse_rfc3339(text).unwrap()
+    }
+
+    #[test]
+    fn test_periods_recurrence_needs_ends_at_present() {
+        let full = serde_json::json!({ "anchor": "2026-01-31T00:00:00.000Z", "every": 1,
+            "unit": "month", "starts_at": "2026-01-31T00:00:00.000Z", "ends_at": null });
+        let read = Recurrence::from_json(&full).unwrap();
+        assert_eq!(read.to_json(), full);
+        let mut missing = full;
+        missing.as_object_mut().unwrap().remove("ends_at");
+        let error = Recurrence::from_json(&missing).unwrap_err().to_string();
+        assert!(error.contains("ends_at: missing"), "{error}");
     }
 
     #[test]

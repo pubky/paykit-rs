@@ -1224,18 +1224,6 @@ impl PaymentListRecord {
         let payee = obj.req_pubky("payee")?;
         let app_id = obj.req_app_id("app_id")?;
         let list = StoredMessage::read(obj.req("list")?, own)?;
-        ensure(
-            list.body.kind() == Kind::PrivatePaymentList,
-            "Paykit wire 5.4: list holds another kind than private_payment_list",
-        )?;
-        ensure(
-            list.sender == payee,
-            "Paykit wire 5.4: the stored list's sender identity isn't payee",
-        )?;
-        ensure(
-            list.message.from.app_id == app_id,
-            "Paykit wire 5.4: the stored list's sender app isn't app_id",
-        )?;
         let msg_ids = read_msg_ids(&obj, &msg_ids_of([&list]))?;
         let mut used = Vec::new();
         for item in obj.opt_arr("used")?.into_iter().flatten() {
@@ -1246,13 +1234,37 @@ impl PaymentListRecord {
                 attempt_id: AttemptId::from_bytes(u.req_b64::<16>("attempt_id")?),
             });
         }
-        Ok(Self {
+        let record = Self {
             payee,
             app_id,
             list,
             used,
             msg_ids,
-        })
+        };
+        record.check()?;
+        Ok(record)
+    }
+
+    /// The record's rules (Paykit wire 5.4), the same for the reader and the writer: the
+    /// stored list is a `private_payment_list` from `payee` and its app `app_id`, addressed
+    /// to another identity.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] naming the rule.
+    fn check(&self) -> Result<()> {
+        ensure(
+            self.list.body.kind() == Kind::PrivatePaymentList,
+            "Paykit wire 5.4: list holds another kind than private_payment_list",
+        )?;
+        ensure(
+            self.list.sender == self.payee && self.list.message.to != self.payee,
+            "Paykit wire 5.4: the stored list's sender identity isn't payee",
+        )?;
+        ensure(
+            self.list.message.from.app_id == self.app_id,
+            "Paykit wire 5.4: the stored list's sender app isn't app_id",
+        )
     }
 
     /// The record key, with the reader's own naming key (Paykit wire 1.5): `lp(payee,
@@ -1290,12 +1302,15 @@ impl PaymentListRecord {
     }
 
     /// Write the record value, `msg_ids` as its canonical list, [`bounded_msg_ids`] of the
-    /// stored list and `msg_ids` (Paykit wire 5.3, 5.4).
+    /// stored list and `msg_ids` (Paykit wire 5.3, 5.4), after the record's rules, as a reader
+    /// checks them.
     ///
     /// # Errors
     ///
+    /// [`Error::Validation`] for a record that breaks a rule of Paykit wire 5.4, and
     /// [`Error::Invalid`] if the value can't be written.
     pub fn to_json(&self) -> Result<Vec<u8>> {
+        self.check().map_err(Error::into_validation)?;
         let msg_ids = written_msg_ids(&msg_ids_of([&self.list]), &self.msg_ids)?;
         let out = ListOut {
             v: 1,
@@ -1484,7 +1499,7 @@ impl AllowanceRecord {
                 grant: ExecutorGrant::from_json(entry.req("grant")?)?,
             });
         }
-        Ok(Self {
+        let record = Self {
             counterparty,
             allowance_id,
             proposal,
@@ -1493,7 +1508,73 @@ impl AllowanceRecord {
             msg_ids,
             grant: obj.opt("grant").map(ExecutorGrant::from_json).transpose()?,
             grants,
-        })
+        };
+        record.check()?;
+        Ok(record)
+    }
+
+    /// The record's rules (Paykit wire 5.4 "Binding"), the same for the reader and the
+    /// writer: the stored messages are between the counterparty and one other identity, each
+    /// of its member's kind and naming `allowance_id`; the response comes from the proposal's
+    /// recipient; and the response and the end refer to the proposal in `refs`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] naming the rule.
+    fn check(&self) -> Result<()> {
+        let members: [(Option<&StoredMessage>, &[Kind]); 3] = [
+            (Some(&self.proposal), &[Kind::AllowanceProposal]),
+            (
+                self.response.as_ref(),
+                &[Kind::AllowanceAcceptance, Kind::AllowanceRejection],
+            ),
+            (self.end.as_ref(), &[Kind::AllowanceEnd]),
+        ];
+        let mut own: Option<[u8; 32]> = None;
+        for (stored, kinds) in members {
+            let Some(stored) = stored else { continue };
+            let (sender, to) = (stored.sender, stored.message.to);
+            let other = if sender == self.counterparty {
+                to
+            } else {
+                sender
+            };
+            ensure(
+                (sender == self.counterparty || to == self.counterparty)
+                    && other != self.counterparty
+                    && own.is_none_or(|o| o == other),
+                "Paykit wire 5.4: a stored message isn't between this identity and counterparty",
+            )?;
+            own = Some(other);
+            ensure(
+                kinds.contains(&stored.body.kind()),
+                "Paykit wire 5.4: a member holds another kind",
+            )?;
+            let named = match &stored.body {
+                Body::AllowanceProposal(p) => &p.allowance_id,
+                Body::AllowanceAcceptance(r)
+                | Body::AllowanceRejection(r)
+                | Body::AllowanceEnd(r) => &r.allowance_id,
+                _ => return invalid("Paykit wire 5.4: a member holds another kind"),
+            };
+            ensure(
+                named == &self.allowance_id,
+                "Paykit wire 5.4: a stored message names another Allowance",
+            )?;
+        }
+        if let Some(response) = &self.response {
+            ensure(
+                response.sender == self.proposal.message.to,
+                "Paykit wire 5.4: a stored message isn't from the side its kind requires",
+            )?;
+        }
+        for stored in self.response.iter().chain(self.end.iter()) {
+            ensure(
+                stored.message.refs.first() == Some(&self.proposal.hash()),
+                "Paykit wire 4.16: a response or an end refers to the proposal in refs",
+            )?;
+        }
+        Ok(())
     }
 
     /// The record key, with the reader's own naming key (Paykit wire 1.5): `lp(counterparty,
@@ -1630,12 +1711,14 @@ impl AllowanceRecord {
 
     /// Write the record value: every member, `null` for absent, `grants` always, and
     /// `msg_ids` as its canonical list, [`bounded_msg_ids`] of the stored messages and
-    /// `msg_ids` (Paykit wire 5.3, 5.4).
+    /// `msg_ids` (Paykit wire 5.3, 5.4), after the record's rules, as a reader checks them.
     ///
     /// # Errors
     ///
+    /// [`Error::Validation`] for a record that breaks a rule of Paykit wire 5.4, and
     /// [`Error::Invalid`] if the value can't be written.
     pub fn to_json(&self) -> Result<Vec<u8>> {
+        self.check().map_err(Error::into_validation)?;
         let stored = std::iter::once(&self.proposal)
             .chain(&self.response)
             .chain(&self.end);
