@@ -31,9 +31,11 @@ use crate::scopes::Label;
 /// days (Paykit spec 5, Paykit wire 4.13).
 pub const PRIVATE_LIST_MAX_AGE_MS: u64 = 30 * 86_400_000;
 
-/// The writers' check: `map`, the body `value` writes, read back by `read`, the reader's
-/// own rules (check 10 of Paykit wire 4.1), must give `value` again. So a writer never emits
-/// a body a recipient drops, and the rules live once, in the reader.
+/// The writers' check: the body `write` gives for `value`, read back by `read`, the reader's
+/// own rules (check 10 of Paykit wire 4.1), must give `value` again, and that value must
+/// write the same body, member for member and spelling for spelling. So a writer never emits
+/// a body a recipient drops, nor one whose text differs from what its value writes, and the
+/// rules live once, in the reader.
 ///
 /// # Errors
 ///
@@ -41,11 +43,12 @@ pub const PRIVATE_LIST_MAX_AGE_MS: u64 = 30 * 86_400_000;
 /// itself, such as a member the writer leaves out.
 pub(crate) fn written<T: PartialEq>(
     value: &T,
-    map: Map<String, Value>,
+    write: impl Fn(&T) -> Map<String, Value>,
     read: impl FnOnce(&Map<String, Value>) -> Result<T>,
 ) -> Result<Map<String, Value>> {
+    let map = write(value);
     let back = read(&map).map_err(Error::into_validation)?;
-    if &back != value {
+    if &back != value || write(&back) != map {
         return Err(Error::Validation(
             "Paykit wire 4.1 check 10: the value doesn't write as itself".into(),
         ));
@@ -452,7 +455,7 @@ impl PaymentRequest {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.
@@ -628,7 +631,7 @@ impl PaymentRequestAcceptance {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.
@@ -673,7 +676,7 @@ impl RequestReply {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.
@@ -740,7 +743,7 @@ impl PeriodDetails {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.
@@ -902,7 +905,7 @@ impl PaymentProof {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self, refs: usize) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), |b| Self::from_body(b, refs))
+        written(self, Self::body_unchecked, |b| Self::from_body(b, refs))
     }
 
     /// The body as written, before the reader checks it.
@@ -1010,7 +1013,7 @@ impl PaymentReceipt {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.
@@ -1097,7 +1100,7 @@ impl ResendRequest {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.
@@ -1232,7 +1235,7 @@ impl PrivatePaymentList {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.
@@ -1295,7 +1298,7 @@ impl PrivatePaymentListRequest {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.
@@ -1363,7 +1366,7 @@ impl AllowanceProposal {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.
@@ -1415,7 +1418,7 @@ impl AllowanceReply {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.
@@ -1477,7 +1480,7 @@ impl ExecutorNotice {
     /// back what it writes by the reader's rules, and refuses a value that fails them or
     /// doesn't read back as itself.
     pub fn to_body(&self) -> Result<Map<String, Value>> {
-        written(self, self.body_unchecked(), Self::from_body)
+        written(self, Self::body_unchecked, Self::from_body)
     }
 
     /// The body as written, before the reader checks it.

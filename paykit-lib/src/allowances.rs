@@ -291,7 +291,7 @@ impl AllowanceTerms {
     pub fn to_json(&self) -> Result<Value> {
         let value = self.json_unchecked();
         let back = Self::from_json(&value).map_err(Error::into_validation)?;
-        if &back != self {
+        if &back != self || back.json_unchecked() != value {
             return Err(Error::Validation(format!(
                 "{TERMS}: the terms don't write as themselves"
             )));
@@ -719,8 +719,8 @@ impl Ledger {
     }
 
     /// Write the ledger value: every entry with its `outcome` (`null` while unknown), and
-    /// `totals` with `spent` `""` for a ledger never compacted and `failed` left out when
-    /// empty. The value is read back by [`Ledger::from_json`] before it is handed out, so
+    /// `totals` with `spent` `""` for a ledger never compacted, else in the normalized
+    /// spelling of a computed amount (Paykit wire 1.2), and `failed` left out when empty. The value is read back by [`Ledger::from_json`] before it is handed out, so
     /// the writer never writes a ledger its readers refuse.
     ///
     /// # Errors
@@ -731,7 +731,9 @@ impl Ledger {
     pub fn to_json(&self) -> Result<Vec<u8>> {
         let json = self.json_unchecked()?;
         let back = Self::from_json(&json).map_err(Error::into_validation)?;
-        if &back != self {
+        // The value, and the bytes: the wire fixes the spelling of a computed amount, which a
+        // comparison of values alone, by scaled amount, wouldn't see.
+        if &back != self || back.json_unchecked()? != json {
             return Err(Error::Validation(format!(
                 "{LEDGER}: the ledger doesn't write as itself"
             )));
@@ -760,7 +762,7 @@ impl Ledger {
                 spent: self
                     .spent
                     .as_ref()
-                    .map_or_else(String::new, |s| s.as_str().into()),
+                    .map_or_else(String::new, Decimal::normalized),
                 count: self.count,
                 failed: self
                     .failed
@@ -1523,6 +1525,25 @@ mod tests {
             t("2026-03-01T00:00:00.000Z")
         )
         .is_err());
+    }
+
+    #[test]
+    fn test_ledger_writes_spent_normalized() {
+        let l = Ledger {
+            spent: Some(Decimal::parse("00.0100").unwrap()),
+            count: 1,
+            ..ledger(Vec::new())
+        };
+        let json = l.to_json().unwrap();
+        let back: Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back["totals"]["spent"], "0.01");
+        assert_eq!(Ledger::from_json(&json).unwrap(), l);
+        let zero = Ledger {
+            spent: Some(Decimal::parse("0.000").unwrap()),
+            ..ledger(Vec::new())
+        };
+        let back: Value = serde_json::from_slice(&zero.to_json().unwrap()).unwrap();
+        assert_eq!(back["totals"]["spent"], "0");
     }
 
     #[test]
