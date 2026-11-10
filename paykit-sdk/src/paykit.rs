@@ -357,6 +357,9 @@ impl Paykit {
     /// The client's errors. A message whose effect couldn't be written yet stays before the
     /// cursor, and the next call hands it over again.
     pub async fn receive(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
+        // An app holding `contacts` reads the flagged senders again first, at most every 10
+        // minutes, for the spam rule (Paykit wire 4.1).
+        self.refresh_lists_when_due().await?;
         let report = self.app.receive(wait).await?;
         self.refresh_own();
         // The payees' cancellations the read kept go into their records, as later writes of

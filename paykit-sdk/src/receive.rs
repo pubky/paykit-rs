@@ -20,6 +20,14 @@
 //! - a `resend_request` is kept, with the cursor move, for [`crate::Paykit::receive`] to
 //!   answer (Paykit spec 9): answering sends messages, which no batch carries.
 //!
+//! The spam rule (Paykit wire 4.1, Switch spec 7) gates every message that would create
+//! state, at an app holding `contacts`: a request, a list, a cancellation or a proof that no
+//! held record matches, and a `resend_request`. From a sender the user blocked or the
+//! service flagged it is only counted; while the app's copy of the lists isn't known to be
+//! complete, it waits on the feed until the lists are read. A message that updates a record
+//! the app holds, such as a receipt for a payment in progress, is applied whoever sent it.
+//! An app without `contacts` can't read the lists, and gates nothing.
+//!
 //! Every write builds on the record the app holds. A record that already reflects a message
 //! was written by another own app: nothing more is written, and only the cursor moves. When
 //! another own app wrote the record meanwhile, the batch fails `409 conflict`, the client
@@ -121,8 +129,10 @@ pub(crate) fn effect(
         Body::PaymentRequest(_) if pay => {
             let target =
                 ActivityTarget::payer(natural_key::request_record(&sender, &stored.hash()));
-            place(cx, &target, sender, Role::Request, stored)?;
-            note_peer(cx, &sender, stored)?;
+            if held_value(cx, &target)?.is_some() || admits_new_state(cx, &sender, &scopes)? {
+                place(cx, &target, sender, Role::Request, stored)?;
+                note_peer(cx, &sender, stored)?;
+            }
         }
         Body::PaymentRequestAcceptance(_)
         | Body::PaymentRequestRejection(_)
@@ -139,11 +149,16 @@ pub(crate) fn effect(
                 ActivityTarget::payer(natural_key::request_record(&sender, &request));
             if payee && payer_reply(cx, stored, &scopes)? {
                 // A payer's cancellation of a request this app sent.
-            } else if pay {
+            } else if pay
+                && (held_value(cx, &payer_target)?.is_some()
+                    || admits_new_state(cx, &sender, &scopes)?)
+            {
                 // A payee's cancellation is kept, the kept-copy stop (Paykit spec 8.1): the
                 // receive step writes no record for it. The app places it in the request
                 // record itself, as a later write of its own, and every new attempt reads
                 // the kept copy, so a stop that can't be placed still refuses the payment.
+                // One for a request the app holds no record of is new state, which the spam
+                // rule gates; one for a held request always applies.
                 keep_cancellation(cx, &payer_target, stored)?;
             }
         }
@@ -151,10 +166,19 @@ pub(crate) fn effect(
             receipt_effect(cx, stored, receipt.attempt_id)?;
         }
         Body::PrivatePaymentList(_) if pay => {
-            list_effect(cx, stored)?;
-            note_peer(cx, &sender, stored)?;
+            let target = list_target(&sender, &stored.message().from.app_id);
+            let held = cx
+                .record(&target)?
+                .is_some_and(|held| held.content.value().is_some());
+            if held || admits_new_state(cx, &sender, &scopes)? {
+                list_effect(cx, stored)?;
+                note_peer(cx, &sender, stored)?;
+            }
         }
         Body::ResendRequest(_) => {
+            if !admits_new_state(cx, &sender, &scopes)? {
+                return Ok(());
+            }
             let queued = QueuedAnswer {
                 requester: sender,
                 cert: stored.cert().signed().clone(),
@@ -186,6 +210,45 @@ fn note_cursor_time(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Resu
         cx.local(local(key::CURSOR_TIME, &at)?);
     }
     Ok(())
+}
+
+/// Whether the spam rule (Paykit wire 4.1, Switch spec 7) lets a message from `sender`
+/// create state, asked only of a message no held record matches. An app without `contacts`
+/// can't read the lists, and gates nothing. At one holding it, a message from a sender the
+/// user blocked or the service flagged is only counted, in the effect's batch; while the
+/// app's copy of the lists isn't known to be complete, the message waits on the feed
+/// ([`Fail::Store`], unavailable for now) until the lists are read, which the client does
+/// at its next read. A failed read of the lists holds the message too: it is never read as
+/// a clean sender.
+fn admits_new_state(
+    cx: &mut ReceiveContext<'_>,
+    sender: &[u8; 32],
+    scopes: &[String],
+) -> Result<bool, Fail> {
+    if !reads_lists(scopes) {
+        return Ok(true);
+    }
+    let standing = cx.sender_disposition(sender)?;
+    if standing.lists_as_of_ms.is_none() {
+        return Err(Fail::Store(StoreFailure::unavailable(
+            StoreError::Unavailable,
+        )));
+    }
+    if !(standing.blocked || standing.flagged) {
+        return Ok(true);
+    }
+    let kept = key::spam(sender);
+    let count = match cx.local_get(kept.as_bytes())? {
+        Some(bytes) => state::decode::<u64>(&bytes).map_err(|_| Fail::corrupt())?,
+        None => 0,
+    };
+    cx.local(local(&kept, &count.saturating_add(1))?);
+    Ok(false)
+}
+
+/// Whether an app with `scopes` reads the lists: `contacts` gives `lists.read`.
+pub(crate) fn reads_lists(scopes: &[String]) -> bool {
+    scopes.iter().any(|s| s == "contacts")
 }
 
 /// Note a counterparty with Paykit activity, for re-sends after a `missed` item or a
@@ -309,7 +372,10 @@ fn payer_reply(
                 natural_key::payee_payment_record(&proof.payment_endpoint_identifier, &settlement),
                 None,
             );
-            place(cx, &target, sender, role, stored)?;
+            // A proof no held record matches is new state, which the spam rule gates.
+            if held_value(cx, &target)?.is_some() || admits_new_state(cx, &sender, scopes)? {
+                place(cx, &target, sender, role, stored)?;
+            }
             Ok(true)
         }
     }
@@ -485,7 +551,47 @@ fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Result<()
     Ok(())
 }
 
+/// How long an app holding `contacts` goes between its reads of the lists, the flagged
+/// senders among them (Paykit wire 4.1: at most every 10 minutes).
+pub const LISTS_REFRESH_MS: u64 = 10 * 60_000;
+
 impl Paykit {
+    /// How many messages from `sender` the spam rule only counted (Paykit wire 4.1): those
+    /// that would have created state while the user had blocked it or the service flagged
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// A store failure, or a kept count that doesn't read.
+    pub async fn spam_count(&self, sender: &[u8; 32]) -> crate::error::Result<u64> {
+        Ok(self
+            .local_get::<u64>(&key::spam(sender))
+            .await?
+            .unwrap_or(0))
+    }
+
+    /// Read the lists again (`GET /allow`, [`pubky_switch_client::app::App::allow_list`])
+    /// when the last read is [`LISTS_REFRESH_MS`] old or more on the host's clock, at an app
+    /// holding `contacts`, so the flagged senders the spam rule reads stay fresh (Paykit
+    /// wire 4.1). Best effort: a refused or failed read leaves the lists as they were, and
+    /// is tried again at the next receive; a store failure or an alarm is an error. A clock
+    /// that went back reads as due.
+    pub(crate) async fn refresh_lists_when_due(&mut self) -> crate::error::Result<()> {
+        if !reads_lists(self.app.cert().scopes()) {
+            return Ok(());
+        }
+        let now = self.now();
+        let last = self.local_get::<u64>(key::LISTS_READ).await?;
+        if last.is_some_and(|last| last <= now && now - last < LISTS_REFRESH_MS) {
+            return Ok(());
+        }
+        match self.app.allow_list().await {
+            Ok(_) => self.local_put(key::LISTS_READ, &now).await,
+            Err(error @ (AppError::Alarm(_) | AppError::Store(_))) => Err(error.into()),
+            Err(_) => Ok(()),
+        }
+    }
+
     /// Answer the `resend_request`s the receive step kept, oldest first, each once (Paykit
     /// spec 9). Returns how many were answered.
     pub(crate) async fn answer_kept_resends(&mut self) -> crate::error::Result<u64> {

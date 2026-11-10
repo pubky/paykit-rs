@@ -33,6 +33,8 @@
 //! | `hc/<record key>` | the user confirmed a held request; never backed up | |
 //! | `kc/<record key>` | a payee's cancellation received before its request, for the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
+//! | `lr` | when the app last read the lists, on the device clock (Paykit wire 4.1) | |
+//! | `spam/<pubky>` | how many messages from a blocked or flagged sender only were counted (Paykit wire 4.1) | |
 //! | `rs/<pubky>/<msg_id>` | when a message was last re-sent to a requester | |
 //! | `rsd/<pubky>/<day>` | how many messages were re-sent to a requester that day | |
 
@@ -182,6 +184,7 @@ pub(crate) mod key {
     pub(crate) const CURSOR_TIME: &str = "ct";
     pub(crate) const RESTORE_HOLD: &str = "rh";
     pub(crate) const HOLD_CONFIRMED: &str = "hc/";
+    pub(crate) const LISTS_READ: &str = "lr";
 
     pub(crate) fn ask(sender: &[u8; 32], from: u64) -> String {
         format!("{ASKS}{}/{}", b64(sender), num(from))
@@ -217,6 +220,10 @@ pub(crate) mod key {
 
     pub(crate) fn peer(pubky: &[u8; 32]) -> String {
         format!("{PEERS}{}", b64(pubky))
+    }
+
+    pub(crate) fn spam(sender: &[u8; 32]) -> String {
+        format!("spam/{}", b64(sender))
     }
 
     pub(crate) fn resent(requester: &[u8; 32], msg_id: &str) -> String {

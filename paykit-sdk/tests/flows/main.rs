@@ -17,5 +17,6 @@ mod recovery;
 mod resend;
 mod restore;
 mod restore_hold;
+mod spam;
 mod unrequested;
 mod wallets;

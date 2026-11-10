@@ -325,6 +325,77 @@ impl StateStore for FailingRecordReads {
     }
 }
 
+/// A store that shows the app's copy of the lists (Switch wire 7.4.6) as a test sets it:
+/// senders flagged, which the scripted switch never flags (its `FAKES.md`), a copy not
+/// known to be complete, as after a restore, and reads of the deny list that fail. It
+/// answers the client's own list keys (`lc/flag/<pubky>`, `lc/lists_at`, `lc/deny/<pubky>`)
+/// in place of the copy it holds; everything else is the inner store's.
+#[derive(Default)]
+pub struct ListsStore {
+    inner: MemoryStore,
+    flagged: std::sync::Mutex<Vec<Vec<u8>>>,
+    unknown: std::sync::atomic::AtomicBool,
+    deny_fails: std::sync::atomic::AtomicBool,
+}
+
+impl ListsStore {
+    /// Show `pubky` among the flagged senders of the last `GET /allow`.
+    pub fn flag(&self, pubky: &[u8; 32]) {
+        let key = format!("lc/flag/{}", pubky_switch_core::enc::pubky_id(pubky));
+        self.flagged.lock().unwrap().push(key.into_bytes());
+    }
+
+    /// Show the copy of the lists as never read (`lc/lists_at` absent), or stop.
+    pub fn lists_unknown(&self, unknown: bool) {
+        self.unknown
+            .store(unknown, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Fail every read of a deny-list entry, or stop.
+    pub fn deny_reads_fail(&self, fail: bool) {
+        self.deny_fails
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl StateStore for ListsStore {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        if self.unknown.load(std::sync::atomic::Ordering::SeqCst) && key == b"lc/lists_at" {
+            return Ok(None);
+        }
+        if self.deny_fails.load(std::sync::atomic::Ordering::SeqCst) && key.starts_with(b"lc/deny/")
+        {
+            return Err(pubky_switch_client::error::StoreError::Unavailable);
+        }
+        if self.flagged.lock().unwrap().iter().any(|k| k == key) {
+            return Ok(Some(Vec::new()));
+        }
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        self.inner.commit(batch)
+    }
+}
+
 pub fn btc(value: &str) -> PaymentAmount {
     PaymentAmount {
         value: Decimal::new(value).unwrap(),
