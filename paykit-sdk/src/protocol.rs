@@ -495,36 +495,12 @@ impl Protocol for PaykitProtocol {
                         "Paykit wire 5.4: a payment_lists record that doesn't read".into(),
                     );
                 };
-                list_regression(&held, &later)
+                // Wire 5.4 "Seen lists": a later list of a greater version, or the same list,
+                // and never a single-use mark dropped, at any version.
+                held.check_later_write(&later).err().map(|e| e.to_string())
             }
             _ => None,
         }
-    }
-}
-
-/// A later `payment_lists` write that goes back on one seen (Paykit wire 5.4, Switch spec
-/// 8.2): an older list, or a single-use endpoint seen used and dropped, which would let it
-/// be paid twice.
-pub(crate) fn list_regression(
-    held: &PaymentListRecord,
-    later: &PaymentListRecord,
-) -> Option<String> {
-    let held_version = list_version(held);
-    let later_version = list_version(later);
-    if later_version < held_version {
-        return Some("Paykit wire 5.4: a later write holds an older list".into());
-    }
-    let dropped = held.used.iter().any(|used| !later.used.contains(used));
-    if dropped && later_version == held_version {
-        return Some("Paykit wire 5.4: a later write drops a single-use endpoint seen used".into());
-    }
-    None
-}
-
-fn list_version(record: &PaymentListRecord) -> u64 {
-    match record.list.body() {
-        paykit_lib::Body::PrivatePaymentList(list) => list.version,
-        _ => 0,
     }
 }
 

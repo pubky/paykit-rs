@@ -259,3 +259,139 @@ async fn test_unrequested_proof_and_receipt_carry_the_attempt_and_no_request_mem
     assert_eq!(receipt["attempt_id"], record["attempt_id"]);
     assert!(receipt["billing_period"].is_null());
 }
+
+// ---------------------------------------------------------------------------------------
+// A later `payment_lists` write another own app makes (Paykit wire 5.4, "Seen lists")
+
+/// A `private_payment_list` from bob's `shop` to alice at `version`, with one single-use
+/// on-chain endpoint paying `payload`, as a record stores it: signed, not delivered.
+fn stored_list(w: &World, version: u64, payload: &str) -> serde_json::Value {
+    let mut endpoints = std::collections::BTreeMap::new();
+    endpoints.insert(
+        crate::common::endpoint("btc-bitcoin-p2wpkh"),
+        paykit_lib::bodies::ListEndpoint {
+            payload: paykit_lib::PaymentEndpointPayload::new(payload).unwrap(),
+            single_use: true,
+        },
+    );
+    let body = paykit_lib::bodies::PrivatePaymentList {
+        version,
+        payment_endpoints: endpoints,
+        expires_at: w.clock.now_ms() + 30 * 24 * crate::common::HOUR_MS,
+    }
+    .to_body()
+    .unwrap();
+    let plaintext = w.sign_as(
+        &w.bob,
+        "shop",
+        &w.alice,
+        "paykit.private_payment_list",
+        vec![],
+        body,
+    );
+    let keys = w.bob.identity().app_keys("shop");
+    let cert = w.bob.switch().app(&keys.app_id_bytes()).cert.unwrap();
+    serde_json::json!({
+        "sender": pubky_switch_core::enc::pubky_id(&w.bob_id()),
+        "cert": { "body": cert.signed().body, "sig": cert.signed().sig },
+        "plaintext": {
+            "sender_app": pubky_switch_core::enc::b64(&plaintext.sender_app_id()),
+            "signature": pubky_switch_core::enc::b64(&plaintext.signature()),
+            "json": pubky_switch_core::enc::b64(plaintext.json()),
+        },
+        "accepted_at": null,
+    })
+}
+
+/// The `payment_lists` record of bob's shop, as `app` holds it, and its target.
+async fn list_record(
+    app: &paykit_sdk::Paykit,
+    w: &World,
+) -> (pubky_switch_client::app::RecordTarget, serde_json::Value) {
+    use paykit_lib::collections::Collection;
+    let shop = w.bob.identity().app_keys("shop").app_id_bytes();
+    let target = pubky_switch_client::app::RecordTarget::new(
+        pubky_switch_client::app::Collection::new(
+            Collection::PaymentLists.name(),
+            Collection::PaymentLists.policy(None),
+        ),
+        &paykit_lib::derive::natural_key::payment_list(&w.bob_id(), &shop),
+    );
+    let key = app.app().record_key(&target).unwrap();
+    let held = app.app().shared_record(&key).await.unwrap().unwrap();
+    let value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    (target, value)
+}
+
+/// The phone, another own app, writes the record `change` makes of the one it holds; the
+/// wallet then reads its feed. Returns what the wallet holds after, and its flagged writes.
+async fn written_by_the_phone(
+    w: &World,
+    change: impl FnOnce(&World, &mut serde_json::Value),
+) -> (
+    serde_json::Value,
+    Vec<pubky_switch_client::app::FlaggedWrite>,
+    serde_json::Value,
+) {
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    // The wallet pays its single-use endpoint: the record marks it used.
+    let paid = wallet
+        .pay_without_request(to_bob(w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    phone.receive(None).await.unwrap();
+    let (target, mut value) = list_record(&phone, w).await;
+    let before = list_record(&wallet, w).await.1;
+    assert_eq!(before["used"].as_array().unwrap().len(), 1);
+    change(w, &mut value);
+    let bytes = serde_json::to_vec(&value).unwrap();
+    let entry = phone
+        .app_mut()
+        .record_op(&target, Some(&bytes), Vec::new())
+        .await
+        .unwrap();
+    phone
+        .app_mut()
+        .submit_batch(pubky_switch_client::app::OpBatch::new().entry(entry))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let after = list_record(&wallet, w).await.1;
+    let flagged = wallet.app().flagged_writes().await.unwrap();
+    (before, flagged, after)
+}
+
+#[tokio::test]
+async fn test_unrequested_later_list_record_with_another_list_at_its_version_flagged() {
+    let w = World::new();
+    let version = w.clock.now_ms();
+    let (before, flagged, after) = written_by_the_phone(&w, move |w, value| {
+        // Another list at the version held: an equivocation, never taken.
+        let other = stored_list(w, version, "bc1qother");
+        assert_ne!(value["list"], other);
+        value["list"] = other;
+    })
+    .await;
+    assert_eq!(flagged.len(), 1, "{flagged:?}");
+    assert_eq!(after, before, "the write was taken");
+}
+
+#[tokio::test]
+async fn test_unrequested_later_list_record_dropping_a_used_mark_flagged() {
+    let w = World::new();
+    let (before, flagged, after) = written_by_the_phone(&w, move |w, value| {
+        // A newer list, but the single-use mark seen dropped: a newer list doesn't reset
+        // `used` (Paykit wire 5.4).
+        value["list"] = stored_list(w, w.clock.now_ms() + 1000, "bc1qnewer");
+        value["used"] = serde_json::json!([]);
+    })
+    .await;
+    assert_eq!(flagged.len(), 1, "{flagged:?}");
+    assert_eq!(after, before, "the write was taken");
+}
