@@ -27,6 +27,7 @@ use paykit_lib::{
 use pubky_switch_client::app::{claim_conflict, Delivery, OpBatch};
 use pubky_switch_core::claims::{ClaimStatus, Outcome};
 use pubky_switch_core::http::ErrorCode;
+use pubky_switch_core::ops::Condition;
 use serde_json::{Map, Value};
 
 use crate::activity::{self, ActivityTarget, KeptSide, Role, SideTag};
@@ -819,11 +820,15 @@ impl Paykit {
 
     /// Reject a request (Paykit spec 8.1, Paykit wire 4.7): recorded first, conditioned on
     /// its claim having no open or paid attempt, then sent. Returns the rejection's `msg_id`.
+    /// A recurring request is rejected before its acceptance, conditioned on its proposal
+    /// not having expired, as its acceptance would be (Paykit spec 8.2), so a wallet that
+    /// doesn't pay recurring requests can still dismiss one.
     ///
     /// # Errors
     ///
     /// [`Refusal::NotFound`]; [`Refusal::Rejected`], [`Refusal::Cancelled`],
-    /// [`Refusal::AlreadyPaid`] or [`Refusal::PaymentInProgress`]; [`Refusal::Recurring`];
+    /// [`Refusal::AlreadyPaid`] or [`Refusal::PaymentInProgress`]; [`Refusal::Recurring`] for
+    /// a recurring request already accepted;
     /// [`PaykitError::Conflict`] when the record changed meanwhile; the client's errors.
     pub async fn reject_request(
         &mut self,
@@ -860,10 +865,9 @@ impl Paykit {
         self.require_pay()?;
         let (target, record) = self.payer_request(request).await?;
         let (_, body) = request_of(&record).ok_or(Refusal::NotFound)?;
-        if body.is_recurring() {
-            return Err(Refusal::Recurring.into());
-        }
+        let recurring = body.is_recurring();
         let label = body.label.clone();
+        let proposal_expires_at = body.proposal_expires_at;
         if record.shows_paid() {
             return Err(Refusal::AlreadyPaid.into());
         }
@@ -873,9 +877,16 @@ impl Paykit {
         if cancelled(&record) || self.kept_stop(&target).await? {
             return Err(Refusal::Cancelled.into());
         }
+        // A recurring request is rejected only before it is accepted (Paykit spec 8.2); its
+        // cancellation and anything after its acceptance belong to the recurring flows.
+        if recurring && (cancel || record.response.is_some()) {
+            return Err(Refusal::Recurring.into());
+        }
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);
-        if let Some(read) = self.app.read_claim(&obligation).await? {
-            refuse_on_claim(&read.view)?;
+        if !recurring {
+            if let Some(read) = self.app.read_claim(&obligation).await? {
+                refuse_on_claim(&read.view)?;
+            }
         }
         let reply = RequestReply { reason, label };
         let (kind, role) = if cancel {
@@ -899,12 +910,25 @@ impl Paykit {
                 },
             )?;
         }
-        // Recorded in the request record in the batch that queues it, conditioned on the
-        // claim at the step read: an attempt meanwhile fails the batch, and the reply goes
-        // nowhere (Paykit spec 8.1).
-        let condition = self.app.claim_condition(&obligation).await?;
+        // Recorded in the request record in the batch that queues it, on the version of the
+        // record read. A one-time request's reply is also conditioned on the claim at the
+        // step read: an attempt meanwhile fails the batch, and the reply goes nowhere (Paykit
+        // spec 8.1). A recurring request has no claim before it is accepted; its rejection is
+        // conditioned as its acceptance is, on the proposal not having expired, so an
+        // acceptance and a rejection can't both go out (Paykit spec 8.2).
+        let conditions = if recurring {
+            proposal_expires_at
+                .map(|expires_at| Condition::ServerTimeIn {
+                    start: None,
+                    end: Some(expires_at.saturating_add(1)),
+                })
+                .into_iter()
+                .collect()
+        } else {
+            vec![self.app.claim_condition(&obligation).await?]
+        };
         let msg_id = match self
-            .send_with_record(signed, &target, role, vec![condition], tx.into_writes())
+            .send_with_record(signed, &target, role, conditions, tx.into_writes())
             .await
         {
             Ok(msg_id) => msg_id,
