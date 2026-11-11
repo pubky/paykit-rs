@@ -12,6 +12,7 @@ use crate::common::{draft, request_from, World};
 /// Alice's wallet pays bob's request, which expires a day from now, with the rail doing
 /// `behaviour`. Returns the wallet.
 async fn paid(w: &World, behaviour: Behaviour) -> Paykit {
+    let hang = matches!(behaviour, Behaviour::Hang);
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
@@ -22,7 +23,8 @@ async fn paid(w: &World, behaviour: Behaviour) -> Paykit {
         .await
         .unwrap();
     assert!(
-        matches!(outcome, PayOutcome::Paid { .. } | PayOutcome::Failed { .. }),
+        matches!(outcome, PayOutcome::Paid { .. } | PayOutcome::Failed { .. })
+            || hang && matches!(outcome, PayOutcome::Pending { .. }),
         "{outcome:?}"
     );
     wallet
@@ -76,4 +78,14 @@ async fn test_pruning_keeps_a_payment_without_deadline_past_30_days() {
     // Its claim is pinned to none: kept 400 days after its last entry.
     later(&w, &mut wallet, DAY_MS + RECONCILIATION_MS + 1_000).await;
     assert_eq!(wallet.payments().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_pruning_keeps_a_payment_still_open_past_its_window() {
+    let w = World::new();
+    let mut wallet = paid(&w, Behaviour::Hang).await;
+    later(&w, &mut wallet, DAY_MS + RECONCILIATION_MS + 1_000).await;
+    let payments = wallet.payments().await.unwrap();
+    assert_eq!(payments.len(), 1);
+    assert_eq!(payments[0].stage, paykit_sdk::Stage::Paying);
 }

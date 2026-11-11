@@ -52,6 +52,9 @@ async fn test_notices_late_receipt_of_a_payment_written_failed_raises_one() {
     let w = World::new();
     let (mut wallet, mut shop, attempt_id) = paid_after_failed(&w).await;
     w.clock.advance_ms(PAST_THE_CLAIM_MS);
+    // The journal keeps the payment past its claim's window, for its receipt.
+    wallet.receive(None).await.unwrap();
+    wallet.resume_payments().await.unwrap();
     receipt(&mut shop).await;
     wallet.receive(None).await.unwrap();
     let notices = wallet.notices().await.unwrap();
