@@ -3141,10 +3141,11 @@ impl Paykit {
 /// Whether `error` says the own switch doesn't answer now: the request or its answer was
 /// lost, the switch answered `503` (`unavailable`, or `staged` while its account is set
 /// up), or an answer with a `5xx` status came without the service's signature, as from a
-/// proxy in front of it.
-fn switch_unavailable(error: &AppError) -> bool {
+/// proxy in front of it; or the account may have been erased, and the app's wait before it
+/// takes it as gone goes on (Switch spec 12.7).
+pub(crate) fn switch_unavailable(error: &AppError) -> bool {
     match error.unkept() {
-        AppError::Transport(_) => true,
+        AppError::Transport(_) | AppError::NotAnsweringAsAccount { .. } => true,
         AppError::Switch(pubky_switch_client::error::ClientError::Transport(_)) => true,
         AppError::Switch(pubky_switch_client::error::ClientError::BadServiceSignature {
             status,
@@ -3153,5 +3154,44 @@ fn switch_unavailable(error: &AppError) -> bool {
             other.code(),
             Some(ErrorCode::Unavailable | ErrorCode::Staged)
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pubky_switch_client::error::{ClientError, TransportError};
+
+    use super::*;
+
+    fn lost() -> AppError {
+        AppError::Transport(TransportError::Connect("down".into()))
+    }
+
+    #[test]
+    fn test_switch_unavailable_through_a_kept_batch_and_the_erasure_wait() {
+        assert!(switch_unavailable(&lost()));
+        assert!(switch_unavailable(&AppError::Kept {
+            batch_id: [1; 16],
+            error: Box::new(lost()),
+        }));
+        assert!(switch_unavailable(&AppError::NotAnsweringAsAccount {
+            since_ms: 1
+        }));
+        assert!(switch_unavailable(&AppError::Switch(
+            ClientError::BadServiceSignature { status: 503 }
+        )));
+    }
+
+    #[test]
+    fn test_switch_unavailable_not_for_an_answer_it_signed() {
+        assert!(!switch_unavailable(&AppError::Switch(
+            ClientError::BadServiceSignature { status: 404 }
+        )));
+        assert!(!switch_unavailable(&AppError::Kept {
+            batch_id: [1; 16],
+            error: Box::new(AppError::Switch(ClientError::BadServiceSignature {
+                status: 404
+            })),
+        }));
     }
 }

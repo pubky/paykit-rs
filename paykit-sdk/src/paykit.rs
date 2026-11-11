@@ -19,7 +19,8 @@ use paykit_lib::scopes::{acts_as_payee, check_certificate};
 use paykit_lib::{Asset, Decimal, Label};
 use pubky_switch_client::app::Protocol as _;
 use pubky_switch_client::app::{
-    App, AppBackup, AppConfig, AppEnv, AppEvent, HomeserverReader, JoinRequest, ReceiveReport,
+    App, AppBackup, AppConfig, AppEnv, AppError, AppEvent, HomeserverReader, JoinRequest,
+    ReceiveReport,
 };
 use pubky_switch_client::clock::Clock;
 use pubky_switch_core::records::{AppCert, Approval};
@@ -214,6 +215,20 @@ pub struct ReceiveSummary {
     /// gives it: the read went on, holding Paykit's entries unprocessed, and none of the
     /// Paykit steps after it ran.
     pub certificate_refused: Option<Refusal>,
+    /// The account is gone at this switch: the client took it as erased (Switch spec 12.7),
+    /// a provider loss (Switch spec 12.6). The host tells the user. The app reads nothing
+    /// more there, and the SDK acts on nothing by itself: lookups of the identity there fail
+    /// closed (Switch spec 4.3), and the payment journal stays, for the recovery at a new
+    /// switch to resume from. Set from the read that takes the account as gone until the
+    /// host acknowledges its `AppEvent::AccountGone`, or until the account shows again.
+    pub account_gone: bool,
+}
+
+/// Whether `events` hold the client's `AccountGone` (Switch spec 12.7).
+fn account_gone(events: &[AppEvent]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event, AppEvent::AccountGone { .. }))
 }
 
 /// One Paykit App of an identity.
@@ -515,8 +530,10 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// The client's errors. A message whose effect couldn't be written yet stays before the
-    /// cursor, and the next call hands it over again.
+    /// The client's errors; [`Refusal::SwitchUnavailable`] while the account may have been
+    /// erased and the client's wait before it takes it as gone goes on, as for a switch that
+    /// doesn't answer (Switch spec 12.7). A message whose effect couldn't be written yet
+    /// stays before the cursor, and the next call hands it over again.
     pub async fn receive(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
         // The read's future goes on the heap: the client's read nests deep, and a host
         // polling it on a small stack, such as a test thread's 2 MiB, keeps room for it.
@@ -527,7 +544,25 @@ impl Paykit {
         // An app holding `contacts` reads the flagged senders again first, at most every 10
         // minutes, for the spam rule (Paykit wire 4.1).
         self.refresh_lists_when_due().await?;
-        let report = self.app.receive(wait).await?;
+        let report = match self.app.receive(wait).await {
+            Ok(report) => report,
+            // The erasure's wait: the switch answers as for an account it doesn't host, and
+            // nothing authenticates that, so it counts as not answering until the wait ends.
+            Err(error @ AppError::NotAnsweringAsAccount { .. }) => {
+                return Err(Refusal::SwitchUnavailable(error.to_string()).into());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let account_gone = account_gone(&report.events)
+            || (report.stopped && account_gone(&self.app.unacknowledged_events().await?));
+        if account_gone {
+            // Nothing more is read or written there: the summary tells the host.
+            return Ok(ReceiveSummary {
+                report,
+                account_gone,
+                ..ReceiveSummary::default()
+            });
+        }
         // Under a certificate Paykit refuses, the host still gets the client's report, with
         // its events and cursor; the Paykit steps below act under the certificate, so none
         // runs.
@@ -569,6 +604,7 @@ impl Paykit {
             applied,
             resends: answered.saturating_add(asked),
             certificate_refused: None,
+            account_gone: false,
         })
     }
 
