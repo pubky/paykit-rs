@@ -3259,3 +3259,116 @@ fn test_activity_record_half_second_anchor_names_periods_by_their_second() {
     };
     assert!(millis.to_json().is_err());
 }
+
+/// The `payment_lists` record of `binding_accepted` with one `used` entry per member, each
+/// entry the record's own, holding that member.
+fn list_with_used(members: &[&str]) -> Vec<u8> {
+    let s = paykit("sealed.json");
+    let mut base: Value = serde_json::from_slice(value(&arr(&s, "binding_accepted")[0])).unwrap();
+    let used = base["used"][0].clone();
+    base["used"] = Value::Array(members.iter().map(|_| used.clone()).collect());
+    for (i, member) in members.iter().enumerate() {
+        base["used"][i]["later_member"] = serde_json::json!(member);
+    }
+    serde_json::to_vec(&base).unwrap()
+}
+
+#[test]
+fn test_payment_list_record_element_of_another_read_takes_no_members() {
+    let alice = pubky(ALICE);
+    let a = PaymentListRecord::read(&list_with_used(&["of the first"]), &alice).unwrap();
+    let mut b = PaymentListRecord::read(&list_with_used(&["of the second"]), &alice).unwrap();
+    // The first record's entry put into the second: it takes neither record's members.
+    b.used = vec![a.used[0].clone()];
+    let written = b.to_json().unwrap();
+    assert_eq!(members_at(&written, &["/used/0"]), vec![Value::Null]);
+    // The same from a stale read of the same record, read again once it changed.
+    let stale = PaymentListRecord::read(&list_with_used(&["kept", "dropped"]), &alice).unwrap();
+    let mut fresh =
+        PaymentListRecord::read(&list_with_used(&["kept", "dropped", "added"]), &alice).unwrap();
+    fresh.used = vec![fresh.used[0].clone(), stale.used[1].clone()];
+    let written = fresh.to_json().unwrap();
+    assert_eq!(
+        members_at(&written, &["/used/0", "/used/1"]),
+        vec![serde_json::json!("kept"), Value::Null]
+    );
+}
+
+#[test]
+fn test_allowance_record_history_grant_made_current_keeps_its_members() {
+    let alice = pubky(ALICE);
+    let s = paykit("sealed.json");
+    let entry = paykit("documents.json")["executor_grant_history_entry"].clone();
+    let mut base: Value = serde_json::from_slice(value(&arr(&s, "binding_accepted")[1])).unwrap();
+    base["grants"] = serde_json::json!([entry]);
+    // A record read without a current grant: its history grant, made current, carries its
+    // members there too, and keeps them once the record is read again.
+    let without = with_members(
+        &serde_json::to_vec(&base).unwrap(),
+        &[("/grants/0/grant", serde_json::json!("history"))],
+    );
+    let held = AllowanceRecord::read(&without, &alice).unwrap();
+    let mut later = held.clone();
+    later.grant = Some(held.grants[0].grant.clone());
+    let written = later.to_json().unwrap();
+    // The grant made current from the history carries its members there too.
+    assert_eq!(
+        members_at(&written, &["/grant", "/grants/0/grant"]),
+        vec![serde_json::json!("history"), serde_json::json!("history")]
+    );
+    let again = AllowanceRecord::read(&written, &alice).unwrap();
+    let mut dropped = again.clone();
+    dropped.grant = None;
+    assert_eq!(
+        members_at(&dropped.to_json().unwrap(), &["/grants/0/grant"]),
+        vec![serde_json::json!("history")]
+    );
+}
+
+#[test]
+fn test_activity_record_attempted_entry_naming_no_period_drops_without_a_claim() {
+    use pubky_switch_core::ops::Condition;
+    let keys = Keys::load();
+    let b = bases(&keys);
+    let (alice, bob) = (pubky(ALICE), pubky(BOB));
+    let nk = keys.identity(&alice).naming_key();
+    // 2026-02-10, inside the February period: no period starts there, so it fences nothing.
+    let between = 1_770_681_600;
+    let start = 1_772_236_800;
+    let held = ActivityRecord {
+        attempted_periods: vec![between, start],
+        ..b.payer_request.clone()
+    };
+    let read = ActivityRecord::read(&held.to_json().unwrap(), &alice, ActivitySide::Payer).unwrap();
+    // Dropped without a claim_step: taken.
+    let later = ActivityRecord {
+        attempted_periods: vec![start],
+        ..read.clone()
+    };
+    assert_eq!(
+        read.check_dropped_periods(&later, &[], &alice, &nk)
+            .unwrap(),
+        [between]
+    );
+    // A real start dropped without its claim_step is still refused, and taken with it.
+    let both = ActivityRecord {
+        attempted_periods: Vec::new(),
+        ..read.clone()
+    };
+    assert!(read.check_dropped_periods(&both, &[], &alice, &nk).is_err());
+    let claim = paykit_lib::derive::request_obligation(
+        &nk,
+        &bob,
+        &read.request.as_ref().unwrap().hash(),
+        start,
+    );
+    let with = [Condition::ClaimStep {
+        claim_key: claim,
+        step: 2,
+    }];
+    assert_eq!(
+        read.check_dropped_periods(&both, &with, &alice, &nk)
+            .unwrap(),
+        [between, start]
+    );
+}

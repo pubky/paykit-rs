@@ -100,16 +100,29 @@ pub fn bounded_msg_ids(stored: &[String], others: &[String]) -> Vec<String> {
 /// dropped with it. An empty set, as a value built in code has, writes nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UnknownMembers {
+    /// The read the members come from: the hash of the value read; `None` without members.
+    read: Option<[u8; 32]>,
     held: Vec<HeldMembers>,
 }
 
 /// Where an element of a shared record value was read, so the members its writer doesn't know
-/// go back into it alone ([`UnknownMembers`]). An element built in code has none.
+/// go back into it alone ([`UnknownMembers`]): the read, by the hash of the value read, the
+/// kind of element and its place among those of its kind. A writer puts an element's members
+/// back only when its origin is of the read the record holds, so an element of another
+/// record, of an older read of the same record, or built in code (no origin) gets none.
 ///
 /// It isn't part of the element's value: two origins always compare equal, so two elements
 /// equal in every member are equal wherever they were read.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Origin(Option<u32>);
+pub struct Origin(Option<Place>);
+
+/// An element's place in a read, for [`Origin`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Place {
+    read: [u8; 32],
+    kind: &'static str,
+    index: u32,
+}
 
 impl PartialEq for Origin {
     fn eq(&self, _: &Self) -> bool {
@@ -121,7 +134,7 @@ impl Eq for Origin {}
 
 /// The origins of the elements of one value as read, by JSON pointer.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Origins(Vec<(String, u32)>);
+pub(crate) struct Origins(Vec<(String, Place)>);
 
 impl Origins {
     /// The origin of the element read at `pointer`.
@@ -130,8 +143,20 @@ impl Origins {
             self.0
                 .iter()
                 .find(|(p, _)| p == pointer)
-                .map(|(_, seq)| *seq),
+                .map(|(_, place)| *place),
         )
+    }
+
+    /// The place of the next element of `kind` read, after those already read.
+    fn next(&mut self, read: [u8; 32], kind: &'static str, pointer: &str) -> Place {
+        let before = self.0.iter().filter(|(_, p)| p.kind == kind).count();
+        let place = Place {
+            read,
+            kind,
+            index: u32::try_from(before).unwrap_or(u32::MAX),
+        };
+        self.0.push((pointer.to_owned(), place));
+        place
     }
 }
 
@@ -152,8 +177,8 @@ struct HeldMembers {
 enum Anchor {
     /// By its shape's name and its identity.
     Identity(&'static str, Value),
-    /// By the origin its element carries.
-    Origin(u32),
+    /// By the kind and place its element carries, in the read the members come from.
+    Origin(&'static str, u32),
     /// An element without an origin, built in code: nothing of what was read goes into it.
     New,
 }
@@ -217,10 +242,29 @@ impl UnknownMembers {
     /// The unknown members of `value`, read as `shape`, and the origins of its carried
     /// elements, which the reader gives the elements it builds.
     pub(crate) fn read(value: &Map<String, Value>, shape: &'static Shape) -> (Self, Origins) {
+        let read = serde_json::to_vec(value)
+            .map(|bytes| pubky_switch_core::enc::hash(&bytes))
+            .unwrap_or_default();
         let mut held = Vec::new();
         let mut origins = Origins::default();
-        collect(value, shape, None, Vec::new(), "", &mut origins, &mut held);
-        (Self { held }, origins)
+        collect(
+            value,
+            shape,
+            None,
+            Vec::new(),
+            "",
+            read,
+            &mut origins,
+            &mut held,
+        );
+        (
+            Self {
+                // Without members, nothing is put back, so the read isn't kept.
+                read: (!held.is_empty()).then_some(read),
+                held,
+            },
+            origins,
+        )
     }
 
     /// Whether there are none.
@@ -263,11 +307,16 @@ impl UnknownMembers {
         origins: &[(String, Origin)],
     ) {
         let (anchor, path) = if shape.carried {
-            let origin = origins
+            // Only an element of the read this record holds takes members back.
+            let place = origins
                 .iter()
                 .find(|(p, _)| p == pointer)
-                .and_then(|(_, o)| o.0);
-            (Some(origin.map_or(Anchor::New, Anchor::Origin)), Vec::new())
+                .and_then(|(_, o)| o.0)
+                .filter(|place| Some(place.read) == self.read);
+            (
+                Some(place.map_or(Anchor::New, |p| Anchor::Origin(p.kind, p.index))),
+                Vec::new(),
+            )
         } else {
             match identity(obj, shape) {
                 Some(id) => (Some(Anchor::Identity(shape.name, id)), Vec::new()),
@@ -305,19 +354,20 @@ impl UnknownMembers {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // the walk's state, passed down as it recurses
 fn collect(
     obj: &Map<String, Value>,
     shape: &'static Shape,
     anchor: Option<Anchor>,
     path: Vec<&'static str>,
     pointer: &str,
+    read: [u8; 32],
     origins: &mut Origins,
     out: &mut Vec<HeldMembers>,
 ) {
     let (anchor, path) = if shape.carried {
-        let seq = u32::try_from(origins.0.len()).unwrap_or(u32::MAX);
-        origins.0.push((pointer.to_owned(), seq));
-        (Some(Anchor::Origin(seq)), Vec::new())
+        let place = origins.next(read, shape.name, pointer);
+        (Some(Anchor::Origin(place.kind, place.index)), Vec::new())
     } else {
         match identity(obj, shape) {
             Some(id) => (Some(Anchor::Identity(shape.name, id)), Vec::new()),
@@ -342,13 +392,14 @@ fn collect(
         let at = format!("{pointer}/{name}");
         match (member, obj.get(*name)) {
             (Member::Object(s), Some(Value::Object(child))) => {
-                collect(child, s, anchor.clone(), below, &at, origins, out);
+                collect(child, s, anchor.clone(), below, &at, read, origins, out);
             }
             (Member::Array(s), Some(Value::Array(items))) if s.found_alone() => {
                 for (i, item) in items.iter().enumerate() {
                     if let Value::Object(child) = item {
                         let at = format!("{at}/{i}");
-                        collect(child, s, anchor.clone(), below.clone(), &at, origins, out);
+                        let below = below.clone();
+                        collect(child, s, anchor.clone(), below, &at, read, origins, out);
                     }
                 }
             }
@@ -481,18 +532,30 @@ static LIST_SHAPE: Shape = Shape {
     ],
 };
 
-/// An executor grant (Paykit wire 3.3), found by the origin it carries.
-static GRANT: Shape = Shape {
-    name: "grant",
+/// The members of an executor grant (Paykit wire 3.3).
+const GRANT_MEMBERS: &[(&str, Member)] = &[
+    ("app_id", Member::Leaf),
+    ("cert", Member::Object(&SIGNED_DOC)),
+    ("confirmed_generation", Member::Leaf),
+    ("sig", Member::Leaf),
+    ("terms_hash", Member::Leaf),
+];
+
+/// The current executor grant, found by the origin it carries.
+static CURRENT_GRANT: Shape = Shape {
+    name: "current grant",
     id: &[],
     carried: true,
-    members: &[
-        ("app_id", Member::Leaf),
-        ("cert", Member::Object(&SIGNED_DOC)),
-        ("confirmed_generation", Member::Leaf),
-        ("sig", Member::Leaf),
-        ("terms_hash", Member::Leaf),
-    ],
+    members: GRANT_MEMBERS,
+};
+
+/// A grant of the history, found by the origin it carries. Its own kind, so the places of
+/// the history's grants don't depend on whether the record holds a current one.
+static GRANT: Shape = Shape {
+    name: "history grant",
+    id: &[],
+    carried: true,
+    members: GRANT_MEMBERS,
 };
 
 static GRANT_ENTRY: Shape = Shape {
@@ -518,7 +581,7 @@ static ALLOWANCE_SHAPE: Shape = Shape {
         ("proposal", Member::Object(&STORED)),
         ("response", Member::Object(&STORED)),
         ("end", Member::Object(&STORED)),
-        ("grant", Member::Object(&GRANT)),
+        ("grant", Member::Object(&CURRENT_GRANT)),
         ("grants", Member::Array(&GRANT_ENTRY)),
         ("msg_ids", Member::Leaf),
     ],
@@ -1951,7 +2014,9 @@ impl ActivityRecord {
     /// "Attempted periods" (Paykit wire 5.3): a reader that holds the version a write was
     /// built on (`self`) checks every listed period `later` drops: the write's `conditions`
     /// carry a `claim_step` condition on that period's claim, the obligation of (payee,
-    /// request hash, start) with the reader's naming key. Returns the periods dropped.
+    /// request hash, start) with the reader's naming key. An entry that names no Billing
+    /// Period start of the request fences nothing, so it is dropped without a condition: no
+    /// claim stands behind it. Returns the entries dropped.
     ///
     /// # Errors
     ///
@@ -1972,9 +2037,17 @@ impl ActivityRecord {
             return invalid("Paykit wire 5.3: attempted_periods belong to a request record");
         };
         let (_, payee) = self.payer_payee(own);
+        let recurrence = match self.request.as_ref().map(StoredMessage::body) {
+            Some(Body::PaymentRequest(r)) => r.recurrence.as_ref(),
+            _ => None,
+        };
         let mut dropped = Vec::new();
         for start in &self.attempted_periods {
             if later.attempted_periods.contains(start) {
+                continue;
+            }
+            if !recurrence.is_some_and(|r| is_period_start(r, *start)) {
+                dropped.push(*start);
                 continue;
             }
             let claim = request_obligation(naming_key, &payee, &request_hash, *start);
