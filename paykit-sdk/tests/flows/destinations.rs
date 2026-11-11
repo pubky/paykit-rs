@@ -960,7 +960,7 @@ async fn test_destinations_every_payable_endpoint_of_another_amount_refused() {
         .await
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::Transfer(_))),
+        matches!(refused.refusal(), Some(Refusal::Transfer { .. })),
         "{refused:?}"
     );
     assert!(wallet.payments().await.unwrap().is_empty());
@@ -1326,4 +1326,133 @@ async fn test_destinations_used_single_use_endpoint_the_method_cant_judge_fails_
         .unwrap_err();
     assert_eq!(failed, paykit_sdk::PaykitError::Rail(offline()));
     assert!(!asked_for_a_list(&mut shop).await);
+}
+
+/// The transfer a refusal by the transfer check shows the user.
+fn quote_of(refused: &paykit_sdk::PaykitError) -> paykit_sdk::TransferQuote {
+    match refused.refusal() {
+        Some(Refusal::Transfer { quote, .. }) => (**quote).clone(),
+        _ => panic!("not a transfer refusal: {refused:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_destinations_confirmed_transfer_of_another_destination_refused_again() {
+    // The method prefers on-chain, which fixes 2 btc: the user sees that and pays anyway.
+    // Meanwhile the method pays only Lightning, which fixes 3: the confirmation is for
+    // another destination, so the payment is refused again with what Lightning would
+    // transfer, nothing paid. Confirmed in turn, Lightning is paid, once.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let draft = endpoints_draft(
+        w.clock.now_ms(),
+        &[
+            ("btc-bitcoin-p2wpkh", "bc1qaddress?amount=2"),
+            ("btc-lightning-bolt11", "lnbc1invoice?amount=3"),
+        ],
+    );
+    let request = request_from(&mut shop, w.alice_id(), draft).await;
+    wallet.receive(None).await.unwrap();
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    let on_chain = quote_of(&refused);
+    assert_eq!(on_chain.endpoint_id.as_str(), "btc-bitcoin-p2wpkh");
+    assert_eq!(on_chain.payee, w.bob_id());
+    assert_eq!(on_chain.app_id, shop.app_id());
+    assert_eq!(on_chain.amount, crate::common::btc("1"));
+    assert_eq!(on_chain.transfer.amount, Some(crate::common::btc("2")));
+    assert_eq!(
+        on_chain.payload_hash,
+        pubky_switch_core::enc::hash(b"bc1qaddress?amount=2")
+    );
+    assert!(
+        !format!("{refused:?}").contains("bc1qaddress"),
+        "{refused:?}"
+    );
+    w.rail
+        .set_endpoint_identifiers(vec![crate::common::endpoint("btc-lightning-bolt11")]);
+    let again = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_transfer_confirmed(on_chain.clone()),
+        )
+        .await
+        .unwrap_err();
+    let lightning = quote_of(&again);
+    assert_eq!(lightning.endpoint_id.as_str(), "btc-lightning-bolt11");
+    assert_eq!(lightning.transfer.amount, Some(crate::common::btc("3")));
+    assert!(wallet.payments().await.unwrap().is_empty());
+    assert!(w.rail.all_executions().is_empty());
+    let outcome = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_transfer_confirmed(lightning),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+        "{outcome:?}"
+    );
+    let paid = wallet.payments().await.unwrap();
+    assert_eq!(paid.len(), 1);
+    assert_eq!(paid[0].endpoint_id.as_str(), "btc-lightning-bolt11");
+    assert_eq!(w.rail.executions(&paid[0].attempt_id), 1);
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_destinations_confirmed_transfer_quoted_again_differently_refused_again() {
+    // The method charges a fee of 5 above the app's cap of none: the user sees it and pays
+    // anyway. Asked again, the method now charges 6: the payment is refused again with the
+    // new fee, nothing paid. Confirmed at 6, it is paid, once.
+    let w = World::new();
+    w.rail
+        .set_max_fee(Some(paykit_lib::Decimal::new("5").unwrap()));
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    let five = quote_of(&refused);
+    assert_eq!(
+        five.transfer.max_fee,
+        Some(paykit_lib::Decimal::new("5").unwrap())
+    );
+    w.rail
+        .set_max_fee(Some(paykit_lib::Decimal::new("6").unwrap()));
+    let again = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_transfer_confirmed(five.clone()),
+        )
+        .await
+        .unwrap_err();
+    let six = quote_of(&again);
+    assert_eq!(
+        six.transfer.max_fee,
+        Some(paykit_lib::Decimal::new("6").unwrap())
+    );
+    assert_eq!(six.endpoint_id, five.endpoint_id);
+    assert_eq!(six.payload_hash, five.payload_hash);
+    assert!(wallet.payments().await.unwrap().is_empty());
+    assert!(w.rail.all_executions().is_empty());
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default().with_transfer_confirmed(six))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+        "{outcome:?}"
+    );
+    let paid = wallet.payments().await.unwrap();
+    assert_eq!(paid.len(), 1);
+    assert_eq!(w.rail.executions(&paid[0].attempt_id), 1);
+    assert_eq!(w.rail.all_executions().len(), 1);
 }

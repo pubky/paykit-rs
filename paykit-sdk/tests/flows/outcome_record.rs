@@ -19,7 +19,7 @@ use std::sync::Arc;
 use crate::common::{draft, request_from, World};
 
 /// A value of the record that doesn't read as an activity record.
-const INVALID: &[u8] = b"{\"not\":\"an activity record\"}";
+pub(crate) const INVALID: &[u8] = b"{\"not\":\"an activity record\"}";
 
 /// Alice's payer record of bob's request `request`.
 pub(crate) fn payer_record(request: &RequestRef) -> RecordTarget {
@@ -35,9 +35,9 @@ pub(crate) fn payer_record(request: &RequestRef) -> RecordTarget {
 /// later value that doesn't read isn't refused as a regression of one it saw (Switch spec
 /// 8.2, Paykit wire 5.3 "Seen roles"), and is held as the record's content.
 #[derive(Default)]
-struct NoSeenMarks {
+pub(crate) struct NoSeenMarks {
     inner: MemoryStore,
-    armed: AtomicBool,
+    pub(crate) armed: AtomicBool,
     /// Every commit that queues a message (the client's `out/` items) fails, applying
     /// nothing.
     refuse_queue: AtomicBool,
@@ -101,7 +101,7 @@ async fn in_flight(w: &World) -> (Paykit, Paykit, RequestRef, AttemptId) {
 }
 
 /// The phone writes `value` at alice's payer record of `request`: `None` deletes it.
-async fn phone_writes(phone: &mut Paykit, request: &RequestRef, value: Option<&[u8]>) {
+pub(crate) async fn phone_writes(phone: &mut Paykit, request: &RequestRef, value: Option<&[u8]>) {
     let op = phone
         .app_mut()
         .record_op(&payer_record(request), value, Vec::new())

@@ -24,7 +24,7 @@ use paykit_lib::scopes::{PaykitScope, ScopeName};
 use paykit_lib::{
     AttemptId, Body, Label, PaymentAmount, PaymentEndpointIdentifier, PaymentReference,
 };
-use pubky_switch_client::app::{claim_conflict, Delivery, OpBatch};
+use pubky_switch_client::app::{claim_conflict, Delivery, OpBatch, RecordContent};
 use pubky_switch_core::claims::{ClaimStatus, Outcome};
 use pubky_switch_core::http::ErrorCode;
 use pubky_switch_core::ops::Condition;
@@ -49,8 +49,9 @@ pub struct RequestRef {
     pub request_hash: [u8; 32],
 }
 
-/// A one-time request to send (Paykit wire 4.5).
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A one-time request to send (Paykit wire 4.5). Its `Debug` shows neither the payment
+/// reference nor the metadata, and no endpoint payload.
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RequestDraft {
     /// The amount requested.
@@ -67,6 +68,29 @@ pub struct RequestDraft {
     pub accepted_endpoint_identifiers: Option<Vec<PaymentEndpointIdentifier>>,
     /// Opaque metadata.
     pub metadata: Option<Map<String, Value>>,
+}
+
+impl std::fmt::Debug for RequestDraft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestDraft")
+            .field("amount", &self.amount)
+            .field("payment_reference", &self.payment_reference)
+            .field("proposal_expires_at_ms", &self.proposal_expires_at_ms)
+            .field("payment_deadline_ms", &self.payment_deadline_ms)
+            .field("destination", &self.destination)
+            .field(
+                "accepted_endpoint_identifiers",
+                &self.accepted_endpoint_identifiers,
+            )
+            .field(
+                "metadata",
+                &self
+                    .metadata
+                    .as_ref()
+                    .map(|m| format!("<{} members>", m.len())),
+            )
+            .finish()
+    }
 }
 
 impl RequestDraft {
@@ -160,8 +184,8 @@ pub enum RequestStatus {
     Held,
 }
 
-/// A request the payer holds.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A request the payer holds. Its `Debug` shows the payment reference's length only.
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RequestView {
     /// The request.
@@ -180,6 +204,24 @@ pub struct RequestView {
     pub recurring: bool,
     /// What the user sees.
     pub status: RequestStatus,
+}
+
+impl std::fmt::Debug for RequestView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestView")
+            .field("request", &self.request)
+            .field("record", &self.record)
+            .field("amount", &self.amount)
+            .field(
+                "payment_reference",
+                &format_args!("<{} chars>", self.payment_reference.chars().count()),
+            )
+            .field("label", &self.label)
+            .field("proposal_expires_at_ms", &self.proposal_expires_at_ms)
+            .field("recurring", &self.recurring)
+            .field("status", &self.status)
+            .finish()
+    }
 }
 
 /// What the payee sees of a request it sent or a payment it received.
@@ -772,9 +814,8 @@ impl Paykit {
     /// Whether the request in `record` may still be answered (Paykit spec 8.1, 8.2): not
     /// paid, rejected or cancelled, nor `stopped` by a cancellation the app keeps; a recurring
     /// one only rejected, and only before it is accepted, its cancellation and anything after
-    /// its acceptance belonging to the recurring flows; and a recurring one not past its
-    /// proposal expiry at the highest service time verified, which the batch's time
-    /// condition would refuse on every try.
+    /// its acceptance belonging to the recurring flows. Its expiry is judged apart, on the
+    /// record read again ([`Paykit::expired_answer`]).
     fn refuse_answer(
         &self,
         record: &ActivityRecord,
@@ -795,10 +836,58 @@ impl Paykit {
         if recurring && (cancel || record.response.is_some()) {
             return Err(Refusal::Recurring.into());
         }
-        if recurring && self.reached(expiry_deadline(record, body)) {
-            return Err(Refusal::DeadlinePassed.into());
-        }
         Ok(())
+    }
+
+    /// The request record at `target` as the switch holds it, read again: a read that fails
+    /// is the error, never taken as the record unchanged. A value is held only when it reads
+    /// and is bound to the key it was read at, whose natural key the request derives, so it
+    /// holds that same request (Paykit wire 5.3).
+    pub(crate) async fn fresh_request(&mut self, target: &ActivityTarget) -> Result<Fresh> {
+        self.app.read_record(&target.record_target()).await?;
+        let key = self.activity_key(target)?;
+        let content = self.app.shared_record(&key).await?.map(|held| held.content);
+        Ok(match content {
+            None | Some(RecordContent::Deleted) => Fresh::Missing,
+            Some(RecordContent::Unreadable) => Fresh::Unreadable,
+            Some(RecordContent::Value(_)) => match self.held_activity(target).await? {
+                Some(record) => Fresh::Held(Box::new(record)),
+                None => Fresh::Unreadable,
+            },
+        })
+    }
+
+    /// The refusal of an answer to a recurring request whose proposal expiry the highest
+    /// service time verified has passed (Paykit spec 8.2), decided on the request record read
+    /// again, never on a copy held: another own app may have accepted, rejected or
+    /// cancelled the request before its expiry, and an accepted recurring request no longer
+    /// expires as a whole. [`Refusal::DeadlinePassed`] only for a record that is there,
+    /// reads, is bound to this request's key, holds this request, and leaves it unanswered
+    /// and past its expiry; a closed one gives what closed it. Any other record gives
+    /// `otherwise`, the error the answer met, or, without one, [`Refusal::NotFound`] for none
+    /// and [`PaykitError::Conflict`] for one that doesn't read as this request.
+    async fn expired_answer(
+        &mut self,
+        target: &ActivityTarget,
+        cancel: bool,
+        otherwise: Option<PaykitError>,
+    ) -> Result<PaykitError> {
+        Ok(match self.fresh_request(target).await? {
+            Fresh::Held(fresh) => {
+                let Some((_, body)) = request_of(&fresh) else {
+                    return Ok(otherwise.unwrap_or_else(unreadable_request));
+                };
+                if let Err(closed) = self.refuse_answer(&fresh, body, cancel, false) {
+                    closed
+                } else if self.reached(expiry_deadline(&fresh, body)) {
+                    Refusal::DeadlinePassed.into()
+                } else {
+                    otherwise.unwrap_or_else(conflict_changed)
+                }
+            }
+            Fresh::Missing => otherwise.unwrap_or_else(|| Refusal::NotFound.into()),
+            Fresh::Unreadable => otherwise.unwrap_or_else(unreadable_request),
+        })
     }
 
     async fn request_status(
@@ -908,6 +997,12 @@ impl Paykit {
         let stopped = self.kept_stop(&target).await?;
         self.refuse_answer(&record, body, cancel, stopped)?;
         let expiry = expiry_deadline(&record, body);
+        // Past its proposal expiry, a recurring request can't be answered: the batch's time
+        // condition would refuse it on every try. The copy held may be stale, so the record
+        // the switch holds decides.
+        if recurring && self.reached(expiry) {
+            return Err(self.expired_answer(&target, cancel, None).await?);
+        }
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);
         if !recurring {
             if let Some(read) = self.app.read_claim(&obligation).await? {
@@ -965,19 +1060,12 @@ impl Paykit {
                     }
                 }
                 // The proposal expired at the service: the answer's verified time says so.
-                // Only on `409 conflict`, after which the record was read again and the read
-                // went through: the one the service holds decides first, not the one this
-                // answer was built on. Another own app may have accepted, rejected or
-                // cancelled the request meanwhile, and an accepted recurring request no
-                // longer expires as a whole. Only one still unanswered is refused as expired;
-                // any other failure is the error, since nothing was read again.
+                // Only on `409 conflict`: any other failure is the error. The record the
+                // service holds decides, read again, and a record that isn't there or doesn't
+                // read as this request leaves the conflict as the answer.
                 if recurring && error.code() == Some(ErrorCode::Conflict) && self.reached(expiry) {
-                    if let Some(fresh) = self.held_activity(&target).await? {
-                        if let Some((_, body)) = request_of(&fresh) {
-                            self.refuse_answer(&fresh, body, cancel, false)?;
-                        }
-                    }
-                    return Err(Refusal::DeadlinePassed.into());
+                    let error = conflict(error);
+                    return Err(self.expired_answer(&target, cancel, Some(error)).await?);
                 }
                 return Err(conflict(error));
             }
@@ -985,6 +1073,25 @@ impl Paykit {
         self.app.flush_message(&msg_id).await?;
         Ok(msg_id)
     }
+}
+
+/// The request record the switch holds, read again ([`Paykit::fresh_request`]).
+pub(crate) enum Fresh {
+    /// It is there, reads, is bound to its key and holds the request.
+    Held(Box<ActivityRecord>),
+    /// There is none, or it was deleted.
+    Missing,
+    /// It doesn't read, isn't bound to its key, or holds another request.
+    Unreadable,
+}
+
+/// The refusal of a request record that doesn't read as the request it should hold.
+pub(crate) fn unreadable_request() -> PaykitError {
+    PaykitError::Conflict("the request record the switch holds doesn't read as this request".into())
+}
+
+fn conflict_changed() -> PaykitError {
+    PaykitError::Conflict("the record changed meanwhile".into())
 }
 
 /// The first service time at which `request` counts as expired: a one-time request's attempt

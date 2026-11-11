@@ -156,6 +156,8 @@ enum Crossing {
     Claim(pubky_switch_core::claims::ClaimStatus),
     /// No claim; then the request record can't be read again.
     RecordUnreadable,
+    /// No claim; another own app deleted the request record before.
+    RecordDeleted,
 }
 
 /// Alice's wallet holds bob's request; its copy of bob's `identity.json` is old, so the
@@ -187,6 +189,11 @@ async fn attempt_answered_past_the_deadline(crossing: Crossing) -> paykit_sdk::P
         )
         .await;
     wallet.receive(None).await.unwrap();
+    if let Crossing::RecordDeleted = crossing {
+        let mut phone = w.wallet("phone").await;
+        phone.receive(None).await.unwrap();
+        crate::outcome_record::phone_writes(&mut phone, &request, None).await;
+    }
     w.clock.advance_ms(11 * 60_000);
     reads.then(w.alice_id(), 0, false);
     reads.then(w.bob_id(), 25 * crate::common::HOUR_MS, false);
@@ -225,7 +232,7 @@ async fn attempt_answered_past_the_deadline(crossing: Crossing) -> paykit_sdk::P
             };
             serde_json::json!({ "claim": view.to_value() })
         }
-        Crossing::RecordUnreadable => serde_json::Value::Null,
+        Crossing::RecordUnreadable | Crossing::RecordDeleted => serde_json::Value::Null,
     };
     w.alice.switch().fail_next(Fault::Error {
         path: "/ops".into(),
@@ -271,6 +278,110 @@ async fn test_wallets_attempt_conflict_past_the_deadline_with_the_record_unread_
         matches!(error, paykit_sdk::PaykitError::Client(_)),
         "{error:?}"
     );
+}
+
+#[tokio::test]
+async fn test_wallets_attempt_conflict_past_the_deadline_with_the_record_gone_is_the_conflict() {
+    // Another own app deleted the request record; the `409` carries no claim and is
+    // answered past the deadline. The record read again isn't there, so nothing shows the
+    // request open: the conflict is the answer, not that the deadline passed.
+    let error = attempt_answered_past_the_deadline(Crossing::RecordDeleted).await;
+    assert!(
+        matches!(error, paykit_sdk::PaykitError::Conflict(_)),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_wallets_payment_past_the_deadline_shows_the_payees_cancellation_placed_elsewhere() {
+    // Bob cancelled the request before its deadline, and the phone placed it in the record;
+    // the wallet still holds the record as it was. Past the deadline, the record read again
+    // says the request was cancelled.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[phone.app_id()],
+        "paykit.payment_request_cancellation",
+        vec![request.request_hash],
+        serde_json::Map::new(),
+    );
+    phone.receive(None).await.unwrap();
+    assert_eq!(
+        phone.request(&request).await.unwrap().status,
+        RequestStatus::Cancelled
+    );
+    w.clock.advance_ms(25 * crate::common::HOUR_MS);
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.refusal(), Some(&Refusal::Cancelled), "{refused:?}");
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_wallets_payment_past_the_deadline_over_a_record_gone_or_unreadable() {
+    // The phone deletes the request record, writes a value that doesn't read, or writes the
+    // record of another request there; the wallet keeps no mark of what it saw and holds the
+    // record as it was. Past the deadline, the record read again shows no open request: one
+    // gone is not found, and one that doesn't read as this request a conflict, never that
+    // the deadline passed.
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    for write in ["delete", "invalid", "another"] {
+        let w = World::new();
+        let store = Arc::new(crate::outcome_record::NoSeenMarks::default());
+        let mut wallet = w
+            .wallet_on(
+                "wallet",
+                Arc::clone(&store) as Arc<dyn pubky_switch_client::store::StateStore>,
+            )
+            .await;
+        let mut phone = w.wallet("phone").await;
+        let mut shop = w.shop().await;
+        let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        w.clock.advance_ms(1);
+        let other = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+        wallet.receive(None).await.unwrap();
+        phone.receive(None).await.unwrap();
+        store.armed.store(true, Ordering::SeqCst);
+        let value = match write {
+            "delete" => None,
+            "invalid" => Some(crate::outcome_record::INVALID.to_vec()),
+            _ => {
+                let target = crate::outcome_record::payer_record(&other);
+                let held = phone.app_mut().read_record(&target).await.unwrap().unwrap();
+                Some(held.content.value().unwrap().to_vec())
+            }
+        };
+        crate::outcome_record::phone_writes(&mut phone, &request, value.as_deref()).await;
+        w.clock.advance_ms(25 * crate::common::HOUR_MS);
+        let error = wallet
+            .pay_request(&request, PayOptions::default())
+            .await
+            .unwrap_err();
+        if write == "delete" {
+            assert_eq!(
+                error.refusal(),
+                Some(&Refusal::NotFound),
+                "{write}: {error:?}"
+            );
+        } else {
+            assert!(
+                matches!(error, paykit_sdk::PaykitError::Conflict(_)),
+                "{write}: {error:?}"
+            );
+        }
+        assert!(w.rail.all_executions().is_empty());
+    }
 }
 
 #[tokio::test]

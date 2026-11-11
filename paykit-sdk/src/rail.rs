@@ -325,8 +325,9 @@ pub enum RailOutcome {
     Pending,
 }
 
-/// A verified success, as the method reports it ([`RailOutcome::Paid`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A verified success, as the method reports it ([`RailOutcome::Paid`]). The proof is
+/// opaque payment data: `Debug` shows only how many members it has.
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RailPaid {
     /// The opaque, method-specific proof (Paykit wire 4.10 `proof`).
@@ -334,6 +335,16 @@ pub struct RailPaid {
     /// The independently verified payment time, in Unix milliseconds, when the method has
     /// one (Paykit spec 8.2).
     pub paid_at_ms: Option<u64>,
+}
+
+impl std::fmt::Debug for RailPaid {
+    // The proof stays out of logs.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RailPaid")
+            .field("proof", &format_args!("<{} members>", self.proof.len()))
+            .field("paid_at_ms", &self.paid_at_ms)
+            .finish()
+    }
 }
 
 impl RailPaid {

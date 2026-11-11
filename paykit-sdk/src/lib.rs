@@ -62,7 +62,9 @@ pub use approval::{AppScopes, RequestedScopes};
 pub use destination::IDENTITY_GRACE_MS;
 pub use error::{PaykitError, Refusal, Result};
 pub use journal::{PaymentView, Stage};
-pub use pay::{PayOptions, PayOutcome, PaymentMode, UnrequestedPayment, UNREQUESTED_DEADLINE_MS};
+pub use pay::{
+    PayOptions, PayOutcome, PaymentMode, TransferQuote, UnrequestedPayment, UNREQUESTED_DEADLINE_MS,
+};
 pub use paykit::{
     orphan_floor_s, Paykit, PaykitBackup, PaykitConfig, ReceiveSummary, DEFAULT_RESEND_BUDGET,
     PRE_DISPATCH_BUDGET_MS,
@@ -79,3 +81,151 @@ pub use requests::{
 };
 pub use resend::{ResendSelection, RESEND_COOLDOWN_MS};
 pub use timer::Timer;
+
+#[cfg(test)]
+mod tests {
+    use paykit_lib::bodies::RequestDestination;
+    use paykit_lib::{
+        Asset, AttemptId, Decimal, PaymentAmount, PaymentEndpointIdentifier,
+        PaymentEndpointPayload, PaymentReference,
+    };
+    use serde_json::{json, Map, Value};
+
+    use crate::rail::{CandidateId, EndpointSelection, PaymentEndpointCandidate, ProofCheck};
+    use crate::*;
+
+    /// A string no `Debug` of payment data may show.
+    const SECRET: &str = "s3cret-sentinel";
+
+    fn btc() -> PaymentAmount {
+        PaymentAmount {
+            value: Decimal::new("1").unwrap(),
+            asset: Asset::new("btc").unwrap(),
+        }
+    }
+
+    fn id() -> PaymentEndpointIdentifier {
+        PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap()
+    }
+
+    fn payload() -> PaymentEndpointPayload {
+        PaymentEndpointPayload::new(&format!("lnbc-{SECRET}")).unwrap()
+    }
+
+    fn proof() -> Map<String, Value> {
+        json!({ "type": "x-ledger", "entry": SECRET })
+            .as_object()
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_debug_never_shows_payment_data() {
+        let paid = RailPaid::new(proof()).with_paid_at_ms(1);
+        let quote = TransferQuote {
+            payee: [1; 32],
+            app_id: [2; 16],
+            endpoint_id: id(),
+            payload_hash: pubky_switch_core::enc::hash(payload().as_str().as_bytes()),
+            amount: btc(),
+            transfer: Transfer::new(Some(btc()), None),
+        };
+        let mut endpoints = std::collections::BTreeMap::new();
+        endpoints.insert(id(), payload());
+        let mut metadata = Map::new();
+        metadata.insert("order".into(), Value::String(SECRET.into()));
+        let draft = RequestDraft::new(
+            btc(),
+            PaymentReference::new(SECRET).unwrap(),
+            RequestDestination::Endpoints(endpoints),
+        )
+        .with_metadata(metadata);
+        let shown = [
+            format!("{paid:?}"),
+            format!("{:?}", RailOutcome::Paid(paid.clone())),
+            format!(
+                "{:?}",
+                RailPayment {
+                    endpoint_id: id(),
+                    payload: payload(),
+                    amount: btc(),
+                    idempotency_key: AttemptId::from_bytes([3; 16]),
+                    payment_reference: Some(SECRET.into()),
+                }
+            ),
+            format!(
+                "{:?}",
+                ProofCheck {
+                    endpoint_id: id(),
+                    payload: Some(payload()),
+                    amount: btc(),
+                    attempt_id: AttemptId::from_bytes([3; 16]),
+                    proof: proof(),
+                }
+            ),
+            format!(
+                "{:?}",
+                PaymentEndpointCandidate::new(CandidateId::new(0), id(), payload())
+            ),
+            format!(
+                "{:?}",
+                EndpointSelection::new(vec![CandidateId::new(0)])
+                    .with_error(CandidateId::new(1), RailError::Unavailable("down".into()))
+            ),
+            format!("{draft:?}"),
+            format!(
+                "{:?}",
+                RequestView {
+                    request: RequestRef {
+                        payee: [1; 32],
+                        request_hash: [4; 32],
+                    },
+                    record: [5; 32],
+                    amount: btc(),
+                    payment_reference: SECRET.into(),
+                    label: None,
+                    proposal_expires_at_ms: None,
+                    recurring: false,
+                    status: RequestStatus::Open,
+                }
+            ),
+            format!(
+                "{:?}",
+                app_records::PublicEndpoint {
+                    app_id: [2; 16],
+                    endpoint_id: id(),
+                    payload: payload(),
+                }
+            ),
+            format!(
+                "{:?}",
+                UnrequestedPayment::new([1; 32], btc()).with_options(
+                    PayOptions::default()
+                        .with_endpoint(id())
+                        .with_transfer_confirmed(quote.clone())
+                )
+            ),
+            format!(
+                "{:?}",
+                PaykitError::from(Refusal::Transfer {
+                    reason: "another amount".into(),
+                    quote: Box::new(quote),
+                })
+            ),
+            format!(
+                "{:?}",
+                crate::journal::Destination::new(
+                    [2; 16],
+                    &id(),
+                    &payload(),
+                    paykit_lib::records::DestinationSource::List,
+                    Some(1),
+                    true,
+                )
+            ),
+        ];
+        for text in shown {
+            assert!(!text.contains(SECRET), "{text}");
+        }
+    }
+}

@@ -294,7 +294,7 @@ async fn test_one_time_transfer_of_another_amount_refused() {
         .await
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::Transfer(_))),
+        matches!(refused.refusal(), Some(Refusal::Transfer { .. })),
         "{refused:?}"
     );
     assert!(wallet.payments().await.unwrap().is_empty());

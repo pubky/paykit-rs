@@ -307,7 +307,10 @@ async fn test_custom_rail_zero_fee_needs_no_cap() {
     });
     let refused = pay_through(&w, &rail).await.unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(paykit_sdk::Refusal::Transfer(_))),
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::Transfer { .. })
+        ),
         "{refused:?}"
     );
 }
@@ -349,7 +352,7 @@ async fn test_custom_rail_fee_cap_is_per_asset() {
             assert!(
                 matches!(
                     outcome.as_ref().map_err(|e| e.refusal()),
-                    Err(Some(paykit_sdk::Refusal::Transfer(_)))
+                    Err(Some(paykit_sdk::Refusal::Transfer { .. }))
                 ),
                 "{outcome:?}"
             );

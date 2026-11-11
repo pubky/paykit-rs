@@ -90,8 +90,15 @@ pub enum Refusal {
     WaitingForList,
     /// The payment method would transfer another amount or asset, an amount it can't tell, or
     /// a fee above the app's cap, and the user didn't choose it (Paykit spec 7.2 step 1).
-    #[error("Paykit spec 7.2 step 1: {0}")]
-    Transfer(String),
+    /// `quote` is what it would transfer, to show the user; paying it anyway carries it back
+    /// ([`crate::PayOptions::with_transfer_confirmed`]).
+    #[error("Paykit spec 7.2 step 1: {reason}")]
+    Transfer {
+        /// Which rule the transfer breaks.
+        reason: String,
+        /// The destination and what it would transfer.
+        quote: Box<crate::TransferQuote>,
+    },
     /// The payee's `identity.json` couldn't be read, or the app's own couldn't be revalidated,
     /// before money moves (Paykit spec 4, 7.2).
     #[error("Paykit spec 7.2: {0}")]

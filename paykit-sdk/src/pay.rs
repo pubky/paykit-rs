@@ -50,10 +50,10 @@ use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::{Destination, JournalEntry, KeptAmount, PaymentView, Stage};
 use crate::paykit::Paykit;
 use crate::rail::{
-    CandidateId, PaymentEndpointCandidate, RailError, RailOutcome, RailPaid, RailPayment,
+    CandidateId, PaymentEndpointCandidate, RailError, RailOutcome, RailPaid, RailPayment, Transfer,
 };
 use crate::records::{list_target, KeptMessage};
-use crate::requests::{cancelled, rejected, request_of, RequestRef};
+use crate::requests::{cancelled, rejected, request_of, unreadable_request, Fresh, RequestRef};
 use crate::state::{self, key};
 
 /// How long after the latest time it has seen a payment without a request's attempt pins its
@@ -85,9 +85,11 @@ pub struct PayOptions {
     pub mode: PaymentMode,
     /// The user has seen "may already be paid" (Paykit spec 7.1).
     pub may_be_paid_confirmed: Option<UserConfirmed>,
-    /// The user has seen that the destination transfers another amount, or a fee above the
-    /// app's cap, and pays it anyway (Paykit spec 7.2 step 1).
-    pub transfer_confirmed: Option<UserConfirmed>,
+    /// The transfer the user was shown and chose to pay anyway, as a refusal for another
+    /// amount, or a fee above the app's cap, gave it ([`Refusal::Transfer`]; Paykit spec 7.2
+    /// step 1). It lets only that destination, with that same transfer, be paid: one chosen
+    /// or quoted differently since is refused again with what it would transfer now.
+    pub transfer_confirmed: Option<TransferQuote>,
     /// The user has seen that the payee's switch couldn't confirm the payee's apps, and pays
     /// anyway ([`Refusal::IdentityUnconfirmed`]; Switch spec 4.3, Paykit spec 7.2).
     pub unconfirmed_identity_confirmed: Option<UserConfirmed>,
@@ -128,11 +130,12 @@ impl PayOptions {
         self
     }
 
-    /// The user has seen that the destination transfers another amount, or a fee above the
-    /// app's cap, and pays it anyway (Paykit spec 7.2 step 1).
+    /// The transfer the user was shown and chose to pay anyway, as a refusal for another
+    /// amount, or a fee above the app's cap, gave it ([`Refusal::Transfer`]; Paykit spec 7.2
+    /// step 1). Only that destination, with that same transfer, is paid.
     #[must_use]
-    pub fn with_transfer_confirmed(mut self, confirmed: UserConfirmed) -> Self {
-        self.transfer_confirmed = Some(confirmed);
+    pub fn with_transfer_confirmed(mut self, quote: TransferQuote) -> Self {
+        self.transfer_confirmed = Some(quote);
         self
     }
 
@@ -153,6 +156,31 @@ impl PayOptions {
         self.possibly_cancelled_confirmed = Some(confirmed);
         self
     }
+}
+
+/// What a destination would transfer, as a payment shows it to the user before paying it on
+/// their explicit choice (Paykit spec 7.2 step 1): the destination, named by its payee app,
+/// Payment Endpoint Identifier and a hash of its payload, never the payload itself; the
+/// amount paid; and the whole [`Transfer`] the payment method reported. A
+/// [`Refusal::Transfer`] carries it, and a payment the user then makes anyway carries it
+/// back ([`PayOptions::with_transfer_confirmed`]): the SDK chooses and asks the method
+/// again, and pays a destination failing the transfer check only when it and its transfer
+/// are this one, field for field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TransferQuote {
+    /// The payee.
+    pub payee: [u8; 32],
+    /// The payee app whose destination it is.
+    pub app_id: [u8; 16],
+    /// The Payment Endpoint Identifier.
+    pub endpoint_id: PaymentEndpointIdentifier,
+    /// The hash of the Payment Endpoint Payload, which names it without showing it.
+    pub payload_hash: [u8; 32],
+    /// The amount paid: the request's, or the payment without a request's.
+    pub amount: PaymentAmount,
+    /// What the method said it would transfer: its amount and largest fee.
+    pub transfer: Transfer,
 }
 
 /// The result of a payment.
@@ -547,7 +575,7 @@ impl Paykit {
         // read first: a payment made, or another wallet's open attempt, is what the request
         // shows, though its deadline has passed; then the request record, read again.
         if self.deadline_passed(deadline) {
-            return Err(self.past_deadline(&target).await?);
+            return Err(self.past_deadline(&target, None).await?);
         }
         let (destination, carrier, reserve) = match &body.destination {
             RequestDestination::Endpoints(endpoints) => {
@@ -581,7 +609,7 @@ impl Paykit {
                     )
                     .into());
                 }
-                self.choose(gathered, &body.amount, &options)?
+                self.choose(&request.payee, gathered, &body.amount, &options)?
                     .ok_or_else(|| unsupported("the request's endpoints"))?
             }
             // The request's accepted identifiers restrict a destination from the payee's lists
@@ -958,7 +986,7 @@ impl Paykit {
                 .into());
             }
             return self
-                .choose(gathered, amount, options)?
+                .choose(payee, gathered, amount, options)?
                 .ok_or_else(|| unsupported("the payee's public endpoints"));
         }
         let now = self.now();
@@ -1049,7 +1077,7 @@ impl Paykit {
                 }
             }
         }
-        if let Some(chosen) = self.choose(gathered, amount, options)? {
+        if let Some(chosen) = self.choose(payee, gathered, amount, options)? {
             return Ok(chosen);
         }
         // Lists in use that offer only endpoints the method doesn't pay, and no app's list to
@@ -1150,6 +1178,7 @@ impl Paykit {
     /// them. The choice is journaled with the attempt, and a resume pays it.
     fn choose(
         &self,
+        payee: &[u8; 32],
         gathered: Vec<Choice>,
         amount: &PaymentAmount,
         options: &PayOptions,
@@ -1164,9 +1193,9 @@ impl Paykit {
             let Some(choice) = gathered.get_mut(at).and_then(Option::take) else {
                 continue;
             };
-            match self.check_transfer(&choice.destination, amount, options) {
+            match self.check_transfer(payee, &choice.destination, amount, options) {
                 Ok(()) => return Ok(Some((choice.destination, choice.carrier, choice.reserve))),
-                Err(error) if matches!(error.refusal(), Some(Refusal::Transfer(_))) => {
+                Err(error) if matches!(error.refusal(), Some(Refusal::Transfer { .. })) => {
                     refused.get_or_insert(error);
                 }
                 Err(error) => return Err(error),
@@ -1178,25 +1207,32 @@ impl Paykit {
         refused.map_or(Ok(None), Err)
     }
 
-    /// The refusal of a payment of the request whose record is at `target`, once its deadline
-    /// has passed (Paykit spec 7.1): what the record the switch holds shows, read again, comes
-    /// first, since another own app may have rejected or cancelled the request, or the payee
-    /// cancelled it, as the request's status shows before its expiry; only a request still
-    /// open is refused as [`Refusal::DeadlinePassed`]. The caller has taken the claim's state
-    /// first.
+    /// The refusal of a payment of the request whose record is at `target`,
+    /// once its deadline has passed (Paykit spec 7.1), decided on the record the switch holds,
+    /// read again, never on a copy held: another own app may have rejected or cancelled the
+    /// request, or the payee cancelled it, as the request's status shows before its expiry.
+    /// [`Refusal::DeadlinePassed`] only for a record that is there, reads, is bound to this
+    /// request's key, holds this request, and leaves it open; a closed one gives what closed
+    /// it. Any other record gives `otherwise`, the error the attempt met, or, without one,
+    /// [`Refusal::NotFound`] for none and [`PaykitError::Conflict`] for one that doesn't read
+    /// as this request. The caller has taken the claim's state first.
     ///
     /// # Errors
     ///
     /// The read's failure: a record that couldn't be read again is never taken as unchanged.
-    async fn past_deadline(&mut self, target: &ActivityTarget) -> Result<PaykitError> {
-        self.app.read_record(&target.record_target()).await?;
-        let refusal = match self.held_activity(target).await? {
-            Some(fresh) if fresh.shows_paid() => Refusal::AlreadyPaid,
-            Some(fresh) if rejected(&fresh) => Refusal::Rejected,
-            Some(fresh) if cancelled(&fresh) => Refusal::Cancelled,
-            _ => Refusal::DeadlinePassed,
-        };
-        Ok(refusal.into())
+    async fn past_deadline(
+        &mut self,
+        target: &ActivityTarget,
+        otherwise: Option<PaykitError>,
+    ) -> Result<PaykitError> {
+        Ok(match self.fresh_request(target).await? {
+            Fresh::Held(fresh) if fresh.shows_paid() => Refusal::AlreadyPaid.into(),
+            Fresh::Held(fresh) if rejected(&fresh) => Refusal::Rejected.into(),
+            Fresh::Held(fresh) if cancelled(&fresh) => Refusal::Cancelled.into(),
+            Fresh::Held(_) => Refusal::DeadlinePassed.into(),
+            Fresh::Missing => otherwise.unwrap_or_else(|| Refusal::NotFound.into()),
+            Fresh::Unreadable => otherwise.unwrap_or_else(unreadable_request),
+        })
     }
 
     /// Paykit spec 8.4, "No usable list": ask the payee for its current list, with a
@@ -1260,40 +1296,56 @@ impl Paykit {
     }
 
     /// The transfer check (Paykit spec 7.2 step 1): the method transfers exactly the amount
-    /// paid, and any fee the payee can influence is within the app's cap, unless the user
-    /// chose otherwise.
+    /// paid, and any fee the payee can influence is within the app's cap. A destination
+    /// failing it is paid only on the user's explicit choice of exactly what it would
+    /// transfer: the method is asked again, and the destination and its transfer must be the
+    /// ones the user confirmed ([`TransferQuote`]); otherwise it is refused with what it
+    /// would transfer now, for the user to see.
     fn check_transfer(
         &self,
+        payee: &[u8; 32],
         destination: &Destination,
         amount: &PaymentAmount,
         options: &PayOptions,
     ) -> Result<()> {
-        if options.transfer_confirmed.is_some() {
+        let endpoint_id = destination.endpoint_id()?;
+        let payload = destination.payload()?;
+        let transfer = self.rail.transfer(&endpoint_id, &payload, amount);
+        // A fee of nothing needs no cap: the default, with no caps, still pays it. The fee is
+        // in the transfer's asset, which is the payment's (checked first).
+        let reason = if transfer.amount.as_ref() != Some(amount) {
+            "the destination transfers another amount or asset, or one the method can't tell"
+        } else if transfer
+            .max_fee
+            .as_ref()
+            .filter(|fee| !fee.is_zero())
+            .is_some_and(|fee| {
+                self.config
+                    .fee_caps
+                    .get(&amount.asset)
+                    .is_none_or(|cap| fee > cap)
+            })
+        {
+            "a fee above the app's cap"
+        } else {
+            return Ok(());
+        };
+        let quote = TransferQuote {
+            payee: *payee,
+            app_id: destination.app_id,
+            endpoint_id,
+            payload_hash: pubky_switch_core::enc::hash(payload.as_str().as_bytes()),
+            amount: amount.clone(),
+            transfer,
+        };
+        if options.transfer_confirmed.as_ref() == Some(&quote) {
             return Ok(());
         }
-        let transfer =
-            self.rail
-                .transfer(&destination.endpoint_id()?, &destination.payload()?, amount);
-        if transfer.amount.as_ref() != Some(amount) {
-            return Err(Refusal::Transfer(
-                "the destination transfers another amount or asset, or one the method can't tell"
-                    .into(),
-            )
-            .into());
+        Err(Refusal::Transfer {
+            reason: reason.into(),
+            quote: Box::new(quote),
         }
-        // A fee of nothing needs no cap: the default, with no caps, still pays it. The fee is
-        // in the transfer's asset, which is the payment's (checked above).
-        if let Some(fee) = transfer.max_fee.as_ref().filter(|fee| !fee.is_zero()) {
-            if self
-                .config
-                .fee_caps
-                .get(&amount.asset)
-                .is_none_or(|cap| fee > cap)
-            {
-                return Err(Refusal::Transfer("a fee above the app's cap".into()).into());
-            }
-        }
-        Ok(())
+        .into())
     }
 
     /// Steps 1 to 4 of the paying order for a planned attempt (Paykit spec 7.2).
@@ -1415,15 +1467,16 @@ impl Paykit {
                 if let Some(view) = claim_conflict(&error) {
                     self.refuse_claim(&view)?;
                 }
+                let changed = PaykitError::Conflict(
+                    "Paykit spec 7.2: the request or list record changed meanwhile".into(),
+                );
                 if self.deadline_passed(entry.deadline) {
                     if on_record {
-                        return Err(self.past_deadline(&record).await?);
+                        return Err(self.past_deadline(&record, Some(changed)).await?);
                     }
                     return Err(Refusal::DeadlinePassed.into());
                 }
-                return Err(PaykitError::Conflict(
-                    "Paykit spec 7.2: the request or list record changed meanwhile".into(),
-                ));
+                return Err(changed);
             }
             Err(AppError::InvalidData(why)) => {
                 // The attempt's proof showed another state: the client wrote it `failed`.
