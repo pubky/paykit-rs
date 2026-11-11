@@ -16,9 +16,13 @@ publish = false
 # Test-only: writers without their rules, for the rejection cases of the vector tests. No
 # production build enables it; the crate's own tests do, through its dev-dependency on itself.
 test-vectors = []
+# Paykit's protocol for the signer (`pubky-switch-signer`): what a host that signs certificates
+# registers so they can hold Paykit's scopes. Apps and the SDK don't need it.
+signer = ["dep:pubky-switch-signer"]
 
 [dependencies]
 pubky-switch-core.workspace = true
+pubky-switch-signer = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

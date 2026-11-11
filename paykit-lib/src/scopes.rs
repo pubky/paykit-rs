@@ -42,6 +42,10 @@ pub const PAYKIT_SCOPE_NAMES: [&str; 7] = [
     "ext",
 ];
 
+/// The Paykit Profile's path on the Homeserver (Paykit spec 3.4, 4): an app's grant covers it,
+/// read and write, only when the user allows that app to edit the Paykit Profile.
+pub const PAYKIT_PROFILE_PATH: &str = "/pub/paykit/profile.json";
+
 /// A label of a labelled selling scope `request:<label>` (Paykit spec 3.1): 1 to 32
 /// characters of `a-z`, `0-9` and `-`, starting with a letter or digit, the syntax of the
 /// Switch's sub-scope. `paykit` is a label like any other.
