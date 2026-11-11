@@ -1130,7 +1130,7 @@ async fn test_default_config_takes_a_one_day_rail() {
         longest_completion_ms: 86_400_000,
         ..paykit_sdk::Rail::declaration(&*w.rail)
     };
-    w.rail.set_declaration(declaration.clone());
+    w.rail.set_declaration(declaration);
     assert_eq!(
         PaykitConfig::default().orphan_after_s_for(&declaration),
         86_400 + paykit_sdk::PRE_DISPATCH_BUDGET_MS / 1000

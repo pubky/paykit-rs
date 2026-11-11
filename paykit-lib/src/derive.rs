@@ -152,6 +152,11 @@ pub mod natural_key {
     }
 }
 
+/// A reader of a payment proof's `proof` object that gives its settlement ID (Paykit wire
+/// 1.5), as [`settlement_id`] does for the methods this crate knows: a payment method's
+/// own reader names the settlements of its own proofs.
+pub type SettlementIdReader<'a> = dyn Fn(&Map<String, Value>) -> Option<Vec<u8>> + 'a;
+
 /// The settlement ID of a payment proof's `proof` object (Paykit wire 1.5): the bytes its
 /// payment method defines to name one settlement, in that method's one spelling.
 ///

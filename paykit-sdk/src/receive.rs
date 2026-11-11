@@ -116,7 +116,7 @@ impl std::fmt::Debug for QueuedAnswer {
 
 /// The writes `stored`, a message that passed check 10, causes, added to `cx` (module docs).
 /// The settlement ID of a proof's `proof` object, by the app's rail ([`crate::Rail::settlement_id`]).
-pub(crate) type Settlement<'a> = &'a dyn Fn(&Map<String, Value>) -> Option<Vec<u8>>;
+pub(crate) type Settlement<'a> = &'a paykit_lib::derive::SettlementIdReader<'a>;
 
 pub(crate) fn effect(
     cx: &mut ReceiveContext<'_>,

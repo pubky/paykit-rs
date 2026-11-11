@@ -113,9 +113,7 @@ async fn test_certificate_join_paykit_refuses_writes_and_sends_nothing() {
         w.timer(),
     )
     .await;
-    let error = joined
-        .err()
-        .expect("a certificate Paykit refuses was joined with");
+    let error = joined.expect_err("a certificate Paykit refuses was joined with");
     assert!(is_cert_refused(&error), "{error:?}");
     // Refused before the client's join: no commit, and no registration at the switch.
     assert_eq!(fault.commits(), 0);

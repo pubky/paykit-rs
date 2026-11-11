@@ -966,7 +966,7 @@ impl ActivityRecord {
     pub fn natural_key_with(
         &self,
         own: &[u8; 32],
-        settlement: &dyn Fn(&Map<String, Value>) -> Option<Vec<u8>>,
+        settlement: &crate::derive::SettlementIdReader<'_>,
     ) -> Result<Vec<u8>> {
         let (_, payee) = self.payer_payee(own);
         Ok(match self.binding()? {

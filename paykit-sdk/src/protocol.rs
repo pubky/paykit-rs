@@ -344,7 +344,7 @@ pub(crate) fn restore_paykit_layer(
         // wire 1.5), and every message it keeps verifies for this app: checked here, before
         // anything is written.
         entry
-            .check_restored(&own, own_cert, &request_obligation)
+            .check_restored(&own, own_cert, request_obligation)
             .map_err(|_| bad())?;
         if rest != entry.attempt_id.as_bytes() {
             return Err(bad());
