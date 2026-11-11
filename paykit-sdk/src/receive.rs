@@ -783,7 +783,9 @@ impl Paykit {
     /// a later receive. Updates to held records still apply meanwhile. A store failure or an
     /// alarm is an error.
     pub(crate) async fn refresh_lists_when_due(&mut self) -> crate::error::Result<()> {
-        if !reads_lists(self.app.cert().scopes()) {
+        // No Paykit action under a certificate Paykit refuses, a read made as the app and a
+        // local write included (Paykit spec 7.2, "The restored certificate").
+        if self.certificate_refused().is_some() || !reads_lists(self.app.cert().scopes()) {
             return Ok(());
         }
         let now = self.now();

@@ -311,12 +311,14 @@ impl Paykit {
     /// # Errors
     ///
     /// [`Refusal::IdentityUnavailable`] or [`Refusal::IdentityUnconfirmed`] for the payee's
-    /// `identity.json`; [`PaykitError::Homeserver`] when a record can't be read now.
+    /// `identity.json`; [`PaykitError::Homeserver`] when a record can't be read now;
+    /// [`Refusal::CertificateRefused`] under a certificate Paykit refuses.
     pub async fn public_endpoints(
         &mut self,
         payee: &[u8; 32],
         confirmed: Option<UserConfirmed>,
     ) -> Result<Vec<PublicEndpoint>> {
+        self.refresh_own()?;
         let records = self
             .public_records(payee, None, Initiator::User, confirmed)
             .await??;

@@ -190,6 +190,11 @@ async fn test_certificate_renewal_paykit_refuses_holds_entries_and_refuses_calls
     // No Paykit call that writes or sends runs under it.
     let error = wallet.flush().await.unwrap_err();
     assert!(is_cert_refused(&error), "{error:?}");
+    let error = wallet
+        .public_endpoints(&w.bob_id(), None)
+        .await
+        .unwrap_err();
+    assert!(is_cert_refused(&error), "{error:?}");
     let error = wallet.resume_payments().await.unwrap_err();
     assert!(is_cert_refused(&error), "{error:?}");
     // A renewal that passes replaces it: the held request is processed then.
@@ -264,4 +269,99 @@ async fn test_certificate_restore_then_renewal_paykit_refuses_takes_no_action() 
     let error = restored.flush().await.unwrap_err();
     assert!(is_cert_refused(&error), "{error:?}");
     assert!(restored.certificate_refused().is_some());
+}
+
+#[tokio::test]
+async fn test_certificate_renewal_paykit_refuses_reads_no_lists() {
+    // A wallet holding `contacts` reads its lists at each receive once they are due. Renewed
+    // with `contacts` but without the `lists.read` it needs, a certificate the Switch takes
+    // and Paykit refuses, it reads no list and writes no local refresh time.
+    let w = World::new();
+    let scopes = AppScopes::new().pay().contacts().build().unwrap();
+    let recording = Arc::new(Recording::default());
+    let mut wallet = w
+        .join_with(
+            &w.alice,
+            "wallet",
+            scopes.clone(),
+            PaykitConfig::default(),
+            Arc::clone(&recording) as Arc<dyn StateStore>,
+        )
+        .await;
+    let me = wallet.app_id();
+    let old = wallet.app().cert().clone();
+    let mut refused = scopes;
+    refused.permissions.retain(|p| *p != Permission::ListsRead);
+    let renewed = renew(&w, me, &refused, 1_000);
+    wallet.receive(None).await.unwrap();
+    list(&w, me, &old, &renewed);
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(summary.certificate_refused.is_some());
+    // The lists are due again: under the refused certificate, no list is asked for.
+    w.clock.advance_ms(paykit_sdk::LISTS_REFRESH_MS + 1);
+    let before = w.router.log().len();
+    recording.keys.lock().unwrap().clear();
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(summary.certificate_refused.is_some());
+    let refreshed: Vec<String> = recording
+        .keys
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|key| key.ends_with("/lr"))
+        .cloned()
+        .collect();
+    assert!(refreshed.is_empty(), "{refreshed:?}");
+    let asked: Vec<String> = w.router.log()[before..]
+        .iter()
+        .filter(|line| line.contains("/allow"))
+        .cloned()
+        .collect();
+    assert!(asked.is_empty(), "{asked:?}");
+}
+
+/// A store that records the key of every write it commits.
+#[derive(Default)]
+struct Recording {
+    inner: pubky_switch_client::store::MemoryStore,
+    keys: std::sync::Mutex<Vec<String>>,
+}
+
+impl StateStore for Recording {
+    fn get(
+        &self,
+        ns: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, pubky_switch_client::error::StoreError> {
+        self.inner.get(ns, key)
+    }
+
+    fn scan(
+        &self,
+        ns: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<pubky_switch_client::store::KeyValue>, pubky_switch_client::error::StoreError>
+    {
+        self.inner.scan(ns, prefix, after, limit)
+    }
+
+    fn commit(
+        &self,
+        batch: pubky_switch_client::store::WriteBatch,
+    ) -> Result<(), pubky_switch_client::error::StoreError> {
+        let mut keys = self.keys.lock().unwrap();
+        for write in &batch.writes {
+            let key = match write {
+                pubky_switch_client::store::Write::Put { key, .. }
+                | pubky_switch_client::store::Write::Delete { key, .. } => key,
+                pubky_switch_client::store::Write::DeletePrefix { prefix, .. } => prefix,
+                _ => continue,
+            };
+            keys.push(String::from_utf8_lossy(key).into_owned());
+        }
+        drop(keys);
+        self.inner.commit(batch)
+    }
 }
