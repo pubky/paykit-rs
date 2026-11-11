@@ -1067,9 +1067,15 @@ impl Paykit {
             )
             .into());
         }
-        // A fee of nothing needs no cap: `fee_cap: None`, the default, still pays it.
+        // A fee of nothing needs no cap: the default, with no caps, still pays it. The fee is
+        // in the transfer's asset, which is the payment's (checked above).
         if let Some(fee) = transfer.max_fee.as_ref().filter(|fee| !fee.is_zero()) {
-            if self.config.fee_cap.as_ref().is_none_or(|cap| fee > cap) {
+            if self
+                .config
+                .fee_caps
+                .get(&amount.asset)
+                .is_none_or(|cap| fee > cap)
+            {
                 return Err(Refusal::Transfer("a fee above the app's cap".into()).into());
             }
         }

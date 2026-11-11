@@ -11,12 +11,12 @@
 //! Recurring requests, Allowances and publishing Private Payment Lists add their own modules
 //! the same way.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use paykit_lib::derive::request_obligation_blinded;
 use paykit_lib::scopes::{acts_as_payee, check_certificate};
-use paykit_lib::{Decimal, Label};
+use paykit_lib::{Asset, Decimal, Label};
 use pubky_switch_client::app::Protocol as _;
 use pubky_switch_client::app::{
     App, AppBackup, AppConfig, AppEnv, AppEvent, HomeserverReader, JoinRequest, ReceiveReport,
@@ -85,8 +85,9 @@ pub struct PaykitConfig {
     /// an app that wants later repeats sets a larger value.
     pub orphan_after_s: Option<u64>,
     /// The largest fee the payee can influence through its destination that the app pays
-    /// automatically (Paykit spec 7.2 step 1); `None` accepts no such fee.
-    pub fee_cap: Option<Decimal>,
+    /// without asking, per asset, in whole units of the payment's asset (Paykit spec 7.2
+    /// step 1): a fee in an asset without a cap here is accepted only when it is zero.
+    pub fee_caps: BTreeMap<Asset, Decimal>,
     /// The label a payee app sends its requests under (Paykit spec 3.1, 8.1). An app holding
     /// only labelled selling scopes needs one unless it holds exactly one label.
     pub selling_label: Option<Label>,
@@ -117,10 +118,12 @@ impl PaykitConfig {
     }
 
     /// The largest fee the payee can influence through its destination that the app pays
-    /// automatically (Paykit spec 7.2 step 1); when not set, the app accepts no such fee.
+    /// without asking for a payment in `asset` (Paykit spec 7.2 step 1), replacing any cap
+    /// set for that asset before. A fee in an asset without a cap is accepted only when it
+    /// is zero.
     #[must_use]
-    pub fn with_fee_cap(mut self, fee_cap: Decimal) -> Self {
-        self.fee_cap = Some(fee_cap);
+    pub fn with_fee_cap(mut self, asset: Asset, fee_cap: Decimal) -> Self {
+        self.fee_caps.insert(asset, fee_cap);
         self
     }
 
@@ -152,7 +155,7 @@ impl Default for PaykitConfig {
         Self {
             app: AppConfig::default(),
             orphan_after_s: None,
-            fee_cap: None,
+            fee_caps: BTreeMap::new(),
             selling_label: None,
             resend_budget: DEFAULT_RESEND_BUDGET,
         }
