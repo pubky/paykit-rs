@@ -717,6 +717,157 @@
         "reserved": 1,
         "spent": 0
       }
+    },
+    {
+      "candidates": [
+        {
+          "allowed": false,
+          "amount": "0.001",
+          "refused_by": "period_count"
+        },
+        {
+          "allowed": false,
+          "amount": "0.01",
+          "refused_by": "period_amount"
+        }
+      ],
+      "claims": [],
+      "ledger": {
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [
+          {
+            "asset": "btc",
+            "at": "2026-02-05T00:00:00.000Z",
+            "attempt_id": "AQEBAQEBAQEBAQEBAQEBAQ",
+            "obligation": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+            "outcome": "done",
+            "value": "0.005"
+          }
+        ],
+        "totals": {
+          "count": 0,
+          "spent": "",
+          "v01": [
+            {
+              "at": "2026-01-15T00:00:00.000Z",
+              "count": 1,
+              "spent": "0.05"
+            },
+            {
+              "at": "2026-02-01T00:00:00.000Z",
+              "count": 2,
+              "spent": "0.02"
+            }
+          ]
+        },
+        "v": 1
+      },
+      "name": "totals.v01: v0.1 usage counts at its at in the period limit, with an entry",
+      "t": "2026-02-10T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.10",
+        "per_payment_amount": {
+          "maximum": "0.01",
+          "minimum": "0.0001"
+        },
+        "period_limits": [
+          {
+            "amount_limit": "0.03",
+            "payment_count_limit": 3,
+            "period": {
+              "anchor": "2026-01-31T00:00:00.000Z",
+              "every": 1,
+              "kind": "anchored",
+              "unit": "month"
+            }
+          }
+        ]
+      },
+      "usage": {
+        "lifetime": "0.075",
+        "periods": [
+          {
+            "amount": "0.025",
+            "count": 3
+          }
+        ],
+        "released": 0,
+        "reserved": 0,
+        "spent": 1
+      }
+    },
+    {
+      "candidates": [
+        {
+          "allowed": true,
+          "amount": "0.005"
+        },
+        {
+          "allowed": false,
+          "amount": "0.0051",
+          "refused_by": "lifetime"
+        }
+      ],
+      "claims": [],
+      "ledger": {
+        "allowance_id": "d0efffb7-191b-4709-b6c7-e343af5500b4",
+        "counterparty": "7p4fn44qoshcwgfndz5grt7fyyz1eycqyduxdqe8o58of1byzodo",
+        "entries": [],
+        "totals": {
+          "count": 0,
+          "spent": "",
+          "v01": [
+            {
+              "at": "2025-06-01T00:00:00.000Z",
+              "count": 9,
+              "spent": "0.095"
+            }
+          ]
+        },
+        "v": 1
+      },
+      "name": "totals.v01: v0.1 usage of an earlier period counts in the lifetime limit only",
+      "t": "2026-02-10T00:00:00.000Z",
+      "terms": {
+        "active_from": null,
+        "allowed_payment_endpoint_identifiers": null,
+        "asset": "btc",
+        "expires_at": null,
+        "lifetime_amount_limit": "0.10",
+        "per_payment_amount": {
+          "maximum": "0.01",
+          "minimum": "0.0001"
+        },
+        "period_limits": [
+          {
+            "amount_limit": "0.03",
+            "payment_count_limit": 3,
+            "period": {
+              "anchor": "2026-01-31T00:00:00.000Z",
+              "every": 1,
+              "kind": "anchored",
+              "unit": "month"
+            }
+          }
+        ]
+      },
+      "usage": {
+        "lifetime": "0.095",
+        "periods": [
+          {
+            "amount": "0",
+            "count": 0
+          }
+        ],
+        "released": 0,
+        "reserved": 0,
+        "spent": 0
+      }
     }
   ],
   "compaction": {
@@ -831,7 +982,7 @@
       ]
     }
   },
-  "description": "Allowance usage (wire 5.5, spec 8.3 with specs/allowances.md): for every period limit the amount and count of counted entries in the period containing t (anchored) or with t < at + 60 s + L (rolling), the lifetime amount including the ledger's compacted totals, and how many entries are reserved, spent and released. An entry's own done spends, and its own failed releases unless its attempt's claim is now done (which spends); an entry without an outcome counts by its attempt's claim state (claims): open and unknown reserve, done spends, failed releases only when the attempt's owner wrote it (resolved_by_owner true), a failed another app wrote stays reserved until the user releases it, and an entry whose claim is gone spends. Candidates are checked against every limit; refused_by names the first limit that refuses. A totals.failed item counts like an entry's own failed, in the lifetime amount only: it adds its value while its attempt's claim is done, until the executor moves it into spent and count. Compaction keeps each compacted failed entry's attempt, obligation and value in totals.failed. period_limit_spellings holds terms whose period limits are, or aren't, duplicates by their wire spelling (wire 4.15); period_limit_members holds terms whose period limit leaves out one of its limits.",
+  "description": "Allowance usage (wire 5.5, spec 8.3 with specs/allowances.md): for every period limit the amount and count of counted entries in the period containing t (anchored) or with t < at + 60 s + L (rolling), the lifetime amount including the ledger's compacted totals, and how many entries are reserved, spent and released. An entry's own done spends, and its own failed releases unless its attempt's claim is now done (which spends); an entry without an outcome counts by its attempt's claim state (claims): open and unknown reserve, done spends, failed releases only when the attempt's owner wrote it (resolved_by_owner true), a failed another app wrote stays reserved until the user releases it, and an entry whose claim is gone spends. Candidates are checked against every limit; refused_by names the first limit that refuses. A totals.failed item counts like an entry's own failed, in the lifetime amount only: it adds its value while its attempt's claim is done, until the executor moves it into spent and count. Compaction keeps each compacted failed entry's attempt, obligation and value in totals.failed. The last cases hold v0.1 usage in totals.v01 (spec 16): each item counts as count done entries of spent in all at its at, in every period limit whose window contains at, and in the lifetime limit always. period_limit_spellings holds terms whose period limits are, or aren't, duplicates by their wire spelling (wire 4.15); period_limit_members holds terms whose period limit leaves out one of its limits.",
   "period_limit_members": {
     "description": "Wire 4.15, specs/allowances.md: the terms of the first case with its period limit's amount_limit or payment_count_limit left out. A period limit carries both, each possibly null, not both null; a missing one isn't read as null, so every reader refuses these terms. reason is paykit-lib's wording.",
     "refused": [

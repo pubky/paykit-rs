@@ -17,8 +17,8 @@ use pubky_switch_core::scopes::{permission_names, Permission};
 use serde_json::{json, Value};
 
 use crate::common::{
-    arr, b64n, body_text, cert, cert_doc, document, generated, paykit, pubky, quoted, reissued,
-    signed, signed_json, st, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
+    arr, b64n, body_text, cert, cert_doc, document, executor_cert, generated, paykit, pubky,
+    quoted, reissued, signed, signed_json, st, Keys, Place, ALICE, ALLOWANCE_ID, BOB,
 };
 
 #[test]
@@ -32,9 +32,10 @@ fn test_vectors_documents() {
         let c = cert(app);
         check_certificate(&c).unwrap_or_else(|e| panic!("{}: {e}", app.name));
         assert_eq!(c.permissions(), permissions_for(c.scopes()).as_slice());
-        assert_eq!(c.scopes(), app.scopes.as_slice());
+        assert_eq!(c.scopes(), crate::common::scopes_of(app).as_slice());
     }
     check_executor_grant(&keys, &d);
+    check_executor_certificates(&keys, &d);
     check_certificate_rejections(&keys, &d);
     check_labelled_scope_rejections(&keys, &d);
     check_multi_protocol_certificates(&d);
@@ -195,7 +196,8 @@ fn check_labelled_scope_rejections(keys: &Keys, d: &Value) {
 /// The top-level description, which names every member.
 const DESCRIPTION: &str = "Paykit's signed documents and Paykit's checks of the Switch's \
 certificates and app records (wire 3): the executor grant, alone and as the Allowance \
-record's grant history holds it, certificates that Paykit's verifiers refuse for their \
+record's grant history holds it, with Paykit's own executor certificate, and the Switch \
+set's, which Paykit's verifiers refuse; certificates that Paykit's verifiers refuse for their \
 scopes or their permissions, certificates that hold another protocol's scopes beside \
 Paykit's or instead of them, and app records as a Paykit reader reads their Paykit member. \
 The certificates are the Switch set's documents.json certificates with scopes or \
@@ -325,7 +327,12 @@ fn app_record_wire_1_4_cases() -> Vec<(&'static str, Value)> {
 /// One `multi_protocol_certificates` case, built from the Switch set's certificate and
 /// checked as it is built: the switch takes it, and Paykit's verifier gives `accepted`.
 fn cert_case(keys: &Keys, (name, app, scopes, permissions): CertCase, accepted: bool) -> Value {
-    let c = reissued(keys, app, scopes, permissions);
+    certificate_case(&reissued(keys, app, scopes, permissions), name, accepted)
+}
+
+/// One certificate case, checked as it is built: the switch takes it, and Paykit's verifier
+/// gives `accepted`.
+fn certificate_case(c: &AppCert, name: &str, accepted: bool) -> Value {
     assert!(
         AppCert::verify(c.signed(), &c.identity()).is_ok(),
         "{name}: the switch takes it"
@@ -340,7 +347,7 @@ fn cert_case(keys: &Keys, (name, app, scopes, permissions): CertCase, accepted: 
         "signed": signed_json(c.signed()),
         "switch_accepts": true,
     });
-    match check_certificate(&c) {
+    match check_certificate(c) {
         Ok(()) => assert!(accepted, "{name}: Paykit takes it"),
         Err(error) => {
             assert!(!accepted, "{name}: {error}");
@@ -376,6 +383,69 @@ fn app_record_case(keys: &Keys, name: &str, member: &Value) -> Value {
     })
 }
 
+const EXECUTOR_CERTIFICATES_DESCRIPTION: &str = "Spec 3.1, wire 3.1 and 3.3: the executor's \
+certificate. allowance_execute requires allowance, pay and contacts, so that every executor \
+reads the deny list. accepted is Paykit's own executor certificate, which the executor grant \
+of this file carries: the Switch set's documents.json executor certificate with contacts \
+added to its scopes and the permissions its scopes need, signed again by alice's identity \
+key. refused is the Switch set's executor certificate as it is, which holds \
+allowance_execute without contacts: the switch takes it (switch_accepts), and Paykit's \
+verifiers refuse it. reason is paykit-lib's wording at a Paykit verifier.";
+
+/// `executor_certificates` (Paykit spec 3.1): Paykit's own executor certificate, which the
+/// grant carries, and the Switch set's, which holds `allowance_execute` without `contacts`.
+fn executor_certificates(keys: &Keys) -> Value {
+    let alice = pubky(ALICE);
+    let switch_cert = AppCert::verify(&document("executor certificate"), &alice).unwrap();
+    json!({
+        "accepted": [certificate_case(&executor_cert(keys), "Paykit's executor certificate, with contacts", true)],
+        "description": EXECUTOR_CERTIFICATES_DESCRIPTION,
+        "refused": [certificate_case(&switch_cert, "allowance_execute without contacts", false)],
+    })
+}
+
+/// `executor_certificates`: each verifies at the switch, signed by alice's identity key;
+/// Paykit's verifiers take Paykit's, the grant's certificate, and refuse the Switch set's for
+/// the scope rule of Paykit spec 3.1.
+fn check_executor_certificates(keys: &Keys, d: &Value) {
+    let alice = pubky(ALICE);
+    let identity = keys.identity(&alice);
+    let e = &d["executor_certificates"];
+    for (list, accepted) in [("accepted", true), ("refused", false)] {
+        let cases = arr(e, list);
+        assert_eq!(cases.len(), 1, "{list}");
+        for case in cases {
+            let name = st(case, "name");
+            let doc = signed(&case["signed"]);
+            assert_eq!(body_text(&doc), st(case, "body"), "{name}");
+            let again = identity.sign_doc(labels::sig::APP_CERT, &[], doc.body_bytes().unwrap());
+            assert_eq!(again, doc, "{name}");
+            let c = AppCert::verify(&doc, &alice).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(c.scopes(), strings(&case["scopes"]).as_slice(), "{name}");
+            match verify_certificate(&doc, &alice) {
+                Ok(_) => {
+                    assert!(accepted, "{name}: Paykit takes it");
+                    assert_eq!(case["signed"], d["executor_grant"]["cert"], "{name}");
+                }
+                Err(error) => {
+                    assert!(!accepted, "{name}: {error}");
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("allowance_execute requires allowance, pay and contacts"),
+                        "{name}: {error}"
+                    );
+                }
+            }
+        }
+    }
+    // The refused one is the Switch set's executor certificate, as it is.
+    assert_eq!(
+        signed(&arr(e, "refused")[0]["signed"]),
+        document("executor certificate")
+    );
+}
+
 /// The cases paykit-lib generates in `documents.json` (README "How the files were
 /// generated"), compared with the file, and written into it with `PAYKIT_WRITE_VECTORS`.
 fn generate(keys: &Keys) {
@@ -395,8 +465,22 @@ fn generate(keys: &Keys) {
         "description": MULTI_PROTOCOL_DESCRIPTION,
         "refused": MULTI_PROTOCOL_REFUSED.iter().map(|c| cert_case(keys, *c, false)).collect::<Vec<_>>(),
     });
+    // Paykit's own executor certificate, in the grant and its history entry: the grant's
+    // signature doesn't cover the certificate, so it stays (Paykit wire 3.3).
+    let held = ExecutorGrant::from_json(&paykit("documents.json")["executor_grant"]).unwrap();
+    let grant = ExecutorGrant {
+        cert: executor_cert(keys).signed().clone(),
+        ..held
+    }
+    .to_json();
     let mut cases = vec![
         (Place::Member("/description"), json!(DESCRIPTION)),
+        (Place::Member("/executor_grant"), grant.clone()),
+        (Place::Member("/executor_grant_history_entry/grant"), grant),
+        (
+            Place::Member("/executor_certificates"),
+            executor_certificates(keys),
+        ),
         (Place::Member("/multi_protocol_certificates"), member),
         (
             Place::Member("/app_records/description"),

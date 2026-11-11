@@ -28,6 +28,7 @@ fn test_vectors_sealed() {
     check_labelled(&keys, &v["labelled"]);
     check_activity_rules(&keys);
     check_activity_records(&keys, &v);
+    check_later_writes(&keys, &v);
     check_msg_ids_bounds(&keys, &v);
     check_allowance_records(&keys, &v);
 }
@@ -76,22 +77,9 @@ fn check_activity_rules(keys: &Keys) {
         read
     };
     let base = ActivityRecord {
-        side: ActivitySide::Payer,
-        counterparty: bob,
         request: Some(stored("payment_request_recurring")),
-        response: None,
-        cancellation: None,
-        proof: None,
-        receipt: None,
-        period_details: None,
-        request_hash: None,
-        billing_period: None,
-        attempt_id: None,
-        unrequested: None,
-        msg_ids: Vec::new(),
-        status: None,
-        allowance_id: None,
         attempted_periods: vec![1_769_817_600, 1_772_236_800],
+        ..ActivityRecord::new(ActivitySide::Payer, bob)
     };
     let held = read(&base).unwrap();
     assert_eq!(held.attempted_periods, base.attempted_periods);
@@ -478,24 +466,7 @@ fn stored_json(keys: &Keys, m: &Value) -> paykit_lib::records::StoredMessage {
 
 /// An empty activity record.
 fn activity(side: ActivitySide, counterparty: [u8; 32]) -> ActivityRecord {
-    ActivityRecord {
-        side,
-        counterparty,
-        request: None,
-        response: None,
-        cancellation: None,
-        proof: None,
-        receipt: None,
-        period_details: None,
-        request_hash: None,
-        billing_period: None,
-        attempt_id: None,
-        unrequested: None,
-        msg_ids: Vec::new(),
-        status: None,
-        allowance_id: None,
-        attempted_periods: Vec::new(),
-    }
+    ActivityRecord::new(side, counterparty)
 }
 
 /// The three records the cases change, as their readers hold them: alice's payer request
@@ -544,6 +515,7 @@ fn bases(keys: &Keys) -> Bases {
             source: DestinationSource::List,
             list_version: Some(l.version),
             single_use: endpoint.single_use,
+            amount: None,
         }),
         proof: Some(proof.clone()),
         ..activity(ActivitySide::Payer, bob)
@@ -734,8 +706,10 @@ const ACTIVITY_DESCRIPTION: &str =
     "Wire 5.3: activity record values, built from messages.json's messages, and \
 the record keys they sit at under the fixed policy, blinded with their reader's naming key: \
 alice's for payer_activity, bob's for payee_activity. Some members only some records carry: \
-request_hash and billing_period only a period record, attempt_id and unrequested only the \
-record of a payment without a request, and allowance_id only a payer's request record. \
+request_hash, billing_period and earlier_details only a period record, attempt_id and \
+unrequested only the record of a payment without a request, allowance_id, reassociations \
+and v01_paid only a payer's request record, and manual_only only a payer's request record \
+of a one-time request or a payer's period record. \
 accepted are records their reader binds at their keys; refused are the same records with a \
 member where their binding and side don't allow it, which their reader refuses, and, last, \
 alice's request records storing a request whose sender's certificate doesn't allow it \
@@ -745,8 +719,398 @@ payment_request presented with documents.json's chat-only certificate of the sho
 the keys their requests name. Appended after \
 them, on payment evidence (wire 4.11): accepted, records whose receipt is of the stored \
 proof's attempt, or of the record's attempt_id; refused, the same with a receipt of another \
-attempt. reason is paykit-lib's wording, of the first check that \
-refuses it.";
+attempt. Appended last, on the members only some records carry (wire 4.9, 5.3): accepted, \
+a payer's request record of the recurring request with reassociations, and with v01_paid; \
+alice's request record of the one-time request, manual_only and v01_paid from 0 to 0; her \
+period record, manual_only; the period record whose proof names messages.json's period \
+details, with later details, signed again by the shop a day later under another msg_id, in \
+earlier_details; the same record without its proof, the later details in period_details and \
+the earlier in earlier_details; the record of the payment without a request with \
+unrequested.amount, the proof's; and that record with members its reader doesn't know, in \
+the value, in unrequested and in the stored proof, which its writer keeps; refused, those \
+members where the record's binding, side or request doesn't allow them, period details out \
+of order or held twice, reassociations without allowance_id, naming it first or not \
+strictly ascending, v01_paid of a one-time request other than from 0 to 0 or with ranges \
+that overlap, and an unrequested.amount other than the stored proof's. later_writes holds \
+pairs of versions of one record, the version a reader holds (held) and a later write \
+(value), both of which bind at record_key (wire 5.3 \"Seen Allowance\"): alice's request \
+record of the recurring request with its February period attempted early, and a write that \
+adds a reassociation; accepted, one from a period after every attempted period, which her \
+reader takes; refused, one from the attempted period itself, which it ignores and flags, \
+since a period attempted early stays under the Allowance it was attempted under. reason is \
+paykit-lib's wording, of the first check that refuses it.";
+
+/// Later period details for the February period of the recurring request: messages.json's
+/// `payment_period_details` a day later, under another `msg_id`, signed again by the shop.
+fn later_details(keys: &Keys) -> paykit_lib::records::StoredMessage {
+    resign_with(keys, "payment_period_details", |m| {
+        m.msg_id = "6b1f0e2a-3c4d-4e5f-8a6b-7c8d9e0f1a2b".into();
+        m.created_at_ms += 86_400_000;
+    })
+}
+
+/// The record `record` as its writer writes it, with members it doesn't know added at
+/// `members` (JSON pointer to an object, member, value), then read back by its reader.
+fn with_unknown(
+    keys: &Keys,
+    record: &ActivityRecord,
+    key: &[u8; 32],
+    members: &[(&str, &str, Value)],
+) -> ActivityRecord {
+    let mut value: Value = serde_json::from_slice(&record.to_json().unwrap()).unwrap();
+    for (pointer, name, member) in members {
+        value
+            .pointer_mut(pointer)
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert((*name).to_owned(), member.clone());
+    }
+    bind_activity(keys, &serde_json::to_vec(&value).unwrap(), record.side, key).unwrap()
+}
+
+/// The cases on the members of wire 5.3 that some records carry, appended after the others:
+/// `earlier_details`, `reassociations`, `manual_only`, `v01_paid` and `unrequested.amount`,
+/// and members a reader doesn't know, which it keeps when it writes the record again.
+fn member_cases(keys: &Keys) -> (Vec<ActivityCase>, Vec<ActivityCase>) {
+    use paykit_lib::bodies::Body;
+    use paykit_lib::identifiers::AllowanceId;
+    use paykit_lib::records::{Reassociation, V01PaidRange};
+    let bob = pubky(BOB);
+    let b = bases(keys);
+    let key = |r: &ActivityRecord| base_key(keys, r);
+    let other = AllowanceId::parse("55de1f16-1a9e-4504-bc9c-57efc3a2b38c").unwrap();
+    let named = b.payer_request.allowance_id.clone().unwrap();
+    let moved = |entries: Vec<(AllowanceId, u64)>| -> Vec<Reassociation> {
+        entries
+            .into_iter()
+            .map(|(allowance_id, from_period)| Reassociation {
+                allowance_id,
+                from_period,
+            })
+            .collect()
+    };
+    let reassociated = ActivityRecord {
+        reassociations: moved(vec![(other.clone(), 1_772_236_800)]),
+        ..b.payer_request.clone()
+    };
+    let one_time = ActivityRecord {
+        request: Some(stored_message(keys, "payment_request")),
+        ..activity(ActivitySide::Payer, bob)
+    };
+    let one_time_marked = ActivityRecord {
+        manual_only: true,
+        v01_paid: vec![V01PaidRange { from: 0, to: 0 }],
+        ..one_time.clone()
+    };
+    let recurring_paid = ActivityRecord {
+        v01_paid: vec![V01PaidRange {
+            from: 1_769_817_600,
+            to: 1_772_236_800,
+        }],
+        ..b.payer_request.clone()
+    };
+    let period_marked = ActivityRecord {
+        manual_only: true,
+        ..b.period.clone()
+    };
+    let (held, later) = (
+        b.period.period_details.clone().unwrap(),
+        later_details(keys),
+    );
+    // The proof names the earlier details, so period_details holds them and the later ones
+    // are earlier_details.
+    let named_by_proof = ActivityRecord {
+        earlier_details: vec![later.clone()],
+        ..b.period.clone()
+    };
+    let without_proof = ActivityRecord {
+        proof: None,
+        ..b.period.clone()
+    };
+    let latest = ActivityRecord {
+        period_details: Some(later.clone()),
+        earlier_details: vec![held.clone()],
+        ..without_proof.clone()
+    };
+    let Some(Body::PaymentProof(proof)) = b.unrequested.proof.as_ref().map(|p| p.body().clone())
+    else {
+        panic!("a proof")
+    };
+    let with_amount = |amount| ActivityRecord {
+        unrequested: b
+            .unrequested
+            .unrequested
+            .clone()
+            .map(|u| paykit_lib::records::UnrequestedDestination { amount, ..u }),
+        ..b.unrequested.clone()
+    };
+    let paid_amount = with_amount(proof.amount.clone());
+    let mut other_amount = proof.amount.clone().unwrap();
+    other_amount.value = paykit_lib::Decimal::parse("0.0016").unwrap();
+    let unknown = with_unknown(
+        keys,
+        &paid_amount,
+        &key(&b.unrequested),
+        &[
+            ("", "payment_note", serde_json::json!({ "text": "kept" })),
+            ("/unrequested", "rail_hint", serde_json::json!("on-chain")),
+            ("/proof", "relayed_by", serde_json::json!(null)),
+        ],
+    );
+    let accepted = vec![
+        (
+            "a payer's request record of a recurring request with reassociations",
+            reassociated.clone(),
+            key(&reassociated),
+        ),
+        (
+            "a payer's request record of a one-time request, manual_only and v01_paid",
+            one_time_marked.clone(),
+            key(&one_time),
+        ),
+        (
+            "a payer's request record of a recurring request with v01_paid",
+            recurring_paid.clone(),
+            key(&recurring_paid),
+        ),
+        (
+            "a payer's period record, manual_only",
+            period_marked.clone(),
+            key(&period_marked),
+        ),
+        (
+            "a period record whose proof names earlier details, with later ones in earlier_details",
+            named_by_proof.clone(),
+            key(&named_by_proof),
+        ),
+        (
+            "a period record without a proof, the latest details in period_details",
+            latest.clone(),
+            key(&latest),
+        ),
+        (
+            "the record of a payment without a request with unrequested.amount, the proof's",
+            paid_amount.clone(),
+            key(&paid_amount),
+        ),
+        (
+            "the record of a payment without a request with members its reader doesn't know",
+            unknown.clone(),
+            key(&unknown),
+        ),
+    ];
+    let refused = vec![
+        (
+            "earlier_details in a request record",
+            ActivityRecord {
+                earlier_details: vec![held.clone()],
+                ..b.payer_request.clone()
+            },
+            key(&b.payer_request),
+        ),
+        (
+            "earlier_details later than period_details, which no proof names",
+            ActivityRecord {
+                earlier_details: vec![later.clone()],
+                ..without_proof.clone()
+            },
+            key(&without_proof),
+        ),
+        (
+            "earlier_details holding period_details again",
+            ActivityRecord {
+                earlier_details: vec![held.clone()],
+                ..without_proof.clone()
+            },
+            key(&without_proof),
+        ),
+        (
+            "reassociations in a period record",
+            ActivityRecord {
+                reassociations: moved(vec![(other.clone(), 1_772_236_800)]),
+                ..b.period.clone()
+            },
+            key(&b.period),
+        ),
+        (
+            "reassociations without allowance_id",
+            ActivityRecord {
+                allowance_id: None,
+                ..reassociated.clone()
+            },
+            key(&reassociated),
+        ),
+        (
+            "reassociations whose first entry names allowance_id",
+            ActivityRecord {
+                reassociations: moved(vec![(named.clone(), 1_772_236_800)]),
+                ..b.payer_request.clone()
+            },
+            key(&b.payer_request),
+        ),
+        (
+            "reassociations not strictly ascending",
+            ActivityRecord {
+                reassociations: moved(vec![(other.clone(), 1_772_236_800), (named, 1_772_236_800)]),
+                ..b.payer_request.clone()
+            },
+            key(&b.payer_request),
+        ),
+        (
+            "manual_only in a payer's request record of a recurring request",
+            ActivityRecord {
+                manual_only: true,
+                ..b.payer_request.clone()
+            },
+            key(&b.payer_request),
+        ),
+        (
+            "manual_only in a payee's request record",
+            ActivityRecord {
+                manual_only: true,
+                ..b.payee_request.clone()
+            },
+            key(&b.payee_request),
+        ),
+        (
+            "v01_paid in a period record",
+            ActivityRecord {
+                v01_paid: vec![V01PaidRange {
+                    from: 1_772_236_800,
+                    to: 1_772_236_800,
+                }],
+                ..b.period.clone()
+            },
+            key(&b.period),
+        ),
+        (
+            "v01_paid of a one-time request other than from 0 to 0",
+            ActivityRecord {
+                v01_paid: vec![V01PaidRange { from: 0, to: 1 }],
+                ..one_time.clone()
+            },
+            key(&one_time),
+        ),
+        (
+            "v01_paid with overlapping ranges",
+            ActivityRecord {
+                v01_paid: vec![
+                    V01PaidRange {
+                        from: 1_769_817_600,
+                        to: 1_772_236_800,
+                    },
+                    V01PaidRange {
+                        from: 1_772_236_800,
+                        to: 1_774_915_200,
+                    },
+                ],
+                ..b.payer_request.clone()
+            },
+            key(&b.payer_request),
+        ),
+        (
+            "unrequested.amount other than the stored proof's",
+            with_amount(Some(other_amount)),
+            key(&b.unrequested),
+        ),
+    ];
+    (accepted, refused)
+}
+
+/// A later-write case of `activity_records`: its name, the record version a reader holds,
+/// the later write, and the key both sit at.
+type LaterWriteCase = (&'static str, ActivityRecord, ActivityRecord, [u8; 32]);
+
+/// `activity_records`' later writes (wire 5.3 "Seen Allowance"): alice's request record of
+/// the recurring request listing its February period as attempted, early, and a write that
+/// adds a reassociation strictly after it, which her reader takes, or at it, which it
+/// ignores and flags.
+fn later_write_cases(keys: &Keys) -> (Vec<LaterWriteCase>, Vec<LaterWriteCase>) {
+    use paykit_lib::identifiers::AllowanceId;
+    use paykit_lib::records::Reassociation;
+    let b = bases(keys);
+    let other = AllowanceId::parse("55de1f16-1a9e-4504-bc9c-57efc3a2b38c").unwrap();
+    let held = ActivityRecord {
+        attempted_periods: vec![1_772_236_800],
+        ..b.payer_request.clone()
+    };
+    let from = |from_period| ActivityRecord {
+        reassociations: vec![Reassociation {
+            allowance_id: other.clone(),
+            from_period,
+        }],
+        ..held.clone()
+    };
+    let key = base_key(keys, &held);
+    let (after, at) = (from(1_774_915_200), from(1_772_236_800));
+    (
+        vec![(
+            "a reassociation from a period after every attempted period",
+            held.clone(),
+            after,
+            key,
+        )],
+        vec![("a reassociation from an attempted period", held, at, key)],
+    )
+}
+
+/// The later writes, as paykit-lib generates them: each record as its writer writes it, and
+/// the reason its reader ignores a refused write.
+fn later_writes(keys: &Keys) -> Value {
+    let (accepted, refused) = later_write_cases(keys);
+    let case = |(name, held, later, key): &LaterWriteCase, taken: bool| -> Value {
+        let mut out = serde_json::json!({
+            "collection": side_collection(held.side),
+            "held": String::from_utf8(held.to_json().unwrap()).unwrap(),
+            "name": name,
+            "record_key": b64(key),
+            "value": String::from_utf8(later.to_json().unwrap()).unwrap(),
+        });
+        match held.check_later_write(later) {
+            Ok(()) => assert!(taken, "{name}: taken"),
+            Err(error) => {
+                assert!(!taken, "{name}: {error}");
+                out["reason"] = serde_json::json!(quoted(&error.to_string()));
+            }
+        }
+        out
+    };
+    serde_json::json!({
+        "accepted": accepted.iter().map(|c| case(c, true)).collect::<Vec<_>>(),
+        "refused": refused.iter().map(|c| case(c, false)).collect::<Vec<_>>(),
+    })
+}
+
+/// `activity_records`' later writes: both versions bind at their key, and the reader holding
+/// `held` takes the accepted write and ignores the refused one, for its rule.
+fn check_later_writes(keys: &Keys, v: &Value) {
+    let m = &v["activity_records"]["later_writes"];
+    let (accepted, refused) = later_write_cases(keys);
+    assert_eq!(arr(m, "accepted").len(), accepted.len());
+    assert_eq!(arr(m, "refused").len(), refused.len());
+    for (list, taken) in [("accepted", true), ("refused", false)] {
+        for case in arr(m, list) {
+            let name = st(case, "name");
+            let bind = |member: &str| {
+                bind_activity(
+                    keys,
+                    st(case, member).as_bytes(),
+                    ActivitySide::Payer,
+                    &key(case),
+                )
+                .unwrap_or_else(|e| panic!("{name}: {member}: {e}"))
+            };
+            let (held, later) = (bind("held"), bind("value"));
+            match held.check_later_write(&later) {
+                Ok(()) => assert!(taken, "{name}: taken"),
+                Err(error) => {
+                    assert!(!taken, "{name}: {error}");
+                    assert_eq!(quoted(&error.to_string()), st(case, "reason"), "{name}");
+                }
+            }
+        }
+    }
+}
 
 /// The cases paykit-lib generates in `sealed.json` (README "How the files were generated"),
 /// compared with the file, and written into it with `PAYKIT_WRITE_VECTORS`.
@@ -772,7 +1136,12 @@ fn generate(keys: &Keys) {
         out
     };
     let (evidence_accepted, evidence_refused) = evidence_cases(keys);
-    let accepted: Vec<ActivityCase> = accepted.into_iter().chain(evidence_accepted).collect();
+    let (member_accepted, member_refused) = member_cases(keys);
+    let accepted: Vec<ActivityCase> = accepted
+        .into_iter()
+        .chain(evidence_accepted)
+        .chain(member_accepted)
+        .collect();
     let mut refused: Vec<Value> = refused.iter().map(|c| write(c, false)).collect();
     for (name, m, cert) in unauthorized_stored(keys) {
         let (value, key) = record_with_request(keys, stored_value(&m, &cert), st(&m, "json"));
@@ -788,23 +1157,67 @@ fn generate(keys: &Keys) {
         }));
     }
     refused.extend(evidence_refused.iter().map(|c| write(c, false)));
+    refused.extend(member_refused.iter().map(|c| write(c, false)));
     let member = serde_json::json!({
         "accepted": accepted.iter().map(|c| write(c, true)).collect::<Vec<_>>(),
         "description": ACTIVITY_DESCRIPTION,
+        "later_writes": later_writes(keys),
         "refused": refused,
     });
-    generated(
-        "sealed.json",
-        &[
-            (
-                Place::Member("/description"),
-                serde_json::json!(DESCRIPTION),
-            ),
-            (Place::Member("/activity_records"), member),
-            (Place::Member("/msg_ids_bounds"), msg_ids_bounds(keys)),
-            (Place::Member("/allowance_records"), allowance_records(keys)),
-        ],
+    let mut cases = vec![
+        (
+            Place::Member("/description"),
+            serde_json::json!(DESCRIPTION),
+        ),
+        (Place::Member("/activity_records"), member),
+        (Place::Member("/msg_ids_bounds"), msg_ids_bounds(keys)),
+        (Place::Member("/allowance_records"), allowance_records(keys)),
+    ];
+    cases.extend(executor_certificate_cases(keys));
+    generated("sealed.json", &cases);
+}
+
+/// `binding_accepted`'s `allowances` record, with the executor certificate the stored
+/// acceptance carries as [`executor_certificate_cases`] generates it.
+fn allowance_record_value(keys: &Keys) -> Vec<u8> {
+    let held = paykit("sealed.json");
+    executor_certificate_cases(keys)
+        .into_iter()
+        .map(|(_, case)| case)
+        .chain(arr(&held, "binding_accepted").iter().cloned())
+        .find(|case| st(case, "name") == st(&arr(&held, "binding_accepted")[1], "name"))
+        .map(|case| st(&case, "value").as_bytes().to_vec())
+        .unwrap()
+}
+
+/// The binding cases that store a message from alice's executor app, with the stored copy
+/// carrying Paykit's own executor certificate (`documents.json` `executor_certificates`)
+/// instead of the Switch set's, which Paykit's verifiers refuse (Paykit spec 3.1). Every
+/// other byte of their values is as the file holds it.
+fn executor_certificate_cases(keys: &Keys) -> Vec<(Place<'static>, Value)> {
+    let switch_cert = crate::common::document("executor certificate");
+    let own = crate::common::executor_cert(keys);
+    let file = paykit("sealed.json");
+    let mut out = Vec::new();
+    for list in ["/binding_accepted", "/binding_rejections"] {
+        for case in file.pointer(list).and_then(Value::as_array).unwrap() {
+            let held = st(case, "value");
+            let value = held
+                .replace(&switch_cert.body, &own.signed().body)
+                .replace(&switch_cert.sig, &own.signed().sig);
+            assert!(!value.contains(&switch_cert.sig));
+            if value != held || held.contains(&own.signed().sig) {
+                let mut case = case.clone();
+                case["value"] = Value::String(value);
+                out.push((Place::Case(list), case));
+            }
+        }
+    }
+    assert!(
+        !out.is_empty(),
+        "the Allowance record stores the executor's acceptance"
     );
+    out
 }
 
 /// `activity_records` (Paykit wire 5.3): each record binds at its key, or is refused, as its
@@ -812,13 +1225,17 @@ fn generate(keys: &Keys) {
 fn check_activity_records(keys: &Keys, v: &Value) {
     let m = &v["activity_records"];
     let (accepted, refused) = activity_cases(keys);
+    let (member_accepted, member_refused) = member_cases(keys);
     assert_eq!(
         arr(m, "accepted").len(),
-        accepted.len() + evidence_cases(keys).0.len()
+        accepted.len() + evidence_cases(keys).0.len() + member_accepted.len()
     );
     assert_eq!(
         arr(m, "refused").len(),
-        refused.len() + unauthorized_stored(keys).len() + evidence_cases(keys).1.len()
+        refused.len()
+            + unauthorized_stored(keys).len()
+            + evidence_cases(keys).1.len()
+            + member_refused.len()
     );
     for (list, taken) in [("accepted", true), ("refused", false)] {
         for case in arr(m, list) {
@@ -1369,8 +1786,7 @@ type AllowanceCase = (&'static str, AllowanceRecord);
 /// The cases of `allowance_records`, accepted then refused.
 fn allowance_cases(keys: &Keys) -> (Vec<AllowanceCase>, Vec<AllowanceCase>) {
     let alice = pubky(ALICE);
-    let s = paykit("sealed.json");
-    let base = AllowanceRecord::read(value(&arr(&s, "binding_accepted")[1]), &alice).unwrap();
+    let base = AllowanceRecord::read(&allowance_record_value(keys), &alice).unwrap();
     let proposal = base.proposal.hash();
     let acceptance = base.response.as_ref().unwrap().hash();
     let end = stored_message(keys, "allowance_end");
@@ -1474,7 +1890,7 @@ fn rejection_with_executor(keys: &Keys) -> (Vec<u8>, [u8; 32]) {
     let alice = pubky(ALICE);
     let s = paykit("sealed.json");
     let accepted = &arr(&s, "binding_accepted")[1];
-    let base = AllowanceRecord::read(value(accepted), &alice).unwrap();
+    let base = AllowanceRecord::read(&allowance_record_value(keys), &alice).unwrap();
     let mut m = pubky_switch_core::message::Message::parse(
         &message_json("allowance_rejection"),
         paykit_lib::kinds::OPAQUE_MEMBERS,
@@ -1634,7 +2050,7 @@ fn test_activity_record_seen_period_details_again_as_late_is_kept() {
 #[test]
 fn test_activity_record_seen_period_details_as_late_with_another_hash_are_refused() {
     // Another signed message as late (the same created_at and msg_id), other rates: an
-    // equivocation, refused, and the held details stay.
+    // equivocation, which replaces nothing and is stored beside nothing.
     let keys = Keys::load();
     let (held, details) = period_held(&keys);
     let equivocation = resigned(&keys, "payment_period_details", None, |body| {
@@ -1645,22 +2061,233 @@ fn test_activity_record_seen_period_details_as_late_with_another_hash_are_refuse
     });
     assert_ne!(equivocation.hash(), details.hash());
     let error = held
-        .check_later_write(&with_details(&held, equivocation))
+        .check_later_write(&with_details(&held, equivocation.clone()))
         .unwrap_err()
         .to_string();
-    assert!(error.contains("other details as late"), "{error}");
+    assert!(error.contains("drops period details seen"), "{error}");
+    let beside = ActivityRecord {
+        earlier_details: vec![equivocation],
+        ..held.clone()
+    };
+    let error = held.check_later_write(&beside).unwrap_err().to_string();
+    assert!(error.contains("two details as late"), "{error}");
 }
 
 #[test]
-fn test_activity_record_seen_period_details_replaced_only_by_later_ones() {
+fn test_activity_record_seen_period_details_kept_beside_later_ones() {
+    // Later details replace none: the later write keeps those seen in earlier_details.
+    let keys = Keys::load();
+    let (held, details) = period_held(&keys);
+    let later = later_details(&keys);
+    let kept = ActivityRecord {
+        earlier_details: vec![details],
+        ..with_details(&held, later.clone())
+    };
+    held.check_later_write(&kept).unwrap();
+    let error = held
+        .check_later_write(&with_details(&held, later))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("drops period details seen"), "{error}");
+    // Back to the earlier details alone: they are no longer the latest held, and the later
+    // ones are dropped.
+    assert!(kept.check_later_write(&held).is_err());
+}
+
+#[test]
+fn test_activity_record_seen_period_details_the_proof_write_names_earlier_ones() {
+    // The payer paid by the earlier details after later ones came: the write that stores its
+    // proof sets period_details to the details the proof names, and keeps the later ones.
+    let keys = Keys::load();
+    let (held, details) = period_held(&keys);
+    let later = later_details(&keys);
+    let latest = ActivityRecord {
+        earlier_details: vec![details.clone()],
+        ..with_details(&held, later.clone())
+    };
+    let proof = bases(&keys).period.proof;
+    assert_eq!(
+        proof.as_ref().unwrap().message().refs.get(1),
+        Some(&details.hash())
+    );
+    let paid = ActivityRecord {
+        proof: proof.clone(),
+        period_details: Some(details.clone()),
+        earlier_details: vec![later],
+        ..held.clone()
+    };
+    latest.check_later_write(&paid).unwrap();
+    // The proof's write that drops the later details is refused.
+    let dropped = ActivityRecord {
+        proof,
+        period_details: Some(details),
+        ..held
+    };
+    let error = latest.check_later_write(&dropped).unwrap_err().to_string();
+    assert!(error.contains("drops period details seen"), "{error}");
+}
+
+#[test]
+fn test_activity_record_period_details_at_most_eight() {
     let keys = Keys::load();
     let (held, _) = period_held(&keys);
-    let later = resign_with(&keys, "payment_period_details", |m| {
-        m.created_at_ms += 1;
-    });
-    held.check_later_write(&with_details(&held, later.clone()))
+    let details = |n: u64| {
+        resign_with(&keys, "payment_period_details", |m| {
+            m.msg_id = format!("6b1f0e2a-3c4d-4e5f-8a6b-{n:012x}");
+            m.created_at_ms -= 1000 * (n + 1);
+        })
+    };
+    let alice = pubky(ALICE);
+    let with = |n: u64| {
+        let mut earlier: Vec<_> = (0..n).map(details).collect();
+        earlier.reverse();
+        ActivityRecord {
+            earlier_details: earlier,
+            ..held.clone()
+        }
+    };
+    let seven = with(7);
+    let json = seven.to_json().unwrap();
+    assert_eq!(
+        ActivityRecord::read(&json, &alice, ActivitySide::Payer)
+            .unwrap()
+            .details()
+            .len(),
+        8
+    );
+    let eight = with(8);
+    assert!(eight.to_json().is_err());
+    let error = ActivityRecord::read(
+        &eight.to_json_unchecked().unwrap(),
+        &alice,
+        ActivitySide::Payer,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("at most 7"), "{error}");
+}
+
+#[test]
+fn test_activity_record_seen_marks_are_kept() {
+    use paykit_lib::identifiers::AllowanceId;
+    use paykit_lib::records::{Reassociation, V01PaidRange};
+    let keys = Keys::load();
+    let b = bases(&keys);
+    let other = AllowanceId::parse("55de1f16-1a9e-4504-bc9c-57efc3a2b38c").unwrap();
+    let named = b.payer_request.allowance_id.clone().unwrap();
+    let entry = |allowance_id: &AllowanceId, from_period| Reassociation {
+        allowance_id: allowance_id.clone(),
+        from_period,
+    };
+    // Reassociations: an entry after the last seen is taken; one changed or dropped isn't.
+    let one = ActivityRecord {
+        reassociations: vec![entry(&other, 1_772_236_800)],
+        ..b.payer_request.clone()
+    };
+    let two = ActivityRecord {
+        reassociations: vec![entry(&other, 1_772_236_800), entry(&named, 1_774_915_200)],
+        ..b.payer_request.clone()
+    };
+    b.payer_request.check_later_write(&one).unwrap();
+    one.check_later_write(&two).unwrap();
+    let error = two.check_later_write(&one).unwrap_err().to_string();
+    assert!(error.contains("reassociation seen"), "{error}");
+    let changed = ActivityRecord {
+        reassociations: vec![entry(&other, 1_774_915_200)],
+        ..b.payer_request.clone()
+    };
+    assert!(one.check_later_write(&changed).is_err());
+    // An entry before the last seen can't be added: the list is strictly ascending.
+    let before = ActivityRecord {
+        reassociations: vec![entry(&other, 1_772_236_800), entry(&named, 1_769_817_600)],
+        ..b.payer_request.clone()
+    };
+    assert!(one.check_later_write(&before).is_err());
+    // manual_only stays once seen.
+    let marked = ActivityRecord {
+        manual_only: true,
+        ..b.period.clone()
+    };
+    b.period.check_later_write(&marked).unwrap();
+    let error = marked.check_later_write(&b.period).unwrap_err().to_string();
+    assert!(error.contains("manual_only"), "{error}");
+    // v01_paid stays as seen.
+    let paid = |to| ActivityRecord {
+        v01_paid: vec![V01PaidRange {
+            from: 1_769_817_600,
+            to,
+        }],
+        ..b.payer_request.clone()
+    };
+    paid(1_772_236_800)
+        .check_later_write(&paid(1_772_236_800))
         .unwrap();
-    assert!(with_details(&held, later).check_later_write(&held).is_err());
+    let error = paid(1_772_236_800)
+        .check_later_write(&paid(1_769_817_600))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("v01_paid"), "{error}");
+    assert!(paid(1_772_236_800)
+        .check_later_write(&b.payer_request)
+        .is_err());
+}
+
+#[test]
+fn test_activity_record_v01_paid_shows_paid() {
+    use paykit_lib::records::V01PaidRange;
+    let keys = Keys::load();
+    let bob = pubky(BOB);
+    let one_time = ActivityRecord {
+        request: Some(stored_message(&keys, "payment_request")),
+        ..activity(ActivitySide::Payer, bob)
+    };
+    assert!(!one_time.shows_paid());
+    let paid = ActivityRecord {
+        v01_paid: vec![V01PaidRange { from: 0, to: 0 }],
+        ..one_time
+    };
+    assert!(paid.shows_paid());
+    // A recurring request's record lists periods; the request record itself isn't paid.
+    let b = bases(&keys);
+    let periods = ActivityRecord {
+        v01_paid: vec![V01PaidRange {
+            from: 1_769_817_600,
+            to: 1_772_236_800,
+        }],
+        ..b.payer_request.clone()
+    };
+    assert!(!periods.shows_paid());
+    assert!(periods.v01_paid_covers(1_769_817_600) && periods.v01_paid_covers(1_772_236_800));
+    assert!(!periods.v01_paid_covers(1_774_915_200));
+}
+
+#[test]
+fn test_activity_record_allowance_for_follows_reassociations() {
+    use paykit_lib::identifiers::AllowanceId;
+    use paykit_lib::records::Reassociation;
+    let keys = Keys::load();
+    let b = bases(&keys);
+    let named = b.payer_request.allowance_id.clone().unwrap();
+    let other = AllowanceId::parse("55de1f16-1a9e-4504-bc9c-57efc3a2b38c").unwrap();
+    let moved = ActivityRecord {
+        reassociations: vec![Reassociation {
+            allowance_id: other.clone(),
+            from_period: 1_772_236_800,
+        }],
+        ..b.payer_request.clone()
+    };
+    assert_eq!(moved.allowance_for(1_769_817_600), Some(&named));
+    assert_eq!(moved.allowance_for(1_772_236_800), Some(&other));
+    assert_eq!(moved.allowance_for(1_774_915_200), Some(&other));
+    assert_eq!(b.payer_request.allowance_for(1_774_915_200), Some(&named));
+    // A later period attempted early, after the reassociation, counts under the Allowance it
+    // was moved to; the write listing it keeps the entry.
+    let attempted = ActivityRecord {
+        attempted_periods: vec![1_774_915_200],
+        ..moved.clone()
+    };
+    moved.check_later_write(&attempted).unwrap();
+    assert_eq!(attempted.allowance_for(1_774_915_200), Some(&other));
 }
 
 #[test]
@@ -1956,4 +2583,130 @@ fn test_activity_record_receipt_is_of_its_proofs_billing_period() {
     );
     let json = other_period.to_json_unchecked().unwrap();
     assert!(ActivityRecord::read(&json, &pubky(ALICE), ActivitySide::Payer).is_err());
+}
+
+/// `record` as its writer writes it, with members added at `members` (JSON pointer to an
+/// object, member, value), read back by alice.
+fn read_with_unknown(record: &ActivityRecord, members: &[(&str, &str, Value)]) -> ActivityRecord {
+    let mut value: Value = serde_json::from_slice(&record.to_json().unwrap()).unwrap();
+    for (pointer, name, member) in members {
+        value
+            .pointer_mut(pointer)
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert((*name).to_owned(), member.clone());
+    }
+    ActivityRecord::read(
+        &serde_json::to_vec(&value).unwrap(),
+        &pubky(ALICE),
+        ActivitySide::Payer,
+    )
+    .unwrap()
+}
+
+fn written(record: &ActivityRecord) -> Value {
+    serde_json::from_slice(&record.to_json().unwrap()).unwrap()
+}
+
+#[test]
+fn test_activity_record_keeps_unknown_members() {
+    let keys = Keys::load();
+    let b = bases(&keys);
+    let note = serde_json::json!({ "text": "kept", "n": 7 });
+    let read = read_with_unknown(
+        &b.unrequested,
+        &[
+            ("", "payment_note", note.clone()),
+            ("/unrequested", "rail_hint", serde_json::json!("on-chain")),
+            ("/proof", "relayed_by", Value::Null),
+            ("/proof/cert", "chain", serde_json::json!(["a"])),
+        ],
+    );
+    assert!(!read.unknown.is_empty());
+    // Read, changed in a member it knows, and written again: every member it doesn't know
+    // is there as read.
+    let changed = ActivityRecord {
+        status: Some("paid".into()),
+        ..read
+    };
+    let out = written(&changed);
+    assert_eq!(out["payment_note"], note);
+    assert_eq!(out["unrequested"]["rail_hint"], "on-chain");
+    assert!(out["proof"].as_object().unwrap().contains_key("relayed_by"));
+    assert_eq!(out["proof"]["cert"]["chain"], serde_json::json!(["a"]));
+    assert_eq!(out["status"], "paid");
+    // And reading that again keeps them once more.
+    let again = ActivityRecord::read(
+        &changed.to_json().unwrap(),
+        &pubky(ALICE),
+        ActivitySide::Payer,
+    )
+    .unwrap();
+    assert_eq!(written(&again), out);
+    // A record built in code has none, and writes as before.
+    assert!(b.unrequested.unknown.is_empty());
+    assert!(written(&b.unrequested).get("payment_note").is_none());
+}
+
+#[test]
+fn test_activity_record_unknown_members_follow_their_object() {
+    let keys = Keys::load();
+    let (held, details) = period_held(&keys);
+    let read = read_with_unknown(
+        &held,
+        &[("/period_details", "relay", serde_json::json!("x"))],
+    );
+    // The stored details move to earlier_details: their members move with them.
+    let later = later_details(&keys);
+    let moved = ActivityRecord {
+        period_details: Some(later),
+        earlier_details: vec![details],
+        ..read.clone()
+    };
+    let out = written(&moved);
+    assert_eq!(out["earlier_details"][0]["relay"], "x");
+    assert!(out["period_details"].get("relay").is_none());
+    // An object the writer no longer holds drops its members with it.
+    let b = bases(&keys);
+    let with_proof = read_with_unknown(
+        &b.unrequested,
+        &[("/proof", "relayed_by", serde_json::json!("bob"))],
+    );
+    let without = ActivityRecord {
+        proof: None,
+        ..with_proof
+    };
+    assert!(!String::from_utf8(without.to_json().unwrap())
+        .unwrap()
+        .contains("relayed_by"));
+}
+
+#[test]
+fn test_list_and_allowance_records_keep_unknown_members() {
+    let alice = pubky(ALICE);
+    let s = paykit("sealed.json");
+    let accepted = arr(&s, "binding_accepted");
+    let add = |case: &Value, pointer: &str| {
+        let mut v: Value = serde_json::from_slice(value(case)).unwrap();
+        v.as_object_mut()
+            .unwrap()
+            .insert("future".into(), serde_json::json!({ "k": 1 }));
+        v.pointer_mut(pointer)
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert("nested".into(), serde_json::json!(true));
+        serde_json::to_vec(&v).unwrap()
+    };
+    let list = PaymentListRecord::read(&add(&accepted[0], "/list"), &alice).unwrap();
+    let out: Value = serde_json::from_slice(&list.to_json().unwrap()).unwrap();
+    assert_eq!(out["future"]["k"], 1);
+    assert_eq!(out["list"]["nested"], true);
+    let allowance = AllowanceRecord::read(&add(&accepted[1], "/proposal"), &alice).unwrap();
+    let out: Value = serde_json::from_slice(&allowance.to_json().unwrap()).unwrap();
+    assert_eq!(out["future"]["k"], 1);
+    assert_eq!(out["proposal"]["nested"], true);
+    // Without unknown members, the bytes are the file's.
+    let plain = AllowanceRecord::read(value(&accepted[1]), &alice).unwrap();
+    assert!(plain.unknown.is_empty());
+    assert_eq!(plain.to_json().unwrap(), value(&accepted[1]));
 }
