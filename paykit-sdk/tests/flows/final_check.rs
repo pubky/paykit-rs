@@ -37,6 +37,7 @@ struct HookedStore {
     paying_hook: Mutex<Option<Hook>>,
     attempted_hook: Mutex<Option<Hook>>,
     stop_at_outbox: std::sync::atomic::AtomicBool,
+    refuse_acceptances: std::sync::atomic::AtomicBool,
     stop_after_paying: std::sync::atomic::AtomicBool,
     stopped: std::sync::atomic::AtomicBool,
     acceptances: Mutex<Vec<String>>,
@@ -67,6 +68,13 @@ impl HookedStore {
     fn stop_at_outbox(&self) {
         self.stop_at_outbox
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Every commit that queues an acceptance fails, applying nothing, while `refuse` holds;
+    /// the proof and every other message still queue.
+    fn refuse_acceptances(&self, refuse: bool) {
+        self.refuse_acceptances
+            .store(refuse, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// The process starts again on what was committed.
@@ -132,6 +140,19 @@ impl StateStore for HookedStore {
             }
         }
         if self.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(StoreError::Unavailable);
+        }
+        const ACCEPTANCE: &[u8] = b"paykit.payment_request_acceptance";
+        let queues_acceptance = batch.writes.iter().any(|write| {
+            matches!(write, Write::Put { key, value, .. }
+                if key.starts_with(b"out/")
+                    && value.windows(ACCEPTANCE.len()).any(|w| w == ACCEPTANCE))
+        });
+        if queues_acceptance
+            && self
+                .refuse_acceptances
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
             return Err(StoreError::Unavailable);
         }
         let queues = batch
@@ -1270,4 +1291,61 @@ async fn test_acceptance_after_a_paid_outcome_goes_only_once_its_proof_is_journa
         "{resumed:?}"
     );
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_acceptance_owed_after_the_outcome_is_queued_once_at_a_resume() {
+    // Every try to queue the acceptance fails, after the call and in the outcome, while the
+    // outcome itself is written: the entry stays owed. After a restart the resume queues
+    // the acceptance exactly once and finishes, and a second resume queues nothing more.
+    let w = World::new();
+    let (store, app_id, request) = with_a_request(&w).await;
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    store.refuse_acceptances(true);
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::AcceptanceOwed
+    );
+    assert_eq!(queued_acceptances(&store, &wallet).await, 0);
+    drop(wallet);
+    store.refuse_acceptances(false);
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+    assert_eq!(queued_acceptances(&store, &wallet).await, 1);
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(queued_acceptances(&store, &wallet).await, 1);
+}
+
+/// How many of the acceptances `store` journaled the wallet's outbox holds.
+async fn queued_acceptances(store: &HookedStore, wallet: &Paykit) -> usize {
+    let mut n = 0;
+    for id in store.acceptances() {
+        if wallet.app().delivery(&id).await.unwrap().is_some() {
+            n += 1;
+        }
+    }
+    n
 }

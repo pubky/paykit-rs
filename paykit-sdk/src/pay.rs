@@ -1150,6 +1150,65 @@ impl Paykit {
         Ok(())
     }
 
+    /// An outcome written while its acceptance couldn't be queued ([`Stage::AcceptanceOwed`]):
+    /// the acceptance is queued now, placed in the payer's activity record, and the entry
+    /// finished in the batch of that update. Nothing else is written again: `done` and the
+    /// proof went with the outcome. A record whose value doesn't read keeps the entry owed,
+    /// as one that changed meanwhile does, for the next resume; one that is gone has nothing
+    /// to place the acceptance in, and the entry finishes.
+    ///
+    /// # Errors
+    ///
+    /// The acceptance's queueing, or the store: the entry stays owed.
+    pub(crate) async fn finish_owed_acceptance(&mut self, entry: &mut JournalEntry) -> Result<()> {
+        self.release_acceptance(entry, None).await?;
+        let attempt_id = entry.attempt()?;
+        let target = ActivityTarget::payer(entry.natural_key.clone());
+        let own = self.identity();
+        let key = self.activity_key(&target)?;
+        let held = self.app.shared_record(&key).await?;
+        let write = match held.as_ref().map(|r| &r.content) {
+            Some(RecordContent::Value(value)) => {
+                let Some(mut record) = activity::read(Some(value), &own, ActivitySide::Payer)
+                else {
+                    return Ok(());
+                };
+                if self.place_acceptance(&mut record, entry)? {
+                    let value = record.to_json()?;
+                    Some(
+                        self.app
+                            .record_op(&target.record_target(), Some(&value), Vec::new())
+                            .await?,
+                    )
+                } else {
+                    None
+                }
+            }
+            Some(RecordContent::Unreadable) => return Ok(()),
+            None | Some(RecordContent::Deleted) => None,
+        };
+        let mut finished = entry.clone();
+        finished.stage = Stage::Finished;
+        match write {
+            Some(write) => {
+                let batch = OpBatch::new()
+                    .entry(write)
+                    .local(state::local_put(&key::journal(&attempt_id), &finished)?);
+                match self.app.submit_batch(batch).await {
+                    Ok(_) => {}
+                    Err(error) if error.code() == Some(ErrorCode::Conflict) => {
+                        self.app.read_record(&target.record_target()).await?;
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            None => self.save(&finished).await?,
+        }
+        *entry = finished;
+        Ok(())
+    }
+
     /// Step 2: pay through the rail with the attempt ID as the idempotency key.
     async fn dispatch(
         &mut self,
@@ -1355,9 +1414,14 @@ impl Paykit {
         if paid {
             // Every path that writes a payment made goes through here: its acceptance is
             // sendable, if it isn't yet, before the batch places it in the record (Paykit
-            // spec 7.2 steps 2, 3). It never holds back the outcome: one that can't be queued
-            // now is left out of the record, and the proof still goes.
-            let _ = self.release_acceptance(entry, None).await;
+            // spec 7.2 steps 2, 3). It never holds back the outcome, nor is it dropped: one
+            // that can't be queued now leaves the entry at `AcceptanceOwed` below, which a
+            // resume finishes ([`Paykit::finish_owed_acceptance`]).
+            if let Err(error) = self.release_acceptance(entry, None).await {
+                if !entry.owes_acceptance()? {
+                    return Err(error);
+                }
+            }
         }
         let attempt_id = entry.attempt()?;
         let attempt = attempt_id.to_bytes();
@@ -1369,7 +1433,7 @@ impl Paykit {
                 .await?
             {
                 self.check_entry(&kept)?;
-                if kept.stage == Stage::Finished {
+                if matches!(kept.stage, Stage::Finished | Stage::AcceptanceOwed) {
                     *entry = kept;
                     return Ok(Written::Done);
                 }
@@ -1417,7 +1481,13 @@ impl Paykit {
                 batch = batch.entry(write);
             }
             let mut finished = entry.clone();
-            finished.stage = Stage::Finished;
+            // An acceptance still owed keeps the entry where a resume visits it: the outcome
+            // is written, the acceptance not yet sent or placed.
+            finished.stage = if paid && entry.owes_acceptance()? {
+                Stage::AcceptanceOwed
+            } else {
+                Stage::Finished
+            };
             finished.record_held = false;
             finished.proof_msg_id = proof.as_ref().map(|p| p.msg_id().to_owned());
             batch = batch.local(state::local_put(&key::journal(&attempt_id), &finished)?);
@@ -1531,10 +1601,6 @@ impl Paykit {
         )))
     }
 
-    /// The payer's activity record of `entry`'s payment, rebuilt from the journal without
-    /// its acceptance and proof, which the outcome places: the request kept with the entry,
-    /// or a payment without a request's own members (Paykit wire 5.3). `None` when the entry
-    /// keeps no request it can be rebuilt from.
     /// Place the acceptance `entry` journaled, sent with its payment, in `record`'s
     /// response role (Paykit spec 7.2 step 3). Whether the record changed.
     pub(crate) fn place_acceptance(
@@ -1558,6 +1624,10 @@ impl Paykit {
         Ok(activity::place(record, Role::Response, stored))
     }
 
+    /// The payer's activity record of `entry`'s payment, rebuilt from the journal without
+    /// its acceptance and proof, which the outcome places: the request kept with the entry,
+    /// or a payment without a request's own members (Paykit wire 5.3). `None` when the entry
+    /// keeps no request it can be rebuilt from.
     pub(crate) fn rebuilt_record(&self, entry: &JournalEntry) -> Result<Option<ActivityRecord>> {
         let own = self.identity();
         let mut record = activity::empty(ActivitySide::Payer, entry.payee);
@@ -1638,6 +1708,11 @@ impl Paykit {
         self.place_kept_cancellations().await?;
         let mut out = Vec::new();
         for mut entry in self.journal().await? {
+            // An outcome written whose acceptance is still owed: queued and placed now.
+            if entry.stage == Stage::AcceptanceOwed {
+                self.finish_owed_acceptance(&mut entry).await?;
+                continue;
+            }
             if !entry.open() {
                 continue;
             }
@@ -1673,7 +1748,7 @@ impl Paykit {
                 Stage::RailPaid | Stage::RailFailed => {
                     out.push(self.report(&mut entry).await?);
                 }
-                Stage::Finished | Stage::Abandoned => {}
+                Stage::AcceptanceOwed | Stage::Finished | Stage::Abandoned => {}
             }
         }
         out.extend(self.recheck_failed().await?);

@@ -76,6 +76,10 @@ pub enum Stage {
     RailPaid,
     /// The method reports a definitive failure.
     RailFailed,
+    /// The outcome, the activity record and the proof were written in one batch, but the
+    /// acceptance the payment owes couldn't be queued: a resume queues it, places it in the
+    /// record, and finishes the entry (Paykit spec 7.2 steps 2, 3).
+    AcceptanceOwed,
     /// Finished: the outcome, the activity record and, for a payment, the proof were written
     /// in one batch; or the failure was written before money could move.
     Finished,
@@ -351,6 +355,11 @@ impl JournalEntry {
         if self.record_held && self.rail_proof.is_none() {
             return bad();
         }
+        if self.stage == Stage::AcceptanceOwed
+            && (self.rail_proof.is_none() || !self.acceptance_owed || self.acceptance_released)
+        {
+            return bad();
+        }
         match (&self.carrier, &self.carrier_record) {
             (Some(_), Some(_)) => return bad(),
             (Some(kept), None) => kept.check_shape()?,
@@ -471,7 +480,16 @@ impl JournalEntry {
 
     /// Whether the entry still has work: not finished, not abandoned.
     pub(crate) fn open(&self) -> bool {
-        !matches!(self.stage, Stage::Finished | Stage::Abandoned)
+        !matches!(
+            self.stage,
+            Stage::AcceptanceOwed | Stage::Finished | Stage::Abandoned
+        )
+    }
+
+    /// Whether the entry owes an acceptance it hasn't released yet: a one-time request's,
+    /// for a payment made.
+    pub(crate) fn owes_acceptance(&self) -> Result<bool> {
+        Ok(self.acceptance_owed && !self.acceptance_released && self.request_hash()?.is_some())
     }
 }
 
