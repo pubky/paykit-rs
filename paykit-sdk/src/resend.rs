@@ -55,6 +55,7 @@ impl Paykit {
         counterparty: [u8; 32],
         selection: ResendSelection,
     ) -> Result<String> {
+        self.refresh_own()?;
         let body = ResendRequest {
             msg_ids: selection.msg_ids,
             accepted_from: selection.accepted_from_ms,

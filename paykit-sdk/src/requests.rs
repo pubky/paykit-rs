@@ -232,6 +232,7 @@ impl Paykit {
     /// [`PaykitError::Lib`] with `Validation` for a draft that breaks Paykit wire 4.5; the
     /// client's errors.
     pub async fn send_request(&mut self, to: [u8; 32], draft: RequestDraft) -> Result<SentRequest> {
+        self.refresh_own()?;
         self.require_payee()?;
         let label = self.selling_label()?;
         let request = PaymentRequest {
@@ -377,6 +378,7 @@ impl Paykit {
     ///
     /// As [`Paykit::verify_payment`]; the client's errors.
     pub async fn confirm_payment(&mut self, record: &[u8; 32]) -> Result<Option<String>> {
+        self.refresh_own()?;
         if self.verify_payment(record).await?.is_none() {
             return Ok(None);
         }
@@ -432,6 +434,7 @@ impl Paykit {
         record: &[u8; 32],
         reason: Option<String>,
     ) -> Result<String> {
+        self.refresh_own()?;
         self.require_payee()?;
         let mut tries = 0;
         let msg_id = loop {
@@ -740,6 +743,7 @@ impl Paykit {
         request: &RequestRef,
         reason: Option<String>,
     ) -> Result<String> {
+        self.refresh_own()?;
         self.answer_request(request, false, reason).await
     }
 
@@ -754,6 +758,7 @@ impl Paykit {
         request: &RequestRef,
         reason: Option<String>,
     ) -> Result<String> {
+        self.refresh_own()?;
         self.answer_request(request, true, reason).await
     }
 

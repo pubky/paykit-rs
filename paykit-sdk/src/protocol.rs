@@ -349,6 +349,12 @@ impl Protocol for PaykitProtocol {
         sender: &AppCert,
         own: &AppCert,
     ) -> Result<(), String> {
+        // Under an own certificate Paykit refuses, such as a renewal's the Switch took, the
+        // message isn't judged by it: the receive step holds the entry until a certificate
+        // that passes replaces it, and this check runs again then (Paykit wire 3.1).
+        if check_certificate(own).is_err() {
+            return Ok(());
+        }
         PaykitKindRules::for_certificate(own)
             .check_scopes(message, sender)
             .map_err(|error| error.to_string())

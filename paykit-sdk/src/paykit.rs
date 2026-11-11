@@ -17,10 +17,12 @@ use std::sync::Arc;
 use paykit_lib::derive::request_obligation_blinded;
 use paykit_lib::scopes::{acts_as_payee, check_certificate};
 use paykit_lib::{Decimal, Label};
+use pubky_switch_client::app::Protocol as _;
 use pubky_switch_client::app::{
     App, AppBackup, AppConfig, AppEnv, AppEvent, HomeserverReader, JoinRequest, ReceiveReport,
 };
 use pubky_switch_client::clock::Clock;
+use pubky_switch_core::records::{AppCert, Approval};
 
 use crate::destination::KeptLookup;
 use crate::error::{Refusal, Result};
@@ -175,6 +177,12 @@ impl std::fmt::Debug for Paykit {
     }
 }
 
+/// The app's own certificate by Paykit's checks (Paykit wire 3.1): its scope rules, and
+/// permissions exactly as its scopes derive them.
+pub(crate) fn check_own_certificate(cert: &AppCert) -> Result<()> {
+    check_certificate(cert).map_err(|error| Refusal::CertificateRefused(error.to_string()).into())
+}
+
 impl Paykit {
     fn new_protocol() -> Arc<PaykitProtocol> {
         Arc::new(PaykitProtocol::new())
@@ -190,7 +198,7 @@ impl Paykit {
     ) -> Result<Self> {
         // Paykit's verifiers check the own certificate as they check every other (Paykit
         // wire 3.1): its scope rules, and permissions exactly as its scopes derive them.
-        check_certificate(app.cert())?;
+        check_own_certificate(app.cert())?;
         protocol.set_own(app.identity(), app.cert().clone());
         Ok(Self {
             app,
@@ -222,6 +230,19 @@ impl Paykit {
     ) -> Result<Self> {
         check_orphan_window(&config, rail.as_ref())?;
         let protocol = Self::new_protocol();
+        // The certificate passes Paykit's checks before the client writes anything: the
+        // client's join reads the approval with this same function, on these same inputs,
+        // before its first commit, so this is the certificate it would keep. An approval
+        // that doesn't read is left to the client's join, which refuses it, writing nothing.
+        if let Ok(approved) = Approval::read(
+            &request.approval,
+            &request.request,
+            &request.identity,
+            &request.keys.bundle_secret(),
+            &|scope| protocol.has_keys(scope),
+        ) {
+            check_own_certificate(&approved.cert)?;
+        }
         let app = App::join(env.clone(), protocol.clone(), config.app.clone(), request).await?;
         Self::assemble(app, env, protocol, config, rail, timer)
     }
@@ -380,9 +401,12 @@ impl Paykit {
 
     /// The certificate may have been renewed: the protocol follows it, once it passes
     /// Paykit's verifiers' checks as at load (Paykit wire 3.1). A renewed certificate they
-    /// refuse, which the Switch took, is an error, and the protocol keeps the one before.
+    /// refuse, which the Switch took, is [`Refusal::CertificateRefused`], and the protocol
+    /// keeps the one before. Every call that writes or sends runs this first, so no Paykit
+    /// action is taken under a certificate that fails; the refusal holds as long as the
+    /// stored certificate fails, so it needs no mark of its own.
     pub(crate) fn refresh_own(&self) -> Result<()> {
-        check_certificate(self.app.cert())?;
+        check_own_certificate(self.app.cert())?;
         self.protocol
             .set_own(self.app.identity(), self.app.cert().clone());
         Ok(())
@@ -441,6 +465,7 @@ impl Paykit {
     ///
     /// The client's errors.
     pub async fn flush(&mut self) -> Result<()> {
+        self.refresh_own()?;
         self.app.flush_outbox().await?;
         Ok(())
     }

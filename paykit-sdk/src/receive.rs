@@ -120,6 +120,14 @@ pub(crate) fn effect(
     stored: &StoredMessage,
     seq: u64,
 ) -> Result<(), Fail> {
+    // No Paykit effect under an own certificate Paykit refuses, such as a renewal's the
+    // Switch took (Paykit wire 3.1): the entry is held, never consumed, and tried again at
+    // later reads, once a certificate that passes replaces it.
+    if paykit_lib::scopes::check_certificate(cx.cert()).is_err() {
+        return Err(Fail::Store(StoreFailure::unavailable(
+            StoreError::Unavailable,
+        )));
+    }
     let sender = stored.sender();
     let scopes = cx.cert().scopes().to_vec();
     let pay = scopes.iter().any(|s| s == "pay");
@@ -788,6 +796,7 @@ impl Paykit {
         app_id: &[u8; 16],
         _confirmed: pubky_switch_client::app::UserConfirmed,
     ) -> crate::error::Result<()> {
+        self.refresh_own()?;
         let own = self.identity();
         let target = list_target(payee, app_id);
         let record_key = self.app.record_key(&target)?;

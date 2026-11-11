@@ -309,6 +309,7 @@ impl Paykit {
         request: &RequestRef,
         options: PayOptions,
     ) -> Result<PayOutcome> {
+        self.refresh_own()?;
         self.require_pay()?;
         self.app.may_attempt(false).map_err(not_now)?;
         let (target, record) = self.payer_request(request).await?;
@@ -451,6 +452,7 @@ impl Paykit {
     /// As [`Paykit::pay_request`]; [`PaykitError::Conflict`] when the `payment_lists` record
     /// changed meanwhile, after which the caller pays to the next usable endpoint.
     pub async fn pay_without_request(&mut self, payment: UnrequestedPayment) -> Result<PayOutcome> {
+        self.refresh_own()?;
         self.require_pay()?;
         self.app.may_attempt(false).map_err(not_now)?;
         let options = payment.options;
@@ -543,6 +545,7 @@ impl Paykit {
     /// [`Refusal::NotFound`] for an attempt whose outcome doesn't wait on its record;
     /// [`PaykitError::Conflict`] as above; the client's errors.
     pub async fn repair_activity_record(&mut self, attempt_id: &AttemptId) -> Result<PayOutcome> {
+        self.refresh_own()?;
         self.require_pay()?;
         let mut entry = self
             .journal()
@@ -1518,6 +1521,7 @@ impl Paykit {
     /// [`Refusal::IdentityUnavailable`] when a repeat is due and the own `identity.json`
     /// isn't confirmed in the last 60 s; the client's errors; the rail's errors.
     pub async fn resume_payments(&mut self) -> Result<Vec<PayOutcome>> {
+        self.refresh_own()?;
         // Batches kept from before go first, so the claim read below shows them and the
         // journal holds what their answers settled.
         self.app.flush_outbox().await?;

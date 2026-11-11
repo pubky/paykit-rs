@@ -112,6 +112,12 @@ pub enum Refusal {
     /// trusts, or is gone with nothing to rebuild it from. Nothing was written.
     #[error("the payer's activity record can't be updated now: {0}")]
     RecordHeld(String),
+    /// The app's certificate fails Paykit's checks (Paykit wire 3.1), though the Switch took
+    /// it: at a join, before anything is written, or after a renewal the client adopted. The
+    /// app takes no Paykit action under it until a certificate that passes replaces it.
+    /// Nothing was written.
+    #[error("Paykit wire 3.1: the app's certificate fails Paykit's checks: {0}")]
+    CertificateRefused(String),
 }
 
 /// A failure of the SDK.
