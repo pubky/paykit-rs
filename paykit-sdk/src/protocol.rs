@@ -365,12 +365,15 @@ pub(crate) fn restore_paykit_layer(
             // The certificate last listed under is the backup's own: this restore sets it to
             // the restored one, which its listing covers. The client's kept batches are its
             // own; a restore keeps no note of them.
+            // A stored entry's note is the client's entry's: the client tells of the entries it
+            // restores again, and the note is kept anew then (`stored.rs`).
             StateKey::RestoreHold
             | StateKey::HoldConfirmed(_)
             | StateKey::RecordsUnlisted
             | StateKey::PayerPassOwed
             | StateKey::ListedCert
-            | StateKey::KeptBatch(_) => continue,
+            | StateKey::KeptBatch(_)
+            | StateKey::StoredNote { .. } => continue,
             StateKey::Journal(attempt) => attempt,
             StateKey::CursorTime => {
                 cursor_time_ms = state::decode::<u64>(&value).map_err(|_| unread())?;
@@ -687,6 +690,26 @@ impl Protocol for PaykitProtocol {
     /// cursor (Switch spec 8.2; `crate::receive`). Called again after `409 conflict`, with
     /// the records read again: the effect is built anew from them.
     fn receive_with(&self, message: &ReceivedMessage, cx: &mut ReceiveContext<'_>) -> Outcome {
+        // A released entry whose effect the app wrote since, by a write of its own, is
+        // declined: its effect isn't applied twice (Switch spec 8.2; `stored.rs`).
+        if message.released {
+            let note = key::stored_note(&message.sender, &message.message.msg_id);
+            match cx.local_get(note.as_bytes()) {
+                Ok(Some(bytes)) => match state::decode::<crate::stored::StoredNote>(&bytes) {
+                    Ok(note) if note.placed => {
+                        return Outcome::Drop {
+                            reason: "Switch spec 8.2: a released entry whose effect the app \
+                                     wrote since"
+                                .into(),
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => return Outcome::Retry(StoreFailure::of_entry(StoreError::Corrupt)),
+                },
+                Ok(None) => {}
+                Err(error) => return Outcome::Retry(store_failure(error)),
+            }
+        }
         let stored = match stored_copy(message) {
             Ok(stored) => stored,
             Err(reason) => return Outcome::Drop { reason },

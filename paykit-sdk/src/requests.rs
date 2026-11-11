@@ -269,6 +269,11 @@ pub enum RequestStatus {
     /// paid only once the user has seen that (Paykit spec 7.2,
     /// [`crate::PayOptions::possibly_cancelled_confirmed`]).
     Held,
+    /// Received, but its record couldn't be written: the switch refused the write for good,
+    /// such as over a quota (Switch spec 8.2). It is shown from the app's own copy and
+    /// written into its record by a later write as room frees; it can't be paid, rejected or
+    /// cancelled until then ([`Refusal::NotFound`]).
+    Unrecorded,
 }
 
 /// A request the payer holds. Its `Debug` shows the payment reference's length only.
@@ -882,6 +887,11 @@ impl Paykit {
                 out.push(view);
             }
         }
+        for view in self.unrecorded_requests().await? {
+            if !out.iter().any(|held| held.request == view.request) {
+                out.push(view);
+            }
+        }
         Ok(out)
     }
 
@@ -896,10 +906,14 @@ impl Paykit {
             &request.payee,
             &request.request_hash,
         ));
-        let record = self
-            .held_activity(&target)
-            .await?
-            .ok_or(Refusal::NotFound)?;
+        let Some(record) = self.held_activity(&target).await? else {
+            return self
+                .unrecorded_requests()
+                .await?
+                .into_iter()
+                .find(|view| view.request == *request)
+                .ok_or_else(|| Refusal::NotFound.into());
+        };
         let key = self.activity_key(&target)?;
         self.request_view(key, &record)
             .await?

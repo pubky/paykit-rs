@@ -44,6 +44,7 @@
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>` | a notice for the host about a payment, until acknowledged (`notices.rs`) | |
+//! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
 
 use paykit_lib::AttemptId;
 use pubky_switch_client::app::LocalWrite;
@@ -199,6 +200,12 @@ pub(crate) mod key {
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const KEPT_BATCHES: &str = "kb/";
     pub(crate) const NOTICES: &str = "nt/";
+    pub(crate) const STORED_NOTES: &str = "se/";
+
+    /// The note of a stored entry's message `msg_id` from `sender`.
+    pub(crate) fn stored_note(sender: &[u8; 32], msg_id: &str) -> String {
+        format!("{STORED_NOTES}{}/{msg_id}", b64(sender))
+    }
 
     /// The notice of `kind` about `attempt`.
     pub(crate) fn notice(attempt: &AttemptId, kind: crate::notices::NoticeKind) -> String {
@@ -321,6 +328,8 @@ pub(crate) enum StateKey {
         payee: [u8; 32],
         app_id: Option<[u8; 16]>,
     },
+    /// `se/<sender>/<msg_id>`: a stored entry's message to write later.
+    StoredNote { sender: [u8; 32], msg_id: String },
     /// `nt/<attempt_id>/<kind>`: a notice for the host.
     Notice {
         attempt: AttemptId,
@@ -423,6 +432,13 @@ impl StateKey {
                             app_id: None,
                         },
                     },
+                    "se" => {
+                        let (sender, id) = rest.split_once('/')?;
+                        Self::StoredNote {
+                            sender: b64_32(sender)?,
+                            msg_id: msg_id(id)?,
+                        }
+                    }
                     "nt" => {
                         let (attempt, tag) = rest.split_once('/')?;
                         let parsed = AttemptId::parse(attempt).ok()?;
@@ -558,6 +574,13 @@ mod tests {
                 StateKey::ListAsk {
                     payee: pubky,
                     app_id: None,
+                },
+            ),
+            (
+                key::stored_note(&pubky, id),
+                StateKey::StoredNote {
+                    sender: pubky,
+                    msg_id: id.into(),
                 },
             ),
             (

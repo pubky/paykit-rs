@@ -55,6 +55,7 @@ mod records;
 mod requests;
 mod resend;
 mod state;
+mod stored;
 #[cfg(test)]
 mod testkit;
 mod timer;

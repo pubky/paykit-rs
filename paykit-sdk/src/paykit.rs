@@ -596,6 +596,9 @@ impl Paykit {
         // A certificate the read took may read more than the one before: its records are
         // listed now, or stay unlisted for the next receive or write (`Paykit::list_widened`).
         let records_unlisted = self.list_widened().await?;
+        // The entries the client stored for good: their messages kept and written into
+        // their records as room frees, their duty events acknowledged (`stored.rs`).
+        self.take_stored_entries().await?;
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1).
         self.place_kept_cancellations().await?;
