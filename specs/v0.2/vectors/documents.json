@@ -600,7 +600,7 @@
     ],
     "description": "Wire 3.1: certificates whose permissions are well formed but aren't exactly the list Paykit's table derives from their scopes (paykit_permissions). Each is the wallet certificate of the Switch set's documents.json with scopes and permissions changed, signed by alice's identity key; the signatures verify. The switch takes them and enforces exactly that list (switch_accepts), while Paykit's verifiers, apps and payers, refuse them. The lists that aren't well formed, which every verifier refuses, are the Switch set's permission_rejections. reason is the prototype's wording at a Paykit verifier."
   },
-  "description": "Paykit's signed documents and Paykit's checks of the Switch's certificates and app records (wire 3): the executor grant, alone and as the Allowance record's grant history holds it, with Paykit's own executor certificate, and the Switch set's, which Paykit's verifiers refuse; certificates that Paykit's verifiers refuse for their scopes or their permissions, certificates that hold another protocol's scopes beside Paykit's or instead of them, and app records as a Paykit reader reads their Paykit member. The certificates are the Switch set's documents.json certificates with scopes or permissions changed, and the app records its shop app record with its Paykit member changed.",
+  "description": "Paykit's signed documents and Paykit's checks of the Switch's certificates and app records (wire 3): the executor grant, alone and as the Allowance record's grant history holds it, with Paykit's own executor certificate, and the Switch set's, which Paykit's verifiers refuse; Paykit's own phone certificate, and certificates holding pay without contacts, which they refuse; certificates that Paykit's verifiers refuse for their scopes or their permissions, certificates that hold another protocol's scopes beside Paykit's or instead of them, and app records as a Paykit reader reads their Paykit member. The certificates are the Switch set's documents.json certificates with scopes or permissions changed, and the app records its shop app record with its Paykit member changed.",
   "executor_certificates": {
     "accepted": [
       {
@@ -886,6 +886,98 @@
         "signed": {
           "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI3cDRmbjQ0cW9zaGN3Z2ZuZHo1Z3J0N2Z5eXoxZXljcXlkdXhkcWU4bzU4b2YxYnl6b2RvIiwiYXBwX2lkIjoicXQ0aHQ4NnJ0ODE1eDZud25vOGhvbWh3a3kiLCJzaWduaW5nX2tleSI6Ii1uNl9oa1FJVVN6dHJGUF8xZVk4YktMa1VkLVFzMmg0a1Zla2tPcG1HdnMiLCJidW5kbGVfa2V5IjoiMjF1eG9zV0ZXX05FdnVxWDltaXhvS3dfNlBibHBjeTNBN0x3VTcyTzBXWSIsInNjb3BlcyI6WyJyZXF1ZXN0IiwiZXh0OmNhcCJdLCJwZXJtaXNzaW9ucyI6WyJjb252ZXJzYXRpb24uYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
           "sig": "LS50T4IUPODLhNZUmZU17uw0Fh6uNbrMzux2-vrnqJ86pgg2c7Ce5mGofOCY4fOgxY8FLFhqS8D2C-hMbbUIDQ"
+        },
+        "switch_accepts": true
+      }
+    ]
+  },
+  "payer_certificates": {
+    "accepted": [
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app_cert\",\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"g7teif9k1ur75jrmidqk7z7u6w\",\"signing_key\":\"UDyX-NYVmJ-eY_CQlFTMbivTuLgYpG8IhudJ4ppkcz4\",\"bundle_key\":\"Kv10Dtuyoka_H9sM9-yfpP3RUNG3iRwvBIq5ebw2dn8\",\"scopes\":[\"pay\",\"allowance\",\"contacts\"],\"permissions\":[\"claims.read\",\"claims.write\",\"lists.read\",\"conversation.add\"],\"issued_at\":\"2025-12-01T00:00:00.000Z\",\"expires_at\":\"2027-01-01T00:00:00.000Z\"}",
+        "name": "Paykit's phone certificate, with contacts",
+        "paykit_permissions": [
+          "claims.read",
+          "claims.write",
+          "lists.read",
+          "conversation.add"
+        ],
+        "paykit_scopes": [
+          "pay",
+          "allowance",
+          "contacts"
+        ],
+        "permissions": [
+          "claims.read",
+          "claims.write",
+          "lists.read",
+          "conversation.add"
+        ],
+        "scopes": [
+          "pay",
+          "allowance",
+          "contacts"
+        ],
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoiZzd0ZWlmOWsxdXI3NWpybWlkcWs3ejd1NnciLCJzaWduaW5nX2tleSI6IlVEeVgtTllWbUotZVlfQ1FsRlRNYml2VHVMZ1lwRzhJaHVkSjRwcGtjejQiLCJidW5kbGVfa2V5IjoiS3YxMER0dXlva2FfSDlzTTkteWZwUDNSVU5HM2lSd3ZCSXE1ZWJ3MmRuOCIsInNjb3BlcyI6WyJwYXkiLCJhbGxvd2FuY2UiLCJjb250YWN0cyJdLCJwZXJtaXNzaW9ucyI6WyJjbGFpbXMucmVhZCIsImNsYWltcy53cml0ZSIsImxpc3RzLnJlYWQiLCJjb252ZXJzYXRpb24uYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI3LTAxLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "GiPbHsZ2XcyACMOE_Wixi_noTCCJ10kDYrKukqHf7kwJex9JL-KUdyrM48JZ7CWgPMPvGeiBcSZ_BRIvYSZKAw"
+        },
+        "switch_accepts": true
+      }
+    ],
+    "description": "Spec 3.1, wire 3.1: a paying app's certificate. pay requires contacts, so that every paying app reads the deny list and pays no counterparty the user blocked. accepted is Paykit's own phone certificate, which the phone's messages stored in sealed.json carry: the Switch set's documents.json phone certificate with contacts added to its scopes and the permissions its scopes need, signed again by alice's identity key. refused are the Switch set's phone certificate as it is, which holds pay and allowance without contacts, and the Switch set's wallet certificate with pay alone and the permissions pay needs, signed again by alice's identity key: the switch takes each (switch_accepts), and Paykit's verifiers refuse each. reason is paykit-lib's wording at a Paykit verifier.",
+    "refused": [
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app_cert\",\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"g7teif9k1ur75jrmidqk7z7u6w\",\"signing_key\":\"UDyX-NYVmJ-eY_CQlFTMbivTuLgYpG8IhudJ4ppkcz4\",\"bundle_key\":\"Kv10Dtuyoka_H9sM9-yfpP3RUNG3iRwvBIq5ebw2dn8\",\"scopes\":[\"pay\",\"allowance\"],\"permissions\":[\"claims.read\",\"claims.write\",\"conversation.add\"],\"issued_at\":\"2025-12-01T00:00:00.000Z\",\"expires_at\":\"2027-01-01T00:00:00.000Z\"}",
+        "name": "pay and allowance without contacts",
+        "paykit_permissions": [
+          "claims.read",
+          "claims.write",
+          "conversation.add"
+        ],
+        "paykit_scopes": [
+          "pay",
+          "allowance"
+        ],
+        "permissions": [
+          "claims.read",
+          "claims.write",
+          "conversation.add"
+        ],
+        "reason": "invalid: pay requires contacts",
+        "scopes": [
+          "pay",
+          "allowance"
+        ],
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoiZzd0ZWlmOWsxdXI3NWpybWlkcWs3ejd1NnciLCJzaWduaW5nX2tleSI6IlVEeVgtTllWbUotZVlfQ1FsRlRNYml2VHVMZ1lwRzhJaHVkSjRwcGtjejQiLCJidW5kbGVfa2V5IjoiS3YxMER0dXlva2FfSDlzTTkteWZwUDNSVU5HM2lSd3ZCSXE1ZWJ3MmRuOCIsInNjb3BlcyI6WyJwYXkiLCJhbGxvd2FuY2UiXSwicGVybWlzc2lvbnMiOlsiY2xhaW1zLnJlYWQiLCJjbGFpbXMud3JpdGUiLCJjb252ZXJzYXRpb24uYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI3LTAxLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "nPEIwVcQCl9GOFU1959Gx2FV0iGhFOdHmYc0f4vVOvxzCb8yZ8vhPWOXRy59EUyzMEGBxHtWKM2BJXQappJ0Bw"
+        },
+        "switch_accepts": true
+      },
+      {
+        "body": "{\"v\":1,\"kind\":\"pubky-switch.app_cert\",\"identity\":\"6frao8w9ss5cn544qd64hynikrbr97ae1s5941c7ma5e1epifhgy\",\"app_id\":\"wejf37ngr7qizej3eoijn3hq4c\",\"signing_key\":\"34ZGVmVZLEaW9LV-fvdhq5LWstPhljHGbJgcQVSR9Ek\",\"bundle_key\":\"iSFVOWWeuN4EuNB7jx0IcOChXdjFaFF0P9YZGeYLsmE\",\"scopes\":[\"pay\"],\"permissions\":[\"claims.read\",\"claims.write\",\"conversation.add\"],\"issued_at\":\"2025-12-01T00:00:00.000Z\",\"expires_at\":\"2026-12-01T00:00:00.000Z\"}",
+        "name": "pay alone",
+        "paykit_permissions": [
+          "claims.read",
+          "claims.write",
+          "conversation.add"
+        ],
+        "paykit_scopes": [
+          "pay"
+        ],
+        "permissions": [
+          "claims.read",
+          "claims.write",
+          "conversation.add"
+        ],
+        "reason": "invalid: pay requires contacts",
+        "scopes": [
+          "pay"
+        ],
+        "signed": {
+          "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFwcF9jZXJ0IiwiaWRlbnRpdHkiOiI2ZnJhbzh3OXNzNWNuNTQ0cWQ2NGh5bmlrcmJyOTdhZTFzNTk0MWM3bWE1ZTFlcGlmaGd5IiwiYXBwX2lkIjoid2VqZjM3bmdyN3FpemVqM2VvaWpuM2hxNGMiLCJzaWduaW5nX2tleSI6IjM0WkdWbVZaTEVhVzlMVi1mdmRocTVMV3N0UGhsakhHYkpnY1FWU1I5RWsiLCJidW5kbGVfa2V5IjoiaVNGVk9XV2V1TjRFdU5CN2p4MEljT0NoWGRqRmFGRjBQOVlaR2VZTHNtRSIsInNjb3BlcyI6WyJwYXkiXSwicGVybWlzc2lvbnMiOlsiY2xhaW1zLnJlYWQiLCJjbGFpbXMud3JpdGUiLCJjb252ZXJzYXRpb24uYWRkIl0sImlzc3VlZF9hdCI6IjIwMjUtMTItMDFUMDA6MDA6MDAuMDAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEyLTAxVDAwOjAwOjAwLjAwMFoifQ",
+          "sig": "UD6xmIfy6B3PfPAP-am0JQt6CCfscGeljzZgFHhtcmtNrR_w8NQKXl-20JYHI1sWCrITWvCVSDyjmdac0UHbBw"
         },
         "switch_accepts": true
       }
