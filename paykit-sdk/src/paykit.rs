@@ -317,7 +317,9 @@ impl Paykit {
             &backup.app,
         )
         .await?;
-        Self::assemble(app, env, protocol, config, rail, timer)
+        let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
+        paykit.bound_restored_cursor_time().await?;
+        Ok(paykit)
     }
 
     /// The app's backup: the client's state and Paykit's, the payment journal in it, read in

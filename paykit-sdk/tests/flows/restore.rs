@@ -1362,3 +1362,40 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
     let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&backup).unwrap()).unwrap();
     restored(&w, &backup).await;
 }
+
+#[tokio::test]
+async fn test_restore_cursor_time_ahead_of_the_backup_is_clamped() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let backup: serde_json::Value =
+        serde_json::from_slice(&wallet.backup().await.unwrap().to_bytes().unwrap()).unwrap();
+    drop(wallet);
+    // The backup's cursor time is a year ahead of anything it verified.
+    let mut state = layer_of(&backup);
+    let cursor = state
+        .iter_mut()
+        .find(|(k, _)| k.as_slice() == b"ct")
+        .expect("the backup keeps its cursor time");
+    cursor.1 = kept(serde_json::json!(
+        w.clock.now_ms() + 365 * 24 * crate::common::HOUR_MS
+    ));
+    let backup = paykit_sdk::PaykitBackup::from_bytes(
+        &serde_json::to_vec(&with_layer(&backup, state)).unwrap(),
+    )
+    .unwrap();
+    let app = restored(&w, &backup).await;
+    // Clamped to the backup's verified time plus the clock tolerance, and the re-sends start
+    // from there, not from the future.
+    let bound = w.clock.now_ms() + pubky_switch_core::records::CLOCK_TOLERANCE_MS;
+    let read = |bytes: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
+    let cursor = read(app.app().protocol_get(b"ct").await.unwrap().unwrap());
+    assert!(cursor["d"].as_u64().unwrap() <= bound, "{cursor}");
+    let hold = read(app.app().protocol_get(b"rh").await.unwrap().unwrap());
+    assert!(
+        hold["d"]["resend_from_ms"].as_u64().unwrap() <= w.clock.now_ms(),
+        "{hold}"
+    );
+}

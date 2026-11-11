@@ -79,6 +79,32 @@ impl Paykit {
             .is_none())
     }
 
+    /// A restored cursor time (`ct`) above the backup's highest verified service time plus
+    /// the clock tolerance is clamped to that bound, with the hold's re-send time: a time
+    /// ahead of any the backup verified would ask counterparties to re-send from the future,
+    /// so nothing would come back (Paykit spec 7.2, "What a restore loses"). Clamped, not
+    /// refused: the time decides only where the re-sends start, and a restore must not fail
+    /// on it. Without a verified time the device clock is the bound.
+    pub(crate) async fn bound_restored_cursor_time(&mut self) -> Result<()> {
+        let Some(cursor) = self.local_get::<u64>(key::CURSOR_TIME).await? else {
+            return Ok(());
+        };
+        let bound = self
+            .service_time()
+            .unwrap_or_else(|| self.now())
+            .saturating_add(CLOCK_TOLERANCE_MS);
+        if cursor <= bound {
+            return Ok(());
+        }
+        let mut tx = Tx::default();
+        tx.put(key::CURSOR_TIME, &bound)?;
+        if let Some(mut hold) = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await? {
+            hold.resend_from_ms = RestoreHold::of(bound).resend_from_ms;
+            tx.put(key::RESTORE_HOLD, &hold)?;
+        }
+        self.local_commit(tx).await
+    }
+
     /// Queue, once after a restore, a `resend_request` to every counterparty with an open
     /// request, from the restore's re-send time; [`Paykit::receive`] sends them.
     pub(crate) async fn queue_restore_asks(&mut self) -> Result<()> {
