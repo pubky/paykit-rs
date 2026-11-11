@@ -2128,7 +2128,10 @@ impl Paykit {
     ///    complete before its attempt is orphaned ([`FinalCheck::Lapsed`]); for a first
     ///    dispatch, the attempt is within its pre-dispatch budget;
     /// 6. the app may still make the attempt: no alarm or restore question raised meanwhile,
-    ///    and for an automatic payment the clocks within the tolerance.
+    ///    for an automatic payment the clocks within the tolerance, and its certificate
+    ///    holds `pay`, so an app a renewal reduced moves no money on any path, a repeat at a
+    ///    resume or a recovery included ([`FinalCheck::Hold`]: nothing is paid, the attempt
+    ///    stays open for an app that holds it).
     ///
     /// Checks 2 to 6 run on the clock after the one await ([`Paykit::final_gates`]). A
     /// repeat's call follows them with no await; a first dispatch's follows the journal
@@ -2258,6 +2261,9 @@ impl Paykit {
         confirmed: Option<UserConfirmed>,
         kind: Dispatch,
     ) -> Result<FinalCheck> {
+        if !self.holds("pay") {
+            return Ok(FinalCheck::Hold);
+        }
         let now = self.now();
         match kind {
             Dispatch::Repeat {
