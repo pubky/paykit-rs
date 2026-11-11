@@ -890,17 +890,31 @@ impl Paykit {
                     options.unconfirmed_identity_confirmed,
                 )
                 .await??;
+            // The payee's public Payment List is every current app's public endpoints together
+            // (Paykit spec 4): the method's first identifier any of them offers is paid, and of
+            // apps offering the same one, the first by App ID, so every payer device picks the
+            // same for the same records.
+            let mut records = records;
+            records.sort_by_key(|usable| usable.record.body().app_id);
             let order = self.rail.endpoint_identifiers();
-            let mut offered = false;
-            for usable in records {
-                let endpoints = &usable.member.public_endpoints;
-                offered |= endpoints.keys().any(&wanted);
-                if let Some((id, payload)) = rail_first(&order, endpoints, |id, _| wanted(id)) {
-                    let destination = usable.destination(id, payload);
-                    return Ok((destination, Carrier::Record(Box::new(usable.record)), None));
-                }
+            let chosen = order.iter().find_map(|want| {
+                records
+                    .iter()
+                    .position(|usable| {
+                        usable.member.public_endpoints.contains_key(want) && wanted(want)
+                    })
+                    .map(|at| (at, want))
+            });
+            if let Some((at, id)) = chosen {
+                let usable = records.swap_remove(at);
+                let payload = usable.member.public_endpoints[id].clone();
+                let destination = usable.destination(id, &payload);
+                return Ok((destination, Carrier::Record(Box::new(usable.record)), None));
             }
-            if offered {
+            if records
+                .iter()
+                .any(|usable| usable.member.public_endpoints.keys().any(&wanted))
+            {
                 return Err(unsupported("the payee's public endpoints"));
             }
             return Err(Refusal::NoDestination(
@@ -933,9 +947,14 @@ impl Paykit {
                 crate::destination::current(&identity.doc, &l.app_id, &carrier, now).is_ok()
             });
         }
-        lists.sort_by_key(|l| match l.list.body() {
-            Body::PrivatePaymentList(list) => std::cmp::Reverse(list.version),
-            _ => std::cmp::Reverse(0),
+        // Newest list first, then by App ID: of the payee's apps offering the same identifier,
+        // the newest list's is paid, and every payer device picks the same for the same lists.
+        lists.sort_by_key(|l| {
+            let version = match l.list.body() {
+                Body::PrivatePaymentList(list) => list.version,
+                _ => 0,
+            };
+            (std::cmp::Reverse(version), l.app_id)
         });
         // The version held of each app's list, newest first, for a request that names it.
         let mut held: Vec<([u8; 16], u64)> = Vec::new();
@@ -950,6 +969,9 @@ impl Paykit {
         let mut expired = false;
         let order = self.rail.endpoint_identifiers();
         let paid = |id: &PaymentEndpointIdentifier| order.contains(id);
+        // The lists in use, in the order above: the method's first identifier any of them
+        // offers is paid, from the first list offering it (Paykit spec 8.4).
+        let mut in_use = Vec::new();
         for record in lists {
             let Body::PrivatePaymentList(list) = record.list.body() else {
                 continue;
@@ -968,16 +990,25 @@ impl Paykit {
                 .payment_endpoints
                 .keys()
                 .any(|id| wanted(id) && paid(id));
-            let used = |id: &PaymentEndpointIdentifier| {
-                record
+            in_use.push(record);
+        }
+        for id in &order {
+            for record in &in_use {
+                let Body::PrivatePaymentList(list) = record.list.body() else {
+                    continue;
+                };
+                let Some(endpoint) = list.payment_endpoints.get(id) else {
+                    continue;
+                };
+                // A single-use endpoint already used at this list's version isn't offered;
+                // the version marked used is the one of the list whose endpoint is chosen.
+                let used = record
                     .used
                     .iter()
-                    .any(|u| u.version == list.version && &u.endpoint == id)
-            };
-            let chosen = rail_first(&order, &list.payment_endpoints, |id, endpoint| {
-                wanted(id) && !(endpoint.single_use && used(id))
-            });
-            if let Some((id, endpoint)) = chosen {
+                    .any(|u| u.version == list.version && &u.endpoint == id);
+                if !wanted(id) || (endpoint.single_use && used) {
+                    continue;
+                }
                 let destination = Destination::new(
                     record.app_id,
                     id,

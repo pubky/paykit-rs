@@ -628,3 +628,166 @@ async fn test_destinations_unsupported_live_list_beside_an_expired_one_asks_for_
         got.report.events
     );
 }
+
+/// Bob's app `app` sends alice's `wallet` its list at `version`, offering the one reusable
+/// endpoint `id`, entered at her switch directly.
+fn list_from(w: &World, app: &str, wallet: [u8; 16], version: u64, id: &str, payload: &str) {
+    let mut endpoints = std::collections::BTreeMap::new();
+    endpoints.insert(
+        crate::common::endpoint(id),
+        paykit_lib::bodies::ListEndpoint {
+            payload: paykit_lib::PaymentEndpointPayload::new(payload).unwrap(),
+            single_use: false,
+        },
+    );
+    let body = paykit_lib::bodies::PrivatePaymentList {
+        version,
+        payment_endpoints: endpoints,
+        expires_at: w.clock.now_ms() + 30 * 24 * crate::common::HOUR_MS,
+    }
+    .to_body()
+    .unwrap();
+    w.inject(
+        &w.bob,
+        app,
+        &w.alice,
+        &[wallet],
+        "paykit.private_payment_list",
+        Vec::new(),
+        body,
+    );
+}
+
+/// Alice's wallet and bob's shop and till, each app's list held by the wallet: the till's,
+/// newer, offers on-chain; the shop's offers Lightning, which the method prefers.
+async fn two_lists(w: &World) -> (paykit_sdk::Paykit, paykit_sdk::Paykit) {
+    w.rail.set_endpoint_identifiers(vec![
+        crate::common::endpoint("btc-lightning-bolt12"),
+        crate::common::endpoint("btc-bitcoin-p2wpkh"),
+    ]);
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    till.app_mut().invite(&w.alice_id()).await.unwrap();
+    let now = w.clock.now_ms();
+    list_from(
+        w,
+        "shop",
+        wallet.app_id(),
+        now,
+        "btc-lightning-bolt12",
+        "lno1shop",
+    );
+    list_from(
+        w,
+        "till",
+        wallet.app_id(),
+        now + 1,
+        "btc-bitcoin-p2wpkh",
+        "bc1qtill",
+    );
+    wallet.receive(None).await.unwrap();
+    (wallet, shop)
+}
+
+#[tokio::test]
+async fn test_destinations_lists_of_every_app_in_the_payment_methods_order() {
+    // The method's first choice is paid from the shop's list, though the till's newer list
+    // offers its second.
+    let w = World::new();
+    let (mut wallet, _shop) = two_lists(&w).await;
+    let outcome = wallet
+        .pay_without_request(paykit_sdk::UnrequestedPayment::new(
+            w.bob_id(),
+            crate::common::btc("1"),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
+        "btc-lightning-bolt12"
+    );
+}
+
+#[tokio::test]
+async fn test_destinations_request_to_any_app_takes_the_payment_methods_first_across_lists() {
+    // A request that leaves the destination to the payee's apps is paid by the same rule.
+    let w = World::new();
+    let (mut wallet, mut shop) = two_lists(&w).await;
+    let mut draft = draft("1", w.clock.now_ms());
+    draft.destination = paykit_lib::bodies::RequestDestination::Any;
+    let request = request_from(&mut shop, w.alice_id(), draft).await;
+    wallet.receive(None).await.unwrap();
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
+        "btc-lightning-bolt12"
+    );
+}
+
+#[tokio::test]
+async fn test_destinations_same_endpoint_in_two_lists_paid_from_the_newer() {
+    // Both apps' lists offer the same identifier: the newer list's endpoint is paid. The
+    // till's, older, fixes another amount, which the transfer check would refuse.
+    let w = World::new();
+    w.rail
+        .set_endpoint_identifiers(vec![crate::common::endpoint("btc-lightning-bolt12")]);
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    till.app_mut().invite(&w.alice_id()).await.unwrap();
+    let now = w.clock.now_ms();
+    list_from(
+        &w,
+        "shop",
+        wallet.app_id(),
+        now + 1,
+        "btc-lightning-bolt12",
+        "lno1shop",
+    );
+    list_from(
+        &w,
+        "till",
+        wallet.app_id(),
+        now,
+        "btc-lightning-bolt12",
+        "lno1till?amount=2",
+    );
+    wallet.receive(None).await.unwrap();
+    let outcome = wallet
+        .pay_without_request(paykit_sdk::UnrequestedPayment::new(
+            w.bob_id(),
+            crate::common::btc("1"),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+        "{outcome:?}"
+    );
+}

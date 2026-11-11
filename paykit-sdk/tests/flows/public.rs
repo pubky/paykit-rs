@@ -20,7 +20,18 @@ fn publish(w: &World, member: Value, expires_at: Option<u64>) -> Vec<u8> {
 
 /// As [`publish`], made at `updated_at`. Returns the bytes served.
 fn publish_at(w: &World, member: Value, updated_at: u64, expires_at: Option<u64>) -> Vec<u8> {
-    let keys = w.bob.identity().app_keys("shop");
+    publish_app_at(w, "shop", member, updated_at, expires_at)
+}
+
+/// As [`publish_at`], for bob's app `app`.
+fn publish_app_at(
+    w: &World,
+    app: &str,
+    member: Value,
+    updated_at: u64,
+    expires_at: Option<u64>,
+) -> Vec<u8> {
+    let keys = w.bob.identity().app_keys(app);
     let app_id = keys.app_id_bytes();
     let held = w.bob.switch().app(&app_id).record.unwrap();
     let mut body = AppRecord::verify(&held, &w.bob_id())
@@ -35,7 +46,8 @@ fn publish_at(w: &World, member: Value, updated_at: u64, expires_at: Option<u64>
     body.expires_at = expires_at;
     let record = AppRecord::sign(&keys, body).unwrap();
     let bytes = serde_json::to_vec(record.signed()).unwrap();
-    serve(w, &bytes);
+    w.homeserver
+        .put(w.bob_id(), &app_record_path(&app_id), bytes.clone());
     bytes
 }
 
@@ -590,6 +602,62 @@ async fn test_public_endpoints_pay_the_payment_methods_first() {
     );
     let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
     assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
+        "btc-lightning-bolt12"
+    );
+}
+
+#[tokio::test]
+async fn test_public_endpoints_of_every_app_in_the_payment_methods_order() {
+    // Bob's public Payment List is both apps' endpoints together: the method's first choice
+    // is paid though only the later app, by App ID, offers it, and the earlier one offers
+    // its second.
+    let w = World::new();
+    w.rail.set_endpoint_identifiers(vec![
+        endpoint("btc-lightning-bolt12"),
+        endpoint("btc-lightning-bolt11"),
+    ]);
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    till.app_mut().invite(&w.alice_id()).await.unwrap();
+    let (earlier, later) = if shop.app_id() < till.app_id() {
+        ("shop", "till")
+    } else {
+        ("till", "shop")
+    };
+    let now = w.clock.now_ms();
+    let expires_at = Some(now + 30 * DAY_MS);
+    publish_app_at(
+        &w,
+        earlier,
+        one_endpoint("btc-lightning-bolt11", "lnbc1earlier"),
+        now,
+        expires_at,
+    );
+    publish_app_at(
+        &w,
+        later,
+        one_endpoint("btc-lightning-bolt12", "lno1later"),
+        now,
+        expires_at,
+    );
+    assert_eq!(
+        listed(&mut wallet, &w).await.len(),
+        2,
+        "both apps' endpoints are listed"
+    );
+    let outcome = wallet.pay_without_request(public_to_bob(&w)).await.unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    // Only the later app offers it.
     assert_eq!(
         wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
         "btc-lightning-bolt12"
