@@ -240,6 +240,14 @@ pub(crate) mod key {
     pub(crate) fn resent_day(requester: &[u8; 32], day: u64) -> String {
         format!("rsd/{}/{}", b64(requester), num(day))
     }
+
+    /// A list request asked of `payee`, of its app `app_id` or of none.
+    pub(crate) fn list_ask(payee: &[u8; 32], app_id: Option<&[u8; 16]>) -> String {
+        match app_id {
+            Some(app) => format!("lq/{}/{}", b64(payee), b64(app)),
+            None => format!("lq/{}", b64(payee)),
+        }
+    }
 }
 
 /// Paykit's local state, closed: every key the SDK writes, as its builder in [`key`] spells
@@ -280,6 +288,11 @@ pub(crate) enum StateKey {
     Resent { requester: [u8; 32], msg_id: String },
     /// `rsd/<requester>/<day>`: how many messages were re-sent to a requester that day.
     ResentDay { requester: [u8; 32], day: u64 },
+    /// `lq/<payee>[/<app>]`: a list request asked of a payee, of one of its apps or none.
+    ListAsk {
+        payee: [u8; 32],
+        app_id: Option<[u8; 16]>,
+    },
 }
 
 impl StateKey {
@@ -363,6 +376,16 @@ impl StateKey {
                             day: number(day)?,
                         }
                     }
+                    "lq" => match rest.split_once('/') {
+                        Some((payee, app)) => Self::ListAsk {
+                            payee: b64_32(payee)?,
+                            app_id: Some(b64_16(app)?),
+                        },
+                        None => Self::ListAsk {
+                            payee: b64_32(rest)?,
+                            app_id: None,
+                        },
+                    },
                     _ => return None,
                 }
             }
@@ -473,6 +496,20 @@ mod tests {
                     day: 10,
                 },
             ),
+            (
+                key::list_ask(&pubky, Some(&app)),
+                StateKey::ListAsk {
+                    payee: pubky,
+                    app_id: Some(app),
+                },
+            ),
+            (
+                key::list_ask(&pubky, None),
+                StateKey::ListAsk {
+                    payee: pubky,
+                    app_id: None,
+                },
+            ),
         ];
         for (built, family) in cases {
             assert_eq!(StateKey::parse(built.as_bytes()), Some(family), "{built}");
@@ -491,6 +528,8 @@ mod tests {
             "j/",
             "ctx",
             "side/123E4567-E89B-42D3-A456-426614174000",
+            "lq/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM/not-an-app",
+            "lq/",
         ] {
             assert_eq!(StateKey::parse(key.as_bytes()), None, "{key}");
         }

@@ -52,6 +52,7 @@ use serde_json::{Map, Value};
 use crate::activity::{self, ActivityTarget, SideTag};
 use crate::hold::RestoreHold;
 use crate::journal::JournalEntry;
+use crate::pay::ListAsk;
 use crate::rail::Rail;
 use crate::receive::{self, Fail, QueuedAnswer};
 use crate::records::{list_target, KeptMessage};
@@ -59,8 +60,11 @@ use crate::state::{self, key, StateKey};
 
 /// The kinds this SDK handles (Paykit wire 4.3): the one-time request flow, payments without
 /// a request, the payer's side of Private Payment Lists and re-sends. Recurring requests,
-/// Allowances and publishing Private Payment Lists come later.
-pub const HANDLED_KINDS: [Kind; 8] = [
+/// Allowances and publishing Private Payment Lists come later. A
+/// `private_payment_list_request` this SDK receives is taken with no effect: it publishes no
+/// list to answer with, and the request is best effort (Paykit spec 8.4), so its payer asks
+/// again later.
+pub const HANDLED_KINDS: [Kind; 9] = [
     Kind::PaymentRequest,
     Kind::PaymentRequestAcceptance,
     Kind::PaymentRequestRejection,
@@ -69,6 +73,7 @@ pub const HANDLED_KINDS: [Kind; 8] = [
     Kind::PaymentReceipt,
     Kind::ResendRequest,
     Kind::PrivatePaymentList,
+    Kind::PrivatePaymentListRequest,
 ];
 
 /// A re-send to ask of a sender (`p/ask/`).
@@ -372,6 +377,11 @@ pub(crate) fn restore_paykit_layer(
             }
             StateKey::HeldList(_) => {
                 check_held_list(&key, &value, &own, &record_key)?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::ListAsk { .. } => {
+                state::decode::<ListAsk>(&value).map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }

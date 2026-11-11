@@ -73,6 +73,15 @@ pub enum Refusal {
     /// usable public endpoint, or none the caller named (Paykit spec 4, 8.1, 8.4).
     #[error("no usable destination: {0}")]
     NoDestination(String),
+    /// No usable Private Payment List from the payee: none held, or each one expired or its
+    /// single-use endpoints the payment would use already used (Paykit spec 8.4, "No usable
+    /// list"). The app asked the payee for its current list with a
+    /// `paykit.private_payment_list_request`; the payee can't be forced to answer, so the
+    /// user is told the app is waiting for the payee's list. The user may choose to pay to
+    /// the payee's public endpoints instead ([`crate::PaymentMode::Public`]); the app never
+    /// switches on its own.
+    #[error("Paykit spec 8.4: waiting for the payee's Private Payment List")]
+    WaitingForList,
     /// The payment method would transfer another amount or asset, an amount it can't tell, or
     /// a fee above the app's cap, and the user didn't choose it (Paykit spec 7.2 step 1).
     #[error("Paykit spec 7.2 step 1: {0}")]

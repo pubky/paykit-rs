@@ -1,10 +1,25 @@
 //! Payments without a request (Paykit spec 8.4): to a Private Payment List's endpoints, with
 //! single-use endpoints reserved in the attempt's batch, and credited once by settlement.
 
-use paykit_sdk::{PayOptions, PayOutcome, PayeeStatus, Refusal, UnrequestedPayment};
+use paykit_sdk::{PayOptions, PayOutcome, PayeeStatus, Paykit, Refusal, UnrequestedPayment};
+use pubky_switch_client::app::AppEvent;
 use pubky_switch_client::clock::Clock;
 
-use crate::common::{btc, endpoint, World};
+use crate::common::{btc, endpoint, World, HOUR_MS};
+
+/// How many `private_payment_list_request`s `shop` takes at its next receive. It publishes no
+/// list, so each one is taken with no effect (Paykit spec 8.4).
+async fn list_requests(shop: &mut Paykit) -> usize {
+    let got = shop.receive(None).await.unwrap();
+    got.report
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(e, AppEvent::MessageReceived { kind, .. }
+                if kind == "paykit.private_payment_list_request")
+        })
+        .count()
+}
 
 fn to_bob(w: &World, value: &str, id: &str) -> UnrequestedPayment {
     UnrequestedPayment {
@@ -100,7 +115,7 @@ async fn test_unrequested_single_use_endpoint_used_once() {
         .await
         .unwrap_err();
     assert!(
-        matches!(used.refusal(), Some(Refusal::NoDestination(_))),
+        matches!(used.refusal(), Some(Refusal::WaitingForList)),
         "{used:?}"
     );
     let used = wallet
@@ -108,7 +123,7 @@ async fn test_unrequested_single_use_endpoint_used_once() {
         .await
         .unwrap_err();
     assert!(
-        matches!(used.refusal(), Some(Refusal::NoDestination(_))),
+        matches!(used.refusal(), Some(Refusal::WaitingForList)),
         "{used:?}"
     );
     assert_eq!(w.rail.all_executions().len(), 1);
@@ -134,7 +149,7 @@ async fn test_unrequested_without_a_list_refused() {
         .await
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
         "{refused:?}"
     );
     let public = wallet
@@ -165,15 +180,104 @@ async fn test_unrequested_expired_list_refused() {
     w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
         .await;
     wallet.receive(None).await.unwrap();
-    w.clock.advance_ms(31 * 24 * crate::common::HOUR_MS);
+    shop.receive(None).await.unwrap();
+    w.clock.advance_ms(31 * 24 * HOUR_MS);
     let refused = wallet
         .pay_without_request(to_bob(&w, "1", "btc-lightning-bolt12"))
         .await
         .unwrap_err();
     assert!(
-        matches!(refused.refusal(), Some(Refusal::NoDestination(_))),
+        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
         "{refused:?}"
     );
+    // An expired list is treated as missing: the payee is asked for its current one
+    // (Paykit wire 4.13).
+    assert_eq!(list_requests(&mut shop).await, 1);
+}
+
+/// The refusal of paying bob's Lightning offer, which `wallet` holds no usable list for.
+async fn pay_lightning(w: &World, wallet: &mut Paykit) -> paykit_sdk::PaykitError {
+    wallet
+        .pay_without_request(to_bob(w, "1", "btc-lightning-bolt12"))
+        .await
+        .unwrap_err()
+}
+
+#[tokio::test]
+async fn test_unrequested_without_a_list_asks_the_payee_once_while_outstanding() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    // Bob shares nothing yet, but takes alice's messages.
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let refused = pay_lightning(&w, &mut wallet).await;
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        "{refused:?}"
+    );
+    assert_eq!(list_requests(&mut shop).await, 1);
+    // Asked again while that request is outstanding, nothing more is sent.
+    let refused = pay_lightning(&w, &mut wallet).await;
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::WaitingForList)),
+        "{refused:?}"
+    );
+    assert_eq!(list_requests(&mut shop).await, 0);
+    // A day on, unanswered, it is asked once more.
+    w.clock.advance_ms(24 * HOUR_MS + 1);
+    pay_lightning(&w, &mut wallet).await;
+    assert_eq!(list_requests(&mut shop).await, 1);
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_unrequested_used_up_list_asks_again_for_each_newer_version() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let first = w.clock.now_ms();
+    w.list_to_alice(&mut shop, &[wallet.app_id()], first).await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    shop.receive(None).await.unwrap();
+    // The single-use endpoint is used: the list is used up for it, and the payee is asked.
+    let used = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(used.refusal(), Some(Refusal::WaitingForList)),
+        "{used:?}"
+    );
+    assert_eq!(list_requests(&mut shop).await, 1);
+    wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap_err();
+    assert_eq!(list_requests(&mut shop).await, 0);
+    // A newer list, used up in turn, is a new version held: asked at once, within the day.
+    w.clock.advance_ms(1000);
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let used = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(used.refusal(), Some(Refusal::WaitingForList)),
+        "{used:?}"
+    );
+    assert_eq!(list_requests(&mut shop).await, 1);
 }
 
 #[tokio::test]

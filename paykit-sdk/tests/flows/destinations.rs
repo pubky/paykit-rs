@@ -209,6 +209,18 @@ async fn test_destinations_list_endpoint_the_request_restricts_refused() {
     );
     assert!(w.rail.all_executions().is_empty());
     assert!(wallet.payments().await.unwrap().is_empty());
+    // The list is current and simply offers no such endpoint: a newer one needn't differ,
+    // so the payee isn't asked for one (Paykit spec 8.4).
+    let got = shop.receive(None).await.unwrap();
+    assert!(
+        !got.report.events.iter().any(|e| matches!(
+            e,
+            pubky_switch_client::app::AppEvent::MessageReceived { kind, .. }
+                if kind == "paykit.private_payment_list_request"
+        )),
+        "{:?}",
+        got.report.events
+    );
 }
 
 #[tokio::test]
