@@ -283,11 +283,12 @@ async fn in_flight(w: &World) -> (Arc<HookedStore>, [u8; 16], paykit_lib::Attemp
     repeatable(w);
     let (store, app_id, request) = with_a_request(w).await;
     let mut wallet = w
-        .load_on_clock(
+        .load_with(
             &w.alice,
             Arc::clone(&store) as Arc<dyn StateStore>,
             app_id,
             Arc::clone(&w.clock),
+            crate::common::day_window(),
         )
         .await;
     w.rail.next(Behaviour::Hang);
@@ -315,7 +316,13 @@ async fn stopped_before_the_rail() -> (World, Arc<HookedStore>, [u8; 16], paykit
             Fault::FailAfter(n),
         ));
         let mut crashing = w
-            .load_on_clock(&w.alice, faulty, app_id, Arc::clone(&w.clock))
+            .load_with(
+                &w.alice,
+                faulty,
+                app_id,
+                Arc::clone(&w.clock),
+                crate::common::day_window(),
+            )
             .await;
         let _ = crashing.pay_request(&request, PayOptions::default()).await;
         drop(crashing);
@@ -1059,7 +1066,7 @@ async fn test_orphan_after_below_the_floor_refused() {
     );
     let scopes = paykit_sdk::AppScopes::new().pay().build().unwrap();
     let config = PaykitConfig {
-        orphan_after_s: floor - 1,
+        orphan_after_s: Some(floor - 1),
         ..PaykitConfig::default()
     };
     let refused = Paykit::join(
@@ -1081,7 +1088,7 @@ async fn test_orphan_after_below_the_floor_refused() {
     );
     // At the floor, another app joins.
     let config = PaykitConfig {
-        orphan_after_s: floor,
+        orphan_after_s: Some(floor),
         ..PaykitConfig::default()
     };
     w.join_with(&w.alice, "phone", scopes, config, crate::common::store())
@@ -1096,7 +1103,8 @@ async fn test_repeat_too_close_to_the_orphan_age_not_made() {
     let w = World::new();
     let (store, app_id, attempt_id) = in_flight(&w).await;
     w.clock.advance_ms(
-        paykit_sdk::DEFAULT_ORPHAN_AFTER_S * 1000
+        crate::common::day_window().orphan_after_s_for(&paykit_sdk::Rail::declaration(&*w.rail))
+            * 1000
             - paykit_sdk::rail::FAKE_LONGEST_COMPLETION_MS
             - pubky_switch_core::records::CLOCK_TOLERANCE_MS,
     );
@@ -1111,4 +1119,34 @@ async fn test_repeat_too_close_to_the_orphan_age_not_made() {
     let resumed = wallet.resume_payments().await.unwrap();
     assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_default_config_takes_a_one_day_rail() {
+    // A rail that may take a day: the default config's `orphan_after` is that day plus the
+    // pre-dispatch budget, so join, load and paying all take it.
+    let w = World::new();
+    let declaration = RailDeclaration {
+        longest_completion_ms: 86_400_000,
+        ..paykit_sdk::Rail::declaration(&*w.rail)
+    };
+    w.rail.set_declaration(declaration.clone());
+    assert_eq!(
+        PaykitConfig::default().orphan_after_s_for(&declaration),
+        86_400 + paykit_sdk::PRE_DISPATCH_BUDGET_MS / 1000
+    );
+    let (store, app_id, request) = with_a_request(&w).await;
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
 }

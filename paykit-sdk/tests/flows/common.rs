@@ -175,11 +175,24 @@ impl World {
         app_id: [u8; 16],
         clock: Arc<TestClock>,
     ) -> Paykit {
+        self.load_with(signer, store, app_id, clock, PaykitConfig::default())
+            .await
+    }
+
+    /// [`World::load_on_clock`], with `config`.
+    pub async fn load_with(
+        &self,
+        signer: &TestSigner,
+        store: Arc<dyn StateStore>,
+        app_id: [u8; 16],
+        clock: Arc<TestClock>,
+        config: PaykitConfig,
+    ) -> Paykit {
         let mut env = self.env(signer, store);
         env.clock = clock as Arc<dyn Clock>;
         Paykit::load(
             env,
-            PaykitConfig::default(),
+            config,
             app_id,
             Arc::clone(&self.rail) as Arc<dyn paykit_sdk::Rail>,
             self.timer(),
@@ -202,12 +215,22 @@ impl World {
 
     /// Alice's wallet, as [`World::wallet`], on `store`.
     pub async fn wallet_on(&self, name: &str, store: Arc<dyn StateStore>) -> Paykit {
+        self.wallet_with(name, store, PaykitConfig::default()).await
+    }
+
+    /// Alice's wallet, as [`World::wallet_on`], with `config`.
+    pub async fn wallet_with(
+        &self,
+        name: &str,
+        store: Arc<dyn StateStore>,
+        config: PaykitConfig,
+    ) -> Paykit {
         let mut wallet = self
             .join_with(
                 &self.alice,
                 name,
                 AppScopes::new().pay().build().unwrap(),
-                PaykitConfig::default(),
+                config,
                 store,
             )
             .await;
@@ -234,6 +257,16 @@ impl World {
             AppScopes::new().request_label(&label).build().unwrap(),
         )
         .await
+    }
+}
+
+/// A config whose attempts carry a day as `orphan_after`, for the scenarios that repeat a
+/// dispatch hours after it: the default for the fake rail, its hour plus the pre-dispatch
+/// budget, would have them orphaned by then.
+pub fn day_window() -> PaykitConfig {
+    PaykitConfig {
+        orphan_after_s: Some(86_400),
+        ..PaykitConfig::default()
     }
 }
 

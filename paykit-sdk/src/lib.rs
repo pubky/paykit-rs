@@ -64,8 +64,8 @@ pub use error::{PaykitError, Refusal, Result};
 pub use journal::{PaymentView, Stage};
 pub use pay::{PayOptions, PayOutcome, PaymentMode, UnrequestedPayment, UNREQUESTED_DEADLINE_MS};
 pub use paykit::{
-    orphan_floor_s, Paykit, PaykitBackup, PaykitConfig, ReceiveSummary, DEFAULT_ORPHAN_AFTER_S,
-    DEFAULT_RESEND_BUDGET, PRE_DISPATCH_BUDGET_MS,
+    orphan_floor_s, Paykit, PaykitBackup, PaykitConfig, ReceiveSummary, DEFAULT_RESEND_BUDGET,
+    PRE_DISPATCH_BUDGET_MS,
 };
 pub use protocol::{PaykitProtocol, HANDLED_KINDS};
 pub use rail::{Rail, RailDeclaration, RailError, RailOutcome, RailPayment, Transfer};

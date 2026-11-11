@@ -846,7 +846,7 @@ impl Paykit {
             entry.obligation,
             step,
             attempt_id.to_bytes(),
-            self.config.orphan_after_s,
+            self.config.orphan_after_s_for(&self.rail.declaration()),
             entry.deadline,
         );
         let mut conditions = Vec::new();

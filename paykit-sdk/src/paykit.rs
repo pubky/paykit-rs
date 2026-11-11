@@ -31,11 +31,6 @@ use crate::rail::{Rail, RailDeclaration};
 use crate::state::{key, Tx};
 use crate::timer::Timer;
 
-/// The default `orphan_after` of an attempt: a day, the longest a payment method is expected
-/// to take (Switch spec 10.2). It must be at least the floor [`orphan_floor_s`] gives for
-/// the app's rail.
-pub const DEFAULT_ORPHAN_AFTER_S: u64 = 86_400;
-
 /// The longest a first dispatch may take from its attempt's answer to the payment method's
 /// call: 10 minutes. Between them come the destination and identity checks, the
 /// acceptance's journaling, the final payment check and the journal write of `Paying`: a few
@@ -58,18 +53,17 @@ pub fn orphan_floor_s(declaration: &RailDeclaration) -> u64 {
         .div_ceil(1000)
 }
 
-/// Refuse a `config` whose `orphan_after_s` is below the floor its rail needs.
+/// Refuse a `config` whose `orphan_after_s` is set below the floor its rail needs.
 pub(crate) fn check_orphan_window(config: &PaykitConfig, rail: &dyn Rail) -> Result<()> {
     let floor = orphan_floor_s(&rail.declaration());
-    if config.orphan_after_s < floor {
-        return Err(paykit_lib::Error::Validation(format!(
-            "Switch spec 10.2: orphan_after_s {} is below the rail's floor of {floor} s, its \
-             longest completion plus the pre-dispatch budget",
-            config.orphan_after_s
+    match config.orphan_after_s {
+        Some(set) if set < floor => Err(paykit_lib::Error::Validation(format!(
+            "Switch spec 10.2: orphan_after_s {set} is below the rail's floor of {floor} s, its \
+             longest completion plus the pre-dispatch budget"
         ))
-        .into());
+        .into()),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// The default number of messages re-sent to one requester identity a day (Paykit spec 9).
@@ -80,10 +74,12 @@ pub const DEFAULT_RESEND_BUDGET: u64 = 500;
 pub struct PaykitConfig {
     /// The client's choices.
     pub app: AppConfig,
-    /// Seconds after which an open attempt of this app is orphaned: the longest its payment
-    /// method takes (Switch spec 10.2), and never below [`orphan_floor_s`] for the app's
-    /// rail, which `join`, `load`, `restore` and every attempt refuse.
-    pub orphan_after_s: u64,
+    /// Seconds after which an open attempt of this app is orphaned (Switch spec 10.2).
+    /// `None`, the default, is [`orphan_floor_s`] for the app's rail: its declared longest
+    /// time to complete or fail plus [`PRE_DISPATCH_BUDGET_MS`], so a default config suits
+    /// any rail. A value set below that floor is refused by `join`, `load`, `restore` and
+    /// every attempt.
+    pub orphan_after_s: Option<u64>,
     /// The largest fee the payee can influence through its destination that the app pays
     /// automatically (Paykit spec 7.2 step 1); `None` accepts no such fee.
     pub fee_cap: Option<Decimal>,
@@ -94,11 +90,20 @@ pub struct PaykitConfig {
     pub resend_budget: u64,
 }
 
+impl PaykitConfig {
+    /// The `orphan_after` the app's attempts carry for a rail that declares `declaration`:
+    /// the value set, or else the rail's floor ([`orphan_floor_s`]).
+    pub fn orphan_after_s_for(&self, declaration: &RailDeclaration) -> u64 {
+        self.orphan_after_s
+            .unwrap_or_else(|| orphan_floor_s(declaration))
+    }
+}
+
 impl Default for PaykitConfig {
     fn default() -> Self {
         Self {
             app: AppConfig::default(),
-            orphan_after_s: DEFAULT_ORPHAN_AFTER_S,
+            orphan_after_s: None,
             fee_cap: None,
             selling_label: None,
             resend_budget: DEFAULT_RESEND_BUDGET,

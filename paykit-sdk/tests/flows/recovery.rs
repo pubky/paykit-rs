@@ -19,7 +19,9 @@ async fn in_flight(
     w: &World,
     base: &Arc<dyn pubky_switch_client::store::StateStore>,
 ) -> (paykit_lib::AttemptId, [u8; 16]) {
-    let mut wallet = w.wallet_on("wallet", Arc::clone(base)).await;
+    let mut wallet = w
+        .wallet_with("wallet", Arc::clone(base), crate::common::day_window())
+        .await;
     let mut shop = w.shop().await;
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
