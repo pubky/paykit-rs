@@ -302,12 +302,18 @@ impl Protocol for PaykitProtocol {
     }
 
     /// Paykit's layer is its whole local state, as the client's default writes it; a
-    /// restore checks and marks the journal in it, before anything is written.
+    /// restore checks the certificate it installs, and checks and marks the journal in the
+    /// layer, before anything is written.
     fn restore_layer(
         &self,
         layer: Option<&ProtocolLayer>,
         restoring: &RestoreContext<'_>,
     ) -> Result<Vec<LocalWrite>, String> {
+        // The certificate the restore installs passes Paykit's checks as every other does
+        // (Paykit wire 3.1). Checked here, before the restore's one commit, a backup whose
+        // certificate the Switch takes and Paykit refuses writes nothing.
+        check_certificate(restoring.cert())
+            .map_err(|error| format!("the backup's certificate: {error}"))?;
         restore_paykit_layer(layer, |payee, request_hash| {
             request_obligation_blinded(&restoring.blind(payee), &restoring.blind(request_hash), 0)
         })

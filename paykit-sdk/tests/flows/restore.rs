@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use paykit_sdk::rail::Behaviour;
 use paykit_sdk::{
-    PayOptions, PayOutcome, Paykit, PaykitBackup, PaykitConfig, Rail, Refusal, RequestStatus,
+    AppScopes, PayOptions, PayOutcome, Paykit, PaykitBackup, PaykitConfig, Rail, Refusal,
+    RequestStatus,
 };
 use pubky_switch_client::app::UserConfirmed;
 use pubky_switch_client::clock::Clock;
@@ -442,6 +443,72 @@ async fn test_restore_another_protocols_layer_refused() {
     let error = refused_restore(&w, backup, Arc::clone(&target)).await;
     assert!(is_refused(&error), "{error:?}");
     nothing_restored(&w, target, app_id).await;
+}
+
+/// `backup` with its certificate, and the app record carrying it, replaced by a new one of
+/// the wallet's keys granting `scopes`, as the Switch takes it.
+fn with_certificate(
+    w: &World,
+    backup: &serde_json::Value,
+    scopes: &paykit_sdk::RequestedScopes,
+) -> (serde_json::Value, pubky_switch_core::records::AppCert) {
+    use pubky_switch_client::testing::{issue_cert, AppSpec};
+    use pubky_switch_core::records::{AppRecord, AppRecordBody};
+    let keys = w.alice.identity().app_keys("wallet");
+    let names: Vec<&str> = scopes.scopes.iter().map(String::as_str).collect();
+    let issued_at = w.clock.now_ms() - 1;
+    let cert = issue_cert(
+        w.alice.identity().key(),
+        &keys,
+        &AppSpec::new(&names).with_permissions(&scopes.permissions),
+        issued_at,
+    )
+    .unwrap();
+    let record = AppRecord::sign(&keys, AppRecordBody::new(&cert, vec![], issued_at)).unwrap();
+    let mut out = backup.clone();
+    out["cert"] = serde_json::to_value(cert.signed()).unwrap();
+    out["record"] = serde_json::to_value(record.signed()).unwrap();
+    (out, cert)
+}
+
+#[tokio::test]
+async fn test_restore_certificate_paykit_refuses_writes_nothing() {
+    use pubky_switch_client::store::{Fault, FaultStore, StateStore};
+    let w = World::new();
+    let (good, app_id) = backup_with_a_payment(&w).await;
+    // `pay` with a switch permission its scopes don't derive: the Switch takes the
+    // certificate, and Paykit refuses it (Paykit wire 3.1).
+    let mut scopes = AppScopes::new().pay().build().unwrap();
+    let extra = pubky_switch_core::scopes::Permission::ALL
+        .into_iter()
+        .find(|p| !scopes.permissions.contains(p))
+        .unwrap();
+    scopes.permissions.push(extra);
+    // Each once, in the Switch's fixed order (Switch wire 3.1).
+    let all = pubky_switch_core::scopes::Permission::ALL;
+    scopes
+        .permissions
+        .sort_by_key(|p| all.iter().position(|q| q == p));
+    let (refused, cert) = with_certificate(&w, &good, &scopes);
+    assert!(paykit_lib::scopes::check_certificate(&cert).is_err());
+    let target = store();
+    let fault = Arc::new(FaultStore::new(Arc::clone(&target), Fault::None));
+    let error = refused_restore(&w, refused, Arc::clone(&fault) as Arc<dyn StateStore>).await;
+    assert!(
+        matches!(
+            &error,
+            paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::InvalidData(why))
+                if why.contains("the backup's certificate")
+        ),
+        "{error:?}"
+    );
+    // Refused before the restore's commit: nothing is written.
+    assert_eq!(fault.commits(), 0);
+    nothing_restored(&w, target, app_id).await;
+    // The same backup with a certificate Paykit takes restores: the refusal is Paykit's.
+    let (taken, _) = with_certificate(&w, &good, &AppScopes::new().pay().build().unwrap());
+    let taken = PaykitBackup::from_bytes(&serde_json::to_vec(&taken).unwrap()).unwrap();
+    restored(&w, &taken).await;
 }
 
 #[tokio::test]
