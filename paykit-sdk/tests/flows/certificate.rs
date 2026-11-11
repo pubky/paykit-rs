@@ -1580,11 +1580,17 @@ async fn test_certificate_none_listed_under_a_refused_one_lists_once_one_passes(
 
 #[tokio::test]
 async fn test_certificate_wider_on_the_payer_side_writes_nothing_while_keys_wait() {
-    // In flight, the wallet is narrowed to `contacts`, then renewed to `pay` and `request`
-    // with no bundle: it holds the `pay` key from before, but its payer's records are read
-    // again by a certificate that reads more of them than the one listed under. The resume
-    // journals the payment made and writes nothing, rather than build on a copy that may
-    // lack what was written meanwhile.
+    // In flight, the wallet is narrowed, then renewed to `pay` and `request` with no
+    // bundle: it holds the `pay` key from before, but the new certificate reads more of the
+    // payer's side than the one listed under, its claims (after `contacts`) or its records
+    // (after `allowance`, which reads claims too). The resume journals the payment made
+    // and writes nothing, rather than build on a copy that may lack what was written
+    // meanwhile.
+    payer_side_widened(AppScopes::new().contacts().build().unwrap()).await;
+    payer_side_widened(AppScopes::new().allowance().build().unwrap()).await;
+}
+
+async fn payer_side_widened(narrowed: RequestedScopes) {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let me = wallet.app_id();
@@ -1605,7 +1611,7 @@ async fn test_certificate_wider_on_the_payer_side_writes_nothing_while_keys_wait
         panic!("in flight");
     };
     let first = wallet.app().cert().clone();
-    let narrow = renew(&w, me, &AppScopes::new().contacts().build().unwrap(), 1_000);
+    let narrow = renew(&w, me, &narrowed, 1_000);
     let _ = wallet.receive(None).await;
     list(&w, me, &first, &narrow);
     wallet.receive(None).await.unwrap();
