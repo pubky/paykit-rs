@@ -1,6 +1,7 @@
 //! The final payment check (Paykit spec 4, 7.2): the last thing before the payment method's
 //! call, on a first dispatch, a resume and a recovery. A late switch answer that removes the
-//! destination's app, or a payee copy that aged past its limit meanwhile, pays nothing.
+//! destination's app, or a payee copy that aged past its limit meanwhile, pays nothing; nor
+//! does one that comes during the journal write of `Paying`, which the fence after it sees.
 
 use std::sync::{Arc, Mutex};
 
@@ -22,18 +23,39 @@ type Step = ([u8; 32], u64, Option<Hook>);
 
 /// A store that runs a hook once, right after it commits the journal entry that holds the
 /// signed acceptance: the last journal write before the final payment check. Armed, it
-/// fails the commit after that one, which queues the acceptance, applying nothing.
+/// fails the commit after that one, which queues the acceptance, applying nothing. It can
+/// also run a hook during the commit that journals `Paying`, after the final payment check
+/// and before the payment method's call, and then stop, as a process that died: every
+/// later commit fails, applying nothing.
 #[derive(Default)]
 struct HookedStore {
     inner: MemoryStore,
     hook: Mutex<Option<Hook>>,
     fail_queueing: std::sync::atomic::AtomicBool,
     queueing_next: std::sync::atomic::AtomicBool,
+    paying_hook: Mutex<Option<Hook>>,
+    stop_after_paying: std::sync::atomic::AtomicBool,
+    stopped: std::sync::atomic::AtomicBool,
 }
 
 impl HookedStore {
     fn on_acceptance_journaled(&self, hook: Hook) {
         *self.hook.lock().unwrap() = Some(hook);
+    }
+
+    fn on_paying(&self, hook: Hook) {
+        *self.paying_hook.lock().unwrap() = Some(hook);
+    }
+
+    fn stop_after_paying(&self) {
+        self.stop_after_paying
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The process starts again on what was committed.
+    fn restart(&self) {
+        self.stopped
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn fail_acceptance_queueing(&self) {
@@ -59,12 +81,20 @@ impl StateStore for HookedStore {
 
     fn commit(&self, batch: WriteBatch) -> Result<(), StoreError> {
         const SIGNED: &[u8] = b"\"acceptance_msg_id\":\"";
-        let signed = batch.writes.iter().any(|write| match write {
-            Write::Put { key, value, .. } => {
-                key.starts_with(b"p/j/") && value.windows(SIGNED.len()).any(|w| w == SIGNED)
-            }
-            _ => false,
-        });
+        const PAYING: &[u8] = b"\"stage\":\"paying\"";
+        let journals = |marker: &[u8]| {
+            batch.writes.iter().any(|write| match write {
+                Write::Put { key, value, .. } => {
+                    key.starts_with(b"p/j/") && value.windows(marker.len()).any(|w| w == marker)
+                }
+                _ => false,
+            })
+        };
+        let signed = journals(SIGNED);
+        let paying = journals(PAYING);
+        if self.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(StoreError::Unavailable);
+        }
         if self
             .queueing_next
             .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -83,6 +113,18 @@ impl StateStore for HookedStore {
         if signed {
             if let Some(hook) = self.hook.lock().unwrap().take() {
                 hook();
+            }
+        }
+        if paying {
+            if let Some(hook) = self.paying_hook.lock().unwrap().take() {
+                hook();
+            }
+            if self
+                .stop_after_paying
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.stopped
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
             }
         }
         Ok(())
@@ -756,4 +798,125 @@ async fn test_final_check_held_first_dispatch_leaves_the_payment_unsubmitted() {
         wallet.payments().await.unwrap()[0].stage,
         paykit_sdk::Stage::Finished
     );
+}
+
+// ---------------------------------------------------------------------------------------
+// The fence after the journal write of `Paying`: an answer that comes during that commit
+
+/// Alice's wallet on a hooked store, with bob's request, a rail neither idempotent nor with
+/// a history, and bob's identity.json past its 10 minutes, so paying looks it up; his
+/// switch answers only during the commit that journals `Paying`, after the final payment
+/// check took the Homeserver's copy.
+async fn answered_during_paying(
+    w: &World,
+    change: impl FnOnce(&World),
+) -> (Arc<HookedStore>, [u8; 16], RequestRef, Paykit) {
+    blind(w);
+    let (store, app_id, request) = with_a_request(w).await;
+    change(w);
+    w.clock.advance_ms(11 * 60_000);
+    let slow = held_switch(w);
+    let reads = HookedReads::new(w);
+    let release = Arc::clone(&slow);
+    store.on_paying(Box::new(move || release.release()));
+    let wallet = wallet(
+        w,
+        Arc::clone(&store) as Arc<dyn StateStore>,
+        app_id,
+        &reads,
+        &slow,
+    )
+    .await;
+    (store, app_id, request, wallet)
+}
+
+#[tokio::test]
+async fn test_fence_removal_answered_during_paying_not_paid() {
+    let w = World::new();
+    let (store, app_id, request, mut wallet) =
+        answered_during_paying(&w, revoke_shop_on_the_switch_only).await;
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    let PayOutcome::Pending { attempt_id } = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(w.rail.pay_calls(&attempt_id), 0);
+    // Nothing was submitted: the entry is written back to `Attempted`, and a resume writes
+    // the attempt `failed` rather than "may be paid".
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Attempted);
+    drop(wallet);
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Failed { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(w.rail.pay_calls(&attempt_id), 0);
+}
+
+#[tokio::test]
+async fn test_fence_equivocation_answered_during_paying_refused() {
+    let w = World::new();
+    let (_store, _app_id, request, mut wallet) = answered_during_paying(&w, equivocate).await;
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused.refusal(),
+            Some(paykit_sdk::Refusal::AttemptFailed(inner))
+                if matches!(**inner, paykit_sdk::Refusal::IdentityUnavailable(_))
+        ),
+        "{refused:?}"
+    );
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Finished);
+    assert_eq!(w.rail.pay_calls(&payment.attempt_id), 0);
+}
+
+#[tokio::test]
+async fn test_fence_stop_lost_to_a_crash_stays_paying_and_uncertain() {
+    let w = World::new();
+    let (store, app_id, request, mut wallet) =
+        answered_during_paying(&w, revoke_shop_on_the_switch_only).await;
+    // The process dies after the fence stops the payment, before the write-back.
+    store.stop_after_paying();
+    assert!(wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .is_err());
+    drop(wallet);
+    assert!(w.rail.all_executions().is_empty());
+    store.restart();
+    let mut wallet = w
+        .load_on_clock(
+            &w.alice,
+            Arc::clone(&store) as Arc<dyn StateStore>,
+            app_id,
+            Arc::clone(&w.clock),
+        )
+        .await;
+    let payment = wallet.payments().await.unwrap().remove(0);
+    assert_eq!(payment.stage, paykit_sdk::Stage::Paying);
+    // Read as possibly dispatched, the safe direction: on a rail that can't tell, it stays
+    // "may be paid", and nothing is paid.
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert_eq!(
+        resumed,
+        vec![PayOutcome::Uncertain {
+            attempt_id: payment.attempt_id
+        }]
+    );
+    assert_eq!(w.rail.pay_calls(&payment.attempt_id), 0);
 }

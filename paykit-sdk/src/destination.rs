@@ -50,7 +50,7 @@ use paykit_lib::records::{DestinationSource, StoredMessage};
 use paykit_lib::scopes::{acts_as_payee, check_certificate};
 use paykit_lib::Body;
 use pubky_switch_client::app::{
-    Initiator, MayAct, PeerIdentity, SwitchAnswer, SwitchLookup, UserConfirmed, DOC_CACHE_MS,
+    Initiator, MayAct, PeerIdentity, SwitchAnswer, UserConfirmed, DOC_CACHE_MS,
 };
 use pubky_switch_client::transport::BoxFuture;
 use pubky_switch_core::records::{AppCert, AppRecord, IdentityDoc, Standing};
@@ -115,7 +115,10 @@ impl Paykit {
             let (identity, switch) = match kept {
                 Some(kept) => (kept.identity, Some(kept.switch)),
                 None => match self.app.begin_identity_lookup(payee, refresh).await {
-                    Ok(lookup) => (lookup.identity, lookup.switch),
+                    Ok(lookup) => (
+                        lookup.identity,
+                        lookup.switch.map(|s| Box::pin(s) as PendingLookup),
+                    ),
                     Err(error) => {
                         return Ok((
                             Err(Refusal::IdentityUnavailable(format!(
@@ -298,6 +301,24 @@ impl Paykit {
         }
     }
 
+    /// Whether the payee's kept switch lookup has answered, polled once without waiting
+    /// (the payment fence, [`Paykit::payment_fence`]). An answer is kept, for the next check
+    /// to take: taking it is an await.
+    pub(crate) fn kept_lookup_answered(&mut self, payee: &[u8; 32]) -> bool {
+        use std::task::{Context, Poll, Waker};
+        let Some(kept) = self.lookups.get_mut(payee) else {
+            return false;
+        };
+        let mut cx = Context::from_waker(Waker::noop());
+        match kept.switch.as_mut().poll(&mut cx) {
+            Poll::Ready(answer) => {
+                kept.switch = Box::pin(std::future::ready(answer));
+                true
+            }
+            Poll::Pending => false,
+        }
+    }
+
     /// The checks of a destination that need no network, on the clock now and the payee's
     /// `identity.json` taken (Paykit spec 4, 5, 7.2): the carrier carries it and hasn't
     /// expired, and its app is current. Run again after every await before money moves.
@@ -346,23 +367,27 @@ impl Need {
     }
 }
 
-/// A payee's switch lookup still running after its grace, with the copy it began from.
+/// A payee's switch lookup still running after its grace, with the copy it began from. An
+/// answer the payment fence saw come is kept in it, as a lookup that answers at once.
 pub(crate) struct KeptLookup {
     pub(crate) identity: PeerIdentity,
-    pub(crate) switch: SwitchLookup,
+    pub(crate) switch: PendingLookup,
 }
+
+/// A switch lookup's answer to come.
+pub(crate) type PendingLookup = BoxFuture<'static, SwitchAnswer>;
 
 /// Where a switch lookup stands after [`race`].
 enum Lookup {
     Answered(SwitchAnswer),
-    Running(SwitchLookup),
+    Running(PendingLookup),
 }
 
 /// Run the switch's lookup beside `reads` until they finish, then wait on it at most until
 /// `grace` resolves (Switch spec 4.3, "No added latency"). Both are polled in turn on the
 /// caller's task: nothing is spawned, and a lookup not answered is handed back to be kept.
 async fn race<R>(
-    mut switch: SwitchLookup,
+    mut switch: PendingLookup,
     reads: Option<BoxFuture<'static, R>>,
     mut grace: BoxFuture<'static, ()>,
 ) -> (Lookup, Option<R>) {

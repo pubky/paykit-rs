@@ -953,15 +953,13 @@ impl Paykit {
             idempotency_key: attempt_id,
             payment_reference: entry.payment_reference.clone(),
         };
-        // Nothing is submitted unless the final payment check passes; between it and the
-        // payment method's call only the journal write of `Paying` awaits, the local commit
-        // that marks the payment as possibly dispatched (Paykit spec 7.2). Held, the attempt
+        // Nothing is submitted unless the final payment check passes. Held, the attempt
         // stays open for a resume to decide: a first dispatch is still `Attempted` then,
         // known unsubmitted, and the resume writes it `failed`.
-        match self
+        let (check, payee) = self
             .final_payment_check(&entry, payee, by, confirmed, kind)
-            .await?
-        {
+            .await?;
+        match check {
             FinalCheck::Pay => {}
             FinalCheck::Hold => return Ok(PayOutcome::Pending { attempt_id }),
             // The method may have forgotten the key: the repeat isn't made, and the attempt
@@ -978,9 +976,16 @@ impl Paykit {
             }
         }
         // Starting to pay is journaled just before the payment begins (Paykit spec 7.2): from
-        // here on it may be paid. A repeat's entry is `Paying` already.
+        // here on it may be paid. A repeat's entry is `Paying` already, and nothing awaits
+        // between its final check and its call.
         if matches!(kind, Dispatch::First) {
             self.set_stage(&mut entry, Stage::Paying).await?;
+            // The commit was an await: the fence judges every gate again, and nothing awaits
+            // after it before the call.
+            match self.payment_fence(&entry, &payee, by, confirmed, kind)? {
+                FinalCheck::Pay => {}
+                stopped => return self.stopped_at_the_fence(entry, stopped).await,
+            }
         }
         let outcome = self.rail.pay(payment).await;
         // The acceptance goes out while the payment runs, not awaited (Paykit spec 7.2 step
@@ -1007,6 +1012,35 @@ impl Paykit {
             // Any other error, once a payment may have been submitted, is nothing yet: the
             // attempt stays open (Paykit spec 7.2).
             Err(_) => Ok(PayOutcome::Pending { attempt_id }),
+        }
+    }
+
+    /// A first dispatch the fence stopped after `Paying` was journaled: nothing was
+    /// submitted, so the entry is written back to `Attempted`, known unsubmitted, as a held
+    /// final check leaves it. Then, with nothing paying, a lookup answer the fence saw come
+    /// is taken: one the client refuses, such as an equivocation (Switch wire 3.3), writes
+    /// the attempt `failed`, as a refused answer before `Paying` does. `Attempted` rather
+    /// than `failed` at once: it is one local commit, the state a held check leaves, and a
+    /// resume writes the open attempt `failed` from it ("no payment started").
+    ///
+    /// The write-back can be lost, to a crash or a store failure: the entry then stays
+    /// `Paying`, which a restart reads as possibly dispatched, resolved by the method's
+    /// history or else "may be paid". That is the safe direction: a payment not made can be
+    /// taken for one that may have been, never the other way.
+    async fn stopped_at_the_fence(
+        &mut self,
+        mut entry: JournalEntry,
+        stopped: FinalCheck,
+    ) -> Result<PayOutcome> {
+        let attempt_id = entry.attempt()?;
+        self.set_stage(&mut entry, Stage::Attempted).await?;
+        let refused = match stopped {
+            FinalCheck::Refused(refusal) => Some(refusal),
+            _ => self.take_kept_lookup(&entry.payee).await?.err(),
+        };
+        match refused {
+            Some(refusal) => self.fail_attempt(&mut entry, refusal).await,
+            None => Ok(PayOutcome::Pending { attempt_id }),
         }
     }
 
@@ -1430,9 +1464,12 @@ impl Paykit {
     /// 6. the app may still make the attempt: no alarm or restore question raised meanwhile,
     ///    and for an automatic payment the clocks within the tolerance.
     ///
-    /// Checks 2 to 5 run on the clock after the one await, and only the local journal write
-    /// of `Paying` follows them before a first dispatch's call. Anything but [`FinalCheck::Pay`]: nothing is paid; a copy past its age is looked
-    /// up again by the next check, at a resume.
+    /// Checks 2 to 6 run on the clock after the one await ([`Paykit::final_gates`]). A
+    /// repeat's call follows them with no await; a first dispatch's follows the journal
+    /// write of `Paying`, after which the fence ([`Paykit::payment_fence`]) runs them all
+    /// again. Anything but [`FinalCheck::Pay`]: nothing is paid; a copy past its age is
+    /// looked up again by the next check, at a resume. Returns the payee's copy the checks
+    /// judged, for the fence.
     pub(crate) async fn final_payment_check(
         &mut self,
         entry: &JournalEntry,
@@ -1440,13 +1477,53 @@ impl Paykit {
         by: Initiator,
         confirmed: Option<UserConfirmed>,
         kind: Dispatch,
-    ) -> Result<FinalCheck> {
+    ) -> Result<(FinalCheck, PeerIdentity)> {
         let payee = match self.take_kept_lookup(&entry.payee).await? {
             Ok(Some(answered)) => answered,
             Ok(None) => payee,
-            Err(refusal) => return Ok(FinalCheck::Refused(refusal)),
+            Err(refusal) => return Ok((FinalCheck::Refused(refusal), payee)),
         };
-        // From here to the payment method's call, nothing awaits.
+        let check = self.final_gates(entry, &payee, by, confirmed, kind)?;
+        Ok((check, payee))
+    }
+
+    /// The fence after the journal write of `Paying` (Paykit spec 7.2): that commit is an
+    /// await, during which a lookup's answer can come and a freshness limit pass, so every
+    /// gate of the final payment check is judged again here, with no await of its own and
+    /// none after it before the payment method's call:
+    ///
+    /// - a switch lookup kept for the payee that has answered meanwhile, polled once without
+    ///   waiting: its answer may remove the destination's app or show equivocation, and
+    ///   taking it is an await, so it stops the payment and is kept for the next check;
+    /// - every gate of [`Paykit::final_gates`], on the clock now.
+    ///
+    /// The kept stop and the restore hold aren't judged again: Paykit's own state, which
+    /// only this app's own calls change (a receive, a placement, a confirmation), and none
+    /// can run while the payment holds the app.
+    fn payment_fence(
+        &mut self,
+        entry: &JournalEntry,
+        payee: &PeerIdentity,
+        by: Initiator,
+        confirmed: Option<UserConfirmed>,
+        kind: Dispatch,
+    ) -> Result<FinalCheck> {
+        if self.kept_lookup_answered(&entry.payee) {
+            return Ok(FinalCheck::Hold);
+        }
+        self.final_gates(entry, payee, by, confirmed, kind)
+    }
+
+    /// Checks 2 to 6 of the final payment check, with no await, on the clock now and the
+    /// payee's copy `payee`.
+    fn final_gates(
+        &self,
+        entry: &JournalEntry,
+        payee: &PeerIdentity,
+        by: Initiator,
+        confirmed: Option<UserConfirmed>,
+        kind: Dispatch,
+    ) -> Result<FinalCheck> {
         let now = self.now();
         if let Dispatch::Repeat {
             idempotency_retention_ms,
@@ -1472,7 +1549,7 @@ impl Paykit {
         // (Switch spec 10.1, 12.4).
         let clear = self.app.may_attempt(by == Initiator::Automatic).is_ok()
             && destination
-            && self.payee_copy_usable(&payee, Need::of(&carrier), by, confirmed)
+            && self.payee_copy_usable(payee, Need::of(&carrier), by, confirmed)
             && self.own_identity_fresh()
             && self.own_identity_authorizes(entry).is_ok();
         Ok(if clear {
