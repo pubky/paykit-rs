@@ -1396,10 +1396,15 @@ audits as polling coverage for the moved peer.
 
 A Linked Peer whose Pubky homeserver cannot be resolved, because the lookup
 fails or finds no homeserver record, reserves no stream and is reported
-`Stale`. It is retried on each topology refresh and does not stop intake for
-other peers, at startup or while the supervisor runs. A peer that already has a
-stream keeps its last resolved homeserver while a later lookup fails, because a
-missing record can be a temporary DHT miss.
+`Stale`. It is retried on each topology refresh, and its failed lookup does not
+stop intake for other peers, at startup or while the supervisor runs. When it
+later resolves, it is placed like any other topology change, so an
+over-capacity result marks the resolved topology stale and stops supervision.
+An unresolved peer that already holds a handshake admission keeps that
+admission across refreshes, so the capacity its pending handshake reserved
+stays reserved. A peer that already has a stream keeps its last resolved
+homeserver while a later lookup fails, because a missing record can be a
+temporary DHT miss.
 
 Durable intake is bounded to 64 packets per Linked Peer and 1,024 packets per
 identity, with equivalent exact ciphertext-byte bounds. A full peer is removed

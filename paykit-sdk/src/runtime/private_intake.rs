@@ -846,15 +846,34 @@ fn is_transient_private_intake_storage_error(error: &PaykitSdkError) -> bool {
     )
 }
 
+/// Replace the stored admissions with `admitted_homeservers`, carrying forward
+/// any admission already stored for a peer in `unresolved`.
 async fn replace_private_intake_admissions<S: StorageAdapter, C: Clock>(
     storage: &S,
     clock: &C,
     lease_id: u64,
-    admitted_homeservers: HashMap<PubkyPublicKey, String>,
+    mut admitted_homeservers: HashMap<PubkyPublicKey, String>,
+    unresolved: Vec<PubkyPublicKey>,
 ) -> Result<bool> {
     let clock = clock.clone();
     storage
         .transaction(move |tx| {
+            // A pending Encrypted Link Handshake reserved its peer's stream
+            // through `reserve_private_intake_admission`. A refresh that misses
+            // that peer's homeserver lookup must not drop the reservation, or a
+            // later handshake could take the capacity and the peer's eventual
+            // resolution could exceed it. Only an admission already stored is
+            // kept; none is invented for an unresolved peer.
+            if !unresolved.is_empty() {
+                let stored = tx
+                    .export_storage_state()
+                    .private_intake_admitted_homeservers;
+                for peer in unresolved {
+                    if let Some(homeserver) = stored.get(&peer) {
+                        admitted_homeservers.insert(peer, homeserver.clone());
+                    }
+                }
+            }
             tx.replace_private_intake_admissions(lease_id, clock.now(), admitted_homeservers)
         })
         .await
@@ -865,6 +884,7 @@ async fn replace_private_intake_admissions_with_retry<S: StorageAdapter, C: Cloc
     clock: &C,
     lease_id: u64,
     admitted_homeservers: HashMap<PubkyPublicKey, String>,
+    unresolved: &[PubkyPublicKey],
     stop: &mut watch::Receiver<bool>,
 ) -> Result<bool> {
     loop {
@@ -873,6 +893,7 @@ async fn replace_private_intake_admissions_with_retry<S: StorageAdapter, C: Cloc
             clock,
             lease_id,
             admitted_homeservers.clone(),
+            unresolved.to_vec(),
         )
         .await
         {
@@ -970,8 +991,13 @@ where
     /// No Noise receive checkpoint advances until explicit buffered processing.
     ///
     /// A Linked Peer whose Pubky homeserver cannot be resolved reserves no
-    /// stream and is reported `Stale`. It is retried on each topology refresh
-    /// and does not stop intake for other peers.
+    /// stream and is reported `Stale`. It is retried on each topology refresh,
+    /// and its failed lookup does not stop intake for other peers. When it
+    /// later resolves, it is placed like any other topology change, so an
+    /// over-capacity result marks the resolved topology stale and stops
+    /// supervision. An unresolved peer that already holds a handshake
+    /// admission keeps it, so the capacity its pending handshake reserved
+    /// stays reserved.
     pub async fn start_private_intake(
         self: &Arc<Self>,
         config: PrivateIntakeConfig,
@@ -1181,6 +1207,7 @@ where
                                     &self.clock,
                                     lease_id,
                                     admissions,
+                                    &unresolved,
                                     &mut stop,
                                 )
                                 .await;
@@ -2721,6 +2748,7 @@ mod tests {
                 &MutableClock::new(now),
                 lease.lease_id,
                 replacement.clone(),
+                &[],
                 &mut stop_rx,
             )
             .await
@@ -2751,6 +2779,7 @@ mod tests {
             &MutableClock::new(now),
             lease.lease_id + 1,
             HashMap::new(),
+            &[],
             &mut stop_rx,
         )
         .await
@@ -2781,8 +2810,14 @@ mod tests {
             let clock = clock.clone();
             let replacement = replacement.clone();
             async move {
-                replace_private_intake_admissions(&storage, &clock, lease.lease_id, replacement)
-                    .await
+                replace_private_intake_admissions(
+                    &storage,
+                    &clock,
+                    lease.lease_id,
+                    replacement,
+                    Vec::new(),
+                )
+                .await
             }
         });
 
@@ -2899,6 +2934,52 @@ mod tests {
                 .unwrap()
                 .private_intake_admitted_homeservers,
             current
+        );
+    }
+
+    #[tokio::test]
+    async fn test_private_intake_admission_replacement_keeps_unresolved_peer_admission() {
+        let storage = crate::storage::InMemoryStorage::new();
+        let peers = users(3);
+        let (streamed, pending, never_admitted) = (&peers[0], &peers[1], &peers[2]);
+        let now = Utc::now();
+        let lease = claim_private_intake_lease(
+            &storage,
+            now,
+            2,
+            HashMap::from([(streamed.clone(), "homeserver-1".to_owned())]),
+        )
+        .await
+        .unwrap();
+        let reserved_peer = pending.clone();
+        assert!(storage
+            .transaction(move |tx| {
+                tx.reserve_private_intake_admission(reserved_peer, "homeserver-2".into(), now)
+            })
+            .await
+            .unwrap());
+        let (_stop_tx, mut stop_rx) = watch::channel(false);
+
+        assert!(replace_private_intake_admissions_with_retry(
+            &storage,
+            &MutableClock::new(now),
+            lease.lease_id,
+            HashMap::from([(streamed.clone(), "homeserver-1".to_owned())]),
+            &[pending.clone(), never_admitted.clone()],
+            &mut stop_rx,
+        )
+        .await
+        .unwrap());
+
+        assert_eq!(
+            storage
+                .snapshot()
+                .unwrap()
+                .private_intake_admitted_homeservers,
+            HashMap::from([
+                (streamed.clone(), "homeserver-1".to_owned()),
+                (pending.clone(), "homeserver-2".to_owned()),
+            ])
         );
     }
 

@@ -675,6 +675,70 @@ async fn test_new_link_re_resolves_running_private_intake_topology_immediately()
 }
 
 #[tokio::test]
+async fn test_private_intake_starts_when_one_peer_has_no_homeserver() {
+    let pair = linked_two_party().await;
+    // Seed an established Linked Peer for a key that never signed up, so its
+    // Pubky homeserver lookup finds no record.
+    let unresolvable = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+    let mut state = pair.alice.storage.snapshot().unwrap();
+    let mut peer = state.linked_peers[&pair.bob.public_key].clone();
+    peer.counterparty = unresolvable.clone();
+    let mut link = state.encrypted_link_states[&pair.bob.public_key].clone();
+    link.counterparty = unresolvable.clone();
+    state.linked_peers.insert(unresolvable.clone(), peer);
+    state
+        .encrypted_link_states
+        .insert(unresolvable.clone(), link);
+    let storage = InMemoryStorage::from_state(state);
+    let sdk = Arc::new(PaykitSdk::new(
+        storage.clone(),
+        TestnetSessionProvider::new(pair.alice.access.clone()),
+        pair.alice.adapter.clone(),
+        PaykitSdkConfig::new(pair.alice.app_id.clone()).unwrap(),
+    ));
+
+    let supervisor = sdk
+        .start_private_intake(PrivateIntakeConfig::new(1).unwrap())
+        .await
+        .expect("an unresolvable peer must not fail private intake startup");
+
+    let health = supervisor.health().await;
+    assert_eq!(health.reserved_streams, 1);
+    assert_eq!(
+        health.peers.get(&unresolvable),
+        Some(&PrivateIntakeTransportState::Stale)
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if supervisor.health().await.peers.get(&pair.bob.public_key)
+                == Some(&PrivateIntakeTransportState::CaughtUp)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("resolvable peer should still become healthy");
+
+    publish_private_lists(&pair.bob, &pair.alice, 1).await;
+    wait_for_buffered(&storage, &pair.bob.public_key, 1).await;
+    let drained = sdk
+        .receive_buffered_private_messages(pair.bob.public_key.clone(), &supervisor)
+        .await
+        .unwrap();
+    assert_eq!(drained.report.stream_item_ids.len(), 1);
+    assert_eq!(drained.remaining_buffered_packets, 0);
+    let health = supervisor.health().await;
+    assert_eq!(health.reserved_streams, 1);
+    assert_eq!(
+        health.peers.get(&unresolvable),
+        Some(&PrivateIntakeTransportState::Stale)
+    );
+    supervisor.stop().await;
+}
+
+#[tokio::test]
 async fn test_post_dequeue_failure_resubscribes_omitted_peer() {
     let pair = linked_two_party().await;
     let attempted_drains = Arc::new(AtomicUsize::new(0));

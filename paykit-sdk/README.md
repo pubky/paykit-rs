@@ -194,10 +194,14 @@ subscriptions group at most 50 users from one homeserver per connection, so 51
 users on one homeserver require two reserved streams; peers on different
 homeservers require separate streams. Startup fails instead of silently leaving
 peers uncovered when capacity is insufficient. A Linked Peer whose Pubky
-homeserver cannot be resolved does not stop intake for other peers: it reserves
-no stream, stays visible in health as `Stale`, and is retried on each topology
-refresh. A peer that already has a stream keeps its last resolved homeserver
-while a later lookup fails. Active supervisor capacity is identity-wide: new
+homeserver cannot be resolved does not stop intake for other peers while its
+lookup fails: it reserves no stream, stays visible in health as `Stale`, and is
+retried on each topology refresh. When it later resolves, it is placed like any
+other topology change, so a result that exceeds capacity stops supervision as
+described below. An unresolved peer that already holds a handshake admission
+keeps it, so the capacity its pending handshake reserved stays reserved. A peer
+that already has a stream keeps its last resolved homeserver while a later
+lookup fails. Active supervisor capacity is identity-wide: new
 handshakes are rejected before becoming pending when their resolved homeserver
 would need another stream. A later topology move that no
 longer fits marks affected health stale and stops supervision instead of keeping
