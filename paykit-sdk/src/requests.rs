@@ -419,6 +419,8 @@ impl Paykit {
             let body = PaymentReceipt {
                 attempt_id: proof.attempt_id,
                 billing_period: proof.billing_period,
+                metadata: None,
+                payment_reference: None,
             }
             .to_body(refs.len())?;
             // The receipt goes into the payee's record in the batch that queues it.

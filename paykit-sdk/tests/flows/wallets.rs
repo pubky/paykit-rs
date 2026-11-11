@@ -128,6 +128,8 @@ async fn test_wallets_receipt_settles_a_claim_the_app_never_read() {
         paykit_lib::bodies::PaymentReceipt {
             attempt_id,
             billing_period: None,
+            metadata: None,
+            payment_reference: None,
         }
         .to_body(2)
         .unwrap(),

@@ -164,6 +164,8 @@ async fn test_receive_faults_receipt_parked_on_a_corrupt_journal_then_settles() 
     let body = paykit_lib::bodies::PaymentReceipt {
         attempt_id,
         billing_period: None,
+        metadata: None,
+        payment_reference: None,
     }
     .to_body(1)
     .unwrap();

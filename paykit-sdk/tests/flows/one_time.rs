@@ -461,6 +461,8 @@ async fn test_one_time_receipt_naming_another_proof_leaves_the_proof_recordable(
     let body = paykit_lib::bodies::PaymentReceipt {
         attempt_id,
         billing_period: None,
+        metadata: None,
+        payment_reference: None,
     }
     .to_body(2)
     .unwrap();
