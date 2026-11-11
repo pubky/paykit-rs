@@ -990,22 +990,12 @@ where
         )
         .await?;
         let lease_id = lease.lease_id;
-        let health = Arc::new(AsyncRwLock::new(PrivateIntakeHealth {
-            peers: groups
-                .iter()
-                .flat_map(|group| group.peers.iter().cloned())
-                .map(|peer| (peer, PrivateIntakeTransportState::Connecting))
-                .chain(
-                    topology
-                        .unresolved
-                        .iter()
-                        .cloned()
-                        .map(|peer| (peer, PrivateIntakeTransportState::Stale)),
-                )
-                .collect(),
+        let mut initial_health = PrivateIntakeHealth {
             reserved_streams,
-            last_successful_audit_at: HashMap::new(),
-        }));
+            ..PrivateIntakeHealth::default()
+        };
+        apply_private_intake_topology_health(&mut initial_health, groups, &topology.unresolved);
+        let health = Arc::new(AsyncRwLock::new(initial_health));
         let work = Arc::new(Notify::new());
         let capacity_released = Arc::new(Notify::new());
         let notifications = PrivateIntakeNotifications {

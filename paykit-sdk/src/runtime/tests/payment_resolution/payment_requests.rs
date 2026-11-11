@@ -274,42 +274,7 @@ async fn test_private_request_resolution_rechecks_state_after_authorization_look
     }
 
     for recover in [false, true] {
-        let storage = registered_test_storage();
-        let counterparty = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-        storage
-            .save_identity_state(IdentityState {
-                public_key: Some(PubkyPublicKey::from_public_key(
-                    &pubky::Keypair::random().public_key(),
-                )),
-                initialized_at: FixedClock.now(),
-            })
-            .await
-            .unwrap();
-        storage
-            .transaction(|tx| {
-                save_authorized_paykit_app(
-                    tx,
-                    counterparty.clone(),
-                    paykit_lib::PaykitAppId::new("server").unwrap(),
-                    private_app_capabilities(),
-                );
-                Ok(())
-            })
-            .await
-            .unwrap();
-        let request_id = PaymentRequestId::new_v4();
-        persist_private_stream_batch(
-            &storage,
-            counterparty.clone(),
-            vec![bound_payment_request_message(
-                request_id.as_str(),
-                "private-address",
-            )],
-            None,
-            FixedClock.now(),
-        )
-        .await
-        .unwrap();
+        let (storage, counterparty, request_id) = bound_payment_request_fixture().await;
         let sdk = PaykitSdk::with_clock(
             storage.clone(),
             ChangingSessionProvider {
