@@ -37,6 +37,8 @@ pub mod kinds;
 pub mod periods;
 pub mod records;
 pub mod scopes;
+#[cfg(feature = "signer")]
+pub mod signer;
 
 pub use amount::{Asset, Decimal, PaymentAmount, Rate};
 pub use bodies::Body;
