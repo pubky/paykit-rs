@@ -143,8 +143,14 @@ async fn test_certificate_renewal_paykit_refuses_holds_entries_and_refuses_calls
     let refused = renew(&w, me, &refused_scopes(), 1_000);
     wallet.receive(None).await.unwrap();
     list(&w, me, &old, &refused);
-    let error = wallet.receive(None).await.unwrap_err();
-    assert!(is_cert_refused(&error), "{error:?}");
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(
+        matches!(
+            summary.certificate_refused,
+            Some(Refusal::CertificateRefused(_))
+        ),
+        "{summary:?}"
+    );
     assert_eq!(wallet.app().cert().hash(), refused.hash());
     // The app still loads, and the host has a notice to show while it lasts.
     drop(wallet);
@@ -155,10 +161,31 @@ async fn test_certificate_renewal_paykit_refuses_holds_entries_and_refuses_calls
         wallet.certificate_refused(),
         Some(Refusal::CertificateRefused(_))
     ));
-    // A request that arrives under it is held, not processed and not dropped.
+    // A request that arrives under it is held, not processed and not dropped, and the
+    // client's report of the read still reaches the host.
     request_to(&w, me);
-    let error = wallet.receive(None).await.unwrap_err();
-    assert!(is_cert_refused(&error), "{error:?}");
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(
+        matches!(
+            summary.certificate_refused,
+            Some(Refusal::CertificateRefused(_))
+        ),
+        "{summary:?}"
+    );
+    // Each read reports to the host: from the client's third try at the held entry, its
+    // `StoreFailing`.
+    let mut events = summary.report.events;
+    for _ in 0..pubky_switch_client::app::RETRY_EVENT_READS {
+        let summary = wallet.receive(None).await.unwrap();
+        assert!(summary.certificate_refused.is_some());
+        events.extend(summary.report.events);
+    }
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AppEvent::StoreFailing { .. })),
+        "{events:?}"
+    );
     assert!(wallet.requests().await.unwrap().is_empty());
     // No Paykit call that writes or sends runs under it.
     let error = wallet.flush().await.unwrap_err();
@@ -199,8 +226,14 @@ async fn test_certificate_restore_then_renewal_paykit_refuses_takes_no_action() 
     let refused = renew(&w, me, &refused_scopes(), 1_000);
     wallet.receive(None).await.unwrap();
     list(&w, me, &old, &refused);
-    let error = wallet.receive(None).await.unwrap_err();
-    assert!(is_cert_refused(&error), "{error:?}");
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(
+        matches!(
+            summary.certificate_refused,
+            Some(Refusal::CertificateRefused(_))
+        ),
+        "{summary:?}"
+    );
     assert_eq!(wallet.app().cert().hash(), refused.hash());
     drop(wallet);
     // The restore checks the backup's certificate, which passes, and restores.
@@ -217,8 +250,14 @@ async fn test_certificate_restore_then_renewal_paykit_refuses_takes_no_action() 
     assert_eq!(restored.app().cert().hash(), old.hash());
     // Its first read takes the renewed certificate the `identity.json` lists, and from then
     // on it takes no Paykit action under it.
-    let error = restored.receive(None).await.unwrap_err();
-    assert!(is_cert_refused(&error), "{error:?}");
+    let summary = restored.receive(None).await.unwrap();
+    assert!(
+        matches!(
+            summary.certificate_refused,
+            Some(Refusal::CertificateRefused(_))
+        ),
+        "{summary:?}"
+    );
     assert_eq!(restored.app().cert().hash(), refused.hash());
     let error = restored.reconcile().await.unwrap_err();
     assert!(is_cert_refused(&error), "{error:?}");

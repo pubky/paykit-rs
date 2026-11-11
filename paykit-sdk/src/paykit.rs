@@ -161,6 +161,10 @@ pub struct ReceiveSummary {
     pub applied: Vec<String>,
     /// The `resend_request`s answered and asked.
     pub resends: u64,
+    /// The app's certificate fails Paykit's checks, as [`Paykit::certificate_refused`]
+    /// gives it: the read went on, holding Paykit's entries unprocessed, and none of the
+    /// Paykit steps after it ran.
+    pub certificate_refused: Option<Refusal>,
 }
 
 /// One Paykit App of an identity.
@@ -460,6 +464,16 @@ impl Paykit {
         // minutes, for the spam rule (Paykit wire 4.1).
         self.refresh_lists_when_due().await?;
         let report = self.app.receive(wait).await?;
+        // Under a certificate Paykit refuses, the host still gets the client's report, with
+        // its events and cursor; the Paykit steps below act under the certificate, so none
+        // runs.
+        if let Some(refused) = self.certificate_refused() {
+            return Ok(ReceiveSummary {
+                report,
+                certificate_refused: Some(refused),
+                ..ReceiveSummary::default()
+            });
+        }
         self.refresh_own()?;
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1).
@@ -480,6 +494,7 @@ impl Paykit {
             report,
             applied,
             resends: answered.saturating_add(asked),
+            certificate_refused: None,
         })
     }
 
