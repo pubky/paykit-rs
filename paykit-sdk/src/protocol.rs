@@ -326,6 +326,12 @@ pub(crate) fn restore_paykit_layer(
             check_kept_cancellation(&key, &value, &own, &record_key)?;
         } else if key.starts_with(key::HELD_LISTS.as_bytes()) {
             check_held_list(&key, &value, &own, &record_key)?;
+        } else if let Some(reads) = shape_of(&key) {
+            // The app's own data, read for its shape: one that doesn't read would fail every
+            // later call that reads it.
+            if !reads(&value) {
+                return Err("Paykit's local state in the backup doesn't read".into());
+            }
         } else if key.starts_with(key::ANSWERS.as_bytes()) {
             let queued = state::decode::<QueuedAnswer>(&value)
                 .map_err(|_| String::from("a queued resend_request in the backup doesn't read"))?;
@@ -362,6 +368,34 @@ pub(crate) fn restore_paykit_layer(
         .map_err(|_| String::from("the restore's hold can't be written"))?;
     writes.push(hold);
     Ok(writes)
+}
+
+/// How the app's own data under `key` reads, for the families a later call reads: the
+/// seen app records (`ar/`), queued asks (`ask/`), times and counts (`missed/`, `peer/`,
+/// `spam/`, `rs/`, `rsd/`, `lr`), and the side of a sent message (`side/`). `None` for the
+/// families checked otherwise, and for keys no reader reads.
+fn shape_of(key: &[u8]) -> Option<fn(&[u8]) -> bool> {
+    fn reads<T: serde::de::DeserializeOwned>(value: &[u8]) -> bool {
+        state::decode::<T>(value).is_ok()
+    }
+    let prefixed = |prefix: &str| key.starts_with(prefix.as_bytes());
+    if prefixed("ar/") {
+        Some(reads::<crate::app_records::SeenRecords>)
+    } else if prefixed(key::ASKS) {
+        Some(reads::<QueuedAsk>)
+    } else if prefixed("side/") {
+        Some(reads::<SideTag>)
+    } else if prefixed(key::MISSED)
+        || prefixed(key::PEERS)
+        || prefixed("spam/")
+        || prefixed("rs/")
+        || prefixed("rsd/")
+        || key == key::LISTS_READ.as_bytes()
+    {
+        Some(reads::<u64>)
+    } else {
+        None
+    }
 }
 
 /// A payee's cancellation kept to place (`kc/<record key>`, Paykit spec 8.1): it verifies

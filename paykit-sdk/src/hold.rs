@@ -38,6 +38,12 @@ pub(crate) struct RestoreHold {
     pub(crate) resend_from_ms: u64,
     /// The re-sends are queued.
     pub(crate) asks_queued: bool,
+    /// The highest service time verified when the reconciliation queued the re-sends: a
+    /// request accepted later was first received after the restore, so its payee's
+    /// cancellation can't predate the backup, and it isn't held. `None` until then, when
+    /// every open request is held.
+    #[serde(default)]
+    pub(crate) held_before_ms: Option<u64>,
 }
 
 impl RestoreHold {
@@ -47,24 +53,28 @@ impl RestoreHold {
         Self {
             resend_from_ms: cursor_time_ms.saturating_sub(CLOCK_TOLERANCE_MS),
             asks_queued: false,
+            held_before_ms: None,
         }
     }
 }
 
 impl Paykit {
     /// Whether the request record at `record_key`, `record`, is held after a restore: a
-    /// restore set the hold, the user hasn't confirmed this request since, and it is open.
+    /// restore set the hold, the request was accepted before the reconciliation after it,
+    /// the user hasn't confirmed this request since, and it is open.
     pub(crate) async fn held(
         &self,
         record_key: &[u8; 32],
         record: &ActivityRecord,
     ) -> Result<bool> {
-        if self
-            .local_get::<RestoreHold>(key::RESTORE_HOLD)
-            .await?
-            .is_none()
-        {
+        let Some(hold) = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await? else {
             return Ok(false);
+        };
+        let accepted = record.request.as_ref().and_then(|r| r.accepted_at());
+        if let (Some(before), Some(accepted)) = (hold.held_before_ms, accepted) {
+            if accepted > before {
+                return Ok(false);
+            }
         }
         if record.shows_paid() || cancelled(record) || rejected(record) {
             return Ok(false);
@@ -116,6 +126,7 @@ impl Paykit {
             )?;
         }
         hold.asks_queued = true;
+        hold.held_before_ms = self.app.highest_service_time();
         tx.put(key::RESTORE_HOLD, &hold)?;
         self.local_commit(tx).await
     }

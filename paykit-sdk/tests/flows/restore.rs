@@ -1041,7 +1041,7 @@ async fn test_restore_kept_request_that_doesnt_verify_writes_nothing() {
 }
 
 #[tokio::test]
-async fn test_restore_kept_cancellation_held_list_or_answer_that_doesnt_verify_writes_nothing() {
+async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
     let w = World::new();
     let (good, app_id) = backup_with_a_payment(&w).await;
     let layer = layer_of(&good);
@@ -1052,16 +1052,23 @@ async fn test_restore_kept_cancellation_held_list_or_answer_that_doesnt_verify_w
         .unwrap();
     let key_of = |prefix: &str| format!("{prefix}{}", pubky_switch_core::enc::b64(&[7u8; 32]));
     // A verified message, but not of the kind kept there, under a key that isn't its
-    // record's; and a resend_request whose certificate isn't its requester's.
+    // record's; a resend_request whose certificate isn't its requester's; and the app's own
+    // data that doesn't read as its reader reads it.
     let answer = serde_json::json!({
         "requester": pubky_switch_core::enc::b64(&w.alice_id()),
         "cert": kept["cert"].clone(),
         "body": { "msg_ids": [] },
     });
-    let cases: [(&str, String, serde_json::Value); 3] = [
+    let cases: [(&str, String, serde_json::Value); 5] = [
         ("kept cancellation", key_of("kc/"), kept.clone()),
         ("held list", key_of("lh/"), kept),
         ("queued answer", "ans/00000000000000000001/m".into(), answer),
+        ("lists read time", "lr".into(), serde_json::json!("soon")),
+        (
+            "queued ask",
+            key_of("ask/"),
+            serde_json::json!({ "sender": 1 }),
+        ),
     ];
     for (what, key, value) in cases {
         let mut state = layer.clone();

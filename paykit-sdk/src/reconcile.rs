@@ -384,11 +384,13 @@ impl Paykit {
     ///   entry, and one that doesn't read, with no copy this app trusts, holds;
     /// - a record this app can't find or rebuild holds too ([`Refusal::RecordHeld`]).
     ///
-    /// `unknown` and `failed` move no money toward the payee and need no record update.
+    /// `unknown` and `failed` move no money toward the payee and need no record update. Neither
+    /// is taken for an own attempt whose payment the method reported made.
     ///
     /// # Errors
     ///
-    /// [`Refusal::NotFound`] for a claim without the attempt; [`Refusal::RecordHeld`] for a
+    /// [`Refusal::NotFound`] for a claim without the attempt; [`Refusal::AlreadyPaid`] for
+    /// `failed` or `unknown` on an own attempt the method reported paid; [`Refusal::RecordHeld`] for a
     /// `done` whose record can't be updated, with nothing written; the switch's refusal, such
     /// as `409 conflict`, for a resolution its rows don't allow now.
     pub async fn resolve_attempt(
@@ -425,6 +427,16 @@ impl Paykit {
         let entry = self.local_get::<JournalEntry>(&journal_key).await?;
         if let Some(entry) = &entry {
             self.check_entry(entry)?;
+        }
+        // An own payment the method reported made is never `failed` or `unknown`: either
+        // would free the claim for a second payment, and its proof would never go (Paykit
+        // spec 7.2, "Failed means definitively not paid"). It is resolved `done`, or by
+        // [`Paykit::repair_activity_record`] once its record can be written.
+        if resolution != Resolution::Done
+            && basis == Basis::Owner
+            && entry.as_ref().is_some_and(|e| e.rail_proof.is_some())
+        {
+            return Err(Refusal::AlreadyPaid.into());
         }
         if resolution == Resolution::Done {
             // An own payment the method reported paid: its outcome, with the proof.

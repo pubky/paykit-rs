@@ -143,7 +143,7 @@ const SEEN_RECORDS: usize = 64;
 /// in order, they rebuild the core's [`RecordView`]; kept, they survive a restart, so a
 /// copy older than one seen, or one conflicting with it, is never used after a reload.
 #[derive(Clone, Default, Serialize, Deserialize)]
-struct SeenRecords {
+pub(crate) struct SeenRecords {
     records: Vec<SignedDoc>,
 }
 

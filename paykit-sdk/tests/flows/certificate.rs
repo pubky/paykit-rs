@@ -133,7 +133,8 @@ async fn test_certificate_join_paykit_refuses_writes_and_sends_nothing() {
 #[tokio::test]
 async fn test_certificate_renewal_paykit_refuses_holds_entries_and_refuses_calls() {
     let w = World::new();
-    let mut wallet = w.wallet("wallet").await;
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
     let _shop = w.shop().await;
     let me = wallet.app_id();
     let old = wallet.app().cert().clone();
@@ -145,7 +146,11 @@ async fn test_certificate_renewal_paykit_refuses_holds_entries_and_refuses_calls
     let error = wallet.receive(None).await.unwrap_err();
     assert!(is_cert_refused(&error), "{error:?}");
     assert_eq!(wallet.app().cert().hash(), refused.hash());
-    // The host has a notice to show while it lasts.
+    // The app still loads, and the host has a notice to show while it lasts.
+    drop(wallet);
+    let mut wallet = w
+        .load_on_clock(&w.alice, Arc::clone(&base), me, Arc::clone(&w.clock))
+        .await;
     assert!(matches!(
         wallet.certificate_refused(),
         Some(Refusal::CertificateRefused(_))

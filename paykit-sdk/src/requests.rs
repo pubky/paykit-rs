@@ -272,11 +272,17 @@ impl Paykit {
             .queue(signed)
             .locals(tx.into_writes());
         self.app.submit_batch(batch).await?;
-        let delivery = self
-            .app
-            .flush_message(&msg_id)
-            .await?
-            .ok_or_else(PaykitError::corrupt)?;
+        // The request is recorded and queued: a try to deliver it now that fails leaves it
+        // queued for the next flush, and the call still reports it sent, so the caller
+        // doesn't send a second request.
+        let delivery = match self.app.flush_message(&msg_id).await {
+            Ok(Some(delivery)) => delivery,
+            _ => self
+                .app
+                .delivery(&msg_id)
+                .await?
+                .ok_or_else(PaykitError::corrupt)?,
+        };
         Ok(SentRequest {
             msg_id,
             delivery,

@@ -701,43 +701,55 @@ impl Paykit {
     /// newer than the record's is dropped. A placement that fails now is tried again at the
     /// next receive.
     pub(crate) async fn place_held_lists(&mut self) -> crate::error::Result<()> {
-        let own = self.identity();
         for (rest, kept) in self.local_scan::<KeptMessage>(key::HELD_LISTS).await? {
-            let list = kept.stored(&own)?;
-            let target = list_target(&list.sender(), &list.message().from.app_id);
-            let record_key = self.app.record_key(&target)?;
-            if format!("{}{rest}", key::HELD_LISTS) != key::held_list(&record_key) {
-                return Err(crate::error::PaykitError::corrupt());
+            // One that can't be placed now stays held, for the next receive; the others are
+            // still placed, and the receive goes on.
+            let _ = self.place_held_list(&rest, &kept).await;
+        }
+        Ok(())
+    }
+
+    /// Place one held list (`lh/<rest>`), as [`Paykit::place_held_lists`] says.
+    async fn place_held_list(
+        &mut self,
+        rest: &str,
+        kept: &KeptMessage,
+    ) -> crate::error::Result<()> {
+        let own = self.identity();
+        let list = kept.stored(&own)?;
+        let target = list_target(&list.sender(), &list.message().from.app_id);
+        let record_key = self.app.record_key(&target)?;
+        if format!("{}{rest}", key::HELD_LISTS) != key::held_list(&record_key) {
+            return Err(crate::error::PaykitError::corrupt());
+        }
+        let held = match self
+            .app
+            .shared_record(&record_key)
+            .await?
+            .map(|r| r.content)
+        {
+            None => None,
+            Some(RecordContent::Value(value)) => match PaymentListRecord::read(&value, &own) {
+                Ok(held) => Some(held),
+                Err(_) => return Ok(()),
+            },
+            Some(RecordContent::Deleted | RecordContent::Unreadable) => return Ok(()),
+        };
+        let mut tx = Tx::default();
+        tx.delete(&key::held_list(&record_key));
+        match next_list_record(held, &list) {
+            Some(record) => {
+                let value = record.to_json()?;
+                let op = self
+                    .app
+                    .record_op(&target, Some(&value), Vec::new())
+                    .await?;
+                let batch = pubky_switch_client::app::OpBatch::new()
+                    .entry(op)
+                    .locals(tx.into_writes());
+                let _ = self.app.submit_batch(batch).await;
             }
-            let held = match self
-                .app
-                .shared_record(&record_key)
-                .await?
-                .map(|r| r.content)
-            {
-                None => None,
-                Some(RecordContent::Value(value)) => match PaymentListRecord::read(&value, &own) {
-                    Ok(held) => Some(held),
-                    Err(_) => continue,
-                },
-                Some(RecordContent::Deleted | RecordContent::Unreadable) => continue,
-            };
-            let mut tx = Tx::default();
-            tx.delete(&key::held_list(&record_key));
-            match next_list_record(held, &list) {
-                Some(record) => {
-                    let value = record.to_json()?;
-                    let op = self
-                        .app
-                        .record_op(&target, Some(&value), Vec::new())
-                        .await?;
-                    let batch = pubky_switch_client::app::OpBatch::new()
-                        .entry(op)
-                        .locals(tx.into_writes());
-                    let _ = self.app.submit_batch(batch).await;
-                }
-                None => self.local_commit(tx).await?,
-            }
+            None => self.local_commit(tx).await?,
         }
         Ok(())
     }

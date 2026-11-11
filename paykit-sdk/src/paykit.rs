@@ -78,7 +78,10 @@ pub struct PaykitConfig {
     /// `None`, the default, is [`orphan_floor_s`] for the app's rail: its declared longest
     /// time to complete or fail plus [`PRE_DISPATCH_BUDGET_MS`], so a default config suits
     /// any rail. A value set below that floor is refused by `join`, `load`, `restore` and
-    /// every attempt.
+    /// every attempt. An idempotent dispatch is repeated after a crash only while the rail's
+    /// longest time still fits before the orphan age (Paykit spec 7.2, "Dispatch window"):
+    /// at the floor that leaves only the pre-dispatch budget, less the clock tolerance, so
+    /// an app that wants later repeats sets a larger value.
     pub orphan_after_s: Option<u64>,
     /// The largest fee the payee can influence through its destination that the app pays
     /// automatically (Paykit spec 7.2 step 1); `None` accepts no such fee.
@@ -201,9 +204,10 @@ impl Paykit {
         rail: Arc<dyn Rail>,
         timer: Arc<dyn Timer>,
     ) -> Result<Self> {
-        // Paykit's verifiers check the own certificate as they check every other (Paykit
-        // wire 3.1): its scope rules, and permissions exactly as its scopes derive them.
-        check_own_certificate(app.cert())?;
+        // The certificate is checked before a join or a restore writes anything. A stored
+        // one may fail Paykit's checks, a renewal the Switch took: the app still loads, so
+        // it can read the feed and take a renewal that passes, and takes no Paykit action
+        // meanwhile ([`Paykit::certificate_refused`]).
         protocol.set_own(app.identity(), app.cert().clone());
         Ok(Self {
             app,
@@ -253,7 +257,9 @@ impl Paykit {
     }
 
     /// Load a Paykit App from the store alone: nothing is sent. Payments a crash left in the
-    /// journal resume at [`Paykit::resume_payments`].
+    /// journal resume at [`Paykit::resume_payments`]. A stored certificate Paykit refuses,
+    /// a renewal the Switch took, still loads: the app reads its feed, to take a renewal
+    /// that passes, and takes no Paykit action meanwhile ([`Paykit::certificate_refused`]).
     ///
     /// # Errors
     ///

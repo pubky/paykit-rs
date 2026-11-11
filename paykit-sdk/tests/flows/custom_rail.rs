@@ -25,6 +25,8 @@ use crate::common::{btc, endpoint, store, World};
 struct LedgerRail {
     fake: Arc<FakeRail>,
     last: Mutex<Option<Map<String, Value>>>,
+    /// The most the ledger may charge on top of a payment.
+    fee: Option<paykit_lib::Decimal>,
 }
 
 fn to_ledger(proof: &Map<String, Value>) -> Map<String, Value> {
@@ -65,7 +67,10 @@ impl Rail for LedgerRail {
         payload: &PaymentEndpointPayload,
         amount: &PaymentAmount,
     ) -> Transfer {
-        self.fake.transfer(endpoint_id, payload, amount)
+        Transfer {
+            max_fee: self.fee.clone(),
+            ..self.fake.transfer(endpoint_id, payload, amount)
+        }
     }
 
     fn pay(&self, payment: RailPayment) -> BoxFuture<'_, Result<RailOutcome, RailError>> {
@@ -145,6 +150,7 @@ async fn test_custom_rail_proof_credited_once_per_settlement() {
     let rail = Arc::new(LedgerRail {
         fake: Arc::clone(&w.rail),
         last: Mutex::new(None),
+        fee: None,
     });
     let mut wallet = joined(
         &w,
@@ -217,4 +223,64 @@ async fn test_custom_rail_proof_credited_once_per_settlement() {
     );
     shop.receive(None).await.unwrap();
     assert_eq!(shop.payee_activity().await.unwrap().len(), 2);
+}
+
+/// Alice's wallet and bob's shop on `rail`, the wallet holding the shop's list, and the
+/// outcome of paying the list's reusable endpoint.
+async fn pay_through(w: &World, rail: &Arc<LedgerRail>) -> paykit_sdk::Result<PayOutcome> {
+    let mut wallet = joined(
+        w,
+        &w.alice,
+        "wallet",
+        AppScopes::new().pay().build().unwrap(),
+        rail,
+    )
+    .await;
+    wallet.app_mut().invite(&w.bob_id()).await.unwrap();
+    let mut shop = joined(
+        w,
+        &w.bob,
+        "shop",
+        AppScopes::new().request().build().unwrap(),
+        rail,
+    )
+    .await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    wallet
+        .pay_without_request(UnrequestedPayment {
+            payee: w.bob_id(),
+            amount: btc("0.0015"),
+            options: PayOptions {
+                endpoint: Some(endpoint("btc-lightning-bolt12")),
+                ..PayOptions::default()
+            },
+        })
+        .await
+}
+
+#[tokio::test]
+async fn test_custom_rail_zero_fee_needs_no_cap() {
+    // A method that charges nothing pays under the default config, which sets no fee cap.
+    let w = World::new();
+    let rail = Arc::new(LedgerRail {
+        fake: Arc::clone(&w.rail),
+        last: Mutex::new(None),
+        fee: Some(paykit_lib::Decimal::zero()),
+    });
+    let outcome = pay_through(&w, &rail).await.unwrap();
+    assert!(matches!(outcome, PayOutcome::Paid { .. }), "{outcome:?}");
+    // One that may charge something is refused without a cap.
+    let w = World::new();
+    let rail = Arc::new(LedgerRail {
+        fake: Arc::clone(&w.rail),
+        last: Mutex::new(None),
+        fee: Some(paykit_lib::Decimal::parse("0.00000001").unwrap()),
+    });
+    let refused = pay_through(&w, &rail).await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(paykit_sdk::Refusal::Transfer(_))),
+        "{refused:?}"
+    );
 }

@@ -793,7 +793,8 @@ impl Paykit {
             )
             .into());
         }
-        if let Some(fee) = &transfer.max_fee {
+        // A fee of nothing needs no cap: `fee_cap: None`, the default, still pays it.
+        if let Some(fee) = transfer.max_fee.as_ref().filter(|fee| !fee.is_zero()) {
             if self.config.fee_cap.as_ref().is_none_or(|cap| fee > cap) {
                 return Err(Refusal::Transfer("a fee above the app's cap".into()).into());
             }
@@ -840,8 +841,6 @@ impl Paykit {
         {
             return Err(refusal.into());
         }
-        // The attempt ID is journaled before the write (Paykit spec 7.2).
-        self.save(&entry).await?;
         let op = ClaimOp::attempt(
             entry.obligation,
             step,
@@ -892,6 +891,9 @@ impl Paykit {
         let mut attempted = entry.clone();
         attempted.stage = Stage::Attempted;
         batch = batch.local(state::local_put(&key::journal(&attempt_id), &attempted)?);
+        // The attempt ID is journaled before the write (Paykit spec 7.2), once the batch is
+        // built: a batch that can't be built leaves no open entry behind it.
+        self.save(&entry).await?;
         // The client checks the attempt's proof: only one that shows this app's own open
         // attempt lets money move (Paykit spec 7.2; Switch wire 6.5 "Binding").
         let submitted = self.app.submit_batch(batch).await;
@@ -1264,9 +1266,7 @@ impl Paykit {
         let attempt_id = entry.attempt()?;
         match outcome {
             RailOutcome::Paid { proof, paid_at_ms } => {
-                // The payment shows: its acceptance is sendable, if it isn't yet, before
-                // the outcome's batch places it in the record (Paykit spec 7.2 steps 2, 3).
-                self.release_acceptance(entry, None).await?;
+                // The proof is journaled first: nothing after it can lose the payment.
                 entry.rail_proof = Some(proof);
                 entry.paid_at_ms = paid_at_ms;
                 self.set_stage(entry, Stage::RailPaid).await?;
@@ -1285,6 +1285,13 @@ impl Paykit {
     pub(crate) async fn report(&mut self, entry: &mut JournalEntry) -> Result<PayOutcome> {
         let attempt_id = entry.attempt()?;
         let paid = entry.rail_proof.is_some();
+        if paid {
+            // The payment shows: its acceptance is sendable, if it isn't yet, before the
+            // outcome's batch places it in the record (Paykit spec 7.2 steps 2, 3). It never
+            // holds back the outcome: one that can't be queued now is left out of the
+            // record, and the proof still goes.
+            let _ = self.release_acceptance(entry, None).await;
+        }
         match self.write_outcome(entry, paid, false).await {
             Ok(Written::Done) => {}
             Ok(Written::Held) => return Ok(PayOutcome::RecordHeld { attempt_id }),

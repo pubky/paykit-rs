@@ -292,3 +292,46 @@ async fn test_outcome_record_user_done_of_a_payment_made_places_its_proof() {
     assert_eq!(payment.stage, paykit_sdk::Stage::Finished);
     assert!(!payment.record_held);
 }
+
+#[tokio::test]
+async fn test_outcome_record_user_cant_fail_a_payment_the_method_reported_made() {
+    // The method reported the payment made, and its outcome waits on a record that doesn't
+    // read: the user can't resolve it `failed` or `unknown`, which would free the claim for
+    // a second payment, and the attempt stays open with its proof journaled.
+    let w = World::new();
+    let store = Arc::new(NoSeenMarks::default());
+    let (mut wallet, mut phone, request, attempt_id) =
+        in_flight_on(&w, Arc::clone(&store) as Arc<dyn StateStore>).await;
+    store.armed.store(true, Ordering::SeqCst);
+    phone_writes(&mut phone, &request, Some(INVALID)).await;
+    w.rail.settle(&attempt_id, true);
+    assert_eq!(
+        wallet.resume_payments().await.unwrap(),
+        vec![PayOutcome::RecordHeld { attempt_id }]
+    );
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    for resolution in [
+        paykit_sdk::Resolution::Failed,
+        paykit_sdk::Resolution::Unknown,
+    ] {
+        let refused = wallet
+            .resolve_attempt(
+                &obligation,
+                attempt_id,
+                resolution,
+                pubky_switch_client::app::UserConfirmed::new(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            refused.refusal(),
+            Some(&paykit_sdk::Refusal::AlreadyPaid),
+            "{resolution:?}"
+        );
+    }
+    assert_eq!(claim_outcome(&mut wallet, &attempt_id).await, Outcome::Open);
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::RailPaid
+    );
+}
