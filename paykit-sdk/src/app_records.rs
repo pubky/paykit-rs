@@ -167,6 +167,15 @@ impl SeenRecords {
         self.records.drain(..excess.min(droppable));
     }
 
+    /// Whether every kept record is `payee`'s, verified as its signer signed it, and of its
+    /// app `app_id`: what [`SeenRecords::view`] requires, checked before a restore installs
+    /// a copy (`p/ar/<payee>/<app>`), so none can fail every later read of the payee.
+    pub(crate) fn verifies(&self, payee: &[u8; 32], app_id: &[u8; 16]) -> bool {
+        self.records.iter().all(|signed| {
+            AppRecord::verify(signed, payee).is_ok_and(|record| record.cert().app_id() == *app_id)
+        })
+    }
+
     /// The view the records give, at the reader's clock `now`. A kept record that no longer
     /// verifies is a corrupt store.
     fn view(&self, payee: &[u8; 32], now: u64) -> Result<(RecordView, Vec<AppRecord>)> {

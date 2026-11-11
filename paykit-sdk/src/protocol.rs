@@ -278,8 +278,10 @@ pub const BACKUP_NAME: &str = "paykit";
 /// Every message another party signed that the layer keeps is verified again for `own`, as
 /// its later use verifies it, and bound to the record key it is kept under, from `blind`,
 /// the backup's naming key: a journal entry's request and carrier
-/// ([`JournalEntry::check_restored`]), a kept cancellation (`kc/`), a held list (`lh/`)
-/// and a queued `resend_request`'s certificate (`ans/`). The rest is the app's own data,
+/// ([`JournalEntry::check_restored`]), a kept cancellation (`kc/`), a held list (`lh/`),
+/// a queued `resend_request`'s certificate (`ans/`; its body, which nobody signed here, is
+/// read at its use, which drops one that doesn't read), and a payee app's records seen
+/// (`ar/`, bound to the payee and app its key names). The rest is the app's own data,
 /// read for its shape only: a backup carries the app's signing keys, so whoever can write
 /// one can sign anything the app can, and a check of what the app signed guards against
 /// corruption only.
@@ -322,7 +324,9 @@ pub(crate) fn restore_paykit_layer(
             cursor_time_ms = state::decode::<u64>(&value)
                 .map_err(|_| String::from("Paykit's cursor time in the backup doesn't read"))?;
         }
-        if key.starts_with(key::KEPT_CANCELLATIONS.as_bytes()) {
+        if key.starts_with(b"ar/") {
+            check_seen_records(&key, &value)?;
+        } else if key.starts_with(key::KEPT_CANCELLATIONS.as_bytes()) {
             check_kept_cancellation(&key, &value, &own, &record_key)?;
         } else if key.starts_with(key::HELD_LISTS.as_bytes()) {
             check_held_list(&key, &value, &own, &record_key)?;
@@ -370,18 +374,17 @@ pub(crate) fn restore_paykit_layer(
     Ok(writes)
 }
 
-/// How the app's own data under `key` reads, for the families a later call reads: the
-/// seen app records (`ar/`), queued asks (`ask/`), times and counts (`missed/`, `peer/`,
-/// `spam/`, `rs/`, `rsd/`, `lr`), and the side of a sent message (`side/`). `None` for the
-/// families checked otherwise, and for keys no reader reads.
+/// How the app's own data under `key` reads, for the families a later call reads, which
+/// nobody but the app signs: queued asks (`ask/`), times and counts (`missed/`, `peer/`,
+/// `spam/`, `rs/`, `rsd/`, `lr`), and the side of a message it sent (`side/`). `None` for
+/// the families that hold what another party signed, verified otherwise (`j/`, `kc/`,
+/// `lh/`, `ans/`, `ar/`), and for keys no reader reads.
 fn shape_of(key: &[u8]) -> Option<fn(&[u8]) -> bool> {
     fn reads<T: serde::de::DeserializeOwned>(value: &[u8]) -> bool {
         state::decode::<T>(value).is_ok()
     }
     let prefixed = |prefix: &str| key.starts_with(prefix.as_bytes());
-    if prefixed("ar/") {
-        Some(reads::<crate::app_records::SeenRecords>)
-    } else if prefixed(key::ASKS) {
+    if prefixed(key::ASKS) {
         Some(reads::<QueuedAsk>)
     } else if prefixed("side/") {
         Some(reads::<SideTag>)
@@ -396,6 +399,27 @@ fn shape_of(key: &[u8]) -> Option<fn(&[u8]) -> bool> {
     } else {
         None
     }
+}
+
+/// A payee app's records a reader has seen (`ar/<payee>/<app>`, Switch spec 4.2): each one
+/// the payee's, as it signed it, of the app the key names. They are the payee's, not the
+/// app's own: one that doesn't verify would fail every later public-endpoint read of that
+/// payee.
+fn check_seen_records(key: &[u8], value: &[u8]) -> Result<(), String> {
+    let bad =
+        || String::from("Switch spec 4.2: a payee's seen app records in the backup don't verify");
+    let text = std::str::from_utf8(key).map_err(|_| bad())?;
+    let mut parts = text.strip_prefix("ar/").ok_or_else(bad)?.split('/');
+    let (Some(payee), Some(app), None) = (parts.next(), parts.next(), parts.next()) else {
+        return Err(bad());
+    };
+    let payee = unb64_array::<32>(payee).map_err(|_| bad())?;
+    let app_id = unb64_array::<16>(app).map_err(|_| bad())?;
+    let seen = state::decode::<crate::app_records::SeenRecords>(value).map_err(|_| bad())?;
+    if !seen.verifies(&payee, &app_id) {
+        return Err(bad());
+    }
+    Ok(())
 }
 
 /// A payee's cancellation kept to place (`kc/<record key>`, Paykit spec 8.1): it verifies

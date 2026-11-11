@@ -941,12 +941,25 @@ fn kept_message(
     kind: &str,
     body: serde_json::Value,
 ) -> serde_json::Value {
+    kept_message_with_refs(w, app, cert_app, to, kind, Vec::new(), body)
+}
+
+/// [`kept_message`], naming `refs`.
+fn kept_message_with_refs(
+    w: &World,
+    app: &str,
+    cert_app: &str,
+    to: &pubky_switch_client::testing::TestSigner,
+    kind: &str,
+    refs: Vec<[u8; 32]>,
+    body: serde_json::Value,
+) -> serde_json::Value {
     let plaintext = w.sign_as(
         &w.bob,
         app,
         to,
         kind,
-        Vec::new(),
+        refs,
         body.as_object().cloned().unwrap(),
     );
     let keys = w.bob.identity().app_keys(cert_app);
@@ -1038,6 +1051,70 @@ async fn test_restore_kept_request_that_doesnt_verify_writes_nothing() {
         state[journal].1["d"]["request"] = request;
         refused_writing_nothing(&w, with_layer(&good, state), app_id, what).await;
     }
+    // The entry's own members against the request it keeps, which still verifies: another
+    // amount, payment reference or label; a carrier addressed to bob; and an acceptance
+    // that isn't one of the request, a message of another kind signed by bob.
+    let to_bob = kept_message(
+        &w,
+        "shop1",
+        "shop1",
+        &w.bob,
+        "paykit.payment_request",
+        another_request_body(),
+    );
+    let members: [(&str, &str, serde_json::Value); 4] = [
+        (
+            "amount",
+            "amount",
+            serde_json::json!({ "value": "2", "asset": "btc" }),
+        ),
+        (
+            "payment reference",
+            "payment_reference",
+            serde_json::json!("order-other"),
+        ),
+        ("label", "label", serde_json::json!("shop2")),
+        ("carrier", "carrier", to_bob),
+    ];
+    for (what, member, value) in members {
+        let mut state = layer.clone();
+        let entry = &mut state[journal].1["d"];
+        assert!(entry.get(member).is_some(), "{what}: no {member}");
+        entry[member] = value;
+        refused_writing_nothing(&w, with_layer(&good, state), app_id, what).await;
+    }
+    // An acceptance the wallet signed, with its `msg_id` kept, but of another kind: the
+    // wallet's rejection of the request.
+    let request_hash: [u8; 32] = pubky_switch_core::enc::unb64_array(
+        layer[journal].1["d"]["request_hash"].as_str().unwrap(),
+    )
+    .unwrap();
+    let wallet = w.alice.identity().app_keys("wallet");
+    let rejection = pubky_switch_core::message::Message::new(
+        "paykit.payment_request_rejection",
+        pubky_switch_core::message::Sender::of_app(w.alice_id(), &wallet),
+        w.bob_id(),
+        w.clock.now_ms(),
+        vec![request_hash],
+        serde_json::json!({ "reason": null, "label": "shop1" })
+            .as_object()
+            .cloned()
+            .unwrap(),
+    )
+    .unwrap();
+    let mut state = layer.clone();
+    let entry = &mut state[journal].1["d"];
+    assert!(entry.get("acceptance_plaintext").is_some());
+    entry["acceptance_plaintext"] = serde_json::Value::String(pubky_switch_core::enc::b64(
+        &rejection.sign(&wallet).unwrap().encode(),
+    ));
+    entry["acceptance_msg_id"] = serde_json::Value::String(rejection.msg_id.clone());
+    refused_writing_nothing(&w, with_layer(&good, state), app_id, "acceptance").await;
+}
+
+/// `value` as Paykit's local state keeps it.
+fn kept(value: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "v": 1, "d": value })
 }
 
 #[tokio::test]
@@ -1045,29 +1122,105 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
     let w = World::new();
     let (good, app_id) = backup_with_a_payment(&w).await;
     let layer = layer_of(&good);
-    let kept = layer
+    let entry = layer
         .iter()
         .find(|(k, _)| k.starts_with(b"j/"))
-        .map(|(_, v)| v["d"]["request"].clone())
+        .map(|(_, v)| v["d"].clone())
         .unwrap();
+    let request = entry["request"].clone();
+    let request_hash: [u8; 32] =
+        pubky_switch_core::enc::unb64_array(entry["request_hash"].as_str().unwrap()).unwrap();
     let key_of = |prefix: &str| format!("{prefix}{}", pubky_switch_core::enc::b64(&[7u8; 32]));
-    // A verified message, but not of the kind kept there, under a key that isn't its
-    // record's; a resend_request whose certificate isn't its requester's; and the app's own
-    // data that doesn't read as its reader reads it.
+    // Of the right kind, verified, but kept under a key that isn't its record's: a payee's
+    // cancellation and a payee's list.
+    let cancellation = kept_message_with_refs(
+        &w,
+        "shop1",
+        "shop1",
+        &w.alice,
+        "paykit.payment_request_cancellation",
+        vec![request_hash],
+        serde_json::json!({ "reason": null }),
+    );
+    let list = kept_message(
+        &w,
+        "shop1",
+        "shop1",
+        &w.alice,
+        "paykit.private_payment_list",
+        serde_json::Value::Object(
+            paykit_lib::bodies::PrivatePaymentList {
+                version: 1,
+                payment_endpoints: std::collections::BTreeMap::new(),
+                expires_at: w.clock.now_ms() + 86_400_000,
+            }
+            .to_body()
+            .unwrap(),
+        ),
+    );
     let answer = serde_json::json!({
         "requester": pubky_switch_core::enc::b64(&w.alice_id()),
-        "cert": kept["cert"].clone(),
+        "cert": request["cert"].clone(),
         "body": { "msg_ids": [] },
     });
-    let cases: [(&str, String, serde_json::Value); 5] = [
-        ("kept cancellation", key_of("kc/"), kept.clone()),
-        ("held list", key_of("lh/"), kept),
-        ("queued answer", "ans/00000000000000000001/m".into(), answer),
-        ("lists read time", "lr".into(), serde_json::json!("soon")),
+    // A payee app's records seen: a certificate, not a record, and a record of bob's
+    // under the key of another of his apps.
+    let shop1 = w.bob.identity().app_keys("shop1");
+    let shop1_cert = w.bob.switch().app(&shop1.app_id_bytes()).cert.unwrap();
+    let record = pubky_switch_core::records::AppRecord::sign(
+        &shop1,
+        pubky_switch_core::records::AppRecordBody::new(&shop1_cert, vec![], w.clock.now_ms()),
+    )
+    .unwrap();
+    let seen_key = |app: [u8; 16]| {
+        format!(
+            "ar/{}/{}",
+            pubky_switch_core::enc::b64(&w.bob_id()),
+            pubky_switch_core::enc::b64(&app)
+        )
+    };
+    let record_json = serde_json::to_value(record.signed()).unwrap();
+    let cases: [(&str, String, serde_json::Value); 9] = [
+        (
+            "kept cancellation of another kind",
+            key_of("kc/"),
+            kept(request.clone()),
+        ),
+        (
+            "kept cancellation under another key",
+            key_of("kc/"),
+            kept(cancellation),
+        ),
+        (
+            "held list of another kind",
+            key_of("lh/"),
+            kept(request.clone()),
+        ),
+        ("held list under another key", key_of("lh/"), kept(list)),
+        (
+            "queued answer",
+            "ans/00000000000000000001/m".into(),
+            kept(answer),
+        ),
+        (
+            "seen records holding a certificate",
+            seen_key(shop1.app_id_bytes()),
+            kept(serde_json::json!({ "records": [request["cert"].clone()] })),
+        ),
+        (
+            "seen records of another app",
+            seen_key([9; 16]),
+            kept(serde_json::json!({ "records": [record_json.clone()] })),
+        ),
+        (
+            "lists read time",
+            "lr".into(),
+            kept(serde_json::json!("soon")),
+        ),
         (
             "queued ask",
             key_of("ask/"),
-            serde_json::json!({ "sender": 1 }),
+            kept(serde_json::json!({ "sender": 1 })),
         ),
     ];
     for (what, key, value) in cases {
@@ -1075,4 +1228,13 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
         state.push((key.into_bytes(), value));
         refused_writing_nothing(&w, with_layer(&good, state), app_id, what).await;
     }
+    // A record of bob's, under its own app's key, restores.
+    let mut state = layer.clone();
+    state.push((
+        seen_key(shop1.app_id_bytes()).into_bytes(),
+        kept(serde_json::json!({ "records": [record_json] })),
+    ));
+    let backup = with_layer(&good, state);
+    let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&backup).unwrap()).unwrap();
+    restored(&w, &backup).await;
 }
