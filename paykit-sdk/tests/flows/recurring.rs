@@ -126,3 +126,123 @@ async fn test_recurring_request_rejection_after_its_proposal_expired_refused() {
     );
     assert_eq!(rejections_received(&mut shop).await, 0);
 }
+
+/// What alice's phone, another own app, does to bob's monthly request first.
+#[derive(Clone, Copy, Debug)]
+enum FirstAnswer {
+    /// Accepts it: the phone writes its acceptance into the request record.
+    Accept,
+    /// Rejects it.
+    Reject,
+    /// Reads bob's cancellation of it, which the phone places in the record.
+    PayeeCancelled,
+}
+
+/// The phone's acceptance of `request`, as the request record stores it.
+fn phone_acceptance(w: &World, request: &RequestRef) -> paykit_lib::records::StoredMessage {
+    let plaintext = w.sign_as(
+        &w.alice,
+        "phone",
+        &w.bob,
+        "paykit.payment_request_acceptance",
+        vec![request.request_hash],
+        serde_json::Map::new(),
+    );
+    let keys = w.alice.identity().app_keys("phone");
+    let cert = w.alice.switch().app(&keys.app_id_bytes()).cert.unwrap();
+    paykit_lib::records::StoredMessage::new(
+        w.alice_id(),
+        cert.signed(),
+        plaintext,
+        None,
+        &w.bob_id(),
+    )
+    .unwrap()
+}
+
+/// Alice's wallet and phone both hold bob's monthly request, open for an hour. The phone
+/// answers it first, as `first` says; the clock then passes the proposal expiry, and the
+/// wallet, which last heard from its switch before then and still holds the request record
+/// as it was, rejects it. Its batch is refused with `409`, which the service answers past
+/// the expiry. Returns the wallet's refusal, and the wallet.
+async fn rejected_across_expiry(w: &World, first: FirstAnswer) -> (Refusal, Paykit, RequestRef) {
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let expires_at = w.clock.now_ms() + HOUR_MS;
+    let request = monthly_to(w, &mut wallet, expires_at).await;
+    phone.receive(None).await.unwrap();
+    match first {
+        FirstAnswer::Accept => {
+            let target = crate::outcome_record::payer_record(&request);
+            let held = phone.app_mut().read_record(&target).await.unwrap().unwrap();
+            let mut record = paykit_lib::records::ActivityRecord::read(
+                held.content.value().unwrap(),
+                &w.alice_id(),
+                paykit_lib::records::ActivitySide::Payer,
+            )
+            .unwrap();
+            record.response = Some(phone_acceptance(w, &request));
+            phone
+                .app_mut()
+                .put_record(&target, &record.to_json().unwrap(), Vec::new())
+                .await
+                .unwrap();
+        }
+        FirstAnswer::Reject => {
+            phone.reject_request(&request, None).await.unwrap();
+        }
+        FirstAnswer::PayeeCancelled => {
+            w.inject(
+                &w.bob,
+                "shop",
+                &w.alice,
+                &[phone.app_id()],
+                "paykit.payment_request_cancellation",
+                vec![request.request_hash],
+                serde_json::Map::new(),
+            );
+            phone.receive(None).await.unwrap();
+            assert_eq!(
+                phone.request(&request).await.unwrap().status,
+                RequestStatus::Cancelled
+            );
+        }
+    }
+    w.clock.advance_ms(expires_at + 1 - w.clock.now_ms());
+    let refused = wallet.reject_request(&request, None).await.unwrap_err();
+    let refusal = refused
+        .refusal()
+        .cloned()
+        .unwrap_or_else(|| panic!("{refused:?}"));
+    (refusal, wallet, request)
+}
+
+#[tokio::test]
+async fn test_recurring_rejection_crossing_an_acceptance_past_expiry_is_recurring() {
+    // Another own app accepted the request before its proposal expired: an accepted
+    // recurring request no longer expires as a whole, so the wallet's rejection, refused
+    // past the expiry, says the request is accepted and recurring, not that it expired.
+    let w = World::new();
+    let (refusal, wallet, request) = rejected_across_expiry(&w, FirstAnswer::Accept).await;
+    assert_eq!(refusal, Refusal::Recurring);
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+}
+
+#[tokio::test]
+async fn test_recurring_rejection_crossing_another_answer_past_expiry_shows_it() {
+    // The request record the service holds says what became of the request: rejected by
+    // the phone, or cancelled by bob, though the service answered past the expiry.
+    for (first, expected) in [
+        (FirstAnswer::Reject, Refusal::Rejected),
+        (FirstAnswer::PayeeCancelled, Refusal::Cancelled),
+    ] {
+        let w = World::new();
+        let (refusal, _, _) = rejected_across_expiry(&w, first).await;
+        assert_eq!(refusal, expected, "{first:?}");
+    }
+}

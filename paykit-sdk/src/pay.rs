@@ -30,7 +30,9 @@ use paykit_lib::kinds::Kind;
 use paykit_lib::records::{
     ActivityRecord, ActivitySide, DestinationSource, PaymentListRecord, UsedEndpoint,
 };
-use paykit_lib::{AttemptId, Body, PaymentAmount, PaymentEndpointIdentifier};
+use paykit_lib::{
+    AttemptId, Body, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload,
+};
 use pubky_switch_client::app::{
     claim_conflict, AppError, ClaimOp, Initiator, LocalWrite, ObligationDeadline, OpBatch,
     PeerIdentity, RecordContent, Refusal as ClientRefusal, SignedMessage, UserConfirmed,
@@ -47,7 +49,9 @@ use crate::destination::{Carrier, Need};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::{Destination, JournalEntry, KeptAmount, PaymentView, Stage};
 use crate::paykit::Paykit;
-use crate::rail::{RailError, RailOutcome, RailPaid, RailPayment};
+use crate::rail::{
+    CandidateId, PaymentEndpointCandidate, RailError, RailOutcome, RailPaid, RailPayment,
+};
 use crate::records::{list_target, KeptMessage};
 use crate::requests::{cancelled, rejected, request_of, RequestRef};
 use crate::state::{self, key};
@@ -295,19 +299,38 @@ struct Plan {
     end_hold: Option<[u8; 32]>,
 }
 
-/// Of `offered`, the endpoint `usable` takes that comes first in the payment method's order
-/// ([`Rail::endpoint_identifiers`]): the method, not the payee's listing, decides which of
-/// several it pays, as the v0.1 SDK's adapter did. Then the second endpoint a payee lists is
-/// paid when the method prefers it; the payee credits whichever one the proof names.
-fn rail_first<'a, V>(
-    order: &[PaymentEndpointIdentifier],
-    offered: &'a std::collections::BTreeMap<PaymentEndpointIdentifier, V>,
-    usable: impl Fn(&PaymentEndpointIdentifier, &V) -> bool,
-) -> Option<(&'a PaymentEndpointIdentifier, &'a V)> {
-    order
-        .iter()
-        .find_map(|id| offered.get_key_value(id).filter(|(id, v)| usable(id, v)))
+/// A Payment Endpoint a payment may take: its identifier and payload, handed to the payment
+/// method as a candidate ([`crate::Rail::select_endpoints`]), and what paying it needs: the
+/// destination journaled, its carrier, and, for a single-use list endpoint, the
+/// `payment_lists` record whose mark the attempt's batch writes.
+struct Choice {
+    endpoint_id: PaymentEndpointIdentifier,
+    payload: PaymentEndpointPayload,
+    destination: Destination,
+    carrier: Carrier,
+    reserve: Option<PaymentListRecord>,
 }
+
+impl Choice {
+    fn new(
+        endpoint_id: &PaymentEndpointIdentifier,
+        payload: &PaymentEndpointPayload,
+        destination: Destination,
+        carrier: Carrier,
+        reserve: Option<PaymentListRecord>,
+    ) -> Self {
+        Self {
+            endpoint_id: endpoint_id.clone(),
+            payload: payload.clone(),
+            destination,
+            carrier,
+            reserve,
+        }
+    }
+}
+
+/// The endpoint a payment takes, as [`Paykit::choose`] chose it.
+type Chosen = (Destination, Carrier, Option<PaymentListRecord>);
 
 /// The refusal of a destination whose endpoints the payment method pays none of.
 fn unsupported(what: &str) -> PaykitError {
@@ -523,33 +546,33 @@ impl Paykit {
                         .as_ref()
                         .is_none_or(|ids| ids.contains(id))
                 };
-                let wanted = |id: &PaymentEndpointIdentifier,
-                              _: &paykit_lib::PaymentEndpointPayload| {
-                    allowed(id) && options.endpoint.as_ref().is_none_or(|want| want == id)
-                };
-                let order = self.rail.endpoint_identifiers();
-                let Some((id, payload)) = rail_first(&order, endpoints, wanted) else {
-                    if endpoints.iter().any(|(id, payload)| wanted(id, payload)) {
-                        return Err(unsupported("the request's endpoints"));
-                    }
+                // The request's endpoints the payment may use, by identifier.
+                let gathered: Vec<Choice> = endpoints
+                    .iter()
+                    .filter(|(id, _)| {
+                        allowed(id) && options.endpoint.as_ref().is_none_or(|want| want == *id)
+                    })
+                    .map(|(id, payload)| {
+                        let destination = Destination::new(
+                            stored.message().from.app_id,
+                            id,
+                            payload,
+                            DestinationSource::Request,
+                            None,
+                            false,
+                        );
+                        let carrier = Carrier::Message(Box::new(stored.clone()));
+                        Choice::new(id, payload, destination, carrier, None)
+                    })
+                    .collect();
+                if gathered.is_empty() {
                     return Err(Refusal::NoDestination(
                         "Paykit spec 8.1: the request has no such endpoint".into(),
                     )
                     .into());
-                };
-                let destination = Destination::new(
-                    stored.message().from.app_id,
-                    id,
-                    payload,
-                    DestinationSource::Request,
-                    None,
-                    false,
-                );
-                (
-                    destination,
-                    Carrier::Message(Box::new(stored.clone())),
-                    None,
-                )
+                }
+                self.choose(gathered, &body.amount, &options)?
+                    .ok_or_else(|| unsupported("the request's endpoints"))?
             }
             // The request's accepted identifiers restrict a destination from the payee's lists
             // as they do its own endpoints (Paykit wire 4.5).
@@ -558,6 +581,7 @@ impl Paykit {
                     &request.payee,
                     Some(*app),
                     body.accepted_payment_endpoint_identifiers.as_deref(),
+                    &body.amount,
                     &options,
                 )
                 .await?
@@ -567,12 +591,12 @@ impl Paykit {
                     &request.payee,
                     options.list_app,
                     body.accepted_payment_endpoint_identifiers.as_deref(),
+                    &body.amount,
                     &options,
                 )
                 .await?
             }
         };
-        self.check_transfer(&destination, &body.amount, &options)?;
         let entry = JournalEntry {
             attempt_id: AttemptId::generate()?.to_text(),
             obligation,
@@ -635,9 +659,14 @@ impl Paykit {
         self.refuse_while_payer_pass_owed().await?;
         let options = payment.options;
         let (destination, carrier, reserve) = self
-            .list_destination(&payment.payee, options.list_app, None, &options)
+            .list_destination(
+                &payment.payee,
+                options.list_app,
+                None,
+                &payment.amount,
+                &options,
+            )
             .await?;
-        self.check_transfer(&destination, &payment.amount, &options)?;
         let attempt_id = AttemptId::generate()?;
         // The own switch is asked first, before anything is written: Paykit spec 8.4 lets
         // a payment to a reusable public endpoint go ahead while it doesn't answer, and this
@@ -861,28 +890,32 @@ impl Paykit {
         }
     }
 
-    /// A destination from the payee's Private Payment Lists (Paykit spec 8.4): the newest
-    /// usable list of the app asked for, or of any app, and an endpoint of it that isn't a
-    /// single-use endpoint already used at that version and, for a request that restricts
-    /// them, is one of its accepted identifiers, `allowed` (Paykit wire 4.5). In
-    /// [`PaymentMode::Public`], an endpoint of the payee's public endpoints instead, from its
-    /// current apps' records ([`crate::app_records`]), with the same restrictions. With no
-    /// usable list, missing, expired or used up, the payee is asked for its current one
+    /// A destination from the payee's Private Payment Lists (Paykit spec 8.4): of the lists
+    /// in use, of the app asked for or of every current app, the endpoints the payment may
+    /// use, not a single-use endpoint already used at its list's version and, for a request
+    /// that restricts them, one of its accepted identifiers, `allowed` (Paykit wire 4.5),
+    /// are handed to the payment method, which chooses ([`Paykit::choose`]). In
+    /// [`PaymentMode::Public`], the endpoints of the payee's public endpoints instead, from
+    /// its current apps' records ([`crate::app_records`]), with the same restrictions. With
+    /// no usable list, missing, expired or used up, the payee is asked for its current one
     /// ([`Paykit::ask_for_lists`]) and the refusal is [`Refusal::WaitingForList`]; a list in
-    /// use that offers no endpoint the payment may use is [`Refusal::NoDestination`].
+    /// use that offers no endpoint the payment may use is [`Refusal::NoDestination`]; lists
+    /// in use whose endpoints the method pays none of, and no expired list, are
+    /// [`Refusal::UnsupportedEndpoint`], without asking.
     async fn list_destination(
         &mut self,
         payee: &[u8; 32],
         app: Option<[u8; 16]>,
         allowed: Option<&[PaymentEndpointIdentifier]>,
+        amount: &PaymentAmount,
         options: &PayOptions,
-    ) -> Result<(Destination, Carrier, Option<PaymentListRecord>)> {
+    ) -> Result<Chosen> {
         let wanted = |id: &PaymentEndpointIdentifier| {
             options.endpoint.as_ref().is_none_or(|want| want == id)
                 && allowed.is_none_or(|ids| ids.contains(id))
         };
         if let PaymentMode::Public(_) = options.mode {
-            let records = self
+            let mut records = self
                 .public_records(
                     payee,
                     app,
@@ -891,36 +924,32 @@ impl Paykit {
                 )
                 .await??;
             // The payee's public Payment List is every current app's public endpoints together
-            // (Paykit spec 4): the method's first identifier any of them offers is paid, and of
-            // apps offering the same one, the first by App ID, so every payer device picks the
-            // same for the same records.
-            let mut records = records;
+            // (Paykit spec 4), handed to the method by App ID, then by identifier, so every
+            // payer device hands the same for the same records.
             records.sort_by_key(|usable| usable.record.body().app_id);
-            let order = self.rail.endpoint_identifiers();
-            let chosen = order.iter().find_map(|want| {
-                records
-                    .iter()
-                    .position(|usable| {
-                        usable.member.public_endpoints.contains_key(want) && wanted(want)
-                    })
-                    .map(|at| (at, want))
-            });
-            if let Some((at, id)) = chosen {
-                let usable = records.swap_remove(at);
-                let payload = usable.member.public_endpoints[id].clone();
-                let destination = usable.destination(id, &payload);
-                return Ok((destination, Carrier::Record(Box::new(usable.record)), None));
-            }
-            if records
+            let gathered: Vec<Choice> = records
                 .iter()
-                .any(|usable| usable.member.public_endpoints.keys().any(&wanted))
-            {
-                return Err(unsupported("the payee's public endpoints"));
+                .flat_map(|usable| {
+                    usable
+                        .member
+                        .public_endpoints
+                        .iter()
+                        .filter(|(id, _)| wanted(id))
+                        .map(|(id, payload)| {
+                            let carrier = Carrier::Record(Box::new(usable.record.clone()));
+                            Choice::new(id, payload, usable.destination(id, payload), carrier, None)
+                        })
+                })
+                .collect();
+            if gathered.is_empty() {
+                return Err(Refusal::NoDestination(
+                    "Paykit spec 4: the payee has no usable public endpoint".into(),
+                )
+                .into());
             }
-            return Err(Refusal::NoDestination(
-                "Paykit spec 4: the payee has no usable public endpoint".into(),
-            )
-            .into());
+            return self
+                .choose(gathered, amount, options)?
+                .ok_or_else(|| unsupported("the payee's public endpoints"));
         }
         let now = self.now();
         let mut lists = self.lists_of(payee).await?;
@@ -947,8 +976,8 @@ impl Paykit {
                 crate::destination::current(&identity.doc, &l.app_id, &carrier, now).is_ok()
             });
         }
-        // Newest list first, then by App ID: of the payee's apps offering the same identifier,
-        // the newest list's is paid, and every payer device picks the same for the same lists.
+        // Newest list first, then by App ID, so every payer device hands the method the same
+        // for the same lists.
         lists.sort_by_key(|l| {
             let version = match l.list.body() {
                 Body::PrivatePaymentList(list) => list.version,
@@ -962,16 +991,13 @@ impl Paykit {
         // one is used: a list used up, not one without such an endpoint.
         let mut offered = false;
         let mut live = false;
-        // Whether a list in use offers an endpoint the payment may use that the payment
-        // method pays, and whether some app's list has expired, which its current one may
-        // replace.
-        let mut paid_offered = false;
+        // Whether some app's list has expired, which its current one may replace.
         let mut expired = false;
-        let order = self.rail.endpoint_identifiers();
-        let paid = |id: &PaymentEndpointIdentifier| order.contains(id);
-        // The lists in use, in the order above: the method's first identifier any of them
-        // offers is paid, from the first list offering it (Paykit spec 8.4).
-        let mut in_use = Vec::new();
+        // The endpoints of the lists in use that the payment may use, in the order above and
+        // then by identifier; the single-use ones already used at their list's version are
+        // left out (Paykit spec 8.4), and kept apart only to tell a list used up.
+        let mut gathered = Vec::new();
+        let mut used = Vec::new();
         for record in lists {
             let Body::PrivatePaymentList(list) = record.list.body() else {
                 continue;
@@ -985,30 +1011,11 @@ impl Paykit {
                 continue;
             }
             live = true;
-            offered |= list.payment_endpoints.keys().any(&wanted);
-            paid_offered |= list
-                .payment_endpoints
-                .keys()
-                .any(|id| wanted(id) && paid(id));
-            in_use.push(record);
-        }
-        for id in &order {
-            for record in &in_use {
-                let Body::PrivatePaymentList(list) = record.list.body() else {
-                    continue;
-                };
-                let Some(endpoint) = list.payment_endpoints.get(id) else {
-                    continue;
-                };
-                // A single-use endpoint already used at this list's version isn't offered;
-                // the version marked used is the one of the list whose endpoint is chosen.
-                let used = record
-                    .used
-                    .iter()
-                    .any(|u| u.version == list.version && &u.endpoint == id);
-                if !wanted(id) || (endpoint.single_use && used) {
+            for (id, endpoint) in &list.payment_endpoints {
+                if !wanted(id) {
                     continue;
                 }
+                offered = true;
                 let destination = Destination::new(
                     record.app_id,
                     id,
@@ -1017,21 +1024,35 @@ impl Paykit {
                     Some(list.version),
                     endpoint.single_use,
                 );
+                let carrier = Carrier::Message(Box::new(record.list.clone()));
+                // The version marked used is the one of the list whose endpoint is chosen.
                 let reserve = endpoint.single_use.then(|| record.clone());
-                return Ok((
-                    destination,
-                    Carrier::Message(Box::new(record.list.clone())),
-                    reserve,
-                ));
+                let choice = Choice::new(id, &endpoint.payload, destination, carrier, reserve);
+                let spent = record
+                    .used
+                    .iter()
+                    .any(|u| u.version == list.version && &u.endpoint == id);
+                if endpoint.single_use && spent {
+                    used.push(choice);
+                } else {
+                    gathered.push(choice);
+                }
             }
+        }
+        if let Some(chosen) = self.choose(gathered, amount, options)? {
+            return Ok(chosen);
+        }
+        // Lists in use that offer only endpoints the method doesn't pay, and no app's list to
+        // ask again: a newer list needn't differ, so the payee isn't asked. A single-use
+        // endpoint used up that the method pays is one a newer list may offer again.
+        if offered
+            && !expired
+            && (used.is_empty() || self.rail_order(&used, Some(amount))?.is_empty())
+        {
+            return Err(unsupported("the payee's Private Payment List endpoints"));
         }
         // A list still in use with no endpoint the payment may use isn't missing, expired or
         // used up: a newer one needn't differ, so the payee isn't asked.
-        // Lists in use that offer only endpoints the method doesn't pay, and no app's list to
-        // ask again: a newer list needn't differ, so the payee isn't asked.
-        if offered && !paid_offered && !expired {
-            return Err(unsupported("the payee's Private Payment List endpoints"));
-        }
         if live && !offered {
             return Err(Refusal::NoDestination(
                 "Paykit spec 8.4: the payee's Private Payment List has no endpoint this payment \
@@ -1042,6 +1063,76 @@ impl Paykit {
         }
         self.ask_for_lists(payee, app, &held).await?;
         Err(Refusal::WaitingForList.into())
+    }
+
+    /// The payment method's choice among `gathered` ([`crate::Rail::select_endpoints`]): each one
+    /// handed in as a candidate whose ID is its place, in the order gathered, with `amount`.
+    /// Returns the places of the ones it pays, in its order. An ID that isn't one of the
+    /// candidates', or one returned twice, refuses the call: the method answered about
+    /// something it wasn't asked.
+    fn rail_order(
+        &self,
+        gathered: &[Choice],
+        amount: Option<&PaymentAmount>,
+    ) -> Result<Vec<usize>> {
+        let mut candidates = Vec::with_capacity(gathered.len());
+        for (at, choice) in gathered.iter().enumerate() {
+            let id = u32::try_from(at).map_err(|_| {
+                Refusal::NoDestination("more endpoints than a payment method is handed".into())
+            })?;
+            candidates.push(PaymentEndpointCandidate::new(
+                CandidateId::new(id),
+                choice.endpoint_id.clone(),
+                choice.payload.clone(),
+            ));
+        }
+        let mut order: Vec<usize> = Vec::new();
+        for id in self.rail.select_endpoints(&candidates, amount) {
+            let at = usize::try_from(id.get())
+                .ok()
+                .filter(|at| *at < candidates.len())
+                .ok_or_else(|| {
+                    RailError::Refused("the method chose a candidate it wasn't handed".into())
+                })?;
+            if order.contains(&at) {
+                return Err(RailError::Refused("the method chose a candidate twice".into()).into());
+            }
+            order.push(at);
+        }
+        Ok(order)
+    }
+
+    /// The endpoint a payment takes of `gathered` (Paykit spec 7.2): the first in the
+    /// payment method's order ([`Paykit::rail_order`]) whose transfer check passes
+    /// ([`Paykit::check_transfer`]), so a malformed or amount-incompatible payload falls to
+    /// the next. `None` when there are none, or the method pays none of them; the first one's
+    /// transfer refusal when each one it pays fails the check. The choice is journaled with
+    /// the attempt, and a resume pays it.
+    fn choose(
+        &self,
+        gathered: Vec<Choice>,
+        amount: &PaymentAmount,
+        options: &PayOptions,
+    ) -> Result<Option<Chosen>> {
+        if gathered.is_empty() {
+            return Ok(None);
+        }
+        let order = self.rail_order(&gathered, Some(amount))?;
+        let mut gathered: Vec<Option<Choice>> = gathered.into_iter().map(Some).collect();
+        let mut refused = None;
+        for at in order {
+            let Some(choice) = gathered.get_mut(at).and_then(Option::take) else {
+                continue;
+            };
+            match self.check_transfer(&choice.destination, amount, options) {
+                Ok(()) => return Ok(Some((choice.destination, choice.carrier, choice.reserve))),
+                Err(error) if matches!(error.refusal(), Some(Refusal::Transfer(_))) => {
+                    refused.get_or_insert(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        refused.map_or(Ok(None), Err)
     }
 
     /// Paykit spec 8.4, "No usable list": ask the payee for its current list, with a
@@ -1252,7 +1343,24 @@ impl Paykit {
             Err(error) if error.code() == Some(ErrorCode::Conflict) => {
                 self.set_stage(&mut entry, Stage::Abandoned).await?;
                 // The answer's service time may show the deadline passed (Paykit spec 7.1).
+                // The request record the switch holds is read again first, not the one the
+                // attempt was built on: another own app may have rejected or cancelled the
+                // request meanwhile, or the payee cancelled it, which the request's status
+                // shows before its expiry.
                 if self.deadline_passed(entry.deadline) {
+                    if on_record && self.app.read_record(&record.record_target()).await.is_ok() {
+                        if let Some(fresh) = self.held_activity(&record).await? {
+                            if fresh.shows_paid() {
+                                return Err(Refusal::AlreadyPaid.into());
+                            }
+                            if rejected(&fresh) {
+                                return Err(Refusal::Rejected.into());
+                            }
+                            if cancelled(&fresh) {
+                                return Err(Refusal::Cancelled.into());
+                            }
+                        }
+                    }
                     return Err(Refusal::DeadlinePassed.into());
                 }
                 if let Some(view) = claim_conflict(&error) {

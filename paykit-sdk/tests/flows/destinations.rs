@@ -387,11 +387,19 @@ async fn test_destinations_list_of_a_removed_app_shadows_no_current_one() {
 
 /// A request offering Lightning and on-chain, on-chain first by the identifiers' order.
 fn two_endpoints(now: u64) -> paykit_sdk::RequestDraft {
+    endpoints_draft(
+        now,
+        &[
+            ("btc-bitcoin-p2wpkh", "bc1qaddress"),
+            ("btc-lightning-bolt11", "lnbc1invoice"),
+        ],
+    )
+}
+
+/// A request for 1 btc offering `offered`, each an identifier and its payload.
+fn endpoints_draft(now: u64, offered: &[(&str, &str)]) -> paykit_sdk::RequestDraft {
     let mut endpoints = std::collections::BTreeMap::new();
-    for (id, payload) in [
-        ("btc-bitcoin-p2wpkh", "bc1qaddress"),
-        ("btc-lightning-bolt11", "lnbc1invoice"),
-    ] {
+    for (id, payload) in offered {
         endpoints.insert(
             crate::common::endpoint(id),
             paykit_lib::PaymentEndpointPayload::new(payload).unwrap(),
@@ -718,6 +726,16 @@ async fn test_destinations_lists_of_every_app_in_the_payment_methods_order() {
         wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
         "btc-lightning-bolt12"
     );
+    // Both lists' endpoints were handed to the method at once, the newer list's first, with
+    // the payment's amount.
+    assert_eq!(
+        handed(&w),
+        [vec![
+            "0 btc-bitcoin-p2wpkh bc1qtill",
+            "1 btc-lightning-bolt12 lno1shop",
+        ]]
+    );
+    assert_eq!(w.rail.selections()[0].1, Some(crate::common::btc("1")));
 }
 
 #[tokio::test]
@@ -789,5 +807,328 @@ async fn test_destinations_same_endpoint_in_two_lists_paid_from_the_newer() {
     assert!(
         matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
         "{outcome:?}"
+    );
+    // The newer list's endpoint is handed first, so the method, whose order is the choice,
+    // tries it first.
+    assert_eq!(
+        handed(&w),
+        [vec![
+            "0 btc-lightning-bolt12 lno1shop",
+            "1 btc-lightning-bolt12 lno1till?amount=2",
+        ]]
+    );
+}
+
+/// What each call of the method's choice was handed: each candidate's ID, identifier and
+/// payload, in the order handed.
+fn handed(w: &World) -> Vec<Vec<String>> {
+    w.rail
+        .selections()
+        .iter()
+        .map(|(candidates, _)| {
+            candidates
+                .iter()
+                .map(|c| format!("{} {} {}", c.id.get(), c.endpoint_id, c.payload.as_str()))
+                .collect()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn test_destinations_preferred_endpoint_of_another_amount_falls_to_the_next() {
+    // The method prefers on-chain, but the request's on-chain payload fixes another amount:
+    // the transfer check refuses it, and the method's next choice, Lightning, is paid and
+    // credited.
+    let w = World::new();
+    w.rail.set_endpoint_identifiers(vec![
+        crate::common::endpoint("btc-bitcoin-p2wpkh"),
+        crate::common::endpoint("btc-lightning-bolt11"),
+    ]);
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let draft = endpoints_draft(
+        w.clock.now_ms(),
+        &[
+            ("btc-bitcoin-p2wpkh", "bc1qaddress?amount=2"),
+            ("btc-lightning-bolt11", "lnbc1invoice"),
+        ],
+    );
+    let request = request_from(&mut shop, w.alice_id(), draft).await;
+    wallet.receive(None).await.unwrap();
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+        "{outcome:?}"
+    );
+    let paid = wallet.payments().await.unwrap();
+    assert_eq!(paid.len(), 1);
+    assert_eq!(paid[0].endpoint_id.as_str(), "btc-lightning-bolt11");
+    // The request's endpoints, by identifier, with the request's amount.
+    assert_eq!(
+        handed(&w),
+        [vec![
+            "0 btc-bitcoin-p2wpkh bc1qaddress?amount=2",
+            "1 btc-lightning-bolt11 lnbc1invoice",
+        ]]
+    );
+    assert_eq!(w.rail.selections()[0].1, Some(crate::common::btc("1")));
+    shop.receive(None).await.unwrap();
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        paykit_sdk::PayeeStatus::ProofReceived
+    );
+}
+
+#[tokio::test]
+async fn test_destinations_malformed_endpoint_of_one_app_falls_to_another_apps() {
+    // The method prefers Lightning, which only the shop's list offers, with a payload the
+    // method can't read an amount from; the till's on-chain endpoint is paid instead.
+    let w = World::new();
+    w.rail.set_endpoint_identifiers(vec![
+        crate::common::endpoint("btc-lightning-bolt12"),
+        crate::common::endpoint("btc-bitcoin-p2wpkh"),
+    ]);
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let mut till = w
+        .join(
+            &w.bob,
+            "till",
+            paykit_sdk::AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    till.app_mut().invite(&w.alice_id()).await.unwrap();
+    let now = w.clock.now_ms();
+    list_from(
+        &w,
+        "shop",
+        wallet.app_id(),
+        now + 1,
+        "btc-lightning-bolt12",
+        "lno1shop?amount=unknown",
+    );
+    list_from(
+        &w,
+        "till",
+        wallet.app_id(),
+        now,
+        "btc-bitcoin-p2wpkh",
+        "bc1qtill",
+    );
+    wallet.receive(None).await.unwrap();
+    let outcome = wallet
+        .pay_without_request(paykit_sdk::UnrequestedPayment::new(
+            w.bob_id(),
+            crate::common::btc("1"),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
+        "btc-bitcoin-p2wpkh"
+    );
+    till.receive(None).await.unwrap();
+    assert_eq!(till.payee_activity().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_destinations_every_payable_endpoint_of_another_amount_refused() {
+    // Each endpoint the method pays fixes another amount: the payment is refused by the
+    // transfer check, nothing written or paid.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let draft = endpoints_draft(
+        w.clock.now_ms(),
+        &[
+            ("btc-bitcoin-p2wpkh", "bc1qaddress?amount=2"),
+            ("btc-lightning-bolt11", "lnbc1invoice?amount=3"),
+        ],
+    );
+    let request = request_from(&mut shop, w.alice_id(), draft).await;
+    wallet.receive(None).await.unwrap();
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::Transfer(_))),
+        "{refused:?}"
+    );
+    assert!(wallet.payments().await.unwrap().is_empty());
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_destinations_method_choosing_a_candidate_it_wasnt_handed_refused() {
+    // The method answers with an ID it wasn't handed, or one ID twice: the call is refused,
+    // nothing written or paid, and the request stays payable.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), two_endpoints(w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let unknown = |candidates: &[paykit_sdk::rail::PaymentEndpointCandidate],
+                   _: Option<&paykit_lib::PaymentAmount>| {
+        vec![paykit_sdk::rail::CandidateId::new(
+            u32::try_from(candidates.len()).unwrap(),
+        )]
+    };
+    let twice = |candidates: &[paykit_sdk::rail::PaymentEndpointCandidate],
+                 _: Option<&paykit_lib::PaymentAmount>| {
+        vec![candidates[1].id, candidates[0].id, candidates[1].id]
+    };
+    w.rail.set_selection(unknown);
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            paykit_sdk::PaykitError::Rail(paykit_sdk::RailError::Refused(_))
+        ),
+        "{refused:?}"
+    );
+    w.rail.set_selection(twice);
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            paykit_sdk::PaykitError::Rail(paykit_sdk::RailError::Refused(_))
+        ),
+        "{refused:?}"
+    );
+    assert!(wallet.payments().await.unwrap().is_empty());
+    assert!(w.rail.all_executions().is_empty());
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+    // The method's own order, Lightning only, is then paid.
+    w.rail.set_selection(|candidates, _| vec![candidates[1].id]);
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
+        "btc-lightning-bolt11"
+    );
+}
+
+/// Whether `shop` receives a `paykit.private_payment_list_request` at its next read.
+async fn asked_for_a_list(shop: &mut paykit_sdk::Paykit) -> bool {
+    let got = shop.receive(None).await.unwrap();
+    got.report.events.iter().any(|e| {
+        matches!(
+            e,
+            pubky_switch_client::app::AppEvent::MessageReceived { kind, .. }
+                if kind == "paykit.private_payment_list_request"
+        )
+    })
+}
+
+#[tokio::test]
+async fn test_destinations_method_choosing_none_refused_as_unsupported() {
+    // The method pays none of the candidates: the request's endpoints, and a live list's,
+    // are refused as unsupported, the list's without asking bob for another.
+    let w = World::new();
+    w.rail.set_selection(|_, _| Vec::new());
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), two_endpoints(w.clock.now_ms())).await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::UnsupportedEndpoint(_))),
+        "{refused:?}"
+    );
+    let refused = wallet
+        .pay_without_request(paykit_sdk::UnrequestedPayment::new(
+            w.bob_id(),
+            crate::common::btc("1"),
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::UnsupportedEndpoint(_))),
+        "{refused:?}"
+    );
+    assert!(!asked_for_a_list(&mut shop).await);
+    assert!(wallet.payments().await.unwrap().is_empty());
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
+async fn test_destinations_used_single_use_endpoint_the_method_doesnt_pay_not_asked_for() {
+    // Alice pays bob's single-use on-chain endpoint; her method then pays only Taproot. The
+    // list's other endpoint, Lightning, isn't one it pays, nor is the used one, which a newer
+    // list would offer again: refused as unsupported, without asking bob for another list.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let version = w.clock.now_ms();
+    w.list_to_alice(&mut shop, &[wallet.app_id()], version)
+        .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(paykit_sdk::UnrequestedPayment::new(
+            w.bob_id(),
+            crate::common::btc("1"),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
+        "{paid:?}"
+    );
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
+        "btc-bitcoin-p2wpkh"
+    );
+    asked_for_a_list(&mut shop).await;
+    w.rail
+        .set_endpoint_identifiers(vec![crate::common::endpoint("btc-bitcoin-p2tr")]);
+    let refused = wallet
+        .pay_without_request(paykit_sdk::UnrequestedPayment::new(
+            w.bob_id(),
+            crate::common::btc("1"),
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::UnsupportedEndpoint(_))),
+        "{refused:?}"
+    );
+    assert!(!asked_for_a_list(&mut shop).await);
+    // The used endpoint was handed in apart, after the method chose none of the others.
+    let calls = handed(&w);
+    assert_eq!(
+        calls[calls.len() - 2..],
+        [
+            vec!["0 btc-lightning-bolt12 lno1reusable".to_owned()],
+            vec![format!("0 btc-bitcoin-p2wpkh bc1qsingle{version}")],
+        ]
     );
 }

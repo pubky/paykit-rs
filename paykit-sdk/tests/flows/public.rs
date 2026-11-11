@@ -662,4 +662,21 @@ async fn test_public_endpoints_of_every_app_in_the_payment_methods_order() {
         wallet.payments().await.unwrap()[0].endpoint_id.as_str(),
         "btc-lightning-bolt12"
     );
+    // Both apps' endpoints were handed to the method at once, by App ID.
+    let handed: Vec<String> = w
+        .rail
+        .selections()
+        .last()
+        .unwrap()
+        .0
+        .iter()
+        .map(|c| format!("{} {} {}", c.id.get(), c.endpoint_id, c.payload.as_str()))
+        .collect();
+    assert_eq!(
+        handed,
+        [
+            "0 btc-lightning-bolt11 lnbc1earlier",
+            "1 btc-lightning-bolt12 lno1later"
+        ]
+    );
 }

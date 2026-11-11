@@ -9,9 +9,12 @@
 //!   and for how long, whether its history shows a dispatch's outcome and for how long, and
 //!   whether that history survives a restore of the paying device (Paykit spec 7.2, "What a
 //!   payment method declares");
-//! - **which endpoints it pays** ([`Rail::endpoint_identifiers`]): the Payment Endpoint
-//!   Identifiers it can pay, in the order it wants them tried; the SDK pays the first of them
-//!   a destination offers, as the v0.1 SDK's adapter chose and ordered the payable candidates;
+//! - **which endpoints it pays** ([`Rail::select_endpoints`]): of the Payment Endpoints a
+//!   payment may take, handed in all at once as candidates with the payment's amount, the
+//!   ones it pays, in the order to try them, as the v0.1 SDK's payment adapter ordered the
+//!   payable candidates; the SDK pays the first of them whose transfer check passes;
+//! - **which identifiers it can pay** ([`Rail::endpoint_identifiers`]), for an app's record
+//!   to list as its `capabilities` (Paykit spec 4);
 //! - **what it would transfer** to a destination for an amount, before any write
 //!   ([`Rail::transfer`], Paykit spec 7.2 step 1);
 //! - **pay** an endpoint with the attempt ID as the idempotency key ([`Rail::pay`]);
@@ -154,6 +157,68 @@ impl Transfer {
     }
 }
 
+/// A candidate's ID in one call of [`Rail::select_endpoints`]: opaque, it only names one of
+/// the candidates handed in, and a rail returns it as it was given. The SDK numbers the
+/// candidates of a call in the order it hands them, so the same candidates get the same
+/// IDs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CandidateId(u32);
+
+impl CandidateId {
+    /// The ID with the value `value`, for a binding that carries IDs as numbers.
+    pub fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    /// The ID's value.
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// A Payment Endpoint a payment may take, handed to [`Rail::select_endpoints`]: its
+/// candidate ID, its Payment Endpoint Identifier and its payload.
+///
+/// The payload is sensitive: it is the payee's destination, such as an invoice or an
+/// address, that only the rail interprets. It stays out of `Debug`, and a rail never logs it.
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PaymentEndpointCandidate {
+    /// The candidate's ID in this call.
+    pub id: CandidateId,
+    /// The Payment Endpoint Identifier.
+    pub endpoint_id: PaymentEndpointIdentifier,
+    /// The payload, sensitive, which only the rail interprets.
+    pub payload: PaymentEndpointPayload,
+}
+
+impl PaymentEndpointCandidate {
+    /// The candidate `id`, of the endpoint `endpoint_id` with `payload`.
+    pub fn new(
+        id: CandidateId,
+        endpoint_id: PaymentEndpointIdentifier,
+        payload: PaymentEndpointPayload,
+    ) -> Self {
+        Self {
+            id,
+            endpoint_id,
+            payload,
+        }
+    }
+}
+
+impl std::fmt::Debug for PaymentEndpointCandidate {
+    // The payload stays out of logs.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "PaymentEndpointCandidate({}, {})",
+            self.id.get(),
+            self.endpoint_id
+        )
+    }
+}
+
 /// One payment to make: the endpoint, the amount, and the attempt ID as the idempotency key
 /// (Paykit spec 7.2).
 #[derive(Clone, PartialEq, Eq)]
@@ -248,11 +313,50 @@ pub trait Rail: Send + Sync {
     /// What the method declares (Paykit spec 7.2).
     fn declaration(&self) -> RailDeclaration;
 
-    /// The Payment Endpoint Identifiers the method can pay, in the order it wants them
-    /// tried, each once. Of the endpoints a destination offers, the SDK pays the first in
-    /// this order; a destination offering endpoints but none of these is refused as
-    /// [`crate::Refusal::UnsupportedEndpoint`]. They are what an app's record will list as
-    /// its `capabilities` (Paykit wire 3.2) once the SDK publishes its own record.
+    /// Of `candidates`, the ones the method pays, in the order to try them, each once: their
+    /// IDs, best first (Paykit spec 7.2). `amount` is the payment's amount, when there is
+    /// one: a request's, or a payment without a request's.
+    ///
+    /// The candidates are every Payment Endpoint the payment may take, across every payee
+    /// app it may use, handed in at once, in this order:
+    ///
+    /// - a request's own endpoints: by Payment Endpoint Identifier;
+    /// - the payee's public endpoints: by App ID, then by identifier;
+    /// - the payee's Private Payment Lists in use: newest version first, then by App ID,
+    ///   then by identifier, a single-use endpoint already used at its list's version left
+    ///   out.
+    ///
+    /// Only endpoints the payment may use are handed in: those of the request's accepted
+    /// identifiers, and the one the caller named, if any. A payload is sensitive: see
+    /// [`PaymentEndpointCandidate`].
+    ///
+    /// The SDK takes the first of the returned candidates whose transfer check passes
+    /// ([`Rail::transfer`]; Paykit spec 7.2 step 1), so a malformed or amount-incompatible
+    /// payload falls to the next. The order returned is the whole choice: of two apps
+    /// offering the same identifier, the one returned first is paid. None returned refuses
+    /// the payment as [`crate::Refusal::UnsupportedEndpoint`], but for Private Payment Lists
+    /// a newer one may serve, when one has expired or a single-use endpoint is used up: then
+    /// the payee is asked for it ([`crate::Refusal::WaitingForList`]). Every one failing the
+    /// transfer check refuses it as [`crate::Refusal::Transfer`], the first one's refusal. An
+    /// ID that isn't one of the candidates', or one returned twice, refuses the call as
+    /// [`RailError::Refused`], nothing written.
+    ///
+    /// The choice is journaled with the attempt before the method pays: a payment resumed
+    /// later pays the endpoint chosen, whatever the method would choose then.
+    ///
+    /// For Private Payment Lists, a call that returns none may be followed by one handing in
+    /// only the single-use endpoints left out as used, to tell whether a newer list may
+    /// serve: none of those is paid.
+    fn select_endpoints(
+        &self,
+        candidates: &[PaymentEndpointCandidate],
+        amount: Option<&PaymentAmount>,
+    ) -> Vec<CandidateId>;
+
+    /// The Payment Endpoint Identifiers the method can pay to: what an app's record lists as
+    /// its `capabilities.endpoint_identifiers`, so payees can offer matching destinations
+    /// (Paykit spec 4, Paykit wire 3.2), once the SDK publishes its own record. The SDK
+    /// never chooses a destination by them: [`Rail::select_endpoints`] does.
     fn endpoint_identifiers(&self) -> Vec<PaymentEndpointIdentifier>;
 
     /// What paying `amount` to `payload` would transfer (Paykit spec 7.2 step 1): a payload
@@ -323,5 +427,20 @@ mod tests {
         let text = format!("{payment:?}");
         assert!(!text.contains("secret"), "{text}");
         assert!(text.contains("btc-lightning-bolt11"));
+    }
+
+    #[test]
+    fn test_rail_candidate_debug_hides_the_payload() {
+        let candidate = PaymentEndpointCandidate::new(
+            CandidateId::new(3),
+            PaymentEndpointIdentifier::new("btc-lightning-bolt11").unwrap(),
+            PaymentEndpointPayload::new("lnbc-secret-invoice").unwrap(),
+        );
+        let text = format!("{candidate:?}");
+        assert!(!text.contains("secret"), "{text}");
+        assert!(
+            text.contains("btc-lightning-bolt11") && text.contains('3'),
+            "{text}"
+        );
     }
 }

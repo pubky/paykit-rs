@@ -73,10 +73,10 @@ pub enum Refusal {
     /// usable public endpoint, or none the caller named (Paykit spec 4, 8.1, 8.4).
     #[error("no usable destination: {0}")]
     NoDestination(String),
-    /// The destination offers endpoints, but none of the Payment Endpoint Identifiers the
-    /// payment method pays ([`crate::Rail::endpoint_identifiers`]), or the caller named one
-    /// it doesn't pay. Nothing was written. Another list or request from the payee, or
-    /// another payment method, may serve.
+    /// The destination offers endpoints the payment may use, but the payment method pays
+    /// none of them ([`crate::Rail::select_endpoints`]), or the caller named one it doesn't
+    /// pay. Nothing was written. Another list or request from the payee, or another payment
+    /// method, may serve.
     #[error("no endpoint the payment method pays: {0}")]
     UnsupportedEndpoint(String),
     /// No usable Private Payment List from the payee: none held, or each one expired or its

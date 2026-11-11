@@ -5,6 +5,9 @@
 //! a history every device sees. Its proofs are `{ "type": "bitcoin-txid", "txid": ... }`,
 //! whose settlement ID Paykit wire 1.5 fixes, so a payee credits a payment without a request
 //! by it. A payload `...?amount=<value>` fixes the amount it transfers, as an invoice does.
+//!
+//! It pays the identifiers of [`FAKE_ENDPOINT_IDENTIFIERS`], in that order, unless told
+//! another order or another choice, and keeps every set of candidates it was handed.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -15,8 +18,14 @@ use pubky_switch_client::transport::BoxFuture;
 use serde_json::{Map, Value};
 
 use super::{
-    ProofCheck, Rail, RailDeclaration, RailError, RailOutcome, RailPaid, RailPayment, Transfer,
+    CandidateId, PaymentEndpointCandidate, ProofCheck, Rail, RailDeclaration, RailError,
+    RailOutcome, RailPaid, RailPayment, Transfer,
 };
+
+/// A choice of candidates in place of the fake rail's own.
+type Choice = Arc<
+    dyn Fn(&[PaymentEndpointCandidate], Option<&PaymentAmount>) -> Vec<CandidateId> + Send + Sync,
+>;
 
 /// The longest a fake dispatch takes to complete or fail, as its declaration says: an hour.
 pub const FAKE_LONGEST_COMPLETION_MS: u64 = 3_600_000;
@@ -55,6 +64,8 @@ struct Inner {
     calls: BTreeMap<AttemptId, u64>,
     declaration: Option<RailDeclaration>,
     endpoints: Option<Vec<PaymentEndpointIdentifier>>,
+    choice: Option<Choice>,
+    selections: Vec<(Vec<PaymentEndpointCandidate>, Option<PaymentAmount>)>,
 }
 
 /// An in-memory payment rail shared by payers and payees. Tests only.
@@ -118,9 +129,39 @@ impl FakeRail {
     }
 
     /// Pay `endpoints`, in that order, from now on, instead of the default
-    /// ([`FAKE_ENDPOINT_IDENTIFIERS`]).
+    /// ([`FAKE_ENDPOINT_IDENTIFIERS`]): of the candidates handed in, those with one of these
+    /// identifiers, by identifier in this order, then in the order handed in.
     pub fn set_endpoint_identifiers(&self, endpoints: Vec<PaymentEndpointIdentifier>) {
         self.lock().endpoints = Some(endpoints);
+    }
+
+    /// Answer [`Rail::select_endpoints`] with `choose` from now on, instead of by its
+    /// identifiers, whatever IDs it returns.
+    pub fn set_selection(
+        &self,
+        choose: impl Fn(&[PaymentEndpointCandidate], Option<&PaymentAmount>) -> Vec<CandidateId>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        self.lock().choice = Some(Arc::new(choose));
+    }
+
+    /// Every set of candidates [`Rail::select_endpoints`] was handed, with its amount, in
+    /// the order of the calls.
+    pub fn selections(&self) -> Vec<(Vec<PaymentEndpointCandidate>, Option<PaymentAmount>)> {
+        self.lock().selections.clone()
+    }
+
+    /// The identifiers it pays, in its order.
+    fn identifiers(&self) -> Vec<PaymentEndpointIdentifier> {
+        if let Some(endpoints) = &self.lock().endpoints {
+            return endpoints.clone();
+        }
+        FAKE_ENDPOINT_IDENTIFIERS
+            .iter()
+            .filter_map(|id| PaymentEndpointIdentifier::new(id).ok())
+            .collect()
     }
 
     /// Declare `declaration` from now on instead of the default (idempotent while
@@ -234,14 +275,34 @@ pub const FAKE_ENDPOINT_IDENTIFIERS: [&str; 4] = [
 ];
 
 impl Rail for FakeRail {
-    fn endpoint_identifiers(&self) -> Vec<PaymentEndpointIdentifier> {
-        if let Some(endpoints) = &self.lock().endpoints {
-            return endpoints.clone();
+    fn select_endpoints(
+        &self,
+        candidates: &[PaymentEndpointCandidate],
+        amount: Option<&PaymentAmount>,
+    ) -> Vec<CandidateId> {
+        let choice = {
+            let mut inner = self.lock();
+            inner
+                .selections
+                .push((candidates.to_vec(), amount.cloned()));
+            inner.choice.clone()
+        };
+        if let Some(choose) = choice {
+            return choose(candidates, amount);
         }
-        FAKE_ENDPOINT_IDENTIFIERS
+        self.identifiers()
             .iter()
-            .filter_map(|id| PaymentEndpointIdentifier::new(id).ok())
+            .flat_map(|id| {
+                candidates
+                    .iter()
+                    .filter(move |candidate| &candidate.endpoint_id == id)
+                    .map(|candidate| candidate.id)
+            })
             .collect()
+    }
+
+    fn endpoint_identifiers(&self) -> Vec<PaymentEndpointIdentifier> {
+        self.identifiers()
     }
 
     fn declaration(&self) -> RailDeclaration {
@@ -453,6 +514,36 @@ mod tests {
             .is_some());
         assert!(rail.verify(check(proof, "2")).await.unwrap().is_none());
         assert!(rail.verify(check(Map::new(), "1")).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_fake_rail_selection_follows_its_identifiers_then_the_order_handed() {
+        let rail = FakeRail::new();
+        let candidate = |id: u32, endpoint: &str| {
+            PaymentEndpointCandidate::new(
+                CandidateId::new(id),
+                PaymentEndpointIdentifier::new(endpoint).unwrap(),
+                PaymentEndpointPayload::new("payload").unwrap(),
+            )
+        };
+        let candidates = [
+            candidate(0, "btc-lightning-bolt11"),
+            candidate(1, "btc-bitcoin-p2wpkh"),
+            candidate(2, "x-unpaid"),
+            candidate(3, "btc-lightning-bolt11"),
+        ];
+        let ids = |ids: Vec<CandidateId>| ids.into_iter().map(CandidateId::get).collect::<Vec<_>>();
+        assert_eq!(ids(rail.select_endpoints(&candidates, None)), [1, 0, 3]);
+        rail.set_endpoint_identifiers(vec![PaymentEndpointIdentifier::new("x-unpaid").unwrap()]);
+        assert_eq!(ids(rail.select_endpoints(&candidates, None)), [2]);
+        rail.set_selection(|candidates, _| vec![candidates[3].id]);
+        assert_eq!(
+            ids(rail.select_endpoints(&candidates, Some(&amount("1")))),
+            [3]
+        );
+        let handed = rail.selections();
+        assert_eq!(handed.len(), 3);
+        assert_eq!(handed[2], (candidates.to_vec(), Some(amount("1"))));
     }
 
     #[test]

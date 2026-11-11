@@ -92,6 +92,34 @@ async fn test_wallets_one_rejects_the_other_cannot_pay() {
 }
 
 #[tokio::test]
+async fn test_wallets_payment_crossing_the_others_rejection_past_the_deadline_shows_it() {
+    // The phone rejects the request; past the request's deadline, the wallet, which still
+    // holds the record as it was and last heard from its switch before the deadline, pays
+    // it. Its attempt is refused with `409`, answered past the deadline: the record the
+    // switch holds says the request was rejected, as its status does, and that comes first.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    let now = w.clock.now_ms();
+    let request = request_from(&mut shop, w.alice_id(), draft("1", now)).await;
+    wallet.receive(None).await.unwrap();
+    phone.receive(None).await.unwrap();
+    phone.reject_request(&request, None).await.unwrap();
+    w.clock.advance_ms(25 * crate::common::HOUR_MS);
+    let raced = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(raced.refusal(), Some(&Refusal::Rejected), "{raced:?}");
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Rejected
+    );
+    assert!(w.rail.all_executions().is_empty());
+}
+
+#[tokio::test]
 async fn test_wallets_receipt_settles_a_claim_the_app_never_read() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;

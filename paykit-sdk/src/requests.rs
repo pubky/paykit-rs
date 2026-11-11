@@ -769,6 +769,38 @@ impl Paykit {
         deadline.is_some_and(|deadline| self.service_time().is_some_and(|t| deadline <= t))
     }
 
+    /// Whether the request in `record` may still be answered (Paykit spec 8.1, 8.2): not
+    /// paid, rejected or cancelled, nor `stopped` by a cancellation the app keeps; a recurring
+    /// one only rejected, and only before it is accepted, its cancellation and anything after
+    /// its acceptance belonging to the recurring flows; and a recurring one not past its
+    /// proposal expiry at the highest service time verified, which the batch's time
+    /// condition would refuse on every try.
+    fn refuse_answer(
+        &self,
+        record: &ActivityRecord,
+        body: &PaymentRequest,
+        cancel: bool,
+        stopped: bool,
+    ) -> Result<()> {
+        if record.shows_paid() {
+            return Err(Refusal::AlreadyPaid.into());
+        }
+        if rejected(record) {
+            return Err(Refusal::Rejected.into());
+        }
+        if cancelled(record) || stopped {
+            return Err(Refusal::Cancelled.into());
+        }
+        let recurring = body.is_recurring();
+        if recurring && (cancel || record.response.is_some()) {
+            return Err(Refusal::Recurring.into());
+        }
+        if recurring && self.reached(expiry_deadline(record, body)) {
+            return Err(Refusal::DeadlinePassed.into());
+        }
+        Ok(())
+    }
+
     async fn request_status(
         &self,
         record: &ActivityRecord,
@@ -831,8 +863,10 @@ impl Paykit {
     /// [`Refusal::NotFound`]; [`Refusal::Rejected`], [`Refusal::Cancelled`],
     /// [`Refusal::AlreadyPaid`] or [`Refusal::PaymentInProgress`]; [`Refusal::Recurring`] for
     /// a recurring request already accepted; [`Refusal::DeadlinePassed`] for a recurring
-    /// request whose proposal expired;
-    /// [`PaykitError::Conflict`] when the record changed meanwhile; the client's errors.
+    /// request whose proposal expired, decided once the record the service holds shows it
+    /// still unanswered: one another own app accepted meanwhile gives [`Refusal::Recurring`],
+    /// one rejected or cancelled gives that refusal; [`PaykitError::Conflict`] when the
+    /// record changed meanwhile; the client's errors.
     pub async fn reject_request(
         &mut self,
         request: &RequestRef,
@@ -871,26 +905,9 @@ impl Paykit {
         let recurring = body.is_recurring();
         let label = body.label.clone();
         let proposal_expires_at = body.proposal_expires_at;
-        if record.shows_paid() {
-            return Err(Refusal::AlreadyPaid.into());
-        }
-        if rejected(&record) {
-            return Err(Refusal::Rejected.into());
-        }
-        if cancelled(&record) || self.kept_stop(&target).await? {
-            return Err(Refusal::Cancelled.into());
-        }
-        // A recurring request is rejected only before it is accepted (Paykit spec 8.2); its
-        // cancellation and anything after its acceptance belong to the recurring flows.
-        if recurring && (cancel || record.response.is_some()) {
-            return Err(Refusal::Recurring.into());
-        }
-        // Past its proposal expiry, a recurring request is expired and can't be answered: the
-        // batch's time condition would refuse it on every try.
+        let stopped = self.kept_stop(&target).await?;
+        self.refuse_answer(&record, body, cancel, stopped)?;
         let expiry = expiry_deadline(&record, body);
-        if recurring && self.reached(expiry) {
-            return Err(Refusal::DeadlinePassed.into());
-        }
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);
         if !recurring {
             if let Some(read) = self.app.read_claim(&obligation).await? {
@@ -948,7 +965,17 @@ impl Paykit {
                     }
                 }
                 // The proposal expired at the service: the answer's verified time says so.
+                // On `409 conflict` the record was read again, and the one the service holds
+                // decides first, not the one this answer was built on: another own app may
+                // have accepted, rejected or cancelled the request meanwhile, and an accepted
+                // recurring request no longer expires as a whole. Only one still unanswered
+                // is refused as expired.
                 if recurring && self.reached(expiry) {
+                    if let Some(fresh) = self.held_activity(&target).await? {
+                        if let Some((_, body)) = request_of(&fresh) {
+                            self.refuse_answer(&fresh, body, cancel, false)?;
+                        }
+                    }
                     return Err(Refusal::DeadlinePassed.into());
                 }
                 return Err(conflict(error));

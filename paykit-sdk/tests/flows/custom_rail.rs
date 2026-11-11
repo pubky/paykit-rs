@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use paykit_lib::bodies::PaymentProof;
 use paykit_lib::{AttemptId, PaymentAmount, PaymentEndpointIdentifier, PaymentEndpointPayload};
 use paykit_sdk::rail::{
-    FakeRail, ProofCheck, RailDeclaration, RailError, RailOutcome, RailPayment, Transfer,
+    CandidateId, FakeRail, PaymentEndpointCandidate, ProofCheck, RailDeclaration, RailError,
+    RailOutcome, RailPayment, Transfer,
 };
 use paykit_sdk::{
     AppScopes, PayOptions, PayOutcome, Paykit, PaykitConfig, Rail, RequestedScopes,
@@ -59,6 +60,14 @@ impl LedgerRail {
 impl Rail for LedgerRail {
     fn declaration(&self) -> RailDeclaration {
         self.fake.declaration()
+    }
+
+    fn select_endpoints(
+        &self,
+        candidates: &[PaymentEndpointCandidate],
+        amount: Option<&PaymentAmount>,
+    ) -> Vec<CandidateId> {
+        self.fake.select_endpoints(candidates, amount)
     }
 
     fn endpoint_identifiers(&self) -> Vec<PaymentEndpointIdentifier> {
