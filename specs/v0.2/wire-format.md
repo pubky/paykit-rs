@@ -939,7 +939,7 @@ Example entry (`documents.json` `executor_grant_history_entry`: the record was c
 | `counterparty` | pubky | yes | the allowee |
 | `allowance_id` | uuid | yes | |
 | `entries` | `array<object>` | no | one per attempt under the Allowance, below |
-| `totals` | object | no | `{ "spent": amount, "count": int, "failed": array<object> }`: paid amounts and payments of compacted entries, and the compacted `failed` entries, each `{ "obligation": b64(32), "attempt_id": b64(16), "value": amount }`, so a later `done` still counts once; `spent` may be `""` for none, and `failed` is left out when empty. `v01`, left out when empty: v0.1 usage under the Allowance (spec 16), each item `{ "at": time, "spent": amount, "count": int }`, the amount and number of payments v0.1 made in the period starting at `at`; only the migration from v0.1 writes it, once |
+| `totals` | object | no | `{ "spent": amount, "count": int, "failed": array<object> }`: paid amounts and payments of compacted entries, and the compacted `failed` entries, each `{ "obligation": b64(32), "attempt_id": b64(16), "value": amount }`, so a later `done` still counts once; `spent` may be `""` for none, and `failed` is left out when empty. `v01`, left out when empty: v0.1 usage under the Allowance (spec 16), at most 64 items, each `{ "at": time, "spent": amount, "count": int }`: `count` payments totalling `spent`, made at `at`. An item counts in every period limit whose window contains `at`, and in the lifetime limit always. Only the migration from v0.1 writes it, once, and never an executor; with more usage than 64 items hold, it merges the oldest items into one, dated at the latest `at` among them, so no limit counts less |
 
 An entry:
 
