@@ -30,7 +30,7 @@ Paykit's documents follow the JSON rules of the Switch (Switch wire 1.1). What P
 
 - **Integers** follow the Switch's rule (Switch wire 1.1), outside the opaque members below. Paykit documents carry no other numbers. Times are never integers on the wire, except the Private Payment List `version` (Unix milliseconds) and period starts inside derivations.
 - **Opaque members** of Paykit's message bodies, besides the Switch's:
-  - a message body's `metadata` (Switch wire 5.1, Section 4.5);
+  - a message body's `metadata` (Switch wire 5.1, Sections 4.5 and 4.11);
   - the `proof` of a `paykit.payment_proof` body (4.10);
 
   Every other member is checked, whatever its name: a `metadata` elsewhere in a message, or a `proof` holding a transition proof or a Stored message. An extension kind's body (4.3) is no exception: only its `metadata` is opaque.
@@ -131,7 +131,7 @@ A well-formed list with a permission missing, or, in a certificate that holds no
 
 Only valid names count in this table: a name that starts with `request:` or `ext:` but isn't a valid labelled selling scope or extension scope (above), such as `ext:paykit`, derives no permission. A certificate holding one is invalid at Paykit's verifiers anyway.
 
-`allowance_execute` requires `allowance` and `pay`, and `manage_contacts` requires `contacts` (spec 3.1); a certificate that breaks this is invalid.
+`allowance_execute` requires `allowance`, `pay` and `contacts`, and `manage_contacts` requires `contacts` (spec 3.1); a certificate that breaks this is invalid.
 
 **Several protocols** (spec 3.2, Switch wire 3.1 "Several protocols"). A certificate may hold other protocols' scopes beside Paykit's, or only theirs. Paykit's verifiers apply the Switch's rule with Paykit as the protocol they know:
 
@@ -187,7 +187,7 @@ Example (`documents.json` `executor_grant`, whose write built on version (1, 12)
   "app_id": "cw5ahtdkixcafna9zh1y5y5o1w",
   "cert": {
     "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFw...",
-    "sig": "NME2u7XfjKa1BildhigSTz3Yoq1YHgteEWWPSbVxva9DLho8TrNB9hy6b-2fQyArPR1IXlCzL9-jE1xHqcYDBQ"
+    "sig": "wX8NrG-Xn5tfiN4Nhe9iON15nc3rgBO60ysBJnuvWGmT0WgAUaOXHKRiaMvqT0FArsXOJXWFeiVxni5Jq6ynAw"
   },
   "confirmed_generation": 1,
   "sig": "TwAuCSVx5eKgCkbbyAxeqddsr0xSL5QebVA794GsLihQO5VxA0O_qUCAk30KFH2TNuVgcWqpORJMNWNEaaLGDw",
@@ -224,6 +224,7 @@ Bodies use the v0.1 definitions of `specs/payment-requests.md`, `specs/payment-c
 | the `request` object of `paykit.payment_request` | the request terms are the `body` itself |
 | `conversion_quote_id` of a proof | the period details hash in the proof's `refs` |
 | `paykit.payment_conversion_quote` | `paykit.payment_period_details` (4.9) |
+| `valid_from` of a quote | the period details' `created_at`, cut to whole seconds (4.9) |
 | `proposal_event_id`, `acceptance_event_id` of Allowance messages | the proposal and acceptance hashes in `refs` |
 | Receipt Access, Receipt Location, Delivery Confirmations | `paykit.payment_receipt` (4.11); no confirmations |
 | the 1000-byte message limit | the envelope sizes of Switch wire 5.1 |
@@ -387,13 +388,13 @@ The payee's details for one Billing Period of a recurring request (spec 8.2).
 | `billing_period` | Billing Period | yes | a period of the request | |
 | `payment_endpoints` | Payment endpoints | no | | the period's destination |
 | `rates` | Rates | no | cross-asset only: no rate for the requested asset | as v0.1 quotes |
-| `expires_at` | time | yes | | the payer uses only unexpired details; their rates apply to a payment verified at or before it (below) |
+| `expires_at` | time | yes | | the payer uses only unexpired details; their rates apply to a payment verified from their start through it (below) |
 
 - At least one of `payment_endpoints` and `rates` is present; recipients drop details with neither.
 - Cross-asset only means no rate whose `asset`, or its asset segment, is the requested asset: a `usd` request's details with a `usd` or a `usd-polygon` rate are invalid against it. Each rate's `asset` is `<asset>` or `<asset>-<rail>` of lower-case letters and digits, as in conversion terms (4.4), or recipients drop the details; and it matches the asset, and the rail when it names one, of an endpoint the details' `payment_endpoints` or the request names, when they name any, or the details are invalid against the request (vectors: `messages.json` `conversion_terms`).
-- A later message for the same period replaces an earlier one. Later means a later `created_at` instant, then, at the same instant, the greater `msg_id` compared as text. Details as late as those held, the same `created_at` and `msg_id`, are the same message only if their hash is; other details as late are an equivocation, which replaces nothing: the reader keeps the details it holds. Details a proof already references are kept.
+- Each details stays valid until its own `expires_at`: a later message for the same period replaces none (spec 8.2). Later means a later `created_at` instant, then, at the same instant, the greater `msg_id` compared as text; the latest is the payer's default. Details as late as those held, the same `created_at` and `msg_id`, are the same message only if their hash is; other details as late are an equivocation: the reader keeps the details it holds and stores no other. A period has at most 8 details: the payee sends no more, and a reader that holds 8 stores no other (5.3).
 - `refs`: the request hash.
-- **Rates and payment time** (spec 8.2). The rates apply to a payment whose independently verified payment time, from the payment method's evidence, is at or before `expires_at`, both read at millisecond precision, further digits truncated (Switch wire 1.6). The payment method defines what counts as verified payment time, as in v0.1 (`specs/payment-conversion.md`): for an ERC-20 transfer, the canonical block timestamp of its successful execution; a Bitcoin app documents its own rule, such as its zero-confirmation policy. An evidence time in whole seconds, such as a block timestamp, is read as `.000`. The payee credits a payment at the rates only then; one verified later doesn't pay the period at those rates, and gets no receipt. The payer pays by the rates only while its device clock and its highest verified service time are both before `expires_at`, at planning and again after the attempt's answer, before money moves. Rates price a payment to an endpoint of another asset than the requested one, by the asset-rail rate, else the asset-wide one, as `specs/payment-conversion.md` says; a payment to an endpoint of the requested asset is paid 1:1 and isn't bound by them. Vectors: `periods.json` `details_rates`.
+- **Rates and payment time** (spec 8.2). The rates apply to a payment whose independently verified payment time, from the payment method's evidence, is at or after their start and at or before `expires_at`, all read at millisecond precision, further digits truncated (Switch wire 1.6). Their start is the details' `created_at` cut to whole seconds, v0.1's `valid_from`: `2026-02-28T00:00:00.999Z` starts at `2026-02-28T00:00:00.000Z`. The payee sets `created_at` to the time it signs the details and never backdates them, as in v0.1. The payment method defines what counts as verified payment time, as in v0.1 (`specs/payment-conversion.md`): for an ERC-20 transfer, the canonical block timestamp of its successful execution; a Bitcoin app documents its own rule, such as its zero-confirmation policy. An evidence time in whole seconds, such as a block timestamp, is read as `.000`. The payee credits a payment at the rates only then; one verified outside that interval doesn't pay the period at those rates, and gets no receipt. The payer pays by the rates only while its device clock and its highest verified service time are both at or after their start and before `expires_at`, at planning and again after the attempt's answer, before money moves. Rates price a payment to an endpoint of another asset than the requested one, by the asset-rail rate, else the asset-wide one, as `specs/payment-conversion.md` says; a payment to an endpoint of the requested asset is paid 1:1 and isn't bound by them. Vectors: `periods.json` `details_rates`.
 
 ```json
 {
@@ -431,7 +432,7 @@ The payee's details for one Billing Period of a recurring request (spec 8.2).
 
 `refs`: the request hash, then the hash of the period details the payment used, if any. A proof of a payment without a request has no `refs`; the payee records it by its settlement (Switch wire 1.5), so the same evidence sent again under a new `msg_id` is a replay. A proof with `refs` carries no `amount`; one without carries no `billing_period`, `label`, `payment_reference` or `allowance_id`, which name a request's context (an automatic payment under an Allowance pays a request, spec 8.3); and one that names the period details it used carries their `billing_period`. Recipients drop a proof that breaks this (vectors: `messages.json` `proof_members`).
 
-The `amount` of a proof without a request is the asset and amount paid, which the payment method transferred exactly (spec 7.2 step 1). The payer's record of the payment and the payee's keep it as the stored proof gives it (5.3); a receipt carries none and confirms the proof whose hash it names (4.11); and the payee checks the payment by its own method (spec 8.1). Until the payer writes `done` with the proof, its record of the payment holds the destination (`unrequested`, 5.3) but no amount.
+The `amount` of a proof without a request is the asset and amount paid, which the payment method transferred exactly (spec 7.2 step 1). The payer's record of the payment and the payee's keep it as the stored proof gives it (5.3); a receipt carries none and confirms the proof whose hash it names (4.11); and the payee checks the payment by its own method (spec 8.1). Before the payer writes `done` with the proof, its record of the payment holds the destination and, when its writer knows the member, this amount (`unrequested`, 5.3).
 
 ```json
 {
@@ -489,6 +490,8 @@ Without a request:
 |---|---|---|---|
 | `attempt_id` | `b64(16)` | yes | the attempt of the proof it confirms |
 | `billing_period` | Billing Period | for a recurring request | the proof's |
+| `metadata` | object | no | the payee's, opaque (1.1), as v0.1 `Receipt.metadata` |
+| `payment_reference` | string | no | a payment without a request: the payee's reference for it, 1 to 256 characters, no control characters (4.5); recipients drop a receipt that carries it and a request hash, whose request's reference applies |
 
 `refs`: the proof hash, then the request hash when there is a request. The payer's apps find the obligation and the record from the request hash, and may hold the receipt without the proof (Switch spec 10.2 row 3). A receipt with the proof hash alone names no Billing Period. A record that holds a receipt and its proof is invalid when their `attempt_id` or `billing_period` differ, and the record of a payment without a request when its receipt's `attempt_id` isn't the record's (5.3; vectors: `sealed.json` `activity_records`).
 
@@ -725,7 +728,7 @@ Between apps of one identity only, through the own inbox, wrapped only to the ex
 
 ## 5. Shared record values
 
-Own apps of one identity share state through sealed shared records (spec 6, Switch spec 10.3). Apps of different vendors on one identity read each other's records, so the plaintext of each Paykit collection is part of the wire format. A value is JSON (Switch wire 1.1), sealed as in Switch wire 6.2 under the collection's read scope. Readers verify every stored message on use (Switch spec 8.2) and work out status from the verified messages and the claim, never from a field alone.
+Own apps of one identity share state through sealed shared records (spec 6, Switch spec 10.3). Apps of different vendors on one identity read each other's records, so the plaintext of each Paykit collection is part of the wire format. A value is JSON (Switch wire 1.1), sealed as in Switch wire 6.2 under the collection's read scope. Readers verify every stored message on use (Switch spec 8.2) and work out status from the verified messages and the claim, never from a field alone. A writer that writes a record again keeps every member it doesn't know as it read it, in the value and in each object of it that it keeps, so a member a later version adds survives an older writer.
 
 ### 5.1 Fixed policies
 
@@ -766,7 +769,8 @@ One message per role (spec 6).
 | `cancellation` | Stored message | no | from either side |
 | `proof` | Stored message | no | |
 | `receipt` | Stored message | no | |
-| `period_details` | Stored message | no | period records; newer ones replace older ones unless the proof references them |
+| `period_details` | Stored message | no | period records: the latest details held (4.9), or, once the record holds a proof that names details, those |
+| `earlier_details` | `array<Stored message>` | no | period records: every other details held for the period, in 4.9 order, at most 7 |
 | `request_hash` | `b64(32)` | no | period records: the request's hash |
 | `billing_period` | Billing Period | no | period records |
 | `attempt_id` | `b64(16)` | no | a payment without a request |
@@ -775,12 +779,14 @@ One message per role (spec 6).
 | `status` | string | no | informational, written by the last writer, never trusted |
 | `allowance_id` | uuid | no | a payer's request record: the Allowance its first automatic payment was made under, written in that attempt's batch; later automatic payments of the request and its periods use only that one (spec 8.3) |
 | `attempted_periods` | `array<int>` | no | a payer's request record of a recurring request: the start, in Unix seconds as in the obligation ID (Switch wire 1.5), of every Billing Period that may have an open attempt; at most 16, ascending, each once (spec 8.2). Anywhere else, or with more, a repeat or another order, the record is invalid |
+| `reassociations` | `array<object>` | no | a payer's request record of a recurring request, beside `allowance_id`: `{ "allowance_id": uuid, "from_period": int }`, the Allowance the user moved the Billing Periods from `from_period` on to (spec 8.3); at most 16, `from_period` a period start as in `attempted_periods`, strictly ascending; the first names another Allowance than `allowance_id`, and each another than the entry before it |
+| `manual_only` | bool | no | `true` or absent: a payer's request record of a one-time request, or a payer's period record; no executor pays the occurrence automatically (spec 8.3) |
 
-`unrequested`: `{ "app_id": app-id, "endpoint_id": string, "payload": string, "source": "request" | "list" | "public", "list_version": int (for a list), "single_use": bool }`. `list_version` is present for a list and absent otherwise, and the stored proof's `list_version` is the same (4.10).
+`unrequested`: `{ "app_id": app-id, "endpoint_id": string, "payload": string, "source": "request" | "list" | "public", "list_version": int (for a list), "single_use": bool, "amount": Amount }`. `list_version` is present for a list and absent otherwise, and the stored proof's `list_version` is the same (4.10). `amount` is the asset and amount being paid: every app writes it with the `attempt`, and the stored proof's `amount` is the same. A reader takes a record without it, as written by an app that doesn't know it, with the amount unknown until the proof is stored.
 
-`request_hash` and `billing_period` appear only in a period record, `attempt_id` and `unrequested` only in that of a payment without a request, and `allowance_id` only in a payer's request record, each by the record's binding (below); a record that carries one anywhere else is invalid (vectors: `sealed.json` `activity_records`).
+`request_hash`, `billing_period` and `earlier_details` appear only in a period record, `attempt_id` and `unrequested` only in that of a payment without a request, and `allowance_id` and `reassociations` only in a payer's request record, each by the record's binding (below), and `manual_only` only where the table says; a record that carries one anywhere else is invalid (vectors: `sealed.json` `activity_records`).
 
-A payment without a request to a reusable public endpoint made while the payer's own switch didn't answer (spec 8.4) has the same record and claim, written once the switch answers: first the batch of its `attempt` (with a `deadline` 10 minutes after that write) and this record, then `done` and the record with its proof. The payer reads the payment's claim first: a lost answer may have had the first batch applied, and then only the record is read back.
+A payment without a request to a reusable public endpoint made while the payer's own switch didn't answer (spec 8.4) has the same record and claim, written once the switch answers: first the batch of its `attempt` (with a `deadline` 10 minutes after the service time of the switch's first answer once it answers again, such as the read of the claim below; spec 8.4) and this record, then `done` and the record with its proof. The payer reads the payment's claim first: a lost answer may have had the first batch applied, and then only the record is read back.
 
 A request record sits at the key derived from `blind(lp(payee, request hash))`, a period record at `blind(lp(payee, request hash, u64(period start)))` (Switch wire 1.5). Readers check that the stored request's hash matches the record key, recomputing it with their own naming key.
 
@@ -789,7 +795,7 @@ A request record sits at the key derived from `blind(lp(payee, request hash))`, 
 - the request hash at its place in `refs`: first in an acceptance, rejection, cancellation, period details and proof, second in a receipt, after the proof hash it confirms (4.6 to 4.11);
 - for a Billing Period, the signed `billing_period` of the period details, proof and receipt.
 
-In a request record these must name its request, and none may name a Billing Period. **Labels** (spec 6): in a `payee_activity` record under a labelled policy, the stored request and every message from the payer (acceptance, rejection, the payer's cancellation, proof) carry that `label`; under the fixed policy none does. The payee's own messages, period details, receipts and the payee's cancellation, carry no `label`, and readers don't check them for one. A period record holds no request, so under a labelled policy the payer's messages in it carry the label. A record that breaks this is invalid. The record key derives from the policy hash, so a labelled request's record sits at another key than an unlabelled one's. A `payer_activity` record keeps the fixed policy whatever the request's label. Vectors: `sealed.json` `labelled`, with its rejections (another label's policy, the fixed policy, an unlabelled request under a label). **Seen Allowance:** an app that has seen a request record's `allowance_id` ignores and flags a write that changes or drops it (Switch spec 8.2). A record without a `request` is a period record if any message in it names a request or a period, or `request_hash` or `billing_period` is set; then every message in it must name both, all the same ones, the key is recomputed from them, and `request_hash` and `billing_period`, if set, must equal them. A message missing a binding field makes the record invalid. A record whose messages name no request is that of a payment without a request.
+In a request record these must name its request, and none may name a Billing Period. **Labels** (spec 6): in a `payee_activity` record under a labelled policy, the stored request and every message from the payer (acceptance, rejection, the payer's cancellation, proof) carry that `label`; under the fixed policy none does. The payee's own messages, period details, receipts and the payee's cancellation, carry no `label`, and readers don't check them for one. A period record holds no request, so under a labelled policy the payer's messages in it carry the label. A record that breaks this is invalid. The record key derives from the policy hash, so a labelled request's record sits at another key than an unlabelled one's. A `payer_activity` record keeps the fixed policy whatever the request's label. Vectors: `sealed.json` `labelled`, with its rejections (another label's policy, the fixed policy, an unlabelled request under a label). **Seen Allowance:** an app that has seen a request record's `allowance_id`, or an entry of its `reassociations`, ignores and flags a write that changes or drops it, or that adds an entry not after the last it saw (Switch spec 8.2). The `record.put` that adds an entry carries `server_time_in(null, s)`, `s` the entry's `from_period`, so the period hasn't started on the service's clock. A writer adds an entry only with a `from_period` later than every period in the `attempted_periods` of the record version its write builds on, and a reader that holds that version ignores and flags a write whose new entry's `from_period` is at or before one of them: a period attempted early stays under the Allowance it was attempted under (spec 8.2, 8.3). An attempt on a later period, early or not, counts under the Allowance of the last entry starting at or before it. **Seen marks:** an app ignores and flags a write that drops a `manual_only` it saw. A record without a `request` is a period record if any message in it names a request or a period, or `request_hash` or `billing_period` is set; then every message in it must name both, all the same ones, the key is recomputed from them, and `request_hash` and `billing_period`, if set, must equal them. A message missing a binding field makes the record invalid. A record whose messages name no request is that of a payment without a request.
 
 **Attempted periods** (spec 8.2). The batches that read or write `attempted_periods`:
 
@@ -797,15 +803,15 @@ In a request record these must name its request, and none may name a Billing Per
 - **An attempt on a listed period** doesn't write the request record; its `record_version` condition is enough.
 - **Any other write** of the request record may drop listed periods the same way, each with its `claim_step` condition; one that doesn't drop keeps the list as it read it.
 - **A payer's cancellation** (4.8) is a `record.put` of the request record at its next version, with a `claim_step` condition for the claim of every listed period, at the step read, none of which had an open attempt.
-- **Conditions per operation:** these `record.put`s are the Paykit operations with the most conditions: at most 17, one `claim_step` for each of the at most 16 listed periods and, where one is carried, a `record_version`; every other Paykit operation carries at most two (4.5, 5.5). The pinned Switch sets no limit on the number of conditions per operation.
+- **Conditions per operation:** these `record.put`s are the Paykit operations with the most conditions: at most 18, one `claim_step` for each of the at most 16 listed periods and, where one is carried, a `record_version` and the `server_time_in` of a write that adds a reassociation (Seen Allowance, above); every other Paykit operation carries at most two (4.5, 5.5). The pinned Switch sets no limit on the number of conditions per operation.
 
 A reader that holds the version a write was built on (its `expected_version`) checks every listed period the write drops: the `record.put` must carry a `claim_step` condition on that period's claim. One that doesn't is ignored and flagged, like a dropped role (Seen roles, below), and the reader keeps the period listed. The reader checks only that the condition is there: the service enforced it against the claim as it stood when it applied the write, and it enforced a cancellation's conditions the same way, so readers don't check those. Readers check the list's shape: ascending, each start once, at most 16. A start that names no Billing Period of the request fences nothing. An empty list is the same as none, and writers leave it out. `status` never comes from the list (Switch spec 8.2).
 
 **`msg_ids` is bounded** (Switch spec 11): a writer keeps the IDs of the messages the record stores and the 16 newest of the others it adds (`RECENT_MSG_IDS`), in order, and drops older ones; each app's processed pairs, kept 30 days, cover those. Each ID appears once, and a repeat is dropped at its later place before the 16 are taken, so the 16 are distinct; a reader reads a list that repeats an ID, or names more, as the list a writer would have written (vectors: `sealed.json` `msg_ids_bounds`). A reader treats a message the record stores as reflected whether or not the list names it. So a record stays bounded however many messages repeat a role it holds.
 
-**Seen roles** (Switch spec 8.2): a record holds one message per role, so a reader that has seen a message in a role ignores, and shows with its writer, a later write that drops or replaces it, and one whose period details are older than those it saw (by `created_at`, then `msg_id`, 4.9), as late with another hash, or gone. A delete isn't such a write (spec 6), but the reader keeps what it saw, so a later write that brings the record back without it is one.
+**Seen roles** (Switch spec 8.2): a record holds one message per role, so a reader that has seen a message in a role ignores, and shows with its writer, a later write that drops or replaces it. Period details it saw, in `period_details` or `earlier_details`, stay in one of them: a later write that drops one, or holds other details as late with another hash, is ignored the same way. A write may move `period_details` only to later details, except the write that stores the proof, which sets it to the details the proof names. A delete isn't such a write (spec 6), but the reader keeps what it saw, so a later write that brings the record back without it is one.
 
-The prototype writes every member of an activity record, with `null` for an absent one, as the example shows, except `allowance_id`, which it leaves out when absent, and `attempted_periods`, which it leaves out when empty; readers treat `null` like a missing member (Conventions).
+The prototype writes every member of an activity record, with `null` for an absent one, as the example shows, except `allowance_id`, which it leaves out when absent, `attempted_periods`, `earlier_details` and `reassociations`, which it leaves out when empty, and `manual_only`, which it leaves out when false; readers treat `null` like a missing member (Conventions).
 
 Example (alice's `payer_activity` record of bob's request, certificate and plaintext cut short):
 
@@ -912,7 +918,7 @@ Example entry (`documents.json` `executor_grant_history_entry`: the record was c
     "app_id": "cw5ahtdkixcafna9zh1y5y5o1w",
     "cert": {
       "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFw...",
-      "sig": "NME2u7XfjKa1BildhigSTz3Yoq1YHgteEWWPSbVxva9DLho8TrNB9hy6b-2fQyArPR1IXlCzL9-jE1xHqcYDBQ"
+      "sig": "wX8NrG-Xn5tfiN4Nhe9iON15nc3rgBO60ysBJnuvWGmT0WgAUaOXHKRiaMvqT0FArsXOJXWFeiVxni5Jq6ynAw"
     },
     "confirmed_generation": 1,
     "sig": "TwAuCSVx5eKgCkbbyAxeqddsr0xSL5QebVA794GsLihQO5VxA0O_qUCAk30KFH2TNuVgcWqpORJMNWNEaaLGDw",
@@ -932,7 +938,7 @@ Example entry (`documents.json` `executor_grant_history_entry`: the record was c
 | `counterparty` | pubky | yes | the allowee |
 | `allowance_id` | uuid | yes | |
 | `entries` | `array<object>` | no | one per attempt under the Allowance, below |
-| `totals` | object | no | `{ "spent": amount, "count": int, "failed": array<object> }`: paid amounts and payments of compacted entries, and the compacted `failed` entries, each `{ "obligation": b64(32), "attempt_id": b64(16), "value": amount }`, so a later `done` still counts once; `spent` may be `""` for none, and `failed` is left out when empty |
+| `totals` | object | no | `{ "spent": amount, "count": int, "failed": array<object> }`: paid amounts and payments of compacted entries, and the compacted `failed` entries, each `{ "obligation": b64(32), "attempt_id": b64(16), "value": amount }`, so a later `done` still counts once; `spent` may be `""` for none, and `failed` is left out when empty. |
 
 An entry:
 
@@ -973,9 +979,9 @@ The prototype fixed every other detail above when this document was written; the
 |---|---|---|---|
 | A1 | Time comparisons | as instants at millisecond precision (Switch wire 1.6); period details ordered by `created_at` instant, then `msg_id` text (4.9) | compares milliseconds; orders period details by the `created_at` text, the same order for the fixed form |
 | A2 | Amount bounds | at most 18 fraction digits and value times 10^18 below 2^128, integer part of at most 20 digits advised; rates above zero (1.2) | the same bounds through its `u128` decimal; differs: checks that a rate is above zero only when it prices a payment, not when it reads the body |
-| A3 | `accepted_payment_endpoint_identifiers` | optional; narrows the identifiers, and holds every key of `payment_endpoints` when both are present (4.5) | differs: ignores it, so it neither narrows nor checks the identifiers, nor matches rate selectors against them (4.4) |
+| A3 | `accepted_payment_endpoint_identifiers` | optional, since the destination already limits a request to the payee's own endpoints (spec 8.1), and an app that receives no payments can't know which identifiers the identity's other apps publish; narrows the identifiers, and holds every key of `payment_endpoints` when both are present (4.5) | differs: ignores it, so it neither narrows nor checks the identifiers, nor matches rate selectors against them (4.4) |
 | A4 | `payment_reference` in a proof | optional; when present it equals the request's (4.10) | doesn't write it |
-| A5 | Period details | at least one of `payment_endpoints` and `rates`; v0.1's `valid_from` dropped (4.9) | differs: doesn't check that details carry one, and predates the selector rules of 4.9 |
+| A5 | Period details | at least one of `payment_endpoints` and `rates`; v0.1's `valid_from` is `created_at` cut to whole seconds; each valid until its own `expires_at`, at most 8 per period (4.9) | differs: doesn't check that details carry one, and predates the selector rules, the start and the bound of 4.9 |
 | A6 | `resend_request` selectors | `request_hashes` and `billing_period` added for the spec's "by request or Billing Period"; at least one selector; both range ends inclusive, an absent end open (4.12) | implements every selector |
 | A7 | `reason` on rejection and cancellation | kept from v0.1, optional (4.7, 4.8) | sends `{}` |
 | A8 | Allowance terms and unknown members | ignored, as everywhere in v0.2; a later restriction needs a new `v` or kind (4.15) | ignores them |
