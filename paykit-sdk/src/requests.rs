@@ -275,6 +275,9 @@ pub enum RequestStatus {
     /// written into its record by a later write as room frees; it can't be paid, rejected or
     /// cancelled until then ([`Refusal::NotFound`]).
     Unrecorded,
+    /// From a payee the identity's deny list holds, as the app last read it: paused, and
+    /// paid only once the user confirms (Paykit spec 8.1, [`Refusal::Blocked`]).
+    Blocked,
 }
 
 /// A request the payer holds. Its `Debug` shows the payment reference's length only.
@@ -964,6 +967,9 @@ impl Paykit {
         }
         if status == RequestStatus::Open && self.held(&record_key, record).await? {
             status = RequestStatus::Held;
+        }
+        if status == RequestStatus::Open && self.denied_as_last_read(&payee).await? {
+            status = RequestStatus::Blocked;
         }
         Ok(Some(RequestView {
             request: RequestRef {

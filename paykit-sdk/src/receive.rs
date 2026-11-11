@@ -935,11 +935,55 @@ impl Paykit {
             return Ok(());
         }
         match self.app.allow_list().await {
-            Ok(_) => self.local_put(key::LISTS_READ, &now).await,
+            Ok(lists) => {
+                let mut tx = Tx::default();
+                tx.put(key::LISTS_READ, &now)?
+                    .put(key::DENIED, &lists.deny)?;
+                self.local_commit(tx).await
+            }
             Err(error @ (AppError::Alarm(_) | AppError::Store(_))) => Err(error.into()),
             Err(_) if last.is_some() => self.local_delete(key::LISTS_READ).await,
             Err(_) => Ok(()),
         }
+    }
+
+    /// Whether the identity's deny list holds `pubky` (Paykit spec 8.1, "Blocked
+    /// counterparties"), read from the switch now (`GET /allow`), at an app holding
+    /// `contacts`; the copy kept for the views is replaced with it. An app without
+    /// `contacts` can't read the lists: `false`.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Refusal::SwitchUnavailable`] when the own switch doesn't answer; the
+    /// client's errors: a read that fails is never taken as a payee not blocked.
+    pub(crate) async fn denied(&mut self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
+        if !reads_lists(self.app.cert().scopes()) {
+            return Ok(false);
+        }
+        let lists = self.app.allow_list().await.map_err(|error| {
+            if crate::pay::switch_unavailable(&error) {
+                crate::error::Refusal::SwitchUnavailable(error.to_string()).into()
+            } else {
+                crate::error::PaykitError::from(error)
+            }
+        })?;
+        let mut tx = Tx::default();
+        tx.put(key::LISTS_READ, &self.now())?
+            .put(key::DENIED, &lists.deny)?;
+        self.local_commit(tx).await?;
+        Ok(lists.deny.contains(pubky))
+    }
+
+    /// Whether the copy of the deny list kept from the last read holds `pubky`, at an app
+    /// holding `contacts`, for the views, which read nothing from the switch.
+    pub(crate) async fn denied_as_last_read(&self, pubky: &[u8; 32]) -> crate::error::Result<bool> {
+        if !reads_lists(self.app.cert().scopes()) {
+            return Ok(false);
+        }
+        Ok(self
+            .local_get::<Vec<[u8; 32]>>(key::DENIED)
+            .await?
+            .is_some_and(|denied| denied.contains(pubky)))
     }
 
     /// Place the list held for payee `payee`'s app `app_id` although its `payment_lists`

@@ -156,6 +156,15 @@ pub enum Refusal {
     /// make one, and pays only attempt-first (Paykit spec 7.2). Nothing was written or paid.
     #[error("Paykit spec 8.4: the own switch doesn't answer: {0}")]
     SwitchUnavailable(String),
+    /// The identity's deny list holds the payee: what is open with it is paused, and its
+    /// request is paid only once the user confirms (Paykit spec 8.1, "Blocked
+    /// counterparties"). `payment` is what the user is shown; paying anyway carries it back
+    /// ([`crate::PayOptions::with_blocked_confirmed`]). Nothing was written.
+    #[error("Paykit spec 8.1: the payee is blocked; the user must confirm")]
+    Blocked {
+        /// The payment the user is shown.
+        payment: Box<crate::BlockedPayment>,
+    },
 }
 
 /// A failure of the SDK.

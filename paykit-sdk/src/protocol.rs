@@ -415,6 +415,11 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::Denied => {
+                state::decode::<Vec<[u8; 32]>>(&value).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             StateKey::Side(msg_id) => {
                 let kept = state::decode::<KeptSide>(&value).map_err(|_| unread())?;
                 if kept.msg_id != msg_id {

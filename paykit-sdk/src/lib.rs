@@ -68,8 +68,8 @@ pub use error::{PaykitError, Refusal, Result};
 pub use journal::{PaymentView, Stage};
 pub use notices::{Notice, NoticeKind};
 pub use pay::{
-    PayOptions, PayOutcome, PaymentDoubt, PaymentMode, TransferQuote, UnrequestedPayment,
-    UNREQUESTED_DEADLINE_MS,
+    BlockedPayment, PayOptions, PayOutcome, PaymentDoubt, PaymentMode, TransferQuote,
+    UnrequestedPayment, UNREQUESTED_DEADLINE_MS,
 };
 pub use paykit::{
     orphan_floor_s, Paykit, PaykitBackup, PaykitConfig, ReceiveSummary, DEFAULT_RESEND_BUDGET,

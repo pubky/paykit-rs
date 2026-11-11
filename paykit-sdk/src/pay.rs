@@ -110,6 +110,9 @@ pub struct PayOptions {
     /// 7.2, "What a restore loses"). It ends the request's hold; it never overrides a
     /// cancellation the app holds.
     pub possibly_cancelled_confirmed: Option<UserConfirmed>,
+    /// The payment of a request from a blocked payee the user was shown and chose to make,
+    /// as a [`Refusal::Blocked`] gave it (Paykit spec 8.1): only that same payment is made.
+    pub blocked_confirmed: Option<BlockedPayment>,
 }
 
 impl PayOptions {
@@ -169,6 +172,30 @@ impl PayOptions {
         self.possibly_cancelled_confirmed = Some(confirmed);
         self
     }
+
+    /// The payment of a request from a blocked payee the user was shown and chose to make,
+    /// as a [`Refusal::Blocked`] gave it (Paykit spec 8.1): only that same payment is made.
+    #[must_use]
+    pub fn with_blocked_confirmed(mut self, payment: BlockedPayment) -> Self {
+        self.blocked_confirmed = Some(payment);
+        self
+    }
+}
+
+/// A request from a payee the identity's deny list holds, as a [`Refusal::Blocked`] shows it
+/// to the user (Paykit spec 8.1, "Blocked counterparties"): the payee, the request and the
+/// amount it asks. A payment the user then makes anyway carries it back
+/// ([`PayOptions::with_blocked_confirmed`]): the SDK reads the deny list again and pays only
+/// when what it would show now is this, field for field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BlockedPayment {
+    /// The blocked payee.
+    pub payee: [u8; 32],
+    /// The request.
+    pub request: RequestRef,
+    /// The amount it asks.
+    pub amount: PaymentAmount,
 }
 
 /// Why a payment may already have been made, as a [`Refusal::MayBePaid`] shows it to the
@@ -619,7 +646,9 @@ impl Paykit {
     /// request (Paykit spec 8.4); after it, [`Refusal::AttemptFailed`] says `failed` was
     /// written; [`PaykitError::Conflict`] when the request record changed
     /// meanwhile; the client's errors. A failure after money may have moved is never an
-    /// error: it is [`PayOutcome::Pending`] or [`PayOutcome::Uncertain`].
+    /// error: it is [`PayOutcome::Pending`] or [`PayOutcome::Uncertain`]. At an app holding
+    /// `contacts`, the deny list is read first: a request from a blocked payee is
+    /// [`Refusal::Blocked`] until the user confirms paying it.
     pub async fn pay_request(
         &mut self,
         request: &RequestRef,
@@ -658,6 +687,20 @@ impl Paykit {
         } else {
             None
         };
+        // A blocked payee's request is paid only once the user confirms it (Paykit spec 8.1).
+        if self.denied(&request.payee).await? {
+            let shown = BlockedPayment {
+                payee: request.payee,
+                request: *request,
+                amount: body.amount.clone(),
+            };
+            if options.blocked_confirmed.as_ref() != Some(&shown) {
+                return Err(Refusal::Blocked {
+                    payment: Box::new(shown),
+                }
+                .into());
+            }
+        }
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);
         let deadline = body.attempt_deadline(None)?;
         let restored = self.restored_attempts(&obligation).await?;

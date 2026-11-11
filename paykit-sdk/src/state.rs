@@ -44,6 +44,7 @@
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
 //! | `nt/<attempt_id>/<kind>`, `nt/<sender>/<msg_id>` | a notice for the host about a payment, or a message given up, until acknowledged (`notices.rs`) | |
+//! | `dl` | the deny list as the app last read it, for the views (Paykit spec 8.1) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing but may send a `resend_request` twice | |
 //! | `pr/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, kept until it does (`receive.rs`) | |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
@@ -211,6 +212,7 @@ pub(crate) mod key {
     }
 
     pub(crate) const KEPT_REPLIES: &str = "pr/";
+    pub(crate) const DENIED: &str = "dl";
 
     /// A payer's reply `msg_id` kept for the payee's record `record_key`.
     pub(crate) fn kept_reply(record_key: &[u8; 32], msg_id: &str) -> String {
@@ -348,6 +350,8 @@ pub(crate) enum StateKey {
         payee: [u8; 32],
         app_id: Option<[u8; 16]>,
     },
+    /// `dl`: the deny list as last read.
+    Denied,
     /// `dt/<event ID>`: a duty event taken.
     Taken(String),
     /// `pr/<record key>/<msg_id>`: a payer's reply kept for its record.
@@ -396,6 +400,7 @@ impl StateKey {
             "pp" => Self::PayerPassOwed,
             "lc" => Self::ListedCert,
             "lr" => Self::ListsRead,
+            "dl" => Self::Denied,
             _ => {
                 let (family, rest) = text.split_once('/')?;
                 match family {
@@ -581,6 +586,7 @@ mod tests {
             (key::kept_batch(&app), StateKey::KeptBatch(app)),
             (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),
             (key::LISTS_READ.into(), StateKey::ListsRead),
+            (key::DENIED.into(), StateKey::Denied),
             (
                 format!("{}{}-7", key::TAKEN, "05".repeat(16)),
                 StateKey::Taken(format!("{}-7", "05".repeat(16))),
