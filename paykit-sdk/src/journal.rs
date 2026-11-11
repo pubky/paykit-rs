@@ -19,8 +19,9 @@
 //! Sensitive: an entry holds the destination's payload, the message carrying it and the
 //! rail's proof.
 
+use paykit_lib::bodies::Body;
 use paykit_lib::derive::{natural_key, payment_obligation};
-use paykit_lib::records::DestinationSource;
+use paykit_lib::records::{DestinationSource, StoredMessage};
 use paykit_lib::{
     Asset, AttemptId, Decimal, Label, PaymentAmount, PaymentEndpointIdentifier,
     PaymentEndpointPayload, PaymentReference,
@@ -28,7 +29,7 @@ use paykit_lib::{
 use pubky_switch_core::chain::TransitionProof;
 use pubky_switch_core::enc::{serde_b64, serde_b64_vec};
 use pubky_switch_core::message::MessagePlaintext;
-use pubky_switch_core::records::AppRecord;
+use pubky_switch_core::records::{AppCert, AppRecord};
 use pubky_switch_core::sig::SignedDoc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -378,6 +379,70 @@ impl JournalEntry {
         if let Some(hash) = self.request_hash()? {
             if self.obligation != request_obligation(&self.payee, &hash) {
                 return Err(PaykitError::corrupt());
+            }
+        }
+        Ok(())
+    }
+
+    /// The entry as a restore takes it (Paykit spec 7.2), before anything is written:
+    /// [`JournalEntry::check_bound`], and every message the entry keeps verified again for
+    /// `own`, as its later use verifies it, so a restore never installs what that use would
+    /// refuse.
+    ///
+    /// - The request another party signed: its certificate, signature and recipient, its
+    ///   sender the payee, its hash the request hash the entry pays, a `payment_request`,
+    ///   and its amount, payment reference and label the entry's.
+    /// - The destination's carrier: the list message or app record, verified again.
+    /// - The acceptance this app signed: read as its own message, under `own_cert`, to the
+    ///   payee, an acceptance of that request with the `msg_id` the entry keeps.
+    ///
+    /// A corrupt store for any mismatch.
+    pub(crate) fn check_restored(
+        &self,
+        own: &[u8; 32],
+        own_cert: &AppCert,
+        request_obligation: impl Fn(&[u8; 32], &[u8; 32]) -> [u8; 32],
+    ) -> Result<()> {
+        self.check_bound(request_obligation)?;
+        let corrupt = || Err(PaykitError::corrupt());
+        let request_hash = self.request_hash()?;
+        if let Some(kept) = &self.request {
+            let Some(hash) = request_hash else {
+                return corrupt();
+            };
+            let request = kept.stored(own)?;
+            let Body::PaymentRequest(body) = request.body() else {
+                return corrupt();
+            };
+            let reference = self
+                .payment_reference
+                .as_deref()
+                .map(PaymentReference::parse)
+                .transpose()
+                .map_err(|_| PaykitError::corrupt())?;
+            if request.hash() != hash
+                || request.sender() != self.payee
+                || reference.as_ref() != Some(&body.payment_reference)
+                || self.amount.amount()? != body.amount
+                || self.label()? != body.label
+            {
+                return corrupt();
+            }
+        }
+        self.kept_carrier(own)?;
+        if let Some(bytes) = &self.acceptance_plaintext {
+            let Some(hash) = request_hash else {
+                return corrupt();
+            };
+            let plaintext = MessagePlaintext::decode(bytes).map_err(|_| PaykitError::corrupt())?;
+            let acceptance =
+                StoredMessage::new(*own, own_cert.signed(), plaintext, None, &self.payee)
+                    .map_err(|_| PaykitError::corrupt())?;
+            if !matches!(acceptance.body(), Body::PaymentRequestAcceptance(_))
+                || acceptance.message().refs != [hash]
+                || self.acceptance_msg_id.as_deref() != Some(acceptance.message().msg_id.as_str())
+            {
+                return corrupt();
             }
         }
         Ok(())

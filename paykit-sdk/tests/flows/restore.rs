@@ -930,3 +930,142 @@ async fn test_restore_unrebuildable_failure_stays_doubtful_then_paid_is_not_lost
         .is_err());
     assert_eq!(w.rail.all_executions().len(), 1);
 }
+
+/// A message bob's app `app` signs for `to`, of `kind` with `body`, kept as a journal entry
+/// keeps a request, with the certificate of bob's app `cert_app`.
+fn kept_message(
+    w: &World,
+    app: &str,
+    cert_app: &str,
+    to: &pubky_switch_client::testing::TestSigner,
+    kind: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let plaintext = w.sign_as(
+        &w.bob,
+        app,
+        to,
+        kind,
+        Vec::new(),
+        body.as_object().cloned().unwrap(),
+    );
+    let keys = w.bob.identity().app_keys(cert_app);
+    let cert = w.bob.switch().app(&keys.app_id_bytes()).cert.unwrap();
+    serde_json::json!({
+        "sender": pubky_switch_core::enc::b64(&w.bob_id()),
+        "cert": serde_json::to_value(cert.signed()).unwrap(),
+        "plaintext": pubky_switch_core::enc::b64(&plaintext.encode()),
+        "accepted_at": w.clock.now_ms(),
+    })
+}
+
+fn another_request_body() -> serde_json::Value {
+    serde_json::json!({
+        "amount": { "asset": "btc", "value": "1" },
+        "payment_reference": "order-2",
+        "proposal_expires_at": null,
+        "payment_endpoints": { "btc-lightning-bolt11": "lnbc1invoice" }
+    })
+}
+
+/// `backup` refused onto an empty store, with no commit and nothing to load.
+async fn refused_writing_nothing(
+    w: &World,
+    backup: serde_json::Value,
+    app_id: [u8; 16],
+    what: &str,
+) {
+    use pubky_switch_client::store::{Fault, FaultStore, StateStore};
+    let target = store();
+    let fault = Arc::new(FaultStore::new(Arc::clone(&target), Fault::None));
+    let error = refused_restore(w, backup, Arc::clone(&fault) as Arc<dyn StateStore>).await;
+    assert!(is_refused(&error), "{what}: {error:?}");
+    assert_eq!(fault.commits(), 0, "{what}");
+    nothing_restored(w, target, app_id).await;
+}
+
+#[tokio::test]
+async fn test_restore_kept_request_that_doesnt_verify_writes_nothing() {
+    let w = World::new();
+    let (good, app_id) = backup_with_a_payment(&w).await;
+    // Bob's plain shop, whose certificate another signature claims below.
+    let _shop = w.shop().await;
+    let layer = layer_of(&good);
+    let journal = layer
+        .iter()
+        .position(|(k, _)| k.starts_with(b"j/"))
+        .unwrap();
+    let kept = layer[journal].1["d"]["request"].clone();
+    let own_cert = good["cert"].clone();
+    let another = |kind: &str, to: &pubky_switch_client::testing::TestSigner, cert_app: &str| {
+        kept_message(&w, "shop1", cert_app, to, kind, another_request_body())
+    };
+    let mut sender = kept.clone();
+    sender["sender"] = serde_json::Value::String(pubky_switch_core::enc::b64(&w.alice_id()));
+    let mut certificate = kept.clone();
+    certificate["cert"] = own_cert;
+    // Each reads, and fails one check a use of the request would make: another request
+    // than the one paid (its hash), one addressed to bob, a message of another kind, a
+    // signature by another key than the certificate's, a sender the certificate isn't
+    // for, and a certificate not the sender's.
+    let rejection = kept_message(
+        &w,
+        "shop1",
+        "shop1",
+        &w.alice,
+        "paykit.payment_request_rejection",
+        serde_json::json!({ "reason": null, "label": "shop1" }),
+    );
+    let cases: [(&str, serde_json::Value); 6] = [
+        (
+            "another request",
+            another("paykit.payment_request", &w.alice, "shop1"),
+        ),
+        (
+            "addressed to bob",
+            another("paykit.payment_request", &w.bob, "shop1"),
+        ),
+        ("another kind", rejection),
+        (
+            "another key",
+            another("paykit.payment_request", &w.alice, "shop"),
+        ),
+        ("sender", sender),
+        ("certificate", certificate),
+    ];
+    for (what, request) in cases {
+        let mut state = layer.clone();
+        state[journal].1["d"]["request"] = request;
+        refused_writing_nothing(&w, with_layer(&good, state), app_id, what).await;
+    }
+}
+
+#[tokio::test]
+async fn test_restore_kept_cancellation_held_list_or_answer_that_doesnt_verify_writes_nothing() {
+    let w = World::new();
+    let (good, app_id) = backup_with_a_payment(&w).await;
+    let layer = layer_of(&good);
+    let kept = layer
+        .iter()
+        .find(|(k, _)| k.starts_with(b"j/"))
+        .map(|(_, v)| v["d"]["request"].clone())
+        .unwrap();
+    let key_of = |prefix: &str| format!("{prefix}{}", pubky_switch_core::enc::b64(&[7u8; 32]));
+    // A verified message, but not of the kind kept there, under a key that isn't its
+    // record's; and a resend_request whose certificate isn't its requester's.
+    let answer = serde_json::json!({
+        "requester": pubky_switch_core::enc::b64(&w.alice_id()),
+        "cert": kept["cert"].clone(),
+        "body": { "msg_ids": [] },
+    });
+    let cases: [(&str, String, serde_json::Value); 3] = [
+        ("kept cancellation", key_of("kc/"), kept.clone()),
+        ("held list", key_of("lh/"), kept),
+        ("queued answer", "ans/00000000000000000001/m".into(), answer),
+    ];
+    for (what, key, value) in cases {
+        let mut state = layer.clone();
+        state.push((key.into_bytes(), value));
+        refused_writing_nothing(&w, with_layer(&good, state), app_id, what).await;
+    }
+}

@@ -25,30 +25,34 @@
 
 use std::sync::{PoisonError, RwLock};
 
-use paykit_lib::bodies::check_body;
+use paykit_lib::bodies::{check_body, Body};
 use paykit_lib::collections::Collection;
-use paykit_lib::derive::request_obligation_blinded;
+use paykit_lib::derive::{natural_key, request_obligation_blinded};
 use paykit_lib::kinds::{targets_app, Kind, Role as KindRole, Side, OPAQUE_MEMBERS};
 use paykit_lib::records::{ActivitySide, PaymentListRecord, StoredMessage};
-use paykit_lib::scopes::{acts_as_payee, check_certificate, PaykitScope, ScopeName};
+use paykit_lib::scopes::{
+    acts_as_payee, check_certificate, verify_certificate, PaykitScope, ScopeName,
+};
 use paykit_lib::{Label, PaykitKindRules};
 use pubky_switch_client::app::{
     decode_local_state, Collection as SwitchCollection, Effect, LocalView, LocalWrite, LossActions,
     MissedEntries, OpaqueRule, Outcome, Protocol, ProtocolLayer, ProviderLoss, ReceiveContext,
-    ReceivedMessage, ResendNeeded, RestoreContext, StoreFailure,
+    ReceivedMessage, RecordTarget, ResendNeeded, RestoreContext, StoreFailure,
 };
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::enc::{serde_b64, unb64_array};
+use pubky_switch_core::ident::record_key_from_blinded;
 use pubky_switch_core::message::Message;
 use pubky_switch_core::receive::KindRules;
 use pubky_switch_core::records::{AppCert, AppRecord};
 use pubky_switch_core::scopes as switch_scopes;
 use serde::{Deserialize, Serialize};
 
-use crate::activity::{self, SideTag};
+use crate::activity::{self, ActivityTarget, SideTag};
 use crate::hold::RestoreHold;
 use crate::journal::JournalEntry;
-use crate::receive::{self, Fail};
+use crate::receive::{self, Fail, QueuedAnswer};
+use crate::records::{list_target, KeptMessage};
 use crate::state::{self, key};
 
 /// The kinds this SDK handles (Paykit wire 4.3): the one-time request flow, payments without
@@ -246,10 +250,36 @@ pub const BACKUP_NAME: &str = "paykit";
 /// naming key, each entry at its own attempt's key, and at most one open entry
 /// for one obligation, since a payment in progress blocks any other. `Err` names the rule,
 /// without content: nothing is written. Pure: it is called at backup time too.
+///
+/// Every message another party signed that the layer keeps is verified again for `own`, as
+/// its later use verifies it, and bound to the record key it is kept under, from `blind`,
+/// the backup's naming key: a journal entry's request and carrier
+/// ([`JournalEntry::check_restored`]), a kept cancellation (`kc/`), a held list (`lh/`)
+/// and a queued `resend_request`'s certificate (`ans/`). The rest is the app's own data,
+/// read for its shape only: a backup carries the app's signing keys, so whoever can write
+/// one can sign anything the app can, and a check of what the app signed guards against
+/// corruption only.
 pub(crate) fn restore_paykit_layer(
     layer: Option<&ProtocolLayer>,
-    request_obligation: impl Fn(&[u8; 32], &[u8; 32]) -> [u8; 32],
+    own: [u8; 32],
+    own_cert: &AppCert,
+    blind: impl Fn(&[u8]) -> [u8; 32],
 ) -> Result<Vec<LocalWrite>, String> {
+    let request_obligation = |payee: &[u8; 32], request_hash: &[u8; 32]| {
+        request_obligation_blinded(&blind(payee), &blind(request_hash), 0)
+    };
+    let record_key = |target: &RecordTarget| -> Result<[u8; 32], String> {
+        let policy = target
+            .collection
+            .policy
+            .hash()
+            .map_err(|_| String::from("a Paykit collection's policy doesn't hash"))?;
+        Ok(record_key_from_blinded(
+            &target.collection.name,
+            &blind(&target.natural_key),
+            &policy,
+        ))
+    };
     let Some(layer) = layer else {
         return Err("a Paykit App's backup carries Paykit's layer, with its journal".into());
     };
@@ -268,6 +298,17 @@ pub(crate) fn restore_paykit_layer(
             cursor_time_ms = state::decode::<u64>(&value)
                 .map_err(|_| String::from("Paykit's cursor time in the backup doesn't read"))?;
         }
+        if key.starts_with(key::KEPT_CANCELLATIONS.as_bytes()) {
+            check_kept_cancellation(&key, &value, &own, &record_key)?;
+        } else if key.starts_with(key::HELD_LISTS.as_bytes()) {
+            check_held_list(&key, &value, &own, &record_key)?;
+        } else if key.starts_with(key::ANSWERS.as_bytes()) {
+            let queued = state::decode::<QueuedAnswer>(&value)
+                .map_err(|_| String::from("a queued resend_request in the backup doesn't read"))?;
+            verify_certificate(&queued.cert, &queued.requester).map_err(|_| {
+                String::from("a queued resend_request's certificate doesn't verify")
+            })?;
+        }
         let Some(rest) = key.strip_prefix(key::JOURNAL.as_bytes()) else {
             writes.push(LocalWrite::Put { key, value });
             continue;
@@ -276,8 +317,11 @@ pub(crate) fn restore_paykit_layer(
         let mut entry = state::decode::<JournalEntry>(&value).map_err(|_| bad())?;
         // Each request payment's claim key is the one its payee and request blind to under
         // the backup's naming key, which the restore context gives (Paykit spec 7.1, Paykit
-        // wire 1.5): checked here, before anything is written.
-        entry.check_bound(&request_obligation).map_err(|_| bad())?;
+        // wire 1.5), and every message it keeps verifies for this app: checked here, before
+        // anything is written.
+        entry
+            .check_restored(&own, own_cert, &request_obligation)
+            .map_err(|_| bad())?;
         if rest != entry.attempt_id.as_bytes() {
             return Err(bad());
         }
@@ -294,6 +338,52 @@ pub(crate) fn restore_paykit_layer(
         .map_err(|_| String::from("the restore's hold can't be written"))?;
     writes.push(hold);
     Ok(writes)
+}
+
+/// A payee's cancellation kept to place (`kc/<record key>`, Paykit spec 8.1): it verifies
+/// for `own`, is a `paykit.payment_request_cancellation`, and is kept under the record key
+/// of the request it cancels.
+fn check_kept_cancellation(
+    key: &[u8],
+    value: &[u8],
+    own: &[u8; 32],
+    record_key: &impl Fn(&RecordTarget) -> Result<[u8; 32], String>,
+) -> Result<(), String> {
+    let bad = || String::from("Paykit spec 8.1: a kept cancellation in the backup doesn't verify");
+    let kept = state::decode::<KeptMessage>(value).map_err(|_| bad())?;
+    let cancellation = kept.stored(own).map_err(|_| bad())?;
+    if !matches!(cancellation.body(), Body::PaymentRequestCancellation(_)) {
+        return Err(bad());
+    }
+    let request = cancellation.message().refs.first().ok_or_else(bad)?;
+    let target =
+        ActivityTarget::payer(natural_key::request_record(&cancellation.sender(), request));
+    if key != key::kept_cancellation(&record_key(&target.record_target())?).as_bytes() {
+        return Err(bad());
+    }
+    Ok(())
+}
+
+/// A list held over a record that didn't read (`lh/<record key>`, Paykit wire 5.4): it
+/// verifies for `own`, is a `paykit.private_payment_list`, and is kept under the record
+/// key of its payee app's `payment_lists` record.
+fn check_held_list(
+    key: &[u8],
+    value: &[u8],
+    own: &[u8; 32],
+    record_key: &impl Fn(&RecordTarget) -> Result<[u8; 32], String>,
+) -> Result<(), String> {
+    let bad = || String::from("Paykit wire 5.4: a held list in the backup doesn't verify");
+    let kept = state::decode::<KeptMessage>(value).map_err(|_| bad())?;
+    let list = kept.stored(own).map_err(|_| bad())?;
+    if !matches!(list.body(), Body::PrivatePaymentList(_)) {
+        return Err(bad());
+    }
+    let target = list_target(&list.sender(), &list.message().from.app_id);
+    if key != key::held_list(&record_key(&target)?).as_bytes() {
+        return Err(bad());
+    }
+    Ok(())
 }
 
 impl Protocol for PaykitProtocol {
@@ -314,8 +404,8 @@ impl Protocol for PaykitProtocol {
         // certificate the Switch takes and Paykit refuses writes nothing.
         check_certificate(restoring.cert())
             .map_err(|error| format!("the backup's certificate: {error}"))?;
-        restore_paykit_layer(layer, |payee, request_hash| {
-            request_obligation_blinded(&restoring.blind(payee), &restoring.blind(request_hash), 0)
+        restore_paykit_layer(layer, restoring.identity(), restoring.cert(), |input| {
+            restoring.blind(input)
         })
     }
 
