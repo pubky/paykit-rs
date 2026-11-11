@@ -103,6 +103,7 @@ impl Paykit {
                 proposal_expires_at_ms: request.proposal_expires_at,
                 recurring: request.is_recurring(),
                 status: RequestStatus::Unrecorded,
+                receipt: None,
             });
         }
         Ok(out)

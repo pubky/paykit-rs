@@ -864,17 +864,25 @@ impl Paykit {
         .await
     }
 
-    /// The payments in the journal.
+    /// The payments in the journal, each with the payee's receipt of it, if the payer's
+    /// record holds one.
     ///
     /// # Errors
     ///
     /// A store failure.
     pub async fn payments(&self) -> Result<Vec<PaymentView>> {
-        self.journal()
-            .await?
-            .iter()
-            .map(JournalEntry::view)
-            .collect()
+        let mut out = Vec::new();
+        for entry in self.journal().await? {
+            let mut view = entry.view()?;
+            let target = ActivityTarget::payer(entry.natural_key.clone());
+            if let Some(record) = self.held_activity(&target).await? {
+                view.receipt =
+                    crate::receipts::received_receipt(self.activity_key(&target)?, &record)
+                        .filter(|receipt| receipt.attempt_id == view.attempt_id);
+            }
+            out.push(view);
+        }
+        Ok(out)
     }
 
     /// Write the payer's activity record of a payment whose outcome waits on it again, and

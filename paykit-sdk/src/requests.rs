@@ -36,6 +36,7 @@ use crate::activity::{self, ActivityTarget, KeptSide, Role, SideTag};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::paykit::Paykit;
 use crate::rail::ProofCheck;
+use crate::receipts::{received_receipt, ReceiptDetails, ReceivedReceipt};
 use crate::records::{conflict, KeptMessage};
 use crate::state::{key, Tx};
 
@@ -296,6 +297,8 @@ pub struct RequestView {
     pub recurring: bool,
     /// What the user sees.
     pub status: RequestStatus,
+    /// The payee's receipt the record holds, if any (Paykit wire 4.11).
+    pub receipt: Option<ReceivedReceipt>,
 }
 
 impl std::fmt::Debug for RequestView {
@@ -312,6 +315,7 @@ impl std::fmt::Debug for RequestView {
             .field("proposal_expires_at_ms", &self.proposal_expires_at_ms)
             .field("recurring", &self.recurring)
             .field("status", &self.status)
+            .field("receipt", &self.receipt)
             .finish()
     }
 }
@@ -633,6 +637,23 @@ impl Paykit {
     ///
     /// As [`Paykit::verify_payment`]; the client's errors.
     pub async fn confirm_payment(&mut self, record: &[u8; 32]) -> Result<Option<String>> {
+        self.confirm_payment_with(record, ReceiptDetails::new())
+            .await
+    }
+
+    /// [`Paykit::confirm_payment`], the receipt carrying `details`: the payee's metadata
+    /// and, for a payment without a request, its reference for it (Paykit spec 5, Paykit
+    /// wire 4.11). A receipt already sent is not sent again, whatever `details` say.
+    ///
+    /// # Errors
+    ///
+    /// As [`Paykit::confirm_payment`]; [`PaykitError::Lib`] for a `payment_reference` on a
+    /// receipt of a request, whose reference applies, with nothing sent.
+    pub async fn confirm_payment_with(
+        &mut self,
+        record: &[u8; 32],
+        details: ReceiptDetails,
+    ) -> Result<Option<String>> {
         self.refresh_own()?;
         self.records_known().await?;
         if self.verify_payment(record).await?.is_none() {
@@ -656,8 +677,8 @@ impl Paykit {
             let body = PaymentReceipt {
                 attempt_id: proof.attempt_id,
                 billing_period: proof.billing_period,
-                metadata: None,
-                payment_reference: None,
+                metadata: details.metadata.clone(),
+                payment_reference: details.payment_reference.clone(),
             }
             .to_body(refs.len())?;
             // The receipt goes into the payee's record in the batch that queues it.
@@ -956,6 +977,7 @@ impl Paykit {
             proposal_expires_at_ms: request.proposal_expires_at,
             recurring: request.is_recurring(),
             status,
+            receipt: received_receipt(record_key, record),
         }))
     }
 

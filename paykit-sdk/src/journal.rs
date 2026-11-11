@@ -609,6 +609,9 @@ pub struct PaymentView {
     /// [`crate::Paykit::resume_payments`], or when the user has the record written again
     /// with [`crate::Paykit::repair_activity_record`].
     pub record_held: bool,
+    /// The payee's receipt of this attempt the payer's activity record holds, if any
+    /// (Paykit wire 4.11).
+    pub receipt: Option<crate::ReceivedReceipt>,
 }
 
 impl JournalEntry {
@@ -623,6 +626,7 @@ impl JournalEntry {
             stage: self.stage,
             restored: self.restored,
             record_held: self.record_held,
+            receipt: None,
         })
     }
 }
