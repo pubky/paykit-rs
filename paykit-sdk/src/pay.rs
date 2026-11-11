@@ -332,6 +332,14 @@ impl Choice {
 /// The endpoint a payment takes, as [`Paykit::choose`] chose it.
 type Chosen = (Destination, Carrier, Option<PaymentListRecord>);
 
+/// The payment method's answer, as [`Paykit::rail_order`] checked it: the places of the
+/// candidates it pays, in its order, and the first error of one it couldn't judge, by the
+/// order handed in.
+struct Ordered {
+    payable: Vec<usize>,
+    error: Option<RailError>,
+}
+
 /// The refusal of a destination whose endpoints the payment method pays none of.
 fn unsupported(what: &str) -> PaykitError {
     Refusal::UnsupportedEndpoint(format!(
@@ -532,13 +540,15 @@ impl Paykit {
         };
         let obligation = self.obligation(&request.payee, &request.request_hash, 0);
         let deadline = body.attempt_deadline(None)?;
-        // No attempt once the deadline is at or before the highest service time verified
-        // (Paykit spec 7.1); the service refuses one from its own clock anyway.
-        if self.deadline_passed(deadline) {
-            return Err(Refusal::DeadlinePassed.into());
-        }
         self.refuse_open_entry(&obligation, &options).await?;
         let step = self.claim_step(&obligation, deadline, &options).await?;
+        // No attempt once the deadline is at or before the highest service time verified
+        // (Paykit spec 7.1); the service refuses one from its own clock anyway. The claim is
+        // read first: a payment made, or another wallet's open attempt, is what the request
+        // shows, though its deadline has passed; then the request record, read again.
+        if self.deadline_passed(deadline) {
+            return Err(self.past_deadline(&target).await?);
+        }
         let (destination, carrier, reserve) = match &body.destination {
             RequestDestination::Endpoints(endpoints) => {
                 let allowed = |id: &PaymentEndpointIdentifier| {
@@ -1045,10 +1055,7 @@ impl Paykit {
         // Lists in use that offer only endpoints the method doesn't pay, and no app's list to
         // ask again: a newer list needn't differ, so the payee isn't asked. A single-use
         // endpoint used up that the method pays is one a newer list may offer again.
-        if offered
-            && !expired
-            && (used.is_empty() || self.rail_order(&used, Some(amount))?.is_empty())
-        {
+        if offered && !expired && !self.pays_any(&used, amount)? {
             return Err(unsupported("the payee's Private Payment List endpoints"));
         }
         // A list still in use with no endpoint the payment may use isn't missing, expired or
@@ -1067,14 +1074,15 @@ impl Paykit {
 
     /// The payment method's choice among `gathered` ([`crate::Rail::select_endpoints`]): each one
     /// handed in as a candidate whose ID is its place, in the order gathered, with `amount`.
-    /// Returns the places of the ones it pays, in its order. An ID that isn't one of the
-    /// candidates', or one returned twice, refuses the call: the method answered about
-    /// something it wasn't asked.
-    fn rail_order(
-        &self,
-        gathered: &[Choice],
-        amount: Option<&PaymentAmount>,
-    ) -> Result<Vec<usize>> {
+    /// Returns the places of the ones it pays, in its order, and the first error of one it
+    /// couldn't judge, by the order handed in.
+    ///
+    /// # Errors
+    ///
+    /// The method's error for the whole call; [`RailError::InvalidSelection`] for an ID that
+    /// isn't one of the candidates', or one returned twice, or both as payable and in error:
+    /// the method answered about something it wasn't asked.
+    fn rail_order(&self, gathered: &[Choice], amount: Option<&PaymentAmount>) -> Result<Ordered> {
         let mut candidates = Vec::with_capacity(gathered.len());
         for (at, choice) in gathered.iter().enumerate() {
             let id = u32::try_from(at).map_err(|_| {
@@ -1086,28 +1094,60 @@ impl Paykit {
                 choice.payload.clone(),
             ));
         }
-        let mut order: Vec<usize> = Vec::new();
-        for id in self.rail.select_endpoints(&candidates, amount) {
-            let at = usize::try_from(id.get())
+        let selection = self.rail.select_endpoints(&candidates, amount)?;
+        let place = |id: CandidateId| {
+            usize::try_from(id.get())
                 .ok()
                 .filter(|at| *at < candidates.len())
                 .ok_or_else(|| {
-                    RailError::Refused("the method chose a candidate it wasn't handed".into())
-                })?;
-            if order.contains(&at) {
-                return Err(RailError::Refused("the method chose a candidate twice".into()).into());
+                    RailError::InvalidSelection("a candidate ID it wasn't handed".into())
+                })
+        };
+        let mut payable: Vec<usize> = Vec::new();
+        for id in selection.payable {
+            let at = place(id)?;
+            if payable.contains(&at) {
+                return Err(RailError::InvalidSelection("a candidate ID twice".into()).into());
             }
-            order.push(at);
+            payable.push(at);
         }
-        Ok(order)
+        let mut errors: Vec<(usize, RailError)> = Vec::new();
+        for failed in selection.errors {
+            let at = place(failed.id)?;
+            if payable.contains(&at) || errors.iter().any(|(e, _)| *e == at) {
+                return Err(RailError::InvalidSelection("a candidate ID twice".into()).into());
+            }
+            errors.push((at, failed.error));
+        }
+        let error = errors
+            .into_iter()
+            .min_by_key(|(at, _)| *at)
+            .map(|(_, error)| error);
+        Ok(Ordered { payable, error })
+    }
+
+    /// Whether the payment method pays any of `used`, the single-use endpoints left out as
+    /// used, which a newer list may offer again. None is paid; a candidate the method
+    /// couldn't judge fails the payment with its error, so the payee isn't taken to offer
+    /// nothing it pays.
+    fn pays_any(&self, used: &[Choice], amount: &PaymentAmount) -> Result<bool> {
+        if used.is_empty() {
+            return Ok(false);
+        }
+        let ordered = self.rail_order(used, Some(amount))?;
+        if !ordered.payable.is_empty() {
+            return Ok(true);
+        }
+        ordered.error.map_or(Ok(false), |error| Err(error.into()))
     }
 
     /// The endpoint a payment takes of `gathered` (Paykit spec 7.2): the first in the
     /// payment method's order ([`Paykit::rail_order`]) whose transfer check passes
     /// ([`Paykit::check_transfer`]), so a malformed or amount-incompatible payload falls to
-    /// the next. `None` when there are none, or the method pays none of them; the first one's
-    /// transfer refusal when each one it pays fails the check. The choice is journaled with
-    /// the attempt, and a resume pays it.
+    /// the next. With none taken: the error of a candidate the method couldn't judge, which
+    /// may be payable once it can, so nothing is concluded from the others; else the first
+    /// transfer refusal; else `None`, as when there are none or the method pays none of
+    /// them. The choice is journaled with the attempt, and a resume pays it.
     fn choose(
         &self,
         gathered: Vec<Choice>,
@@ -1117,10 +1157,10 @@ impl Paykit {
         if gathered.is_empty() {
             return Ok(None);
         }
-        let order = self.rail_order(&gathered, Some(amount))?;
+        let ordered = self.rail_order(&gathered, Some(amount))?;
         let mut gathered: Vec<Option<Choice>> = gathered.into_iter().map(Some).collect();
         let mut refused = None;
-        for at in order {
+        for at in ordered.payable {
             let Some(choice) = gathered.get_mut(at).and_then(Option::take) else {
                 continue;
             };
@@ -1132,7 +1172,31 @@ impl Paykit {
                 Err(error) => return Err(error),
             }
         }
+        if let Some(error) = ordered.error {
+            return Err(error.into());
+        }
         refused.map_or(Ok(None), Err)
+    }
+
+    /// The refusal of a payment of the request whose record is at `target`, once its deadline
+    /// has passed (Paykit spec 7.1): what the record the switch holds shows, read again, comes
+    /// first, since another own app may have rejected or cancelled the request, or the payee
+    /// cancelled it, as the request's status shows before its expiry; only a request still
+    /// open is refused as [`Refusal::DeadlinePassed`]. The caller has taken the claim's state
+    /// first.
+    ///
+    /// # Errors
+    ///
+    /// The read's failure: a record that couldn't be read again is never taken as unchanged.
+    async fn past_deadline(&mut self, target: &ActivityTarget) -> Result<PaykitError> {
+        self.app.read_record(&target.record_target()).await?;
+        let refusal = match self.held_activity(target).await? {
+            Some(fresh) if fresh.shows_paid() => Refusal::AlreadyPaid,
+            Some(fresh) if rejected(&fresh) => Refusal::Rejected,
+            Some(fresh) if cancelled(&fresh) => Refusal::Cancelled,
+            _ => Refusal::DeadlinePassed,
+        };
+        Ok(refusal.into())
     }
 
     /// Paykit spec 8.4, "No usable list": ask the payee for its current list, with a
@@ -1342,29 +1406,20 @@ impl Paykit {
             Ok(submitted) => submitted,
             Err(error) if error.code() == Some(ErrorCode::Conflict) => {
                 self.set_stage(&mut entry, Stage::Abandoned).await?;
-                // The answer's service time may show the deadline passed (Paykit spec 7.1).
-                // The request record the switch holds is read again first, not the one the
-                // attempt was built on: another own app may have rejected or cancelled the
-                // request meanwhile, or the payee cancelled it, which the request's status
-                // shows before its expiry.
-                if self.deadline_passed(entry.deadline) {
-                    if on_record && self.app.read_record(&record.record_target()).await.is_ok() {
-                        if let Some(fresh) = self.held_activity(&record).await? {
-                            if fresh.shows_paid() {
-                                return Err(Refusal::AlreadyPaid.into());
-                            }
-                            if rejected(&fresh) {
-                                return Err(Refusal::Rejected.into());
-                            }
-                            if cancelled(&fresh) {
-                                return Err(Refusal::Cancelled.into());
-                            }
-                        }
-                    }
-                    return Err(Refusal::DeadlinePassed.into());
-                }
+                // What the answer carries decides first: the claim it shows, with the open
+                // attempt of another wallet, or the payment made (Paykit spec 7.1). Then the
+                // request record the switch holds, read again, which another own app may
+                // have rejected or cancelled meanwhile, or the payee cancelled; a read that
+                // fails is the error, never taken as the record unchanged. Only then the
+                // deadline, at the answer's service time.
                 if let Some(view) = claim_conflict(&error) {
                     self.refuse_claim(&view)?;
+                }
+                if self.deadline_passed(entry.deadline) {
+                    if on_record {
+                        return Err(self.past_deadline(&record).await?);
+                    }
+                    return Err(Refusal::DeadlinePassed.into());
                 }
                 return Err(PaykitError::Conflict(
                     "Paykit spec 7.2: the request or list record changed meanwhile".into(),

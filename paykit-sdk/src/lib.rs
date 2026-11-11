@@ -69,8 +69,8 @@ pub use paykit::{
 };
 pub use protocol::{PaykitProtocol, HANDLED_KINDS};
 pub use rail::{
-    CandidateId, PaymentEndpointCandidate, Rail, RailDeclaration, RailError, RailOutcome, RailPaid,
-    RailPayment, Transfer,
+    CandidateError, CandidateId, EndpointSelection, PaymentEndpointCandidate, Rail,
+    RailDeclaration, RailError, RailOutcome, RailPaid, RailPayment, Transfer,
 };
 pub use receive::{HeldList, LISTS_REFRESH_MS};
 pub use reconcile::{Doubtful, ReconcileReport, Resolution};

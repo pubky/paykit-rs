@@ -11,8 +11,9 @@
 //!   payment method declares");
 //! - **which endpoints it pays** ([`Rail::select_endpoints`]): of the Payment Endpoints a
 //!   payment may take, handed in all at once as candidates with the payment's amount, the
-//!   ones it pays, in the order to try them, as the v0.1 SDK's payment adapter ordered the
-//!   payable candidates; the SDK pays the first of them whose transfer check passes;
+//!   ones it pays, in the order to try them, and the ones it couldn't judge now, each by its
+//!   candidate ID, as the v0.1 SDK's payment adapter ordered the payable candidates; the SDK
+//!   pays the first payable one whose transfer check passes;
 //! - **which identifiers it can pay** ([`Rail::endpoint_identifiers`]), for an app's record
 //!   to list as its `capabilities` (Paykit spec 4);
 //! - **what it would transfer** to a destination for an amount, before any write
@@ -58,6 +59,12 @@ pub enum RailError {
     /// (Paykit spec 7.2). The text names why, never a payload.
     #[error("the payment method refused the call: {0}")]
     Refused(String),
+    /// The method's answer to [`Rail::select_endpoints`] breaks that call's rules: an ID it
+    /// wasn't handed, or one ID returned twice, or both as payable and in error. The SDK
+    /// returns it, nothing written; the method's own failures come as the two above. The
+    /// text names the rule, never a payload.
+    #[error("the payment method's choice of endpoints is invalid: {0}")]
+    InvalidSelection(String),
 }
 
 /// What a payment method declares (Paykit spec 7.2, "What a payment method declares").
@@ -207,6 +214,69 @@ impl PaymentEndpointCandidate {
     }
 }
 
+/// A candidate the method couldn't judge now, in an [`EndpointSelection`]: its ID, as handed
+/// in, and why ([`RailError`], whose text names why, never a payload). It isn't "not
+/// payable": a candidate the method doesn't pay is left out of the answer instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CandidateError {
+    /// The candidate's ID.
+    pub id: CandidateId,
+    /// Why the method couldn't judge it.
+    pub error: RailError,
+}
+
+impl CandidateError {
+    /// The candidate `id` failed with `error`.
+    pub fn new(id: CandidateId, error: RailError) -> Self {
+        Self { id, error }
+    }
+}
+
+/// The method's answer to [`Rail::select_endpoints`]: the candidates it pays, in the order to
+/// try them, and the ones it couldn't judge now, each by the [`CandidateId`] it was handed. A
+/// candidate in neither is one it doesn't pay.
+///
+/// The order is sensitive, as the payable endpoints it ranks are: `Debug` shows only how many
+/// of each there are.
+#[derive(Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EndpointSelection {
+    /// The candidates the method pays, best first, each once.
+    pub payable: Vec<CandidateId>,
+    /// The candidates it couldn't judge now, each once, none of them in `payable`.
+    pub errors: Vec<CandidateError>,
+}
+
+impl EndpointSelection {
+    /// The method pays `payable`, best first, and judged every other candidate.
+    pub fn new(payable: Vec<CandidateId>) -> Self {
+        Self {
+            payable,
+            errors: Vec::new(),
+        }
+    }
+
+    /// The method couldn't judge the candidate `id` now, for `error`.
+    #[must_use]
+    pub fn with_error(mut self, id: CandidateId, error: RailError) -> Self {
+        self.errors.push(CandidateError::new(id, error));
+        self
+    }
+}
+
+impl std::fmt::Debug for EndpointSelection {
+    // The order of the payable endpoints stays out of logs.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "EndpointSelection({} payable, {} in error)",
+            self.payable.len(),
+            self.errors.len()
+        )
+    }
+}
+
 impl std::fmt::Debug for PaymentEndpointCandidate {
     // The payload stays out of logs.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -313,9 +383,10 @@ pub trait Rail: Send + Sync {
     /// What the method declares (Paykit spec 7.2).
     fn declaration(&self) -> RailDeclaration;
 
-    /// Of `candidates`, the ones the method pays, in the order to try them, each once: their
-    /// IDs, best first (Paykit spec 7.2). `amount` is the payment's amount, when there is
-    /// one: a request's, or a payment without a request's.
+    /// Of `candidates`, the ones the method pays, in the order to try them, and the ones it
+    /// couldn't judge now, by their IDs ([`EndpointSelection`]; Paykit spec 7.2). `amount` is
+    /// the payment's amount, when there is one: a request's, or a payment without a
+    /// request's. A candidate it doesn't pay is left out of both.
     ///
     /// The candidates are every Payment Endpoint the payment may take, across every payee
     /// app it may use, handed in at once, in this order:
@@ -330,28 +401,46 @@ pub trait Rail: Send + Sync {
     /// identifiers, and the one the caller named, if any. A payload is sensitive: see
     /// [`PaymentEndpointCandidate`].
     ///
-    /// The SDK takes the first of the returned candidates whose transfer check passes
-    /// ([`Rail::transfer`]; Paykit spec 7.2 step 1), so a malformed or amount-incompatible
-    /// payload falls to the next. The order returned is the whole choice: of two apps
-    /// offering the same identifier, the one returned first is paid. None returned refuses
-    /// the payment as [`crate::Refusal::UnsupportedEndpoint`], but for Private Payment Lists
-    /// a newer one may serve, when one has expired or a single-use endpoint is used up: then
-    /// the payee is asked for it ([`crate::Refusal::WaitingForList`]). Every one failing the
-    /// transfer check refuses it as [`crate::Refusal::Transfer`], the first one's refusal. An
-    /// ID that isn't one of the candidates', or one returned twice, refuses the call as
-    /// [`RailError::Refused`], nothing written.
+    /// What the SDK does with the answer, before anything is written:
     ///
-    /// The choice is journaled with the attempt before the method pays: a payment resumed
-    /// later pays the endpoint chosen, whatever the method would choose then.
+    /// - It takes the first payable candidate whose transfer check passes ([`Rail::transfer`];
+    ///   Paykit spec 7.2 step 1), so a malformed or amount-incompatible payload falls to the
+    ///   next. The order returned is the whole choice: of two apps offering the same
+    ///   identifier, the one returned first is paid. A candidate in error doesn't stop a
+    ///   later payable one from being paid.
+    /// - With none taken, a candidate in error decides: the payment fails with its error, the
+    ///   first by the order handed in, as [`crate::PaykitError::Rail`], so the caller may try
+    ///   again; it is never refused as unsupported, nor is the payee asked for a newer list.
+    /// - Otherwise, a payable candidate that failed the transfer check refuses the payment
+    ///   as [`crate::Refusal::Transfer`], the first one's refusal.
+    /// - Otherwise the method pays none: the payment is refused as
+    ///   [`crate::Refusal::UnsupportedEndpoint`], but for Private Payment Lists a newer one
+    ///   may serve, when one has expired or a single-use endpoint is used up: then the payee
+    ///   is asked for it ([`crate::Refusal::WaitingForList`]).
     ///
-    /// For Private Payment Lists, a call that returns none may be followed by one handing in
+    /// An error for the whole call (`Err`) fails the payment with it, as
+    /// [`crate::PaykitError::Rail`]. An ID that isn't one of the candidates', or one returned
+    /// twice, or both as payable and in error, fails it as [`RailError::InvalidSelection`].
+    ///
+    /// The call must have no effect the method relies on: the SDK may make it again for the
+    /// same payment, and makes it with nothing written. The method must not call into the
+    /// [`crate::Paykit`] waiting for it. The choice is journaled with the attempt before the
+    /// method pays: a payment resumed later pays the endpoint chosen, whatever the method
+    /// would choose then.
+    ///
+    /// For Private Payment Lists, a call that pays none may be followed by one handing in
     /// only the single-use endpoints left out as used, to tell whether a newer list may
     /// serve: none of those is paid.
+    ///
+    /// # Errors
+    ///
+    /// A [`RailError`] when the method can't choose now for any candidate; its text names
+    /// why, never a payload.
     fn select_endpoints(
         &self,
         candidates: &[PaymentEndpointCandidate],
         amount: Option<&PaymentAmount>,
-    ) -> Vec<CandidateId>;
+    ) -> Result<EndpointSelection, RailError>;
 
     /// The Payment Endpoint Identifiers the method can pay to: what an app's record lists as
     /// its `capabilities.endpoint_identifiers`, so payees can offer matching destinations
@@ -427,6 +516,17 @@ mod tests {
         let text = format!("{payment:?}");
         assert!(!text.contains("secret"), "{text}");
         assert!(text.contains("btc-lightning-bolt11"));
+    }
+
+    #[test]
+    fn test_rail_selection_debug_hides_the_order() {
+        let selection = EndpointSelection::new(vec![CandidateId::new(7), CandidateId::new(3)])
+            .with_error(
+                CandidateId::new(5),
+                RailError::Unavailable("node offline".into()),
+            );
+        let text = format!("{selection:?}");
+        assert_eq!(text, "EndpointSelection(2 payable, 1 in error)");
     }
 
     #[test]

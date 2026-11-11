@@ -965,12 +965,13 @@ impl Paykit {
                     }
                 }
                 // The proposal expired at the service: the answer's verified time says so.
-                // On `409 conflict` the record was read again, and the one the service holds
-                // decides first, not the one this answer was built on: another own app may
-                // have accepted, rejected or cancelled the request meanwhile, and an accepted
-                // recurring request no longer expires as a whole. Only one still unanswered
-                // is refused as expired.
-                if recurring && self.reached(expiry) {
+                // Only on `409 conflict`, after which the record was read again and the read
+                // went through: the one the service holds decides first, not the one this
+                // answer was built on. Another own app may have accepted, rejected or
+                // cancelled the request meanwhile, and an accepted recurring request no
+                // longer expires as a whole. Only one still unanswered is refused as expired;
+                // any other failure is the error, since nothing was read again.
+                if recurring && error.code() == Some(ErrorCode::Conflict) && self.reached(expiry) {
                     if let Some(fresh) = self.held_activity(&target).await? {
                         if let Some((_, body)) = request_of(&fresh) {
                             self.refuse_answer(&fresh, body, cancel, false)?;

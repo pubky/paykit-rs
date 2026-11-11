@@ -18,13 +18,18 @@ use pubky_switch_client::transport::BoxFuture;
 use serde_json::{Map, Value};
 
 use super::{
-    CandidateId, PaymentEndpointCandidate, ProofCheck, Rail, RailDeclaration, RailError,
-    RailOutcome, RailPaid, RailPayment, Transfer,
+    CandidateId, EndpointSelection, PaymentEndpointCandidate, ProofCheck, Rail, RailDeclaration,
+    RailError, RailOutcome, RailPaid, RailPayment, Transfer,
 };
 
 /// A choice of candidates in place of the fake rail's own.
 type Choice = Arc<
-    dyn Fn(&[PaymentEndpointCandidate], Option<&PaymentAmount>) -> Vec<CandidateId> + Send + Sync,
+    dyn Fn(
+            &[PaymentEndpointCandidate],
+            Option<&PaymentAmount>,
+        ) -> Result<EndpointSelection, RailError>
+        + Send
+        + Sync,
 >;
 
 /// The longest a fake dispatch takes to complete or fail, as its declaration says: an hour.
@@ -136,10 +141,13 @@ impl FakeRail {
     }
 
     /// Answer [`Rail::select_endpoints`] with `choose` from now on, instead of by its
-    /// identifiers, whatever IDs it returns.
+    /// identifiers, whatever it returns.
     pub fn set_selection(
         &self,
-        choose: impl Fn(&[PaymentEndpointCandidate], Option<&PaymentAmount>) -> Vec<CandidateId>
+        choose: impl Fn(
+                &[PaymentEndpointCandidate],
+                Option<&PaymentAmount>,
+            ) -> Result<EndpointSelection, RailError>
             + Send
             + Sync
             + 'static,
@@ -279,7 +287,7 @@ impl Rail for FakeRail {
         &self,
         candidates: &[PaymentEndpointCandidate],
         amount: Option<&PaymentAmount>,
-    ) -> Vec<CandidateId> {
+    ) -> Result<EndpointSelection, RailError> {
         let choice = {
             let mut inner = self.lock();
             inner
@@ -290,7 +298,8 @@ impl Rail for FakeRail {
         if let Some(choose) = choice {
             return choose(candidates, amount);
         }
-        self.identifiers()
+        let payable: Vec<CandidateId> = self
+            .identifiers()
             .iter()
             .flat_map(|id| {
                 candidates
@@ -298,7 +307,8 @@ impl Rail for FakeRail {
                     .filter(move |candidate| &candidate.endpoint_id == id)
                     .map(|candidate| candidate.id)
             })
-            .collect()
+            .collect();
+        Ok(EndpointSelection::new(payable))
     }
 
     fn endpoint_identifiers(&self) -> Vec<PaymentEndpointIdentifier> {
@@ -532,15 +542,24 @@ mod tests {
             candidate(2, "x-unpaid"),
             candidate(3, "btc-lightning-bolt11"),
         ];
-        let ids = |ids: Vec<CandidateId>| ids.into_iter().map(CandidateId::get).collect::<Vec<_>>();
+        let ids = |answer: Result<EndpointSelection, RailError>| {
+            let answer = answer.unwrap();
+            assert!(answer.errors.is_empty());
+            answer
+                .payable
+                .into_iter()
+                .map(CandidateId::get)
+                .collect::<Vec<_>>()
+        };
         assert_eq!(ids(rail.select_endpoints(&candidates, None)), [1, 0, 3]);
         rail.set_endpoint_identifiers(vec![PaymentEndpointIdentifier::new("x-unpaid").unwrap()]);
         assert_eq!(ids(rail.select_endpoints(&candidates, None)), [2]);
-        rail.set_selection(|candidates, _| vec![candidates[3].id]);
+        rail.set_selection(|candidates, _| Ok(EndpointSelection::new(vec![candidates[3].id])));
         assert_eq!(
             ids(rail.select_endpoints(&candidates, Some(&amount("1")))),
             [3]
         );
+
         let handed = rail.selections();
         assert_eq!(handed.len(), 3);
         assert_eq!(handed[2], (candidates.to_vec(), Some(amount("1"))));

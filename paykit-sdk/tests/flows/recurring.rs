@@ -246,3 +246,30 @@ async fn test_recurring_rejection_crossing_another_answer_past_expiry_shows_it()
         assert_eq!(refusal, expected, "{first:?}");
     }
 }
+
+#[tokio::test]
+async fn test_recurring_rejection_failing_otherwise_past_expiry_is_the_failure() {
+    // The wallet's rejection is answered past the expiry with another error than `409`: the
+    // record isn't read again, so whether another own app accepted the request meanwhile
+    // isn't known. The failure is the answer, not the expiry.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    shop.app_mut().invite(&w.alice_id()).await.unwrap();
+    let mut wallet = w.wallet("wallet").await;
+    let expires_at = w.clock.now_ms() + HOUR_MS;
+    let request = monthly_to(&w, &mut wallet, expires_at).await;
+    w.clock.advance_ms(expires_at + 1 - w.clock.now_ms());
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::QuotaExceeded,
+            current: serde_json::Value::Null,
+        });
+    let failed = wallet.reject_request(&request, None).await.unwrap_err();
+    assert_eq!(
+        failed.code(),
+        Some(pubky_switch_core::http::ErrorCode::QuotaExceeded),
+        "{failed:?}"
+    );
+}
