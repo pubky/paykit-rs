@@ -336,6 +336,8 @@ async fn test_crash_receiving_a_receipt_settles_its_claim_once() {
 /// The request and its record were written together: either both or neither.
 async fn crash_sending_a_request(fault: Fault) -> bool {
     let w = World::new();
+    // The entries alice's inbox accepted are counted after her wallet passed them.
+    w.alice.switch().keep_passed_entries();
     let mut wallet = w.wallet("wallet").await;
     let base = store();
     let shop = w
@@ -401,6 +403,8 @@ async fn test_crash_sending_a_request_keeps_it_and_its_record_together() {
 /// flushes. The rejection and its record were written together: either both or neither.
 async fn crash_rejecting(fault: Fault) -> bool {
     let w = World::new();
+    // The entries bob's inbox accepted are counted after his shop passed them.
+    w.bob.switch().keep_passed_entries();
     let base = store();
     let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
     let wallet_id = wallet.app_id();

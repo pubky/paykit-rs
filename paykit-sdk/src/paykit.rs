@@ -518,6 +518,12 @@ impl Paykit {
     /// The client's errors. A message whose effect couldn't be written yet stays before the
     /// cursor, and the next call hands it over again.
     pub async fn receive(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
+        // The read's future goes on the heap: the client's read nests deep, and a host
+        // polling it on a small stack, such as a test thread's 2 MiB, keeps room for it.
+        Box::pin(self.receive_inner(wait)).await
+    }
+
+    async fn receive_inner(&mut self, wait: Option<u32>) -> Result<ReceiveSummary> {
         // An app holding `contacts` reads the flagged senders again first, at most every 10
         // minutes, for the spam rule (Paykit wire 4.1).
         self.refresh_lists_when_due().await?;

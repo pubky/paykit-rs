@@ -226,20 +226,13 @@ async fn test_certificate_restore_then_renewal_paykit_refuses_takes_no_action() 
     let me = wallet.app_id();
     let old = wallet.app().cert().clone();
     let backup = wallet.backup().await.unwrap();
-    // After the backup, the certificate is renewed for scopes Paykit refuses, and the app
-    // takes it: the backup's and the current certificate differ in their permissions.
+    // After the backup, the certificate is renewed for scopes Paykit refuses and listed:
+    // the backup's and the current certificate differ in their permissions. The wallet
+    // stops before it takes it, so its record never carries it, and the restored app reads
+    // its `cert.put`.
     let refused = renew(&w, me, &refused_scopes(), 1_000);
     wallet.receive(None).await.unwrap();
     list(&w, me, &old, &refused);
-    let summary = wallet.receive(None).await.unwrap();
-    assert!(
-        matches!(
-            summary.certificate_refused,
-            Some(Refusal::CertificateRefused(_))
-        ),
-        "{summary:?}"
-    );
-    assert_eq!(wallet.app().cert().hash(), refused.hash());
     drop(wallet);
     // The restore checks the backup's certificate, which passes, and restores.
     let backup = PaykitBackup::from_bytes(&backup.to_bytes().unwrap()).unwrap();
@@ -566,8 +559,9 @@ async fn test_certificate_restored_lost_acceptance_not_signed_again_without_pay(
     let first = wallet.app().cert().clone();
     let reduced = renew(&w, me, &AppScopes::new().contacts().build().unwrap(), 1_000);
     let _ = wallet.receive(None).await;
+    // The renewal is listed and the wallet stops before it takes it: its record never
+    // carries it, so the restored app reads its `cert.put` and takes it.
     list(&w, me, &first, &reduced);
-    wallet.receive(None).await.unwrap();
     drop(wallet);
     w.rail.settle(&attempt_id, true);
     let mut restored = Paykit::restore(
@@ -885,8 +879,9 @@ async fn test_certificate_restore_without_pay_attempts_nothing_until_a_reconcile
     let first = wallet.app().cert().clone();
     let reduced = renew(&w, me, &AppScopes::new().contacts().build().unwrap(), 1_000);
     let _ = wallet.receive(None).await;
+    // The renewal is listed and the wallet stops before it takes it: its record never
+    // carries it, so the restored app reads its `cert.put` and takes it.
     list(&w, me, &first, &reduced);
-    wallet.receive(None).await.unwrap();
     drop(wallet);
     let mut restored = Paykit::restore(
         w.env(&w.alice, store()),

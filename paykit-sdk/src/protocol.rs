@@ -893,6 +893,7 @@ mod receive_tests {
             standing: Standing::Listed,
             context: None,
             parked: false,
+            released: false,
             conflict: None,
         }
     }
