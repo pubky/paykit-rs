@@ -1669,10 +1669,8 @@ impl Paykit {
             // A batch the client still keeps is noted: until it is sent or dropped, the claim
             // can't show the attempt, and a resume leaves the entry as it is.
             Err(error) => {
-                // The kept error is the call's answer: a note that can't be written
-                // leaves only the resume reading the claim, as before the note.
                 if let Some(batch_id) = error.kept_batch() {
-                    let _ = self.note_kept(batch_id, None, Some(&attempt_id)).await;
+                    self.note_kept(batch_id, None, Some(&attempt_id)).await?;
                 }
                 return Err(error.into());
             }
