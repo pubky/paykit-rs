@@ -254,6 +254,10 @@ pub(crate) enum Dispatch {
         orphan_after_s: u64,
         /// The longest the method takes to complete or fail, as it declares.
         longest_completion_ms: u64,
+        /// The highest service time verified right after that read, with the monotonic
+        /// clock then: service time can't be less now than it plus the time since, whatever
+        /// the device clock was set to meanwhile.
+        read_at: (u64, std::time::Instant),
     },
 }
 
@@ -1205,14 +1209,17 @@ impl Paykit {
         // acceptance, so nothing sent ever runs ahead of the proof; a refused or failed one
         // releases none. A failure to queue it decides nothing about paying: the outcome or
         // a resume releases it once the payment shows.
-        if matches!(
+        let acceptance = if matches!(
             outcome,
             Ok(RailOutcome::Pending) | Err(RailError::Unavailable(_))
         ) {
             let _ = self.release_acceptance(&mut entry, acceptance).await;
-        }
+            None
+        } else {
+            acceptance
+        };
         match outcome {
-            Ok(outcome) => self.take_outcome(&mut entry, outcome).await,
+            Ok(outcome) => self.take_outcome(&mut entry, outcome, acceptance).await,
             // A refusal is authoritative: nothing was and nothing will be submitted, so a
             // first dispatch is definitively not paid, written `failed`, and may be replaced
             // (Paykit spec 7.2). A repeat's refusal says nothing of the dispatch before it,
@@ -1262,18 +1269,24 @@ impl Paykit {
         }
     }
 
+    /// The method's outcome of `entry`'s dispatch, journaled and reported. `acceptance` is
+    /// the one this dispatch signed, released once a payment made is journaled.
     async fn take_outcome(
         &mut self,
         entry: &mut JournalEntry,
         outcome: RailOutcome,
+        acceptance: Option<SignedMessage>,
     ) -> Result<PayOutcome> {
         let attempt_id = entry.attempt()?;
         match outcome {
             RailOutcome::Paid { proof, paid_at_ms } => {
-                // The proof is journaled first: nothing after it can lose the payment.
+                // The proof is journaled first: nothing after it can lose the payment. Then
+                // the acceptance goes, the one signed for this dispatch (Paykit spec 7.2
+                // step 2); one that can't be queued now is left to the report.
                 entry.rail_proof = Some(proof);
                 entry.paid_at_ms = paid_at_ms;
                 self.set_stage(entry, Stage::RailPaid).await?;
+                let _ = self.release_acceptance(entry, acceptance).await;
             }
             RailOutcome::Failed => {
                 entry.failed_by_method = true;
@@ -1724,7 +1737,7 @@ impl Paykit {
     ) -> Result<Option<PayOutcome>> {
         let attempt_id = entry.attempt()?;
         if let Some(outcome) = self.rail.payment(attempt_id).await? {
-            return self.take_outcome(&mut entry, outcome).await.map(Some);
+            return self.take_outcome(&mut entry, outcome, None).await.map(Some);
         }
         let declaration = self.rail.declaration();
         let now = self.now();
@@ -1735,7 +1748,7 @@ impl Paykit {
         {
             entry.stage = Stage::Paying;
             return self
-                .take_outcome(&mut entry, RailOutcome::Failed)
+                .take_outcome(&mut entry, RailOutcome::Failed, None)
                 .await
                 .map(Some);
         }
@@ -1747,6 +1760,7 @@ impl Paykit {
             let Some(claim) = self.app.read_claim(&entry.obligation).await? else {
                 return Ok(Some(PayOutcome::Uncertain { attempt_id }));
             };
+            let read_at = (self.service_time().unwrap_or(0), std::time::Instant::now());
             let claim = claim.view;
             let me = self.app_id();
             let held = claim
@@ -1777,6 +1791,7 @@ impl Paykit {
                 opened_at_ms,
                 orphan_after_s,
                 longest_completion_ms: declaration.longest_completion_ms,
+                read_at,
             };
             return self
                 .dispatch(entry, doc, Initiator::Automatic, None, repeat, None)
@@ -1859,8 +1874,10 @@ impl Paykit {
 
     /// Whether a repeat made now completes, at the method's longest, before its attempt is
     /// orphaned (Switch spec 10.2): `now + longest_completion_ms < opened_at + orphan_after`,
-    /// on the service clock. Service time now is taken late: the later of the highest
-    /// service time verified and the device clock plus the clock tolerance. Past it another
+    /// on the service clock. Service time now is taken late: the latest of the highest
+    /// service time verified, the device clock plus the clock tolerance, and the service
+    /// time verified at the claim read plus the monotonic time since (`read_at`), which a
+    /// device clock set back meanwhile can't shorten. Past it another
     /// own app may soon resolve the attempt, `unknown` or `failed` with the user's
     /// confirmation (rows 5 and 6), while the repeat's payment could still run, so it isn't
     /// made, and the attempt stays "may be paid" as past the idempotency retention.
@@ -1871,14 +1888,18 @@ impl Paykit {
     fn repeat_completes_before_orphaned(
         &self,
         now: u64,
+        read_at: (u64, std::time::Instant),
         opened_at_ms: u64,
         orphan_after_s: u64,
         longest_completion_ms: u64,
     ) -> bool {
+        let (read_service_ms, read_instant) = read_at;
+        let since_read = u64::try_from(read_instant.elapsed().as_millis()).unwrap_or(u64::MAX);
         let service_now = self
             .service_time()
             .unwrap_or(0)
-            .max(now.saturating_add(CLOCK_TOLERANCE_MS));
+            .max(now.saturating_add(CLOCK_TOLERANCE_MS))
+            .max(read_service_ms.saturating_add(since_read));
         let orphaned_at = opened_at_ms.saturating_add(orphan_after_s.saturating_mul(1000));
         service_now.saturating_add(longest_completion_ms) < orphaned_at
     }
@@ -1936,12 +1957,14 @@ impl Paykit {
                 opened_at_ms,
                 orphan_after_s,
                 longest_completion_ms,
+                read_at,
             } => {
                 if !retained(idempotency_retention_ms, entry.journaled_at_ms, now) {
                     return Ok(FinalCheck::Lapsed);
                 }
                 if !self.repeat_completes_before_orphaned(
                     now,
+                    read_at,
                     opened_at_ms,
                     orphan_after_s,
                     longest_completion_ms,

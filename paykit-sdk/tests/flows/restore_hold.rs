@@ -205,3 +205,35 @@ async fn test_restore_hold_spares_a_request_first_received_after_the_reconciliat
         .unwrap();
     assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
 }
+
+#[tokio::test]
+async fn test_restore_hold_keeps_a_request_created_before_and_resent_after() {
+    // A request bob made before the restore, which the lost device never placed, comes
+    // only after the reconciliation, as a re-send would: it is held.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let _shop = w.shop().await;
+    let body = serde_json::json!({
+        "amount": { "asset": "btc", "value": "1" },
+        "payment_reference": "order-1",
+        "proposal_expires_at": null,
+        "payment_endpoints": { "btc-lightning-bolt11": "lnbc1invoice" }
+    });
+    let made = w.sign_as(
+        &w.bob,
+        "shop",
+        &w.alice,
+        "paykit.payment_request",
+        Vec::new(),
+        body.as_object().cloned().unwrap(),
+    );
+    let mut app = restored(&w, &backup).await;
+    w.clock.advance_ms(60_000);
+    w.deliver(&w.bob, "shop", &w.alice, &[app.app_id()], &made);
+    app.receive(None).await.unwrap();
+    let requests = app.requests().await.unwrap();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0].status, RequestStatus::Held);
+}

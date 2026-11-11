@@ -39,7 +39,7 @@ pub(crate) struct RestoreHold {
     /// The re-sends are queued.
     pub(crate) asks_queued: bool,
     /// The highest service time verified when the reconciliation queued the re-sends: a
-    /// request accepted later was first received after the restore, so its payee's
+    /// request created and accepted later was made after the restore, so its payee's
     /// cancellation can't predate the backup, and it isn't held. `None` until then, when
     /// every open request is held.
     #[serde(default)]
@@ -60,7 +60,8 @@ impl RestoreHold {
 
 impl Paykit {
     /// Whether the request record at `record_key`, `record`, is held after a restore: a
-    /// restore set the hold, the request was accepted before the reconciliation after it,
+    /// restore set the hold, the request was created or accepted before the reconciliation
+    /// after it,
     /// the user hasn't confirmed this request since, and it is open.
     pub(crate) async fn held(
         &self,
@@ -70,9 +71,12 @@ impl Paykit {
         let Some(hold) = self.local_get::<RestoreHold>(key::RESTORE_HOLD).await? else {
             return Ok(false);
         };
-        let accepted = record.request.as_ref().and_then(|r| r.accepted_at());
-        if let (Some(before), Some(accepted)) = (hold.held_before_ms, accepted) {
-            if accepted > before {
+        // A request is spared only if both its creation and its acceptance come after the
+        // reconciliation: one created before it, re-sent after, may be one the lost device
+        // never placed, whose cancellation may still be on its way.
+        if let (Some(before), Some(request)) = (hold.held_before_ms, record.request.as_ref()) {
+            let created = request.message().created_at_ms;
+            if created > before && request.accepted_at().is_some_and(|at| at > before) {
                 return Ok(false);
             }
         }
