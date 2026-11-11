@@ -517,11 +517,19 @@ pub(crate) fn claim_view_or_need(
 /// this app never saw read before (else the client refuses it as a regression and keeps
 /// what it saw, Switch spec 8.2), or one sealed at an epoch whose key the app lacks, is
 /// never written over: its single-use marks can't be seen, and a list written without them
-/// would let an endpoint already paid be paid again. The list is held instead
-/// ([`key::held_list`], the newest version kept), a durable notice
-/// ([`Paykit::held_lists`]), and placed once the record reads
-/// ([`Paykit::place_held_lists`]). Payments meanwhile don't use the record: lists that
-/// don't read are never paid to. An absent or deleted record is written afresh.
+/// would let an endpoint already paid be paid again. A record whose current write is a
+/// delete is held the same way: the delete took the marks with it. The list is held
+/// instead ([`key::held_list`], the newest version kept), a durable notice
+/// ([`Paykit::held_lists`]), and placed once another own app that holds the marks writes
+/// the record again ([`Paykit::place_held_lists`]), or when the host, having shown the user
+/// that single-use endpoints may be paid twice, places it without them
+/// ([`Paykit::place_held_list_without_marks`]). Payments meanwhile don't use the record:
+/// lists that don't read, or are held, are never paid to. The SDK never deletes a record.
+///
+/// The limit: a delete is seen only by an app that holds the record's delete write, from
+/// its feed or a read. To an app that never held the record, a deleted one looks absent,
+/// and the switch takes a create over a delete, so its first list is written afresh. A
+/// record merely absent is never held, or a payee's first list could never be stored.
 fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Result<(), Fail> {
     let payee = stored.sender();
     let app_id = stored.message().from.app_id;
@@ -531,12 +539,14 @@ fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Result<()
     let own = cx.identity();
     let target = list_target(&payee, &app_id);
     let held = match cx.record(&target)?.map(|r| r.content) {
-        None | Some(RecordContent::Deleted) => None,
+        None => None,
         Some(RecordContent::Value(value)) => match PaymentListRecord::read(&value, &own) {
             Ok(held) => Some(held),
             Err(_) => return hold_list(cx, &target, stored),
         },
-        Some(RecordContent::Unreadable) => return hold_list(cx, &target, stored),
+        Some(RecordContent::Deleted | RecordContent::Unreadable) => {
+            return hold_list(cx, &target, stored)
+        }
     };
     if let Some(record) = next_list_record(held, stored) {
         cx.put_record(&target, &record.to_json()?, Vec::new())?;
@@ -611,9 +621,11 @@ fn hold_list(
 /// senders among them (Paykit wire 4.1: at most every 10 minutes).
 pub const LISTS_REFRESH_MS: u64 = 10 * 60_000;
 
-/// A Private Payment List held because its `payment_lists` record doesn't read
-/// ([`Paykit::held_lists`]): never written over it, which could drop the single-use marks it
-/// holds, until the record reads again. No payment uses that payee app's list meanwhile.
+/// A Private Payment List held because its `payment_lists` record doesn't read, or is
+/// deleted ([`Paykit::held_lists`]): never written over it, which could drop the single-use
+/// marks it holds or held, until the record reads again or the host places it without them
+/// ([`Paykit::place_held_list_without_marks`]). No payment uses that payee app's list
+/// meanwhile.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeldList {
     /// The payee.
@@ -627,9 +639,11 @@ pub struct HeldList {
 }
 
 impl Paykit {
-    /// The Private Payment Lists held because their `payment_lists` record doesn't read
-    /// (Paykit wire 5.4): a durable notice for the host. Each is placed once the record reads
-    /// again, at a receive; until then no payment uses the payee app's list.
+    /// The Private Payment Lists held because their `payment_lists` record doesn't read or
+    /// is deleted (Paykit wire 5.4): a durable notice for the host. Each is placed once the
+    /// record reads again, at a receive, or by
+    /// [`Paykit::place_held_list_without_marks`]; until then no payment uses the payee app's
+    /// list.
     ///
     /// # Errors
     ///
@@ -649,11 +663,12 @@ impl Paykit {
         Ok(out)
     }
 
-    /// Place the lists held because their record didn't read, once it reads again, or is
-    /// gone (Paykit wire 5.4): the record's update, built on the version held with its marks
-    /// kept, and the notice's delete, in one batch. A record that still doesn't read keeps
-    /// its list held; a list no newer than the record's is dropped. A placement that fails
-    /// now is tried again at the next receive.
+    /// Place the lists held because their record didn't read or was deleted, once another
+    /// own app has written it again so it reads (Paykit wire 5.4): the record's update,
+    /// built on the version held with its marks kept, and the notice's delete, in one batch.
+    /// A record that still doesn't read, or is still deleted, keeps its list held; a list no
+    /// newer than the record's is dropped. A placement that fails now is tried again at the
+    /// next receive.
     pub(crate) async fn place_held_lists(&mut self) -> crate::error::Result<()> {
         let own = self.identity();
         for (rest, kept) in self.local_scan::<KeptMessage>(key::HELD_LISTS).await? {
@@ -669,12 +684,12 @@ impl Paykit {
                 .await?
                 .map(|r| r.content)
             {
-                None | Some(RecordContent::Deleted) => None,
+                None => None,
                 Some(RecordContent::Value(value)) => match PaymentListRecord::read(&value, &own) {
                     Ok(held) => Some(held),
                     Err(_) => continue,
                 },
-                Some(RecordContent::Unreadable) => continue,
+                Some(RecordContent::Deleted | RecordContent::Unreadable) => continue,
             };
             let mut tx = Tx::default();
             tx.delete(&key::held_list(&record_key));
@@ -735,6 +750,65 @@ impl Paykit {
             Err(_) if last.is_some() => self.local_delete(key::LISTS_READ).await,
             Err(_) => Ok(()),
         }
+    }
+
+    /// Place the list held for payee `payee`'s app `app_id` although its `payment_lists`
+    /// record is deleted or doesn't read, accepting that the single-use marks it held are
+    /// gone (Paykit wire 5.4): the list is written afresh, built on the version this app
+    /// holds, with no endpoint marked used, so a single-use endpoint another own app already
+    /// paid can be paid again. The host must show the user exactly that before calling it,
+    /// with `confirmed` as the proof the user saw it. A record that changed since is read
+    /// again and refused with [`crate::PaykitError::Conflict`]; one that reads by then has
+    /// the list placed with its marks, as at a receive.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Refusal::NotFound`] when no list is held for that app; the client's errors,
+    /// such as `NotNow` while the record is sealed at an epoch whose key the app lacks.
+    pub async fn place_held_list_without_marks(
+        &mut self,
+        payee: &[u8; 32],
+        app_id: &[u8; 16],
+        _confirmed: pubky_switch_client::app::UserConfirmed,
+    ) -> crate::error::Result<()> {
+        let own = self.identity();
+        let target = list_target(payee, app_id);
+        let record_key = self.app.record_key(&target)?;
+        let notice = key::held_list(&record_key);
+        let list = self
+            .local_get::<KeptMessage>(&notice)
+            .await?
+            .ok_or(crate::error::Refusal::NotFound)?
+            .stored(&own)?;
+        let held = self
+            .app
+            .shared_record(&record_key)
+            .await?
+            .and_then(|r| r.content.value().map(<[u8]>::to_vec))
+            .and_then(|value| PaymentListRecord::read(&value, &own).ok());
+        let mut tx = Tx::default();
+        tx.delete(&notice);
+        let Some(record) = next_list_record(held, &list) else {
+            return self.local_commit(tx).await;
+        };
+        let value = record.to_json()?;
+        let op = self
+            .app
+            .record_op(&target, Some(&value), Vec::new())
+            .await?;
+        let batch = pubky_switch_client::app::OpBatch::new()
+            .entry(op)
+            .locals(tx.into_writes());
+        if let Err(error) = self.app.submit_batch(batch).await {
+            if error.code() == Some(pubky_switch_core::http::ErrorCode::Conflict) {
+                self.app.read_record(&target).await?;
+                return Err(crate::error::PaykitError::Conflict(
+                    "the payment_lists record changed since it was seen".into(),
+                ));
+            }
+            return Err(error.into());
+        }
+        Ok(())
     }
 
     /// Answer the `resend_request`s the receive step kept, oldest first, each once (Paykit

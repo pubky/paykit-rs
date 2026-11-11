@@ -450,3 +450,68 @@ async fn test_unrequested_list_over_a_record_that_doesnt_read_keeps_single_use_m
     assert!(refused.is_err(), "{refused:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
 }
+
+#[tokio::test]
+async fn test_unrequested_list_after_a_delete_is_held_until_placed_without_marks() {
+    use paykit_lib::collections::Collection;
+    use pubky_switch_client::app::{Collection as SwitchCollection, OpBatch, RecordTarget};
+
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    // Another own app deletes the record, and its single-use mark with it; the wallet sees
+    // the delete.
+    let collection = Collection::PaymentLists;
+    let target = RecordTarget::new(
+        SwitchCollection::new(collection.name(), collection.policy(None)),
+        &paykit_lib::derive::natural_key::payment_list(&w.bob_id(), &shop.app_id()),
+    );
+    phone.app_mut().read_record(&target).await.unwrap();
+    let op = phone
+        .app_mut()
+        .record_op(&target, None, Vec::new())
+        .await
+        .unwrap();
+    phone
+        .app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+
+    // Bob sends a list of the same version again, the single-use endpoint the wallet paid
+    // in it: written afresh, it would be payable again. It is held instead.
+    w.list_to_alice(&mut shop, &[wallet.app_id()], 1).await;
+    wallet.receive(None).await.unwrap();
+    let held = wallet.held_lists().await.unwrap();
+    assert_eq!(held.len(), 1, "{held:?}");
+    let refused = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+
+    // The host has shown the user the endpoint may be paid twice, and places it anyway.
+    wallet
+        .place_held_list_without_marks(
+            &w.bob_id(),
+            &shop.app_id(),
+            pubky_switch_client::app::UserConfirmed::new(),
+        )
+        .await
+        .unwrap();
+    assert!(wallet.held_lists().await.unwrap().is_empty());
+    let again = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap();
+    assert!(matches!(again, PayOutcome::Paid { .. }), "{again:?}");
+}
