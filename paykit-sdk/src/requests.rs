@@ -525,6 +525,10 @@ impl Paykit {
                 Some(code) => MessageDelivery::Failed {
                     reason: format!("the batch that queues it was dropped unsent: {code}"),
                 },
+                None if self.aged(&note) => MessageDelivery::Failed {
+                    reason: "the batch that queues it went unanswered past the kept-batch window"
+                        .into(),
+                },
                 None => MessageDelivery::Kept { batch_id },
             }))
     }

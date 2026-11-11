@@ -1318,7 +1318,8 @@ async fn in_flight_under_a_wider_certificate_without_keys(
     wallet.receive(None).await.unwrap();
     list(w, me, &old, &wider);
     wallet.receive(None).await.unwrap();
-    wallet.receive(None).await.unwrap();
+    let summary = wallet.receive(None).await.unwrap();
+    assert!(summary.scope_keys_awaited, "{summary:?}");
     assert_eq!(wallet.app().cert().hash(), wider.hash());
     (wallet, shop, paid, other, attempt_id)
 }
@@ -1378,26 +1379,17 @@ async fn test_certificate_wider_without_keys_holds_a_new_payment_and_a_reconcile
     // A new payment waits for the keys, as a reconcile does: its payer pass reads the
     // obligations from records a listing can't open yet.
     let w = World::new();
-    let (mut wallet, _shop, _paid, other, _attempt_id) =
+    let (mut wallet, _shop, _paid, other, attempt_id) =
         in_flight_under_a_wider_certificate_without_keys(&w).await;
     let refused = wallet
         .pay_request(&other, paykit_sdk::PayOptions::default())
         .await
         .unwrap_err();
-    assert!(is_not_now(&refused), "{refused:?}");
+    assert!(waits_for_keys(&refused), "{refused:?}");
     let refused = wallet.reconcile().await.unwrap_err();
-    assert!(is_not_now(&refused), "{refused:?}");
-    assert_eq!(w.rail.all_executions().len(), 1);
-}
-
-#[tokio::test]
-async fn test_certificate_wider_without_keys_lets_the_user_resolve_a_dispatched_attempt() {
-    // The user says the payment in flight was made: the resolution goes on.
-    let w = World::new();
-    let (mut wallet, _shop, _paid, _other, attempt_id) =
-        in_flight_under_a_wider_certificate_without_keys(&w).await;
+    assert!(waits_for_keys(&refused), "{refused:?}");
     let obligation = wallet.payments().await.unwrap()[0].obligation;
-    wallet
+    let refused = wallet
         .resolve_attempt(
             &obligation,
             attempt_id,
@@ -1405,9 +1397,176 @@ async fn test_certificate_wider_without_keys_lets_the_user_resolve_a_dispatched_
             pubky_switch_client::app::UserConfirmed::new(),
         )
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(waits_for_keys(&refused), "{refused:?}");
+    // A list placed over a record the app can't open would drop its single-use marks.
+    let refused = wallet
+        .place_held_list_without_marks(
+            &w.bob_id(),
+            &[9; 16],
+            pubky_switch_client::app::UserConfirmed::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(waits_for_keys(&refused), "{refused:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+/// The refusal while a wider certificate's scope keys are missing: not now, saying so.
+fn waits_for_keys(error: &PaykitError) -> bool {
+    matches!(error.refusal(), Some(Refusal::NotNow(why)) if why.contains("scope keys"))
+}
+
+#[tokio::test]
+async fn test_certificate_wider_without_the_pay_key_writes_nothing_and_journals_the_payment() {
+    // A data epoch rotation besides: the wallet lacks the `pay` key too. The resume asks the
+    // method's history only and journals the payment made; it writes nothing to the switch
+    // and sends nothing until the keys come.
+    let w = World::new();
+    let (mut wallet, _shop, _paid, _other, attempt_id) =
+        in_flight_under_a_wider_certificate_without_keys(&w).await;
+    w.alice.next_doc(|body| body.data_epoch += 1).unwrap();
+    wallet.receive(None).await.unwrap();
+    let entries = w.bob.switch().entries_from(&w.alice_id());
+    w.rail.settle(&attempt_id, true);
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            resumed.as_slice(),
+            [paykit_sdk::PayOutcome::PaidOutcomeUnwritten { .. }]
+        ),
+        "{resumed:?}"
+    );
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::RailPaid
+    );
     assert_eq!(
         claim_done(&mut wallet).await,
-        pubky_switch_core::claims::Outcome::Done
+        pubky_switch_core::claims::Outcome::Open
     );
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), entries);
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}
+
+/// The signer stores `cert`'s key bundle for app `me`, every data epoch up to the current.
+fn store_bundle(w: &World, me: [u8; 16], cert: &AppCert) {
+    let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let parts = pubky_switch_core::records::seal_bundle_parts(
+        w.alice.identity().key(),
+        cert,
+        1,
+        epoch,
+        &|scope| crate::common::spec().has_keys(scope),
+    )
+    .unwrap();
+    for part in parts {
+        w.alice
+            .switch()
+            .signer_op(OpKind::KeyBundlePut(pubky_switch_core::ops::KeyBundlePut {
+                target_app_id: me,
+                bundle: part.bundle,
+                first_epoch: part.first_epoch,
+                last_epoch: part.last_epoch,
+            }))
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_certificate_narrowed_then_widened_lists_again() {
+    // Listed under `pay` and `request`, renewed to `pay`, and back: a record written while
+    // narrowed is listed once the wider certificate's keys are held.
+    let w = World::new();
+    let (mut wallet, wider) = renewed_to_read_more(&w).await;
+    let me = wallet.app_id();
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
+    let narrow = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 2_000);
+    wallet.receive(None).await.unwrap();
+    list(&w, me, &wider, &narrow);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), narrow.hash());
+    let mut till = w
+        .join(
+            &w.alice,
+            "till2",
+            AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    till.send_request(w.bob_id(), crate::common::draft("2", w.clock.now_ms()))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    let again = renew(
+        &w,
+        me,
+        &AppScopes::new().pay().request().build().unwrap(),
+        3_000,
+    );
+    store_bundle(&w, me, &again);
+    wallet.receive(None).await.unwrap();
+    list(&w, me, &narrow, &again);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), again.hash());
+    assert_eq!(wallet.payee_activity().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn test_certificate_reconcile_waits_for_the_scope_keys_then_lists() {
+    // A reconcile before the wider certificate's keys lists nothing and keeps nothing as
+    // listed: once the keys come, a read lists the records.
+    let w = World::new();
+    let (mut wallet, wider) = renewed_to_read_more(&w).await;
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), wider.hash());
+    let refused = wallet.reconcile().await.unwrap_err();
+    assert!(waits_for_keys(&refused), "{refused:?}");
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_certificate_none_listed_under_a_refused_one_lists_once_one_passes() {
+    // A store an earlier build wrote keeps no certificate listed under, and loads under one
+    // Paykit refuses, so it keeps none. Once a renewal passes, its read lists the records.
+    let w = World::new();
+    let base = store();
+    let mut wallet = w.wallet_on("wallet", Arc::clone(&base)).await;
+    let me = wallet.app_id();
+    let old = wallet.app().cert().clone();
+    let refused = renew(&w, me, &refused_scopes(), 1_000);
+    wallet.receive(None).await.unwrap();
+    list(&w, me, &old, &refused);
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.certificate_refused().is_some());
+    wallet
+        .app_mut()
+        .protocol_commit(&[pubky_switch_client::app::LocalWrite::Delete {
+            key: b"lc".to_vec(),
+        }])
+        .await
+        .unwrap();
+    drop(wallet);
+    let mut wallet = w
+        .load_on_clock(&w.alice, Arc::clone(&base), me, Arc::clone(&w.clock))
+        .await;
+    assert!(wallet.app().protocol_get(b"lc").await.unwrap().is_none());
+    let fixed = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 2_000);
+    wallet.receive(None).await.unwrap();
+    list(&w, me, &refused, &fixed);
+    let before = w.router.log().len();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), fixed.hash());
+    assert!(
+        w.router.log()[before..]
+            .iter()
+            .any(|line| line.contains("/records")),
+        "{:?}",
+        &w.router.log()[before..]
+    );
+    let listed = wallet.app().protocol_get(b"lc").await.unwrap().unwrap();
+    assert!(!listed.is_empty());
 }

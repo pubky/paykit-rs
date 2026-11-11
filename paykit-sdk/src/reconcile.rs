@@ -160,7 +160,6 @@ impl Paykit {
     /// dispatched meanwhile.
     pub async fn reconcile(&mut self) -> Result<ReconcileReport> {
         self.refresh_own()?;
-        self.refuse_while_scope_keys_missing().await?;
         self.list_records().await?;
         // After a restore, the counterparties of the open requests the records now show are
         // asked to re-send from the backup's cursor time, once (`hold.rs`, Paykit spec 7.2);
@@ -442,7 +441,7 @@ impl Paykit {
         _confirmed: UserConfirmed,
     ) -> Result<()> {
         self.refresh_own()?;
-        self.records_known_for_payments_made().await?;
+        self.records_known().await?;
         let read = self
             .app
             .read_claim(obligation)

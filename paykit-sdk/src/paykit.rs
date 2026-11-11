@@ -220,6 +220,12 @@ pub struct ReceiveSummary {
     /// content. The records stay unlisted, so the calls that only read are refused as not
     /// now, and the next receive or write lists them again.
     pub records_unlisted: Option<String>,
+    /// A certificate taken reads collections the one the records were last listed under
+    /// didn't, and the app waits for its scope keys, which the signer stores when it is next
+    /// online (Switch spec 3.5): the client asks for them with its next reads. Until then the
+    /// records it adds aren't listed, and the calls that act on them are refused as not now;
+    /// the host tells the user the signer must come online.
+    pub scope_keys_awaited: bool,
     /// The account is gone at this switch: the client took it as erased (Switch spec 12.7),
     /// a provider loss (Switch spec 12.6). The host tells the user. The app reads nothing
     /// more there, and the SDK acts on nothing by itself: lookups of the identity there fail
@@ -328,7 +334,7 @@ impl Paykit {
         let app = App::join(env.clone(), protocol.clone(), config.app.clone(), request).await?;
         let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
         // The client lists the collections at its first read, under this certificate.
-        paykit.settle_listed_cert().await?;
+        paykit.follow_listed_cert(true).await?;
         Ok(paykit)
     }
 
@@ -358,7 +364,7 @@ impl Paykit {
         if paykit.certificate_refused().is_none() {
             paykit.bound_restored_cursor_time().await?;
         }
-        paykit.settle_listed_cert().await?;
+        paykit.follow_listed_cert(true).await?;
         Ok(paykit)
     }
 
@@ -596,6 +602,11 @@ impl Paykit {
         // A certificate the read took may read more than the one before: its records are
         // listed now, or stay unlisted for the next receive or write (`Paykit::list_widened`).
         let records_unlisted = self.list_widened().await?;
+        // A certificate the read took that reads no more than the one listed under, a
+        // narrowed one included, is followed; one that passes Paykit's checks only now, as
+        // after a refused one, too (`Paykit::follow_listed_cert`).
+        self.follow_listed_cert(false).await?;
+        let scope_keys_awaited = self.scope_keys_awaited().await?.is_some();
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1).
         self.place_kept_cancellations().await?;
@@ -617,6 +628,7 @@ impl Paykit {
             resends: answered.saturating_add(asked),
             certificate_refused: None,
             records_unlisted,
+            scope_keys_awaited,
             account_gone: false,
         })
     }

@@ -1669,8 +1669,10 @@ impl Paykit {
             // A batch the client still keeps is noted: until it is sent or dropped, the claim
             // can't show the attempt, and a resume leaves the entry as it is.
             Err(error) => {
+                // The kept error is the call's answer: a note that can't be written
+                // leaves only the resume reading the claim, as before the note.
                 if let Some(batch_id) = error.kept_batch() {
-                    self.note_kept(batch_id, None, Some(&attempt_id)).await?;
+                    let _ = self.note_kept(batch_id, None, Some(&attempt_id)).await;
                 }
                 return Err(error.into());
             }
@@ -2500,7 +2502,16 @@ impl Paykit {
     /// isn't confirmed in the last 60 s; the client's errors; the rail's errors.
     pub async fn resume_payments(&mut self) -> Result<Vec<PayOutcome>> {
         self.refresh_own()?;
-        self.records_known_for_payments_made().await?;
+        // While a wider certificate's scope keys are missing, the resume goes on only on the
+        // payer's side it can read: with the `pay` key held and the payer's records and
+        // claims read as before, its writes are built on versions it holds. Otherwise it
+        // asks the method's history only, journals what it says, and writes nothing to the
+        // switch, as without `pay`, until the keys come.
+        let keys = self.scope_keys_awaited().await?;
+        let payer_waits = keys == Some(crate::hold::KeysAwaited::PayerSide);
+        if keys.is_none() {
+            self.records_known().await?;
+        }
         // Batches kept from before go first, so the claim read below shows those sent and
         // the journal holds what their answers settled. One the client still can't send
         // stays kept: its attempt isn't on the claim yet, so its entry is left `Recorded`
@@ -2515,7 +2526,9 @@ impl Paykit {
             // One that fails now stays owed for the next resume, and stops no other entry:
             // those after it are still resolved from the method's history.
             if entry.stage == Stage::AcceptanceOwed {
-                let _ = self.finish_owed_acceptance(&mut entry).await;
+                if !payer_waits {
+                    let _ = self.finish_owed_acceptance(&mut entry).await;
+                }
                 continue;
             }
             if !entry.open() {
@@ -2526,7 +2539,7 @@ impl Paykit {
             // service refuses both, `403 permission_missing`), and makes no payment
             // ([`Paykit::final_payment_check`]): every open entry waits for an app holding
             // it, its proof kept if it has one, and the other entries go on.
-            if !self.holds("pay") {
+            if !self.holds("pay") || payer_waits {
                 out.push(self.held_without_pay(&mut entry).await?);
                 continue;
             }
@@ -2567,7 +2580,7 @@ impl Paykit {
                 Stage::AcceptanceOwed | Stage::Finished | Stage::Abandoned => {}
             }
         }
-        if self.holds("pay") {
+        if self.holds("pay") && !payer_waits {
             out.extend(self.recheck_failed().await?);
         }
         // Last, after every payment's own work: what can't be delivered now stays queued.
