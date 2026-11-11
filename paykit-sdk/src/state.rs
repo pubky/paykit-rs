@@ -31,6 +31,7 @@
 //! | `ct` | the acceptance time of the last Paykit entry the receive step passed | |
 //! | `rh` | the hold a restore set on the open requests (`hold.rs`); never backed up | |
 //! | `hc/<record key>` | the user confirmed a held request; never backed up | |
+//! | `lh/<record key>` | a Private Payment List held because its `payment_lists` record doesn't read: never written over it, which could drop its single-use marks, until the record reads | |
 //! | `kc/<record key>` | a payee's cancellation of a one-time request, kept until it is placed in the payer's request record | |
 //! | `peer/<pubky>` | a counterparty with Paykit activity, and when | |
 //! | `lr` | when the app last read the lists, on the device clock; absent before the first read and after a due read failed, when new activity waits (Paykit wire 4.1) | |
@@ -185,6 +186,7 @@ pub(crate) mod key {
     pub(crate) const RESTORE_HOLD: &str = "rh";
     pub(crate) const HOLD_CONFIRMED: &str = "hc/";
     pub(crate) const LISTS_READ: &str = "lr";
+    pub(crate) const HELD_LISTS: &str = "lh/";
 
     pub(crate) fn ask(sender: &[u8; 32], from: u64) -> String {
         format!("{ASKS}{}/{}", b64(sender), num(from))
@@ -212,6 +214,10 @@ pub(crate) mod key {
 
     pub(crate) fn hold_confirmed(record_key: &[u8; 32]) -> String {
         format!("{HOLD_CONFIRMED}{}", b64(record_key))
+    }
+
+    pub(crate) fn held_list(record_key: &[u8; 32]) -> String {
+        format!("{HELD_LISTS}{}", b64(record_key))
     }
 
     pub(crate) fn kept_cancellation(record_key: &[u8; 32]) -> String {

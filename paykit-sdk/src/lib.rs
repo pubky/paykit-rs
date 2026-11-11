@@ -69,7 +69,7 @@ pub use paykit::{
 };
 pub use protocol::{PaykitProtocol, HANDLED_KINDS};
 pub use rail::{Rail, RailDeclaration, RailError, RailOutcome, RailPayment, Transfer};
-pub use receive::LISTS_REFRESH_MS;
+pub use receive::{HeldList, LISTS_REFRESH_MS};
 pub use reconcile::{Doubtful, ReconcileReport, Resolution};
 pub use requests::{
     PayeeActivity, PayeeStatus, RequestDraft, RequestRef, RequestStatus, RequestView, SentRequest,

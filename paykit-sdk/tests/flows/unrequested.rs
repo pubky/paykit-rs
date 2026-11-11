@@ -395,3 +395,58 @@ async fn test_unrequested_later_list_record_dropping_a_used_mark_flagged() {
     assert_eq!(flagged.len(), 1, "{flagged:?}");
     assert_eq!(after, before, "the write was taken");
 }
+
+// ---------------------------------------------------------------------------------------
+// A `payment_lists` record that doesn't read is never written over without its marks
+
+#[tokio::test]
+async fn test_unrequested_list_over_a_record_that_doesnt_read_keeps_single_use_marks() {
+    use paykit_lib::collections::Collection;
+    use pubky_switch_client::app::{Collection as SwitchCollection, OpBatch, RecordTarget};
+
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut phone = w.wallet("phone").await;
+    let mut tool = w.wallet("tool").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id(), phone.app_id()], 1)
+        .await;
+    // The wallet pays the single-use endpoint: it is marked used in the record, in the
+    // attempt's batch.
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    // A faulty own app writes a value that doesn't read over the record.
+    let collection = Collection::PaymentLists;
+    let target = RecordTarget::new(
+        SwitchCollection::new(collection.name(), collection.policy(None)),
+        &paykit_lib::derive::natural_key::payment_list(&w.bob_id(), &shop.app_id()),
+    );
+    tool.app_mut().read_record(&target).await.unwrap();
+    let op = tool
+        .app_mut()
+        .record_op(&target, Some(b"{\"not\":\"a list record\"}"), Vec::new())
+        .await
+        .unwrap();
+    tool.app_mut()
+        .submit_batch(OpBatch::new().entry(op))
+        .await
+        .unwrap();
+
+    // The phone reads the list only now. It never saw the record read, so it takes the
+    // value that doesn't read; it doesn't write the list over it, which would drop the
+    // single-use mark, and keeps it until the record reads.
+    phone.receive(None).await.unwrap();
+    let held = phone.held_lists().await.unwrap();
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0].payee, w.bob_id());
+    assert_eq!(held[0].version, 1);
+    let refused = phone
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+}

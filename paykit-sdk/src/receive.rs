@@ -40,7 +40,7 @@ use paykit_lib::records::{PaymentListRecord, StoredMessage, UnrequestedDestinati
 use paykit_lib::{AttemptId, Body};
 use pubky_switch_client::app::{
     AppError, ClaimFetch, ClaimOp, LocalWrite, Need, ObligationDeadline, ReceiveContext,
-    Refusal as ClientRefusal, StoreFailure,
+    RecordContent, Refusal as ClientRefusal, StoreFailure,
 };
 use pubky_switch_client::error::StoreError;
 use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome};
@@ -512,38 +512,62 @@ pub(crate) fn claim_view_or_need(
 
 /// A Private Payment List (Paykit spec 5, 8.4; Paykit wire 5.4): the latest list of its
 /// publishing app replaces an older one, keeping the single-use endpoints marked used.
+///
+/// A `payment_lists` record that doesn't read, such as a value a faulty own app wrote that
+/// this app never saw read before (else the client refuses it as a regression and keeps
+/// what it saw, Switch spec 8.2), or one sealed at an epoch whose key the app lacks, is
+/// never written over: its single-use marks can't be seen, and a list written without them
+/// would let an endpoint already paid be paid again. The list is held instead
+/// ([`key::held_list`], the newest version kept), a durable notice
+/// ([`Paykit::held_lists`]), and placed once the record reads
+/// ([`Paykit::place_held_lists`]). Payments meanwhile don't use the record: lists that
+/// don't read are never paid to. An absent or deleted record is written afresh.
 fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Result<(), Fail> {
     let payee = stored.sender();
     let app_id = stored.message().from.app_id;
-    let Body::PrivatePaymentList(list) = stored.body() else {
+    if !matches!(stored.body(), Body::PrivatePaymentList(_)) {
         return Ok(());
-    };
+    }
     let own = cx.identity();
     let target = list_target(&payee, &app_id);
-    let held = cx
-        .record(&target)?
-        .and_then(|r| r.content.value().map(<[u8]>::to_vec))
-        .and_then(|v| PaymentListRecord::read(&v, &own).ok());
+    let held = match cx.record(&target)?.map(|r| r.content) {
+        None | Some(RecordContent::Deleted) => None,
+        Some(RecordContent::Value(value)) => match PaymentListRecord::read(&value, &own) {
+            Ok(held) => Some(held),
+            Err(_) => return hold_list(cx, &target, stored),
+        },
+        Some(RecordContent::Unreadable) => return hold_list(cx, &target, stored),
+    };
+    if let Some(record) = next_list_record(held, stored) {
+        cx.put_record(&target, &record.to_json()?, Vec::new())?;
+    }
+    Ok(())
+}
+
+/// The `payment_lists` record after `stored`, a list, on `held`; `None` when nothing
+/// changes: the list is reflected already, or of a version no newer than the one held
+/// (Paykit wire 4.13). The marks of single-use endpoints used are kept.
+pub(crate) fn next_list_record(
+    held: Option<PaymentListRecord>,
+    stored: &StoredMessage,
+) -> Option<PaymentListRecord> {
+    let Body::PrivatePaymentList(list) = stored.body() else {
+        return None;
+    };
     let msg_id = &stored.message().msg_id;
     let mut record = match held {
         Some(held) => {
             if held.list.message().msg_id == *msg_id || held.msg_ids.contains(msg_id) {
-                return Ok(());
+                return None;
             }
-            let held_version = match held.list.body() {
-                Body::PrivatePaymentList(l) => l.version,
-                _ => 0,
-            };
-            // A list with a lower or equal version than one held is ignored (Paykit wire
-            // 4.13).
-            if list.version <= held_version {
-                return Ok(());
+            if list.version <= list_version(&held.list) {
+                return None;
             }
             held
         }
         None => PaymentListRecord {
-            payee,
-            app_id,
+            payee: stored.sender(),
+            app_id: stored.message().from.app_id,
             list: stored.clone(),
             used: Vec::new(),
             msg_ids: Vec::new(),
@@ -552,7 +576,34 @@ fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Result<()
     record.list = stored.clone();
     record.msg_ids =
         paykit_lib::records::bounded_msg_ids(std::slice::from_ref(msg_id), &record.msg_ids);
-    cx.put_record(&target, &record.to_json()?, Vec::new())?;
+    Some(record)
+}
+
+/// A list's version; 0 for a message that isn't one.
+pub(crate) fn list_version(stored: &StoredMessage) -> u64 {
+    match stored.body() {
+        Body::PrivatePaymentList(list) => list.version,
+        _ => 0,
+    }
+}
+
+/// Hold `stored`, a list whose `payment_lists` record doesn't read, with the cursor move,
+/// unless a newer list is held already ([`list_effect`]).
+fn hold_list(
+    cx: &mut ReceiveContext<'_>,
+    target: &pubky_switch_client::app::RecordTarget,
+    stored: &StoredMessage,
+) -> Result<(), Fail> {
+    let kept = key::held_list(&cx.record_key(target)?);
+    if let Some(bytes) = cx.local_get(kept.as_bytes())? {
+        let held = state::decode::<KeptMessage>(&bytes)
+            .and_then(|k| k.stored(&cx.identity()))
+            .map_err(|_| Fail::corrupt())?;
+        if list_version(&held) >= list_version(stored) {
+            return Ok(());
+        }
+    }
+    cx.local(local(&kept, &KeptMessage::of(stored))?);
     Ok(())
 }
 
@@ -560,7 +611,91 @@ fn list_effect(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Result<()
 /// senders among them (Paykit wire 4.1: at most every 10 minutes).
 pub const LISTS_REFRESH_MS: u64 = 10 * 60_000;
 
+/// A Private Payment List held because its `payment_lists` record doesn't read
+/// ([`Paykit::held_lists`]): never written over it, which could drop the single-use marks it
+/// holds, until the record reads again. No payment uses that payee app's list meanwhile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldList {
+    /// The payee.
+    pub payee: [u8; 32],
+    /// The payee's app that published the list.
+    pub app_id: [u8; 16],
+    /// The list's version.
+    pub version: u64,
+    /// The list message's `msg_id`.
+    pub msg_id: String,
+}
+
 impl Paykit {
+    /// The Private Payment Lists held because their `payment_lists` record doesn't read
+    /// (Paykit wire 5.4): a durable notice for the host. Each is placed once the record reads
+    /// again, at a receive; until then no payment uses the payee app's list.
+    ///
+    /// # Errors
+    ///
+    /// A store failure, or a held list that doesn't read.
+    pub async fn held_lists(&self) -> crate::error::Result<Vec<HeldList>> {
+        let own = self.identity();
+        let mut out = Vec::new();
+        for (_, kept) in self.local_scan::<KeptMessage>(key::HELD_LISTS).await? {
+            let list = kept.stored(&own)?;
+            out.push(HeldList {
+                payee: list.sender(),
+                app_id: list.message().from.app_id,
+                version: list_version(&list),
+                msg_id: list.message().msg_id.clone(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Place the lists held because their record didn't read, once it reads again, or is
+    /// gone (Paykit wire 5.4): the record's update, built on the version held with its marks
+    /// kept, and the notice's delete, in one batch. A record that still doesn't read keeps
+    /// its list held; a list no newer than the record's is dropped. A placement that fails
+    /// now is tried again at the next receive.
+    pub(crate) async fn place_held_lists(&mut self) -> crate::error::Result<()> {
+        let own = self.identity();
+        for (rest, kept) in self.local_scan::<KeptMessage>(key::HELD_LISTS).await? {
+            let list = kept.stored(&own)?;
+            let target = list_target(&list.sender(), &list.message().from.app_id);
+            let record_key = self.app.record_key(&target)?;
+            if format!("{}{rest}", key::HELD_LISTS) != key::held_list(&record_key) {
+                return Err(crate::error::PaykitError::corrupt());
+            }
+            let held = match self
+                .app
+                .shared_record(&record_key)
+                .await?
+                .map(|r| r.content)
+            {
+                None | Some(RecordContent::Deleted) => None,
+                Some(RecordContent::Value(value)) => match PaymentListRecord::read(&value, &own) {
+                    Ok(held) => Some(held),
+                    Err(_) => continue,
+                },
+                Some(RecordContent::Unreadable) => continue,
+            };
+            let mut tx = Tx::default();
+            tx.delete(&key::held_list(&record_key));
+            match next_list_record(held, &list) {
+                Some(record) => {
+                    let value = record.to_json()?;
+                    let op = self
+                        .app
+                        .record_op(&target, Some(&value), Vec::new())
+                        .await?;
+                    let batch = pubky_switch_client::app::OpBatch::new()
+                        .entry(op)
+                        .locals(tx.into_writes());
+                    let _ = self.app.submit_batch(batch).await;
+                }
+                None => self.local_commit(tx).await?,
+            }
+        }
+        Ok(())
+    }
+
     /// How many messages from `sender` the spam rule only counted (Paykit wire 4.1): those
     /// that would have created state while the user had blocked it or the service flagged
     /// it.
