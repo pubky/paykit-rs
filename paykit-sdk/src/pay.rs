@@ -28,7 +28,7 @@ use paykit_lib::bodies::{
 use paykit_lib::derive::{natural_key, payment_obligation};
 use paykit_lib::kinds::Kind;
 use paykit_lib::records::{
-    ActivityRecord, ActivitySide, DestinationSource, PaymentListRecord, StoredMessage, UsedEndpoint,
+    ActivityRecord, ActivitySide, DestinationSource, PaymentListRecord, UsedEndpoint,
 };
 use paykit_lib::{AttemptId, Body, PaymentAmount, PaymentEndpointIdentifier};
 use pubky_switch_client::app::{
@@ -39,7 +39,6 @@ use pubky_switch_client::app::{
 use pubky_switch_core::chain::TransitionProof;
 use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome};
 use pubky_switch_core::http::ErrorCode;
-use pubky_switch_core::message::MessagePlaintext;
 use pubky_switch_core::ops::{Condition, OpKind};
 use pubky_switch_core::records::{CLOCK_TOLERANCE_MS, DAY_MS};
 
@@ -356,6 +355,7 @@ impl Paykit {
         self.records_known().await?;
         self.require_pay()?;
         self.app.may_attempt(false).map_err(not_now)?;
+        self.refuse_while_payer_pass_owed().await?;
         let (target, record) = self.payer_request(request).await?;
         let (stored, body) = request_of(&record).ok_or(Refusal::NotFound)?;
         let (stored, body) = (stored.clone(), body.clone());
@@ -462,6 +462,7 @@ impl Paykit {
             acceptance_owed: record.response.is_none(),
             acceptance_msg_id: None,
             acceptance_plaintext: None,
+            acceptance_cert: None,
             acceptance_released: false,
             rail_proof: None,
             paid_at_ms: None,
@@ -504,6 +505,7 @@ impl Paykit {
         self.records_known().await?;
         self.require_pay()?;
         self.app.may_attempt(false).map_err(not_now)?;
+        self.refuse_while_payer_pass_owed().await?;
         let options = payment.options;
         let (destination, carrier, reserve) = self
             .list_destination(&payment.payee, options.list_app, None, &options)
@@ -548,6 +550,7 @@ impl Paykit {
             acceptance_owed: false,
             acceptance_msg_id: None,
             acceptance_plaintext: None,
+            acceptance_cert: None,
             acceptance_released: false,
             rail_proof: None,
             paid_at_ms: None,
@@ -1279,6 +1282,10 @@ impl Paykit {
         let Some(request_hash) = entry.request_hash()? else {
             return Ok(None);
         };
+        // A new acceptance goes only under a certificate that may send one: after a renewal
+        // that dropped `pay`, none is signed (Paykit spec 3.3); one signed before keeps its
+        // own certificate ([`JournalEntry::acceptance_cert`]).
+        self.require_pay()?;
         let label = entry.label()?;
         let signed = self.sign(
             entry.payee,
@@ -1288,6 +1295,7 @@ impl Paykit {
         )?;
         entry.acceptance_msg_id = Some(signed.msg_id().to_owned());
         entry.acceptance_plaintext = Some(signed.plaintext().encode());
+        entry.acceptance_cert = Some(self.app.cert().signed().clone());
         Ok(Some(signed))
     }
 
@@ -1317,6 +1325,7 @@ impl Paykit {
             entry.acceptance_released = false;
             entry.acceptance_msg_id = None;
             entry.acceptance_plaintext = None;
+            entry.acceptance_cert = None;
             signed = None;
         }
         let queued = match &entry.acceptance_msg_id {
@@ -1811,18 +1820,14 @@ impl Paykit {
         entry: &JournalEntry,
     ) -> Result<bool> {
         // Only an acceptance that went out: one journaled for a payment that never ran
-        // isn't the payer's (Paykit spec 7.2 step 2).
-        let Some(bytes) = entry
-            .acceptance_plaintext
-            .as_ref()
-            .filter(|_| entry.acceptance_released)
-        else {
+        // isn't the payer's (Paykit spec 7.2 step 2). It is placed under the certificate it
+        // was signed under, not a later renewal's.
+        if !entry.acceptance_released {
+            return Ok(false);
+        }
+        let Some(stored) = entry.acceptance_message(&self.identity(), self.app.cert())? else {
             return Ok(false);
         };
-        let own = self.identity();
-        let plaintext = MessagePlaintext::decode(bytes).map_err(|_| PaykitError::corrupt())?;
-        let stored =
-            StoredMessage::new(own, self.app.cert().signed(), plaintext, None, &entry.payee)?;
         Ok(activity::place(record, Role::Response, stored))
     }
 
@@ -1922,6 +1927,14 @@ impl Paykit {
                 continue;
             }
             let attempt_id = entry.attempt()?;
+            // Without `pay` the app reads and writes no claim and no payer record (the
+            // service refuses both, `403 permission_missing`), and makes no payment
+            // ([`Paykit::final_payment_check`]): every open entry waits for an app holding
+            // it, its proof kept if it has one, and the other entries go on.
+            if !self.holds("pay") {
+                out.push(self.held_without_pay(&mut entry).await?);
+                continue;
+            }
             match entry.stage {
                 Stage::Recorded | Stage::Attempted | Stage::Paying if entry.restored => {
                     match self.attempt_state(&entry).await? {
@@ -1958,7 +1971,9 @@ impl Paykit {
                 Stage::AcceptanceOwed | Stage::Finished | Stage::Abandoned => {}
             }
         }
-        out.extend(self.recheck_failed().await?);
+        if self.holds("pay") {
+            out.extend(self.recheck_failed().await?);
+        }
         // Last, after every payment's own work: what can't be delivered now stays queued.
         let _ = self.app.flush_outbox().await;
         Ok(out)
@@ -1981,6 +1996,33 @@ impl Paykit {
             return Ok(());
         }
         self.set_stage(entry, Stage::Finished).await
+    }
+
+    /// An open entry under a certificate without `pay`, which reads and writes no claim and
+    /// no payer record: a dispatch that may have been made asks the method's history alone,
+    /// so a payment made is journaled with its proof (`RailPaid`) and one that failed as such
+    /// (`RailFailed`), each for an app holding `pay` to report; nothing else is touched.
+    async fn held_without_pay(&mut self, entry: &mut JournalEntry) -> Result<PayOutcome> {
+        let attempt_id = entry.attempt()?;
+        if entry.stage == Stage::Paying || entry.restored && entry.may_have_dispatched() {
+            match self.rail.payment(attempt_id).await? {
+                Some(RailOutcome::Paid { proof, paid_at_ms }) => {
+                    entry.rail_proof = Some(proof);
+                    entry.paid_at_ms = paid_at_ms;
+                    self.set_stage(entry, Stage::RailPaid).await?;
+                }
+                Some(RailOutcome::Failed) => {
+                    entry.failed_by_method = true;
+                    self.set_stage(entry, Stage::RailFailed).await?;
+                }
+                Some(RailOutcome::Pending) | None => {}
+            }
+        }
+        Ok(if entry.rail_proof.is_some() {
+            PayOutcome::PaidOutcomeUnwritten { attempt_id }
+        } else {
+            PayOutcome::Pending { attempt_id }
+        })
     }
 
     /// Ask the payment method's history again about the dispatches it reported failed, while
@@ -2125,7 +2167,10 @@ impl Paykit {
     ///    complete before its attempt is orphaned ([`FinalCheck::Lapsed`]); for a first
     ///    dispatch, the attempt is within its pre-dispatch budget;
     /// 6. the app may still make the attempt: no alarm or restore question raised meanwhile,
-    ///    and for an automatic payment the clocks within the tolerance.
+    ///    for an automatic payment the clocks within the tolerance, and its certificate
+    ///    holds `pay`, so an app a renewal reduced moves no money on any path, a repeat at a
+    ///    resume or a recovery included ([`FinalCheck::Hold`]: nothing is paid, the attempt
+    ///    stays open for an app that holds it).
     ///
     /// Checks 2 to 6 run on the clock after the one await ([`Paykit::final_gates`]). A
     /// repeat's call follows them with no await; a first dispatch's follows the journal
@@ -2255,6 +2300,9 @@ impl Paykit {
         confirmed: Option<UserConfirmed>,
         kind: Dispatch,
     ) -> Result<FinalCheck> {
+        if !self.holds("pay") {
+            return Ok(FinalCheck::Hold);
+        }
         let now = self.now();
         match kind {
             Dispatch::Repeat {
@@ -2353,8 +2401,9 @@ impl Paykit {
     /// 4, 7.2 step 1). In order:
     ///
     /// 1. the app may make an attempt now: no alarm, not left, no restore question, not in
-    ///    reconcile mode and, for an automatic payment, the clocks within the tolerance
-    ///    (Switch spec 10.1, 12.4);
+    ///    reconcile mode, no payer pass owed since a restore ([`Paykit::payer_pass_owed`])
+    ///    and, for an automatic payment, the clocks within the tolerance (Switch spec 10.1,
+    ///    12.4; Paykit spec 7.3);
     /// 2. `claim`, the view of a checked proof or of a claim read, shows the attempt open,
     ///    this app's and current (Paykit spec 7.2, "Only a verified answer lets money move");
     /// 3. the destination passes its checks against its carrier and the payee's
@@ -2380,6 +2429,9 @@ impl Paykit {
     ) -> Result<std::result::Result<PeerIdentity, Held>> {
         if let Err(refusal) = self.app.may_attempt(by == Initiator::Automatic) {
             return Ok(Err(Held::Check(Refusal::NotNow(refusal.to_string()))));
+        }
+        if self.payer_pass_owed().await? {
+            return Ok(Err(Held::Check(crate::hold::payer_pass_refusal())));
         }
         let attempt = entry.attempt()?.to_bytes();
         let me = self.app_id();

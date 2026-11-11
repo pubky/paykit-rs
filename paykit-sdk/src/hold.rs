@@ -167,6 +167,35 @@ impl Paykit {
         Ok(())
     }
 
+    /// Whether a reconcile still owes the payer pass since a restore: the restore sets the
+    /// mark in its own commit, and only a [`Paykit::reconcile`] that ran the payer pass,
+    /// under `pay`, clears it. The backup doesn't hold the attempts made after it, and only
+    /// that pass finds them on the payer's obligations (Paykit spec 7.3), so until then no
+    /// new attempt is made and nothing is dispatched, whatever the host does meanwhile, such
+    /// as [`Paykit::end_reconcile`] after a reconcile without `pay` skipped the pass.
+    pub(crate) async fn payer_pass_owed(&self) -> Result<bool> {
+        Ok(self
+            .local_get::<bool>(key::PAYER_PASS_OWED)
+            .await?
+            .is_some())
+    }
+
+    /// Refused as not now while [`Paykit::payer_pass_owed`].
+    pub(crate) async fn refuse_while_payer_pass_owed(&self) -> Result<()> {
+        if self.payer_pass_owed().await? {
+            return Err(payer_pass_refusal().into());
+        }
+        Ok(())
+    }
+
+    /// A reconcile ran the payer pass: the restore's mark goes.
+    pub(crate) async fn payer_pass_ran(&mut self) -> Result<()> {
+        if self.payer_pass_owed().await? {
+            self.local_delete(key::PAYER_PASS_OWED).await?;
+        }
+        Ok(())
+    }
+
     /// Queue, once after a restore, a `resend_request` to every counterparty with an open
     /// request, from the restore's re-send time; [`Paykit::receive`] sends them. The start is
     /// bounded where it is used as well as at the restore and the load: no ordering of a
@@ -216,6 +245,15 @@ impl Paykit {
 }
 
 /// The refusal while the shared records aren't listed since a restore.
+/// The refusal while a reconcile owes the payer pass since a restore.
+pub(crate) fn payer_pass_refusal() -> Refusal {
+    Refusal::NotNow(
+        "Paykit spec 7.3: no reconcile under pay has read the payer's obligations since the \
+         restore"
+            .into(),
+    )
+}
+
 fn unlisted() -> crate::error::PaykitError {
     Refusal::NotNow(
         "Switch spec 12.4 step 2.1: the shared records aren't listed since the restore".into(),
