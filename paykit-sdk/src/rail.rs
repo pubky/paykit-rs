@@ -449,8 +449,8 @@ pub trait Rail: Send + Sync {
     /// - a request's own endpoints: by Payment Endpoint Identifier;
     /// - the payee's public endpoints: by App ID, then by identifier;
     /// - the payee's Private Payment Lists in use: newest version first, then by App ID,
-    ///   then by identifier, a single-use endpoint already used at its list's version left
-    ///   out.
+    ///   then by identifier, every endpoint of a version a payment to one of its single-use
+    ///   endpoints consumed left out (Paykit spec 8.4).
     ///
     /// Only endpoints the payment may use are handed in: those of the request's accepted
     /// identifiers, and the one the caller named, if any. A payload is sensitive: see
@@ -470,8 +470,8 @@ pub trait Rail: Send + Sync {
     ///   as [`crate::Refusal::Transfer`], the first one's refusal.
     /// - Otherwise the method pays none: the payment is refused as
     ///   [`crate::Refusal::UnsupportedEndpoint`], but for Private Payment Lists a newer one
-    ///   may serve, when one has expired or a single-use endpoint is used up: then the payee
-    ///   is asked for it ([`crate::Refusal::WaitingForList`]).
+    ///   may serve, when one has expired or its version is consumed: then the payee is asked
+    ///   for it ([`crate::Refusal::WaitingForList`]).
     ///
     /// An error for the whole call (`Err`) fails the payment with it, as
     /// [`crate::PaykitError::Rail`]. An ID that isn't one of the candidates', or one returned
@@ -484,7 +484,7 @@ pub trait Rail: Send + Sync {
     /// would choose then.
     ///
     /// For Private Payment Lists, a call that pays none may be followed by one handing in
-    /// only the single-use endpoints left out as used, to tell whether a newer list may
+    /// only the endpoints left out of consumed versions, to tell whether a newer list may
     /// serve: none of those is paid.
     ///
     /// # Errors

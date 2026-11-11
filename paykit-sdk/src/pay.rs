@@ -1149,7 +1149,8 @@ impl Paykit {
 
     /// A destination from the payee's Private Payment Lists (Paykit spec 8.4): of the lists
     /// in use, of the app asked for or of every current app, the endpoints the payment may
-    /// use, not a single-use endpoint already used at its list's version and, for a request
+    /// use, none of a list version a payment to one of its single-use endpoints consumed
+    /// (Paykit spec 8.4, wire 4.13), and, for a request
     /// that restricts them, one of its accepted identifiers, `allowed` (Paykit wire 4.5),
     /// are handed to the payment method, which chooses ([`Paykit::choose`]). In
     /// [`PaymentMode::Public`], the endpoints of the payee's public endpoints instead, from
@@ -1248,15 +1249,17 @@ impl Paykit {
         });
         // The version held of each app's list, newest first, for a request that names it.
         let mut held: Vec<([u8; 16], u64)> = Vec::new();
-        // Whether a list still in use offers an endpoint the payment would use, though each
-        // one is used: a list used up, not one without such an endpoint.
+        // Whether a list still in use offers an endpoint the payment would use, though its
+        // version may be consumed: a list used up, not one without such an endpoint.
         let mut offered = false;
         let mut live = false;
         // Whether some app's list has expired, which its current one may replace.
         let mut expired = false;
         // The endpoints of the lists in use that the payment may use, in the order above and
-        // then by identifier; the single-use ones already used at their list's version are
-        // left out (Paykit spec 8.4), and kept apart only to tell a list used up.
+        // then by identifier. Paying a single-use endpoint consumes its whole list version,
+        // reusable endpoints included, until the publisher sends a newer one (Paykit spec 8.4,
+        // wire 4.13): every endpoint of a version marked used is left out, and kept apart only
+        // to tell a list used up.
         let mut gathered = Vec::new();
         let mut used = Vec::new();
         for record in lists {
@@ -1272,6 +1275,7 @@ impl Paykit {
                 continue;
             }
             live = true;
+            let consumed = record.used.iter().any(|u| u.version == list.version);
             for (id, endpoint) in &list.payment_endpoints {
                 if !wanted(id) {
                     continue;
@@ -1289,11 +1293,7 @@ impl Paykit {
                 // The version marked used is the one of the list whose endpoint is chosen.
                 let reserve = endpoint.single_use.then(|| record.clone());
                 let choice = Choice::new(id, &endpoint.payload, destination, carrier, reserve);
-                let spent = record
-                    .used
-                    .iter()
-                    .any(|u| u.version == list.version && &u.endpoint == id);
-                if endpoint.single_use && spent {
+                if consumed {
                     used.push(choice);
                 } else {
                     gathered.push(choice);
@@ -1304,8 +1304,8 @@ impl Paykit {
             return Ok(chosen);
         }
         // Lists in use that offer only endpoints the method doesn't pay, and no app's list to
-        // ask again: a newer list needn't differ, so the payee isn't asked. A single-use
-        // endpoint used up that the method pays is one a newer list may offer again.
+        // ask again: a newer list needn't differ, so the payee isn't asked. An endpoint of a
+        // consumed version that the method pays is one a newer list may offer again.
         if offered && !expired && !self.pays_any(&used, amount)? {
             return Err(unsupported("the payee's Private Payment List endpoints"));
         }

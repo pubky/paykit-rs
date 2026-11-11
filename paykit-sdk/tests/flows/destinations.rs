@@ -1235,9 +1235,10 @@ async fn test_destinations_method_choosing_none_refused_as_unsupported() {
 
 #[tokio::test]
 async fn test_destinations_used_single_use_endpoint_the_method_doesnt_pay_not_asked_for() {
-    // Alice pays bob's single-use on-chain endpoint; her method then pays only Taproot. The
-    // list's other endpoint, Lightning, isn't one it pays, nor is the used one, which a newer
-    // list would offer again: refused as unsupported, without asking bob for another list.
+    // Alice pays bob's single-use on-chain endpoint, which consumes the list's version; her
+    // method then pays only Taproot. Neither of the version's endpoints, which a newer list
+    // would offer again, is one it pays: refused as unsupported, without asking bob for
+    // another list.
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
@@ -1275,13 +1276,14 @@ async fn test_destinations_used_single_use_endpoint_the_method_doesnt_pay_not_as
         "{refused:?}"
     );
     assert!(!asked_for_a_list(&mut shop).await);
-    // The used endpoint was handed in apart, after the method chose none of the others.
+    // The consumed version's endpoints were handed in only to tell whether a newer list may
+    // serve.
     let calls = handed(&w);
     assert_eq!(
-        calls[calls.len() - 2..],
-        [
-            vec!["0 btc-lightning-bolt12 lno1reusable".to_owned()],
-            vec![format!("0 btc-bitcoin-p2wpkh bc1qsingle{version}")],
+        calls[calls.len() - 1],
+        vec![
+            format!("0 btc-bitcoin-p2wpkh bc1qsingle{version}"),
+            "1 btc-lightning-bolt12 lno1reusable".to_owned(),
         ]
     );
 }

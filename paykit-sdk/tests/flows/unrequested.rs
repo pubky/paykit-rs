@@ -134,6 +134,73 @@ async fn test_unrequested_single_use_endpoint_used_once() {
 }
 
 #[tokio::test]
+async fn test_unrequested_single_use_payment_consumes_its_whole_list_version() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    // Its reusable endpoint is consumed with it: the payee is asked for a newer list.
+    let waiting = pay_lightning(&w, &mut wallet).await;
+    assert!(
+        matches!(waiting.refusal(), Some(Refusal::WaitingForList)),
+        "{waiting:?}"
+    );
+    assert_eq!(list_requests(&mut shop).await, 1);
+    assert_eq!(w.rail.all_executions().len(), 1);
+    // A request paid to any of the payee's endpoints waits for it too.
+    let mut any = crate::common::draft("1", w.clock.now_ms());
+    any.destination = paykit_lib::bodies::RequestDestination::Any;
+    let request = crate::common::request_from(&mut shop, w.alice_id(), any).await;
+    wallet.receive(None).await.unwrap();
+    let waiting = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(waiting.refusal(), Some(Refusal::WaitingForList)),
+        "{waiting:?}"
+    );
+    // A newer version is payable again, its reusable endpoint included.
+    w.clock.advance_ms(1000);
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    let again = wallet
+        .pay_without_request(to_bob(&w, "1", "btc-lightning-bolt12"))
+        .await
+        .unwrap();
+    assert!(matches!(again, PayOutcome::Paid { .. }), "{again:?}");
+}
+
+#[tokio::test]
+async fn test_unrequested_reusable_payment_consumes_no_list_version() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_without_request(to_bob(&w, "1", "btc-lightning-bolt12"))
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    let single = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))
+        .await
+        .unwrap();
+    assert!(matches!(single, PayOutcome::Paid { .. }), "{single:?}");
+    assert_eq!(list_requests(&mut shop).await, 0);
+}
+
+#[tokio::test]
 async fn test_unrequested_without_a_list_refused() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
