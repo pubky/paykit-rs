@@ -187,7 +187,7 @@ Example (`documents.json` `executor_grant`, whose write built on version (1, 12)
   "app_id": "cw5ahtdkixcafna9zh1y5y5o1w",
   "cert": {
     "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFw...",
-    "sig": "wX8NrG-Xn5tfiN4Nhe9iON15nc3rgBO60ysBJnuvWGmT0WgAUaOXHKRiaMvqT0FArsXOJXWFeiVxni5Jq6ynAw"
+    "sig": "NME2u7XfjKa1BildhigSTz3Yoq1YHgteEWWPSbVxva9DLho8TrNB9hy6b-2fQyArPR1IXlCzL9-jE1xHqcYDBQ"
   },
   "confirmed_generation": 1,
   "sig": "TwAuCSVx5eKgCkbbyAxeqddsr0xSL5QebVA794GsLihQO5VxA0O_qUCAk30KFH2TNuVgcWqpORJMNWNEaaLGDw",
@@ -919,7 +919,7 @@ Example entry (`documents.json` `executor_grant_history_entry`: the record was c
     "app_id": "cw5ahtdkixcafna9zh1y5y5o1w",
     "cert": {
       "body": "eyJ2IjoxLCJraW5kIjoicHVia3ktc3dpdGNoLmFw...",
-      "sig": "wX8NrG-Xn5tfiN4Nhe9iON15nc3rgBO60ysBJnuvWGmT0WgAUaOXHKRiaMvqT0FArsXOJXWFeiVxni5Jq6ynAw"
+      "sig": "NME2u7XfjKa1BildhigSTz3Yoq1YHgteEWWPSbVxva9DLho8TrNB9hy6b-2fQyArPR1IXlCzL9-jE1xHqcYDBQ"
     },
     "confirmed_generation": 1,
     "sig": "TwAuCSVx5eKgCkbbyAxeqddsr0xSL5QebVA794GsLihQO5VxA0O_qUCAk30KFH2TNuVgcWqpORJMNWNEaaLGDw",
