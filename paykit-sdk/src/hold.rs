@@ -209,8 +209,8 @@ impl Paykit {
         Ok(())
     }
 
-    /// The shared records known as far as a payment already dispatched needs them: its
-    /// resume, its outcome and the user's resolution of its attempt go on while a wider
+    /// The shared records known as far as a payment already made needs them: its resume
+    /// and outcome, and the user's resolution of its attempt, go on while a wider
     /// certificate's scope keys are still missing, on the copy the app holds, rather than
     /// wait with the new calls ([`Paykit::records_known`]). That copy holds every record
     /// the certificate the payment was made under read, and each write is built on the
@@ -226,18 +226,15 @@ impl Paykit {
 
     /// List every collection the app's certificate reads, then clear the restore's mark and
     /// keep that certificate as the one listed under, in one commit: a crash before it
-    /// leaves the records to be listed again. A listing made before the certificate's scope
-    /// keys are held keeps values the app can't open, so it isn't kept as one under that
-    /// certificate. Only a receive takes a certificate, so none is taken during the listing.
+    /// leaves the records to be listed again. Every caller lists only once a wider
+    /// certificate's scope keys are held ([`Paykit::refuse_while_scope_keys_missing`]). Only
+    /// a receive takes a certificate, so none is taken during the listing.
     pub(crate) async fn list_records(&mut self) -> Result<()> {
         let signed = self.app.cert().signed().clone();
-        let keys = self.holds_scope_keys();
         self.app.list_collections().await?;
         let mut tx = Tx::default();
         tx.delete(key::RECORDS_UNLISTED);
-        if keys {
-            tx.put(key::LISTED_CERT, &signed)?;
-        }
+        tx.put(key::LISTED_CERT, &signed)?;
         self.local_commit(tx).await
     }
 

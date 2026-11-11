@@ -891,7 +891,9 @@ impl Paykit {
     /// [`PaykitError::Conflict`] as above; the client's errors.
     pub async fn repair_activity_record(&mut self, attempt_id: &AttemptId) -> Result<PayOutcome> {
         self.refresh_own()?;
-        self.records_known_for_payments_made().await?;
+        // A repair writes over a value the app can't read, on the user's word: it waits for
+        // the records to be listed, a wider certificate's keys included.
+        self.records_known().await?;
         self.require_pay()?;
         let mut entry = self
             .journal()

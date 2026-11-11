@@ -1389,3 +1389,25 @@ async fn test_certificate_wider_without_keys_holds_a_new_payment_and_a_reconcile
     assert!(is_not_now(&refused), "{refused:?}");
     assert_eq!(w.rail.all_executions().len(), 1);
 }
+
+#[tokio::test]
+async fn test_certificate_wider_without_keys_lets_the_user_resolve_a_dispatched_attempt() {
+    // The user says the payment in flight was made: the resolution goes on.
+    let w = World::new();
+    let (mut wallet, _shop, _paid, _other, attempt_id) =
+        in_flight_under_a_wider_certificate_without_keys(&w).await;
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    wallet
+        .resolve_attempt(
+            &obligation,
+            attempt_id,
+            paykit_sdk::Resolution::Done,
+            pubky_switch_client::app::UserConfirmed::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        claim_done(&mut wallet).await,
+        pubky_switch_core::claims::Outcome::Done
+    );
+}
