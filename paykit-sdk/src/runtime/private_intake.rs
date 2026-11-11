@@ -2984,6 +2984,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_private_intake_admission_replacement_counts_unresolved_peer_admission_toward_capacity(
+    ) {
+        let storage = crate::storage::InMemoryStorage::new();
+        let peers = users(3);
+        let (streamed, pending, newcomer) = (&peers[0], &peers[1], &peers[2]);
+        let now = Utc::now();
+        let lease = claim_private_intake_lease(
+            &storage,
+            now,
+            2,
+            HashMap::from([(streamed.clone(), "homeserver-1".to_owned())]),
+        )
+        .await
+        .unwrap();
+        let reserved_peer = pending.clone();
+        assert!(storage
+            .transaction(move |tx| {
+                tx.reserve_private_intake_admission(reserved_peer, "homeserver-2".into(), now)
+            })
+            .await
+            .unwrap());
+        let before = storage
+            .snapshot()
+            .unwrap()
+            .private_intake_admitted_homeservers;
+        let (_stop_tx, mut stop_rx) = watch::channel(false);
+
+        // The resolved map alone needs two streams and fits, but the carried
+        // admission on "homeserver-2" makes it three.
+        let result = replace_private_intake_admissions_with_retry(
+            &storage,
+            &MutableClock::new(now),
+            lease.lease_id,
+            HashMap::from([
+                (streamed.clone(), "homeserver-1".to_owned()),
+                (newcomer.clone(), "homeserver-3".to_owned()),
+            ]),
+            std::slice::from_ref(pending),
+            &mut stop_rx,
+        )
+        .await;
+
+        assert!(matches!(result, Err(PaykitSdkError::Policy { .. })));
+        assert_eq!(
+            storage
+                .snapshot()
+                .unwrap()
+                .private_intake_admitted_homeservers,
+            before
+        );
+    }
+
+    #[tokio::test]
     async fn test_private_intake_stop_marks_every_peer_stopped() {
         let peers = users(2);
         let (stop, _) = watch::channel(false);
