@@ -342,7 +342,7 @@ async fn in_flight(w: &World) -> (Arc<HookedStore>, [u8; 16], paykit_lib::Attemp
         )
         .await;
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()
@@ -430,7 +430,7 @@ async fn test_final_check_first_dispatch_late_answer_removing_the_app_not_paid()
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap();
-    let PayOutcome::Pending { attempt_id } = outcome else {
+    let PayOutcome::Pending { attempt_id, .. } = outcome else {
         panic!("{outcome:?}");
     };
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
@@ -457,7 +457,11 @@ async fn test_final_check_resume_late_answer_removing_the_app_not_paid() {
     )
     .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Pending { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Pending { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
 
@@ -479,7 +483,11 @@ async fn test_final_check_recovery_late_answer_removing_the_app_not_paid() {
     )
     .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Pending { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Pending { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
 }
 
@@ -547,7 +555,11 @@ async fn test_final_check_resume_payee_copy_aged_during_the_own_read_not_paid() 
     )
     .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Pending { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Pending { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
 
@@ -568,7 +580,11 @@ async fn test_final_check_recovery_payee_copy_aged_during_the_own_read_not_paid(
     )
     .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Pending { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Pending { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
 }
 
@@ -595,7 +611,7 @@ async fn test_final_check_repeat_retention_ending_during_the_lookup_not_paid() {
         )
         .await;
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = first
+    let PayOutcome::Pending { attempt_id, .. } = first
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()
@@ -621,7 +637,11 @@ async fn test_final_check_repeat_retention_ending_during_the_lookup_not_paid() {
     )
     .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
 
@@ -702,7 +722,11 @@ async fn test_final_check_resume_late_equivocation_not_paid() {
     .await;
     // A repeat may follow a dispatch that paid: it stays "may be paid".
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
 
@@ -724,7 +748,11 @@ async fn test_final_check_recovery_late_equivocation_not_paid() {
     )
     .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
 }
 
@@ -941,7 +969,7 @@ async fn test_fence_removal_answered_during_paying_not_paid() {
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap();
-    let PayOutcome::Pending { attempt_id } = outcome else {
+    let PayOutcome::Pending { attempt_id, .. } = outcome else {
         panic!("{outcome:?}");
     };
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
@@ -1018,12 +1046,11 @@ async fn test_fence_stop_lost_to_a_crash_stays_paying_and_uncertain() {
     // Read as possibly dispatched, the safe direction: on a rail that can't tell, it stays
     // "may be paid", and nothing is paid.
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(
-        resumed,
-        vec![PayOutcome::Uncertain {
-            attempt_id: payment.attempt_id
-        }]
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
     );
+    assert_eq!(resumed[0].attempt_id(), payment.attempt_id);
     assert_eq!(w.rail.pay_calls(&payment.attempt_id), 0);
     // "May be paid" isn't a payment the method's history shows: no acceptance goes out.
     no_acceptance_queued(&store, &mut wallet).await;
@@ -1153,7 +1180,11 @@ async fn test_repeat_too_close_to_the_orphan_age_not_made() {
         )
         .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
 
@@ -1392,7 +1423,7 @@ async fn test_acceptance_owed_sent_with_a_users_done_on_a_pending_payment() {
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap();
-    let PayOutcome::Pending { attempt_id } = outcome else {
+    let PayOutcome::Pending { attempt_id, .. } = outcome else {
         panic!("{outcome:?}")
     };
     store.refuse_acceptances(false);
@@ -1463,7 +1494,7 @@ async fn test_acceptance_owed_sent_when_another_app_resolves_the_payment_done() 
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap();
-    let PayOutcome::Pending { attempt_id } = outcome else {
+    let PayOutcome::Pending { attempt_id, .. } = outcome else {
         panic!("{outcome:?}")
     };
     store.refuse_acceptances(false);
@@ -1599,7 +1630,7 @@ async fn test_resume_an_owed_acceptance_that_fails_stops_no_later_entry() {
             .unwrap();
         assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
         w.rail.next(Behaviour::Hang);
-        let PayOutcome::Pending { attempt_id } = wallet
+        let PayOutcome::Pending { attempt_id, .. } = wallet
             .pay_request(&second, PayOptions::default())
             .await
             .unwrap()
@@ -1649,7 +1680,7 @@ async fn test_acceptance_sent_earlier_is_placed_when_another_app_resolves_the_pa
         .await;
     // In flight: the call is made and the acceptance is queued.
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()
@@ -1775,7 +1806,7 @@ async fn crash_owed_acceptance_path(
         .await
         .unwrap();
     let attempt_id = match outcome {
-        PayOutcome::Paid { attempt_id, .. } | PayOutcome::Pending { attempt_id } => attempt_id,
+        PayOutcome::Paid { attempt_id, .. } | PayOutcome::Pending { attempt_id, .. } => attempt_id,
         other => panic!("{other:?}"),
     };
     store.refuse_acceptances(false);

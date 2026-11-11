@@ -157,6 +157,7 @@ impl PayOptions {
 #[non_exhaustive]
 pub enum PayOutcome {
     /// Paid: `done` written, the proof queued.
+    #[non_exhaustive]
     Paid {
         /// The attempt.
         attempt_id: AttemptId,
@@ -165,11 +166,13 @@ pub enum PayOutcome {
     },
     /// Paid, but the outcome couldn't be written: the app isn't current any more. Its
     /// attempt is reconciled through the receipt or by another app (Paykit spec 7.3).
+    #[non_exhaustive]
     PaidUnreported {
         /// The attempt.
         attempt_id: AttemptId,
     },
     /// Definitively not paid: `failed` written.
+    #[non_exhaustive]
     Failed {
         /// The attempt.
         attempt_id: AttemptId,
@@ -178,12 +181,14 @@ pub enum PayOutcome {
     },
     /// Nothing yet: the attempt stays open until the payment method reports (Paykit spec
     /// 7.2, "Failed means definitively not paid").
+    #[non_exhaustive]
     Pending {
         /// The attempt.
         attempt_id: AttemptId,
     },
     /// The payment method's history can't tell: "may be paid", resolved only by a receipt or
     /// by the user (Paykit spec 7.2, 7.3).
+    #[non_exhaustive]
     Uncertain {
         /// The attempt.
         attempt_id: AttemptId,
@@ -192,6 +197,7 @@ pub enum PayOutcome {
     /// answer, or the write failed otherwise). The journal keeps the proof and the attempt
     /// stays open, so nothing pays again; a resume ([`Paykit::resume_payments`]) writes the
     /// outcome and sends the proof (Paykit spec 7.2 steps 3 and 4).
+    #[non_exhaustive]
     PaidOutcomeUnwritten {
         /// The attempt.
         attempt_id: AttemptId,
@@ -201,10 +207,26 @@ pub enum PayOutcome {
     /// 3). Nothing was written; the attempt stays open, so nothing pays again, and the
     /// journal keeps the proof ([`PaymentView::record_held`]). It settles at a resume once
     /// the record reads again, or with [`Paykit::repair_activity_record`].
+    #[non_exhaustive]
     RecordHeld {
         /// The attempt.
         attempt_id: AttemptId,
     },
+}
+
+impl PayOutcome {
+    /// The attempt the outcome reports: every outcome names one.
+    pub fn attempt_id(&self) -> AttemptId {
+        match self {
+            Self::Paid { attempt_id, .. }
+            | Self::PaidUnreported { attempt_id, .. }
+            | Self::Failed { attempt_id, .. }
+            | Self::Pending { attempt_id, .. }
+            | Self::Uncertain { attempt_id, .. }
+            | Self::PaidOutcomeUnwritten { attempt_id, .. }
+            | Self::RecordHeld { attempt_id, .. } => *attempt_id,
+        }
+    }
 }
 
 /// A payment without a request (Paykit spec 8.4).

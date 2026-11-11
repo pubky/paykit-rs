@@ -26,7 +26,7 @@ async fn in_flight(
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()
@@ -59,7 +59,11 @@ async fn test_recovery_clock_gone_back_empty_history_stays_uncertain() {
         .load_on_clock(&w.alice, Arc::clone(&base), app_id, clock_gone_back(&w))
         .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     // Nothing was written `failed`: the attempt stays open, "may be paid".
     let payment = wallet.payments().await.unwrap().remove(0);
     assert_eq!(payment.stage, Stage::Paying);
@@ -89,7 +93,11 @@ async fn test_recovery_clock_gone_back_idempotent_rail_not_dispatched_again() {
         .load_on_clock(&w.alice, Arc::clone(&base), app_id, clock_gone_back(&w))
         .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
 
@@ -115,7 +123,11 @@ async fn test_recovery_within_retention_idempotent_rail_asked_again() {
         )
         .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Pending { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Pending { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 2);
     assert_eq!(w.rail.executions(&attempt_id), 1);
 }
@@ -174,7 +186,7 @@ async fn test_recovery_attempt_resolved_failed_may_be_paid_again() {
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()
@@ -214,7 +226,7 @@ async fn test_recovery_attempt_resolved_done_never_dispatched_again() {
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()
@@ -344,7 +356,11 @@ async fn test_recovery_repeat_to_a_revoked_payee_app_held() {
         .await;
     // Not repeated, and not written `failed`: the first dispatch may have paid.
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
     assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Paying);
 }
@@ -463,7 +479,11 @@ async fn resume_after_provider_change(change: impl FnOnce(&World)) {
     // nothing is paid on it, and it stays "may be paid" until the move rules resolve it
     // (Paykit spec 4, 7.2; Switch spec 12.5, 12.6).
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
     assert!(w.rail.all_executions().is_empty());
     assert_eq!(wallet.payments().await.unwrap()[0].stage, Stage::Paying);
@@ -517,7 +537,11 @@ async fn test_recovery_not_paid_once_the_own_app_is_unlisted() {
         .load_on_clock(&w.alice, Arc::clone(&base), app_id, Arc::clone(&w.clock))
         .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 0);
 }
 
@@ -645,7 +669,7 @@ async fn test_recovery_list_expiring_during_the_own_identity_read_not_paid() {
     );
     wallet.receive(None).await.unwrap();
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_without_request(paykit_sdk::UnrequestedPayment::new(
             w.bob_id(),
             crate::common::btc("0.001"),
@@ -673,7 +697,11 @@ async fn test_recovery_list_expiring_during_the_own_identity_read_not_paid() {
         )
         .await;
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::Uncertain { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     assert_eq!(w.rail.pay_calls(&attempt_id), 1);
 }
 
@@ -719,11 +747,11 @@ async fn test_recovery_empty_history_proves_nothing_from_the_retention_end() {
                 "age {age}: {resumed:?}"
             );
         } else {
-            assert_eq!(
-                resumed,
-                vec![PayOutcome::Uncertain { attempt_id }],
-                "age {age}"
+            assert!(
+                matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+                "age {age}: {resumed:?}"
             );
+            assert_eq!(resumed[0].attempt_id(), attempt_id);
         }
     }
 }
@@ -747,18 +775,18 @@ async fn test_recovery_repeat_only_before_the_idempotency_retention_end() {
         let resumed = wallet.resume_payments().await.unwrap();
         // At the retention's end the method may have forgotten the key: no repeat.
         if kept {
-            assert_eq!(
-                resumed,
-                vec![PayOutcome::Pending { attempt_id }],
-                "age {age}"
+            assert!(
+                matches!(resumed.as_slice(), [PayOutcome::Pending { .. }]),
+                "age {age}: {resumed:?}"
             );
+            assert_eq!(resumed[0].attempt_id(), attempt_id);
             assert_eq!(w.rail.pay_calls(&attempt_id), 2, "age {age}");
         } else {
-            assert_eq!(
-                resumed,
-                vec![PayOutcome::Uncertain { attempt_id }],
-                "age {age}"
+            assert!(
+                matches!(resumed.as_slice(), [PayOutcome::Uncertain { .. }]),
+                "age {age}: {resumed:?}"
             );
+            assert_eq!(resumed[0].attempt_id(), attempt_id);
             assert_eq!(w.rail.pay_calls(&attempt_id), 1, "age {age}");
         }
     }

@@ -86,7 +86,7 @@ async fn in_flight_on(
     wallet.receive(None).await.unwrap();
     phone.receive(None).await.unwrap();
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()
@@ -204,7 +204,11 @@ async fn test_outcome_record_invalid_value_holds_done_until_repaired() {
 
     w.rail.settle(&attempt_id, true);
     let resumed = wallet.resume_payments().await.unwrap();
-    assert_eq!(resumed, vec![PayOutcome::RecordHeld { attempt_id }]);
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::RecordHeld { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     // Nothing was written: the attempt stays open, the journal keeps the proof, and the
     // host is told.
     assert_eq!(claim_outcome(&mut wallet, &attempt_id).await, Outcome::Open);
@@ -288,10 +292,12 @@ async fn test_outcome_record_user_done_of_a_payment_made_places_its_proof() {
     store.armed.store(true, Ordering::SeqCst);
     phone_writes(&mut phone, &request, Some(INVALID)).await;
     w.rail.settle(&attempt_id, true);
-    assert_eq!(
-        wallet.resume_payments().await.unwrap(),
-        vec![PayOutcome::RecordHeld { attempt_id }]
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::RecordHeld { .. }]),
+        "{resumed:?}"
     );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     phone.receive(None).await.unwrap();
     phone_writes(&mut phone, &request, None).await;
     wallet.receive(None).await.unwrap();
@@ -317,10 +323,12 @@ async fn test_outcome_record_user_cant_fail_a_payment_the_method_reported_made()
     store.armed.store(true, Ordering::SeqCst);
     phone_writes(&mut phone, &request, Some(INVALID)).await;
     w.rail.settle(&attempt_id, true);
-    assert_eq!(
-        wallet.resume_payments().await.unwrap(),
-        vec![PayOutcome::RecordHeld { attempt_id }]
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::RecordHeld { .. }]),
+        "{resumed:?}"
     );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     let obligation = wallet.payments().await.unwrap()[0].obligation;
     for resolution in [
         paykit_sdk::Resolution::Failed,
@@ -360,10 +368,12 @@ async fn made_without_its_acceptance(
     store.armed.store(true, Ordering::SeqCst);
     phone_writes(&mut phone, &request, Some(INVALID)).await;
     w.rail.settle(&attempt_id, true);
-    assert_eq!(
-        wallet.resume_payments().await.unwrap(),
-        vec![PayOutcome::RecordHeld { attempt_id }]
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::RecordHeld { .. }]),
+        "{resumed:?}"
     );
+    assert_eq!(resumed[0].attempt_id(), attempt_id);
     store.refuse_queue.store(false, Ordering::SeqCst);
     (wallet, phone, request, attempt_id)
 }

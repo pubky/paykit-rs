@@ -39,7 +39,7 @@ async fn test_restore_reconciles_a_payment_made_after_the_backup() {
 
     // Paid after the backup, then the device is lost before the outcome is written.
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()
@@ -88,7 +88,7 @@ async fn test_restore_resolves_a_restored_journal_entry_and_sends_its_proof() {
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()
@@ -124,7 +124,7 @@ async fn test_restore_unresolvable_attempt_stays_doubtful() {
     wallet.receive(None).await.unwrap();
     let backup = wallet.backup().await.unwrap();
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()
@@ -173,7 +173,8 @@ async fn paid_after_the_backup(
 ) -> (paykit_lib::AttemptId, PaykitBackup) {
     let backup = wallet.backup().await.unwrap();
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet.pay_request(request, options).await.unwrap()
+    let PayOutcome::Pending { attempt_id, .. } =
+        wallet.pay_request(request, options).await.unwrap()
     else {
         panic!("pending");
     };
@@ -634,7 +635,7 @@ async fn test_restore_failure_rebuilt_that_completed_after_all_sends_its_proof()
     // Paid after the backup; the method reports a failure, and the device is lost before
     // the outcome is written.
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()
@@ -806,7 +807,7 @@ async fn reconcile_with_marks(
     wallet.receive(None).await.unwrap();
     let backup = wallet.backup().await.unwrap();
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(
             &request,
             PayOptions::default()
@@ -926,7 +927,7 @@ async fn test_restore_unrebuildable_failure_stays_doubtful_then_paid_is_not_lost
     wallet.receive(None).await.unwrap();
     let backup = wallet.backup().await.unwrap();
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()
@@ -1556,7 +1557,7 @@ async fn test_restore_bare_then_resume_sends_no_acceptance_the_record_holds() {
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     w.rail.next(paykit_sdk::rail::Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()

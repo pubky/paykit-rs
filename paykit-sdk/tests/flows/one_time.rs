@@ -150,7 +150,7 @@ async fn test_one_time_rejection_refused_while_a_payment_is_in_progress() {
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap();
-    let PayOutcome::Pending { attempt_id } = outcome else {
+    let PayOutcome::Pending { attempt_id, .. } = outcome else {
         panic!("{outcome:?}");
     };
     assert_eq!(
@@ -449,7 +449,7 @@ async fn test_one_time_receipt_naming_another_proof_leaves_the_proof_recordable(
     let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
     wallet.receive(None).await.unwrap();
     w.rail.next(Behaviour::Hang);
-    let PayOutcome::Pending { attempt_id } = wallet
+    let PayOutcome::Pending { attempt_id, .. } = wallet
         .pay_request(&request, PayOptions::default())
         .await
         .unwrap()

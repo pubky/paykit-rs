@@ -680,7 +680,7 @@ async fn test_unrequested_paid_with_its_outcome_unwritten_is_no_error() {
         .pay_without_request(to_bob(&w, "0.0015", "btc-lightning-bolt12"))
         .await
         .unwrap();
-    let PayOutcome::PaidOutcomeUnwritten { attempt_id } = outcome else {
+    let PayOutcome::PaidOutcomeUnwritten { attempt_id, .. } = outcome else {
         panic!("money moved, so the call reports it paid: {outcome:?}");
     };
     assert_eq!(w.rail.executions(&attempt_id), 1);
