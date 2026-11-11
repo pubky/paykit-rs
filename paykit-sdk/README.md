@@ -376,7 +376,9 @@ Common workflows:
   `resolve_private_payment_request`, `resolve_public_payment_request`, or
   `prepare_and_resolve_private_payment_request`; these use the request amount
   and enforce its accepted endpoint identifiers and required payee App before
-  invoking the payment adapter. Request preparation still performs fresh private
+  invoking the payment adapter. `resolve_public_payment_request` returns
+  `Policy` while the counterparty is blocked, before any App Registry or
+  Payment Endpoint read. Request preparation still performs fresh private
   intake and final validation, but leaves an otherwise idle queue of unclaimed,
   unprepared Delivery Confirmations durable for later outbound processing.
   Callers must drive maintenance; preparation does not schedule a worker or
