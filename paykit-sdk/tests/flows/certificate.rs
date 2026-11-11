@@ -1019,3 +1019,73 @@ async fn test_certificate_restored_payee_ends_reconcile_and_requests() {
     wallet.receive(None).await.unwrap();
     assert!(wallet.request(&request).await.is_ok());
 }
+
+#[tokio::test]
+async fn test_certificate_renewal_reading_more_lists_its_records_first() {
+    // Alice's till, holding `request`, sent bob a request: its `payee_activity` record is
+    // alice's. Her wallet holds `pay` only and reads none of them. Renewed to hold `request`
+    // too, the wallet's copy lacks that record until the collection is listed: a call that
+    // only reads is refused meanwhile, rather than show no requests sent, and a read lists it.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let me = wallet.app_id();
+    let mut till = w
+        .join(
+            &w.alice,
+            "till",
+            AppScopes::new().request().build().unwrap(),
+        )
+        .await;
+    till.send_request(w.bob_id(), crate::common::draft("1", w.clock.now_ms()))
+        .await
+        .unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(wallet.payee_activity().await.unwrap().is_empty());
+    let old = wallet.app().cert().clone();
+    let wider = renew(
+        &w,
+        me,
+        &AppScopes::new().pay().request().build().unwrap(),
+        1_000,
+    );
+    // The signer stores a bundle with the scope keys the renewed certificate needs.
+    let epoch = w.alice.switch().identity_doc().unwrap().data_epoch();
+    let parts = pubky_switch_core::records::seal_bundle_parts(
+        w.alice.identity().key(),
+        &wider,
+        1,
+        epoch,
+        &|scope| crate::common::spec().has_keys(scope),
+    )
+    .unwrap();
+    for part in parts {
+        w.alice
+            .switch()
+            .signer_op(OpKind::KeyBundlePut(pubky_switch_core::ops::KeyBundlePut {
+                target_app_id: me,
+                bundle: part.bundle,
+                first_epoch: part.first_epoch,
+                last_epoch: part.last_epoch,
+            }))
+            .unwrap();
+    }
+    wallet.receive(None).await.unwrap();
+    list(&w, me, &old, &wider);
+    // The read that takes the certificate can't list the collections now.
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/records".into(),
+            after: 0,
+        });
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), wider.hash());
+    let refused = wallet.payee_activity().await.unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::NotNow(_))),
+        "{refused:?}"
+    );
+    // The next read lists them: the till's request shows.
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
+}

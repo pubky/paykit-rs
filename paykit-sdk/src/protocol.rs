@@ -23,6 +23,7 @@
 //! record marks keep an own app from silently dropping a message another app recorded
 //! (Switch spec 8.2). Destinations never come from shared state alone (Paykit spec 6).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use paykit_lib::bodies::{check_body, Body, ResendRequest};
@@ -100,6 +101,10 @@ struct Own {
 /// context, a [`LocalView`]), and never hold the naming key: they blind through the client.
 pub struct PaykitProtocol {
     own: RwLock<Option<Own>>,
+    /// A certificate set since the app's last listing reads collections, or members of one,
+    /// the one before it didn't: the copy holds none of their records until they are
+    /// listed (`Paykit::keep_widened_mark`).
+    reads_widened: AtomicBool,
     /// The app's rail, which names a proof's settlement (Paykit wire 1.5); without one, the
     /// methods `paykit-lib` knows.
     rail: Option<Arc<dyn Rail>>,
@@ -122,6 +127,7 @@ impl PaykitProtocol {
     pub fn new() -> Self {
         Self {
             own: RwLock::new(None),
+            reads_widened: AtomicBool::new(false),
             rail: None,
         }
     }
@@ -144,10 +150,29 @@ impl PaykitProtocol {
         }
     }
 
-    /// Set the own identity and certificate, after a join, a load or a renewal.
+    /// Set the own identity and certificate, after a join, a load or a renewal. A renewal
+    /// whose certificate reads more of Paykit's collections than the one before is noted:
+    /// the client's copy holds none of the records it adds until they are listed.
     pub fn set_own(&self, identity: [u8; 32], cert: AppCert) {
         let mut own = self.own.write().unwrap_or_else(PoisonError::into_inner);
+        if own.as_ref().is_some_and(|held| {
+            held.identity == identity && reads_more(&self.collections(), &held.cert, &cert)
+        }) {
+            self.reads_widened.store(true, Ordering::SeqCst);
+        }
         *own = Some(Own { identity, cert });
+    }
+
+    /// Whether a certificate set since the last listing reads more than the one before
+    /// ([`PaykitProtocol::set_own`]).
+    pub(crate) fn reads_widened(&self) -> bool {
+        self.reads_widened.load(Ordering::SeqCst)
+    }
+
+    /// The records a widened certificate reads are listed, or the mark that waits for
+    /// their listing is kept: the note goes.
+    pub(crate) fn clear_reads_widened(&self) {
+        self.reads_widened.store(false, Ordering::SeqCst);
     }
 
     fn own(&self) -> Option<Own> {
@@ -191,6 +216,30 @@ impl PaykitProtocol {
         let side = self.reply_side(kind, label.as_ref(), kept);
         targets_app(kind, side, label.as_ref(), recipient.cert().scopes())
     }
+}
+
+/// Whether `new` reads a record of `collections` that `old` doesn't (Switch spec 8.3, Paykit
+/// spec 6): a collection `old` lists none of, or, in a family with a policy per sub-scope,
+/// a sub-scope's records `old` reads neither by that sub-scope nor by the family's own read
+/// scope, which reads every member, such as `request:<label>` after `request` alone.
+pub(crate) fn reads_more(collections: &[SwitchCollection], old: &AppCert, new: &AppCert) -> bool {
+    collections.iter().any(|collection| {
+        if !collection.readable_by(new) {
+            return false;
+        }
+        if !collection.readable_by(old) {
+            return true;
+        }
+        let name = collection.policy.read_scope.as_str();
+        if old.holds_scope(name) {
+            return false;
+        }
+        new.holds_scope(name)
+            || new.scopes().iter().any(|scope| {
+                switch_scopes::split(scope).is_some_and(|(held, sub)| sub.is_some() && held == name)
+                    && !old.scopes().contains(scope)
+            })
+    })
 }
 
 /// A record of Paykit's local state, read through a [`LocalView`]: `Err` when the store
@@ -824,6 +873,39 @@ mod tests {
 
     fn protocol() -> PaykitProtocol {
         PaykitProtocol::new()
+    }
+
+    fn cert(scopes: &[&str]) -> AppCert {
+        crate::testkit::Party::new("alice", "wallet", scopes).cert
+    }
+
+    #[test]
+    fn test_protocol_reads_more_with_a_collection_or_a_label_added() {
+        let collections = protocol().collections();
+        let reads_more =
+            |old: &[&str], new: &[&str]| reads_more(&collections, &cert(old), &cert(new));
+        assert!(reads_more(&["pay"], &["pay", "request"]));
+        assert!(reads_more(
+            &["request:shop"],
+            &["request:shop", "request:cafe"]
+        ));
+        assert!(reads_more(&["request:shop"], &["request"]));
+        assert!(!reads_more(&["pay", "request"], &["pay"]));
+        assert!(!reads_more(&["request"], &["request:shop"]));
+        assert!(!reads_more(&["pay"], &["pay", "contacts"]));
+    }
+
+    #[test]
+    fn test_protocol_set_own_notes_a_certificate_that_reads_more() {
+        let p = protocol();
+        p.set_own([1; 32], cert(&["pay"]));
+        assert!(!p.reads_widened());
+        p.set_own([1; 32], cert(&["pay", "contacts"]));
+        assert!(!p.reads_widened());
+        p.set_own([1; 32], cert(&["pay", "request"]));
+        assert!(p.reads_widened());
+        p.clear_reads_widened();
+        assert!(!p.reads_widened());
     }
 
     #[test]

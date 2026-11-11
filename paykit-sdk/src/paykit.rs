@@ -546,6 +546,9 @@ impl Paykit {
         if !report.stopped {
             self.records_listed().await?;
         }
+        // A certificate the read took may read more than the one before: its records are
+        // listed now, or the mark waits for a listing (`Paykit::list_widened`).
+        self.list_widened().await?;
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1).
         self.place_kept_cancellations().await?;
