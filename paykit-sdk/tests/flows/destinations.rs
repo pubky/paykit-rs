@@ -384,3 +384,136 @@ async fn test_destinations_list_of_a_removed_app_shadows_no_current_one() {
     till.receive(None).await.unwrap();
     assert_eq!(till.payee_activity().await.unwrap().len(), 1);
 }
+
+/// A request offering Lightning and on-chain, on-chain first by the identifiers' order.
+fn two_endpoints(now: u64) -> paykit_sdk::RequestDraft {
+    let mut endpoints = std::collections::BTreeMap::new();
+    for (id, payload) in [
+        ("btc-bitcoin-p2wpkh", "bc1qaddress"),
+        ("btc-lightning-bolt11", "lnbc1invoice"),
+    ] {
+        endpoints.insert(
+            crate::common::endpoint(id),
+            paykit_lib::PaymentEndpointPayload::new(payload).unwrap(),
+        );
+    }
+    paykit_sdk::RequestDraft::new(
+        crate::common::btc("1"),
+        paykit_lib::PaymentReference::new("order-1").unwrap(),
+        paykit_lib::bodies::RequestDestination::Endpoints(endpoints),
+    )
+    .with_proposal_expires_at_ms(now + 24 * crate::common::HOUR_MS)
+}
+
+#[tokio::test]
+async fn test_destinations_payment_method_order_picks_the_endpoint_and_the_payee_credits_it() {
+    // The method prefers Lightning: of the two endpoints the request offers, it is paid,
+    // though the payee lists it second, and the payee credits and receipts it.
+    let w = World::new();
+    w.rail.set_endpoint_identifiers(vec![
+        crate::common::endpoint("btc-lightning-bolt11"),
+        crate::common::endpoint("btc-bitcoin-p2wpkh"),
+    ]);
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), two_endpoints(w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+        "{outcome:?}"
+    );
+    let paid = wallet.payments().await.unwrap();
+    assert_eq!(paid[0].endpoint_id.as_str(), "btc-lightning-bolt11");
+    shop.receive(None).await.unwrap();
+    let sales = shop.payee_activity().await.unwrap();
+    assert_eq!(sales[0].status, paykit_sdk::PayeeStatus::ProofReceived);
+    assert!(shop
+        .confirm_payment(&sales[0].record)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        shop.payee_activity().await.unwrap()[0].status,
+        paykit_sdk::PayeeStatus::Receipted
+    );
+}
+
+#[tokio::test]
+async fn test_destinations_no_endpoint_the_payment_method_pays_refused() {
+    // The method pays only Taproot: the request's endpoints are refused as unsupported,
+    // nothing is written, and the request stays payable by a method that pays one.
+    let w = World::new();
+    w.rail
+        .set_endpoint_identifiers(vec![crate::common::endpoint("btc-bitcoin-p2tr")]);
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), two_endpoints(w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    let refused = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::UnsupportedEndpoint(_))),
+        "{refused:?}"
+    );
+    // Naming an endpoint the method doesn't pay is refused the same way.
+    let named = wallet
+        .pay_request(
+            &request,
+            PayOptions::default().with_endpoint(crate::common::endpoint("btc-lightning-bolt11")),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(named.refusal(), Some(Refusal::UnsupportedEndpoint(_))),
+        "{named:?}"
+    );
+    assert!(wallet.payments().await.unwrap().is_empty());
+    assert!(w.rail.all_executions().is_empty());
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+    w.rail
+        .set_endpoint_identifiers(vec![crate::common::endpoint("btc-bitcoin-p2wpkh")]);
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, paykit_sdk::PayOutcome::Paid { .. }),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_destinations_list_without_an_endpoint_the_payment_method_pays_refused() {
+    // The payee's list offers on-chain and Lightning; the method pays only Taproot. The
+    // list is in use, so the payee isn't asked for another: the payment is refused as
+    // unsupported, not left waiting for a list.
+    let w = World::new();
+    w.rail
+        .set_endpoint_identifiers(vec![crate::common::endpoint("btc-bitcoin-p2tr")]);
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    let refused = wallet
+        .pay_without_request(paykit_sdk::UnrequestedPayment::new(
+            w.bob_id(),
+            crate::common::btc("1"),
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::UnsupportedEndpoint(_))),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+}

@@ -61,6 +61,10 @@ impl Rail for LedgerRail {
         self.fake.declaration()
     }
 
+    fn endpoint_identifiers(&self) -> Vec<PaymentEndpointIdentifier> {
+        self.fake.endpoint_identifiers()
+    }
+
     fn transfer(
         &self,
         endpoint_id: &PaymentEndpointIdentifier,

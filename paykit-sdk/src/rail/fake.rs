@@ -52,6 +52,7 @@ struct Inner {
     forgotten: Vec<AttemptId>,
     calls: BTreeMap<AttemptId, u64>,
     declaration: Option<RailDeclaration>,
+    endpoints: Option<Vec<PaymentEndpointIdentifier>>,
 }
 
 /// An in-memory payment rail shared by payers and payees. Tests only.
@@ -112,6 +113,12 @@ impl FakeRail {
     /// Make the rail idempotent on the key, or not: then a repeat pays again.
     pub fn set_idempotent(&self, idempotent: bool) {
         self.lock().idempotent = idempotent;
+    }
+
+    /// Pay `endpoints`, in that order, from now on, instead of the default
+    /// ([`FAKE_ENDPOINT_IDENTIFIERS`]).
+    pub fn set_endpoint_identifiers(&self, endpoints: Vec<PaymentEndpointIdentifier>) {
+        self.lock().endpoints = Some(endpoints);
     }
 
     /// Declare `declaration` from now on instead of the default (idempotent while
@@ -214,7 +221,26 @@ fn paid_outcome(key: &AttemptId, counter: u64, now: Option<u64>) -> RailOutcome 
     }
 }
 
+/// The Payment Endpoint Identifiers the fake rail pays by default, in the order it tries
+/// them.
+pub const FAKE_ENDPOINT_IDENTIFIERS: [&str; 4] = [
+    "btc-bitcoin-p2tr",
+    "btc-bitcoin-p2wpkh",
+    "btc-lightning-bolt11",
+    "btc-lightning-bolt12",
+];
+
 impl Rail for FakeRail {
+    fn endpoint_identifiers(&self) -> Vec<PaymentEndpointIdentifier> {
+        if let Some(endpoints) = &self.lock().endpoints {
+            return endpoints.clone();
+        }
+        FAKE_ENDPOINT_IDENTIFIERS
+            .iter()
+            .filter_map(|id| PaymentEndpointIdentifier::new(id).ok())
+            .collect()
+    }
+
     fn declaration(&self) -> RailDeclaration {
         let inner = self.lock();
         if let Some(declared) = inner.declaration {

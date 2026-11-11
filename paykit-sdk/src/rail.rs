@@ -9,6 +9,9 @@
 //!   and for how long, whether its history shows a dispatch's outcome and for how long, and
 //!   whether that history survives a restore of the paying device (Paykit spec 7.2, "What a
 //!   payment method declares");
+//! - **which endpoints it pays** ([`Rail::endpoint_identifiers`]): the Payment Endpoint
+//!   Identifiers it can pay, in the order it wants them tried; the SDK pays the first of them
+//!   a destination offers, as the v0.1 SDK's adapter chose and ordered the payable candidates;
 //! - **what it would transfer** to a destination for an amount, before any write
 //!   ([`Rail::transfer`], Paykit spec 7.2 step 1);
 //! - **pay** an endpoint with the attempt ID as the idempotency key ([`Rail::pay`]);
@@ -32,7 +35,7 @@ use serde_json::{Map, Value};
 mod fake;
 
 #[cfg(feature = "test-support")]
-pub use fake::{Behaviour, FakeRail, FAKE_LONGEST_COMPLETION_MS};
+pub use fake::{Behaviour, FakeRail, FAKE_ENDPOINT_IDENTIFIERS, FAKE_LONGEST_COMPLETION_MS};
 
 /// A failure of the payment method's call (Paykit spec 7.2). [`RailError::Unavailable`] is
 /// ambiguous: a payment may have been submitted, so it means nothing yet and the attempt
@@ -222,6 +225,13 @@ impl std::fmt::Debug for ProofCheck {
 pub trait Rail: Send + Sync {
     /// What the method declares (Paykit spec 7.2).
     fn declaration(&self) -> RailDeclaration;
+
+    /// The Payment Endpoint Identifiers the method can pay, in the order it wants them
+    /// tried, each once. Of the endpoints a destination offers, the SDK pays the first in
+    /// this order; a destination offering endpoints but none of these is refused as
+    /// [`crate::Refusal::UnsupportedEndpoint`]. An app's record lists them as its
+    /// `capabilities` (Paykit wire 3.2).
+    fn endpoint_identifiers(&self) -> Vec<PaymentEndpointIdentifier>;
 
     /// What paying `amount` to `payload` would transfer (Paykit spec 7.2 step 1): a payload
     /// that fixes an amount transfers that one, an amount-less one exactly `amount`.
