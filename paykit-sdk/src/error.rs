@@ -200,7 +200,9 @@ impl PaykitError {
     /// The ID of the call's own batch, when the client kept it to send again
     /// ([`AppError::Kept`]): what it writes and sends goes, the same bytes, at the app's next
     /// write or read, so the caller doesn't make the call again. `None` when nothing of the
-    /// call was kept.
+    /// call was kept, but for a store failure: the client returns that bare when it can't
+    /// read whether it kept the batch, which may still go with the next write or read, so a
+    /// caller reads the state the call would change after that write before it calls again.
     pub fn kept_batch(&self) -> Option<[u8; 16]> {
         match self {
             Self::Client(error) => error.kept_batch(),

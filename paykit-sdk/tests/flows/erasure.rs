@@ -89,4 +89,29 @@ async fn test_erasure_wait_is_the_switch_not_answering_then_the_account_gone() {
     assert!(again.account_gone, "{again:?}");
     assert_eq!(wallet.payments().await.unwrap().len(), 1);
     assert_eq!(w.rail.all_executions().len(), 1);
+    // Acknowledged, the read is stopped with nothing more to tell, and a call that writes
+    // is refused by the client cleanly.
+    let gone = wallet
+        .app_mut()
+        .unacknowledged_events()
+        .await
+        .unwrap()
+        .into_iter()
+        .find_map(|event| match event {
+            pubky_switch_client::app::AppEvent::AccountGone { id } => Some(id),
+            _ => None,
+        })
+        .unwrap();
+    wallet.app_mut().ack_events(gone).await.unwrap();
+    let after = wallet.receive(None).await.unwrap();
+    assert!(after.report.stopped && !after.account_gone, "{after:?}");
+    let refused = wallet.flush().await.unwrap_err();
+    assert!(
+        matches!(
+            refused,
+            paykit_sdk::PaykitError::Client(pubky_switch_client::app::AppError::Refused(_))
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(w.rail.all_executions().len(), 1);
 }

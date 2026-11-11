@@ -684,7 +684,10 @@ async fn test_one_time_request_kept_is_sent_once_by_the_next_write() {
         "{:?}",
         sent.delivery
     );
-    assert!(shop.message_delivery(&sent.msg_id).await.unwrap().is_none());
+    assert_eq!(
+        shop.message_delivery(&sent.msg_id).await.unwrap(),
+        Some(sent.delivery.clone())
+    );
     shop.flush().await.unwrap();
     assert!(
         matches!(
@@ -699,4 +702,91 @@ async fn test_one_time_request_kept_is_sent_once_by_the_next_write() {
     assert_eq!(requests.len(), 1);
     assert_eq!(Some(requests[0].request), sent.request);
     assert_eq!(w.alice.switch().entries_from(&w.bob_id()), 1);
+}
+
+fn unreachable_ops() -> pubky_switch_client::testing::Fault {
+    pubky_switch_client::testing::Fault::Unreachable {
+        path: "/ops".into(),
+        after: 0,
+    }
+}
+
+#[tokio::test]
+async fn test_one_time_attempt_kept_unsent_stays_recorded_through_a_resume() {
+    // The attempt's batch can't connect and is kept. A resume whose flush still can't send
+    // it leaves the entry as it was: the claim can't show the attempt yet. Once the batch
+    // goes, the resume finds the attempt open with no payment started and writes `failed`,
+    // and the user pays once.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.alice.switch().fail_next(unreachable_ops());
+    let kept = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(kept.kept_batch().is_some(), "{kept:?}");
+    let stage = |payments: Vec<paykit_sdk::PaymentView>| payments[0].stage;
+    assert_eq!(
+        stage(wallet.payments().await.unwrap()),
+        paykit_sdk::Stage::Recorded
+    );
+    w.alice.switch().fail_next(unreachable_ops());
+    w.alice.switch().fail_next(unreachable_ops());
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(
+        stage(wallet.payments().await.unwrap()),
+        paykit_sdk::Stage::Recorded
+    );
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Failed { .. }]),
+        "{resumed:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    let paid = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(paid, PayOutcome::Paid { .. }), "{paid:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+}
+
+#[tokio::test]
+async fn test_one_time_request_kept_then_refused_reads_as_failed() {
+    // The request's batch is kept, then refused for good when it is sent again: the
+    // request never went out, and reads as failed, not as one delivered and forgotten.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    w.bob.switch().fail_next(unreachable_ops());
+    let sent = shop
+        .send_request(w.alice_id(), draft("1", w.clock.now_ms()))
+        .await
+        .unwrap();
+    let MessageDelivery::Kept { batch_id } = sent.delivery else {
+        panic!("{:?}", sent.delivery);
+    };
+    assert_eq!(
+        shop.message_delivery(&sent.msg_id).await.unwrap(),
+        Some(MessageDelivery::Kept { batch_id })
+    );
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            current: serde_json::Value::Null,
+        });
+    shop.flush().await.unwrap();
+    assert!(
+        matches!(
+            shop.message_delivery(&sent.msg_id).await.unwrap(),
+            Some(MessageDelivery::Failed { .. })
+        ),
+        "{:?}",
+        shop.message_delivery(&sent.msg_id).await
+    );
+    assert!(shop.payee_activity().await.unwrap().is_empty());
 }

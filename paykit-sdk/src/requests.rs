@@ -198,6 +198,9 @@ pub enum MessageDelivery {
         /// Why, without content.
         reason: String,
     },
+    /// A state of the client's this version of the SDK doesn't name, as the client reports
+    /// it.
+    Other(Delivery),
 }
 
 impl MessageDelivery {
@@ -223,11 +226,8 @@ impl MessageDelivery {
             },
             Delivery::Accepted { accepted_at_ms, .. } => Self::Accepted { accepted_at_ms },
             Delivery::Failed { reason, .. } => Self::Failed { reason },
-            // A state a later client adds: still queued as far as this SDK can tell.
-            _ => Self::Queued {
-                tries: 0,
-                last_error: None,
-            },
+            // A state a later client adds, which this SDK doesn't name.
+            other => Self::Other(other),
         }
     }
 }
@@ -418,10 +418,14 @@ impl Paykit {
     ///
     /// [`Refusal::ScopeMissing`] without `request` or a label; [`Refusal::Label`];
     /// [`PaykitError::Lib`] with `Validation` for a draft that breaks Paykit wire 4.5; the
-    /// client's errors, after which nothing of the request was kept and the host may send it
-    /// again. A failure that leaves the request's batch kept (the network, `429`, `503`) is
-    /// no error: the request is reported sent, [`MessageDelivery::Kept`], recorded and
-    /// queued by the app's next write or read, so the host doesn't send a second one.
+    /// client's errors. A failure that leaves the request's batch kept (the network, `429`,
+    /// `503`) is no error: the request is reported sent, [`MessageDelivery::Kept`], recorded
+    /// and queued by the app's next write or read, so the host doesn't send a second one.
+    /// After any other error but a store failure nothing of the request was kept, and the
+    /// host may send it again. A store failure is returned bare when the client can't tell
+    /// whether it kept the batch, which may still go out with the next write or read: a
+    /// host that retries after one reads [`Paykit::payee_activity`] after its next write
+    /// first.
     pub async fn send_request(&mut self, to: [u8; 32], draft: RequestDraft) -> Result<SentRequest> {
         self.refresh_own()?;
         self.require_payee()?;
@@ -467,14 +471,18 @@ impl Paykit {
             request_hash: hash,
         });
         if let Err(error) = self.app.submit_batch(batch).await {
-            return match error.kept_batch() {
-                Some(batch_id) => Ok(SentRequest {
-                    msg_id,
-                    delivery: MessageDelivery::Kept { batch_id },
-                    request,
-                }),
-                None => Err(error.into()),
+            let Some(batch_id) = error.kept_batch() else {
+                return Err(error.into());
             };
+            // The note lets `Paykit::message_delivery` tell the request kept, or dropped
+            // unsent, from one delivered long ago. The request is kept whatever the note's
+            // write does, so a failure to write it is no error of the call.
+            let _ = self.note_kept(batch_id, Some(&msg_id), None).await;
+            return Ok(SentRequest {
+                msg_id,
+                delivery: MessageDelivery::Kept { batch_id },
+                request,
+            });
         }
         // The request is recorded and queued: a try to deliver it now that fails leaves it
         // queued for the next flush, and the call still reports it sent, so the caller
@@ -496,14 +504,29 @@ impl Paykit {
 
     /// Where the message this app sent as `msg_id` is now, such as a request after the
     /// flushes since [`Paykit::send_request`], or a payment's proof: for example "waiting for
-    /// them to admit you" ([`MessageDelivery::WaitingForAdmission`]). `None` for a message
-    /// the outbox doesn't hold, such as one delivered and past its retention.
+    /// them to admit you" ([`MessageDelivery::WaitingForAdmission`]). A request whose batch
+    /// the client still keeps is [`MessageDelivery::Kept`]; one whose kept batch the client
+    /// dropped unsent is [`MessageDelivery::Failed`], once a receive or a flush has taken
+    /// the client's event about it (`AppEvent::BatchRefused` or
+    /// `AppEvent::KeptBatchDropped`, naming the same batch ID). `None` for a message neither
+    /// the outbox nor such a note holds, such as one delivered and past its retention.
     ///
     /// # Errors
     ///
     /// A store failure.
     pub async fn message_delivery(&self, msg_id: &str) -> Result<Option<MessageDelivery>> {
-        Ok(self.app.delivery(msg_id).await?.map(MessageDelivery::of))
+        if let Some(delivery) = self.app.delivery(msg_id).await? {
+            return Ok(Some(MessageDelivery::of(delivery)));
+        }
+        Ok(self
+            .kept_request(msg_id)
+            .await?
+            .map(|(batch_id, note)| match note.dropped {
+                Some(code) => MessageDelivery::Failed {
+                    reason: format!("the batch that queues it was dropped unsent: {code}"),
+                },
+                None => MessageDelivery::Kept { batch_id },
+            }))
     }
 
     /// The payee's record at `record`, bound under its policy, with its target.

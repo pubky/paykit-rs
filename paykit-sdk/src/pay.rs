@@ -1664,7 +1664,14 @@ impl Paykit {
             }
             // The answer may have been lost: the batch is kept and the journal says no money
             // moved, so a resume reads the claim and writes `failed` if the attempt is ours.
-            Err(error) => return Err(error.into()),
+            // A batch the client still keeps is noted: until it is sent or dropped, the claim
+            // can't show the attempt, and a resume leaves the entry as it is.
+            Err(error) => {
+                if let Some(batch_id) = error.kept_batch() {
+                    self.note_kept(batch_id, None, Some(&attempt_id)).await?;
+                }
+                return Err(error.into());
+            }
         };
         let proof = submitted.proofs.first();
         entry.step = proof.and_then(|proof| proof.body().step);
@@ -2492,9 +2499,12 @@ impl Paykit {
     pub async fn resume_payments(&mut self) -> Result<Vec<PayOutcome>> {
         self.refresh_own()?;
         self.records_known().await?;
-        // Batches kept from before go first, so the claim read below shows them and the
-        // journal holds what their answers settled.
+        // Batches kept from before go first, so the claim read below shows those sent and
+        // the journal holds what their answers settled. One the client still can't send
+        // stays kept: its attempt isn't on the claim yet, so its entry is left `Recorded`
+        // below, until the batch is sent or the client drops it (`kept.rs`).
         self.app.flush_outbox().await?;
+        self.note_unacknowledged().await?;
         // Cancellations kept and not yet placed go into their records (Paykit spec 8.1).
         self.place_kept_cancellations().await?;
         let mut out = Vec::new();
@@ -2531,6 +2541,7 @@ impl Paykit {
                         None => self.set_stage(&mut entry, Stage::Abandoned).await?,
                     }
                 }
+                Stage::Recorded if self.attempt_kept(&attempt_id).await? => {}
                 Stage::Recorded | Stage::Attempted => match self.attempt_state(&entry).await? {
                     // No payment started: the open attempt is written `failed`.
                     Some((step, Outcome::Open | Outcome::Unknown)) => {

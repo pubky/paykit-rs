@@ -215,6 +215,11 @@ pub struct ReceiveSummary {
     /// gives it: the read went on, holding Paykit's entries unprocessed, and none of the
     /// Paykit steps after it ran.
     pub certificate_refused: Option<Refusal>,
+    /// A certificate taken reads collections the one the records were last listed under
+    /// didn't, and the listing this read made for them failed: the text says why, without
+    /// content. The records stay unlisted, so the calls that only read are refused as not
+    /// now, and the next receive or write lists them again.
+    pub records_unlisted: Option<String>,
     /// The account is gone at this switch: the client took it as erased (Switch spec 12.7),
     /// a provider loss (Switch spec 12.6). The host tells the user. The app reads nothing
     /// more there, and the SDK acts on nothing by itself: lookups of the identity there fail
@@ -321,7 +326,10 @@ impl Paykit {
             check_own_certificate(&approved.cert)?;
         }
         let app = App::join(env.clone(), protocol.clone(), config.app.clone(), request).await?;
-        Self::assemble(app, env, protocol, config, rail, timer)
+        let mut paykit = Self::assemble(app, env, protocol, config, rail, timer)?;
+        // The client lists the collections at its first read, under this certificate.
+        paykit.settle_listed_cert().await?;
+        Ok(paykit)
     }
 
     /// Load a Paykit App from the store alone: nothing is sent. Payments a crash left in the
@@ -350,6 +358,7 @@ impl Paykit {
         if paykit.certificate_refused().is_none() {
             paykit.bound_restored_cursor_time().await?;
         }
+        paykit.settle_listed_cert().await?;
         Ok(paykit)
     }
 
@@ -553,6 +562,9 @@ impl Paykit {
             }
             Err(error) => return Err(error.into()),
         };
+        // The client's events about the app's kept batches, first: a request or an attempt
+        // whose batch it dropped is no longer kept (`kept.rs`).
+        self.note_kept_events(&report.events).await?;
         let account_gone = account_gone(&report.events)
             || (report.stopped && account_gone(&self.app.unacknowledged_events().await?));
         if account_gone {
@@ -582,8 +594,8 @@ impl Paykit {
             self.records_listed().await?;
         }
         // A certificate the read took may read more than the one before: its records are
-        // listed now, or the mark waits for a listing (`Paykit::list_widened`).
-        self.list_widened().await?;
+        // listed now, or stay unlisted for the next receive or write (`Paykit::list_widened`).
+        let records_unlisted = self.list_widened().await?;
         // The payees' cancellations the read kept go into their records, as later writes of
         // this app's own (Paykit spec 8.1).
         self.place_kept_cancellations().await?;
@@ -604,6 +616,7 @@ impl Paykit {
             applied,
             resends: answered.saturating_add(asked),
             certificate_refused: None,
+            records_unlisted,
             account_gone: false,
         })
     }
@@ -616,6 +629,7 @@ impl Paykit {
     pub async fn flush(&mut self) -> Result<()> {
         self.refresh_own()?;
         self.app.flush_outbox().await?;
+        self.note_unacknowledged().await?;
         Ok(())
     }
 }

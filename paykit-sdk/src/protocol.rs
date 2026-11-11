@@ -23,7 +23,6 @@
 //! record marks keep an own app from silently dropping a message another app recorded
 //! (Switch spec 8.2). Destinations never come from shared state alone (Paykit spec 6).
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use paykit_lib::bodies::{check_body, Body, ResendRequest};
@@ -101,10 +100,6 @@ struct Own {
 /// context, a [`LocalView`]), and never hold the naming key: they blind through the client.
 pub struct PaykitProtocol {
     own: RwLock<Option<Own>>,
-    /// A certificate set since the app's last listing reads collections, or members of one,
-    /// the one before it didn't: the copy holds none of their records until they are
-    /// listed (`Paykit::keep_widened_mark`).
-    reads_widened: AtomicBool,
     /// The app's rail, which names a proof's settlement (Paykit wire 1.5); without one, the
     /// methods `paykit-lib` knows.
     rail: Option<Arc<dyn Rail>>,
@@ -127,7 +122,6 @@ impl PaykitProtocol {
     pub fn new() -> Self {
         Self {
             own: RwLock::new(None),
-            reads_widened: AtomicBool::new(false),
             rail: None,
         }
     }
@@ -150,34 +144,10 @@ impl PaykitProtocol {
         }
     }
 
-    /// Set the own identity and certificate, after a join, a load or a renewal. A renewal
-    /// whose certificate reads more of Paykit's collections than the one before is noted:
-    /// the client's copy holds none of the records it adds until they are listed.
+    /// Set the own identity and certificate, after a join, a load or a renewal.
     pub fn set_own(&self, identity: [u8; 32], cert: AppCert) {
         let mut own = self.own.write().unwrap_or_else(PoisonError::into_inner);
-        if own.as_ref().is_some_and(|held| {
-            held.identity == identity && reads_more(&self.collections(), &held.cert, &cert)
-        }) {
-            self.reads_widened.store(true, Ordering::SeqCst);
-        }
         *own = Some(Own { identity, cert });
-    }
-
-    /// Whether a certificate set since the last listing reads more than the one before
-    /// ([`PaykitProtocol::set_own`]), or `cert`, the one the app holds now and not yet set,
-    /// reads more than the one set: a read that took it and then failed returned before the
-    /// protocol followed it.
-    pub(crate) fn reads_widened(&self, cert: &AppCert) -> bool {
-        self.reads_widened.load(Ordering::SeqCst)
-            || self
-                .own()
-                .is_some_and(|held| reads_more(&self.collections(), &held.cert, cert))
-    }
-
-    /// The records a widened certificate reads are listed, or the mark that waits for
-    /// their listing is kept: the note goes.
-    pub(crate) fn clear_reads_widened(&self) {
-        self.reads_widened.store(false, Ordering::SeqCst);
     }
 
     fn own(&self) -> Option<Own> {
@@ -391,10 +361,15 @@ pub(crate) fn restore_paykit_layer(
             // sets its own (`hold.rs`).
             // So do the marks of records not yet listed and of the payer pass owed: this
             // restore sets its own.
+            // The certificate last listed under is the backup's own: this restore sets it to
+            // the restored one, which its listing covers. The client's kept batches are its
+            // own; a restore keeps no note of them.
             StateKey::RestoreHold
             | StateKey::HoldConfirmed(_)
             | StateKey::RecordsUnlisted
-            | StateKey::PayerPassOwed => continue,
+            | StateKey::PayerPassOwed
+            | StateKey::ListedCert
+            | StateKey::KeptBatch(_) => continue,
             StateKey::Journal(attempt) => attempt,
             StateKey::CursorTime => {
                 cursor_time_ms = state::decode::<u64>(&value).map_err(|_| unread())?;
@@ -492,6 +467,11 @@ pub(crate) fn restore_paykit_layer(
     let unlisted = state::local_put(key::RECORDS_UNLISTED, &true)
         .map_err(|_| String::from("the restore's records mark can't be written"))?;
     writes.push(unlisted);
+    // The restore's listing covers what the restored certificate reads; a wider one the
+    // client takes later is listed by Paykit (`Paykit::unlisted`).
+    let listed = state::local_put(key::LISTED_CERT, own_cert.signed())
+        .map_err(|_| String::from("the restore's listed certificate can't be written"))?;
+    writes.push(listed);
     // No new attempt until a reconcile has run the payer pass, under `pay`: the backup
     // doesn't hold the attempts made after it (`Paykit::payer_pass_owed`).
     let owed = state::local_put(key::PAYER_PASS_OWED, &true)
@@ -898,23 +878,6 @@ mod tests {
         assert!(!reads_more(&["pay", "request"], &["pay"]));
         assert!(!reads_more(&["request"], &["request:shop"]));
         assert!(!reads_more(&["pay"], &["pay", "contacts"]));
-    }
-
-    #[test]
-    fn test_protocol_set_own_notes_a_certificate_that_reads_more() {
-        let p = protocol();
-        p.set_own([1; 32], cert(&["pay"]));
-        let paying = cert(&["pay"]);
-        assert!(!p.reads_widened(&paying));
-        p.set_own([1; 32], cert(&["pay", "contacts"]));
-        assert!(!p.reads_widened(&paying));
-        // Held but not set yet, then set.
-        let wider = cert(&["pay", "request"]);
-        assert!(p.reads_widened(&wider));
-        p.set_own([1; 32], wider.clone());
-        assert!(p.reads_widened(&wider));
-        p.clear_reads_widened();
-        assert!(!p.reads_widened(&wider));
     }
 
     #[test]

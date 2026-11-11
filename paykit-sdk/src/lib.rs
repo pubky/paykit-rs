@@ -43,6 +43,7 @@ mod destination;
 mod error;
 mod hold;
 mod journal;
+mod kept;
 mod pay;
 mod paykit;
 mod protocol;
