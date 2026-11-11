@@ -312,12 +312,11 @@ impl Paykit {
             }
             return self.write_placed(target, stored).await;
         };
-        if role == Role::Receipt
-            && !record
-                .proof
-                .as_ref()
-                .is_some_and(|proof| stored.message().refs.first() == Some(&proof.hash()))
-        {
+        let names_proof = record
+            .proof
+            .as_ref()
+            .is_some_and(|proof| stored.message().refs.first() == Some(&proof.hash()));
+        if role == Role::Receipt && !names_proof {
             return Ok(false);
         }
         self.write_placed(target, stored).await
