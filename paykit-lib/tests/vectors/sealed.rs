@@ -731,8 +731,11 @@ the value, in unrequested and in the stored proof, which its writer keeps; refus
 members where the record's binding, side or request doesn't allow them, period details out \
 of order or held twice, reassociations without allowance_id, naming it first or not \
 strictly ascending, v01_paid of a one-time request other than from 0 to 0 or with ranges \
-that overlap, and an unrequested.amount other than the stored proof's; and, last, a period \
-record with manual_only false, which is true or absent. later_writes holds pairs of \
+that overlap, an unrequested.amount other than the stored proof's, and a reassociation or a \
+recurring v01_paid range naming a time that isn't a Billing Period start of the stored \
+request (between two starts, before the first period, or, for the request signed again \
+ending at its March period, after its ends_at); and, last, a period record with \
+manual_only false, which is true or absent. later_writes holds pairs of \
 versions of one record, the version a reader holds (held) and a later write (value), both of \
 which bind at record_key, with built_on_held true when the write builds on the held version \
 (wire 5.3 \"Seen roles\", \"Seen Allowance\", \"Seen marks\"). On alice's request record of \
@@ -1019,7 +1022,73 @@ fn member_cases(keys: &Keys) -> (Vec<ActivityCase>, Vec<ActivityCase>) {
             key(&b.unrequested),
         ),
     ];
+    let mut refused = refused;
+    refused.extend(period_start_cases(keys));
     (accepted, refused)
+}
+
+/// Refused cases whose reassociation or recurring `v01_paid` names a time that isn't a Billing
+/// Period start of the stored request (wire 5.3): between two starts, before the first
+/// period, and after the request's `ends_at`.
+fn period_start_cases(keys: &Keys) -> Vec<ActivityCase> {
+    use paykit_lib::identifiers::AllowanceId;
+    use paykit_lib::records::{Reassociation, V01PaidRange};
+    let b = bases(keys);
+    let key = |r: &ActivityRecord| base_key(keys, r);
+    let other = AllowanceId::parse("55de1f16-1a9e-4504-bc9c-57efc3a2b38c").unwrap();
+    let from = |base: &ActivityRecord, from_period| ActivityRecord {
+        reassociations: vec![Reassociation {
+            allowance_id: other.clone(),
+            from_period,
+        }],
+        ..base.clone()
+    };
+    let paid = |from, to| ActivityRecord {
+        v01_paid: vec![V01PaidRange { from, to }],
+        ..b.payer_request.clone()
+    };
+    // The recurring request ending at its March period's start: February is its last.
+    let ended_request = resign_with(keys, "payment_request_recurring", |m| {
+        m.body
+            .get_mut("recurrence")
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert(
+                "ends_at".into(),
+                serde_json::json!("2026-03-31T00:00:00.000Z"),
+            );
+    });
+    let ended = ActivityRecord {
+        request: Some(ended_request),
+        ..b.payer_request.clone()
+    };
+    vec![
+        (
+            "a reassociation from between two Billing Period starts",
+            from(&b.payer_request, 1_772_236_801),
+            key(&b.payer_request),
+        ),
+        (
+            "a reassociation from before the first Billing Period",
+            from(&b.payer_request, 1_767_225_600),
+            key(&b.payer_request),
+        ),
+        (
+            "a reassociation from after the request's ends_at",
+            from(&ended, 1_774_915_200),
+            key(&ended),
+        ),
+        (
+            "v01_paid of a recurring request ending between two Billing Period starts",
+            paid(1_769_817_600, 1_771_200_000),
+            key(&b.payer_request),
+        ),
+        (
+            "v01_paid of a recurring request from before the first Billing Period",
+            paid(1_767_225_600, 1_769_817_600),
+            key(&b.payer_request),
+        ),
+    ]
 }
 
 /// Refused `activity_records` cases no record a writer builds can hold, appended last: alice's
@@ -2902,4 +2971,166 @@ fn test_activity_record_seen_rules_hold_for_every_member() {
     .unwrap_err()
     .to_string();
     assert!(error.contains("manual_only"), "{error}");
+}
+
+#[test]
+fn test_activity_record_period_starts_resolve_through_the_recurrence() {
+    use paykit_lib::identifiers::AllowanceId;
+    use paykit_lib::records::{Reassociation, V01PaidRange};
+    let keys = Keys::load();
+    let b = bases(&keys);
+    let alice = pubky(ALICE);
+    let other = AllowanceId::parse("55de1f16-1a9e-4504-bc9c-57efc3a2b38c").unwrap();
+    let from = |from_period| ActivityRecord {
+        reassociations: vec![Reassociation {
+            allowance_id: other.clone(),
+            from_period,
+        }],
+        ..b.payer_request.clone()
+    };
+    // A start of the request's periods is taken, at write and read.
+    let at_start = from(1_772_236_800);
+    ActivityRecord::read(&at_start.to_json().unwrap(), &alice, ActivitySide::Payer).unwrap();
+    // A second later isn't: the writer and the reader refuse it.
+    let between = from(1_772_236_801);
+    assert!(between.to_json().is_err());
+    let error = ActivityRecord::read(
+        &between.to_json_unchecked().unwrap(),
+        &alice,
+        ActivitySide::Payer,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("isn't a Billing Period start"), "{error}");
+    // And a later write that carries it is ignored.
+    assert!(b.payer_request.check_later_write(&between).is_err());
+    // v01_paid of a recurring request runs from one start to another.
+    let paid = |from, to| ActivityRecord {
+        v01_paid: vec![V01PaidRange { from, to }],
+        ..b.payer_request.clone()
+    };
+    paid(1_769_817_600, 1_774_915_200).to_json().unwrap();
+    assert!(paid(1_769_817_601, 1_774_915_200).to_json().is_err());
+    assert!(paid(1_769_817_600, 1_774_915_199).to_json().is_err());
+    // A request with ends_at: its last period's start is taken, the next refused.
+    let ended = ActivityRecord {
+        request: Some(resign_with(&keys, "payment_request_recurring", |m| {
+            m.body
+                .get_mut("recurrence")
+                .and_then(Value::as_object_mut)
+                .unwrap()
+                .insert(
+                    "ends_at".into(),
+                    serde_json::json!("2026-03-31T00:00:00.000Z"),
+                );
+        })),
+        ..b.payer_request.clone()
+    };
+    let moved = |from_period| ActivityRecord {
+        reassociations: vec![Reassociation {
+            allowance_id: other.clone(),
+            from_period,
+        }],
+        ..ended.clone()
+    };
+    moved(1_772_236_800).to_json().unwrap();
+    assert!(moved(1_774_915_200).to_json().is_err());
+}
+
+/// `value` with `member` set to `unknown` in the object at each pointer.
+fn with_members(value: &[u8], members: &[(&str, Value)]) -> Vec<u8> {
+    let mut v: Value = serde_json::from_slice(value).unwrap();
+    for (pointer, unknown) in members {
+        v.pointer_mut(pointer)
+            .and_then(Value::as_object_mut)
+            .unwrap_or_else(|| panic!("{pointer}"))
+            .insert("later_member".into(), unknown.clone());
+    }
+    serde_json::to_vec(&v).unwrap()
+}
+
+/// The member each pointer's object holds in `json`.
+fn members_at(json: &[u8], pointers: &[&str]) -> Vec<Value> {
+    let v: Value = serde_json::from_slice(json).unwrap();
+    pointers
+        .iter()
+        .map(|p| {
+            v.pointer(&format!("{p}/later_member"))
+                .cloned()
+                .unwrap_or(Value::Null)
+        })
+        .collect()
+}
+
+#[test]
+fn test_allowance_record_equal_grants_keep_their_own_unknown_members() {
+    let alice = pubky(ALICE);
+    let s = paykit("sealed.json");
+    let entry = paykit("documents.json")["executor_grant_history_entry"].clone();
+    let mut base: Value = serde_json::from_slice(value(&arr(&s, "binding_accepted")[1])).unwrap();
+    // The current grant is the last of the history: two equal objects. And the history holds
+    // one entry twice, which the record reads (only its use is refused).
+    base["grant"] = entry["grant"].clone();
+    base["grants"] = serde_json::json!([entry.clone(), entry]);
+    let pointers = [
+        "/grant",
+        "/grant/cert",
+        "/grants/0",
+        "/grants/0/grant",
+        "/grants/1",
+        "/grants/1/grant/cert",
+    ];
+    let members: Vec<(&str, Value)> = pointers
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (*p, serde_json::json!(format!("of object {i}"))))
+        .collect();
+    let json = with_members(&serde_json::to_vec(&base).unwrap(), &members);
+    let mut read = AllowanceRecord::read(&json, &alice).unwrap();
+    read.msg_ids
+        .push("00000000-0000-4000-8000-000000000001".into());
+    let written = read.to_json().unwrap();
+    let again = AllowanceRecord::read(&written, &alice)
+        .unwrap()
+        .to_json()
+        .unwrap();
+    let want: Vec<Value> = members.iter().map(|(_, v)| v.clone()).collect();
+    assert_eq!(members_at(&written, &pointers), want);
+    assert_eq!(members_at(&again, &pointers), want);
+}
+
+#[test]
+fn test_payment_list_record_equal_used_entries_keep_their_own_unknown_members() {
+    let alice = pubky(ALICE);
+    let s = paykit("sealed.json");
+    let mut base: Value = serde_json::from_slice(value(&arr(&s, "binding_accepted")[0])).unwrap();
+    let used = base["used"][0].clone();
+    base["used"] = serde_json::json!([used.clone(), used]);
+    let members = [
+        ("/used/0", serde_json::json!("first")),
+        ("/used/1", serde_json::json!("second")),
+    ];
+    let json = with_members(&serde_json::to_vec(&base).unwrap(), &members);
+    let mut read = PaymentListRecord::read(&json, &alice).unwrap();
+    assert_eq!(read.used.len(), 2);
+    read.msg_ids
+        .push("00000000-0000-4000-8000-000000000001".into());
+    let written = read.to_json().unwrap();
+    let again = PaymentListRecord::read(&written, &alice)
+        .unwrap()
+        .to_json()
+        .unwrap();
+    let want = vec![serde_json::json!("first"), serde_json::json!("second")];
+    assert_eq!(members_at(&written, &["/used/0", "/used/1"]), want);
+    assert_eq!(members_at(&again, &["/used/0", "/used/1"]), want);
+    // A unique entry that moves keeps its members: reordered, each still has its own.
+    let mut other: Value = serde_json::from_slice(&json).unwrap();
+    other["used"][1]["attempt_id"] = serde_json::json!("AAAAAAAAAAAAAAAAAAAAAA");
+    let mut read = PaymentListRecord::read(&serde_json::to_vec(&other).unwrap(), &alice).unwrap();
+    read.used.reverse();
+    let written = read.to_json().unwrap();
+    assert_eq!(
+        members_at(&written, &["/used/0", "/used/1"]),
+        vec![serde_json::json!("second"), serde_json::json!("first")]
+    );
 }

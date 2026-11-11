@@ -24,7 +24,7 @@ use crate::error::{ensure, invalid, Error, Result};
 use crate::identifiers::{AllowanceId, AttemptId, PaymentEndpointIdentifier};
 use crate::json::{bad, check_v1, parse_object, Obj};
 use crate::periods::{AnchoredRule, Unit};
-use crate::records::{Member, Shape, UnknownMembers};
+use crate::records::{Member, Shape, Spelling, UnknownMembers};
 
 /// The window an executor batch is dated in: its entry's `at` and at most 60 s after
 /// (Paykit spec 8.3).
@@ -650,7 +650,7 @@ pub struct Ledger {
 
 static ENTRY_SHAPE: Shape = Shape {
     name: "ledger entry",
-    id: &["attempt_id"],
+    id: &[("attempt_id", Spelling::Exact)],
     members: &[
         ("obligation", Member::Leaf),
         ("attempt_id", Member::Leaf),
@@ -663,7 +663,7 @@ static ENTRY_SHAPE: Shape = Shape {
 
 static FAILED_SHAPE: Shape = Shape {
     name: "totals.failed item",
-    id: &["attempt_id"],
+    id: &[("attempt_id", Spelling::Exact)],
     members: &[
         ("obligation", Member::Leaf),
         ("attempt_id", Member::Leaf),
@@ -673,7 +673,11 @@ static FAILED_SHAPE: Shape = Shape {
 
 static V01_SHAPE: Shape = Shape {
     name: "totals.v01 item",
-    id: &["at", "spent", "count"],
+    id: &[
+        ("at", Spelling::Time),
+        ("spent", Spelling::Exact),
+        ("count", Spelling::Exact),
+    ],
     members: &[
         ("at", Member::Leaf),
         ("spent", Member::Leaf),
@@ -2206,6 +2210,45 @@ mod tests {
         let mut changed = after;
         changed.v01[0].count = 1;
         assert!(check_successor(&terms, &before, &changed, now).is_err());
+    }
+
+    #[test]
+    fn test_ledger_equal_v01_items_keep_their_own_unknown_members() {
+        let mut held = ledger(Vec::new());
+        held.v01 = vec![
+            v01("2025-06-01T00:00:00.000Z", "0.01", 1),
+            v01("2025-06-01T00:00:00.000Z", "0.01", 1),
+        ];
+        let mut value: Value = serde_json::from_slice(&held.to_json().unwrap()).unwrap();
+        value["totals"]["v01"][0]["note"] = json!("first");
+        value["totals"]["v01"][1]["note"] = json!("second");
+        let mut read = Ledger::from_map(value.as_object().unwrap()).unwrap();
+        read.count += 1;
+        let out: Value = serde_json::from_slice(&read.to_json().unwrap()).unwrap();
+        assert_eq!(out["totals"]["v01"][0]["note"], "first");
+        assert_eq!(out["totals"]["v01"][1]["note"], "second");
+        let again = Ledger::from_json(&read.to_json().unwrap()).unwrap();
+        assert_eq!(again.to_json().unwrap(), read.to_json().unwrap());
+    }
+
+    #[test]
+    fn test_ledger_unknown_members_survive_other_spellings() {
+        // A time without a fraction and an amount with trailing zeros, as readers take them,
+        // beside members the writer doesn't know: the ledger writes, and keeps them.
+        let mut value: Value =
+            serde_json::from_slice(&ledger(Vec::new()).to_json().unwrap()).unwrap();
+        value["totals"]["v01"] = json!([{ "at": "2025-06-01T00:00:00Z", "count": 1,
+            "spent": "0.010", "note": "kept" }]);
+        value["totals"]["note"] = json!("kept too");
+        let read = Ledger::from_map(value.as_object().unwrap()).unwrap();
+        let json = read.to_json().unwrap();
+        let out: Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(out["totals"]["v01"][0]["at"], "2025-06-01T00:00:00.000Z");
+        assert_eq!(out["totals"]["v01"][0]["spent"], "0.010");
+        assert_eq!(out["totals"]["v01"][0]["note"], "kept");
+        assert_eq!(out["totals"]["note"], "kept too");
+        let again = Ledger::from_json(&json).unwrap();
+        assert_eq!(again.to_json().unwrap(), json);
     }
 
     #[test]

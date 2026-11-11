@@ -27,7 +27,7 @@ use serde_json::{Map, Value};
 
 use crate::allowances::Ledger;
 use crate::amount::PaymentAmount;
-use crate::bodies::{check_body, Body, ProposerRole};
+use crate::bodies::{check_body, Body, PaymentRequest, ProposerRole};
 use crate::collections::Collection;
 use crate::derive::{natural_key, request_obligation, terms_hash};
 use crate::error::{ensure, invalid, Error, Result};
@@ -37,7 +37,7 @@ use crate::identifiers::{
 };
 use crate::json::{bad, check_v1, parse_object, Obj};
 use crate::kinds::{check_sender_scopes, Kind, OPAQUE_MEMBERS};
-use crate::periods::PeriodRef;
+use crate::periods::{PeriodRef, Recurrence};
 use crate::scopes::{self, Label};
 
 /// How many `msg_id`s of messages a record doesn't store it keeps, the newest (Paykit wire
@@ -91,8 +91,14 @@ pub fn bounded_msg_ids(stored: &[String], others: &[String]) -> Vec<String> {
 /// below the nearest object that has an identity of its own: a stored message by its
 /// signature, a ledger entry by its attempt, an entry of a list by the members that name it.
 /// So a stored message moved to another role keeps its members, and those of an object the
-/// writer no longer holds, such as a compacted ledger entry, are dropped with it. An empty
-/// set, as a value built in code has, writes nothing.
+/// writer no longer holds, such as a compacted ledger entry, are dropped with it.
+///
+/// Members attach to an occurrence: objects of one shape with equal identities, such as the
+/// current `grant` and the last grant of the history, two equal `used` entries or two equal
+/// `totals.v01` items, are told apart by their order in the value, so each keeps its own. A
+/// writer that drops one of them may leave its members to the next. Identities compare in
+/// the spelling writers write, so a time read as `...00Z` is the one written as `...00.000Z`.
+/// An empty set, as a value built in code has, writes nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UnknownMembers {
     held: Vec<HeldMembers>,
@@ -101,24 +107,42 @@ pub struct UnknownMembers {
 /// The unknown members of one object, and where the object sits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HeldMembers {
-    /// The nearest object with an identity at or above it, by its shape and identity; `None`
-    /// for the value itself.
-    anchor: Option<(&'static str, Value)>,
+    /// The nearest object with an identity at or above it: its shape, its identity and its
+    /// occurrence, how many objects of that shape and identity come before it in the value;
+    /// `None` for the value itself.
+    anchor: Option<Anchor>,
     /// The members from there down to the object.
     path: Vec<&'static str>,
     /// The members.
     members: Map<String, Value>,
 }
 
+/// An object with an identity, by its shape's name, its identity and its occurrence.
+type Anchor = (&'static str, Value, usize);
+
 /// The members a writer knows in one object of a shared record value (Paykit wire 5).
 pub(crate) struct Shape {
     /// The shape's name, which tells apart identities of different objects.
     pub(crate) name: &'static str,
-    /// The members, dotted for nested ones, that name the object wherever it sits; empty for
-    /// an object found by where it sits.
-    pub(crate) id: &'static [&'static str],
+    /// The members, dotted for nested ones, that name the object wherever it sits, each with
+    /// how its spelling is compared; empty for an object found by where it sits.
+    pub(crate) id: &'static [(&'static str, Spelling)],
     /// The members it knows, each with what it holds.
     pub(crate) members: &'static [(&'static str, Member)],
+}
+
+/// How a member of an identity is compared: as its writer writes it, so a value read in
+/// another spelling the wire allows is the same object once written again.
+#[derive(Clone, Copy)]
+pub(crate) enum Spelling {
+    /// As written: a member whose readers take one spelling only, such as an integer,
+    /// base64url without padding (Switch wire 1.2), a lower-case UUID (Paykit wire 1.3), a
+    /// Payment Endpoint Identifier (Paykit wire 1.4), or an amount, which writers write in
+    /// the spelling read.
+    Exact,
+    /// A time (Switch wire 1.6), in the spelling writers write: `2026-01-01T00:00:00Z` is
+    /// `2026-01-01T00:00:00.000Z`.
+    Time,
 }
 
 /// What a known member holds, for [`UnknownMembers`].
@@ -140,7 +164,7 @@ fn identity(obj: &Map<String, Value>, shape: &Shape) -> Option<Value> {
     let parts = shape
         .id
         .iter()
-        .map(|dotted| {
+        .map(|(dotted, spelling)| {
             let mut at: Option<&Value> = None;
             for (i, step) in dotted.split('.').enumerate() {
                 at = if i == 0 {
@@ -149,17 +173,68 @@ fn identity(obj: &Map<String, Value>, shape: &Shape) -> Option<Value> {
                     at.and_then(|v| v.get(step))
                 };
             }
-            at.cloned().unwrap_or(Value::Null)
+            let value = at.cloned().unwrap_or(Value::Null);
+            match (spelling, &value) {
+                (Spelling::Time, Value::String(text)) => {
+                    pubky_switch_core::time::parse_rfc3339(text)
+                        .map_or(value.clone(), |ms| Value::String(rfc3339(ms)))
+                }
+                _ => value,
+            }
         })
         .collect();
     Some(Value::Array(parts))
+}
+
+/// A walk over a value as `shape`, which counts the occurrences of each identity in the order
+/// the shape and the arrays give, the same for the value read and the value written.
+#[derive(Default)]
+struct Walk {
+    seen: Vec<(&'static str, Value, usize)>,
+}
+
+impl Walk {
+    /// Where `obj` sits: its anchor and path, a new anchor when it has an identity.
+    fn place(
+        &mut self,
+        obj: &Map<String, Value>,
+        shape: &'static Shape,
+        anchor: Option<Anchor>,
+        path: Vec<&'static str>,
+    ) -> (Option<Anchor>, Vec<&'static str>) {
+        let Some(id) = identity(obj, shape) else {
+            return (anchor, path);
+        };
+        let occurrence = match self
+            .seen
+            .iter_mut()
+            .find(|(name, held, _)| *name == shape.name && *held == id)
+        {
+            Some((_, _, count)) => {
+                *count += 1;
+                *count
+            }
+            None => {
+                self.seen.push((shape.name, id.clone(), 0));
+                0
+            }
+        };
+        (Some((shape.name, id, occurrence)), Vec::new())
+    }
 }
 
 impl UnknownMembers {
     /// The unknown members of `value`, read as `shape`.
     pub(crate) fn read(value: &Map<String, Value>, shape: &'static Shape) -> Self {
         let mut held = Vec::new();
-        collect(value, shape, None, Vec::new(), &mut held);
+        collect(
+            value,
+            shape,
+            None,
+            Vec::new(),
+            &mut Walk::default(),
+            &mut held,
+        );
         Self { held }
     }
 
@@ -183,7 +258,7 @@ impl UnknownMembers {
         let Value::Object(map) = &mut value else {
             return Err(cant());
         };
-        self.apply(map, shape, None, Vec::new());
+        self.apply(map, shape, None, Vec::new(), &mut Walk::default());
         serde_json::to_vec(&value).map_err(|_| cant())
     }
 
@@ -191,13 +266,11 @@ impl UnknownMembers {
         &self,
         obj: &mut Map<String, Value>,
         shape: &'static Shape,
-        anchor: Option<(&'static str, Value)>,
+        anchor: Option<Anchor>,
         path: Vec<&'static str>,
+        walk: &mut Walk,
     ) {
-        let (anchor, path) = match identity(obj, shape) {
-            Some(id) => (Some((shape.name, id)), Vec::new()),
-            None => (anchor, path),
-        };
+        let (anchor, path) = walk.place(obj, shape, anchor, path);
         if let Some(held) = self
             .held
             .iter()
@@ -212,12 +285,12 @@ impl UnknownMembers {
             below.push(name);
             match (member, obj.get_mut(*name)) {
                 (Member::Object(s), Some(Value::Object(child))) => {
-                    self.apply(child, s, anchor.clone(), below);
+                    self.apply(child, s, anchor.clone(), below, walk);
                 }
                 (Member::Array(s), Some(Value::Array(items))) if !s.id.is_empty() => {
                     for item in items {
                         if let Value::Object(child) = item {
-                            self.apply(child, s, anchor.clone(), below.clone());
+                            self.apply(child, s, anchor.clone(), below.clone(), walk);
                         }
                     }
                 }
@@ -230,14 +303,12 @@ impl UnknownMembers {
 fn collect(
     obj: &Map<String, Value>,
     shape: &'static Shape,
-    anchor: Option<(&'static str, Value)>,
+    anchor: Option<Anchor>,
     path: Vec<&'static str>,
+    walk: &mut Walk,
     out: &mut Vec<HeldMembers>,
 ) {
-    let (anchor, path) = match identity(obj, shape) {
-        Some(id) => (Some((shape.name, id)), Vec::new()),
-        None => (anchor, path),
-    };
+    let (anchor, path) = walk.place(obj, shape, anchor, path);
     let members: Map<String, Value> = obj
         .iter()
         .filter(|(name, _)| !shape.members.iter().any(|(known, _)| known == name))
@@ -255,12 +326,12 @@ fn collect(
         below.push(name);
         match (member, obj.get(*name)) {
             (Member::Object(s), Some(Value::Object(child))) => {
-                collect(child, s, anchor.clone(), below, out);
+                collect(child, s, anchor.clone(), below, walk, out);
             }
             (Member::Array(s), Some(Value::Array(items))) if !s.id.is_empty() => {
                 for item in items {
                     if let Value::Object(child) = item {
-                        collect(child, s, anchor.clone(), below.clone(), out);
+                        collect(child, s, anchor.clone(), below.clone(), walk, out);
                     }
                 }
             }
@@ -288,7 +359,7 @@ static PLAINTEXT: Shape = Shape {
 /// A stored message (Paykit wire 5.2), found by its signature wherever it sits.
 static STORED: Shape = Shape {
     name: "stored message",
-    id: &["plaintext.signature"],
+    id: &[("plaintext.signature", Spelling::Exact)],
     members: &[
         ("sender", Member::Leaf),
         ("cert", Member::Object(&SIGNED_DOC)),
@@ -325,7 +396,10 @@ static UNREQUESTED: Shape = Shape {
 
 static REASSOCIATION: Shape = Shape {
     name: "reassociation",
-    id: &["allowance_id", "from_period"],
+    id: &[
+        ("allowance_id", Spelling::Exact),
+        ("from_period", Spelling::Exact),
+    ],
     members: &[
         ("allowance_id", Member::Leaf),
         ("from_period", Member::Leaf),
@@ -334,7 +408,7 @@ static REASSOCIATION: Shape = Shape {
 
 static V01_PAID: Shape = Shape {
     name: "v01_paid",
-    id: &["from", "to"],
+    id: &[("from", Spelling::Exact), ("to", Spelling::Exact)],
     members: &[("from", Member::Leaf), ("to", Member::Leaf)],
 };
 
@@ -368,7 +442,11 @@ static ACTIVITY_SHAPE: Shape = Shape {
 
 static USED: Shape = Shape {
     name: "used",
-    id: &["version", "endpoint", "attempt_id"],
+    id: &[
+        ("version", Spelling::Exact),
+        ("endpoint", Spelling::Exact),
+        ("attempt_id", Spelling::Exact),
+    ],
     members: &[
         ("version", Member::Leaf),
         ("endpoint", Member::Leaf),
@@ -393,7 +471,7 @@ static LIST_SHAPE: Shape = Shape {
 /// An executor grant (Paykit wire 3.3), found by its signature.
 static GRANT: Shape = Shape {
     name: "grant",
-    id: &["sig"],
+    id: &[("sig", Spelling::Exact)],
     members: &[
         ("app_id", Member::Leaf),
         ("cert", Member::Object(&SIGNED_DOC)),
@@ -405,7 +483,10 @@ static GRANT: Shape = Shape {
 
 static GRANT_ENTRY: Shape = Shape {
     name: "grant history entry",
-    id: &["generation", "version"],
+    id: &[
+        ("generation", Spelling::Exact),
+        ("version", Spelling::Exact),
+    ],
     members: &[
         ("generation", Member::Leaf),
         ("version", Member::Leaf),
@@ -1024,6 +1105,21 @@ fn check_reassociations(
     Ok(())
 }
 
+/// Whether `start`, in Unix seconds, is the start of one of `recurrence`'s Billing Periods,
+/// from the first through the last (Paykit spec 8.2, Paykit wire 4.4).
+fn is_period_start(recurrence: &Recurrence, start: u64) -> bool {
+    start
+        .checked_mul(1000)
+        .and_then(|ms| {
+            recurrence
+                .lookup(ms)
+                .ok()
+                .flatten()
+                .map(|p| p.starts_at == ms)
+        })
+        .unwrap_or(false)
+}
+
 /// The shape of `v01_paid` (Paykit wire 5.3): at most 16 ranges, each `from` at or before
 /// its `to`, ascending and not overlapping.
 fn check_v01_paid(ranges: &[V01PaidRange]) -> Result<()> {
@@ -1404,6 +1500,27 @@ impl ActivityRecord {
             ensure(
                 self.v01_paid.is_empty() || self.v01_paid == [V01PaidRange { from: 0, to: 0 }],
                 "Paykit wire 5.3: v01_paid of a one-time request is [{ from: 0, to: 0 }]",
+            )?;
+        }
+        // Paykit wire 5.3: each from_period and each end of a recurring request's v01_paid
+        // ranges is a Billing Period start of the stored request, so neither moves nor marks
+        // paid a time that names no period.
+        if let Some(Body::PaymentRequest(PaymentRequest {
+            recurrence: Some(recurrence),
+            ..
+        })) = self.request.as_ref().map(StoredMessage::body)
+        {
+            ensure(
+                self.reassociations
+                    .iter()
+                    .all(|r| is_period_start(recurrence, r.from_period)),
+                "Paykit wire 5.3: a reassociation's from_period isn't a Billing Period start of the request",
+            )?;
+            ensure(
+                self.v01_paid.iter().all(|r| {
+                    is_period_start(recurrence, r.from) && is_period_start(recurrence, r.to)
+                }),
+                "Paykit wire 5.3: a v01_paid range doesn't run between Billing Period starts of the request",
             )?;
         }
         if self.manual_only {
@@ -2945,7 +3062,7 @@ mod tests {
     fn test_unknown_members_by_shape() {
         static INNER: Shape = Shape {
             name: "inner",
-            id: &["id"],
+            id: &[("id", Spelling::Exact)],
             members: &[("id", Member::Leaf)],
         };
         static OUTER: Shape = Shape {
