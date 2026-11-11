@@ -254,9 +254,9 @@ pub(crate) enum Dispatch {
         orphan_after_s: u64,
         /// The longest the method takes to complete or fail, as it declares.
         longest_completion_ms: u64,
-        /// The highest service time verified right after that read, with the monotonic
-        /// clock then: service time can't be less now than it plus the time since, whatever
-        /// the device clock was set to meanwhile.
+        /// The highest service time verified once that read is answered, with the monotonic
+        /// clock taken before it was sent: their sum later is never short of service time,
+        /// the read's own time included, whatever the device clock was set to meanwhile.
         read_at: (u64, std::time::Instant),
     },
 }
@@ -1302,13 +1302,6 @@ impl Paykit {
     pub(crate) async fn report(&mut self, entry: &mut JournalEntry) -> Result<PayOutcome> {
         let attempt_id = entry.attempt()?;
         let paid = entry.rail_proof.is_some();
-        if paid {
-            // The payment shows: its acceptance is sendable, if it isn't yet, before the
-            // outcome's batch places it in the record (Paykit spec 7.2 steps 2, 3). It never
-            // holds back the outcome: one that can't be queued now is left out of the
-            // record, and the proof still goes.
-            let _ = self.release_acceptance(entry, None).await;
-        }
         match self.write_outcome(entry, paid, false).await {
             Ok(Written::Done) => {}
             Ok(Written::Held) => return Ok(PayOutcome::RecordHeld { attempt_id }),
@@ -1359,6 +1352,13 @@ impl Paykit {
         paid: bool,
         overwrite: bool,
     ) -> Result<Written> {
+        if paid {
+            // Every path that writes a payment made goes through here: its acceptance is
+            // sendable, if it isn't yet, before the batch places it in the record (Paykit
+            // spec 7.2 steps 2, 3). It never holds back the outcome: one that can't be queued
+            // now is left out of the record, and the proof still goes.
+            let _ = self.release_acceptance(entry, None).await;
+        }
         let attempt_id = entry.attempt()?;
         let attempt = attempt_id.to_bytes();
         let target = ActivityTarget::payer(entry.natural_key.clone());
@@ -1757,10 +1757,14 @@ impl Paykit {
             // A repeat may execute money: only while the claim still shows this app's own
             // attempt open. One resolved meanwhile is never carried out again, and one in
             // doubt (`unknown`, or gone from the claim) stays so (Paykit spec 7.2, 7.3).
+            // The monotonic clock before the read, with the service time verified once it is
+            // answered: their sum later never falls short of service time, the read's own
+            // time included.
+            let read_started = std::time::Instant::now();
             let Some(claim) = self.app.read_claim(&entry.obligation).await? else {
                 return Ok(Some(PayOutcome::Uncertain { attempt_id }));
             };
-            let read_at = (self.service_time().unwrap_or(0), std::time::Instant::now());
+            let read_at = (self.service_time().unwrap_or(0), read_started);
             let claim = claim.view;
             let me = self.app_id();
             let held = claim

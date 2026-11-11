@@ -38,6 +38,9 @@ fn payer_record(request: &RequestRef) -> RecordTarget {
 struct NoSeenMarks {
     inner: MemoryStore,
     armed: AtomicBool,
+    /// Every commit that queues a message (the client's `out/` items) fails, applying
+    /// nothing.
+    refuse_queue: AtomicBool,
 }
 
 impl StateStore for NoSeenMarks {
@@ -59,6 +62,12 @@ impl StateStore for NoSeenMarks {
     }
 
     fn commit(&self, batch: WriteBatch) -> Result<(), StoreError> {
+        let queues = batch.writes.iter().any(|write| {
+            matches!(write, pubky_switch_client::store::Write::Put { key, .. } if key.starts_with(b"out/"))
+        });
+        if queues && self.refuse_queue.load(Ordering::SeqCst) {
+            return Err(StoreError::Unavailable);
+        }
         self.inner.commit(batch)
     }
 }
@@ -334,4 +343,54 @@ async fn test_outcome_record_user_cant_fail_a_payment_the_method_reported_made()
         wallet.payments().await.unwrap()[0].stage,
         paykit_sdk::Stage::RailPaid
     );
+}
+
+/// A payment made whose acceptance could never be queued, its record held over a value
+/// that doesn't read: the wallet on `store`, the phone, the request and the attempt.
+async fn made_without_its_acceptance(
+    w: &World,
+    store: &Arc<NoSeenMarks>,
+) -> (Paykit, Paykit, RequestRef, AttemptId) {
+    store.refuse_queue.store(true, Ordering::SeqCst);
+    let (mut wallet, mut phone, request, attempt_id) =
+        in_flight_on(w, Arc::clone(store) as Arc<dyn StateStore>).await;
+    store.armed.store(true, Ordering::SeqCst);
+    phone_writes(&mut phone, &request, Some(INVALID)).await;
+    w.rail.settle(&attempt_id, true);
+    assert_eq!(
+        wallet.resume_payments().await.unwrap(),
+        vec![PayOutcome::RecordHeld { attempt_id }]
+    );
+    store.refuse_queue.store(false, Ordering::SeqCst);
+    (wallet, phone, request, attempt_id)
+}
+
+#[tokio::test]
+async fn test_outcome_record_repair_sends_the_acceptance_still_owed() {
+    // Every try to queue the acceptance failed, and the outcome waited on the record: the
+    // repair that settles the outcome sends the acceptance and places it with the proof.
+    let w = World::new();
+    let store = Arc::new(NoSeenMarks::default());
+    let (mut wallet, _phone, request, attempt_id) = made_without_its_acceptance(&w, &store).await;
+    let repaired = wallet.repair_activity_record(&attempt_id).await.unwrap();
+    assert!(matches!(repaired, PayOutcome::Paid { .. }), "{repaired:?}");
+    let value = record_value(&mut wallet, &request).await.unwrap();
+    assert!(!value["response"].is_null(), "{value}");
+    assert!(!value["proof"].is_null(), "{value}");
+}
+
+#[tokio::test]
+async fn test_outcome_record_user_done_sends_the_acceptance_still_owed() {
+    // The same, settled by the user's `done` once the record is deleted and rebuilt.
+    let w = World::new();
+    let store = Arc::new(NoSeenMarks::default());
+    let (mut wallet, mut phone, request, attempt_id) =
+        made_without_its_acceptance(&w, &store).await;
+    phone.receive(None).await.unwrap();
+    phone_writes(&mut phone, &request, None).await;
+    wallet.receive(None).await.unwrap();
+    resolve_done(&mut wallet, attempt_id).await.unwrap();
+    let value = record_value(&mut wallet, &request).await.unwrap();
+    assert!(!value["response"].is_null(), "{value}");
+    assert!(!value["proof"].is_null(), "{value}");
 }
