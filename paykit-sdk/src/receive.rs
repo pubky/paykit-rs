@@ -184,7 +184,10 @@ pub(crate) fn effect(
                 cert: stored.cert().signed().clone(),
                 body: stored.message().body.clone(),
             };
-            cx.local(local(&key::answer(seq, &stored.message().msg_id), &queued)?);
+            keep_local(
+                cx,
+                local(&key::answer(seq, &stored.message().msg_id), &queued)?,
+            );
         }
         _ => {}
     }
@@ -193,6 +196,20 @@ pub(crate) fn effect(
 
 fn local<T: Serialize>(key: &str, value: &T) -> Result<LocalWrite, Fail> {
     state::local_put(key, value).map_err(|_| Fail::corrupt())
+}
+
+/// Add `write` to the step's local writes. Past the step's bound
+/// ([`pubky_switch_client::app::MAX_STEP_LOCAL_BYTES`]) the context refuses it and marks
+/// the step; the step goes on, and the client stores the entry as too large once the step
+/// applies (Switch spec 8.2). Dropping the message here instead would consume a valid
+/// entry, so the refusal is not passed on.
+fn keep_local(cx: &mut ReceiveContext<'_>, write: LocalWrite) {
+    if let Err(error) = cx.local(write) {
+        debug_assert!(
+            matches!(error, AppError::Refused(ClientRefusal::Usage(_))),
+            "{error:?}"
+        );
+    }
 }
 
 /// Keep the acceptance time of the latest Paykit entry the receive step passed, with the
@@ -207,7 +224,7 @@ fn note_cursor_time(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Resu
         None => 0,
     };
     if at > held {
-        cx.local(local(key::CURSOR_TIME, &at)?);
+        keep_local(cx, local(key::CURSOR_TIME, &at)?);
     }
     Ok(())
 }
@@ -247,7 +264,7 @@ fn admits_new_state(
         Some(bytes) => state::decode::<u64>(&bytes).map_err(|_| Fail::corrupt())?,
         None => 0,
     };
-    cx.local(local(&kept, &count.saturating_add(1))?);
+    keep_local(cx, local(&kept, &count.saturating_add(1))?);
     Ok(false)
 }
 
@@ -263,10 +280,10 @@ fn note_peer(
     pubky: &[u8; 32],
     stored: &StoredMessage,
 ) -> Result<(), Fail> {
-    cx.local(local(
-        &key::peer(pubky),
-        &stored.accepted_at().unwrap_or(0),
-    )?);
+    keep_local(
+        cx,
+        local(&key::peer(pubky), &stored.accepted_at().unwrap_or(0))?,
+    );
     Ok(())
 }
 
@@ -325,7 +342,7 @@ fn keep_cancellation(
     if cx.local_get(kept.as_bytes())?.is_some() {
         return Ok(());
     }
-    cx.local(local(&kept, &KeptMessage::of(stored))?);
+    keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
     Ok(())
 }
 
@@ -613,7 +630,7 @@ fn hold_list(
             return Ok(());
         }
     }
-    cx.local(local(&kept, &KeptMessage::of(stored))?);
+    keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
     Ok(())
 }
 

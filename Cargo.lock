@@ -861,7 +861,7 @@ dependencies = [
 [[package]]
 name = "pubky-switch-client"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-switch?rev=da130a3b1cf14f88e0e8152fde565bd11e005e04#da130a3b1cf14f88e0e8152fde565bd11e005e04"
+source = "git+https://github.com/pubky/pubky-switch?rev=c5534283be7ae150e546f892e811deb6ae6f39b1#c5534283be7ae150e546f892e811deb6ae6f39b1"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -878,7 +878,7 @@ dependencies = [
 [[package]]
 name = "pubky-switch-core"
 version = "0.1.0"
-source = "git+https://github.com/pubky/pubky-switch?rev=da130a3b1cf14f88e0e8152fde565bd11e005e04#da130a3b1cf14f88e0e8152fde565bd11e005e04"
+source = "git+https://github.com/pubky/pubky-switch?rev=c5534283be7ae150e546f892e811deb6ae6f39b1#c5534283be7ae150e546f892e811deb6ae6f39b1"
 dependencies = [
  "base64 0.22.1",
  "blake3",
