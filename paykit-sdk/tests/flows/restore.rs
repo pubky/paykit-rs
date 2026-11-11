@@ -1714,7 +1714,7 @@ async fn test_restore_asks_start_bounded_where_they_are_queued() {
     );
 }
 
-// ---- review throwaway (95144b26) ----
+/// The restore of `backup`, a backup's JSON, on a fresh store: the app, or the refusal.
 async fn restored_or_refused(
     w: &World,
     backup: serde_json::Value,
@@ -1730,7 +1730,12 @@ async fn restored_or_refused(
     .await
 }
 
-fn review_swap(good: &serde_json::Value, cert: Option<serde_json::Value>) -> serde_json::Value {
+/// `good` with its journaled payment's kept acceptance certificate replaced by `cert`, or
+/// removed with `None`.
+fn with_acceptance_cert(
+    good: &serde_json::Value,
+    cert: Option<serde_json::Value>,
+) -> serde_json::Value {
     let mut layer = layer_of(good);
     let entry = layer
         .iter_mut()
@@ -1755,7 +1760,7 @@ fn review_swap(good: &serde_json::Value, cert: Option<serde_json::Value>) -> ser
 async fn test_restore_acceptance_without_a_kept_certificate_read_under_the_current() {
     let w = World::new();
     let (good, _app_id) = backup_with_a_payment(&w).await;
-    let r = restored_or_refused(&w, review_swap(&good, None)).await;
+    let r = restored_or_refused(&w, with_acceptance_cert(&good, None)).await;
     assert!(r.is_ok(), "{:?}", r.err());
 }
 
@@ -1767,13 +1772,13 @@ async fn test_restore_acceptance_certificate_of_another_own_app_refused() {
     let other = pubky_switch_client::testing::issue_cert(
         w.alice.identity().key(),
         &keys,
-        &review_spec(&AppScopes::new().pay().build().unwrap()),
+        &app_spec(&AppScopes::new().pay().build().unwrap()),
         w.clock.now_ms(),
     )
     .unwrap();
     refused_writing_nothing(
         &w,
-        review_swap(&good, Some(serde_json::to_value(other.signed()).unwrap())),
+        with_acceptance_cert(&good, Some(serde_json::to_value(other.signed()).unwrap())),
         app_id,
         "other own app",
     )
@@ -1788,13 +1793,13 @@ async fn test_restore_acceptance_certificate_of_another_identity_refused() {
     let other = pubky_switch_client::testing::issue_cert(
         w.bob.identity().key(),
         &keys,
-        &review_spec(&AppScopes::new().pay().build().unwrap()),
+        &app_spec(&AppScopes::new().pay().build().unwrap()),
         w.clock.now_ms(),
     )
     .unwrap();
     refused_writing_nothing(
         &w,
-        review_swap(&good, Some(serde_json::to_value(other.signed()).unwrap())),
+        with_acceptance_cert(&good, Some(serde_json::to_value(other.signed()).unwrap())),
         app_id,
         "other identity",
     )
@@ -1823,29 +1828,30 @@ async fn test_restore_kept_certificate_without_its_acceptance_refused() {
     .await;
 }
 
-fn review_spec(scopes: &paykit_sdk::RequestedScopes) -> pubky_switch_client::testing::AppSpec {
+/// The app spec a certificate for `scopes` is issued with.
+fn app_spec(scopes: &paykit_sdk::RequestedScopes) -> pubky_switch_client::testing::AppSpec {
     let names: Vec<&str> = scopes.scopes.iter().map(String::as_str).collect();
     pubky_switch_client::testing::AppSpec::new(&names).with_permissions(&scopes.permissions)
 }
 
 #[tokio::test]
 async fn test_restore_acceptance_under_a_certificate_without_pay_refused() {
-    // The author's failure-path case, with the contacts scope's own permissions, so the
-    // certificate verifies and only the sender-scope check can refuse it.
+    // A certificate holding only `contacts`, with that scope's own permissions, so it
+    // verifies and only the check of the sender's scopes can refuse it.
     let w = World::new();
     let (good, app_id) = backup_with_a_payment(&w).await;
     let keys = w.alice.identity().app_keys("wallet");
     let c = pubky_switch_client::testing::issue_cert(
         w.alice.identity().key(),
         &keys,
-        &review_spec(&AppScopes::new().contacts().build().unwrap()),
+        &app_spec(&AppScopes::new().contacts().build().unwrap()),
         w.clock.now_ms(),
     )
     .unwrap();
     paykit_lib::scopes::verify_certificate(c.signed(), &w.alice_id()).expect("verifies");
     refused_writing_nothing(
         &w,
-        review_swap(&good, Some(serde_json::to_value(c.signed()).unwrap())),
+        with_acceptance_cert(&good, Some(serde_json::to_value(c.signed()).unwrap())),
         app_id,
         "contacts verified",
     )
@@ -1856,7 +1862,7 @@ async fn test_restore_acceptance_under_a_certificate_without_pay_refused() {
 async fn test_restore_acceptance_of_another_own_app_refused() {
     // Both the plaintext and the kept certificate replaced by another own app's ("phone",
     // `pay`): a genuine acceptance of the same request, signed by the phone. Only the
-    // App-ID check of 95144b26 refuses it.
+    // App ID check refuses it.
     use pubky_switch_core::message::{Message, MessagePlaintext, Sender};
     let w = World::new();
     let (good, app_id) = backup_with_a_payment(&w).await;
@@ -1864,7 +1870,7 @@ async fn test_restore_acceptance_of_another_own_app_refused() {
     let phone = pubky_switch_client::testing::issue_cert(
         w.alice.identity().key(),
         &keys,
-        &review_spec(&AppScopes::new().pay().build().unwrap()),
+        &app_spec(&AppScopes::new().pay().build().unwrap()),
         w.clock.now_ms(),
     )
     .unwrap();
@@ -1878,7 +1884,6 @@ async fn test_restore_acceptance_of_another_own_app_refused() {
         .unwrap();
     let pt = MessagePlaintext::decode(&pt).unwrap();
     let json: serde_json::Value = serde_json::from_slice(pt.json()).unwrap();
-    println!("{json}");
     let refs = json["refs"]
         .as_array()
         .unwrap()
