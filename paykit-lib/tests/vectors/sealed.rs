@@ -1915,3 +1915,45 @@ fn test_record_transitions_compare_versions_of_one_record() {
     assert!(ended.check_later_history(&swapped).is_err());
     assert!(ended.check_later_write(&swapped).is_err());
 }
+
+#[test]
+fn test_activity_record_receipt_is_of_its_proofs_billing_period() {
+    // A period record with the February period's proof, and a receipt of that proof's attempt
+    // that names another Billing Period: refused for the receipt's period.
+    let keys = Keys::load();
+    let b = bases(&keys);
+    let proof = b.period.proof.clone().unwrap();
+    let paykit_lib::bodies::Body::PaymentProof(p) = proof.body() else {
+        panic!("a proof")
+    };
+    let receipt = |period: Value| {
+        resign_with(&keys, "payment_receipt", |m| {
+            m.refs = vec![proof.hash(), b.period.request_hash.unwrap()];
+            m.body.insert(
+                "attempt_id".into(),
+                serde_json::json!(p.attempt_id.to_text()),
+            );
+            m.body.insert("billing_period".into(), period);
+        })
+    };
+    let february = serde_json::json!({ "ends_at": "2026-03-31T00:00:00.000Z",
+        "starts_at": "2026-02-28T00:00:00.000Z" });
+    let march = serde_json::json!({ "ends_at": "2026-04-30T00:00:00.000Z",
+        "starts_at": "2026-03-31T00:00:00.000Z" });
+    let paid = ActivityRecord {
+        receipt: Some(receipt(february)),
+        ..b.period.clone()
+    };
+    paid.to_json().unwrap();
+    let other_period = ActivityRecord {
+        receipt: Some(receipt(march)),
+        ..b.period.clone()
+    };
+    let error = other_period.to_json().unwrap_err().to_string();
+    assert!(
+        error.contains("the receipt isn't of the stored proof's attempt and Billing Period"),
+        "{error}"
+    );
+    let json = other_period.to_json_unchecked().unwrap();
+    assert!(ActivityRecord::read(&json, &pubky(ALICE), ActivitySide::Payer).is_err());
+}

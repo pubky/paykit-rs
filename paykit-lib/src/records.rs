@@ -730,6 +730,22 @@ impl ActivityRecord {
             )?;
         }
         check_attempted_periods(&self.attempted_periods)?;
+        // Paykit wire 4.11: a receipt confirms the proof's attempt, of the proof's Billing
+        // Period; in the record of a payment without a request, the record's attempt. Checked
+        // before the binding, which would refuse a receipt of another period only as a
+        // message of another period than the record's.
+        let receipt = match self.receipt.as_ref().map(StoredMessage::body) {
+            Some(Body::PaymentReceipt(r)) => Some(r),
+            _ => None,
+        };
+        if let (Some(r), Some(Body::PaymentProof(p))) =
+            (receipt, self.proof.as_ref().map(StoredMessage::body))
+        {
+            ensure(
+                r.attempt_id == p.attempt_id && r.billing_period == p.billing_period,
+                "Paykit wire 4.11: the receipt isn't of the stored proof's attempt and Billing Period",
+            )?;
+        }
         let binding = self.binding()?;
         self.check_members(&binding)?;
         self.check_refs(&binding)?;
@@ -753,20 +769,6 @@ impl ActivityRecord {
             ensure(
                 p.list_version == u.list_version,
                 "Paykit wire 4.10: the proof's list_version isn't the destination's",
-            )?;
-        }
-        // Paykit wire 4.11: a receipt confirms the proof's attempt, of the proof's Billing
-        // Period; in the record of a payment without a request, the record's attempt.
-        let receipt = match self.receipt.as_ref().map(StoredMessage::body) {
-            Some(Body::PaymentReceipt(r)) => Some(r),
-            _ => None,
-        };
-        if let (Some(r), Some(Body::PaymentProof(p))) =
-            (receipt, self.proof.as_ref().map(StoredMessage::body))
-        {
-            ensure(
-                r.attempt_id == p.attempt_id && r.billing_period == p.billing_period,
-                "Paykit wire 4.11: the receipt isn't of the stored proof's attempt and Billing Period",
             )?;
         }
         if let (RecordBinding::Unrequested, Some(a), Some(r)) = (binding, self.attempt_id, receipt)
@@ -951,6 +953,21 @@ impl ActivityRecord {
     /// [`Error::Invalid`] for a record without what its key needs, such as a proof whose
     /// method gives no settlement ID, which isn't credited.
     pub fn natural_key(&self, own: &[u8; 32]) -> Result<Vec<u8>> {
+        self.natural_key_with(own, &crate::derive::settlement_id)
+    }
+
+    /// [`ActivityRecord::natural_key`], with a payee's settlement ID read from its proof's
+    /// `proof` object by `settlement`: the reader of the payment method's rail, so a method
+    /// this crate doesn't know names its settlement too (Paykit wire 1.5).
+    ///
+    /// # Errors
+    ///
+    /// As [`ActivityRecord::natural_key`].
+    pub fn natural_key_with(
+        &self,
+        own: &[u8; 32],
+        settlement: &crate::derive::SettlementIdReader<'_>,
+    ) -> Result<Vec<u8>> {
         let (_, payee) = self.payer_payee(own);
         Ok(match self.binding()? {
             RecordBinding::Request { request_hash } => {
@@ -977,7 +994,7 @@ impl ActivityRecord {
                             "Paykit wire 5.3: a payee's record of a payment without a request holds its proof",
                         );
                     };
-                    let settlement = proof.settlement_id().ok_or_else(|| {
+                    let settlement = settlement(&proof.proof).ok_or_else(|| {
                         Error::Invalid(
                             "Paykit wire 1.5: a proof whose method gives no settlement ID isn't credited".into(),
                         )

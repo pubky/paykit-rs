@@ -12,6 +12,21 @@ categories = ["finance", "cryptography"]
 # Unpublished until the v0.2 spec is frozen (specs/v0.2/README.md).
 publish = false
 
+[features]
+# Test-only: the fake payment rail. No production build enables it; this crate's own tests
+# turn it on through the dev-dependency below.
+test-support = []
+
 [dependencies]
 paykit-lib.workspace = true
+pubky-switch-client.workspace = true
+pubky-switch-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 
+[dev-dependencies]
+paykit-sdk = { path = ".", features = ["test-support"] }
+pubky-switch-client = { workspace = true, features = ["test-support"] }
+pubky-switch-core = { workspace = true, features = ["test-vectors"] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
