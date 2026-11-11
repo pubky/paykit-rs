@@ -1250,3 +1250,23 @@ async fn test_certificate_renewal_reading_more_listing_refused_keeps_the_receive
     assert!(summary.records_unlisted.is_none(), "{summary:?}");
     assert_eq!(wallet.payee_activity().await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn test_certificate_restore_keeps_the_restored_one_as_listed_under() {
+    // A restore's listing covers what the restored certificate reads, so the restore keeps
+    // it as the one listed under: a wider one taken later is seen against it.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let backup = wallet.backup().await.unwrap();
+    drop(wallet);
+    let restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert!(restored.app().protocol_get(b"lc").await.unwrap().is_some());
+}

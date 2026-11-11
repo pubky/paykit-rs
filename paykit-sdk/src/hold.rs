@@ -362,3 +362,47 @@ fn unanswered(error: &PaykitError) -> bool {
 fn local_failure(error: &PaykitError) -> bool {
     matches!(error, PaykitError::Client(client) if matches!(client.unkept(), AppError::Store(_) | AppError::Alarm(_)))
 }
+
+#[cfg(test)]
+mod tests {
+    use pubky_switch_client::error::{ClientError, StoreError, TransportError};
+
+    use super::*;
+
+    fn switch(code: ErrorCode) -> PaykitError {
+        PaykitError::Client(AppError::Switch(ClientError::Switch {
+            status: code.status(),
+            code,
+            message: "scripted".into(),
+            current: serde_json::Value::Null,
+            known_version: None,
+            retry_after: None,
+        }))
+    }
+
+    #[test]
+    fn test_listing_unanswered_as_a_switch_read_counts_it() {
+        let lost = PaykitError::Client(AppError::Transport(TransportError::Connect("down".into())));
+        assert!(unanswered(&lost));
+        assert!(unanswered(&PaykitError::Client(
+            AppError::NotAnsweringAsAccount { since_ms: 1 }
+        )));
+        assert!(unanswered(&PaykitError::Client(AppError::Switch(
+            ClientError::BadServiceSignature { status: 502 }
+        ))));
+        assert!(unanswered(&switch(ErrorCode::RateLimited)));
+        assert!(unanswered(&switch(ErrorCode::Unavailable)));
+        assert!(!unanswered(&switch(ErrorCode::PermissionMissing)));
+    }
+
+    #[test]
+    fn test_listing_failure_of_the_app_own_is_the_store_or_an_alarm() {
+        assert!(local_failure(&PaykitError::Client(AppError::Store(
+            StoreError::Unavailable
+        ))));
+        assert!(!local_failure(&switch(ErrorCode::PermissionMissing)));
+        assert!(!local_failure(&PaykitError::Client(AppError::InvalidData(
+            "bad".into()
+        ))));
+    }
+}
