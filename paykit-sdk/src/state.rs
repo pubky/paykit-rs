@@ -39,6 +39,7 @@
 //! | `rs/<pubky>/<msg_id>` | when a message was last re-sent to a requester | |
 //! | `rsd/<pubky>/<day>` | how many messages were re-sent to a requester that day | |
 
+use paykit_lib::AttemptId;
 use pubky_switch_client::app::LocalWrite;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -241,6 +242,134 @@ pub(crate) mod key {
     }
 }
 
+/// Paykit's local state, closed: every key the SDK writes, as its builder in [`key`] spells
+/// it, parsed back whole. A restore takes only keys that parse here, each value checked
+/// against what its key names (`protocol.rs`, `restore_paykit_layer`); a test checks that
+/// every builder's key parses to its own family, so the two can't drift.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum StateKey {
+    /// `j/<attempt ID>`: a journal entry.
+    Journal(AttemptId),
+    /// `ask/<sender>/<from>`: a `resend_request` to send.
+    Ask { sender: [u8; 32], from_ms: u64 },
+    /// `ans/<seq>/<msg_id>`: a `resend_request` received, to answer.
+    Answer { seq: u64, msg_id: String },
+    /// `missed/<from>`: a `missed` item's re-sends to ask for.
+    Missed { from_ms: u64 },
+    /// `peer/<pubky>`: a counterparty with Paykit activity.
+    Peer([u8; 32]),
+    /// `kc/<record key>`: a payee's cancellation kept to place.
+    KeptCancellation([u8; 32]),
+    /// `ct`: the acceptance time of the last entry the cursor passed.
+    CursorTime,
+    /// `rh`: the hold a restore set.
+    RestoreHold,
+    /// `hc/<record key>`: the user's confirmation of a held request.
+    HoldConfirmed([u8; 32]),
+    /// `lr`: when the lists were last read.
+    ListsRead,
+    /// `lh/<record key>`: a list held over a record that didn't read.
+    HeldList([u8; 32]),
+    /// `side/<msg_id>`: the side of a message the app sent.
+    Side(String),
+    /// `ar/<payee>/<app>`: a payee app's records a reader has seen.
+    SeenRecords { payee: [u8; 32], app_id: [u8; 16] },
+    /// `spam/<sender>`: the messages the spam rule only counted.
+    Spam([u8; 32]),
+    /// `rs/<requester>/<msg_id>`: when a message was re-sent to a requester.
+    Resent { requester: [u8; 32], msg_id: String },
+    /// `rsd/<requester>/<day>`: how many messages were re-sent to a requester that day.
+    ResentDay { requester: [u8; 32], day: u64 },
+}
+
+impl StateKey {
+    /// The family of `key`, read whole and strictly: a base64 member in its one spelling,
+    /// a number as [`num`] writes it, a `msg_id` a lower-case UUID v4. `None` for any key
+    /// the SDK doesn't write.
+    pub(crate) fn parse(key: &[u8]) -> Option<Self> {
+        let text = std::str::from_utf8(key).ok()?;
+        let b64_32 = |s: &str| {
+            pubky_switch_core::enc::unb64_array::<32>(s)
+                .ok()
+                .filter(|bytes| pubky_switch_core::enc::b64(bytes) == s)
+        };
+        let b64_16 = |s: &str| {
+            pubky_switch_core::enc::unb64_array::<16>(s)
+                .ok()
+                .filter(|bytes| pubky_switch_core::enc::b64(bytes) == s)
+        };
+        let number = |s: &str| {
+            (s.len() == 20 && s.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| s.parse::<u64>().ok())
+                .flatten()
+        };
+        let msg_id = |s: &str| {
+            pubky_switch_core::json::check_uuid_v4(s)
+                .is_ok()
+                .then(|| s.to_owned())
+        };
+        Some(match text {
+            "ct" => Self::CursorTime,
+            "rh" => Self::RestoreHold,
+            "lr" => Self::ListsRead,
+            _ => {
+                let (family, rest) = text.split_once('/')?;
+                match family {
+                    "j" => {
+                        let attempt = AttemptId::parse(rest).ok()?;
+                        (attempt.to_text() == rest).then_some(Self::Journal(attempt))?
+                    }
+                    "ask" => {
+                        let (sender, from) = rest.split_once('/')?;
+                        Self::Ask {
+                            sender: b64_32(sender)?,
+                            from_ms: number(from)?,
+                        }
+                    }
+                    "ans" => {
+                        let (seq, id) = rest.split_once('/')?;
+                        Self::Answer {
+                            seq: number(seq)?,
+                            msg_id: msg_id(id)?,
+                        }
+                    }
+                    "missed" => Self::Missed {
+                        from_ms: number(rest)?,
+                    },
+                    "peer" => Self::Peer(b64_32(rest)?),
+                    "kc" => Self::KeptCancellation(b64_32(rest)?),
+                    "hc" => Self::HoldConfirmed(b64_32(rest)?),
+                    "lh" => Self::HeldList(b64_32(rest)?),
+                    "side" => Self::Side(msg_id(rest)?),
+                    "ar" => {
+                        let (payee, app) = rest.split_once('/')?;
+                        Self::SeenRecords {
+                            payee: b64_32(payee)?,
+                            app_id: b64_16(app)?,
+                        }
+                    }
+                    "spam" => Self::Spam(b64_32(rest)?),
+                    "rs" => {
+                        let (requester, id) = rest.split_once('/')?;
+                        Self::Resent {
+                            requester: b64_32(requester)?,
+                            msg_id: msg_id(id)?,
+                        }
+                    }
+                    "rsd" => {
+                        let (requester, day) = rest.split_once('/')?;
+                        Self::ResentDay {
+                            requester: b64_32(requester)?,
+                            day: number(day)?,
+                        }
+                    }
+                    _ => return None,
+                }
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -286,5 +415,84 @@ mod tests {
     fn test_state_numbered_keys_sort() {
         assert!(key::answer(9, "m") < key::answer(10, "m"));
         assert!(key::missed(2) < key::missed(11));
+    }
+
+    #[test]
+    fn test_state_key_every_builder_parses_to_its_family() {
+        let pubky = [3u8; 32];
+        let app = [4u8; 16];
+        let attempt = AttemptId::from_bytes([5; 16]);
+        let id = "123e4567-e89b-42d3-a456-426614174000";
+        let cases: Vec<(String, StateKey)> = vec![
+            (key::journal(&attempt), StateKey::Journal(attempt)),
+            (
+                key::ask(&pubky, 7),
+                StateKey::Ask {
+                    sender: pubky,
+                    from_ms: 7,
+                },
+            ),
+            (
+                key::answer(8, id),
+                StateKey::Answer {
+                    seq: 8,
+                    msg_id: id.into(),
+                },
+            ),
+            (key::missed(9), StateKey::Missed { from_ms: 9 }),
+            (key::peer(&pubky), StateKey::Peer(pubky)),
+            (
+                key::kept_cancellation(&pubky),
+                StateKey::KeptCancellation(pubky),
+            ),
+            (key::CURSOR_TIME.into(), StateKey::CursorTime),
+            (key::RESTORE_HOLD.into(), StateKey::RestoreHold),
+            (key::hold_confirmed(&pubky), StateKey::HoldConfirmed(pubky)),
+            (key::LISTS_READ.into(), StateKey::ListsRead),
+            (key::held_list(&pubky), StateKey::HeldList(pubky)),
+            (key::side(id), StateKey::Side(id.into())),
+            (
+                key::seen_records(&pubky, &app),
+                StateKey::SeenRecords {
+                    payee: pubky,
+                    app_id: app,
+                },
+            ),
+            (key::spam(&pubky), StateKey::Spam(pubky)),
+            (
+                key::resent(&pubky, id),
+                StateKey::Resent {
+                    requester: pubky,
+                    msg_id: id.into(),
+                },
+            ),
+            (
+                key::resent_day(&pubky, 10),
+                StateKey::ResentDay {
+                    requester: pubky,
+                    day: 10,
+                },
+            ),
+        ];
+        for (built, family) in cases {
+            assert_eq!(StateKey::parse(built.as_bytes()), Some(family), "{built}");
+        }
+    }
+
+    #[test]
+    fn test_state_key_refuses_what_no_builder_writes() {
+        for key in [
+            "zz/1",
+            "peer/not-base64",
+            "peer/",
+            "ask/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM/7",
+            "ans/00000000000000000001/not-a-uuid",
+            "missed/1",
+            "j/",
+            "ctx",
+            "side/123E4567-E89B-42D3-A456-426614174000",
+        ] {
+            assert_eq!(StateKey::parse(key.as_bytes()), None, "{key}");
+        }
     }
 }

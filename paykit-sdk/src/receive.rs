@@ -102,6 +102,9 @@ impl From<paykit_lib::Error> for Fail {
 /// A `resend_request` received and still to be answered (`p/ans/<seq>/<msg_id>`).
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct QueuedAnswer {
+    /// The `seq` and `msg_id` it was read at, which its key names.
+    pub(crate) seq: u64,
+    pub(crate) msg_id: String,
     #[serde(with = "serde_b64")]
     pub(crate) requester: [u8; 32],
     pub(crate) cert: SignedDoc,
@@ -192,6 +195,8 @@ pub(crate) fn effect(
                 return Ok(());
             }
             let queued = QueuedAnswer {
+                seq,
+                msg_id: stored.message().msg_id.clone(),
                 requester: sender,
                 cert: stored.cert().signed().clone(),
                 body: stored.message().body.clone(),

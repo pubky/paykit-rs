@@ -1158,11 +1158,20 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
             .unwrap(),
         ),
     );
-    let answer = serde_json::json!({
-        "requester": pubky_switch_core::enc::b64(&w.alice_id()),
-        "cert": request["cert"].clone(),
-        "body": { "msg_ids": [] },
-    });
+    let uuid = "123e4567-e89b-42d3-a456-426614174000";
+    let other_uuid = "223e4567-e89b-42d3-a456-426614174000";
+    let answer_key = format!("ans/00000000000000000001/{uuid}");
+    let answer = |cert: serde_json::Value, body: serde_json::Value, msg_id: &str| {
+        serde_json::json!({
+            "seq": 1,
+            "msg_id": msg_id,
+            "requester": pubky_switch_core::enc::b64(&w.alice_id()),
+            "cert": cert,
+            "body": body,
+        })
+    };
+    let good_body = serde_json::json!({ "msg_ids": [uuid] });
+    let own_cert = good["cert"].clone();
     // A payee app's records seen: a certificate, not a record, and a record of bob's
     // under the key of another of his apps.
     let shop1 = w.bob.identity().app_keys("shop1");
@@ -1180,7 +1189,7 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
         )
     };
     let record_json = serde_json::to_value(record.signed()).unwrap();
-    let cases: [(&str, String, serde_json::Value); 9] = [
+    let cases: [(&str, String, serde_json::Value); 13] = [
         (
             "kept cancellation of another kind",
             key_of("kc/"),
@@ -1198,10 +1207,30 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
         ),
         ("held list under another key", key_of("lh/"), kept(list)),
         (
-            "queued answer",
-            "ans/00000000000000000001/m".into(),
-            kept(answer),
+            "queued answer of another's certificate",
+            answer_key.clone(),
+            kept(answer(request["cert"].clone(), good_body.clone(), uuid)),
         ),
+        (
+            "queued answer with a malformed body",
+            answer_key.clone(),
+            kept(answer(
+                own_cert.clone(),
+                serde_json::json!({ "bogus": 1 }),
+                uuid,
+            )),
+        ),
+        (
+            "queued answer under another key",
+            answer_key.clone(),
+            kept(answer(own_cert.clone(), good_body.clone(), other_uuid)),
+        ),
+        (
+            "malformed key",
+            "peer/not-base64".into(),
+            kept(serde_json::json!(1)),
+        ),
+        ("unknown key", "zz/1".into(), kept(serde_json::json!(1))),
         (
             "seen records holding a certificate",
             seen_key(shop1.app_id_bytes()),
@@ -1233,6 +1262,11 @@ async fn test_restore_layer_state_that_doesnt_verify_or_read_writes_nothing() {
     state.push((
         seen_key(shop1.app_id_bytes()).into_bytes(),
         kept(serde_json::json!({ "records": [record_json] })),
+    ));
+    // A queued answer bound to its key restores too.
+    state.push((
+        answer_key.into_bytes(),
+        kept(answer(own_cert, good_body, uuid)),
     ));
     let backup = with_layer(&good, state);
     let backup = PaykitBackup::from_bytes(&serde_json::to_vec(&backup).unwrap()).unwrap();

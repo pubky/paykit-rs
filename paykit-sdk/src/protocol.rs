@@ -25,7 +25,7 @@
 
 use std::sync::{Arc, PoisonError, RwLock};
 
-use paykit_lib::bodies::{check_body, Body};
+use paykit_lib::bodies::{check_body, Body, ResendRequest};
 use paykit_lib::collections::Collection;
 use paykit_lib::derive::{natural_key, request_obligation_blinded};
 use paykit_lib::kinds::{targets_app, Kind, Role as KindRole, Side, OPAQUE_MEMBERS};
@@ -55,7 +55,7 @@ use crate::journal::JournalEntry;
 use crate::rail::Rail;
 use crate::receive::{self, Fail, QueuedAnswer};
 use crate::records::{list_target, KeptMessage};
-use crate::state::{self, key};
+use crate::state::{self, key, StateKey};
 
 /// The kinds this SDK handles (Paykit wire 4.3): the one-time request flow, payments without
 /// a request, the payer's side of Private Payment Lists and re-sends. Recurring requests,
@@ -275,16 +275,20 @@ pub const BACKUP_NAME: &str = "paykit";
 /// for one obligation, since a payment in progress blocks any other. `Err` names the rule,
 /// without content: nothing is written. Pure: it is called at backup time too.
 ///
+/// The layer's schema is closed (`state::StateKey`): a key no builder of the SDK writes is
+/// refused, every key is parsed whole, and every value is read as its family's and bound
+/// to what its key names.
+///
 /// Every message another party signed that the layer keeps is verified again for `own`, as
 /// its later use verifies it, and bound to the record key it is kept under, from `blind`,
 /// the backup's naming key: a journal entry's request and carrier
 /// ([`JournalEntry::check_restored`]), a kept cancellation (`kc/`), a held list (`lh/`),
-/// a queued `resend_request`'s certificate (`ans/`; its body, which nobody signed here, is
-/// read at its use, which drops one that doesn't read), and a payee app's records seen
-/// (`ar/`, bound to the payee and app its key names). The rest is the app's own data,
-/// read for its shape only: a backup carries the app's signing keys, so whoever can write
-/// one can sign anything the app can, and a check of what the app signed guards against
-/// corruption only.
+/// a queued `resend_request` (`ans/`: the requester's certificate, a `resend_request`'s
+/// body, and the `seq` and `msg_id` its key names), and a payee app's records seen (`ar/`,
+/// bound to the payee and app its key names). The rest is the app's own data, read as its
+/// family's and bound to its key (`ask/`, times and counts, `side/`): a backup carries the
+/// app's signing keys, so whoever can write one can sign anything the app can, and a check
+/// of what the app signed guards against corruption only.
 pub(crate) fn restore_paykit_layer(
     layer: Option<&ProtocolLayer>,
     own: [u8; 32],
@@ -315,37 +319,67 @@ pub(crate) fn restore_paykit_layer(
     let mut writes = Vec::with_capacity(state.len());
     let mut cursor_time_ms = 0;
     for (key, value) in state {
-        // A hold, or a user's confirmation of one, belongs to a restore before: this one
-        // sets its own (`hold.rs`).
-        if key == key::RESTORE_HOLD.as_bytes() || key.starts_with(key::HOLD_CONFIRMED.as_bytes()) {
-            continue;
-        }
-        if key == key::CURSOR_TIME.as_bytes() {
-            cursor_time_ms = state::decode::<u64>(&value)
-                .map_err(|_| String::from("Paykit's cursor time in the backup doesn't read"))?;
-        }
-        if key.starts_with(b"ar/") {
-            check_seen_records(&key, &value)?;
-        } else if key.starts_with(key::KEPT_CANCELLATIONS.as_bytes()) {
-            check_kept_cancellation(&key, &value, &own, &record_key)?;
-        } else if key.starts_with(key::HELD_LISTS.as_bytes()) {
-            check_held_list(&key, &value, &own, &record_key)?;
-        } else if let Some(reads) = shape_of(&key) {
-            // The app's own data, read for its shape: one that doesn't read would fail every
-            // later call that reads it.
-            if !reads(&value) {
-                return Err("Paykit's local state in the backup doesn't read".into());
+        // The schema is closed: a key no builder of the SDK writes is refused, and every
+        // value is read as its family's, bound to what its key names (`state::StateKey`).
+        let Some(family) = StateKey::parse(&key) else {
+            return Err(
+                "Paykit's local state in the backup holds a key the SDK doesn't write".into(),
+            );
+        };
+        let unread = || String::from("Paykit's local state in the backup doesn't read");
+        let attempt = match family {
+            // A hold, or a user's confirmation of one, belongs to a restore before: this one
+            // sets its own (`hold.rs`).
+            StateKey::RestoreHold | StateKey::HoldConfirmed(_) => continue,
+            StateKey::Journal(attempt) => attempt,
+            StateKey::CursorTime => {
+                cursor_time_ms = state::decode::<u64>(&value).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
             }
-        } else if key.starts_with(key::ANSWERS.as_bytes()) {
-            let queued = state::decode::<QueuedAnswer>(&value)
-                .map_err(|_| String::from("a queued resend_request in the backup doesn't read"))?;
-            verify_certificate(&queued.cert, &queued.requester).map_err(|_| {
-                String::from("a queued resend_request's certificate doesn't verify")
-            })?;
-        }
-        let Some(rest) = key.strip_prefix(key::JOURNAL.as_bytes()) else {
-            writes.push(LocalWrite::Put { key, value });
-            continue;
+            StateKey::Ask { sender, from_ms } => {
+                let ask = state::decode::<QueuedAsk>(&value).map_err(|_| unread())?;
+                if ask.sender != sender || ask.from_ms != from_ms {
+                    return Err(unread());
+                }
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::Answer { seq, msg_id } => {
+                check_queued_answer(&value, seq, &msg_id)?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::Missed { .. }
+            | StateKey::Peer(_)
+            | StateKey::Spam(_)
+            | StateKey::Resent { .. }
+            | StateKey::ResentDay { .. }
+            | StateKey::ListsRead => {
+                state::decode::<u64>(&value).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::Side(_) => {
+                state::decode::<SideTag>(&value).map_err(|_| unread())?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::KeptCancellation(_) => {
+                check_kept_cancellation(&key, &value, &own, &record_key)?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::HeldList(_) => {
+                check_held_list(&key, &value, &own, &record_key)?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::SeenRecords { payee, app_id } => {
+                check_seen_records(&value, &payee, &app_id)?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
         };
         let bad = || String::from("Paykit spec 7.2: a journal entry in the backup doesn't read");
         let mut entry = state::decode::<JournalEntry>(&value).map_err(|_| bad())?;
@@ -356,7 +390,7 @@ pub(crate) fn restore_paykit_layer(
         entry
             .check_restored(&own, own_cert, request_obligation)
             .map_err(|_| bad())?;
-        if rest != entry.attempt_id.as_bytes() {
+        if entry.attempt().map_err(|_| bad())? != attempt {
             return Err(bad());
         }
         if entry.open() && !open.insert(entry.obligation) {
@@ -374,51 +408,32 @@ pub(crate) fn restore_paykit_layer(
     Ok(writes)
 }
 
-/// How the app's own data under `key` reads, for the families a later call reads, which
-/// nobody but the app signs: queued asks (`ask/`), times and counts (`missed/`, `peer/`,
-/// `spam/`, `rs/`, `rsd/`, `lr`), and the side of a message it sent (`side/`). `None` for
-/// the families that hold what another party signed, verified otherwise (`j/`, `kc/`,
-/// `lh/`, `ans/`, `ar/`), and for keys no reader reads.
-fn shape_of(key: &[u8]) -> Option<fn(&[u8]) -> bool> {
-    fn reads<T: serde::de::DeserializeOwned>(value: &[u8]) -> bool {
-        state::decode::<T>(value).is_ok()
-    }
-    let prefixed = |prefix: &str| key.starts_with(prefix.as_bytes());
-    if prefixed(key::ASKS) {
-        Some(reads::<QueuedAsk>)
-    } else if prefixed("side/") {
-        Some(reads::<SideTag>)
-    } else if prefixed(key::MISSED)
-        || prefixed(key::PEERS)
-        || prefixed("spam/")
-        || prefixed("rs/")
-        || prefixed("rsd/")
-        || key == key::LISTS_READ.as_bytes()
-    {
-        Some(reads::<u64>)
-    } else {
-        None
-    }
-}
-
 /// A payee app's records a reader has seen (`ar/<payee>/<app>`, Switch spec 4.2): each one
 /// the payee's, as it signed it, of the app the key names. They are the payee's, not the
 /// app's own: one that doesn't verify would fail every later public-endpoint read of that
 /// payee.
-fn check_seen_records(key: &[u8], value: &[u8]) -> Result<(), String> {
+fn check_seen_records(value: &[u8], payee: &[u8; 32], app_id: &[u8; 16]) -> Result<(), String> {
     let bad =
         || String::from("Switch spec 4.2: a payee's seen app records in the backup don't verify");
-    let text = std::str::from_utf8(key).map_err(|_| bad())?;
-    let mut parts = text.strip_prefix("ar/").ok_or_else(bad)?.split('/');
-    let (Some(payee), Some(app), None) = (parts.next(), parts.next(), parts.next()) else {
-        return Err(bad());
-    };
-    let payee = unb64_array::<32>(payee).map_err(|_| bad())?;
-    let app_id = unb64_array::<16>(app).map_err(|_| bad())?;
     let seen = state::decode::<crate::app_records::SeenRecords>(value).map_err(|_| bad())?;
-    if !seen.verifies(&payee, &app_id) {
+    if !seen.verifies(payee, app_id) {
         return Err(bad());
     }
+    Ok(())
+}
+
+/// A `resend_request` received and queued to answer (`ans/<seq>/<msg_id>`, Paykit spec 9):
+/// read at the `seq` and `msg_id` its key names, its body a `resend_request`'s, and its
+/// certificate the requester's.
+fn check_queued_answer(value: &[u8], seq: u64, msg_id: &str) -> Result<(), String> {
+    let bad =
+        || String::from("Paykit spec 9: a queued resend_request in the backup doesn't verify");
+    let queued = state::decode::<QueuedAnswer>(value).map_err(|_| bad())?;
+    if queued.seq != seq || queued.msg_id != msg_id {
+        return Err(bad());
+    }
+    ResendRequest::from_body(&queued.body).map_err(|_| bad())?;
+    verify_certificate(&queued.cert, &queued.requester).map_err(|_| bad())?;
     Ok(())
 }
 
