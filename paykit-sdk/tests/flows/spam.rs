@@ -4,7 +4,7 @@
 //! are read; a message that updates a record the app holds is applied whoever sent it. An
 //! app without `contacts` gates nothing.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use paykit_sdk::{
@@ -284,11 +284,22 @@ async fn test_spam_without_contacts_unknown_lists_gate_nothing() {
     assert_eq!(wallet.spam_count(&w.bob_id()).await.unwrap(), 0);
 }
 
-/// A transport counting the `GET /allow` reads of the lists, every request going through
-/// the world's router.
+/// A transport counting the `GET /allow` reads of the lists, and failing them to connect
+/// while `fail` is set; every other request goes through the world's router.
 struct CountingAllow {
     inner: Arc<Router>,
     reads: AtomicUsize,
+    fail: AtomicBool,
+}
+
+impl CountingAllow {
+    fn new(w: &World) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Arc::clone(&w.router),
+            reads: AtomicUsize::new(0),
+            fail: AtomicBool::new(false),
+        })
+    }
 }
 
 impl Transport for CountingAllow {
@@ -304,23 +315,27 @@ impl Transport for CountingAllow {
     > {
         if request.method == "GET" && request.path_and_query.ends_with("/allow") {
             self.reads.fetch_add(1, Ordering::SeqCst);
+            if self.fail.load(Ordering::SeqCst) {
+                return Box::pin(async {
+                    Err(pubky_switch_client::error::TransportError::Connect(
+                        "the lists can't be read now".into(),
+                    ))
+                });
+            }
         }
         self.inner.send(request)
     }
 }
 
-#[tokio::test]
-async fn test_spam_lists_read_at_most_every_ten_minutes() {
-    let w = World::new();
+/// Alice's wallet holding `contacts`, its lists read at its join, loaded again with its
+/// requests through a counting transport.
+async fn counted_wallet(w: &World) -> (Paykit, Arc<CountingAllow>) {
     let store = store();
-    let joined = contacts_wallet(&w, Arc::clone(&store)).await;
+    let joined = contacts_wallet(w, Arc::clone(&store)).await;
     let app_id = joined.app_id();
     drop(joined);
-    let transport = Arc::new(CountingAllow {
-        inner: Arc::clone(&w.router),
-        reads: AtomicUsize::new(0),
-    });
-    let mut wallet = w
+    let transport = CountingAllow::new(w);
+    let wallet = w
         .load_with_transport(
             &w.alice,
             store,
@@ -328,6 +343,13 @@ async fn test_spam_lists_read_at_most_every_ten_minutes() {
             Arc::clone(&transport) as Arc<dyn Transport>,
         )
         .await;
+    (wallet, transport)
+}
+
+#[tokio::test]
+async fn test_spam_lists_read_at_most_every_ten_minutes() {
+    let w = World::new();
+    let (mut wallet, transport) = counted_wallet(&w).await;
 
     // The join read the lists; within 10 minutes no receive reads them again.
     wallet.receive(None).await.unwrap();
@@ -339,4 +361,30 @@ async fn test_spam_lists_read_at_most_every_ten_minutes() {
     wallet.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert_eq!(transport.reads.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_spam_failed_refresh_of_a_stale_copy_defers_a_request() {
+    // The copy of the lists is past its 10 minutes and its read fails to connect: it may
+    // miss a sender flagged since, so the request waits on the feed until a read succeeds
+    // (Paykit wire 4.1), and the receive itself goes on.
+    let w = World::new();
+    let (mut wallet, transport) = counted_wallet(&w).await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    w.clock.advance_ms(LISTS_REFRESH_MS);
+    transport.fail.store(true, Ordering::SeqCst);
+    let got = wallet.receive(None).await.unwrap();
+    assert!(got.applied.is_empty(), "{got:?}");
+    assert!(wallet.requests().await.unwrap().is_empty());
+    assert_eq!(transport.reads.load(Ordering::SeqCst), 1);
+
+    // The next receive reads the lists: the request opens.
+    transport.fail.store(false, Ordering::SeqCst);
+    let got = wallet.receive(None).await.unwrap();
+    assert_eq!(got.applied.len(), 1, "{got:?}");
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
 }

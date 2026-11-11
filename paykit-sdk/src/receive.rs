@@ -217,9 +217,12 @@ fn note_cursor_time(cx: &mut ReceiveContext<'_>, stored: &StoredMessage) -> Resu
 /// can't read the lists, and gates nothing. At one holding it, a message from a sender the
 /// user blocked or the service flagged is only counted, in the effect's batch; while the
 /// app's copy of the lists isn't known to be complete, the message waits on the feed
-/// ([`Fail::Store`], unavailable for now) until the lists are read, which the client does
-/// at its next read. A failed read of the lists holds the message too: it is never read as
-/// a clean sender.
+/// ([`Fail::Store`], unavailable for now) until the lists are read. The copy isn't known to
+/// be complete when the client says so (`lists_as_of_ms: None`), or when the SDK's due read
+/// of the lists failed ([`key::LISTS_READ`] absent): a copy older than the refresh interval
+/// may miss a flag, and [`Paykit::refresh_lists_when_due`] reads the lists again before the
+/// next read of the feed. A failed store read holds the message too: it is never read as a
+/// clean sender.
 fn admits_new_state(
     cx: &mut ReceiveContext<'_>,
     sender: &[u8; 32],
@@ -228,11 +231,13 @@ fn admits_new_state(
     if !reads_lists(scopes) {
         return Ok(true);
     }
+    let unknown = || Fail::Store(StoreFailure::unavailable(StoreError::Unavailable));
+    if cx.local_get(key::LISTS_READ.as_bytes())?.is_none() {
+        return Err(unknown());
+    }
     let standing = cx.sender_disposition(sender)?;
     if standing.lists_as_of_ms.is_none() {
-        return Err(Fail::Store(StoreFailure::unavailable(
-            StoreError::Unavailable,
-        )));
+        return Err(unknown());
     }
     if !(standing.blocked || standing.flagged) {
         return Ok(true);
@@ -571,11 +576,15 @@ impl Paykit {
     }
 
     /// Read the lists again (`GET /allow`, [`pubky_switch_client::app::App::allow_list`])
-    /// when the last read is [`LISTS_REFRESH_MS`] old or more on the host's clock, at an app
-    /// holding `contacts`, so the flagged senders the spam rule reads stay fresh (Paykit
-    /// wire 4.1). Best effort: a refused or failed read leaves the lists as they were, and
-    /// is tried again at the next receive; a store failure or an alarm is an error. A clock
-    /// that went back reads as due.
+    /// when the last read is [`LISTS_REFRESH_MS`] old or more on the host's clock, or none
+    /// is kept, at an app holding `contacts`, so the flagged senders the spam rule reads stay
+    /// fresh (Paykit wire 4.1). A clock that went back reads as due.
+    ///
+    /// It fails closed: a refused or failed read drops the time of the last one
+    /// ([`key::LISTS_READ`]), so the copy of the lists isn't known to be complete, and the
+    /// receive step defers every message that would create state until a read succeeds, at
+    /// a later receive. Updates to held records still apply meanwhile. A store failure or an
+    /// alarm is an error.
     pub(crate) async fn refresh_lists_when_due(&mut self) -> crate::error::Result<()> {
         if !reads_lists(self.app.cert().scopes()) {
             return Ok(());
@@ -588,6 +597,7 @@ impl Paykit {
         match self.app.allow_list().await {
             Ok(_) => self.local_put(key::LISTS_READ, &now).await,
             Err(error @ (AppError::Alarm(_) | AppError::Store(_))) => Err(error.into()),
+            Err(_) if last.is_some() => self.local_delete(key::LISTS_READ).await,
             Err(_) => Ok(()),
         }
     }
