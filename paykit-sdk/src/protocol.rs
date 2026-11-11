@@ -312,7 +312,8 @@ pub const BACKUP_NAME: &str = "paykit";
 /// Every message another party signed that the layer keeps is verified again for `own`, as
 /// its later use verifies it, and bound to the record key it is kept under, from `blind`,
 /// the backup's naming key: a journal entry's request and carrier
-/// ([`JournalEntry::check_restored`]), a kept cancellation (`kc/`), a held list (`lh/`),
+/// ([`JournalEntry::check_restored`]), a kept cancellation (`kc/`), a kept payer's reply
+/// (`pr/`), a held list (`lh/`),
 /// a queued `resend_request` (`ans/`: the requester's certificate, a `resend_request`'s
 /// body, and the `seq` and `msg_id` its key names), and a payee app's records seen (`ar/`,
 /// bound to the payee and app its key names). The rest is the app's own data, read as its
@@ -452,6 +453,11 @@ pub(crate) fn restore_paykit_layer(
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
+            StateKey::KeptReply { record, msg_id } => {
+                check_kept_reply(&value, &own, record, &msg_id, &record_key)?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
             StateKey::Notice { attempt, kind } => {
                 state::decode::<KeptNotice>(&value)
                     .and_then(|notice| notice.check(&attempt, kind))
@@ -550,6 +556,41 @@ fn check_kept_cancellation(
     let target =
         ActivityTarget::payer(natural_key::request_record(&cancellation.sender(), request));
     if key != key::kept_cancellation(&record_key(&target.record_target())?).as_bytes() {
+        return Err(bad());
+    }
+    Ok(())
+}
+
+/// A payer's reply kept for a request record the app didn't hold yet (`pr/<record
+/// key>/<msg_id>`, Switch spec 8.2): it verifies for `own`, is an acceptance, rejection,
+/// cancellation or proof with the `msg_id` its key names, and is kept under the record key of
+/// the payee's record of the request it names, under its label.
+fn check_kept_reply(
+    value: &[u8],
+    own: &[u8; 32],
+    record: [u8; 32],
+    msg_id: &str,
+    record_key: &impl Fn(&RecordTarget) -> Result<[u8; 32], String>,
+) -> Result<(), String> {
+    let bad = || String::from("Switch spec 8.2: a kept payer's reply in the backup doesn't verify");
+    let kept = state::decode::<KeptMessage>(value).map_err(|_| bad())?;
+    let reply = kept.stored(own).map_err(|_| bad())?;
+    let replies = matches!(
+        reply.body(),
+        Body::PaymentRequestAcceptance(_)
+            | Body::PaymentRequestRejection(_)
+            | Body::PaymentRequestCancellation(_)
+            | Body::PaymentProof(_)
+    );
+    let request = reply.message().refs.first().ok_or_else(bad)?;
+    let target = ActivityTarget::payee(
+        natural_key::request_record(own, request),
+        reply.body().label(),
+    );
+    if !replies
+        || reply.message().msg_id != msg_id
+        || record_key(&target.record_target())? != record
+    {
         return Err(bad());
     }
     Ok(())

@@ -23,6 +23,7 @@ mod receipts;
 mod receive_faults;
 mod recovery;
 mod recurring;
+mod replies;
 mod resend;
 mod restore;
 mod restore_hold;

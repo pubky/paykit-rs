@@ -14,9 +14,10 @@
 //!   it names, by evidence (Switch spec 10.2 row 3), in the same batch: only the payee's yes
 //!   counts (Paykit spec 7.3).
 //! - **payee side** (`request` or a label): the payer's acceptance, rejection, cancellation
-//!   and proof go into the request record under the request's label; a proof of a payment
-//!   without a request into the record of its settlement, so one settlement is credited
-//!   once (Paykit spec 8.4).
+//!   and proof go into the request record under the request's label, or, for a request
+//!   whose record the app doesn't hold yet, are kept until it does (`p/pr/`); a proof of a
+//!   payment without a request into the record of its settlement, so one settlement is
+//!   credited once (Paykit spec 8.4).
 //! - a `resend_request` is kept, with the cursor move, for [`crate::Paykit::receive`] to
 //!   answer (Paykit spec 9): answering sends messages, which no batch carries.
 //!
@@ -394,10 +395,20 @@ fn payer_reply(
         Some(request) => {
             let target =
                 ActivityTarget::payee(natural_key::request_record(&own, request), label.as_ref());
-            // The request's record goes in the batch that queues the request, so it comes
-            // before any reply in the feed: a reply to a request this app holds no record of
-            // isn't about one of its scopes' requests.
+            // A reply to a request this app holds no record of yet, such as one another own
+            // app sent whose record this app hasn't taken yet, is kept until the record is
+            // held, then placed (`Paykit::place_kept_replies`). It is new state, which the
+            // spam rule gates.
             if held_value(cx, &target)?.is_none() {
+                if admits_new_state(cx, &sender, scopes)? {
+                    let kept = key::kept_reply(
+                        &cx.record_key(&target.record_target())?,
+                        &stored.message().msg_id,
+                    );
+                    if cx.local_get(kept.as_bytes())?.is_none() {
+                        keep_local(cx, local(&kept, &KeptMessage::of(stored))?);
+                    }
+                }
                 return Ok(false);
             }
             place(cx, &target, sender, role, stored)?;
@@ -833,6 +844,57 @@ impl Paykit {
                 let _ = self.app.submit_batch(batch).await;
             }
             None => self.local_commit(tx).await?,
+        }
+        Ok(())
+    }
+
+    /// Place the payer's replies kept for requests this app held no record of, each once
+    /// the record is held, as a later write of its own with the kept copy dropped in its
+    /// batch (Switch spec 8.2, Paykit spec 8.1). One whose record doesn't come within
+    /// [`KEPT_REPLY_MS`] of its acceptance, on the highest service time verified, is
+    /// dropped: the payer keeps what it sent that long, and may send it again (Paykit spec
+    /// 9). A placement that fails now is tried again at the next receive.
+    pub(crate) async fn place_kept_replies(&mut self) -> crate::error::Result<()> {
+        let own = self.identity();
+        for (rest, kept) in self.local_scan::<KeptMessage>(key::KEPT_REPLIES).await? {
+            let kept_key = format!("{}{rest}", key::KEPT_REPLIES);
+            let reply = kept.stored(&own)?;
+            let (Some(request), Some(role)) = (
+                reply.message().refs.first(),
+                crate::activity::Role::of(reply.body()),
+            ) else {
+                self.local_delete(&kept_key).await?;
+                continue;
+            };
+            let target = ActivityTarget::payee(
+                natural_key::request_record(&own, request),
+                reply.body().label(),
+            );
+            if self.held_activity(&target).await?.is_none() {
+                let stale = reply.accepted_at().is_none_or(|at| {
+                    self.service_time()
+                        .is_some_and(|t| at.saturating_add(KEPT_REPLY_MS) <= t)
+                });
+                if stale {
+                    self.local_delete(&kept_key).await?;
+                }
+                continue;
+            }
+            let mut tx = Tx::default();
+            tx.delete(&kept_key);
+            let sender = reply.sender();
+            match self
+                .placed_write(&target, sender, role, reply, Vec::new())
+                .await?
+            {
+                Some(entry) => {
+                    let batch = pubky_switch_client::app::OpBatch::new()
+                        .entry(entry)
+                        .locals(tx.into_writes());
+                    let _ = self.app.submit_batch(batch).await;
+                }
+                None => self.local_commit(tx).await?,
+            }
         }
         Ok(())
     }
