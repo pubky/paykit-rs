@@ -1318,3 +1318,41 @@ async fn test_certificate_restore_keeps_the_restored_one_as_listed_under() {
     .unwrap();
     assert!(restored.app().protocol_get(b"lc").await.unwrap().is_some());
 }
+
+#[tokio::test]
+async fn test_certificate_stored_entry_the_app_cant_keep_stays_for_the_host() {
+    // A request's step is refused for good, and the app is renewed without `pay` before
+    // Paykit sees the event: no record of its own takes the request, so the event isn't
+    // taken, and stays for the host.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let me = wallet.app_id();
+    let mut shop = w.shop().await;
+    crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("1", w.clock.now_ms()),
+    )
+    .await;
+    let first = wallet.app().cert().clone();
+    let reduced = renew(&w, me, &AppScopes::new().contacts().build().unwrap(), 1_000);
+    list(&w, me, &first, &reduced);
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            current: serde_json::Value::Null,
+        });
+    let _ = wallet.app_mut().receive(None).await;
+    let _ = wallet.app_mut().receive(None).await;
+    assert_eq!(wallet.app().cert().hash(), reduced.hash());
+    wallet.receive(None).await.unwrap();
+    let events = wallet.app_mut().unacknowledged_events().await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, pubky_switch_client::app::AppEvent::EffectRefused { .. })),
+        "{events:?}"
+    );
+}
