@@ -1797,20 +1797,21 @@ impl ActivityRecord {
     /// "Seen roles", "Seen Allowance" and "Seen marks" (Paykit wire 5.3, Switch spec 8.2): a
     /// reader that holds `self` ignores, and shows with its writer, a later write of the same
     /// record that drops or replaces a message in a role it saw; that drops period details it
-    /// saw, in `period_details` or `earlier_details`, or holds other details as late with
-    /// another hash; that changes or
-    /// drops the `allowance_id` or an entry of `reassociations` it saw, or adds an entry not
-    /// after the last it saw, or at or before a period of the `attempted_periods` it holds;
-    /// that drops a `manual_only` it saw; or that changes or drops the
-    /// `v01_paid` it saw. A later write moves `period_details` only to later details, or, when
-    /// it stores the proof, to the details the proof names: both records are valid, and the
-    /// later keeps every details seen.
+    /// saw, in `period_details` or `earlier_details`; that changes or drops the
+    /// `allowance_id` or an entry of `reassociations` it saw, or adds an entry not after the
+    /// last it saw; that drops a `manual_only` it saw; or that changes or drops the
+    /// `v01_paid` it saw. These hold whatever version the write builds on, so they apply to
+    /// a reader that holds an older one too. A later write moves `period_details` only to
+    /// later details, or, when it stores the proof, to the details the proof names: both
+    /// records are valid, and the later keeps every details seen.
+    ///
+    /// A reader that holds the version the write builds on checks
+    /// [`ActivityRecord::check_later_write_built_on`] instead.
     ///
     /// # Errors
     ///
     /// [`Error::Invalid`] naming the rule `later` breaks.
     pub fn check_later_write(&self, later: &ActivityRecord) -> Result<()> {
-        use std::cmp::Ordering;
         // Records built in code are held to the reader's rules first (Paykit wire 5.3).
         self.check()?;
         later.check()?;
@@ -1830,23 +1831,13 @@ impl ActivityRecord {
             )?;
         }
         // Paykit wire 4.9: each details stays valid until its own expiry, so none replaces
-        // another; details as late as those seen are the same message only by hash, and
-        // others as late are an equivocation, which the record never stores.
+        // another. Other details as late as those seen, an equivocation, can't come beside
+        // them: a valid record holds no two details as late as each other.
         let (seen, now) = (self.details(), later.details());
         ensure(
             seen.iter()
                 .all(|s| now.iter().any(|n| n.hash() == s.hash())),
             "Paykit wire 5.3: a later write drops period details seen",
-        )?;
-        ensure(
-            now.iter().all(|n| {
-                seen.iter().all(|s| {
-                    s.hash() == n.hash()
-                        || crate::bodies::period_details_order(&n.message, &s.message)
-                            != Ordering::Equal
-                })
-            }),
-            "Paykit wire 5.3: a later write holds other period details as late as those seen",
         )?;
         // Where period_details may move follows: a valid record holds the latest details in
         // it unless its proof names others, and a later write keeps every details seen, so
@@ -1863,8 +1854,32 @@ impl ActivityRecord {
             later.reassociations.starts_with(&self.reassociations),
             "Paykit wire 5.3: a later write changes or drops a reassociation seen",
         )?;
-        // A period attempted early stays under the Allowance it was attempted under (Paykit
-        // spec 8.2, 8.3): a new entry starts after every period the version built on lists.
+        ensure(
+            !self.manual_only || later.manual_only,
+            "Paykit wire 5.3: a later write drops the manual_only seen",
+        )?;
+        ensure(
+            self.v01_paid.is_empty() || later.v01_paid == self.v01_paid,
+            "Paykit wire 5.3: a later write changes or drops the v01_paid seen",
+        )
+    }
+
+    /// [`ActivityRecord::check_later_write`] for a reader that holds the version `later`
+    /// builds on, `self`: the write's `expected_version` is the version the reader holds.
+    /// Such a reader also ignores and flags a write that adds a reassociation whose
+    /// `from_period` is at or before a period of `self`'s `attempted_periods`, so a period
+    /// attempted early stays under the Allowance it was attempted under (Paykit spec 8.2,
+    /// 8.3, Paykit wire 5.3 "Seen Allowance").
+    ///
+    /// A reader that holds another version doesn't check that rule: the version the write
+    /// builds on may have dropped a period its own lists, once its attempt ended, and a
+    /// period attempted after the reassociation, early or not, counts under it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Invalid`] naming the rule `later` breaks.
+    pub fn check_later_write_built_on(&self, later: &ActivityRecord) -> Result<()> {
+        self.check_later_write(later)?;
         let added = later.reassociations.get(self.reassociations.len()..);
         ensure(
             added.into_iter().flatten().all(|entry| {
@@ -1873,14 +1888,6 @@ impl ActivityRecord {
                     .all(|start| entry.from_period > *start)
             }),
             "Paykit wire 5.3: a later write adds a reassociation at or before an attempted period",
-        )?;
-        ensure(
-            !self.manual_only || later.manual_only,
-            "Paykit wire 5.3: a later write drops the manual_only seen",
-        )?;
-        ensure(
-            self.v01_paid.is_empty() || later.v01_paid == self.v01_paid,
-            "Paykit wire 5.3: a later write changes or drops the v01_paid seen",
         )
     }
 

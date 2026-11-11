@@ -614,7 +614,8 @@ pub const MAX_V01_USAGE: usize = 64;
 /// An item of a ledger's `totals.v01` (Paykit spec 16, Paykit wire 5.5): `count` payments
 /// v0.1 made under the Allowance, totalling `spent`, made at `at`. It counts as `count` `done`
 /// entries of `spent` in all at `at`, in every limit. Only the migration from v0.1 writes
-/// it, once, and never an executor.
+/// it, once, and never an executor. Items are told apart by their members, so two equal items
+/// keep the members a writer doesn't know of the first ([`UnknownMembers`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct V01Usage {
     /// When the payments were made, in Unix milliseconds.

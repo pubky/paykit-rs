@@ -786,6 +786,11 @@ impl Protocol for PaykitProtocol {
                 let Some(later) = activity::read(Some(value), &own.identity, side) else {
                     return Some("Paykit wire 5.3: an activity record that doesn't read".into());
                 };
+                // The client names the value the app saw, not the version the write builds on,
+                // which may be a later one the app never saw (after a `missed` item it lists
+                // only the latest values). So the app checks as a reader that doesn't hold it:
+                // the seen rules that hold whatever the base, without the reassociation rule
+                // of the version a write builds on (Paykit wire 5.3 "Seen Allowance").
                 held.check_later_write(&later).err().map(|e| e.to_string())
             }
             Collection::PaymentLists => {
@@ -996,6 +1001,53 @@ mod receive_tests {
         let valid = Party::new("bob", "shop", &["request"]);
         assert!(p.receives("paykit.payment_proof", &valid.cert));
         assert!(!p.accepts(&valid.cert).is_empty());
+    }
+
+    #[test]
+    fn test_protocol_record_regression_takes_a_reassociation_on_a_version_it_missed() {
+        use paykit_lib::identifiers::AllowanceId;
+        use paykit_lib::records::Reassociation;
+        let alice = Party::new("alice", "wallet", &["pay"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let p = protocol_of(&alice);
+        let mut body = request_body();
+        body.insert(
+            "recurrence".into(),
+            json!({ "anchor": "2026-01-31T00:00:00.000Z", "every": 1, "unit": "month",
+                "starts_at": "2026-01-31T00:00:00.000Z", "ends_at": null }),
+        );
+        body.insert(
+            "payment_deadline".into(),
+            json!({ "type": "period_start", "seconds": 86_400 }),
+        );
+        let request = bob.message(&alice, "paykit.payment_request", vec![], body);
+        let mut record = activity::empty(ActivitySide::Payer, bob.id());
+        activity::place(&mut record, activity::Role::Request, request);
+        record.allowance_id =
+            Some(AllowanceId::parse("d0efffb7-191b-4709-b6c7-e343af5500b4").unwrap());
+        let period = 1_772_236_800;
+        // The app saw the period attempted early; the version that dropped it, once its
+        // attempt ended, it missed; the write it gets moves the request from that period on.
+        let seen = ActivityRecord {
+            attempted_periods: vec![period],
+            ..record.clone()
+        };
+        let moved = ActivityRecord {
+            reassociations: vec![Reassociation {
+                allowance_id: AllowanceId::parse("55de1f16-1a9e-4504-bc9c-57efc3a2b38c").unwrap(),
+                from_period: period,
+            }],
+            ..record
+        };
+        let (seen, moved) = (seen.to_json().unwrap(), moved.to_json().unwrap());
+        assert_eq!(
+            p.record_regression("payer_activity", &seen, Some(&moved)),
+            None
+        );
+        // Dropping the entry again is a regression.
+        assert!(p
+            .record_regression("payer_activity", &moved, Some(&seen))
+            .is_some());
     }
 
     #[test]

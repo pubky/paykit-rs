@@ -731,14 +731,19 @@ the value, in unrequested and in the stored proof, which its writer keeps; refus
 members where the record's binding, side or request doesn't allow them, period details out \
 of order or held twice, reassociations without allowance_id, naming it first or not \
 strictly ascending, v01_paid of a one-time request other than from 0 to 0 or with ranges \
-that overlap, and an unrequested.amount other than the stored proof's. later_writes holds \
-pairs of versions of one record, the version a reader holds (held) and a later write \
-(value), both of which bind at record_key (wire 5.3 \"Seen Allowance\"): alice's request \
-record of the recurring request with its February period attempted early, and a write that \
-adds a reassociation; accepted, one from a period after every attempted period, which her \
-reader takes; refused, one from the attempted period itself, which it ignores and flags, \
-since a period attempted early stays under the Allowance it was attempted under. reason is \
-paykit-lib's wording, of the first check that refuses it.";
+that overlap, and an unrequested.amount other than the stored proof's; and, last, a period \
+record with manual_only false, which is true or absent. later_writes holds pairs of \
+versions of one record, the version a reader holds (held) and a later write (value), both of \
+which bind at record_key, with built_on_held true when the write builds on the held version \
+(wire 5.3 \"Seen roles\", \"Seen Allowance\", \"Seen marks\"). On alice's request record of \
+the recurring request with its February period attempted early: accepted, a reassociation \
+from a period after every attempted period, and one from that period built on a later \
+version that dropped it, which a reader holding the older version takes; refused, built on \
+the held version, a reassociation from the attempted period and one from before it, since a \
+period attempted early stays under the Allowance it was attempted under. Also refused, \
+whatever the write builds on: a write dropping period details seen only in earlier_details, \
+and one adding a range to the v01_paid seen. reason is paykit-lib's wording, of the first \
+check that refuses it.";
 
 /// Later period details for the February period of the recurring request: messages.json's
 /// `payment_period_details` a day later, under another `msg_id`, signed again by the shop.
@@ -1017,56 +1022,145 @@ fn member_cases(keys: &Keys) -> (Vec<ActivityCase>, Vec<ActivityCase>) {
     (accepted, refused)
 }
 
-/// A later-write case of `activity_records`: its name, the record version a reader holds,
-/// the later write, and the key both sit at.
-type LaterWriteCase = (&'static str, ActivityRecord, ActivityRecord, [u8; 32]);
+/// Refused `activity_records` cases no record a writer builds can hold, appended last: alice's
+/// period record with `manual_only` `false`, which is `true` or absent (wire 5.3).
+fn written_member_cases(keys: &Keys) -> Vec<(&'static str, Vec<u8>, [u8; 32])> {
+    let b = bases(keys);
+    let mut value: Value = serde_json::from_slice(&b.period.to_json().unwrap()).unwrap();
+    value["manual_only"] = serde_json::json!(false);
+    vec![(
+        "manual_only false in a payer's period record",
+        serde_json::to_vec(&value).unwrap(),
+        base_key(keys, &b.period),
+    )]
+}
 
-/// `activity_records`' later writes (wire 5.3 "Seen Allowance"): alice's request record of
-/// the recurring request listing its February period as attempted, early, and a write that
-/// adds a reassociation strictly after it, which her reader takes, or at it, which it
-/// ignores and flags.
+/// A later-write case of `activity_records`: its name, whether the write builds on the
+/// version the reader holds, that version, the later write, and the key both sit at.
+type LaterWriteCase = (&'static str, bool, ActivityRecord, ActivityRecord, [u8; 32]);
+
+/// `activity_records`' later writes (wire 5.3 "Seen roles", "Seen Allowance", "Seen marks"):
+/// alice's request record of the recurring request listing its February period as
+/// attempted, early, and writes that add a reassociation, built on that version or on a later
+/// one that dropped the period; and later writes that drop details seen only in
+/// earlier_details, or add a range to the v01_paid seen.
 fn later_write_cases(keys: &Keys) -> (Vec<LaterWriteCase>, Vec<LaterWriteCase>) {
     use paykit_lib::identifiers::AllowanceId;
-    use paykit_lib::records::Reassociation;
+    use paykit_lib::records::{Reassociation, V01PaidRange};
     let b = bases(keys);
     let other = AllowanceId::parse("55de1f16-1a9e-4504-bc9c-57efc3a2b38c").unwrap();
     let held = ActivityRecord {
         attempted_periods: vec![1_772_236_800],
         ..b.payer_request.clone()
     };
-    let from = |from_period| ActivityRecord {
+    let from = |base: &ActivityRecord, from_period| ActivityRecord {
         reassociations: vec![Reassociation {
             allowance_id: other.clone(),
             from_period,
         }],
-        ..held.clone()
+        ..base.clone()
     };
     let key = base_key(keys, &held);
-    let (after, at) = (from(1_774_915_200), from(1_772_236_800));
+    // Built on the version that dropped the period once its attempt ended.
+    let dropped = b.payer_request.clone();
+    let (period, details) = period_held(keys);
+    let later = later_details(keys);
+    let both = ActivityRecord {
+        period_details: Some(later.clone()),
+        earlier_details: vec![details],
+        ..period.clone()
+    };
+    let without_earlier = with_details(&period, later);
+    let range = |from, to| V01PaidRange { from, to };
+    let paid = ActivityRecord {
+        v01_paid: vec![range(1_769_817_600, 1_769_817_600)],
+        ..b.payer_request.clone()
+    };
+    let paid_more = ActivityRecord {
+        v01_paid: vec![
+            range(1_769_817_600, 1_769_817_600),
+            range(1_772_236_800, 1_772_236_800),
+        ],
+        ..b.payer_request.clone()
+    };
     (
-        vec![(
-            "a reassociation from a period after every attempted period",
-            held.clone(),
-            after,
-            key,
-        )],
-        vec![("a reassociation from an attempted period", held, at, key)],
+        vec![
+            (
+                "a reassociation from a period after every attempted period",
+                true,
+                held.clone(),
+                from(&held, 1_774_915_200),
+                key,
+            ),
+            (
+                "a reassociation from a period the held version lists, built on a later version that dropped it",
+                false,
+                held.clone(),
+                from(&dropped, 1_772_236_800),
+                key,
+            ),
+        ],
+        vec![
+            (
+                "a reassociation from an attempted period",
+                true,
+                held.clone(),
+                from(&held, 1_772_236_800),
+                key,
+            ),
+            (
+                "a reassociation from before an attempted period",
+                true,
+                held.clone(),
+                from(&held, 1_769_817_600),
+                key,
+            ),
+            (
+                "a write dropping period details seen only in earlier_details",
+                false,
+                both.clone(),
+                without_earlier,
+                base_key(keys, &both),
+            ),
+            (
+                "a write adding a range to the v01_paid seen",
+                false,
+                paid,
+                paid_more,
+                key,
+            ),
+        ],
     )
+}
+
+/// The check of a reader that holds `held`: [`ActivityRecord::check_later_write_built_on`]
+/// when the write builds on it, else [`ActivityRecord::check_later_write`].
+fn later_write_check(
+    held: &ActivityRecord,
+    later: &ActivityRecord,
+    built_on_held: bool,
+) -> paykit_lib::Result<()> {
+    if built_on_held {
+        held.check_later_write_built_on(later)
+    } else {
+        held.check_later_write(later)
+    }
 }
 
 /// The later writes, as paykit-lib generates them: each record as its writer writes it, and
 /// the reason its reader ignores a refused write.
 fn later_writes(keys: &Keys) -> Value {
     let (accepted, refused) = later_write_cases(keys);
-    let case = |(name, held, later, key): &LaterWriteCase, taken: bool| -> Value {
+    let case = |(name, built_on_held, held, later, key): &LaterWriteCase, taken: bool| -> Value {
         let mut out = serde_json::json!({
+            "built_on_held": built_on_held,
             "collection": side_collection(held.side),
             "held": String::from_utf8(held.to_json().unwrap()).unwrap(),
             "name": name,
             "record_key": b64(key),
             "value": String::from_utf8(later.to_json().unwrap()).unwrap(),
         });
-        match held.check_later_write(later) {
+        match later_write_check(held, later, *built_on_held) {
             Ok(()) => assert!(taken, "{name}: taken"),
             Err(error) => {
                 assert!(!taken, "{name}: {error}");
@@ -1082,7 +1176,8 @@ fn later_writes(keys: &Keys) -> Value {
 }
 
 /// `activity_records`' later writes: both versions bind at their key, and the reader holding
-/// `held` takes the accepted write and ignores the refused one, for its rule.
+/// `held` takes the accepted write and ignores the refused one, for its rule, checking as a
+/// reader that holds the version the write builds on when `built_on_held` says so.
 fn check_later_writes(keys: &Keys, v: &Value) {
     let m = &v["activity_records"]["later_writes"];
     let (accepted, refused) = later_write_cases(keys);
@@ -1101,7 +1196,8 @@ fn check_later_writes(keys: &Keys, v: &Value) {
                 .unwrap_or_else(|e| panic!("{name}: {member}: {e}"))
             };
             let (held, later) = (bind("held"), bind("value"));
-            match held.check_later_write(&later) {
+            let built_on_held = case["built_on_held"].as_bool().unwrap();
+            match later_write_check(&held, &later, built_on_held) {
                 Ok(()) => assert!(taken, "{name}: taken"),
                 Err(error) => {
                     assert!(!taken, "{name}: {error}");
@@ -1158,6 +1254,18 @@ fn generate(keys: &Keys) {
     }
     refused.extend(evidence_refused.iter().map(|c| write(c, false)));
     refused.extend(member_refused.iter().map(|c| write(c, false)));
+    for (name, value, key) in written_member_cases(keys) {
+        let error = bind_activity(keys, &value, ActivitySide::Payer, &key)
+            .expect_err(name)
+            .to_string();
+        refused.push(serde_json::json!({
+            "collection": "payer_activity",
+            "name": name,
+            "reason": quoted(&error),
+            "record_key": b64(&key),
+            "value": String::from_utf8(value).unwrap(),
+        }));
+    }
     let member = serde_json::json!({
         "accepted": accepted.iter().map(|c| write(c, true)).collect::<Vec<_>>(),
         "description": ACTIVITY_DESCRIPTION,
@@ -1236,6 +1344,7 @@ fn check_activity_records(keys: &Keys, v: &Value) {
             + unauthorized_stored(keys).len()
             + evidence_cases(keys).1.len()
             + member_refused.len()
+            + written_member_cases(keys).len()
     );
     for (list, taken) in [("accepted", true), ("refused", false)] {
         for case in arr(m, list) {
@@ -2709,4 +2818,88 @@ fn test_list_and_allowance_records_keep_unknown_members() {
     let plain = AllowanceRecord::read(value(&accepted[1]), &alice).unwrap();
     assert!(plain.unknown.is_empty());
     assert_eq!(plain.to_json().unwrap(), value(&accepted[1]));
+}
+
+#[test]
+fn test_activity_record_reassociation_on_a_version_the_reader_does_not_hold() {
+    use paykit_lib::identifiers::AllowanceId;
+    use paykit_lib::records::Reassociation;
+    let keys = Keys::load();
+    let b = bases(&keys);
+    let other = AllowanceId::parse("55de1f16-1a9e-4504-bc9c-57efc3a2b38c").unwrap();
+    let period = 1_772_236_800;
+    // The first version lists the period, attempted early; the second drops it once the
+    // attempt ended; the third, built on the second, moves the request from that period on.
+    let first = ActivityRecord {
+        attempted_periods: vec![period],
+        ..b.payer_request.clone()
+    };
+    let second = b.payer_request.clone();
+    let third = ActivityRecord {
+        reassociations: vec![Reassociation {
+            allowance_id: other,
+            from_period: period,
+        }],
+        ..second.clone()
+    };
+    // A reader still holding the first version takes the third: it doesn't hold the version
+    // the third builds on.
+    first.check_later_write(&third).unwrap();
+    // The holder of the second takes it too: the second lists no period.
+    second.check_later_write_built_on(&third).unwrap();
+    // But a write built on the first, which lists the period, may not add it.
+    let error = first
+        .check_later_write_built_on(&third)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("at or before an attempted period"),
+        "{error}"
+    );
+}
+
+#[test]
+fn test_activity_record_seen_rules_hold_for_every_member() {
+    use paykit_lib::records::V01PaidRange;
+    let keys = Keys::load();
+    let b = bases(&keys);
+    // Period details seen only in earlier_details stay.
+    let (held, details) = period_held(&keys);
+    let later = later_details(&keys);
+    let both = ActivityRecord {
+        period_details: Some(later.clone()),
+        earlier_details: vec![details],
+        ..held.clone()
+    };
+    let error = both
+        .check_later_write(&with_details(&held, later))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("drops period details seen"), "{error}");
+    // A range appended to the v01_paid seen changes it.
+    let range = |from, to| V01PaidRange { from, to };
+    let one = ActivityRecord {
+        v01_paid: vec![range(1_769_817_600, 1_769_817_600)],
+        ..b.payer_request.clone()
+    };
+    let two = ActivityRecord {
+        v01_paid: vec![
+            range(1_769_817_600, 1_769_817_600),
+            range(1_772_236_800, 1_772_236_800),
+        ],
+        ..b.payer_request.clone()
+    };
+    let error = one.check_later_write(&two).unwrap_err().to_string();
+    assert!(error.contains("v01_paid"), "{error}");
+    // manual_only is true or absent: false doesn't read.
+    let mut value: Value = serde_json::from_slice(&b.period.to_json().unwrap()).unwrap();
+    value["manual_only"] = serde_json::json!(false);
+    let error = ActivityRecord::read(
+        &serde_json::to_vec(&value).unwrap(),
+        &pubky(ALICE),
+        ActivitySide::Payer,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("manual_only"), "{error}");
 }
