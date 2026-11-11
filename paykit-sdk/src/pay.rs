@@ -817,8 +817,10 @@ impl Paykit {
             Err(refusal @ Refusal::NotCurrent(_)) => return Err(refusal.into()),
             Err(refusal) => return self.fail_attempt(&mut entry, refusal).await,
         };
-        // Starting to pay is journaled before the payment begins (Paykit spec 7.2).
-        self.set_stage(&mut entry, Stage::Paying).await?;
+        // The entry stays `Attempted`, known unsubmitted, through the acceptance's queueing
+        // and the final payment check: either can stop the payment, and a resume then writes
+        // the attempt `failed` rather than taking it as possibly dispatched. `Paying` is
+        // journaled just before the payment method's call ([`Paykit::dispatch`]).
         self.queue_owed_acceptance(&mut entry).await?;
         self.dispatch(entry, doc, by, unconfirmed, Dispatch::First)
             .await
@@ -951,9 +953,11 @@ impl Paykit {
             idempotency_key: attempt_id,
             payment_reference: entry.payment_reference.clone(),
         };
-        // Nothing is submitted unless the final payment check passes; nothing awaits
-        // between it and the payment method's call. Refused, the attempt stays open for a
-        // resume to decide.
+        // Nothing is submitted unless the final payment check passes; between it and the
+        // payment method's call only the journal write of `Paying` awaits, the local commit
+        // that marks the payment as possibly dispatched (Paykit spec 7.2). Held, the attempt
+        // stays open for a resume to decide: a first dispatch is still `Attempted` then,
+        // known unsubmitted, and the resume writes it `failed`.
         match self
             .final_payment_check(&entry, payee, by, confirmed, kind)
             .await?
@@ -972,6 +976,11 @@ impl Paykit {
                     Dispatch::Repeat { .. } => Ok(PayOutcome::Uncertain { attempt_id }),
                 }
             }
+        }
+        // Starting to pay is journaled just before the payment begins (Paykit spec 7.2): from
+        // here on it may be paid. A repeat's entry is `Paying` already.
+        if matches!(kind, Dispatch::First) {
+            self.set_stage(&mut entry, Stage::Paying).await?;
         }
         let outcome = self.rail.pay(payment).await;
         // The acceptance goes out while the payment runs, not awaited (Paykit spec 7.2 step
@@ -1421,8 +1430,8 @@ impl Paykit {
     /// 6. the app may still make the attempt: no alarm or restore question raised meanwhile,
     ///    and for an automatic payment the clocks within the tolerance.
     ///
-    /// Checks 2 to 5 run on the clock after the one await, and none follows them before the
-    /// call. Anything but [`FinalCheck::Pay`]: nothing is paid; a copy past its age is looked
+    /// Checks 2 to 5 run on the clock after the one await, and only the local journal write
+    /// of `Paying` follows them before a first dispatch's call. Anything but [`FinalCheck::Pay`]: nothing is paid; a copy past its age is looked
     /// up again by the next check, at a resume.
     pub(crate) async fn final_payment_check(
         &mut self,
