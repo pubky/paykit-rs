@@ -110,6 +110,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   reached the app as an internal panic error that included the platform error
   text, and a throw from `SdkStateBlobStore` left that SDK handle failing every
   later call with `state_transaction_lock_poisoned`.
+- In the Rust-only SSE-assisted private intake API (`start_private_intake` and
+  `PrivateIntakeSupervisor`), one Linked Peer or pending Encrypted Link
+  Handshake peer with no resolvable Pubky homeserver no longer makes
+  `start_private_intake` fail for every peer, and no longer freezes a running
+  supervisor's peer set while marking every stream `Stale`. That peer reserves
+  no stream, is reported `Stale` in health, and is retried on each topology
+  refresh.
 
 ### Integration
 
