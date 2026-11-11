@@ -1636,7 +1636,7 @@ impl Paykit {
                 // have rejected or cancelled meanwhile, or the payee cancelled; a read that
                 // fails is the error, never taken as the record unchanged. Only then the
                 // deadline, at the answer's service time.
-                if let Some(view) = claim_conflict(&error) {
+                if let Some(view) = claim_conflict(error.unkept()) {
                     self.refuse_claim(&view)?;
                 }
                 let changed = PaykitError::Conflict(
@@ -1650,6 +1650,9 @@ impl Paykit {
                 }
                 return Err(changed);
             }
+            // These two are matched bare: a refusal or a proof that showed another state left
+            // nothing kept. The same wrapped in `Kept` keeps the batch, the attempt in it, so
+            // it goes to the last arm, as a lost answer does.
             Err(AppError::InvalidData(why)) => {
                 // The attempt's proof showed another state: the client wrote it `failed`.
                 self.set_stage(&mut entry, Stage::Finished).await?;
@@ -2144,7 +2147,12 @@ impl Paykit {
         match self.write_outcome(entry, paid, false).await {
             Ok(Written::Done) => {}
             Ok(Written::Held) => return Ok(PayOutcome::RecordHeld { attempt_id }),
-            Err(error) if error.code() == Some(ErrorCode::NotCurrent) => {
+            // A batch the client kept, refused about the caller before it was sent, still goes
+            // once the app is current again: the entry stays, as for any outcome unwritten,
+            // so a refusal of that batch later leaves it for a resume to write again.
+            Err(error)
+                if error.kept_batch().is_none() && error.code() == Some(ErrorCode::NotCurrent) =>
+            {
                 // An app that isn't current can write nothing (Paykit spec 7.3).
                 self.set_stage(entry, Stage::Finished).await?;
                 return Ok(if paid {
@@ -3135,7 +3143,7 @@ impl Paykit {
 /// up), or an answer with a `5xx` status came without the service's signature, as from a
 /// proxy in front of it.
 fn switch_unavailable(error: &AppError) -> bool {
-    match error {
+    match error.unkept() {
         AppError::Transport(_) => true,
         AppError::Switch(pubky_switch_client::error::ClientError::Transport(_)) => true,
         AppError::Switch(pubky_switch_client::error::ClientError::BadServiceSignature {

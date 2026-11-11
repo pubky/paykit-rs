@@ -186,10 +186,22 @@ pub enum PaykitError {
 }
 
 impl PaykitError {
-    /// The switch's error code, when the failure is an answer of the switch.
+    /// The switch's error code, when the failure is an answer of the switch, also one that
+    /// left the call's batch kept ([`AppError::Kept`]).
     pub fn code(&self) -> Option<ErrorCode> {
         match self {
             Self::Client(error) => error.code(),
+            _ => None,
+        }
+    }
+
+    /// The ID of the call's own batch, when the client kept it to send again
+    /// ([`AppError::Kept`]): what it writes and sends goes, the same bytes, at the app's next
+    /// write or read, so the caller doesn't make the call again. `None` when nothing of the
+    /// call was kept.
+    pub fn kept_batch(&self) -> Option<[u8; 16]> {
+        match self {
+            Self::Client(error) => error.kept_batch(),
             _ => None,
         }
     }

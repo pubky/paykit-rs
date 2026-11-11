@@ -659,3 +659,44 @@ async fn test_one_time_request_waits_for_the_payer_to_admit_the_payee() {
     wallet.receive(None).await.unwrap();
     assert_eq!(wallet.requests().await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn test_one_time_request_kept_is_sent_once_by_the_next_write() {
+    // The request's batch can't connect: the client keeps it. The call reports the request
+    // sent and kept, not a failure a host would answer with a second request; the next
+    // flush sends the kept batch, and alice gets one request.
+    let w = World::new();
+    w.alice.switch().keep_passed_entries();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Unreachable {
+            path: "/ops".into(),
+            after: 0,
+        });
+    let sent = shop
+        .send_request(w.alice_id(), draft("1", w.clock.now_ms()))
+        .await
+        .unwrap();
+    assert!(
+        matches!(sent.delivery, MessageDelivery::Kept { .. }),
+        "{:?}",
+        sent.delivery
+    );
+    assert!(shop.message_delivery(&sent.msg_id).await.unwrap().is_none());
+    shop.flush().await.unwrap();
+    assert!(
+        matches!(
+            shop.message_delivery(&sent.msg_id).await.unwrap(),
+            Some(MessageDelivery::Accepted { .. })
+        ),
+        "{:?}",
+        shop.message_delivery(&sent.msg_id).await
+    );
+    wallet.receive(None).await.unwrap();
+    let requests = wallet.requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(Some(requests[0].request), sent.request);
+    assert_eq!(w.alice.switch().entries_from(&w.bob_id()), 1);
+}

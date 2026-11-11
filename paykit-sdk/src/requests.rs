@@ -152,6 +152,14 @@ impl RequestDraft {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MessageDelivery {
+    /// The batch that records and queues it was signed and kept, the switch not answering
+    /// now: it is sent again, the same bytes, at the app's next write or read, and the
+    /// message is queued once it is answered (Switch wire 6.4 step 5). Calling again would
+    /// send a second message.
+    Kept {
+        /// The kept batch's ID.
+        batch_id: [u8; 16],
+    },
     /// In the outbox, to be tried again.
     Queued {
         /// How many times it was tried.
@@ -233,7 +241,7 @@ pub struct SentRequest {
     /// Where the message is.
     pub delivery: MessageDelivery,
     /// The request: its record is written in the batch that queues it, so it is known once
-    /// the call returns.
+    /// the call returns, and written once that batch is answered.
     pub request: Option<RequestRef>,
 }
 
@@ -410,11 +418,10 @@ impl Paykit {
     ///
     /// [`Refusal::ScopeMissing`] without `request` or a label; [`Refusal::Label`];
     /// [`PaykitError::Lib`] with `Validation` for a draft that breaks Paykit wire 4.5; the
-    /// client's errors. After a failure the client keeps a batch for (the network, `429`,
-    /// `503`), this request may still be recorded and sent, by the app's next write: the
-    /// error doesn't say whether the batch was kept, so a second call can send a second
-    /// request. A host that retries reads [`Paykit::payee_activity`] after its next write
-    /// first.
+    /// client's errors, after which nothing of the request was kept and the host may send it
+    /// again. A failure that leaves the request's batch kept (the network, `429`, `503`) is
+    /// no error: the request is reported sent, [`MessageDelivery::Kept`], recorded and
+    /// queued by the app's next write or read, so the host doesn't send a second one.
     pub async fn send_request(&mut self, to: [u8; 32], draft: RequestDraft) -> Result<SentRequest> {
         self.refresh_own()?;
         self.require_payee()?;
@@ -455,7 +462,20 @@ impl Paykit {
             .entry(write)
             .queue(signed)
             .locals(tx.into_writes());
-        self.app.submit_batch(batch).await?;
+        let request = Some(RequestRef {
+            payee: own,
+            request_hash: hash,
+        });
+        if let Err(error) = self.app.submit_batch(batch).await {
+            return match error.kept_batch() {
+                Some(batch_id) => Ok(SentRequest {
+                    msg_id,
+                    delivery: MessageDelivery::Kept { batch_id },
+                    request,
+                }),
+                None => Err(error.into()),
+            };
+        }
         // The request is recorded and queued: a try to deliver it now that fails leaves it
         // queued for the next flush, and the call still reports it sent, so the caller
         // doesn't send a second request.
@@ -470,10 +490,7 @@ impl Paykit {
         Ok(SentRequest {
             msg_id,
             delivery: MessageDelivery::of(delivery),
-            request: Some(RequestRef {
-                payee: own,
-                request_hash: hash,
-            }),
+            request,
         })
     }
 
@@ -1167,7 +1184,7 @@ impl Paykit {
             Ok(msg_id) => msg_id,
             Err(error) => {
                 if let PaykitError::Client(client) = &error {
-                    if let Some(view) = claim_conflict(client) {
+                    if let Some(view) = claim_conflict(client.unkept()) {
                         refuse_on_claim(&view)?;
                     }
                 }

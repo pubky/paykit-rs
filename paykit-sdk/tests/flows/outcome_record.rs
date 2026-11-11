@@ -407,3 +407,72 @@ async fn test_outcome_record_user_done_sends_the_acceptance_still_owed() {
     assert!(!value["response"].is_null(), "{value}");
     assert!(!value["proof"].is_null(), "{value}");
 }
+
+/// Pay `attempt_id` through, with the outcome batch's first try failing as `first` says and
+/// the switch refusing it for good when it is sent again: the resume reports the payment
+/// made and its outcome unwritten.
+async fn outcome_refused_when_sent_again(
+    w: &World,
+    wallet: &mut Paykit,
+    attempt_id: &AttemptId,
+    first: pubky_switch_client::testing::Fault,
+) {
+    w.rail.settle(attempt_id, true);
+    let switch = w.alice.switch();
+    switch.fail_next(first);
+    switch.fail_next(pubky_switch_client::testing::Fault::Error {
+        path: "/ops".into(),
+        code: pubky_switch_core::http::ErrorCode::Conflict,
+        current: serde_json::Value::Null,
+    });
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(
+            resumed.as_slice(),
+            [PayOutcome::PaidOutcomeUnwritten { .. }]
+        ),
+        "{resumed:?}"
+    );
+}
+
+/// The entry is where the refused batch left it, and a resume under `pay` writes the outcome
+/// once: `done`, the acceptance and the proof, paying nothing again.
+async fn outcome_written_again(
+    w: &World,
+    wallet: &mut Paykit,
+    request: &RequestRef,
+    attempt_id: &AttemptId,
+) {
+    assert_eq!(
+        wallet.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::RailPaid
+    );
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [PayOutcome::Paid { .. }]),
+        "{resumed:?}"
+    );
+    assert_eq!(claim_outcome(wallet, attempt_id).await, Outcome::Done);
+    let value = record_value(wallet, request).await.unwrap();
+    assert!(!value["response"].is_null(), "{value}");
+    assert!(!value["proof"].is_null(), "{value}");
+    assert_eq!(w.rail.executions(attempt_id), 1);
+}
+
+#[tokio::test]
+async fn test_outcome_record_kept_after_a_refusal_about_the_caller_stays_unwritten() {
+    // The outcome's batch is signed and kept, and the service time read before its first
+    // send is refused `403 not_current`. The batch still goes once the app is current, so
+    // the entry isn't finished as unreportable: when the switch then refuses the batch for
+    // good, the entry is still there for a resume.
+    let w = World::new();
+    let (mut wallet, _phone, request, attempt_id) = in_flight(&w).await;
+    w.clock.advance_ms(11 * 60_000);
+    let not_current = pubky_switch_client::testing::Fault::Error {
+        path: "/feed".into(),
+        code: pubky_switch_core::http::ErrorCode::NotCurrent,
+        current: serde_json::Value::Null,
+    };
+    outcome_refused_when_sent_again(&w, &mut wallet, &attempt_id, not_current).await;
+    outcome_written_again(&w, &mut wallet, &request, &attempt_id).await;
+}
