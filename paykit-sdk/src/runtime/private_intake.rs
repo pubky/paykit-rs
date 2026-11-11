@@ -2113,27 +2113,49 @@ mod tests {
 
     #[test]
     fn test_private_intake_topology_keeps_covered_peer_homeserver_on_lookup_failure() {
-        let homeserver = pubky::Keypair::random().public_key();
+        let first_homeserver = pubky::Keypair::random().public_key();
+        let second_homeserver = pubky::Keypair::random().public_key();
         let peers = users(2);
-        let current = group_private_intake_peers_by_homeserver(
-            peers
-                .iter()
-                .cloned()
-                .map(|peer| (homeserver.to_string(), homeserver.clone(), peer))
-                .collect(),
-        );
+        let (resolving_peer, failing_peer) = (&peers[0], &peers[1]);
 
-        for failed_lookup in [Ok(None), homeserver_lookup_error()] {
-            let topology = private_intake_topology_from_lookups(
-                vec![
-                    (peers[0].clone(), Ok(Some(homeserver.clone()))),
-                    (peers[1].clone(), failed_lookup),
-                ],
-                &current,
-            );
+        // Groups are ordered by homeserver name, so run both assignments: in
+        // one of them the failing peer's group is not the first group.
+        for (homeserver_a, homeserver_b) in [
+            (&first_homeserver, &second_homeserver),
+            (&second_homeserver, &first_homeserver),
+        ] {
+            let current = group_private_intake_peers_by_homeserver(vec![
+                (
+                    homeserver_a.to_string(),
+                    homeserver_a.clone(),
+                    resolving_peer.clone(),
+                ),
+                (
+                    homeserver_b.to_string(),
+                    homeserver_b.clone(),
+                    failing_peer.clone(),
+                ),
+            ]);
 
-            assert!(topology.groups == current);
-            assert!(topology.unresolved.is_empty());
+            for failed_lookup in [Ok(None), homeserver_lookup_error()] {
+                let topology = private_intake_topology_from_lookups(
+                    vec![
+                        (resolving_peer.clone(), Ok(Some(homeserver_a.clone()))),
+                        (failing_peer.clone(), failed_lookup),
+                    ],
+                    &current,
+                );
+
+                assert!(topology.groups == current);
+                assert!(topology.unresolved.is_empty());
+                let failing_group = topology
+                    .groups
+                    .iter()
+                    .find(|group| group.peers.contains(failing_peer))
+                    .expect("failing peer keeps a stream");
+                assert_eq!(failing_group.homeserver_name, homeserver_b.to_string());
+                assert!(!failing_group.peers.contains(resolving_peer));
+            }
         }
     }
 
