@@ -471,11 +471,13 @@ impl JournalEntry {
 
     /// The acceptance this app signed, as its own message to the payee, under the certificate
     /// it was signed under ([`JournalEntry::acceptance_cert`]), or `current` for an entry
-    /// that kept none. A kept certificate must be one of this app's, issued by the acceptance
-    /// and not expired at it: a later renewal, revocation of a scope or key-preserving change
-    /// never refuses an acceptance its certificate authorized, and one no certificate of
-    /// this app authorized is still refused (the sender's scopes are checked as at any
-    /// reader, Paykit wire 5.2). `None` when the entry keeps no acceptance.
+    /// that kept none. It is read as any reader reads a stored message
+    /// ([`StoredMessage::new`], Paykit wire 5.2: the certificate verified for this identity,
+    /// its App ID the plaintext's, the signature, and the sender's scopes); a kept
+    /// certificate must also be this app's own. So a later renewal, revocation of a scope or
+    /// key-preserving change never refuses an acceptance its certificate authorized, and one
+    /// no certificate of this app authorized is still refused. `None` when the entry keeps
+    /// no acceptance.
     pub(crate) fn acceptance_message(
         &self,
         own: &[u8; 32],
@@ -487,15 +489,10 @@ impl JournalEntry {
         let plaintext = MessagePlaintext::decode(bytes).map_err(|_| PaykitError::corrupt())?;
         let cert = self.acceptance_cert.as_ref().unwrap_or(current.signed());
         let stored = StoredMessage::new(*own, cert, plaintext, None, &self.payee)?;
-        if self.acceptance_cert.is_some() {
-            let signed_under = paykit_lib::scopes::verify_certificate(cert, own)?;
-            let at = stored.message().created_at_ms;
-            if signed_under.app_id() != current.app_id()
-                || signed_under.issued_at() > at
-                || signed_under.expired_at(at)
-            {
-                return Err(PaykitError::corrupt());
-            }
+        // Not another own app's acceptance: the plaintext names the certificate's App ID,
+        // which must be this app's.
+        if stored.message().from.app_id != current.app_id() {
+            return Err(PaykitError::corrupt());
         }
         Ok(Some(stored))
     }

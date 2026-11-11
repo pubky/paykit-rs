@@ -482,3 +482,51 @@ async fn test_certificate_renewal_dropping_pay_keeps_a_dispatched_payment() {
     assert!(!value["proof"].is_null(), "{value}");
     assert_eq!(w.rail.executions(&attempt_id), 1);
 }
+
+#[tokio::test]
+async fn test_certificate_issued_ahead_of_the_apps_clock_keeps_its_acceptance_backed_up() {
+    // The signer's clock runs ahead of the app's: a renewal is issued a minute "later" than
+    // the app's clock reads, and the app signs an acceptance under it at once. No reader
+    // judges a certificate by its issue time, so neither does the journal: the backup takes
+    // the payment.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let me = wallet.app_id();
+    let old = wallet.app().cert().clone();
+    let ahead = renew(&w, me, &AppScopes::new().pay().build().unwrap(), 60_000);
+    let _ = wallet.receive(None).await;
+    list(&w, me, &old, &ahead);
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), ahead.hash());
+    let mut shop = w.shop().await;
+    let request = crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("1", w.clock.now_ms()),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    let paid = wallet
+        .pay_request(&request, paykit_sdk::PayOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        matches!(paid, paykit_sdk::PayOutcome::Paid { .. }),
+        "{paid:?}"
+    );
+    assert!(ahead.issued_at() > w.clock.now_ms());
+    let backup = wallet.backup().await.unwrap();
+    let restored = Paykit::restore(
+        w.env(&w.alice, store()),
+        PaykitConfig::default(),
+        &backup,
+        Arc::clone(&w.rail) as Arc<dyn Rail>,
+        w.timer(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        restored.payments().await.unwrap()[0].stage,
+        paykit_sdk::Stage::Finished
+    );
+}
