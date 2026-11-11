@@ -538,3 +538,31 @@ async fn test_unrequested_with_the_own_switch_down_refused_and_nothing_paid() {
     assert!(w.rail.all_executions().is_empty());
     assert!(wallet.payments().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn test_unrequested_with_the_own_switch_unavailable_refused_and_nothing_paid() {
+    // The switch answers `503 unavailable`: the same refusal as one that doesn't answer.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
+        .await;
+    wallet.receive(None).await.unwrap();
+    w.alice
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "claims".into(),
+            code: pubky_switch_core::http::ErrorCode::Unavailable,
+            current: serde_json::Value::Null,
+        });
+    let refused = wallet
+        .pay_without_request(to_bob(&w, "0.0015", "btc-lightning-bolt12"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.refusal(), Some(Refusal::SwitchUnavailable(_))),
+        "{refused:?}"
+    );
+    assert!(w.rail.all_executions().is_empty());
+    assert!(wallet.payments().await.unwrap().is_empty());
+}

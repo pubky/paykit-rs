@@ -703,8 +703,12 @@ impl Paykit {
     pub(crate) async fn place_held_lists(&mut self) -> crate::error::Result<()> {
         for (rest, kept) in self.local_scan::<KeptMessage>(key::HELD_LISTS).await? {
             // One that can't be placed now stays held, for the next receive; the others are
-            // still placed, and the receive goes on.
-            let _ = self.place_held_list(&rest, &kept).await;
+            // still placed, and the receive goes on. A held list that doesn't read or isn't
+            // at its own record's key is a corrupt store, which is surfaced.
+            match self.place_held_list(&rest, &kept).await {
+                Err(error) if error == crate::error::PaykitError::corrupt() => return Err(error),
+                _ => {}
+            }
         }
         Ok(())
     }

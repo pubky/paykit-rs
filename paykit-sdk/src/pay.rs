@@ -471,15 +471,13 @@ impl Paykit {
         // switch that doesn't answer refuses the payment, nothing written or paid. The read
         // also makes the service time current.
         let obligation = payment_obligation(&attempt_id);
-        self.app
-            .read_claim(&obligation)
-            .await
-            .map_err(|error| match error {
-                AppError::Transport(why) => {
-                    PaykitError::from(Refusal::SwitchUnavailable(why.to_string()))
-                }
-                other => other.into(),
-            })?;
+        self.app.read_claim(&obligation).await.map_err(|error| {
+            if switch_unavailable(&error) {
+                PaykitError::from(Refusal::SwitchUnavailable(error.to_string()))
+            } else {
+                error.into()
+            }
+        })?;
         // 10 minutes after the latest service time the app has seen (Paykit spec 8.4),
         // which a recent read makes current (Switch spec 10.1).
         let seen = self.recent_service_time(&obligation).await?;
@@ -2140,5 +2138,23 @@ impl Paykit {
             );
         }
         Ok(())
+    }
+}
+
+/// Whether `error` says the own switch doesn't answer now: the request or its answer was
+/// lost, the switch answered `503` (`unavailable`, or `staged` while its account is set
+/// up), or an answer with a `5xx` status came without the service's signature, as from a
+/// proxy in front of it.
+fn switch_unavailable(error: &AppError) -> bool {
+    match error {
+        AppError::Transport(_) => true,
+        AppError::Switch(pubky_switch_client::error::ClientError::Transport(_)) => true,
+        AppError::Switch(pubky_switch_client::error::ClientError::BadServiceSignature {
+            status,
+        }) => *status >= 500,
+        other => matches!(
+            other.code(),
+            Some(ErrorCode::Unavailable | ErrorCode::Staged)
+        ),
     }
 }
