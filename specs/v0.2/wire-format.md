@@ -811,7 +811,7 @@ A reader that holds the version a write was built on (its `expected_version`) ch
 
 **Seen roles** (Switch spec 8.2): a record holds one message per role, so a reader that has seen a message in a role ignores, and shows with its writer, a later write that drops or replaces it. Period details it saw, in `period_details` or `earlier_details`, stay in one of them: a later write that drops one, or holds other details as late with another hash, is ignored the same way. A write may move `period_details` only to later details, except the write that stores the proof, which sets it to the details the proof names. A delete isn't such a write (spec 6), but the reader keeps what it saw, so a later write that brings the record back without it is one.
 
-The prototype writes every member of an activity record, with `null` for an absent one, as the example shows, except `allowance_id`, which it leaves out when absent, and `attempted_periods`, which it leaves out when empty; readers treat `null` like a missing member (Conventions).
+The prototype writes every member of an activity record, with `null` for an absent one, as the example shows, except `allowance_id`, which it leaves out when absent, `attempted_periods`, `earlier_details` and `reassociations`, which it leaves out when empty, and `manual_only`, which it leaves out when false; readers treat `null` like a missing member (Conventions).
 
 Example (alice's `payer_activity` record of bob's request, certificate and plaintext cut short):
 
