@@ -891,7 +891,7 @@ impl Paykit {
     /// [`PaykitError::Conflict`] as above; the client's errors.
     pub async fn repair_activity_record(&mut self, attempt_id: &AttemptId) -> Result<PayOutcome> {
         self.refresh_own()?;
-        self.records_known().await?;
+        self.records_known_for_payments_made().await?;
         self.require_pay()?;
         let mut entry = self
             .journal()
@@ -2498,7 +2498,7 @@ impl Paykit {
     /// isn't confirmed in the last 60 s; the client's errors; the rail's errors.
     pub async fn resume_payments(&mut self) -> Result<Vec<PayOutcome>> {
         self.refresh_own()?;
-        self.records_known().await?;
+        self.records_known_for_payments_made().await?;
         // Batches kept from before go first, so the claim read below shows those sent and
         // the journal holds what their answers settled. One the client still can't send
         // stays kept: its attempt isn't on the claim yet, so its entry is left `Recorded`

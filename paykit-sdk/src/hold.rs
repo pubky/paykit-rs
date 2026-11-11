@@ -187,10 +187,9 @@ impl Paykit {
     /// never "gone". Any other failure (a store failure, an alarm, the switch's refusal for
     /// good) is that error: the call is refused all the same.
     pub(crate) async fn records_known(&mut self) -> Result<()> {
-        match self.unlisted().await? {
-            None => return Ok(()),
-            Some(Unlisted::Certificate) if !self.holds_scope_keys() => return Err(unlisted()),
-            Some(_) => {}
+        self.refuse_while_scope_keys_missing().await?;
+        if self.unlisted().await?.is_none() {
+            return Ok(());
         }
         self.list_records().await.map_err(|error| {
             if unanswered(&error) {
@@ -201,16 +200,44 @@ impl Paykit {
         })
     }
 
+    /// Refused as not now while a wider certificate's scope keys are still missing: the
+    /// records it adds can't be listed yet, and a call that acts on what they hold waits.
+    pub(crate) async fn refuse_while_scope_keys_missing(&self) -> Result<()> {
+        if self.unlisted().await? == Some(Unlisted::Certificate) && !self.holds_scope_keys() {
+            return Err(unlisted());
+        }
+        Ok(())
+    }
+
+    /// The shared records known as far as a payment already dispatched needs them: its
+    /// resume, its outcome and the user's resolution of its attempt go on while a wider
+    /// certificate's scope keys are still missing, on the copy the app holds, rather than
+    /// wait with the new calls ([`Paykit::records_known`]). That copy holds every record
+    /// the certificate the payment was made under read, and each write is built on the
+    /// version held, so a record a wider certificate adds and the copy lacks gives a `409
+    /// conflict` and a read again, never a write over it. Otherwise as
+    /// [`Paykit::records_known`].
+    pub(crate) async fn records_known_for_payments_made(&mut self) -> Result<()> {
+        if self.unlisted().await? == Some(Unlisted::Certificate) && !self.holds_scope_keys() {
+            return Ok(());
+        }
+        self.records_known().await
+    }
+
     /// List every collection the app's certificate reads, then clear the restore's mark and
     /// keep that certificate as the one listed under, in one commit: a crash before it
-    /// leaves the records to be listed again. Only a receive takes a certificate, so none
-    /// is taken during the listing.
+    /// leaves the records to be listed again. A listing made before the certificate's scope
+    /// keys are held keeps values the app can't open, so it isn't kept as one under that
+    /// certificate. Only a receive takes a certificate, so none is taken during the listing.
     pub(crate) async fn list_records(&mut self) -> Result<()> {
         let signed = self.app.cert().signed().clone();
+        let keys = self.holds_scope_keys();
         self.app.list_collections().await?;
         let mut tx = Tx::default();
         tx.delete(key::RECORDS_UNLISTED);
-        tx.put(key::LISTED_CERT, &signed)?;
+        if keys {
+            tx.put(key::LISTED_CERT, &signed)?;
+        }
         self.local_commit(tx).await
     }
 

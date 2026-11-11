@@ -1270,3 +1270,122 @@ async fn test_certificate_restore_keeps_the_restored_one_as_listed_under() {
     .unwrap();
     assert!(restored.app().protocol_get(b"lc").await.unwrap().is_some());
 }
+
+/// A payment in flight, its method hanging, when the wallet takes a certificate renewed to
+/// read `request` too, whose scope keys no bundle brings: the records stay unlisted, and
+/// can't be listed until the keys come. Returns the wallet, the shop, the request paid and a
+/// second request, and the attempt.
+async fn in_flight_under_a_wider_certificate_without_keys(
+    w: &World,
+) -> (
+    Paykit,
+    Paykit,
+    paykit_sdk::RequestRef,
+    paykit_sdk::RequestRef,
+    paykit_lib::AttemptId,
+) {
+    let mut wallet = w.wallet("wallet").await;
+    let me = wallet.app_id();
+    let mut shop = w.shop().await;
+    let paid = crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("1", w.clock.now_ms()),
+    )
+    .await;
+    let other = crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("2", w.clock.now_ms()),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&paid, paykit_sdk::PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("in flight");
+    };
+    let old = wallet.app().cert().clone();
+    let wider = renew(
+        w,
+        me,
+        &AppScopes::new().pay().request().build().unwrap(),
+        1_000,
+    );
+    wallet.receive(None).await.unwrap();
+    list(w, me, &old, &wider);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert_eq!(wallet.app().cert().hash(), wider.hash());
+    (wallet, shop, paid, other, attempt_id)
+}
+
+#[tokio::test]
+async fn test_certificate_wider_without_keys_lets_a_dispatched_payment_finish() {
+    // The method then completes: the resume writes the outcome and sends the proof once,
+    // without waiting for the keys of the scope the payment doesn't use.
+    let w = World::new();
+    let (mut wallet, _shop, paid, _other, attempt_id) =
+        in_flight_under_a_wider_certificate_without_keys(&w).await;
+    let unlisted = wallet.payee_activity().await.unwrap_err();
+    assert!(is_not_now(&unlisted), "{unlisted:?}");
+    w.rail.settle(&attempt_id, true);
+    let resumed = wallet.resume_payments().await.unwrap();
+    let [paykit_sdk::PayOutcome::Paid {
+        proof_msg_id: Some(proof),
+        ..
+    }] = resumed.as_slice()
+    else {
+        panic!("{resumed:?}");
+    };
+    assert!(
+        matches!(
+            wallet.message_delivery(proof).await.unwrap(),
+            Some(paykit_sdk::MessageDelivery::Accepted { .. })
+        ),
+        "{:?}",
+        wallet.message_delivery(proof).await
+    );
+    // The acceptance, released at the dispatch, and the proof: each once.
+    assert_eq!(w.bob.switch().entries_from(&w.alice_id()), 2);
+    assert_eq!(
+        claim_done(&mut wallet).await,
+        pubky_switch_core::claims::Outcome::Done
+    );
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+    // The records the wider certificate adds are still unlisted.
+    let unlisted = wallet.request(&paid).await.unwrap_err();
+    assert!(is_not_now(&unlisted), "{unlisted:?}");
+}
+
+/// The outcome of the wallet's one payment's attempt on its claim, read from the switch.
+async fn claim_done(wallet: &mut Paykit) -> pubky_switch_core::claims::Outcome {
+    let obligation = wallet.payments().await.unwrap()[0].obligation;
+    let read = wallet
+        .app_mut()
+        .read_claim(&obligation)
+        .await
+        .unwrap()
+        .unwrap();
+    read.view.attempts[0].outcome
+}
+
+#[tokio::test]
+async fn test_certificate_wider_without_keys_holds_a_new_payment_and_a_reconcile() {
+    // A new payment waits for the keys, as a reconcile does: its payer pass reads the
+    // obligations from records a listing can't open yet.
+    let w = World::new();
+    let (mut wallet, _shop, _paid, other, _attempt_id) =
+        in_flight_under_a_wider_certificate_without_keys(&w).await;
+    let refused = wallet
+        .pay_request(&other, paykit_sdk::PayOptions::default())
+        .await
+        .unwrap_err();
+    assert!(is_not_now(&refused), "{refused:?}");
+    let refused = wallet.reconcile().await.unwrap_err();
+    assert!(is_not_now(&refused), "{refused:?}");
+    assert_eq!(w.rail.all_executions().len(), 1);
+}

@@ -153,9 +153,14 @@ impl Paykit {
     ///
     /// # Errors
     ///
-    /// The client's errors; the rail's errors.
+    /// The client's errors; the rail's errors; [`crate::Refusal::NotNow`] while a wider
+    /// certificate's scope keys are still missing: its payer pass reads the obligations from
+    /// the records, and a listing before the keys can't open the records they add, so the
+    /// pass would miss them. [`Paykit::resume_payments`] still finishes the payments already
+    /// dispatched meanwhile.
     pub async fn reconcile(&mut self) -> Result<ReconcileReport> {
         self.refresh_own()?;
+        self.refuse_while_scope_keys_missing().await?;
         self.list_records().await?;
         // After a restore, the counterparties of the open requests the records now show are
         // asked to re-send from the backup's cursor time, once (`hold.rs`, Paykit spec 7.2);
@@ -437,7 +442,7 @@ impl Paykit {
         _confirmed: UserConfirmed,
     ) -> Result<()> {
         self.refresh_own()?;
-        self.records_known().await?;
+        self.records_known_for_payments_made().await?;
         let read = self
             .app
             .read_claim(obligation)
