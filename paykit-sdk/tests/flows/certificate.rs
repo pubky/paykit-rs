@@ -405,6 +405,54 @@ async fn test_certificate_renewal_dropping_pay_keeps_finished_payments_backed_up
 }
 
 #[tokio::test]
+async fn test_certificate_renewal_dropping_pay_raises_a_notice_for_a_held_payment() {
+    // A payment in flight when the app is renewed without `pay` waits, and the host is told
+    // why, once: a later resume raises nothing new, and an acknowledged notice stays so.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let me = wallet.app_id();
+    let mut shop = w.shop().await;
+    let request = crate::common::request_from(
+        &mut shop,
+        w.alice_id(),
+        crate::common::draft("1", w.clock.now_ms()),
+    )
+    .await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, paykit_sdk::PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("in flight");
+    };
+    // Under `pay`, a payment in flight raises no notice.
+    wallet.resume_payments().await.unwrap();
+    assert!(wallet.notices().await.unwrap().is_empty());
+    let first = wallet.app().cert().clone();
+    let reduced = renew(&w, me, &AppScopes::new().contacts().build().unwrap(), 1_000);
+    let _ = wallet.receive(None).await;
+    list(&w, me, &first, &reduced);
+    wallet.receive(None).await.unwrap();
+    let resumed = wallet.resume_payments().await.unwrap();
+    assert!(
+        matches!(resumed.as_slice(), [paykit_sdk::PayOutcome::Pending { .. }]),
+        "{resumed:?}"
+    );
+    let notices = wallet.notices().await.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, paykit_sdk::NoticeKind::HeldWithoutPay);
+    assert_eq!(notices[0].attempt_id, attempt_id);
+    assert_eq!(notices[0].request_hash, Some(request.request_hash));
+    wallet.resume_payments().await.unwrap();
+    assert_eq!(wallet.notices().await.unwrap(), notices);
+    wallet.acknowledge_notice(&notices[0].id).await.unwrap();
+    wallet.resume_payments().await.unwrap();
+    assert!(wallet.notices().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn test_certificate_renewal_dropping_pay_keeps_a_dispatched_payment() {
     // The payment is in flight, its acceptance released, when the app is renewed to
     // `contacts`. Without `pay` the app can neither write nor read payer records, so its

@@ -44,6 +44,7 @@ mod error;
 mod hold;
 mod journal;
 mod kept;
+mod notices;
 mod pay;
 mod paykit;
 mod protocol;
@@ -63,6 +64,7 @@ pub use approval::{AppScopes, RequestedScopes};
 pub use destination::IDENTITY_GRACE_MS;
 pub use error::{PaykitError, Refusal, Result};
 pub use journal::{PaymentView, Stage};
+pub use notices::{Notice, NoticeKind};
 pub use pay::{
     PayOptions, PayOutcome, PaymentDoubt, PaymentMode, TransferQuote, UnrequestedPayment,
     UNREQUESTED_DEADLINE_MS,

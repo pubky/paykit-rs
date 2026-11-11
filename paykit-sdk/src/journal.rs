@@ -295,6 +295,13 @@ pub(crate) struct JournalEntry {
     /// kept before it was journaled, held to the app's cap now.
     #[serde(default)]
     pub(crate) transfer_bound: Option<TransferBound>,
+    /// The payment method reported the dispatch failed, `failed` was written on the claim,
+    /// and the method's history later showed it paid: its proof went, and `failed` stands on
+    /// the claim until the payee's receipt settles it by evidence. A receipt that comes once
+    /// the claim is gone raises [`crate::NoticeKind::PaidAfterFailed`] (Paykit spec 7.2,
+    /// "What a payment method declares").
+    #[serde(default)]
+    pub(crate) failed_on_claim: bool,
 }
 
 impl std::fmt::Debug for JournalEntry {
@@ -341,7 +348,8 @@ impl JournalEntry {
     ///   proof message; a `Finished` entry marked failed by the method holds no proof;
     /// - at most one carrier, which reads; the attempt's proof, when kept, reads;
     /// - a kept request only in a payment of a request, and it reads; an outcome held for
-    ///   its record only once paid by the method.
+    ///   its record, and a payment made after `failed` was written, only once paid by the
+    ///   method.
     pub(crate) fn check(&self) -> Result<()> {
         let bad = || Err(PaykitError::corrupt());
         let attempt = self.attempt()?;
@@ -391,7 +399,7 @@ impl JournalEntry {
             }
             kept.check_shape()?;
         }
-        if self.record_held && self.rail_proof.is_none() {
+        if (self.record_held || self.failed_on_claim) && self.rail_proof.is_none() {
             return bad();
         }
         // Owed: a proof, and an acceptance to queue or to place. One queued and not yet

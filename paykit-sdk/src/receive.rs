@@ -43,7 +43,7 @@ use pubky_switch_client::app::{
     RecordContent, Refusal as ClientRefusal, StoreFailure,
 };
 use pubky_switch_client::error::StoreError;
-use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome};
+use pubky_switch_core::claims::{Basis, ClaimStatus, Outcome, RECONCILIATION_MS};
 use pubky_switch_core::enc::serde_b64;
 use pubky_switch_core::scopes::Permission;
 use pubky_switch_core::sig::SignedDoc;
@@ -52,6 +52,7 @@ use serde_json::{Map, Value};
 
 use crate::activity::{self, ActivityTarget, Role};
 use crate::journal::JournalEntry;
+use crate::notices::{KeptNotice, NoticeKind};
 use crate::paykit::Paykit;
 use crate::protocol::writes_payee_label;
 use crate::records::{list_target, KeptMessage};
@@ -428,7 +429,9 @@ fn payer_reply(
 
 /// A receipt (Paykit spec 7.3, 8.4): stored in the payer's record and, in the same batch,
 /// the attempt it names settled by evidence when it is open, unknown or failed and the
-/// claim isn't SETTLED (Switch spec 10.2 row 3).
+/// claim isn't SETTLED (Switch spec 10.2 row 3). Once the claim is gone, a receipt for a
+/// payment made after `failed` was written raises the notice "marked failed, was paid"
+/// instead (Paykit spec 7.2).
 fn receipt_effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
@@ -463,6 +466,18 @@ fn receipt_effect(
     if names_held_proof {
         place(cx, &target, sender, Role::Receipt, stored)?;
     }
+    // The journal entry of the attempt, if this app made it: it holds a payment without a
+    // request's deadline, and whether `failed` stands on the claim of a payment made. One
+    // that doesn't read parks the receipt rather than settling the claim with no deadline,
+    // or consuming it (Switch spec 8.2): the store is corrupt.
+    let journaled = match cx.local_get(key::journal(&attempt_id).as_bytes())? {
+        Some(bytes) => Some(
+            state::decode::<JournalEntry>(&bytes)
+                .and_then(|entry| entry.check().map(|()| entry))
+                .map_err(|_| Fail::corrupt())?,
+        ),
+        None => None,
+    };
     if !cx.cert().has_permission(Permission::ClaimsWrite) {
         return Ok(());
     }
@@ -475,19 +490,11 @@ fn receipt_effect(
         }
         None => {
             // The deadline of a payment without a request is the one its journal kept.
-            // A kept entry that doesn't read parks the receipt rather than settling the claim
-            // with no deadline, or consuming it (Switch spec 8.2): the store is corrupt.
-            let journaled = match cx.local_get(key::journal(&attempt_id).as_bytes())? {
-                Some(bytes) => Some(
-                    state::decode::<JournalEntry>(&bytes)
-                        .and_then(|entry| entry.check().map(|()| entry))
-                        .map_err(|_| Fail::corrupt())?,
-                ),
-                None => None,
-            };
-            let deadline = journaled.map_or(ObligationDeadline::NotKnown, |e| {
-                crate::pay::own_deadline(e.deadline)
-            });
+            let deadline = journaled
+                .as_ref()
+                .map_or(ObligationDeadline::NotKnown, |e| {
+                    crate::pay::own_deadline(e.deadline)
+                });
             (
                 paykit_lib::derive::payment_obligation(&attempt_id),
                 deadline,
@@ -496,7 +503,34 @@ fn receipt_effect(
     };
     // A claim the app keeps no view of is read from the switch first, so the receipt
     // settles it in the cursor's batch (Switch spec 10.2 row 3).
-    let Some(view) = claim_view_or_need(cx, &obligation)? else {
+    let view = match cx.claim_view(&obligation)? {
+        Some(view) => Some(view),
+        None => match cx.switch_claim(&obligation) {
+            None => return Err(Fail::Need(vec![Need::Claim(obligation)])),
+            Some(ClaimFetch::Read(read)) => Some(read.view.clone()),
+            Some(ClaimFetch::Absent) => None,
+            // Refused, such as without `claims.read`: nothing to settle here.
+            Some(_) => return Ok(()),
+        },
+    };
+    // The claim is gone, or may be: the switch holds none, or its pinned deadline is 30 days
+    // or more before the highest service time verified, when the switch may delete it
+    // (Switch spec 6.3). The receipt can't be recorded on it. For a payment made after
+    // `failed` was written on it, the user is told it was paid (Paykit spec 7.2, "What a
+    // payment method declares"); the receipt is in the record already.
+    let gone = view.as_ref().is_none_or(|view| {
+        view.deadline.is_some_and(|deadline| {
+            cx.highest_service_time()
+                .is_some_and(|t| deadline.saturating_add(RECONCILIATION_MS) <= t)
+        })
+    });
+    if gone {
+        if let Some(entry) = journaled.filter(|entry| entry.failed_on_claim) {
+            late_receipt(cx, entry)?;
+        }
+        return Ok(());
+    }
+    let Some(view) = view else {
         return Ok(());
     };
     if view.status == ClaimStatus::Settled {
@@ -522,6 +556,27 @@ fn receipt_effect(
     Ok(())
 }
 
+/// The notice "marked failed, was paid" for the payment `entry` journals, raised with the
+/// cursor move once (Paykit spec 7.2), and the entry kept as no longer waiting for a
+/// receipt.
+fn late_receipt(cx: &mut ReceiveContext<'_>, mut entry: JournalEntry) -> Result<(), Fail> {
+    let attempt = entry.attempt().map_err(|_| Fail::corrupt())?;
+    let notice = key::notice(&attempt, NoticeKind::PaidAfterFailed);
+    if cx.local_get(notice.as_bytes())?.is_none() {
+        let at = cx.highest_service_time().unwrap_or(0);
+        keep_local(
+            cx,
+            local(
+                &notice,
+                &KeptNotice::of(NoticeKind::PaidAfterFailed, &entry, at),
+            )?,
+        );
+    }
+    entry.failed_on_claim = false;
+    keep_local(cx, local(&key::journal(&attempt), &entry)?);
+    Ok(())
+}
+
 /// The obligation ID of a request or Billing Period, blinded through the receive context
 /// (Paykit wire 1.5).
 pub(crate) fn obligation(
@@ -531,23 +586,6 @@ pub(crate) fn obligation(
     period_start_secs: u64,
 ) -> [u8; 32] {
     request_obligation_blinded(&cx.blind(payee), &cx.blind(request_hash), period_start_secs)
-}
-
-/// The view of `claim_key` the app keeps, or the switch's answer read for this step;
-/// [`Fail::Need`] when neither is there yet, and `None` when the switch holds no such claim
-/// or refused the read.
-pub(crate) fn claim_view_or_need(
-    cx: &ReceiveContext<'_>,
-    claim_key: &[u8; 32],
-) -> Result<Option<ClaimView>, Fail> {
-    if let Some(view) = cx.claim_view(claim_key)? {
-        return Ok(Some(view));
-    }
-    match cx.switch_claim(claim_key) {
-        None => Err(Fail::Need(vec![Need::Claim(*claim_key)])),
-        Some(ClaimFetch::Read(read)) => Ok(Some(read.view.clone())),
-        Some(_) => Ok(None),
-    }
 }
 
 /// A Private Payment List (Paykit spec 5, 8.4; Paykit wire 5.4): the latest list of its

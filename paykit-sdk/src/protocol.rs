@@ -52,6 +52,7 @@ use serde_json::{Map, Value};
 use crate::activity::{self, ActivityTarget, KeptSide, SideTag};
 use crate::hold::RestoreHold;
 use crate::journal::JournalEntry;
+use crate::notices::KeptNotice;
 use crate::pay::ListAsk;
 use crate::rail::Rail;
 use crate::receive::{self, Fail, QueuedAnswer};
@@ -315,9 +316,9 @@ pub const BACKUP_NAME: &str = "paykit";
 /// a queued `resend_request` (`ans/`: the requester's certificate, a `resend_request`'s
 /// body, and the `seq` and `msg_id` its key names), and a payee app's records seen (`ar/`,
 /// bound to the payee and app its key names). The rest is the app's own data, read as its
-/// family's and bound to its key (`ask/`, times and counts, `side/`): a backup carries the
-/// app's signing keys, so whoever can write one can sign anything the app can, and a check
-/// of what the app signed guards against corruption only.
+/// family's and bound to its key (`ask/`, times and counts, `side/`, notices `nt/`): a
+/// backup carries the app's signing keys, so whoever can write one can sign anything the
+/// app can, and a check of what the app signed guards against corruption only.
 pub(crate) fn restore_paykit_layer(
     layer: Option<&ProtocolLayer>,
     own: [u8; 32],
@@ -434,6 +435,13 @@ pub(crate) fn restore_paykit_layer(
             }
             StateKey::SeenRecords { payee, app_id } => {
                 check_seen_records(&value, &payee, &app_id)?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            StateKey::Notice { attempt, kind } => {
+                state::decode::<KeptNotice>(&value)
+                    .and_then(|notice| notice.check(&attempt, kind))
+                    .map_err(|_| unread())?;
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }

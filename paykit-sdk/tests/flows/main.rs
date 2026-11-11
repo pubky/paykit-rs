@@ -13,6 +13,7 @@ mod erasure;
 mod final_check;
 mod labels;
 mod mixed_versions;
+mod notices;
 mod one_time;
 mod outcome_record;
 mod protocols;

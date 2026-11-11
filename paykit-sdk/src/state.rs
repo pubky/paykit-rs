@@ -43,6 +43,7 @@
 //! | `kb/<batch_id>` | a batch of the app's the client keeps to send again, and what it carries: a request's `msg_id` or an attempt's ID, and the switch's refusal once it dropped it; never restored | |
 //! | `pp` | set by a restore: a payer pass is owed, so no new attempt is made and nothing is dispatched; cleared only after a reconcile under `pay` ran that pass (`hold.rs`); never restored | |
 //! | `lq/<payee>[/<app_id>]` | a `private_payment_list_request` asked of a payee's app, or of none: the version it named and when (Paykit spec 8.4) | |
+//! | `nt/<attempt_id>/<kind>` | a notice for the host about a payment, until acknowledged (`notices.rs`) | |
 
 use paykit_lib::AttemptId;
 use pubky_switch_client::app::LocalWrite;
@@ -197,6 +198,12 @@ pub(crate) mod key {
     pub(crate) const PAYER_PASS_OWED: &str = "pp";
     pub(crate) const LISTED_CERT: &str = "lc";
     pub(crate) const KEPT_BATCHES: &str = "kb/";
+    pub(crate) const NOTICES: &str = "nt/";
+
+    /// The notice of `kind` about `attempt`.
+    pub(crate) fn notice(attempt: &AttemptId, kind: crate::notices::NoticeKind) -> String {
+        format!("{NOTICES}{}", crate::notices::notice_id(attempt, kind))
+    }
 
     pub(crate) fn kept_batch(batch_id: &[u8; 16]) -> String {
         format!("{KEPT_BATCHES}{}", b64(batch_id))
@@ -314,6 +321,11 @@ pub(crate) enum StateKey {
         payee: [u8; 32],
         app_id: Option<[u8; 16]>,
     },
+    /// `nt/<attempt_id>/<kind>`: a notice for the host.
+    Notice {
+        attempt: AttemptId,
+        kind: crate::notices::NoticeKind,
+    },
 }
 
 impl StateKey {
@@ -411,6 +423,15 @@ impl StateKey {
                             app_id: None,
                         },
                     },
+                    "nt" => {
+                        let (attempt, tag) = rest.split_once('/')?;
+                        let parsed = AttemptId::parse(attempt).ok()?;
+                        (parsed.to_text() == attempt).then_some(())?;
+                        Self::Notice {
+                            attempt: parsed,
+                            kind: crate::notices::NoticeKind::from_tag(tag)?,
+                        }
+                    }
                     _ => return None,
                 }
             }
@@ -539,6 +560,20 @@ mod tests {
                     app_id: None,
                 },
             ),
+            (
+                key::notice(&attempt, crate::notices::NoticeKind::PaidAfterFailed),
+                StateKey::Notice {
+                    attempt,
+                    kind: crate::notices::NoticeKind::PaidAfterFailed,
+                },
+            ),
+            (
+                key::notice(&attempt, crate::notices::NoticeKind::HeldWithoutPay),
+                StateKey::Notice {
+                    attempt,
+                    kind: crate::notices::NoticeKind::HeldWithoutPay,
+                },
+            ),
         ];
         for (built, family) in cases {
             assert_eq!(StateKey::parse(built.as_bytes()), Some(family), "{built}");
@@ -559,6 +594,8 @@ mod tests {
             "side/123E4567-E89B-42D3-A456-426614174000",
             "lq/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM/not-an-app",
             "lq/",
+            "nt/BQUFBQUFBQUFBQUFBQUFBQ/paid",
+            "nt/BQUFBQUFBQUFBQUFBQUFBQ",
         ] {
             assert_eq!(StateKey::parse(key.as_bytes()), None, "{key}");
         }

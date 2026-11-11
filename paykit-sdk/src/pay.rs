@@ -48,6 +48,7 @@ use crate::activity::{self, ActivityTarget, Role};
 use crate::destination::{Carrier, Need};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::{Destination, JournalEntry, KeptAmount, PaymentView, Stage, TransferBound};
+use crate::notices::NoticeKind;
 use crate::paykit::Paykit;
 use crate::rail::{
     CandidateId, PaymentEndpointCandidate, RailError, RailOutcome, RailPaid, RailPayment, Transfer,
@@ -746,6 +747,7 @@ impl Paykit {
             request: Some(KeptMessage::of(&stored)),
             record_held: false,
             transfer_bound: Some(bound),
+            failed_on_claim: false,
         };
         self.execute(Plan {
             entry,
@@ -843,6 +845,7 @@ impl Paykit {
             request: None,
             record_held: false,
             transfer_bound: Some(bound),
+            failed_on_claim: false,
         };
         self.execute(Plan {
             entry,
@@ -2595,9 +2598,11 @@ impl Paykit {
     /// An open entry under a certificate without `pay`, which reads and writes no claim and
     /// no payer record: a dispatch that may have been made asks the method's history alone,
     /// so a payment made is journaled with its proof (`RailPaid`) and one that failed as such
-    /// (`RailFailed`), each for an app holding `pay` to report; nothing else is touched.
+    /// (`RailFailed`), each for an app holding `pay` to report; nothing else is touched. The
+    /// host is told why the payment waits ([`NoticeKind::HeldWithoutPay`]).
     async fn held_without_pay(&mut self, entry: &mut JournalEntry) -> Result<PayOutcome> {
         let attempt_id = entry.attempt()?;
+        self.raise_notice(NoticeKind::HeldWithoutPay, entry).await?;
         if entry.stage == Stage::Paying || entry.restored && entry.may_have_dispatched() {
             match self.rail.payment(attempt_id).await? {
                 Some(RailOutcome::Paid(RailPaid {
@@ -2653,7 +2658,9 @@ impl Paykit {
             };
             entry.failed_by_method = false;
             // The attempt is `failed` on the claim: no claim entry is written, and the
-            // payee's receipt settles it by evidence (Switch spec 10.2 row 3).
+            // payee's receipt settles it by evidence (Switch spec 10.2 row 3), or, once the
+            // claim is gone, tells the user it was paid.
+            entry.failed_on_claim = true;
             entry.step = None;
             entry.rail_proof = Some(proof);
             entry.paid_at_ms = paid_at_ms;

@@ -398,6 +398,7 @@ impl Paykit {
             request: Some(KeptMessage::of(stored)),
             record_held: false,
             transfer_bound: None,
+            failed_on_claim: false,
         };
         entry.keep_carrier(&carrier);
         Ok(Some(entry))
