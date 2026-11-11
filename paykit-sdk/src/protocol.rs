@@ -1285,7 +1285,8 @@ mod receive_tests {
         let other = "123e4567-e89b-42d3-a456-426614174000";
         assert!(check_kept_reply(&value, &bob.id(), record, other, &fake_key).is_err());
         // A kind that isn't a payer's reply, naming the same request.
-        let receipt = alice.message(
+        let carol = Party::new("carol", "shop", &["request"]);
+        let receipt = carol.message(
             &bob,
             "paykit.payment_receipt",
             vec![[4; 32], [5; 32]],
