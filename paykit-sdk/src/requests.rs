@@ -305,9 +305,13 @@ impl Paykit {
             label.as_ref(),
             record,
             |t| self.app.record_key(t).ok(),
+            &|p| self.rail.settlement_id(p),
         )
         .ok_or(Refusal::NotFound)?;
-        let target = ActivityTarget::payee(bound.natural_key(&self.identity())?, label.as_ref());
+        let target = ActivityTarget::payee(
+            bound.natural_key_with(&self.identity(), &|p| self.rail.settlement_id(p))?,
+            label.as_ref(),
+        );
         Ok((target, bound))
     }
 
@@ -607,6 +611,7 @@ impl Paykit {
                 None,
                 &held.key,
                 |t| self.app.record_key(t).ok(),
+                &|p| self.rail.settlement_id(p),
             ) else {
                 continue;
             };

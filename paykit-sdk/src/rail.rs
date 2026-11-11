@@ -193,6 +193,16 @@ pub trait Rail: Send + Sync {
     ///
     /// A [`RailError`] when the method can't check now.
     fn verify(&self, check: ProofCheck) -> BoxFuture<'_, Result<Option<u64>, RailError>>;
+
+    /// The settlement ID of a proof's `proof` object made by this method (Paykit wire 1.5):
+    /// the bytes the method defines to name one settlement, the same for every proof of it,
+    /// read from the proof alone and deterministic, so a payee credits a payment without a
+    /// request once whoever sends its proof (Paykit spec 8.4). `None` for a proof that names
+    /// none, which isn't credited. The default reads the methods `paykit-lib` knows
+    /// ([`paykit_lib::derive::settlement_id`]); a rail of another method overrides it.
+    fn settlement_id(&self, proof: &Map<String, Value>) -> Option<Vec<u8>> {
+        paykit_lib::derive::settlement_id(proof)
+    }
 }
 
 #[cfg(test)]

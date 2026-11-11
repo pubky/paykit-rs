@@ -7,6 +7,7 @@
 mod certificate;
 mod common;
 mod crash;
+mod custom_rail;
 mod destinations;
 mod final_check;
 mod labels;

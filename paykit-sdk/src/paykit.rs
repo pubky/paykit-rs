@@ -189,8 +189,8 @@ pub(crate) fn check_own_certificate(cert: &AppCert) -> Result<()> {
 }
 
 impl Paykit {
-    fn new_protocol() -> Arc<PaykitProtocol> {
-        Arc::new(PaykitProtocol::new())
+    fn new_protocol(rail: &Arc<dyn Rail>) -> Arc<PaykitProtocol> {
+        Arc::new(PaykitProtocol::with_rail(Arc::clone(rail)))
     }
 
     fn assemble(
@@ -234,7 +234,7 @@ impl Paykit {
         timer: Arc<dyn Timer>,
     ) -> Result<Self> {
         check_orphan_window(&config, rail.as_ref())?;
-        let protocol = Self::new_protocol();
+        let protocol = Self::new_protocol(&rail);
         // The certificate passes Paykit's checks before the client writes anything: the
         // client's join reads the approval with this same function, on these same inputs,
         // before its first commit, so this is the certificate it would keep. An approval
@@ -267,7 +267,7 @@ impl Paykit {
         timer: Arc<dyn Timer>,
     ) -> Result<Self> {
         check_orphan_window(&config, rail.as_ref())?;
-        let protocol = Self::new_protocol();
+        let protocol = Self::new_protocol(&rail);
         let app = App::load(env.clone(), protocol.clone(), config.app.clone(), app_id).await?;
         Self::assemble(app, env, protocol, config, rail, timer)
     }
@@ -299,7 +299,7 @@ impl Paykit {
         // whole journal (`PaykitProtocol::restore_layer`), before anything is written; then
         // both go in one commit: on an error, neither is in the store.
         check_orphan_window(&config, rail.as_ref())?;
-        let protocol = Self::new_protocol();
+        let protocol = Self::new_protocol(&rail);
         let app = App::restore(
             env.clone(),
             protocol.clone(),

@@ -25,6 +25,7 @@ use serde_json::{Map, Value};
 use crate::activity::{self, ActivityTarget, Role};
 use crate::error::{PaykitError, Result};
 use crate::paykit::Paykit;
+use crate::receive::Settlement;
 
 /// A verified message kept in Paykit's local state, to be stored in a record later: its
 /// sender, the certificate it was received with, its signed plaintext and its acceptance
@@ -105,6 +106,7 @@ impl Paykit {
             target.label().as_ref(),
             &key,
             |t| self.app.record_key(t).ok(),
+            &|p| self.rail.settlement_id(p),
         ))
     }
 
@@ -243,8 +245,8 @@ impl Paykit {
 
 /// Bind an activity record value held at `key` under the policy of `label` (Paykit wire
 /// 5.1, 5.3, Switch spec 8.2): it reads as `own` holds it, its labels are its policy's, and
-/// `key` is the one its messages name, as `record_key` derives it. `None`: the reader doesn't
-/// act on it.
+/// `key` is the one its messages name, as `record_key` derives it, a payee's settlement read
+/// by `settlement`, the app's rail. `None`: the reader doesn't act on it.
 pub(crate) fn bind_activity(
     value: &[u8],
     own: &[u8; 32],
@@ -252,10 +254,11 @@ pub(crate) fn bind_activity(
     label: Option<&Label>,
     key: &[u8; 32],
     record_key: impl Fn(&RecordTarget) -> Option<[u8; 32]>,
+    settlement: Settlement<'_>,
 ) -> Option<ActivityRecord> {
     let record = ActivityRecord::read(value, own, side).ok()?;
     record.check_label(label).ok()?;
-    let natural = record.natural_key(own).ok()?;
+    let natural = record.natural_key_with(own, settlement).ok()?;
     let target = RecordTarget::new(
         activity::switch_collection(side.collection(), label),
         &natural,

@@ -23,7 +23,7 @@
 //! record marks keep an own app from silently dropping a message another app recorded
 //! (Switch spec 8.2). Destinations never come from shared state alone (Paykit spec 6).
 
-use std::sync::{PoisonError, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use paykit_lib::bodies::{check_body, Body};
 use paykit_lib::collections::Collection;
@@ -47,10 +47,12 @@ use pubky_switch_core::receive::KindRules;
 use pubky_switch_core::records::{AppCert, AppRecord};
 use pubky_switch_core::scopes as switch_scopes;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::activity::{self, ActivityTarget, SideTag};
 use crate::hold::RestoreHold;
 use crate::journal::JournalEntry;
+use crate::rail::Rail;
 use crate::receive::{self, Fail, QueuedAnswer};
 use crate::records::{list_target, KeptMessage};
 use crate::state::{self, key};
@@ -93,6 +95,9 @@ struct Own {
 /// context, a [`LocalView`]), and never hold the naming key: they blind through the client.
 pub struct PaykitProtocol {
     own: RwLock<Option<Own>>,
+    /// The app's rail, which names a proof's settlement (Paykit wire 1.5); without one, the
+    /// methods `paykit-lib` knows.
+    rail: Option<Arc<dyn Rail>>,
 }
 
 impl std::fmt::Debug for PaykitProtocol {
@@ -112,6 +117,25 @@ impl PaykitProtocol {
     pub fn new() -> Self {
         Self {
             own: RwLock::new(None),
+            rail: None,
+        }
+    }
+
+    /// The protocol of one app paying and paid through `rail`, which names the settlement of
+    /// a proof of its method (Paykit wire 1.5, spec 8.4).
+    pub fn with_rail(rail: Arc<dyn Rail>) -> Self {
+        Self {
+            rail: Some(rail),
+            ..Self::new()
+        }
+    }
+
+    /// The settlement ID of a proof's `proof` object: the rail's, or else the one
+    /// `paykit-lib` knows.
+    fn settlement_id(&self, proof: &Map<String, Value>) -> Option<Vec<u8>> {
+        match &self.rail {
+            Some(rail) => rail.settlement_id(proof),
+            None => paykit_lib::derive::settlement_id(proof),
         }
     }
 
@@ -512,7 +536,7 @@ impl Protocol for PaykitProtocol {
             Ok(stored) => stored,
             Err(reason) => return Outcome::Drop { reason },
         };
-        match receive::effect(cx, &stored, message.seq) {
+        match receive::effect(cx, &stored, message.seq, &|proof| self.settlement_id(proof)) {
             // A write the context couldn't build for want of a key: the context holds the
             // entry itself, whatever is returned (Switch spec 3.5).
             Ok(()) | Err(Fail::NotNow) => Outcome::Apply(Effect::default()),

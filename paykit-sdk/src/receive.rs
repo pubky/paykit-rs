@@ -115,10 +115,14 @@ impl std::fmt::Debug for QueuedAnswer {
 }
 
 /// The writes `stored`, a message that passed check 10, causes, added to `cx` (module docs).
+/// The settlement ID of a proof's `proof` object, by the app's rail ([`crate::Rail::settlement_id`]).
+pub(crate) type Settlement<'a> = &'a dyn Fn(&Map<String, Value>) -> Option<Vec<u8>>;
+
 pub(crate) fn effect(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
     seq: u64,
+    settlement: Settlement<'_>,
 ) -> Result<(), Fail> {
     // No Paykit effect under an own certificate Paykit refuses, such as a renewal's the
     // Switch took (Paykit wire 3.1): the entry is held, never consumed, and tried again at
@@ -147,7 +151,7 @@ pub(crate) fn effect(
         | Body::PaymentProof(_)
             if payee =>
         {
-            payer_reply(cx, stored, &scopes)?;
+            payer_reply(cx, stored, &scopes, settlement)?;
         }
         Body::PaymentRequestCancellation(_) => {
             let Some(request) = stored.message().refs.first().copied() else {
@@ -155,7 +159,7 @@ pub(crate) fn effect(
             };
             let payer_target =
                 ActivityTarget::payer(natural_key::request_record(&sender, &request));
-            if payee && payer_reply(cx, stored, &scopes)? {
+            if payee && payer_reply(cx, stored, &scopes, settlement)? {
                 // A payer's cancellation of a request this app sent.
             } else if pay
                 && (held_value(cx, &payer_target)?.is_some()
@@ -361,6 +365,7 @@ fn payer_reply(
     cx: &mut ReceiveContext<'_>,
     stored: &StoredMessage,
     scopes: &[String],
+    settlement: Settlement<'_>,
 ) -> Result<bool, Fail> {
     let sender = stored.sender();
     let own = cx.identity();
@@ -390,12 +395,13 @@ fn payer_reply(
         }
         None => {
             // A payment without a request: keyed by its settlement, so every proof of one
-            // settlement names one record and is credited once (Paykit spec 8.4). A proof
-            // whose method gives no settlement ID isn't credited.
+            // settlement names one record and is credited once (Paykit spec 8.4). The app's
+            // rail gives the settlement ID, so a method of its own is credited too; a proof
+            // whose method gives none isn't credited.
             let Body::PaymentProof(proof) = stored.body() else {
                 return Ok(false);
             };
-            let Some(settlement) = proof.settlement_id() else {
+            let Some(settlement) = settlement(&proof.proof) else {
                 return Ok(false);
             };
             let target = ActivityTarget::payee(

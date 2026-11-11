@@ -124,6 +124,7 @@ impl Paykit {
                 None,
                 &held.key,
                 |t| self.app.record_key(t).ok(),
+                &|p| self.rail.settlement_id(p),
             ) {
                 out.push(record);
             }
