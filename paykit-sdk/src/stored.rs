@@ -58,6 +58,13 @@ pub(crate) struct StoredNote {
     pub(crate) placed: bool,
 }
 
+/// Whether a released entry with `note` kept for its message is declined: only once the app
+/// has written its effect itself (Switch spec 8.2). Without a note, or before the write, the
+/// released run applies it.
+pub(crate) fn declines(note: Option<&StoredNote>) -> bool {
+    note.is_some_and(|note| note.placed)
+}
+
 /// Where a kept message goes: its record and role.
 enum Place {
     /// Into this record, in this role.
@@ -336,5 +343,44 @@ impl Paykit {
             return Ok(false);
         }
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::{object, Party};
+
+    fn note(placed: bool) -> StoredNote {
+        let alice = Party::new("alice", "wallet", &["pay"]);
+        let bob = Party::new("bob", "shop", &["request"]);
+        let stored = bob.message(
+            &alice,
+            "paykit.payment_request",
+            vec![],
+            object(serde_json::json!({
+                "amount": { "asset": "btc", "value": "1" },
+                "payment_reference": "order-1",
+                "proposal_expires_at": null
+            })),
+        );
+        StoredNote {
+            stored_id: 1,
+            sender: bob.id(),
+            msg_id: stored.message().msg_id.clone(),
+            message: KeptMessage::of(&stored),
+            placed,
+        }
+    }
+
+    #[test]
+    fn test_stored_released_entry_declined_once_its_effect_is_written() {
+        assert!(declines(Some(&note(true))));
+    }
+
+    #[test]
+    fn test_stored_released_entry_applied_before_its_effect_is_written() {
+        assert!(!declines(Some(&note(false))));
+        assert!(!declines(None));
     }
 }

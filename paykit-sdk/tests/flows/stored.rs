@@ -115,11 +115,21 @@ async fn test_stored_entry_dropped_unverified_asked_for_again() {
     assert_eq!(wallet.app_mut().parked_entries().await.unwrap().len(), 1);
     w.clock
         .advance_ms(pubky_switch_client::app::MAX_UNVERIFIED_AGE_MS);
-    w.homeserver.set_down(false);
-    wallet.receive(None).await.unwrap();
+    // The bounds are judged on the service time verified: the first read verifies it.
+    let mut events = wallet.receive(None).await.unwrap().report.events;
+    events.extend(wallet.receive(None).await.unwrap().report.events);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AppEvent::StoredEntryDropped { .. })),
+        "{events:?}"
+    );
+    assert!(wallet.app_mut().parked_entries().await.unwrap().is_empty());
     let events = wallet.app_mut().unacknowledged_events().await.unwrap();
     assert!(!about_stored(&events), "{events:?}");
+    w.homeserver.set_down(false);
     // The wallet asked bob to send it again; bob's shop answers, and the request arrives.
+    wallet.flush().await.unwrap();
     shop.receive(None).await.unwrap();
     wallet.receive(None).await.unwrap();
     assert_eq!(
@@ -246,4 +256,73 @@ async fn test_stored_uncertain_entry_released_after_compensation_declined() {
         wallet.request(&request).await.unwrap().status,
         RequestStatus::Open
     );
+}
+
+/// Whether alice's payer record of `request` holds a receipt.
+async fn holds_receipt(wallet: &paykit_sdk::Paykit, request: &paykit_sdk::RequestRef) -> bool {
+    let key = wallet.request(request).await.unwrap().record;
+    let held = wallet.app().shared_record(&key).await.unwrap().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(held.content.value().unwrap()).unwrap();
+    !value["receipt"].is_null()
+}
+
+#[tokio::test]
+async fn test_stored_refused_receipt_written_beside_its_proof() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    shop.receive(None).await.unwrap();
+    let record = shop.payee_activity().await.unwrap()[0].record;
+    assert!(shop.confirm_payment(&record).await.unwrap().is_some());
+    refuse_writes(&w.alice, 2);
+    wallet.receive(None).await.unwrap();
+    assert!(!holds_receipt(&wallet, &request).await);
+    wallet.receive(None).await.unwrap();
+    assert!(holds_receipt(&wallet, &request).await);
+}
+
+#[tokio::test]
+async fn test_stored_refused_receipt_naming_another_proof_not_written() {
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+    w.rail.next(paykit_sdk::rail::Behaviour::Hang);
+    let paykit_sdk::PayOutcome::Pending { attempt_id, .. } = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap()
+    else {
+        panic!("pending");
+    };
+    // A receipt for the open attempt, naming a proof the record doesn't hold: its step,
+    // which settles the attempt, is refused.
+    let body = paykit_lib::bodies::PaymentReceipt {
+        attempt_id,
+        billing_period: None,
+        metadata: None,
+        payment_reference: None,
+    }
+    .to_body(2)
+    .unwrap();
+    w.inject(
+        &w.bob,
+        "shop",
+        &w.alice,
+        &[wallet.app_id()],
+        "paykit.payment_receipt",
+        vec![[7; 32], request.request_hash],
+        body,
+    );
+    refuse_writes(&w.alice, 1);
+    wallet.receive(None).await.unwrap();
+    wallet.receive(None).await.unwrap();
+    assert!(!holds_receipt(&wallet, &request).await);
 }

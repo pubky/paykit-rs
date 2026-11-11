@@ -696,7 +696,7 @@ impl Protocol for PaykitProtocol {
             let note = key::stored_note(&message.sender, &message.message.msg_id);
             match cx.local_get(note.as_bytes()) {
                 Ok(Some(bytes)) => match state::decode::<crate::stored::StoredNote>(&bytes) {
-                    Ok(note) if note.placed => {
+                    Ok(note) if crate::stored::declines(Some(&note)) => {
                         return Outcome::Drop {
                             reason: "Switch spec 8.2: a released entry whose effect the app \
                                      wrote since"
