@@ -243,6 +243,39 @@ async fn test_one_time_failed_payment_writes_failed_and_may_be_paid_again() {
 }
 
 #[tokio::test]
+async fn test_one_time_rail_refusal_writes_failed_and_may_be_paid_again() {
+    // A refusal says nothing was and nothing will be submitted (Paykit spec 7.2, "Failed
+    // means definitively not paid"): the attempt is written `failed` and the journal entry
+    // finished, so a resume repeats nothing and a replacement payment goes ahead.
+    let w = World::new();
+    let mut wallet = w.wallet("wallet").await;
+    let mut shop = w.shop().await;
+    let request = request_from(&mut shop, w.alice_id(), draft("1", w.clock.now_ms())).await;
+    wallet.receive(None).await.unwrap();
+
+    w.rail.next(Behaviour::Refuse);
+    let outcome = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PayOutcome::Failed { .. }), "{outcome:?}");
+    assert!(wallet.resume_payments().await.unwrap().is_empty());
+    assert!(w.rail.all_executions().is_empty());
+    assert_eq!(
+        wallet.request(&request).await.unwrap().status,
+        RequestStatus::Open
+    );
+    let again = wallet
+        .pay_request(&request, PayOptions::default())
+        .await
+        .unwrap();
+    let PayOutcome::Paid { attempt_id, .. } = again else {
+        panic!("{again:?}");
+    };
+    assert_eq!(w.rail.executions(&attempt_id), 1);
+}
+
+#[tokio::test]
 async fn test_one_time_transfer_of_another_amount_refused() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;

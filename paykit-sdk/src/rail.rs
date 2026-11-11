@@ -18,7 +18,9 @@
 //!
 //! An outcome is one of three, as in the v0.1 SDK (Paykit spec 7.2, "Failed means
 //! definitively not paid"): verified success, definitive failure, or nothing yet. A call that
-//! errs after a payment may have been submitted is nothing yet, never a failure.
+//! errs after a payment may have been submitted is nothing yet, never a failure; only
+//! [`RailError::Refused`] is authoritative, and a first dispatch it answers is written
+//! failed.
 //!
 //! `FakeRail` (feature `test-support`, tests only) is an in-memory rail for tests.
 
@@ -32,16 +34,22 @@ mod fake;
 #[cfg(feature = "test-support")]
 pub use fake::{Behaviour, FakeRail};
 
-/// A failure of the payment method's call. After a payment may have been submitted, a failed
-/// call means nothing yet: the attempt stays open (Paykit spec 7.2).
+/// A failure of the payment method's call (Paykit spec 7.2). [`RailError::Unavailable`] is
+/// ambiguous: a payment may have been submitted, so it means nothing yet and the attempt
+/// stays open. [`RailError::Refused`] is authoritative: nothing was and nothing will be
+/// submitted, so a first dispatch it answers is written `failed`, its journal entry is
+/// finished, and a replacement payment may follow.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum RailError {
-    /// The method can't be reached now, or its call timed out.
+    /// The method can't be reached now, or its call timed out: a payment may have been
+    /// submitted, and the SDK reads it as nothing yet.
     #[error("the payment method is unavailable: {0}")]
     Unavailable(String),
-    /// The method refused the call before anything was submitted: the text names why,
-    /// never a payload.
+    /// Authoritative: nothing was and nothing will be submitted for this call. A rail returns
+    /// it only when it knows that, such as for a payload it can't pay or funds it doesn't
+    /// hold, never for a call whose fate it can't tell: "failed" means definitively not paid
+    /// (Paykit spec 7.2). The text names why, never a payload.
     #[error("the payment method refused the call: {0}")]
     Refused(String),
 }
@@ -156,8 +164,9 @@ pub trait Rail: Send + Sync {
     ///
     /// # Errors
     ///
-    /// A [`RailError`]; once anything may have been submitted, the SDK reads it as nothing
-    /// yet.
+    /// A [`RailError`]: [`RailError::Refused`] only when nothing was and nothing will be
+    /// submitted, which the SDK writes `failed`; any other error the SDK reads as nothing
+    /// yet, since a payment may have been submitted.
     fn pay(&self, payment: RailPayment) -> BoxFuture<'_, Result<RailOutcome, RailError>>;
 
     /// The method's history of the dispatch under `idempotency_key`, with its proof and

@@ -43,7 +43,7 @@ use crate::destination::{Carrier, Need};
 use crate::error::{PaykitError, Refusal, Result};
 use crate::journal::{Destination, JournalEntry, KeptAmount, PaymentView, Stage};
 use crate::paykit::Paykit;
-use crate::rail::{RailOutcome, RailPayment};
+use crate::rail::{RailError, RailOutcome, RailPayment};
 use crate::records::list_target;
 use crate::requests::{cancelled, rejected, request_of, RequestRef};
 use crate::state::{self, key};
@@ -981,8 +981,22 @@ impl Paykit {
         }
         match outcome {
             Ok(outcome) => self.take_outcome(&mut entry, outcome).await,
-            // Once a payment may have been submitted, an error is nothing yet: the attempt
-            // stays open (Paykit spec 7.2).
+            // A refusal is authoritative: nothing was and nothing will be submitted, so a
+            // first dispatch is definitively not paid, written `failed`, and may be replaced
+            // (Paykit spec 7.2). A repeat's refusal says nothing of the dispatch before it,
+            // which may have paid: the attempt stays open.
+            Err(RailError::Refused(why)) if matches!(kind, Dispatch::First) => {
+                self.set_stage(&mut entry, Stage::RailFailed).await?;
+                self.report(&mut entry).await.map(|outcome| match outcome {
+                    PayOutcome::Failed { attempt_id, .. } => PayOutcome::Failed {
+                        attempt_id,
+                        reason: format!("the payment method refused the call: {why}"),
+                    },
+                    other => other,
+                })
+            }
+            // Any other error, once a payment may have been submitted, is nothing yet: the
+            // attempt stays open (Paykit spec 7.2).
             Err(_) => Ok(PayOutcome::Pending { attempt_id }),
         }
     }

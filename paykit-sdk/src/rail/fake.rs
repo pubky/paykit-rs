@@ -27,6 +27,8 @@ pub enum Behaviour {
     Hang,
     /// The call errs while the payment goes through: the payer gets no answer.
     LoseAnswer,
+    /// The method refuses the call: nothing is submitted ([`RailError::Refused`]).
+    Refuse,
 }
 
 #[derive(Clone, Debug)]
@@ -247,13 +249,19 @@ impl Rail for FakeRail {
                 Some(held) if inner.idempotent => Ok(held.outcome),
                 _ => {
                     let behaviour = inner.next.pop_front().unwrap_or(Behaviour::Succeed);
+                    if behaviour == Behaviour::Refuse {
+                        return Box::pin(async move {
+                            Err(RailError::Refused("the method refused the payment".into()))
+                        });
+                    }
                     inner.counter = inner.counter.saturating_add(1);
                     let counter = inner.counter;
                     let outcome = match behaviour {
                         Behaviour::Succeed | Behaviour::LoseAnswer => {
                             paid_outcome(&key, counter, now)
                         }
-                        Behaviour::Fail => RailOutcome::Failed,
+                        // A refusal was answered above.
+                        Behaviour::Fail | Behaviour::Refuse => RailOutcome::Failed,
                         Behaviour::Hang => RailOutcome::Pending,
                     };
                     if outcome != RailOutcome::Failed {
