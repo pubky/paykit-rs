@@ -708,6 +708,8 @@ where
     /// when present, its required payee App before adapter selection.
     /// Requests with bound Payment Endpoints have no public fallback; use
     /// [`Self::resolve_private_payment_request`] for their private destinations.
+    /// Returns `Policy` while the counterparty is `Blocked`, before any App
+    /// Registry or Payment Endpoint read.
     pub async fn resolve_public_payment_request(
         &self,
         counterparty: PubkyPublicKey,
@@ -1098,8 +1100,23 @@ where
         counterparty: &PubkyPublicKey,
         payment_request_id: &PaymentRequestId,
     ) -> Result<PaymentRequestTermsRecord> {
+        // A blocked counterparty's received Payment Request is not resolved.
+        // The preflight keeps a blocked peer's App Registry from being
+        // contacted at all. The recheck below runs atomically with the Payment
+        // Request read, so a block that lands during the registry fetch still
+        // refuses; its failing transaction also discards the authorized-apps
+        // cache write made by the registry observation.
+        self.ensure_peer_not_blocked(counterparty).await?;
         let (context, record) = self
             .counterparty_app_authorization_context_with(counterparty, |tx| {
+                if tx.linked_peer(counterparty).map(|peer| peer.state)
+                    == Some(LinkedPeerState::Blocked)
+                {
+                    return Err(PaykitSdkError::Policy {
+                        context: format!("counterparty {counterparty} is blocked"),
+                        source: None,
+                    });
+                }
                 self.payment_request_record_in_transaction(
                     tx,
                     counterparty,

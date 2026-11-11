@@ -1585,6 +1585,11 @@ Payment Request resolution restricted to a `required_app_id` loads only that
 app's public endpoints. Failure to load it returns `Unavailable`, regardless
 of other apps' endpoints.
 
+`resolve_public_payment_request` reads the received Payment Request, so it
+fails with `Policy` while the counterparty is blocked, before App Registry
+access; `resolve_public_contact_payment` reads no Payment Request and is
+unaffected.
+
 ### Resolve Private Payment
 
 `resolve_private_contact_payment` checks only Linked Peer and cached Private
