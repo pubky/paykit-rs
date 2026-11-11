@@ -156,6 +156,12 @@ pub enum Refusal {
     /// make one, and pays only attempt-first (Paykit spec 7.2). Nothing was written or paid.
     #[error("Paykit spec 8.4: the own switch doesn't answer: {0}")]
     SwitchUnavailable(String),
+    /// The proof names a version of this app's Private Payment List, or an endpoint in it,
+    /// that this app didn't offer the payer, or no longer tracks, [`crate::KEPT_MESSAGE_MS`]
+    /// after it expired (Paykit spec 8.4): the payment isn't confirmed, and no receipt is
+    /// sent. The proof stays in its record.
+    #[error("Paykit spec 8.4: the proof names a list endpoint this app didn't offer the payer")]
+    NotOffered,
     /// The identity's deny list holds the payee: what is open with it is paused, and its
     /// request is paid only once the user confirms (Paykit spec 8.1, "Blocked
     /// counterparties"). `payment` is what the user is shown; paying anyway carries it back

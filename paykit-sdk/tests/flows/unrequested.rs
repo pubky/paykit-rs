@@ -7,8 +7,8 @@ use pubky_switch_client::clock::Clock;
 
 use crate::common::{btc, endpoint, World, HOUR_MS};
 
-/// How many `private_payment_list_request`s `shop` takes at its next receive. It publishes no
-/// list, so each one is taken with no effect (Paykit spec 8.4).
+/// How many `private_payment_list_request`s `shop` takes at its next receive. It sent alice no
+/// list itself, so each one is taken with no effect (Paykit spec 8.4).
 async fn list_requests(shop: &mut Paykit) -> usize {
     let got = shop.receive(None).await.unwrap();
     got.report
@@ -31,8 +31,7 @@ async fn test_unrequested_payment_paid_proven_and_receipted() {
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
-        .await;
+    w.publish_to_alice(&mut shop).await;
     assert_eq!(wallet.receive(None).await.unwrap().applied.len(), 1);
 
     let outcome = wallet
@@ -294,8 +293,7 @@ async fn test_unrequested_proof_and_receipt_carry_the_attempt_and_no_request_mem
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
-        .await;
+    w.publish_to_alice(&mut shop).await;
     wallet.receive(None).await.unwrap();
     let outcome = wallet
         .pay_without_request(to_bob(&w, "0.0015", "btc-bitcoin-p2wpkh"))

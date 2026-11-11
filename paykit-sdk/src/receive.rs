@@ -20,6 +20,9 @@
 //!   credited once (Paykit spec 8.4).
 //! - a `resend_request` is kept, with the cursor move, for [`crate::Paykit::receive`] to
 //!   answer (Paykit spec 9): answering sends messages, which no batch carries.
+//! - a `private_payment_list_request`, and a proof naming a single-use endpoint of a list
+//!   this app published, mark a newer list owed to the sender, with the cursor move; it is
+//!   sent after the read (`publish.rs`, Paykit spec 8.4).
 //!
 //! The spam rule (Paykit wire 4.1, Switch spec 7) gates every message that would create
 //! state, at an app holding `contacts`: a request, a list, a cancellation or a proof that no
@@ -169,6 +172,8 @@ pub(crate) fn effect(
             if payee =>
         {
             payer_reply(cx, stored, &scopes, settlement)?;
+            // A proof naming a single-use endpoint of a list this app sent consumes it.
+            crate::publish::note_proof(cx, stored)?;
         }
         Body::PaymentRequestCancellation(_) => {
             let Some(request) = stored.message().refs.first().copied() else {
@@ -222,10 +227,11 @@ pub(crate) fn effect(
                 local(&key::answer(seq, &stored.message().msg_id), &queued)?,
             );
         }
-        // A publishing app answers a request naming a used version with its current list
-        // (Paykit spec 8.4, "Publishing"). This SDK publishes no list at all yet, so the
-        // request is taken with no effect; the answer comes with list publishing.
-        Body::PrivatePaymentListRequest(_) => {}
+        // A publishing app answers a request naming a used version, an expired one or none
+        // with a newer list (Paykit spec 8.4, "Publishing"): owed here, sent after the read.
+        Body::PrivatePaymentListRequest(request) if payee => {
+            crate::publish::note_list_request(cx, stored, request)?;
+        }
         _ => {}
     }
     Ok(())
@@ -240,7 +246,7 @@ fn local<T: Serialize>(key: &str, value: &T) -> Result<LocalWrite, Fail> {
 /// the step; the step goes on, and the client stores the entry as too large once the step
 /// applies (Switch spec 8.2). Dropping the message here instead would consume a valid
 /// entry, so the refusal is not passed on.
-fn keep_local(cx: &mut ReceiveContext<'_>, write: LocalWrite) {
+pub(crate) fn keep_local(cx: &mut ReceiveContext<'_>, write: LocalWrite) {
     if let Err(error) = cx.local(write) {
         debug_assert!(
             matches!(error, AppError::Refused(ClientRefusal::Usage(_))),

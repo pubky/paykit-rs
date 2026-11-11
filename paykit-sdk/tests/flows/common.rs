@@ -562,6 +562,27 @@ impl World {
             .await
     }
 
+    /// Bob's `shop` publishes its list to alice through the SDK, as a payee app does: a
+    /// single-use on-chain endpoint, whose payload the rail issues, and a reusable Lightning
+    /// offer. Returns the version sent.
+    pub async fn publish_to_alice(&self, shop: &mut Paykit) -> paykit_sdk::SentList {
+        let mut endpoints = std::collections::BTreeMap::new();
+        endpoints.insert(
+            endpoint("btc-bitcoin-p2wpkh"),
+            paykit_sdk::OfferedEndpoint::SingleUse,
+        );
+        endpoints.insert(
+            endpoint("btc-lightning-bolt12"),
+            paykit_sdk::OfferedEndpoint::Reusable(
+                PaymentEndpointPayload::new("lno1reusable").unwrap(),
+            ),
+        );
+        shop.set_list_endpoints(endpoints).await.unwrap();
+        let published = shop.publish_list_to(&[self.alice_id()]).await.unwrap();
+        assert!(published.not_sent.is_empty(), "{published:?}");
+        published.sent[0].clone()
+    }
+
     /// Bob's `shop` sends alice's apps `targets` a Private Payment List of `version` with
     /// `endpoints`, for 30 days, as [`World::list_to_alice`].
     pub async fn list_to_alice_with(

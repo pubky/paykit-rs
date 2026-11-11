@@ -611,7 +611,9 @@ impl Paykit {
     /// # Errors
     ///
     /// [`Refusal::CertificateRefused`] while the app's certificate fails Paykit's checks;
-    /// [`Refusal::NotFound`] for a record without a proof; the rail's errors.
+    /// [`Refusal::NotFound`] for a record without a proof; [`Refusal::NotOffered`] for a
+    /// proof naming a version of this app's Private Payment List, or an endpoint of it, that
+    /// this app didn't offer the payer; the rail's errors.
     pub async fn verify_payment(&mut self, record: &[u8; 32]) -> Result<Option<u64>> {
         self.refresh_own()?;
         self.records_known().await?;
@@ -631,6 +633,21 @@ impl Paykit {
                 (request.amount.clone(), payload)
             }
             None => (proof.amount.clone().ok_or(Refusal::NotFound)?, None),
+        };
+        // A proof naming a version of this app's list is checked against the payload this
+        // app offered that payer at that version (Paykit spec 8.4); one this app didn't
+        // offer it isn't confirmed. Another own app's list is checked by the method alone.
+        let payload = match (payload, proof.list_version) {
+            (None, Some(version)) if proof.payment_app_id == self.app_id() => Some(
+                self.offered_payload(
+                    &bound.counterparty,
+                    version,
+                    &proof.payment_endpoint_identifier,
+                )
+                .await?
+                .ok_or(Refusal::NotOffered)?,
+            ),
+            (payload, _) => payload,
         };
         let check = ProofCheck {
             endpoint_id: proof.payment_endpoint_identifier.clone(),

@@ -109,8 +109,7 @@ async fn test_receipts_of_a_payment_without_a_request_carry_the_payees_reference
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
-        .await;
+    w.publish_to_alice(&mut shop).await;
     wallet.receive(None).await.unwrap();
     let outcome = wallet
         .pay_without_request(

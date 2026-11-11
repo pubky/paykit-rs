@@ -7,9 +7,9 @@
 //!
 //! The flows live in their own modules, each an `impl Paykit` block: receiving
 //! (`receive.rs`), requests and their answers (`requests.rs`), paying (`pay.rs`), destination
-//! checks (`destination.rs`), re-sends (`resend.rs`) and reconciliation (`reconcile.rs`).
-//! Recurring requests, Allowances and publishing Private Payment Lists add their own modules
-//! the same way.
+//! checks (`destination.rs`), re-sends (`resend.rs`), reconciliation (`reconcile.rs`) and
+//! publishing Private Payment Lists (`publish.rs`). Recurring requests and Allowances add
+//! their own modules the same way.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -237,6 +237,10 @@ pub struct ReceiveSummary {
     /// is given up 30 days after its acceptance, on the service time verified, and the host
     /// is told ([`crate::NoticeKind::MessageGivenUp`]) (Paykit spec 8.1).
     pub key_epochs_awaited: Vec<u64>,
+    /// The Private Payment Lists sent after the read: owed by its messages, or renewals due
+    /// (Paykit spec 8.4, Paykit wire 4.13), and those that couldn't be sent, tried again at
+    /// the next receive.
+    pub lists: crate::publish::ListsPublished,
     /// The account is gone at this switch: the client took it as erased (Switch spec 12.7),
     /// a provider loss (Switch spec 12.6). The host tells the user. The app reads nothing
     /// more there, and the SDK acts on nothing by itself: lookups of the identity there fail
@@ -614,6 +618,15 @@ impl Paykit {
         // own marks and notes are kept here, and nothing is written at the switch
         // (`stored.rs`).
         self.take_stored_events(&duties).await?;
+        // Removed from its identity, the app's lists are paid no more (Paykit spec 4): their
+        // single-use payloads go back to the payment method.
+        if report
+            .events
+            .iter()
+            .any(|event| matches!(event, AppEvent::Removed))
+        {
+            self.tend_lists(true, &duties).await?;
+        }
         if account_gone {
             // Nothing more is read or written there: the summary tells the host.
             return Ok(ReceiveSummary {
@@ -679,6 +692,8 @@ impl Paykit {
             .collect();
         let answered = self.answer_kept_resends().await?;
         let asked = self.send_asks().await?;
+        // The lists owed or due (Paykit spec 8.4).
+        let lists = self.tend_lists(false, &duties).await?;
         Ok(ReceiveSummary {
             report,
             applied,
@@ -687,6 +702,7 @@ impl Paykit {
             records_unlisted,
             scope_keys_awaited: keys.is_some() || !key_epochs_awaited.is_empty(),
             key_epochs_awaited,
+            lists,
             account_gone: false,
         })
     }

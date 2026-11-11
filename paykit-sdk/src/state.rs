@@ -48,6 +48,10 @@
 //! | `ud/<sender>` | a mark of a sender's entries dropped unverified, as `pd/` holds (`marks.rs`) | |
 //! | `pr/<sender>/<record key>/<msg_id>` | a payer's reply to a request the app holds no record of yet, kept until it does (`receive.rs`) | |
 //! | `dt/<event ID>` | a duty event the SDK has taken (`stored.rs`), until it is acknowledged; never restored: a restore's events are taken again, which changes nothing, since a dropped entry's time is already in its sender's mark | |
+//! | `ll` | the app's Private Payment List: its endpoints, reusable with their payloads or single-use (`publish.rs`, Paykit spec 8.4) | yes |
+//! | `lv` | the last version of a Private Payment List this app published | |
+//! | `lp/<counterparty>` | the lists this app sent a counterparty: each version still tracked, its expiry, its delivery and the payloads it offered, and whether a newer one is owed (`publish.rs`) | yes |
+//! | `rl/<counterparty>/<version>` | single-use payloads of a list version no payer can pay, kept until the payment method takes them back (`publish.rs`) | yes |
 //! | `se/<sender>/<msg_id>` | the message of an entry the client stored for good, to write into its record later (`stored.rs`); never restored, since the client tells of the entries it restores again | |
 
 use paykit_lib::AttemptId;
@@ -219,6 +223,20 @@ pub(crate) mod key {
     }
     pub(crate) const DENIED: &str = "dl";
     pub(crate) const TAKEN: &str = "dt/";
+    pub(crate) const LIST: &str = "ll";
+    pub(crate) const LAST_VERSION: &str = "lv";
+    pub(crate) const LIST_RECIPIENTS: &str = "lp/";
+    pub(crate) const RELEASES: &str = "rl/";
+
+    /// The lists this app sent `counterparty`.
+    pub(crate) fn list_recipient(counterparty: &[u8; 32]) -> String {
+        format!("{LIST_RECIPIENTS}{}", b64(counterparty))
+    }
+
+    /// The single-use payloads of `counterparty`'s list `version` to give back.
+    pub(crate) fn releases(counterparty: &[u8; 32], version: u64) -> String {
+        format!("{RELEASES}{}/{}", b64(counterparty), num(version))
+    }
 
     /// The mark of the duty event `id`, taken.
     pub(crate) fn taken(id: &pubky_switch_client::app::EventId) -> String {
@@ -368,6 +386,17 @@ pub(crate) enum StateKey {
     DroppedReplies { sender: [u8; 32] },
     /// `ud/<sender>`: the mark of a sender's entries dropped unverified.
     DroppedUnverified { sender: [u8; 32] },
+    /// `ll`: the app's Private Payment List.
+    List,
+    /// `lv`: the last list version published.
+    LastVersion,
+    /// `lp/<counterparty>`: the lists sent a counterparty.
+    ListRecipient([u8; 32]),
+    /// `rl/<counterparty>/<version>`: single-use payloads to give back.
+    Releases {
+        counterparty: [u8; 32],
+        version: u64,
+    },
     /// `pr/<record key>/<msg_id>`: a payer's reply kept for its record.
     KeptReply {
         sender: [u8; 32],
@@ -419,6 +448,8 @@ impl StateKey {
             "lc" => Self::ListedCert,
             "lr" => Self::ListsRead,
             "dl" => Self::Denied,
+            "ll" => Self::List,
+            "lv" => Self::LastVersion,
             _ => {
                 let (family, rest) = text.split_once('/')?;
                 match family {
@@ -456,6 +487,14 @@ impl StateKey {
                         }
                     }
                     "spam" => Self::Spam(b64_32(rest)?),
+                    "lp" => Self::ListRecipient(b64_32(rest)?),
+                    "rl" => {
+                        let (counterparty, version) = rest.split_once('/')?;
+                        Self::Releases {
+                            counterparty: b64_32(counterparty)?,
+                            version: number(version)?,
+                        }
+                    }
                     "rs" => {
                         let (requester, id) = rest.split_once('/')?;
                         Self::Resent {
@@ -615,6 +654,16 @@ mod tests {
                 format!("{}{}-7", key::TAKEN, "05".repeat(16)),
                 StateKey::Taken(format!("{}-7", "05".repeat(16))),
             ),
+            (key::LIST.into(), StateKey::List),
+            (key::LAST_VERSION.into(), StateKey::LastVersion),
+            (key::list_recipient(&pubky), StateKey::ListRecipient(pubky)),
+            (
+                key::releases(&pubky, 11),
+                StateKey::Releases {
+                    counterparty: pubky,
+                    version: 11,
+                },
+            ),
             (key::held_list(&pubky), StateKey::HeldList(pubky)),
             (key::side(id), StateKey::Side(id.into())),
             (
@@ -720,6 +769,9 @@ mod tests {
             "nt/BQUFBQUFBQUFBQUFBQUFBQ/paid",
             "dt/05-7",
             "nt/BQUFBQUFBQUFBQUFBQUFBQ",
+            "lp/",
+            "rl/AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM/11",
+            "llx",
         ] {
             assert_eq!(StateKey::parse(key.as_bytes()), None, "{key}");
         }

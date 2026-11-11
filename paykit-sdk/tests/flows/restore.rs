@@ -266,8 +266,7 @@ async fn test_restore_paid_attempt_to_a_single_use_list_endpoint_sends_its_proof
     let w = World::new();
     let mut wallet = w.wallet("wallet").await;
     let mut shop = w.shop().await;
-    w.list_to_alice(&mut shop, &[wallet.app_id()], w.clock.now_ms())
-        .await;
+    w.publish_to_alice(&mut shop).await;
     let mut any = draft("1", w.clock.now_ms());
     any.destination = paykit_lib::bodies::RequestDestination::Any;
     let request = request_from(&mut shop, w.alice_id(), any).await;

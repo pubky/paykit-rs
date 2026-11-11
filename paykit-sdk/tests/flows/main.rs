@@ -20,6 +20,7 @@ mod outcome_record;
 mod protocols;
 mod pruning;
 mod public;
+mod publishing;
 mod receipts;
 mod receive_faults;
 mod recovery;

@@ -26,8 +26,13 @@
 //! - [`app_records`]: Paykit's member of app records, and reading a payee's public
 //!   endpoints from them ([`Paykit::public_endpoints`]).
 //!
-//! Recurring requests, Allowances with executors and ledgers, and publishing Private Payment
-//! Lists build on the same parts, in their own modules.
+//! - Publishing Private Payment Lists ([`Paykit::set_list_endpoints`],
+//!   [`Paykit::publish_list_to`], [`Paykit::withdraw_list_from`]): versions, renewals, the
+//!   answers to proofs and list requests, and single-use payloads the rail issues and takes
+//!   back ([`Rail::issue_single_use`], [`Rail::release_single_use`]).
+//!
+//! Recurring requests and Allowances with executors and ledgers build on the same parts, in
+//! their own modules.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -48,6 +53,7 @@ mod notices;
 mod pay;
 mod paykit;
 mod protocol;
+mod publish;
 pub mod rail;
 mod receipts;
 mod receive;
@@ -77,9 +83,13 @@ pub use paykit::{
     PRE_DISPATCH_BUDGET_MS,
 };
 pub use protocol::{PaykitProtocol, HANDLED_KINDS};
+pub use publish::{
+    ListNotSent, ListsPublished, OfferedEndpoint, PublishedList, SentList, LIST_LIFETIME_MS,
+};
 pub use rail::{
     CandidateError, CandidateId, EndpointSelection, PaymentEndpointCandidate, Rail,
-    RailDeclaration, RailError, RailOutcome, RailPaid, RailPayment, Transfer,
+    RailDeclaration, RailError, RailOutcome, RailPaid, RailPayment, SingleUseIssue,
+    SingleUseRelease, Transfer,
 };
 pub use receipts::{ReceiptDetails, ReceiptsOf, ReceivedReceipt};
 pub use receive::{

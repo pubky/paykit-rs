@@ -333,7 +333,8 @@ pub const BACKUP_NAME: &str = "paykit";
 /// a queued `resend_request` (`ans/`: the requester's certificate, a `resend_request`'s
 /// body, and the `seq` and `msg_id` its key names), and a payee app's records seen (`ar/`,
 /// bound to the payee and app its key names). The rest is the app's own data, read as its
-/// family's and bound to its key (`ask/`, times and counts, `side/`, notices `nt/`): a
+/// family's and bound to its key (`ask/`, times and counts, `side/`, notices `nt/`, the
+/// list published and what was sent each counterparty, `ll`, `lv`, `lp/` and `rl/`): a
 /// backup carries the app's signing keys, so whoever can write one can sign anything the
 /// app can, and a check of what the app signed guards against corruption only.
 pub(crate) fn restore_paykit_layer(
@@ -491,6 +492,16 @@ pub(crate) fn restore_paykit_layer(
                 msg_id,
             } => {
                 check_kept_reply(&value, &own, (sender, record), &msg_id, &record_key)?;
+                writes.push(LocalWrite::Put { key, value });
+                continue;
+            }
+            published @ (StateKey::List
+            | StateKey::LastVersion
+            | StateKey::ListRecipient(_)
+            | StateKey::Releases { .. }) => {
+                if !crate::publish::check_restored(&published, &value) {
+                    return Err(unread());
+                }
                 writes.push(LocalWrite::Put { key, value });
                 continue;
             }
@@ -1458,5 +1469,33 @@ mod receive_tests {
             p.record_seen("payer_activity", Some(&seen), Some(b"{}")),
             Some(seen)
         );
+    }
+
+    #[test]
+    fn test_protocol_restore_takes_the_lists_sent_only_at_their_own_key() {
+        let bob = Party::new("bob", "shop", &["request"]);
+        let sent = crate::publish::Recipient {
+            counterparty: [3; 32],
+            active: true,
+            owed: false,
+            versions: Vec::new(),
+        };
+        let value = state::encode(&sent).unwrap();
+        let restore = |at: &[u8; 32]| {
+            let layer = ProtocolLayer {
+                protocol: "paykit".into(),
+                data: pubky_switch_client::app::encode_local_state(&[(
+                    key::list_recipient(at).into_bytes(),
+                    value.clone(),
+                )]),
+            };
+            restore_paykit_layer(Some(&layer), bob.id(), &bob.cert, |_| [0; 32])
+        };
+        let writes = restore(&[3; 32]).unwrap();
+        assert!(writes.iter().any(|w| matches!(
+            w,
+            LocalWrite::Put { key: k, .. } if *k == key::list_recipient(&[3; 32]).into_bytes()
+        )));
+        assert!(restore(&[4; 32]).is_err());
     }
 }

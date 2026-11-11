@@ -387,6 +387,50 @@ impl std::fmt::Debug for ProofCheck {
     }
 }
 
+/// A single-use payload to issue for one counterparty's Private Payment List (Paykit spec 8.4,
+/// Paykit wire 4.13): a fresh destination, such as an unused address, that the list offers
+/// that counterparty alone, at one version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SingleUseIssue {
+    /// The counterparty the list goes to.
+    pub counterparty: [u8; 32],
+    /// The Payment Endpoint Identifier the payload is for.
+    pub endpoint_id: PaymentEndpointIdentifier,
+    /// The list's version.
+    pub list_version: u64,
+    /// The list's `expires_at`, in Unix milliseconds: no payer uses the list after it.
+    pub expires_at_ms: u64,
+}
+
+/// A single-use payload the SDK gives back ([`Rail::release_single_use`]): no payer can pay it
+/// to this app's list, so the method may use it again.
+///
+/// The payload is sensitive, as a candidate's is: `Debug` shows only the identifier.
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SingleUseRelease {
+    /// The counterparty it was issued for.
+    pub counterparty: [u8; 32],
+    /// The Payment Endpoint Identifier.
+    pub endpoint_id: PaymentEndpointIdentifier,
+    /// The version of the list it was issued for.
+    pub list_version: u64,
+    /// The payload issued.
+    pub payload: PaymentEndpointPayload,
+}
+
+impl std::fmt::Debug for SingleUseRelease {
+    // The payload stays out of logs.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "SingleUseRelease({}, {})",
+            self.endpoint_id, self.list_version
+        )
+    }
+}
+
 /// A payment method, as Paykit uses it. Object-safe; the SDK holds an `Arc<dyn Rail>`.
 ///
 /// Implementations live with the wallet: Paykit never interprets payloads or proofs.
@@ -505,6 +549,55 @@ pub trait Rail: Send + Sync {
     /// ([`paykit_lib::derive::settlement_id`]); a rail of another method overrides it.
     fn settlement_id(&self, proof: &Map<String, Value>) -> Option<Vec<u8>> {
         paykit_lib::derive::settlement_id(proof)
+    }
+
+    /// A fresh single-use payload for one counterparty's Private Payment List (Paykit spec
+    /// 8.4), as the v0.1 SDK's payment adapter reserved receiving details: the SDK asks for
+    /// one per single-use endpoint each time it sends that counterparty a newer list. The
+    /// method keeps the payload for that counterparty until the SDK releases it
+    /// ([`Rail::release_single_use`]) or the list's `expires_at` passes and the method's own
+    /// rules let it go: the SDK releases only payloads no payer can pay, and leaves one that
+    /// reached the counterparty to the method's expiry. A payload issued before a crash, which
+    /// the SDK never recorded, is never released either, so the method makes issued payloads
+    /// safe to abandon. The default issues none: a list with single-use endpoints isn't sent.
+    ///
+    /// # Errors
+    ///
+    /// A [`RailError`] when the method can't issue one now; the list isn't sent, and the
+    /// payloads issued for it before are released.
+    fn issue_single_use(
+        &self,
+        issue: SingleUseIssue,
+    ) -> BoxFuture<'_, Result<PaymentEndpointPayload, RailError>> {
+        let _ = issue;
+        Box::pin(async {
+            Err(RailError::Refused(
+                "the payment method issues no single-use payloads".into(),
+            ))
+        })
+    }
+
+    /// Take back a single-use payload no payer can pay to this app's list: its list was never
+    /// accepted by the counterparty's inbox, a newer list from this app reached that inbox
+    /// first, or this app was removed from its identity (Paykit spec 4, 8.4). It must be
+    /// idempotent: the SDK keeps each release until the method answers it, and repeats it
+    /// after a crash. The default takes none, so a method that issues payloads implements it,
+    /// and a cleanup never passes silently.
+    ///
+    /// # Errors
+    ///
+    /// A [`RailError`] when the method can't take it back now: the SDK asks again at the next
+    /// receive.
+    fn release_single_use(
+        &self,
+        release: SingleUseRelease,
+    ) -> BoxFuture<'_, Result<(), RailError>> {
+        let _ = release;
+        Box::pin(async {
+            Err(RailError::Refused(
+                "the payment method takes no single-use payload back".into(),
+            ))
+        })
     }
 }
 
