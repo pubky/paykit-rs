@@ -790,3 +790,44 @@ async fn test_one_time_request_kept_then_refused_reads_as_failed() {
     );
     assert!(shop.payee_activity().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn test_one_time_request_kept_then_refused_at_a_read_reads_as_failed_once_acknowledged() {
+    // The read sends the kept batch again and the switch refuses it: the receive takes the
+    // client's event from its report, so the request reads as failed even after the host
+    // acknowledged that event.
+    let w = World::new();
+    let mut shop = w.shop().await;
+    w.bob.switch().fail_next(unreachable_ops());
+    let sent = shop
+        .send_request(w.alice_id(), draft("1", w.clock.now_ms()))
+        .await
+        .unwrap();
+    w.bob
+        .switch()
+        .fail_next(pubky_switch_client::testing::Fault::Error {
+            path: "/ops".into(),
+            code: pubky_switch_core::http::ErrorCode::PermissionMissing,
+            current: serde_json::Value::Null,
+        });
+    let summary = shop.receive(None).await.unwrap();
+    let refused = summary
+        .report
+        .events
+        .iter()
+        .find_map(|event| match event {
+            pubky_switch_client::app::AppEvent::BatchRefused { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("the refusal is reported");
+    shop.app_mut().ack_events(refused).await.unwrap();
+    shop.flush().await.unwrap();
+    assert!(
+        matches!(
+            shop.message_delivery(&sent.msg_id).await.unwrap(),
+            Some(MessageDelivery::Failed { .. })
+        ),
+        "{:?}",
+        shop.message_delivery(&sent.msg_id).await
+    );
+}
