@@ -1713,3 +1713,35 @@ async fn test_restore_asks_start_bounded_where_they_are_queued() {
         "{hold}"
     );
 }
+
+#[tokio::test]
+async fn test_restore_acceptance_under_a_certificate_without_pay_refused() {
+    // The journal names, for its acceptance, a certificate of this app that never held
+    // `pay`: no certificate of the app authorized that acceptance, and the restore refuses
+    // it with nothing written.
+    let w = World::new();
+    let (good, app_id) = backup_with_a_payment(&w).await;
+    let keys = w.alice.identity().app_keys("wallet");
+    let contacts_only = pubky_switch_client::testing::issue_cert(
+        w.alice.identity().key(),
+        &keys,
+        &pubky_switch_client::testing::AppSpec::new(&["contacts"]),
+        w.clock.now_ms(),
+    )
+    .unwrap();
+    let mut layer = layer_of(&good);
+    let entry = layer
+        .iter_mut()
+        .find(|(k, _)| k.starts_with(b"j/"))
+        .map(|(_, v)| v)
+        .unwrap();
+    assert!(!entry["d"]["acceptance_plaintext"].is_null());
+    entry["d"]["acceptance_cert"] = serde_json::to_value(contacts_only.signed()).unwrap();
+    refused_writing_nothing(
+        &w,
+        with_layer(&good, layer),
+        app_id,
+        "acceptance without pay",
+    )
+    .await;
+}

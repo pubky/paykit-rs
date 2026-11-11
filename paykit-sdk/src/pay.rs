@@ -28,7 +28,7 @@ use paykit_lib::bodies::{
 use paykit_lib::derive::{natural_key, payment_obligation};
 use paykit_lib::kinds::Kind;
 use paykit_lib::records::{
-    ActivityRecord, ActivitySide, DestinationSource, PaymentListRecord, StoredMessage, UsedEndpoint,
+    ActivityRecord, ActivitySide, DestinationSource, PaymentListRecord, UsedEndpoint,
 };
 use paykit_lib::{AttemptId, Body, PaymentAmount, PaymentEndpointIdentifier};
 use pubky_switch_client::app::{
@@ -39,7 +39,6 @@ use pubky_switch_client::app::{
 use pubky_switch_core::chain::TransitionProof;
 use pubky_switch_core::claims::{Basis, ClaimStatus, ClaimView, Outcome};
 use pubky_switch_core::http::ErrorCode;
-use pubky_switch_core::message::MessagePlaintext;
 use pubky_switch_core::ops::{Condition, OpKind};
 use pubky_switch_core::records::{CLOCK_TOLERANCE_MS, DAY_MS};
 
@@ -462,6 +461,7 @@ impl Paykit {
             acceptance_owed: record.response.is_none(),
             acceptance_msg_id: None,
             acceptance_plaintext: None,
+            acceptance_cert: None,
             acceptance_released: false,
             rail_proof: None,
             paid_at_ms: None,
@@ -548,6 +548,7 @@ impl Paykit {
             acceptance_owed: false,
             acceptance_msg_id: None,
             acceptance_plaintext: None,
+            acceptance_cert: None,
             acceptance_released: false,
             rail_proof: None,
             paid_at_ms: None,
@@ -1279,6 +1280,10 @@ impl Paykit {
         let Some(request_hash) = entry.request_hash()? else {
             return Ok(None);
         };
+        // A new acceptance goes only under a certificate that may send one: after a renewal
+        // that dropped `pay`, none is signed (Paykit spec 3.3); one signed before keeps its
+        // own certificate ([`JournalEntry::acceptance_cert`]).
+        self.require_pay()?;
         let label = entry.label()?;
         let signed = self.sign(
             entry.payee,
@@ -1288,6 +1293,7 @@ impl Paykit {
         )?;
         entry.acceptance_msg_id = Some(signed.msg_id().to_owned());
         entry.acceptance_plaintext = Some(signed.plaintext().encode());
+        entry.acceptance_cert = Some(self.app.cert().signed().clone());
         Ok(Some(signed))
     }
 
@@ -1317,6 +1323,7 @@ impl Paykit {
             entry.acceptance_released = false;
             entry.acceptance_msg_id = None;
             entry.acceptance_plaintext = None;
+            entry.acceptance_cert = None;
             signed = None;
         }
         let queued = match &entry.acceptance_msg_id {
@@ -1811,18 +1818,14 @@ impl Paykit {
         entry: &JournalEntry,
     ) -> Result<bool> {
         // Only an acceptance that went out: one journaled for a payment that never ran
-        // isn't the payer's (Paykit spec 7.2 step 2).
-        let Some(bytes) = entry
-            .acceptance_plaintext
-            .as_ref()
-            .filter(|_| entry.acceptance_released)
-        else {
+        // isn't the payer's (Paykit spec 7.2 step 2). It is placed under the certificate it
+        // was signed under, not a later renewal's.
+        if !entry.acceptance_released {
+            return Ok(false);
+        }
+        let Some(stored) = entry.acceptance_message(&self.identity(), self.app.cert())? else {
             return Ok(false);
         };
-        let own = self.identity();
-        let plaintext = MessagePlaintext::decode(bytes).map_err(|_| PaykitError::corrupt())?;
-        let stored =
-            StoredMessage::new(own, self.app.cert().signed(), plaintext, None, &entry.payee)?;
         Ok(activity::place(record, Role::Response, stored))
     }
 
